@@ -25,6 +25,7 @@ contract VaultHandler is Test {
         address tokenOut;
         uint256 amountIn;
         uint256 amountOut;
+        bool evil;
     }
 
     Vault public immutable vault;
@@ -44,6 +45,12 @@ contract VaultHandler is Test {
     uint256 public retentions;
     uint256 public overApprovesAccepted;
     uint256 public overApprovesRejected;
+
+    /// catch arms that must never fire: these entry points swallow reverts so a
+    /// bad bound cannot abort a run, which would otherwise hide a starved handler
+    uint256 public executeFailures;
+    uint256 public payoutFailures;
+    uint256 public atomicSwapFailures;
 
     uint256 private _nonce;
 
@@ -108,40 +115,64 @@ contract VaultHandler is Test {
         deposits++;
     }
 
+    /// splits one leg across 1-3 router calls, so a bug that only bites at call
+    /// index > 0 (a missed approve, a missed reset, a skipped target check) is
+    /// reachable. The parts sum to the leg, so the deltas stay exact.
+    /// Both mocks share the swapAtoB(address,address,uint256,uint256) signature,
+    /// so one encoding reaches either: if that ever diverges, evil items would
+    /// fail on a missing selector instead of on the delta check, and the batch
+    /// delta check would go unfalsifiable again.
+    function _splitCalls(Leg memory leg, uint256 n, uint256 slack) internal view returns (Vault.Call[] memory calls) {
+        calls = new Vault.Call[](n);
+        uint256 inLeft = leg.amountIn;
+        uint256 outLeft = leg.amountOut;
+        for (uint256 k = 0; k < n; k++) {
+            uint256 inPart = k + 1 == n ? inLeft : inLeft / (n - k);
+            uint256 outPart = k + 1 == n ? outLeft : outLeft / (n - k);
+            inLeft -= inPart;
+            outLeft -= outPart;
+            calls[k] = Vault.Call(
+                leg.evil ? address(evilRouter) : address(router),
+                0,
+                abi.encodeCall(SwapRouterMock.swapAtoB, (leg.tokenIn, leg.tokenOut, inPart, outPart)),
+                leg.tokenIn,
+                // approving more than the router pulls is the realistic shape:
+                // the leftover allowance is what the reset in _runCalls clears
+                inPart + slack
+            );
+        }
+    }
+
     function canister_execute(
         uint256 inSeed,
         uint256 outSeed,
         uint256 amountInSeed,
         uint256 amountOutSeed,
-        uint256 slackSeed
+        uint256 slackSeed,
+        uint256 callsSeed
     ) external {
         (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
         uint256 pooled = tokenIn.balanceOf(address(vault));
         if (pooled == 0) return;
 
-        uint256 amountIn = bound(amountInSeed, 1, pooled > MAX_AMOUNT ? MAX_AMOUNT : pooled);
-        uint256 amountOut = bound(amountOutSeed, 0, MAX_AMOUNT);
-        // approving more than the router pulls is the realistic shape: the
-        // leftover allowance is what the reset in _runCalls has to clear
-        uint256 approveAmount = amountIn + bound(slackSeed, 0, 1e18);
-
-        Vault.Call[] memory calls = new Vault.Call[](1);
-        calls[0] = Vault.Call(
-            address(router),
-            0,
-            abi.encodeCall(SwapRouterMock.swapAtoB, (address(tokenIn), address(tokenOut), amountIn, amountOut)),
+        Leg memory leg = Leg(
             address(tokenIn),
-            approveAmount
+            address(tokenOut),
+            bound(amountInSeed, 1, pooled > MAX_AMOUNT ? MAX_AMOUNT : pooled),
+            bound(amountOutSeed, 0, MAX_AMOUNT),
+            false
         );
         Vault.Delta[] memory deltas = new Vault.Delta[](2);
-        deltas[0] = Vault.Delta(address(tokenIn), -int256(amountIn));
-        deltas[1] = Vault.Delta(address(tokenOut), int256(amountOut));
+        deltas[0] = Vault.Delta(leg.tokenIn, -int256(leg.amountIn));
+        deltas[1] = Vault.Delta(leg.tokenOut, int256(leg.amountOut));
 
-        try vault.execute(_fresh("swap"), calls, deltas) {
-            ghostOut[address(tokenIn)] += amountIn;
-            ghostIn[address(tokenOut)] += amountOut;
+        try vault.execute(_fresh("swap"), _splitCalls(leg, bound(callsSeed, 1, 3), bound(slackSeed, 0, 1e18)), deltas) {
+            ghostOut[leg.tokenIn] += leg.amountIn;
+            ghostIn[leg.tokenOut] += leg.amountOut;
             executes++;
-        } catch {}
+        } catch {
+            executeFailures++;
+        }
     }
 
     function canister_execute_many(uint256 countSeed, uint256 seed, uint256 gasSeed) external {
@@ -166,44 +197,26 @@ contract VaultHandler is Test {
 
     function _goodItem(uint256 s, uint256 gasLimit) internal returns (Vault.Item memory, Leg memory) {
         (TestToken tokenIn, TestToken tokenOut) = _pair(s, s >> 8);
-        uint256 amountIn = _batchAmountIn(tokenIn, s >> 16);
-        uint256 amountOut = bound(s >> 32, 0, MAX_AMOUNT);
-
-        Vault.Call[] memory calls = new Vault.Call[](1);
-        calls[0] = Vault.Call(
-            address(router),
-            0,
-            abi.encodeCall(SwapRouterMock.swapAtoB, (address(tokenIn), address(tokenOut), amountIn, amountOut)),
-            address(tokenIn),
-            amountIn + bound(s >> 64, 0, 1e18)
+        Leg memory leg = Leg(
+            address(tokenIn), address(tokenOut), _batchAmountIn(tokenIn, s >> 16), bound(s >> 32, 0, MAX_AMOUNT), false
         );
         Vault.Delta[] memory deltas = new Vault.Delta[](2);
-        deltas[0] = Vault.Delta(address(tokenIn), -int256(amountIn));
-        deltas[1] = Vault.Delta(address(tokenOut), int256(amountOut));
+        deltas[0] = Vault.Delta(leg.tokenIn, -int256(leg.amountIn));
+        deltas[1] = Vault.Delta(leg.tokenOut, int256(leg.amountOut));
 
-        return (
-            Vault.Item(_fresh("item"), calls, deltas, gasLimit),
-            Leg(address(tokenIn), address(tokenOut), amountIn, amountOut)
-        );
+        Vault.Call[] memory calls = _splitCalls(leg, bound(s >> 96, 1, 3), bound(s >> 64, 0, 1e18));
+        return (Vault.Item(_fresh("item"), calls, deltas, gasLimit), leg);
     }
 
     function _evilItem(uint256 s, uint256 gasLimit) internal returns (Vault.Item memory, Leg memory) {
         (TestToken tokenIn, TestToken tokenOut) = _pair(s, s >> 8);
-        uint256 amountIn = _batchAmountIn(tokenIn, s >> 16);
+        Leg memory leg = Leg(address(tokenIn), address(tokenOut), _batchAmountIn(tokenIn, s >> 16), 0, true);
 
-        Vault.Call[] memory calls = new Vault.Call[](1);
-        calls[0] = Vault.Call(
-            address(evilRouter),
-            0,
-            abi.encodeCall(EvilRouterMock.swapAtoB, (address(tokenIn), address(tokenOut), amountIn, 0)),
-            address(tokenIn),
-            amountIn + bound(s >> 64, 0, 1e18)
-        );
         Vault.Delta[] memory deltas = new Vault.Delta[](1);
-        deltas[0] = Vault.Delta(address(tokenOut), int256(1)); // never paid: always missed
+        deltas[0] = Vault.Delta(leg.tokenOut, int256(1)); // never paid: always missed
 
-        return
-            (Vault.Item(_fresh("item"), calls, deltas, gasLimit), Leg(address(tokenIn), address(tokenOut), amountIn, 0));
+        Vault.Call[] memory calls = _splitCalls(leg, 1, bound(s >> 64, 0, 1e18));
+        return (Vault.Item(_fresh("item"), calls, deltas, gasLimit), leg);
     }
 
     /// the batch swallows per-item failures, so the vault's own ItemResult log is
@@ -218,6 +231,10 @@ contract VaultHandler is Test {
             if (logs[i].emitter != address(vault) || logs[i].topics.length == 0) continue;
             if (logs[i].topics[0] != ITEM_RESULT) continue;
             if (abi.decode(logs[i].data, (bool))) {
+                // the evil router never pays, so its delta can only be missed and
+                // a gas-capped item can only report false: a success here means
+                // the delta check stopped biting
+                assertFalse(legs[seen].evil, "evil batch item reported success");
                 ghostOut[legs[seen].tokenIn] += legs[seen].amountIn;
                 ghostIn[legs[seen].tokenOut] += legs[seen].amountOut;
                 batchItems++;
@@ -240,12 +257,16 @@ contract VaultHandler is Test {
             try vault.refund(ref, address(t), to, amount) {
                 ghostOut[address(t)] += amount;
                 payouts++;
-            } catch {}
+            } catch {
+                payoutFailures++;
+            }
         } else {
             try vault.payout(ref, address(t), to, amount) {
                 ghostOut[address(t)] += amount;
                 payouts++;
-            } catch {}
+            } catch {
+                payoutFailures++;
+            }
         }
     }
 
@@ -285,7 +306,9 @@ contract VaultHandler is Test {
             ghostIn[address(tokenOut)] += amountOut;
             if (payoutTo != address(0) && amountOut > 0) ghostOut[address(tokenOut)] += amountOut;
             atomicSwaps++;
-        } catch {}
+        } catch {
+            atomicSwapFailures++;
+        }
         vm.stopPrank();
     }
 

@@ -59,11 +59,22 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(address(vault).balance, 0, "unexplained native balance");
     }
 
+    /// four entry points swallow reverts so that a bad bound cannot abort a run.
+    /// These are the arms that must never fire: without this, a handler starved
+    /// into its catch arms would leave the ghosts frozen and every invariant
+    /// above would pass on a vault that was never exercised.
+    function invariant_no_silent_handler_failures() public view {
+        assertEq(handler.executeFailures(), 0, "execute reverted inside the handler");
+        assertEq(handler.payoutFailures(), 0, "payout or refund reverted inside the handler");
+        assertEq(handler.atomicSwapFailures(), 0, "atomic swap reverted inside the handler");
+        assertEq(handler.overApprovesAccepted(), 0, "a stranger's over-approval was accepted");
+    }
+
     /// without this the invariants above could pass vacuously on a handler whose
     /// entry points all revert into their catch arms
     function test_handler_entry_points_all_reach_the_vault() public {
         handler.user_deposit(0, 100e18, 1);
-        handler.canister_execute(0, 1, 50e18, 40e18, 1e18);
+        handler.canister_execute(0, 1, 50e18, 40e18, 1e18, 3); // 3 calls: index > 0 is reachable
         handler.canister_execute_many(3, 7, 0);
         handler.canister_payout(0, 10e18, 2, false);
         handler.canister_payout(0, 10e18, 2, true);
@@ -78,10 +89,10 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(handler.atomicSwaps(), 1, "atomic swap landed");
         assertEq(handler.retentions(), 1, "atomic retention landed");
         assertEq(handler.overApprovesRejected(), 1, "over-approve rejected");
-        assertEq(handler.overApprovesAccepted(), 0, "over-approve never accepted");
 
         invariant_no_router_allowance_survives();
         invariant_balances_match_sanctioned_flows();
+        invariant_no_silent_handler_failures();
     }
 
     /// every entry point that marks a quote must reject a pair already spent,
