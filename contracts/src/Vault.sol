@@ -76,9 +76,21 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event ItemResult(bytes32 indexed swapRef, bool ok);
     event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
     event Refunded(bytes32 indexed ref, address token, address to, uint256 amount);
-    /// distinct from Deposited on purpose: the atomic path settles in-tx, so it must
-    /// never look like a cross-chain deposit the canister would credit a second time
-    event AtomicSwap(bytes32 indexed quoteHash, address token, address from, uint256 amountIn);
+    /// The public path's whole log record. Distinct from Deposited on purpose: the
+    /// atomic path settles in-tx, so it must never look like a cross-chain deposit
+    /// the canister would credit a second time. Every other event above is
+    /// canister-space and must stay unreachable from a public entry point, or a
+    /// stranger could forge the logs the settlement canister trusts.
+    /// `payoutTo == address(0)` means the proceeds stayed in the vault.
+    event AtomicSwap(
+        bytes32 indexed quoteHash,
+        address token,
+        address from,
+        uint256 amountIn,
+        address payoutToken,
+        uint256 amountOut,
+        address payoutTo
+    );
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
@@ -264,7 +276,6 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 beforeIn = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - beforeIn;
-        emit AtomicSwap(quoteHash, token, msg.sender, received);
 
         // anyone may call this, so the calls may only ever spend the caller's own
         // deposit: no native value, approvals only of `token`, capped at `received`
@@ -281,14 +292,15 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         // signed: a payoutToken balance that fell reverts DeltaMissed, not an underflow panic
         int256 change = SafeCast.toInt256(_balance(payoutToken)) - SafeCast.toInt256(beforeOut);
         if (change < SafeCast.toInt256(minOut)) revert DeltaMissed();
-        emit Executed(quoteHash);
 
         uint256 out = uint256(change);
         if (payoutTo != address(0) && out > 0) {
             // through the same door as payout/refund: native-safe, and one place for caps
             _send(payoutToken, payoutTo, out);
-            emit Payout(quoteHash, payoutToken, payoutTo, out);
         }
+        // the single log this path leaves, emitted after the payout leg so it
+        // reports what actually moved. Executed and Payout stay canister-only.
+        emit AtomicSwap(quoteHash, token, msg.sender, received, payoutToken, out, payoutTo);
     }
 
     function executeMany(Item[] calldata items)

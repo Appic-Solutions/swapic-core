@@ -53,16 +53,58 @@ contract VaultDepositAndExecuteTest is Test {
         );
     }
 
-    function test_deposit_and_execute_pays_user_and_emits_all_three() public {
+    /// The standing rule for the public path: it emits its own AtomicSwap and
+    /// nothing else. Every other vault event is canister-space, i.e. a log the
+    /// settlement canister trusts, so a stranger must not be able to forge one.
+    function _assertAtomicSwapIsTheOnlyVaultLog(Vm.Log[] memory logs) internal view {
+        bytes32 atomicSwap = keccak256("AtomicSwap(bytes32,address,address,uint256,address,uint256,address)");
+        bytes32[5] memory canisterSpace = [
+            keccak256("Deposited(bytes32,address,address,uint256)"),
+            keccak256("Executed(bytes32)"),
+            keccak256("Payout(bytes32,address,address,uint256)"),
+            keccak256("Refunded(bytes32,address,address,uint256)"),
+            keccak256("ItemResult(bytes32,bool)")
+        ];
+
+        uint256 vaultLogs;
+        bool sawAtomicSwap;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(vault) || logs[i].topics.length == 0) continue;
+            vaultLogs++;
+            bytes32 t = logs[i].topics[0];
+            if (t == atomicSwap) sawAtomicSwap = true;
+            for (uint256 j = 0; j < canisterSpace.length; j++) {
+                assertTrue(t != canisterSpace[j], "canister-space event emitted from a public entry point");
+            }
+        }
+        // the positive assertions prove the scan sees the vault's logs at all,
+        // so the negative ones above cannot pass vacuously
+        assertTrue(sawAtomicSwap, "AtomicSwap emitted");
+        assertEq(vaultLogs, 1, "AtomicSwap is the vault's only log on the public path");
+    }
+
+    function test_public_path_emits_no_canister_space_events() public {
+        vm.startPrank(user);
+        a.approve(address(vault), 100e18);
+
+        // paying the proceeds out
+        vm.recordLogs();
+        vault.depositAndExecute("qe1", address(a), 50e18, _swapCalls(50e18, 45e18), address(b), 40e18, user);
+        _assertAtomicSwapIsTheOnlyVaultLog(vm.getRecordedLogs());
+
+        // and keeping them: the retention branch takes a different exit
+        vm.recordLogs();
+        vault.depositAndExecute("qe2", address(a), 50e18, _swapCalls(50e18, 45e18), address(b), 40e18, address(0));
+        _assertAtomicSwapIsTheOnlyVaultLog(vm.getRecordedLogs());
+        vm.stopPrank();
+    }
+
+    function test_deposit_and_execute_pays_user_and_emits_one_atomic_swap() public {
         vm.startPrank(user);
         a.approve(address(vault), 100e18);
 
         vm.expectEmit(true, true, true, true);
-        emit Vault.AtomicSwap("q1", address(a), user, 100e18);
-        vm.expectEmit(true, true, true, true);
-        emit Vault.Executed("q1");
-        vm.expectEmit(true, true, true, true);
-        emit Vault.Payout("q1", address(b), user, 95e18);
+        emit Vault.AtomicSwap("q1", address(a), user, 100e18, address(b), 95e18, user);
 
         vault.depositAndExecute("q1", address(a), 100e18, _swapCalls(100e18, 95e18), address(b), 90e18, user);
         vm.stopPrank();
@@ -106,14 +148,16 @@ contract VaultDepositAndExecuteTest is Test {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter != address(vault)) continue;
             bytes32 t = logs[i].topics[0];
-            if (t == keccak256("AtomicSwap(bytes32,address,address,uint256)")) sawAtomicSwap = true;
+            if (t == keccak256("AtomicSwap(bytes32,address,address,uint256,address,uint256,address)")) {
+                sawAtomicSwap = true;
+            }
             if (t == keccak256("Executed(bytes32)")) sawExecuted = true;
             if (t == keccak256("Payout(bytes32,address,address,uint256)")) sawPayout = true;
             if (t == keccak256("Deposited(bytes32,address,address,uint256)")) sawDeposited = true;
         }
-        // the positive assertions prove the scan works, so the negative ones cannot pass vacuously
+        // the positive assertion proves the scan works, so the negative ones cannot pass vacuously
         assertTrue(sawAtomicSwap, "AtomicSwap emitted");
-        assertTrue(sawExecuted, "Executed emitted");
+        assertFalse(sawExecuted, "Executed is canister-only");
         assertFalse(sawPayout, "no Payout without a payoutTo");
         // never Deposited: the canister credits cross-chain swaps off that log
         assertFalse(sawDeposited, "atomic path must not look like a cross-chain deposit");
@@ -276,7 +320,7 @@ contract VaultDepositAndExecuteTest is Test {
         vm.startPrank(user);
         a.approve(address(vault), 100e18);
         vm.expectEmit(true, true, true, true);
-        emit Vault.Payout("qn", address(0), eoa, 1 ether);
+        emit Vault.AtomicSwap("qn", address(a), user, 100e18, address(0), 1 ether, eoa);
         vault.depositAndExecute("qn", address(a), 100e18, calls, address(0), 1 ether, eoa);
         vm.stopPrank();
 
