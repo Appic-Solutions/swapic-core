@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import "./interfaces/ISignatureTransfer.sol";
 
 contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
@@ -47,6 +48,12 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error CallFailed();
     error OnlySelf();
     error ZeroCanister();
+
+    /// completes Permit2's PermitWitnessTransferFrom typehash stub
+    string private constant WITNESS_TYPE =
+        "QuoteWitness witness)QuoteWitness(bytes32 quoteHash)TokenPermissions(address token,uint256 amount)";
+
+    ISignatureTransfer private constant PERMIT2 = ISignatureTransfer(0x000000000022D473030F116dDEE9F6B43aC78BA3);
 
     address public canister;
     address public guardian;
@@ -158,6 +165,24 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(owner, address(this), amount);
         emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
+    }
+
+    function pullWithPermit2(
+        bytes32 quoteHash,
+        address owner,
+        ISignatureTransfer.PermitTransferFrom calldata permit,
+        bytes calldata signature
+    ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
+        _markQuote(quoteHash, owner);
+        PERMIT2.permitWitnessTransferFrom(
+            permit,
+            ISignatureTransfer.SignatureTransferDetails(address(this), permit.permitted.amount),
+            owner,
+            keccak256(abi.encode(keccak256("QuoteWitness(bytes32 quoteHash)"), quoteHash)),
+            WITNESS_TYPE,
+            signature
+        );
+        emit Deposited(quoteHash, permit.permitted.token, owner, permit.permitted.amount);
     }
 
     function setRouterAllowlist(address target, bool ok) external onlyCanister {
