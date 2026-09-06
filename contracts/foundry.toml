@@ -11,5 +11,10 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 
+[invariant]
+runs = 256
+depth = 50
+fail_on_revert = true
+
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
