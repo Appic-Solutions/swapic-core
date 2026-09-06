@@ -95,4 +95,18 @@ contract VaultPayoutTest is Test {
         vm.expectRevert(Vault.SendFailed.selector);
         vault.payout("s5", address(0), address(rejecter), 1 ether);
     }
+
+    /// a native send to address(0) succeeds at the EVM level and burns the ether,
+    /// so the send door has to refuse it outright
+    function test_send_to_zero_address_reverts() public {
+        vm.prank(canister);
+        vm.expectRevert(Vault.SendFailed.selector);
+        vault.payout("s6", address(0), address(0), 1 ether);
+
+        vm.prank(canister);
+        vm.expectRevert(Vault.SendFailed.selector);
+        vault.refund("r6", address(0), address(0), 1 ether);
+
+        assertEq(address(vault).balance, 10 ether, "no ether burned");
+    }
 }

@@ -174,6 +174,28 @@ contract VaultDepositAndExecuteTest is Test {
         vm.stopPrank();
     }
 
+    function test_blocked_when_executions_paused() public {
+        // the public path runs calls, so the Executions pause must reach it too
+        vm.prank(guardian);
+        vault.pause(Vault.PauseClass.Executions);
+
+        vm.startPrank(user);
+        a.approve(address(vault), 100e18);
+        vm.expectRevert(Vault.IsPaused.selector);
+        vault.depositAndExecute("q13", address(a), 100e18, _swapCalls(100e18, 95e18), address(b), 90e18, user);
+        vm.stopPrank();
+
+        // the check sits ahead of _markQuote, so a paused call burns nothing
+        assertFalse(vault.quoteKeyUsed("q13", user), "quote hash still open");
+
+        vm.prank(canister);
+        vault.unpause(Vault.PauseClass.Executions);
+
+        vm.prank(user);
+        vault.depositAndExecute("q13", address(a), 100e18, _swapCalls(100e18, 95e18), address(b), 90e18, user);
+        assertEq(b.balanceOf(user), 95e18, "unpause restores the path");
+    }
+
     function test_duplicate_quote_hash_by_same_payer_reverts() public {
         vm.startPrank(user);
         a.approve(address(vault), 100e18);

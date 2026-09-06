@@ -269,6 +269,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 minOut,
         address payoutTo
     ) external nonReentrant whenNotPaused(PauseClass.Deposits) {
+        // this path runs router calls, so it answers to the Executions pause as well
+        if (_paused[PauseClass.Executions]) revert IsPaused();
         // paying out is Payouts-gated too; keeping proceeds in the vault is not
         if (payoutTo != address(0) && _paused[PauseClass.Payouts]) revert IsPaused();
         _markQuote(quoteHash, msg.sender);
@@ -346,6 +348,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// the single choke point for funds leaving the vault under canister control
     function _send(address token, address to, uint256 amount) internal {
         // todo_onchain_caps: per-token per-day limits land here when re-enabled
+        // a native send to address(0) succeeds and burns the funds, so the door refuses it
+        if (to == address(0)) revert SendFailed();
         if (token == address(0)) {
             (bool ok,) = to.call{value: amount}("");
             if (!ok) revert SendFailed();
