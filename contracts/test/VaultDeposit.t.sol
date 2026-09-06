@@ -43,6 +43,8 @@ contract VaultDepositTest is Test {
 
     function test_fee_on_transfer_records_actual_amount() public {
         feeToken.approve(address(vault), 100e18);
+        vm.expectEmit(true, true, true, true);
+        emit Vault.Deposited("q2", address(feeToken), address(this), 99e18);
         vault.deposit("q2", address(feeToken), 100e18);
         assertEq(feeToken.balanceOf(address(vault)), 99e18);
     }
