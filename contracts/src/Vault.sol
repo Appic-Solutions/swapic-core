@@ -48,6 +48,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error CallFailed();
     error OnlySelf();
     error ZeroCanister();
+    error PublicCallNotAllowed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
     string private constant WITNESS_TYPE =
@@ -251,11 +252,23 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 minOut,
         address payoutTo
     ) external nonReentrant whenNotPaused(PauseClass.Deposits) {
+        // paying out is Payouts-gated too; keeping proceeds in the vault is not
+        if (payoutTo != address(0) && _paused[PauseClass.Payouts]) revert IsPaused();
         _markQuote(quoteHash, msg.sender);
 
         uint256 beforeIn = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit Deposited(quoteHash, token, msg.sender, IERC20(token).balanceOf(address(this)) - beforeIn);
+        uint256 received = IERC20(token).balanceOf(address(this)) - beforeIn;
+        emit Deposited(quoteHash, token, msg.sender, received);
+
+        // anyone may call this, so the calls may only ever spend the caller's own
+        // deposit: no native value, approvals only of `token`, capped at `received`
+        uint256 totalApprove;
+        for (uint256 i = 0; i < calls.length; i++) {
+            if (calls[i].value != 0 || calls[i].approveToken != token) revert PublicCallNotAllowed();
+            totalApprove += calls[i].approveAmount;
+        }
+        if (totalApprove > received) revert PublicCallNotAllowed();
 
         // snapshot after the pull so a token == payoutToken deposit never counts toward minOut
         uint256 beforeOut = _balance(payoutToken);
