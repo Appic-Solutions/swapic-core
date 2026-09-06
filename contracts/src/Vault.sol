@@ -72,6 +72,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event AllowlistSet(address target, bool ok);
     event Executed(bytes32 indexed swapRef);
     event ItemResult(bytes32 indexed swapRef, bool ok);
+    event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
@@ -237,6 +238,38 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         _runCalls(calls);
         _checkDeltas(deltas, beforeBalances);
         emit Executed(swapRef);
+    }
+
+    /// Atomic legacy same-chain path: the caller deposits and swaps in one tx.
+    /// `payoutTo == address(0)` leaves the proceeds in the vault.
+    function depositAndExecute(
+        bytes32 quoteHash,
+        address token,
+        uint256 amount,
+        Call[] calldata calls,
+        address payoutToken,
+        uint256 minOut,
+        address payoutTo
+    ) external nonReentrant whenNotPaused(PauseClass.Deposits) {
+        _markQuote(quoteHash, msg.sender);
+
+        uint256 beforeIn = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit Deposited(quoteHash, token, msg.sender, IERC20(token).balanceOf(address(this)) - beforeIn);
+
+        // snapshot after the pull so a token == payoutToken deposit never counts toward minOut
+        uint256 beforeOut = _balance(payoutToken);
+        _runCalls(calls);
+        // signed: a payoutToken balance that fell reverts DeltaMissed, not an underflow panic
+        int256 change = SafeCast.toInt256(_balance(payoutToken)) - SafeCast.toInt256(beforeOut);
+        if (change < SafeCast.toInt256(minOut)) revert DeltaMissed();
+        emit Executed(quoteHash);
+
+        uint256 out = uint256(change);
+        if (payoutTo != address(0) && out > 0) {
+            IERC20(payoutToken).safeTransfer(payoutTo, out);
+            emit Payout(quoteHash, payoutToken, payoutTo, out);
+        }
     }
 
     function executeMany(Item[] calldata items)
