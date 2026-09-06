@@ -78,9 +78,9 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event Refunded(bytes32 indexed ref, address token, address to, uint256 amount);
     /// The public path's whole log record. Distinct from Deposited on purpose: the
     /// atomic path settles in-tx, so it must never look like a cross-chain deposit
-    /// the canister would credit a second time. Every other event above is
-    /// canister-space and must stay unreachable from a public entry point, or a
-    /// stranger could forge the logs the settlement canister trusts.
+    /// the canister would credit a second time. Executed, ItemResult, Payout and
+    /// Refunded stay canister-only for the same reason: they are logs the settlement
+    /// canister trusts, so no public entry point may be able to forge one.
     /// `payoutTo == address(0)` means the proceeds stayed in the vault.
     event AtomicSwap(
         bytes32 indexed quoteHash,
