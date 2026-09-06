@@ -10,17 +10,33 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
 
+    enum PauseClass {
+        Deposits,
+        Executions,
+        Payouts
+    }
+
     error OnlyCanister();
     error OnlyGuardianOrCanister();
+    error IsPaused();
 
     address public canister;
     address public guardian;
 
+    mapping(PauseClass => bool) private _paused;
+
     event GuardianSet(address guardian);
     event NativeReceived(address from, uint256 amount);
+    event ClassPaused(uint8 class_);
+    event ClassUnpaused(uint8 class_);
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
+        _;
+    }
+
+    modifier whenNotPaused(PauseClass class_) {
+        if (_paused[class_]) revert IsPaused();
         _;
     }
 
@@ -39,6 +55,21 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     function setGuardian(address guardian_) external onlyCanister {
         guardian = guardian_;
         emit GuardianSet(guardian_);
+    }
+
+    function paused(PauseClass class_) public view returns (bool) {
+        return _paused[class_];
+    }
+
+    function pause(PauseClass class_) external {
+        if (msg.sender != canister && msg.sender != guardian) revert OnlyGuardianOrCanister();
+        _paused[class_] = true;
+        emit ClassPaused(uint8(class_));
+    }
+
+    function unpause(PauseClass class_) external onlyCanister {
+        _paused[class_] = false;
+        emit ClassUnpaused(uint8(class_));
     }
 
     function _authorizeUpgrade(address) internal override onlyCanister {}
