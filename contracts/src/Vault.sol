@@ -6,6 +6,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
@@ -125,6 +126,24 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     function depositNative(bytes32 quoteHash) external payable nonReentrant whenNotPaused(PauseClass.Deposits) {
         _markQuote(quoteHash);
         emit Deposited(quoteHash, address(0), msg.sender, msg.value);
+    }
+
+    function pullWithPermit(
+        bytes32 quoteHash,
+        address token,
+        address owner,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
+        _markQuote(quoteHash);
+        // try/ignore: a front-run permit already set the allowance; transferFrom is the truth
+        try IERC20Permit(token).permit(owner, address(this), amount, deadline, v, r, s) {} catch {}
+        uint256 before = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransferFrom(owner, address(this), amount);
+        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
     function setRouterAllowlist(address target, bool ok) external onlyCanister {
