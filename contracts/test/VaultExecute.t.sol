@@ -87,4 +87,32 @@ contract VaultExecuteTest is Test {
         vm.expectRevert(Vault.OnlyCanister.selector);
         vault.execute("s4", new Vault.Call[](0), new Vault.Delta[](0));
     }
+
+    function test_execute_rejects_self_target_even_when_allowlisted() public {
+        // worst case: the canister allowlists the vault itself, letting a call
+        // re-enter runItem (self-only, no reentrancy guard) as a nested frame
+        vm.prank(canister);
+        vault.setRouterAllowlist(address(vault), true);
+
+        Vault.Item memory nested = Vault.Item("nested", new Vault.Call[](0), new Vault.Delta[](0), 0);
+        Vault.Call[] memory calls = new Vault.Call[](1);
+        calls[0] = Vault.Call(address(vault), 0, abi.encodeCall(Vault.runItem, (nested)), address(0), 0);
+
+        vm.prank(canister);
+        vm.expectRevert(Vault.TargetNotAllowed.selector);
+        vault.execute("s5", calls, new Vault.Delta[](0));
+    }
+
+    function test_set_router_allowlist_only_canister() public {
+        vm.expectRevert(Vault.OnlyCanister.selector);
+        vault.setRouterAllowlist(address(0xBAD), true);
+    }
+
+    function test_execute_blocked_when_executions_paused() public {
+        vm.prank(guardian);
+        vault.pause(Vault.PauseClass.Executions);
+        vm.prank(canister);
+        vm.expectRevert(Vault.IsPaused.selector);
+        vault.execute("s6", new Vault.Call[](0), new Vault.Delta[](0));
+    }
 }

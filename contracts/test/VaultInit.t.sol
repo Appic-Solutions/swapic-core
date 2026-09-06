@@ -26,6 +26,28 @@ contract VaultInitTest is Test {
         vault.initialize(address(1), address(2));
     }
 
+    function test_initialize_rejects_zero_canister() public {
+        Vault impl = new Vault();
+        bytes memory init = abi.encodeCall(Vault.initialize, (address(0), guardian));
+        vm.expectRevert(Vault.ZeroCanister.selector);
+        new ERC1967Proxy(address(impl), init);
+    }
+
+    function test_initialize_allows_zero_guardian() public {
+        Vault impl = new Vault();
+        bytes memory init = abi.encodeCall(Vault.initialize, (canister, address(0)));
+        Vault v = Vault(payable(address(new ERC1967Proxy(address(impl), init))));
+        assertEq(v.guardian(), address(0), "no guardian yet is a valid state");
+    }
+
+    function test_only_canister_can_set_guardian() public {
+        vm.expectRevert(Vault.OnlyCanister.selector);
+        vault.setGuardian(address(0xBEEF));
+        vm.prank(canister);
+        vault.setGuardian(address(0xBEEF));
+        assertEq(vault.guardian(), address(0xBEEF));
+    }
+
     function test_only_canister_can_upgrade() public {
         Vault newImpl = new Vault();
         vm.expectRevert(Vault.OnlyCanister.selector);

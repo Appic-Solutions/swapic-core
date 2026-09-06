@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
@@ -45,6 +46,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error DeltaMissed();
     error CallFailed();
     error OnlySelf();
+    error ZeroCanister();
 
     address public canister;
     address public guardian;
@@ -82,8 +84,9 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     function initialize(address canister_, address guardian_) external initializer {
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
+        if (canister_ == address(0)) revert ZeroCanister();
         canister = canister_;
-        guardian = guardian_;
+        guardian = guardian_; // zero is allowed: "no guardian yet"
     }
 
     function setGuardian(address guardian_) external onlyCanister {
@@ -169,9 +172,19 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     function _runCalls(Call[] calldata calls) internal {
         for (uint256 i = 0; i < calls.length; i++) {
             Call calldata c = calls[i];
+            // never let a call re-enter the vault, even if it were allowlisted:
+            // runItem is self-only but carries no reentrancy guard
+            if (c.target == address(this)) revert TargetNotAllowed();
             if (!allowedRouter[c.target]) revert TargetNotAllowed();
             if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, c.approveAmount);
-            (bool ok,) = c.target.call{value: c.value}(c.data);
+            bool ok;
+            address target = c.target;
+            uint256 value = c.value;
+            bytes memory data = c.data;
+            assembly {
+                // no returndata copy: return-bomb safe
+                ok := call(gas(), target, value, add(data, 0x20), mload(data), 0, 0)
+            }
             if (!ok) revert CallFailed();
             if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, 0);
         }
@@ -179,7 +192,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
 
     function _checkDeltas(Delta[] calldata deltas, uint256[] memory beforeBalances) internal view {
         for (uint256 i = 0; i < deltas.length; i++) {
-            int256 change = int256(_balance(deltas[i].token)) - int256(beforeBalances[i]);
+            int256 change = SafeCast.toInt256(_balance(deltas[i].token)) - SafeCast.toInt256(beforeBalances[i]);
             if (change < deltas[i].minChange) revert DeltaMissed();
         }
     }
