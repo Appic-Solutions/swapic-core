@@ -60,6 +60,23 @@ contract VaultPermit2Test is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// no fork: the onlyCanister gate fires before any Permit2 interaction, and
+    /// setUp deploys nothing without an RPC, so this test brings its own vault
+    function test_pull_with_permit2_only_canister() public {
+        Vault impl = new Vault();
+        bytes memory init = abi.encodeCall(Vault.initialize, (canister, guardian));
+        Vault local = Vault(payable(address(new ERC1967Proxy(address(impl), init))));
+
+        ISignatureTransfer.PermitTransferFrom memory permit = ISignatureTransfer.PermitTransferFrom({
+            permitted: ISignatureTransfer.TokenPermissions({token: address(0), amount: 0}),
+            nonce: 0,
+            deadline: 0
+        });
+
+        vm.expectRevert(Vault.OnlyCanister.selector);
+        local.pullWithPermit2(bytes32(0), user, permit, "");
+    }
+
     function test_pull_with_permit2_witness_moves_usdc() public {
         if (bytes(forkUrl).length == 0) vm.skip(true);
 
