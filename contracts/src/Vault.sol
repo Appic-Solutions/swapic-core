@@ -49,6 +49,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error OnlySelf();
     error ZeroCanister();
     error PublicCallNotAllowed();
+    error SendFailed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
     string private constant WITNESS_TYPE =
@@ -74,6 +75,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event Executed(bytes32 indexed swapRef);
     event ItemResult(bytes32 indexed swapRef, bool ok);
     event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
+    event Refunded(bytes32 indexed ref, address token, address to, uint256 amount);
     /// distinct from Deposited on purpose: the atomic path settles in-tx, so it must
     /// never look like a cross-chain deposit the canister would credit a second time
     event AtomicSwap(bytes32 indexed quoteHash, address token, address from, uint256 amountIn);
@@ -326,6 +328,37 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
                 }
             }
         }
+    }
+
+    /// the single choke point for funds leaving the vault under canister control
+    function _send(address token, address to, uint256 amount) internal {
+        // todo_onchain_caps: per-token per-day limits land here when re-enabled
+        if (token == address(0)) {
+            (bool ok,) = to.call{value: amount}("");
+            if (!ok) revert SendFailed();
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
+    }
+
+    function payout(bytes32 swapRef, address token, address to, uint256 amount)
+        external
+        onlyCanister
+        nonReentrant
+        whenNotPaused(PauseClass.Payouts)
+    {
+        _send(token, to, amount);
+        emit Payout(swapRef, token, to, amount);
+    }
+
+    function refund(bytes32 ref, address token, address to, uint256 amount)
+        external
+        onlyCanister
+        nonReentrant
+        whenNotPaused(PauseClass.Payouts)
+    {
+        _send(token, to, amount);
+        emit Refunded(ref, token, to, amount);
     }
 
     receive() external payable {
