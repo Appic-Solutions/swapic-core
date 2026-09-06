@@ -9,6 +9,7 @@ import "./mocks/SwapRouterMock.sol";
 import "./mocks/EvilRouterMock.sol";
 import "./mocks/ReentrantRouterMock.sol";
 import "./mocks/GasHogMock.sol";
+import "./mocks/ReturnBombRouterMock.sol";
 
 contract VaultBatchTest is Test {
     Vault vault;
@@ -18,6 +19,7 @@ contract VaultBatchTest is Test {
     EvilRouterMock evilRouter;
     ReentrantRouterMock reentrant;
     GasHogMock hog;
+    ReturnBombRouterMock bomber;
     address canister = address(0xCA);
     address guardian = address(0x6A);
 
@@ -32,6 +34,7 @@ contract VaultBatchTest is Test {
         evilRouter = new EvilRouterMock();
         reentrant = new ReentrantRouterMock(vault);
         hog = new GasHogMock();
+        bomber = new ReturnBombRouterMock();
 
         a.transfer(address(vault), 1000e18);
         b.transfer(address(router), 1000e18);
@@ -41,6 +44,7 @@ contract VaultBatchTest is Test {
         vault.setRouterAllowlist(address(evilRouter), true);
         vault.setRouterAllowlist(address(reentrant), true);
         vault.setRouterAllowlist(address(hog), true);
+        vault.setRouterAllowlist(address(bomber), true);
         vm.stopPrank();
     }
 
@@ -89,6 +93,31 @@ contract VaultBatchTest is Test {
         return Vault.Item(ref, calls, new Vault.Delta[](0), gasLimit_);
     }
 
+    function bombItem(bytes32 ref, uint256 gasLimit_) internal view returns (Vault.Item memory) {
+        Vault.Call[] memory calls = new Vault.Call[](1);
+        calls[0] = Vault.Call(address(bomber), 0, abi.encodeCall(ReturnBombRouterMock.bomb, ()), address(0), 0);
+        return Vault.Item(ref, calls, new Vault.Delta[](0), gasLimit_);
+    }
+
+    function test_return_bomb_item_cannot_break_batch() public {
+        Vault.Item[] memory items = new Vault.Item[](2);
+        // the cap is the point: 3M gas covers the bomb's own memory expansion
+        // once, but not twice. A caller that copies the returndata OOGs here.
+        items[0] = bombItem("rb1", 3_000_000);
+        items[1] = goodItem("rb2", 100e18, 95e18, 0);
+
+        vm.expectCall(address(bomber), abi.encodeCall(ReturnBombRouterMock.bomb, ()));
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit Vault.ItemResult("rb1", true);
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit Vault.ItemResult("rb2", true);
+
+        vm.prank(canister);
+        vault.executeMany(items);
+
+        assertEq(b.balanceOf(address(vault)), 95e18, "item after the return bomb still runs");
+    }
+
     function test_failed_item_does_not_revert_batch() public {
         Vault.Item[] memory items = new Vault.Item[](3);
         items[0] = goodItem("s1", 100e18, 95e18, 0);
@@ -132,6 +161,10 @@ contract VaultBatchTest is Test {
         items[0] = reentrantItem("r1");
         items[1] = goodItem("r2", 100e18, 95e18, 0);
 
+        // pins that the item actually reached the router: without this, setUp
+        // drift (e.g. the reentrant mock losing its allowlist entry) would make
+        // r1 fail for the wrong reason and the test would pass regardless.
+        vm.expectCall(address(reentrant), abi.encodeCall(ReentrantRouterMock.attack, ()));
         vm.expectEmit(true, false, false, true, address(vault));
         emit Vault.ItemResult("r1", false);
         vm.expectEmit(true, false, false, true, address(vault));
@@ -169,6 +202,24 @@ contract VaultBatchTest is Test {
         vault.executeMany(items);
 
         assertEq(b.balanceOf(address(vault)), 95e18, "item after capped gas-hog still runs");
+    }
+
+    function test_execute_many_only_canister() public {
+        vm.expectRevert(Vault.OnlyCanister.selector);
+        vault.executeMany(new Vault.Item[](0));
+    }
+
+    function test_multicall_only_canister() public {
+        vm.expectRevert(Vault.OnlyCanister.selector);
+        vault.multicall(new bytes[](0));
+    }
+
+    function test_execute_many_blocked_when_executions_paused() public {
+        vm.prank(guardian);
+        vault.pause(Vault.PauseClass.Executions);
+        vm.prank(canister);
+        vm.expectRevert(Vault.IsPaused.selector);
+        vault.executeMany(new Vault.Item[](0));
     }
 
     function test_multicall_is_atomic_and_keeps_sender() public {
