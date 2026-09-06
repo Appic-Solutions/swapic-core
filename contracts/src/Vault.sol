@@ -29,6 +29,13 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         int256 minChange;
     }
 
+    struct Item {
+        bytes32 swapRef;
+        Call[] calls;
+        Delta[] deltas;
+        uint256 gasLimit; // 0 = all
+    }
+
     error OnlyCanister();
     error OnlyGuardianOrCanister();
     error IsPaused();
@@ -36,6 +43,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error TargetNotAllowed();
     error DeltaMissed();
     error CallFailed();
+    error OnlySelf();
 
     address public canister;
     address public guardian;
@@ -51,6 +59,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event Deposited(bytes32 indexed quoteHash, address indexed token, address indexed from, uint256 amount);
     event AllowlistSet(address target, bool ok);
     event Executed(bytes32 indexed swapRef);
+    event ItemResult(bytes32 indexed swapRef, bool ok);
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
@@ -158,6 +167,46 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         _runCalls(calls);
         _checkDeltas(deltas, beforeBalances);
         emit Executed(swapRef);
+    }
+
+    function executeMany(Item[] calldata items)
+        external
+        onlyCanister
+        nonReentrant
+        whenNotPaused(PauseClass.Executions)
+    {
+        for (uint256 i = 0; i < items.length; i++) {
+            uint256 gas_ = items[i].gasLimit == 0 ? gasleft() : items[i].gasLimit;
+            bool ok;
+            bytes memory callData = abi.encodeCall(this.runItem, (items[i]));
+            address self = address(this);
+            assembly {
+                // no returndata copy: return-bomb safe
+                ok := call(gas_, self, 0, add(callData, 0x20), mload(callData), 0, 0)
+            }
+            emit ItemResult(items[i].swapRef, ok);
+        }
+    }
+
+    function runItem(Item calldata item) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        uint256[] memory beforeBalances = new uint256[](item.deltas.length);
+        for (uint256 i = 0; i < item.deltas.length; i++) {
+            beforeBalances[i] = _balance(item.deltas[i].token);
+        }
+        _runCalls(item.calls);
+        _checkDeltas(item.deltas, beforeBalances);
+    }
+
+    function multicall(bytes[] calldata selfCalls) external onlyCanister {
+        for (uint256 i = 0; i < selfCalls.length; i++) {
+            (bool ok, bytes memory ret) = address(this).delegatecall(selfCalls[i]);
+            if (!ok) {
+                assembly {
+                    revert(add(ret, 0x20), mload(ret))
+                }
+            }
+        }
     }
 
     receive() external payable {
