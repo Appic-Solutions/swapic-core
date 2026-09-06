@@ -54,7 +54,7 @@ contract VaultDepositAndExecuteTest is Test {
         a.approve(address(vault), 100e18);
 
         vm.expectEmit(true, true, true, true);
-        emit Vault.Deposited("q1", address(a), user, 100e18);
+        emit Vault.AtomicSwap("q1", address(a), user, 100e18);
         vm.expectEmit(true, true, true, true);
         emit Vault.Executed("q1");
         vm.expectEmit(true, true, true, true);
@@ -95,20 +95,24 @@ contract VaultDepositAndExecuteTest is Test {
         assertEq(b.balanceOf(user), 0, "user paid nothing out");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool sawDeposited;
+        bool sawAtomicSwap;
         bool sawExecuted;
         bool sawPayout;
+        bool sawDeposited;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter != address(vault)) continue;
             bytes32 t = logs[i].topics[0];
-            if (t == keccak256("Deposited(bytes32,address,address,uint256)")) sawDeposited = true;
+            if (t == keccak256("AtomicSwap(bytes32,address,address,uint256)")) sawAtomicSwap = true;
             if (t == keccak256("Executed(bytes32)")) sawExecuted = true;
             if (t == keccak256("Payout(bytes32,address,address,uint256)")) sawPayout = true;
+            if (t == keccak256("Deposited(bytes32,address,address,uint256)")) sawDeposited = true;
         }
-        // the positive assertions prove the scan works, so the negative one cannot pass vacuously
-        assertTrue(sawDeposited, "Deposited emitted");
+        // the positive assertions prove the scan works, so the negative ones cannot pass vacuously
+        assertTrue(sawAtomicSwap, "AtomicSwap emitted");
         assertTrue(sawExecuted, "Executed emitted");
         assertFalse(sawPayout, "no Payout without a payoutTo");
+        // never Deposited: the canister credits cross-chain swaps off that log
+        assertFalse(sawDeposited, "atomic path must not look like a cross-chain deposit");
     }
 
     function test_blocked_when_deposits_paused() public {
@@ -129,6 +133,39 @@ contract VaultDepositAndExecuteTest is Test {
         vm.expectRevert(Vault.QuoteHashUsed.selector);
         vault.depositAndExecute("q5", address(a), 50e18, _swapCalls(50e18, 50e18), address(b), 50e18, user);
         vm.stopPrank();
+    }
+
+    function test_deposit_itself_never_counts_toward_min_out() public {
+        // token == payoutToken with no calls: the payoutToken snapshot is taken after
+        // the pull, so the deposit cannot satisfy minOut on its own
+        vm.startPrank(user);
+        a.approve(address(vault), 10e18);
+        vm.expectRevert(Vault.DeltaMissed.selector);
+        vault.depositAndExecute("q11", address(a), 10e18, new Vault.Call[](0), address(a), 1, user);
+        vm.stopPrank();
+
+        assertEq(a.balanceOf(user), 100e18, "rolled back");
+    }
+
+    function test_approval_sum_across_calls_rejected() public {
+        // each call is individually under the received deposit; only the sum is over
+        Vault.Call[] memory calls = new Vault.Call[](2);
+        calls[0] = Vault.Call(
+            address(router),
+            0,
+            abi.encodeCall(SwapRouterMock.swapAtoB, (address(a), address(b), 60e18, 55e18)),
+            address(a),
+            60e18
+        );
+        calls[1] = calls[0];
+
+        vm.startPrank(user);
+        a.approve(address(vault), 100e18);
+        vm.expectRevert(Vault.PublicCallNotAllowed.selector);
+        vault.depositAndExecute("q12", address(a), 100e18, calls, address(b), 90e18, user);
+        vm.stopPrank();
+
+        assertEq(a.balanceOf(user), 100e18, "user keeps their A");
     }
 
     function test_stranger_cannot_spend_the_vaults_pooled_funds() public {

@@ -74,6 +74,9 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     event Executed(bytes32 indexed swapRef);
     event ItemResult(bytes32 indexed swapRef, bool ok);
     event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
+    /// distinct from Deposited on purpose: the atomic path settles in-tx, so it must
+    /// never look like a cross-chain deposit the canister would credit a second time
+    event AtomicSwap(bytes32 indexed quoteHash, address token, address from, uint256 amountIn);
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
@@ -259,7 +262,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 beforeIn = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - beforeIn;
-        emit Deposited(quoteHash, token, msg.sender, received);
+        emit AtomicSwap(quoteHash, token, msg.sender, received);
 
         // anyone may call this, so the calls may only ever spend the caller's own
         // deposit: no native value, approvals only of `token`, capped at `received`
