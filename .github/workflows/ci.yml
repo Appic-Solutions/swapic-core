@@ -6,6 +6,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.3.5
       - run: forge fmt --check
         working-directory: contracts
       - run: forge test -vv
