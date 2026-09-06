@@ -50,7 +50,9 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     address public guardian;
 
     mapping(PauseClass => bool) private _paused;
-    mapping(bytes32 => bool) public usedQuoteHash;
+    /// keccak256(abi.encode(quoteHash, payer)) => spent. Scoped per payer so a
+    /// stranger cannot burn someone else's quote hash as a griefing DoS.
+    mapping(bytes32 => bool) public usedQuoteKey;
     mapping(address => bool) public allowedRouter;
 
     event GuardianSet(address guardian);
@@ -106,9 +108,18 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
 
     function _authorizeUpgrade(address) internal override onlyCanister {}
 
-    function _markQuote(bytes32 quoteHash) internal {
-        if (usedQuoteHash[quoteHash]) revert QuoteHashUsed();
-        usedQuoteHash[quoteHash] = true;
+    function _quoteKey(bytes32 quoteHash, address payer) internal pure returns (bytes32) {
+        return keccak256(abi.encode(quoteHash, payer));
+    }
+
+    function quoteKeyUsed(bytes32 quoteHash, address payer) external view returns (bool) {
+        return usedQuoteKey[_quoteKey(quoteHash, payer)];
+    }
+
+    function _markQuote(bytes32 quoteHash, address payer) internal {
+        bytes32 key = _quoteKey(quoteHash, payer);
+        if (usedQuoteKey[key]) revert QuoteHashUsed();
+        usedQuoteKey[key] = true;
     }
 
     function deposit(bytes32 quoteHash, address token, uint256 amount)
@@ -116,7 +127,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         nonReentrant
         whenNotPaused(PauseClass.Deposits)
     {
-        _markQuote(quoteHash);
+        _markQuote(quoteHash, msg.sender);
         uint256 before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - before;
@@ -124,7 +135,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     }
 
     function depositNative(bytes32 quoteHash) external payable nonReentrant whenNotPaused(PauseClass.Deposits) {
-        _markQuote(quoteHash);
+        _markQuote(quoteHash, msg.sender);
         emit Deposited(quoteHash, address(0), msg.sender, msg.value);
     }
 
@@ -138,7 +149,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         bytes32 r,
         bytes32 s
     ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
-        _markQuote(quoteHash);
+        _markQuote(quoteHash, owner);
         // try/ignore: a front-run permit already set the allowance; transferFrom is the truth
         try IERC20Permit(token).permit(owner, address(this), amount, deadline, v, r, s) {} catch {}
         uint256 before = IERC20(token).balanceOf(address(this));

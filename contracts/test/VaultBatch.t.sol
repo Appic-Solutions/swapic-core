@@ -144,7 +144,9 @@ contract VaultBatchTest is Test {
         // depositNative has no canister gate and no other revert condition
         // active here (not paused, fresh quote hash): only the nonReentrant
         // guard held by the outer executeMany can explain this not landing.
-        assertFalse(vault.usedQuoteHash("reentrant-deposit"), "reentrant deposit blocked by reentrancy guard");
+        assertFalse(
+            vault.quoteKeyUsed("reentrant-deposit", address(reentrant)), "reentrant deposit blocked by reentrancy guard"
+        );
     }
 
     function test_run_item_self_only() public {

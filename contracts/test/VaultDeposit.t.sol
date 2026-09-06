@@ -41,6 +41,25 @@ contract VaultDepositTest is Test {
         vault.deposit("q1", address(token), 100e18);
     }
 
+    function test_stranger_cannot_burn_someone_elses_quote_hash() public {
+        address attacker = address(0xBAD);
+
+        // attacker burns the hash under their own key, for free
+        vm.prank(attacker);
+        vault.depositNative{value: 0}("q9");
+        assertTrue(vault.quoteKeyUsed("q9", attacker), "attacker's own key is marked");
+
+        // the honest payer's quote is untouched and still usable
+        assertFalse(vault.quoteKeyUsed("q9", address(this)), "honest payer's key is free");
+        token.approve(address(vault), 200e18);
+        vault.deposit("q9", address(token), 100e18);
+        assertEq(token.balanceOf(address(vault)), 100e18, "honest deposit landed");
+
+        // ...but that payer still cannot double-pay the same quote
+        vm.expectRevert(Vault.QuoteHashUsed.selector);
+        vault.deposit("q9", address(token), 100e18);
+    }
+
     function test_fee_on_transfer_records_actual_amount() public {
         feeToken.approve(address(vault), 100e18);
         vm.expectEmit(true, true, true, true);
