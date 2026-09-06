@@ -40,6 +40,8 @@ contract VaultPayoutTest is Test {
     }
 
     function test_native_payout_moves_eth() public {
+        vm.expectEmit(true, true, true, true);
+        emit Vault.Payout("s2", address(0), alice, 1 ether);
         vm.prank(canister);
         vault.payout("s2", address(0), alice, 1 ether);
 
@@ -54,6 +56,17 @@ contract VaultPayoutTest is Test {
         vault.refund("r1", address(token), alice, 50e18);
 
         assertEq(token.balanceOf(alice), 50e18, "refund landed");
+        assertEq(token.balanceOf(address(vault)), 950e18, "vault debited");
+    }
+
+    function test_native_refund_moves_eth() public {
+        vm.expectEmit(true, true, true, true);
+        emit Vault.Refunded("r2", address(0), alice, 2 ether);
+        vm.prank(canister);
+        vault.refund("r2", address(0), alice, 2 ether);
+
+        assertEq(alice.balance, 2 ether, "recipient credited");
+        assertEq(address(vault).balance, 8 ether, "vault debited");
     }
 
     function test_only_canister_can_payout_or_refund() public {

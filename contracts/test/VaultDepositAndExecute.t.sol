@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "../src/Vault.sol";
 import "./mocks/TestToken.sol";
 import "./mocks/SwapRouterMock.sol";
+import "./mocks/NativeRouterMock.sol";
 import "./mocks/FeeOnTransferToken.sol";
 
 contract VaultDepositAndExecuteTest is Test {
@@ -14,6 +15,7 @@ contract VaultDepositAndExecuteTest is Test {
     TestToken b;
     FeeOnTransferToken feeToken;
     SwapRouterMock router;
+    NativeRouterMock nativeRouter;
     address canister = address(0xCA);
     address guardian = address(0x6A);
     address user = address(0xB0B);
@@ -28,6 +30,8 @@ contract VaultDepositAndExecuteTest is Test {
         b = new TestToken();
         feeToken = new FeeOnTransferToken();
         router = new SwapRouterMock();
+        nativeRouter = new NativeRouterMock();
+        vm.deal(address(nativeRouter), 10 ether);
 
         a.transfer(user, 100e18);
         a.transfer(other, 100e18);
@@ -251,6 +255,34 @@ contract VaultDepositAndExecuteTest is Test {
 
         assertEq(b.balanceOf(address(vault)), 95e18, "proceeds retained");
         assertEq(b.balanceOf(user), 0, "nothing paid out while Payouts is paused");
+    }
+
+    function test_native_payout_leg_goes_through_the_send_door() public {
+        // a direct safeTransfer here reverts SafeERC20FailedOperation on address(0),
+        // so this pins the atomic path's native payout to _send
+        address eoa = makeAddr("nativeReceiver");
+        vm.prank(canister);
+        vault.setRouterAllowlist(address(nativeRouter), true);
+
+        Vault.Call[] memory calls = new Vault.Call[](1);
+        calls[0] = Vault.Call(
+            address(nativeRouter),
+            0,
+            abi.encodeCall(NativeRouterMock.swapForNative, (address(a), 100e18, 1 ether)),
+            address(a),
+            100e18
+        );
+
+        vm.startPrank(user);
+        a.approve(address(vault), 100e18);
+        vm.expectEmit(true, true, true, true);
+        emit Vault.Payout("qn", address(0), eoa, 1 ether);
+        vault.depositAndExecute("qn", address(a), 100e18, calls, address(0), 1 ether, eoa);
+        vm.stopPrank();
+
+        assertEq(eoa.balance, 1 ether, "native proceeds paid out");
+        assertEq(address(vault).balance, 0, "no native stranded in the vault");
+        assertEq(a.balanceOf(user), 0, "deposit pulled");
     }
 
     function test_different_payer_may_reuse_the_same_quote_hash() public {

@@ -285,7 +285,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
 
         uint256 out = uint256(change);
         if (payoutTo != address(0) && out > 0) {
-            IERC20(payoutToken).safeTransfer(payoutTo, out);
+            // through the same door as payout/refund: native-safe, and one place for caps
+            _send(payoutToken, payoutTo, out);
             emit Payout(quoteHash, payoutToken, payoutTo, out);
         }
     }
