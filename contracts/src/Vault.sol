@@ -174,6 +174,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         bytes calldata signature
     ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
         _markQuote(quoteHash, owner);
+        address token = permit.permitted.token;
+        uint256 before = IERC20(token).balanceOf(address(this));
         PERMIT2.permitWitnessTransferFrom(
             permit,
             ISignatureTransfer.SignatureTransferDetails(address(this), permit.permitted.amount),
@@ -182,7 +184,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
             WITNESS_TYPE,
             signature
         );
-        emit Deposited(quoteHash, permit.permitted.token, owner, permit.permitted.amount);
+        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
     function setRouterAllowlist(address target, bool ok) external onlyCanister {
