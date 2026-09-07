@@ -12,3 +12,6 @@ jobs:
         working-directory: contracts
       - run: forge test -vv
         working-directory: contracts
+        env:
+          # fork tests skip themselves when this is empty (fork PRs get no secrets)
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
