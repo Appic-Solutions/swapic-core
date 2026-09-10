@@ -4,6 +4,10 @@ use sha2::Digest;
 
 pub type Hash32 = [u8; 32];
 
+// update together with the enum and samples(); the exhaustive match in event_bytes is the
+// compile-time check, this is the golden-count check
+pub const EVENT_VARIANT_COUNT: usize = 16;
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum Event {
     ConfigChanged {
@@ -369,14 +373,16 @@ mod tests {
                 chain_id: 137,
                 token: "USDT".into(),
                 amount: 42,
-                to: "0xabc".into(),
+                // empty string: length prefix must still be written
+                to: String::new(),
             },
             Event::SwapDone {
                 quote_hash: [12; 32],
             },
             Event::Frozen {
                 quote_hash: [13; 32],
-                reason: "sanctions".into(),
+                // multibyte utf8: length is bytes, not chars
+                reason: "griefed \u{2603}".into(),
             },
             Event::FeeAccrued {
                 quote_hash: [14; 32],
@@ -384,7 +390,8 @@ mod tests {
             },
             Event::PocketFunded {
                 chain_id: 10,
-                amount: 5,
+                // high word set: proves the u128 is 16 bytes, not a truncated u64
+                amount: 1u128 << 70,
             },
             Event::PocketReserved {
                 quote_hash: [15; 32],
@@ -400,27 +407,67 @@ mod tests {
         ]
     }
 
+    const GOLDEN: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/event_bytes_v1.txt"
+    );
+
+    fn tag_of(line: &str) -> &str {
+        line.get(..4).unwrap_or("????")
+    }
+
+    #[test]
+    fn choice_encodes_one_byte() {
+        let q = event_bytes(&Event::DecisionMade {
+            quote_hash: [0; 32],
+            choice: Choice::Requote,
+        });
+        let r = event_bytes(&Event::DecisionMade {
+            quote_hash: [0; 32],
+            choice: Choice::Refund,
+        });
+        assert_eq!(q.len(), 35, "tag + hash + one choice byte");
+        assert_eq!(q.len(), r.len());
+        assert_eq!(*q.last().unwrap(), 0, "Requote encodes 0");
+        assert_eq!(*r.last().unwrap(), 1, "Refund encodes 1");
+    }
+
     #[test]
     fn event_bytes_matches_golden_vectors() {
         let s = samples();
-        assert_eq!(s.len(), 16, "one sample per variant");
-        let got = s
-            .iter()
-            .map(|e| hex::encode(event_bytes(e)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/golden/event_bytes_v1.txt"
+        assert_eq!(
+            s.len(),
+            EVENT_VARIANT_COUNT,
+            "samples() must cover every variant"
         );
-        match std::fs::read_to_string(path) {
-            Ok(want) => assert_eq!(got, want.trim_end(), "canonical layout changed: breaking"),
-            // first run writes the golden file; commit it.
-            Err(_) => {
-                std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"))
-                    .unwrap();
-                std::fs::write(path, got + "\n").unwrap()
-            }
+        let got: Vec<String> = s.iter().map(|e| hex::encode(event_bytes(e))).collect();
+
+        // regeneration is opt-in and never green, so a blessing is always a deliberate diff
+        if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+            let dir = std::path::Path::new(GOLDEN).parent().unwrap();
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(GOLDEN, got.join("\n") + "\n").unwrap();
+            panic!("golden regenerated, inspect the diff and rerun: {GOLDEN}");
+        }
+
+        let raw = std::fs::read_to_string(GOLDEN).unwrap_or_else(|e| {
+            panic!("golden missing or unreadable ({e}); regenerate with UPDATE_GOLDEN=1: {GOLDEN}")
+        });
+        let want: Vec<&str> = raw.lines().collect();
+        assert_eq!(
+            want.len(),
+            got.len(),
+            "golden has {} lines but samples() has {}: {GOLDEN}",
+            want.len(),
+            got.len()
+        );
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                g,
+                w,
+                "canonical layout changed: breaking. first differing line {i} (tag {})",
+                tag_of(g)
+            );
         }
     }
 
