@@ -122,10 +122,15 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
             require(s.amount_paid == 0, "swap is already paid in stable")?;
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
-        Event::DecisionRequired { quote_hash, .. } => require(
-            !swap(state, quote_hash)?.status.is_closed(),
-            "swap is closed",
-        ),
+        Event::DecisionRequired { quote_hash, .. } => {
+            let s = swap(state, quote_hash)?;
+            require(!s.status.is_closed(), "swap is closed")?;
+            // one open question at a time: re-asking would silently re-arm the deadline
+            require(
+                s.status != SwapStatus::WaitingForUser,
+                "swap is already waiting for the user",
+            )
+        }
         Event::DecisionMade { quote_hash, .. } => require(
             swap(state, quote_hash)?.status == SwapStatus::WaitingForUser,
             "swap is not waiting for the user",
@@ -159,18 +164,40 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
         Event::FeeAccrued { quote_hash, .. } => swap(state, quote_hash).map(|_| ()),
+        // the three per-swap pocket moves all name a swap, so all three check it exists
         Event::PocketReserved {
-            chain_id, amount, ..
-        } => require(
-            pocket(state, chain_id)?.available >= *amount,
-            "pocket is short",
-        ),
+            quote_hash,
+            chain_id,
+            amount,
+        } => {
+            swap(state, quote_hash)?;
+            require(
+                pocket(state, chain_id)?.available >= *amount,
+                "pocket is short",
+            )
+        }
         Event::PocketReleased {
-            chain_id, amount, ..
-        } => require(
-            pocket(state, chain_id)?.reserved >= *amount,
-            "pocket reservation is short",
-        ),
+            quote_hash,
+            chain_id,
+            amount,
+        } => {
+            swap(state, quote_hash)?;
+            require(
+                pocket(state, chain_id)?.reserved >= *amount,
+                "pocket reservation is short",
+            )
+        }
+        Event::PocketSpent {
+            quote_hash,
+            chain_id,
+            amount,
+        } => {
+            swap(state, quote_hash)?;
+            require(
+                pocket(state, chain_id)?.reserved >= *amount,
+                "pocket reservation is short",
+            )
+        }
         Event::PocketRebalanced {
             from_chain, amount, ..
         } => require(
@@ -251,18 +278,21 @@ pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
                 Choice::Refund => SwapStatus::Refunding,
             };
         }),
-        Event::RefundStarted { quote_hash, .. } => {
-            with_swap(state, quote_hash, |s| s.status = SwapStatus::Refunding)
-        }
+        // a refund answers any open question, so the waiting clock stops with it
+        Event::RefundStarted { quote_hash, .. } => with_swap(state, quote_hash, |s| {
+            s.status = SwapStatus::Refunding;
+            s.waiting_since_ns = None;
+        }),
         Event::Refunded { quote_hash, .. } => {
             with_swap(state, quote_hash, |s| s.status = SwapStatus::Refunded)
         }
         Event::SwapDone { quote_hash } => {
             with_swap(state, quote_hash, |s| s.status = SwapStatus::Done)
         }
-        Event::Frozen { quote_hash, .. } => {
-            with_swap(state, quote_hash, |s| s.status = SwapStatus::Frozen)
-        }
+        Event::Frozen { quote_hash, .. } => with_swap(state, quote_hash, |s| {
+            s.status = SwapStatus::Frozen;
+            s.waiting_since_ns = None;
+        }),
         Event::FeeAccrued { amount, .. } => {
             state.fees_accrued = state.fees_accrued.saturating_add(*amount);
         }
@@ -283,6 +313,13 @@ pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
             let p = state.pockets.entry(*chain_id).or_default();
             p.reserved = p.reserved.saturating_sub(*amount);
             p.available = p.available.saturating_add(*amount);
+        }
+        // the settle debit: the value left the pocket on-chain, so it does not come back
+        Event::PocketSpent {
+            chain_id, amount, ..
+        } => {
+            let p = state.pockets.entry(*chain_id).or_default();
+            p.reserved = p.reserved.saturating_sub(*amount);
         }
         Event::PocketRebalanced {
             from_chain,
@@ -463,10 +500,7 @@ mod tests {
 
     fn decide(qh: Hash32, choice: Choice) -> Vec<Event> {
         vec![
-            Event::DecisionRequired {
-                quote_hash: qh,
-                reason: "slippage".into(),
-            },
+            ask(qh),
             Event::DecisionMade {
                 quote_hash: qh,
                 choice,
@@ -498,15 +532,7 @@ mod tests {
     #[test]
     fn waiting_for_user_blocks_signing() {
         let qh = [1; 32];
-        let mut state = fold(vec![
-            funds(qh),
-            signed(qh, 1),
-            confirmed(qh, 1),
-            Event::DecisionRequired {
-                quote_hash: qh,
-                reason: "slippage".into(),
-            },
-        ]);
+        let mut state = fold(vec![funds(qh), signed(qh, 1), confirmed(qh, 1), ask(qh)]);
         assert!(check_transition(&state, &signed(qh, 2)).is_err());
         // answering the question unblocks the next attempt
         let resume = Event::DecisionMade {
@@ -629,6 +655,117 @@ mod tests {
         .is_err());
     }
 
+    fn ask(qh: Hash32) -> Event {
+        Event::DecisionRequired {
+            quote_hash: qh,
+            reason: "slippage".into(),
+        }
+    }
+
+    // A swap that stops waiting must stop the clock too, or Task 7's expiry sweep would
+    // keep seeing a stale deadline on a swap that is no longer waiting for anyone.
+    #[test]
+    fn refund_stops_the_waiting_clock() {
+        let qh = [1; 32];
+        let state = fold(vec![
+            funds(qh),
+            ask(qh),
+            Event::RefundStarted {
+                quote_hash: qh,
+                reason: "timeout".into(),
+            },
+        ]);
+        assert_eq!(state.swaps[&qh].status, SwapStatus::Refunding);
+        assert_eq!(state.swaps[&qh].waiting_since_ns, None);
+    }
+
+    #[test]
+    fn freeze_stops_the_waiting_clock() {
+        let qh = [1; 32];
+        let state = fold(vec![
+            funds(qh),
+            ask(qh),
+            Event::Frozen {
+                quote_hash: qh,
+                reason: "sanctions".into(),
+            },
+        ]);
+        assert_eq!(state.swaps[&qh].status, SwapStatus::Frozen);
+        assert_eq!(state.swaps[&qh].waiting_since_ns, None);
+    }
+
+    #[test]
+    fn second_decision_request_rejected() {
+        let qh = [1; 32];
+        let state = fold(vec![funds(qh), ask(qh)]);
+        // re-asking would silently re-arm the deadline
+        assert!(check_transition(&state, &ask(qh)).is_err());
+    }
+
+    #[test]
+    fn decision_to_refund_reaches_refunding() {
+        let qh = [1; 32];
+        let mut events = vec![funds(qh)];
+        events.extend(decide(qh, Choice::Refund));
+        let state = fold(events);
+        assert_eq!(state.swaps[&qh].status, SwapStatus::Refunding);
+        assert_eq!(state.swaps[&qh].waiting_since_ns, None);
+    }
+
+    // Unlike a release, a spend does not return the value: the pocket total drops.
+    #[test]
+    fn pocket_spend_debits_reserved_without_returning_it() {
+        let qh = [1; 32];
+        let state = fold(vec![
+            Event::PocketFunded {
+                chain_id: 8453,
+                amount: 1000,
+            },
+            funds(qh),
+            Event::PocketReserved {
+                quote_hash: qh,
+                chain_id: 8453,
+                amount: 400,
+            },
+            Event::PocketSpent {
+                quote_hash: qh,
+                chain_id: 8453,
+                amount: 250,
+            },
+        ]);
+        let p = &state.pockets[&8453];
+        assert_eq!(p.available, 600);
+        assert_eq!(p.reserved, 150);
+        assert_eq!(p.available + p.reserved, 750, "250 left the pocket system");
+        // cannot spend more than is reserved
+        assert!(check_transition(
+            &state,
+            &Event::PocketSpent {
+                quote_hash: qh,
+                chain_id: 8453,
+                amount: 200,
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pocket_reserve_for_unknown_swap_rejected() {
+        let state = fold(vec![Event::PocketFunded {
+            chain_id: 8453,
+            amount: 1000,
+        }]);
+        assert!(check_transition(
+            &state,
+            &Event::PocketReserved {
+                quote_hash: [9; 32],
+                chain_id: 8453,
+                amount: 400,
+            }
+        )
+        .is_err());
+    }
+
     #[test]
     fn pocket_rebalance_moves_available_between_chains() {
         let state = fold(vec![
@@ -664,10 +801,7 @@ mod tests {
     fn decision_sets_then_clears_the_waiting_clock() {
         let qh = [1; 32];
         let mut state = fold(vec![funds(qh)]);
-        let pause = Event::DecisionRequired {
-            quote_hash: qh,
-            reason: "slippage".into(),
-        };
+        let pause = ask(qh);
         check_transition(&state, &pause).expect("guard admits pause");
         let env = seal(state.next_event_index, 777, state.last_event_hash, pause);
         apply(&mut state, &env);
