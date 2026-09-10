@@ -1,0 +1,22 @@
+[package]
+name = "settlement"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+test-endpoints = []
+
+[dependencies]
+ic-cdk = "0.17"
+ic-cdk-timers = "0.11"
+ic-stable-structures = "0.6"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+pocket-ic = "9"

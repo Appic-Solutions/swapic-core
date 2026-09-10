@@ -15,3 +15,15 @@ jobs:
         env:
           # fork tests skip themselves when this is empty (fork PRs get no secrets)
           BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+  canister:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: dfinity/setup-dfx@main
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: make test
