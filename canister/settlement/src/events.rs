@@ -6,7 +6,7 @@ pub type Hash32 = [u8; 32];
 
 // update together with the enum and samples(); the exhaustive match in event_bytes is the
 // compile-time check, this is the golden-count check
-pub const EVENT_VARIANT_COUNT: usize = 16;
+pub const EVENT_VARIANT_COUNT: usize = 17;
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum Event {
@@ -89,6 +89,11 @@ pub enum Event {
         to_chain: u64,
         amount: u128,
         route: String,
+    },
+    PocketReleased {
+        quote_hash: Hash32,
+        chain_id: u64,
+        amount: u128,
     },
 }
 
@@ -274,6 +279,16 @@ pub fn event_bytes(event: &Event) -> Vec<u8> {
             b.extend_from_slice(&amount.to_be_bytes());
             put_str(&mut b, route);
         }
+        Event::PocketReleased {
+            quote_hash,
+            chain_id,
+            amount,
+        } => {
+            put_tag(&mut b, 16);
+            b.extend_from_slice(quote_hash);
+            b.extend_from_slice(&chain_id.to_be_bytes());
+            b.extend_from_slice(&amount.to_be_bytes());
+        }
     }
     b
 }
@@ -403,6 +418,11 @@ mod tests {
                 to_chain: 42161,
                 amount: 250,
                 route: "cctp".into(),
+            },
+            Event::PocketReleased {
+                quote_hash: [16; 32],
+                chain_id: 8453,
+                amount: 150,
             },
         ]
     }
