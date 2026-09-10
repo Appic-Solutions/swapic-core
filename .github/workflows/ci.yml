@@ -31,3 +31,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: make test
+      # pinned like dfx above: extractor output is version-dependent, so an unpinned
+      # install could fail the diff below on a clean tree
+      - run: cargo install candid-extractor --locked --version 0.1.6
+      # the committed did must match the production wasm, which also proves the
+      # test-endpoints door never reaches the public interface
+      - run: make did && git diff --exit-code canister/settlement/settlement.did

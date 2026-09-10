@@ -517,6 +517,26 @@ mod tests {
         }
     }
 
+    // Storage is candid, and a variant that fails to decode would trap post_upgrade and
+    // strand the canister on its current wasm. This walks the same Storable impl that
+    // replay runs, over every variant, so the append-only storage rule is CI-enforced.
+    #[test]
+    fn every_variant_round_trips_through_storage() {
+        use ic_stable_structures::Storable;
+
+        let s = samples();
+        assert_eq!(
+            s.len(),
+            EVENT_VARIANT_COUNT,
+            "samples() must cover every variant"
+        );
+        for (i, event) in s.into_iter().enumerate() {
+            let env = seal(i as u64, 1_700_000_000, [i as u8; 32], event);
+            let back = EventEnvelope::from_bytes(env.to_bytes());
+            assert_eq!(back, env, "variant {i} does not survive stable storage");
+        }
+    }
+
     #[test]
     fn hash_changes_when_any_field_changes() {
         let a = event_hash(

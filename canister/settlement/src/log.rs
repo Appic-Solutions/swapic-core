@@ -58,6 +58,16 @@ pub fn append_event(event: Event) -> Result<u64, String> {
             state.last_event_hash,
             event,
         );
+        // the sealed index must be the slot the log is about to write, or the chain forks;
+        // checked before the write, because returning Err after one would commit an event
+        // that was never applied
+        let next_slot = EVENTS.with(|e| e.borrow().len());
+        if next_slot != envelope.index {
+            return Err(format!(
+                "log is at {next_slot} but the event sealed as {}",
+                envelope.index
+            ));
+        }
         EVENTS
             .with(|e| e.borrow_mut().append(&envelope))
             .map_err(|e| format!("stable append failed: {e:?}"))?;
