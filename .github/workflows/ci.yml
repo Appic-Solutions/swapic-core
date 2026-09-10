@@ -23,7 +23,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
-      - uses: dfinity/setup-dfx@main
+      - uses: dfinity/setup-dfx@e50c04f104ee4285ec010f10609483cf41e4d365 # main @ 2024-04-01; repo publishes no tags or releases
+        with:
+          # paired pin: dfx 0.29.2 bundles pocket-ic-server 9.0.3, which must stay
+          # on the same major as the pocket-ic crate 9.x dev-dependency. Bump both or neither.
+          dfx-version: "0.29.2"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: make test

@@ -5,7 +5,7 @@ wasm:
 	cargo build --target wasm32-unknown-unknown --release -p settlement
 
 wasm-test:
-	cargo build --target wasm32-unknown-unknown --release -p settlement --features test-endpoints
+	cargo build --target-dir target/test --target wasm32-unknown-unknown --release -p settlement --features test-endpoints
 
 test: wasm-test
 	cargo test -p settlement
