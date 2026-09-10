@@ -1,6 +1,7 @@
 use ic_cdk::query;
 
 pub mod events;
+pub mod state;
 
 #[query]
 fn version() -> String {
