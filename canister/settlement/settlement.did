@@ -1,4 +1,25 @@
 type Choice = variant { Requote; Refund };
+// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
+// address maps and the key name are what a deploy fills in.
+type Config = record {
+  confirmations : vec record { nat64; nat64 };
+  rail_status_max_age_s : nat64;
+  expiry_check_interval_s : nat64;
+  batch_window_ms : nat64;
+  ecdsa_key_name : text;
+  max_fee_bps : nat16;
+  rpc_urls : vec record { nat64; text };
+  simulate_before_sign : bool;
+  vault_addresses : vec record { nat64; text };
+  platform_fee_bps : nat16;
+  permit_deadline_s : nat64;
+  replay_audit_interval_s : nat64;
+  quote_ttl_s : nat64;
+  decision_timeout_min : nat64;
+  chain_data_max_age_s : nat64;
+  max_swap_usd : nat64;
+  max_batch_items : nat32;
+};
 type Event = variant {
   PocketFunded : record { chain_id : nat64; amount : nat };
   PaidInStable : record { quote_hash : blob; chain_id : nat64; amount : nat };
@@ -56,10 +77,13 @@ type EventEnvelope = record {
   time_ns : nat64;
   parent_hash : blob;
 };
+type Result = variant { Ok; Err : text };
 service : () -> {
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec EventEnvelope) query;
+  get_config : () -> (Config) query;
+  set_config : (Config) -> (Result);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

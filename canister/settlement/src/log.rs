@@ -6,11 +6,12 @@ use ic_stable_structures::{DefaultMemoryImpl, StableLog, Storable};
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-type Memory = VirtualMemory<DefaultMemoryImpl>;
+pub(crate) type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 // assigned once, never reused for anything else
 const INDEX_MEMORY: MemoryId = MemoryId::new(0);
 const DATA_MEMORY: MemoryId = MemoryId::new(1);
+pub(crate) const CONFIG_MEMORY: MemoryId = MemoryId::new(2);
 
 /// Longest page a query will return, so one call can never walk the whole log.
 const MAX_PAGE: u64 = 500;
@@ -35,15 +36,17 @@ thread_local! {
 
     // The log is the record; both statics are private so `append_event` is the only writer.
     static EVENTS: RefCell<StableLog<EventEnvelope, Memory, Memory>> = RefCell::new(
-        StableLog::init(
-            MEMORY.with(|m| m.borrow().get(INDEX_MEMORY)),
-            MEMORY.with(|m| m.borrow().get(DATA_MEMORY)),
-        )
-        .expect("event log init"),
+        StableLog::init(memory(INDEX_MEMORY), memory(DATA_MEMORY)).expect("event log init"),
     );
 
     // Derived from EVENTS and from nothing else: it is rebuilt from the log on upgrade.
     static STATE: RefCell<AppState> = RefCell::new(AppState::default());
+}
+
+/// The canister's one memory manager; every stable structure takes its pages from here,
+/// under an id from the list above.
+pub(crate) fn memory(id: MemoryId) -> Memory {
+    MEMORY.with(|m| m.borrow().get(id))
 }
 
 /// The one and only path that writes an event: guard, seal, stable append, apply, all

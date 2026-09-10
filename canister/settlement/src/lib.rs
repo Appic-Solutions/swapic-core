@@ -1,20 +1,24 @@
-use ic_cdk::{init, post_upgrade, query};
+use ic_cdk::{init, post_upgrade, query, update};
 
+pub mod config;
 pub mod events;
 pub mod log;
 pub mod state;
 
 #[init]
 fn init() {
-    // touch the log in an update context so the stable headers are written here and no
-    // query is ever the first to grow stable memory
+    // touch the log and the config cell in an update context so the stable headers are
+    // written here and no query is ever the first to grow stable memory
     log::rebuild_state_from_log();
+    config::load();
 }
 
 #[post_upgrade]
 fn post_upgrade() {
     // the heap holds nothing the log cannot rebuild, so there is no pre_upgrade to match
     log::rebuild_state_from_log();
+    // except the config, which is deploy-time truth rather than a fold of the events
+    config::load();
 }
 
 #[query]
@@ -43,8 +47,18 @@ fn verify_replay() -> bool {
     log::verify_replay()
 }
 
-// gated together with its only caller today; the admin endpoints lift it later
-#[cfg(feature = "test-endpoints")]
+#[query]
+fn get_config() -> config::Config {
+    config::get()
+}
+
+#[update]
+fn set_config(new: config::Config) -> Result<(), String> {
+    require_controller()?;
+    config::set(new)
+}
+
+/// The one authorization rule in the canister: controllers only.
 fn require_controller() -> Result<(), String> {
     if ic_cdk::api::is_controller(&ic_cdk::api::caller()) {
         Ok(())
