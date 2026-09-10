@@ -330,9 +330,15 @@ pub fn seal(index: u64, time_ns: u64, parent_hash: Hash32, event: Event) -> Even
     }
 }
 
-pub fn chain_is_valid(events: &[EventEnvelope]) -> bool {
+/// Genesis-anchored: index 0 must link to the zero hash and every link after it must
+/// hold. Takes anything iterable, by value or by reference, so a stable log can be
+/// checked as a stream and a slice can be checked in place: one copy of the rule.
+pub fn chain_is_valid<E: std::borrow::Borrow<EventEnvelope>>(
+    events: impl IntoIterator<Item = E>,
+) -> bool {
     let mut parent = [0u8; 32];
-    for (i, e) in events.iter().enumerate() {
+    for (i, e) in events.into_iter().enumerate() {
+        let e = e.borrow();
         if e.index != i as u64 || e.parent_hash != parent {
             return false;
         }

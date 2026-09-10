@@ -1,1 +1,66 @@
-service : { version : () -> (text) query }
+type Choice = variant { Requote; Refund };
+type Event = variant {
+  PocketFunded : record { chain_id : nat64; amount : nat };
+  PaidInStable : record { quote_hash : blob; chain_id : nat64; amount : nat };
+  FundsReceived : record {
+    token : text;
+    quote_bytes : blob;
+    quote_hash : blob;
+    chain_id : nat64;
+    tx_ref : text;
+    amount : nat;
+  };
+  PocketReleased : record { quote_hash : blob; chain_id : nat64; amount : nat };
+  Refunded : record {
+    to : text;
+    token : text;
+    quote_hash : blob;
+    chain_id : nat64;
+    amount : nat;
+  };
+  TxSigned : record {
+    attempt : nat32;
+    quote_hash : blob;
+    chain_id : nat64;
+    raw_tx : blob;
+    tx_hash : blob;
+  };
+  SwapDone : record { quote_hash : blob };
+  TxFailed : record { attempt : nat32; quote_hash : blob; reason : text };
+  PocketRebalanced : record {
+    to_chain : nat64;
+    from_chain : nat64;
+    amount : nat;
+    route : text;
+  };
+  RefundStarted : record { quote_hash : blob; reason : text };
+  DecisionRequired : record { quote_hash : blob; reason : text };
+  FeeAccrued : record { quote_hash : blob; amount : nat };
+  TxConfirmed : record {
+    attempt : nat32;
+    quote_hash : blob;
+    chain_id : nat64;
+    block : nat64;
+    tx_hash : blob;
+  };
+  DecisionMade : record { quote_hash : blob; choice : Choice };
+  ConfigChanged : record { json : text };
+  Frozen : record { quote_hash : blob; reason : text };
+  PocketReserved : record { quote_hash : blob; chain_id : nat64; amount : nat };
+  PocketSpent : record { quote_hash : blob; chain_id : nat64; amount : nat };
+};
+type EventEnvelope = record {
+  hash : blob;
+  event : Event;
+  index : nat64;
+  time_ns : nat64;
+  parent_hash : blob;
+};
+service : () -> {
+  event_count : () -> (nat64) query;
+  // `len` is capped server-side; ask for the count first and page through.
+  events_page : (nat64, nat64) -> (vec EventEnvelope) query;
+  verify_chain : () -> (bool) query;
+  verify_replay : () -> (bool) query;
+  version : () -> (text) query;
+}
