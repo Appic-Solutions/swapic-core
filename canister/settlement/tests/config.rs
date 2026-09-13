@@ -65,6 +65,18 @@ fn with_secret_rpc() -> Config {
     }
 }
 
+/// `init` seeds the cell with `Config::default()` and nothing validates on the way in, so
+/// this reads the seed back through the real path. Paired with the `defaults_are_valid`
+/// unit test, it pins that what a fresh install stores is a config `set` would accept.
+#[test]
+fn a_fresh_install_seeds_the_defaults() {
+    let (pic, canister, admin) = common::setup();
+    assert_eq!(
+        get_config_full(&pic, canister, admin).unwrap(),
+        Config::default()
+    );
+}
+
 #[test]
 fn admin_set_config_writes_the_value_and_logs_the_change() {
     let (pic, canister, admin) = common::setup();
@@ -153,6 +165,45 @@ fn get_config_full_rejects_a_stranger() {
     set_config(&pic, canister, admin, &with_secret_rpc()).unwrap();
 
     assert!(get_config_full(&pic, canister, stranger).is_err());
+}
+
+/// The footgun the redaction created: an operator reads the public view, edits a knob and
+/// writes it back, which would store `"***"` as the rpc url and cut the canister off.
+#[test]
+fn set_config_rejects_a_round_tripped_redacted_config() {
+    let (pic, canister, admin) = common::setup();
+    let real = with_secret_rpc();
+    set_config(&pic, canister, admin, &real).unwrap();
+
+    let mut round_tripped = get_config(&pic, canister, admin);
+    round_tripped.platform_fee_bps = 20;
+    let err = set_config(&pic, canister, admin, &round_tripped).unwrap_err();
+    assert!(
+        err.contains("rpc_urls"),
+        "the error must name the field: {err}"
+    );
+
+    // the real url is still in place and the rejected write left no event behind
+    assert_eq!(get_config_full(&pic, canister, admin).unwrap(), real);
+    assert_eq!(events(&pic, canister, admin).len(), 1);
+}
+
+#[test]
+fn set_config_rejects_an_incoherent_fee_and_writes_nothing() {
+    let (pic, canister, admin) = common::setup();
+    let bad = Config {
+        platform_fee_bps: 40,
+        max_fee_bps: 30,
+        ..Config::default()
+    };
+    let err = set_config(&pic, canister, admin, &bad).unwrap_err();
+    assert!(
+        err.contains("platform_fee_bps"),
+        "the error must name the field: {err}"
+    );
+
+    assert_eq!(get_config(&pic, canister, admin), Config::default());
+    assert!(events(&pic, canister, admin).is_empty());
 }
 
 /// `events_page` is a public query, so anything in the log is public.

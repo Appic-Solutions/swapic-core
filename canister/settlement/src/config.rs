@@ -5,10 +5,13 @@ use ic_stable_structures::StableCell;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 /// address maps and the key name are what a deploy fills in.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+// No `Debug` in the derive: it is hand-written below, because `rpc_urls` holds secrets.
+// (Kept out of the doc comment above, which the extractor copies into settlement.did.)
+#[derive(CandidType, Deserialize, Clone, PartialEq)]
 pub struct Config {
     pub platform_fee_bps: u16,
     pub max_fee_bps: u16,
@@ -64,22 +67,145 @@ impl Default for Config {
 /// configured.
 const REDACTED: &str = "***";
 
+/// The blanking rule itself: chain ids kept, values gone. Shared by the two mechanisms
+/// that must never leak, so they cannot drift apart.
+fn blank_rpc_urls(rpc_urls: &BTreeMap<u64, String>) -> BTreeMap<u64, String> {
+    rpc_urls
+        .keys()
+        .map(|chain| (*chain, REDACTED.to_string()))
+        .collect()
+}
+
 impl Config {
     /// The only view the public may see. An rpc url *is* its api key (an Alchemy url
     /// carries the key in the path), so the values are blanked and the chain ids kept.
-    /// This is the single redaction point: any field added later that can hold a secret
-    /// must be blanked here, and every public surface must route through it.
+    /// This is the single redaction point for the api surface: any field added later that
+    /// can hold a secret must be blanked here.
     pub fn redacted(&self) -> Config {
+        // exhaustive destructure: a new field breaks this line, forcing a redact-or-not
+        // decision. `..self.clone()` would have forwarded it into the public view silently.
+        let Config {
+            platform_fee_bps,
+            max_fee_bps,
+            max_swap_usd,
+            quote_ttl_s,
+            permit_deadline_s,
+            chain_data_max_age_s,
+            batch_window_ms,
+            max_batch_items,
+            decision_timeout_min,
+            rail_status_max_age_s,
+            simulate_before_sign,
+            expiry_check_interval_s,
+            replay_audit_interval_s,
+            confirmations,
+            rpc_urls,
+            vault_addresses,
+            ecdsa_key_name,
+        } = self.clone();
         Config {
-            rpc_urls: self
-                .rpc_urls
-                .keys()
-                .map(|chain| (*chain, REDACTED.to_string()))
-                .collect(),
-            // vault addresses and the ecdsa key *name* are public by nature: an address is
-            // on-chain already, and the name selects a key it never reveals
-            ..self.clone()
+            platform_fee_bps,
+            max_fee_bps,
+            max_swap_usd,
+            quote_ttl_s,
+            permit_deadline_s,
+            chain_data_max_age_s,
+            batch_window_ms,
+            max_batch_items,
+            decision_timeout_min,
+            rail_status_max_age_s,
+            simulate_before_sign,
+            expiry_check_interval_s,
+            replay_audit_interval_s,
+            confirmations,
+            // the one secret in the record
+            rpc_urls: blank_rpc_urls(&rpc_urls),
+            // both of these are public by nature: an address is on-chain already, and the
+            // key *name* selects a key it never reveals
+            vault_addresses,
+            ecdsa_key_name,
         }
+    }
+
+    /// What a stored config must satisfy. Called at the write chokepoint, so nothing that
+    /// fails here reaches the cell or the log. The fee relation is the record-coherence
+    /// half only; the fee computation clamps against `max_fee_bps` on its own.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_fee_bps > 10_000 {
+            return Err(format!(
+                "max_fee_bps is {}, above the 10000 bps that is 100%",
+                self.max_fee_bps
+            ));
+        }
+        if self.platform_fee_bps > self.max_fee_bps {
+            return Err(format!(
+                "platform_fee_bps is {}, above max_fee_bps {}",
+                self.platform_fee_bps, self.max_fee_bps
+            ));
+        }
+        if self.ecdsa_key_name.is_empty() {
+            return Err("ecdsa_key_name is empty".to_string());
+        }
+        // the read-modify-write guard: storing the public view back would put "***" where
+        // a provider url belongs and cut the canister off from its rpc
+        for (chain, url) in &self.rpc_urls {
+            if url == REDACTED {
+                return Err(format!(
+                    "rpc_urls[{chain}] is the redacted placeholder {REDACTED:?}: \
+                     read with get_config_full, not get_config, before writing"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+// Hand-written so a stray `{:?}` cannot leak an api key: into a log line, a trap message,
+// a test failure. It blanks exactly what `redacted()` blanks, which keeps the logged event
+// json identical whichever of the two the caller went through. `redacted()` stays the
+// api-surface mechanism; this is the backstop under it.
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // exhaustive destructure: a new field breaks this line, forcing a redact-or-not
+        // decision
+        let Config {
+            platform_fee_bps,
+            max_fee_bps,
+            max_swap_usd,
+            quote_ttl_s,
+            permit_deadline_s,
+            chain_data_max_age_s,
+            batch_window_ms,
+            max_batch_items,
+            decision_timeout_min,
+            rail_status_max_age_s,
+            simulate_before_sign,
+            expiry_check_interval_s,
+            replay_audit_interval_s,
+            confirmations,
+            rpc_urls,
+            vault_addresses,
+            ecdsa_key_name,
+        } = self;
+        f.debug_struct("Config")
+            .field("platform_fee_bps", platform_fee_bps)
+            .field("max_fee_bps", max_fee_bps)
+            .field("max_swap_usd", max_swap_usd)
+            .field("quote_ttl_s", quote_ttl_s)
+            .field("permit_deadline_s", permit_deadline_s)
+            .field("chain_data_max_age_s", chain_data_max_age_s)
+            .field("batch_window_ms", batch_window_ms)
+            .field("max_batch_items", max_batch_items)
+            .field("decision_timeout_min", decision_timeout_min)
+            .field("rail_status_max_age_s", rail_status_max_age_s)
+            .field("simulate_before_sign", simulate_before_sign)
+            .field("expiry_check_interval_s", expiry_check_interval_s)
+            .field("replay_audit_interval_s", replay_audit_interval_s)
+            .field("confirmations", confirmations)
+            .field("rpc_urls", &blank_rpc_urls(rpc_urls))
+            .field("vault_addresses", vault_addresses)
+            .field("ecdsa_key_name", ecdsa_key_name)
+            .finish()
     }
 }
 
@@ -119,6 +245,8 @@ pub fn get() -> Config {
 /// Writes the cell and the heap copy, and records the change in the log. Callers do the
 /// authorization; this is the storage path.
 pub fn set(new: Config) -> Result<(), String> {
+    // before anything is written: a rejected config must leave no event and no cell write
+    new.validate()?;
     // the log first, because it is the step that can refuse: the event records THAT the
     // config changed and to what, while the cell below stays the operative copy. The log
     // is world-readable through `events_page`, so what goes in it is the redacted view.
@@ -163,24 +291,28 @@ mod tests {
         assert_eq!(c.ecdsa_key_name, "dfx_test_key");
     }
 
-    /// An rpc url embeds its api key, so the public view must blank the values and keep
-    /// the chain ids, and must touch nothing else.
-    #[test]
-    fn redacted_blanks_rpc_urls_and_nothing_else() {
-        let full = Config {
+    const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
+
+    /// What a real deploy looks like: two provider urls, both of them secrets.
+    fn secret_bearing() -> Config {
+        Config {
             platform_fee_bps: 10,
             rpc_urls: BTreeMap::from([
-                (
-                    1,
-                    "https://eth-mainnet.g.alchemy.com/v2/secret-key".to_string(),
-                ),
+                (1, SECRET.to_string()),
                 (8453, "https://base.example/rpc?key=hunter2".to_string()),
             ]),
             // a vault address is public on-chain data, not a secret: it must survive
             vault_addresses: BTreeMap::from([(1, "0xvault".to_string())]),
             ecdsa_key_name: "key_1".to_string(),
             ..Config::default()
-        };
+        }
+    }
+
+    /// An rpc url embeds its api key, so the public view must blank the values and keep
+    /// the chain ids, and must touch nothing else.
+    #[test]
+    fn redacted_blanks_rpc_urls_and_nothing_else() {
+        let full = secret_bearing();
         let public = full.redacted();
 
         assert_eq!(
@@ -196,5 +328,79 @@ mod tests {
             },
             full
         );
+    }
+
+    /// `redacted()` guards the api surface, but a stray `{:?}` anywhere would still print
+    /// the keys, so Debug blanks them too.
+    #[test]
+    fn debug_never_prints_an_rpc_url() {
+        let shown = format!("{:?}", secret_bearing());
+        assert!(
+            !shown.contains(SECRET),
+            "a stray debug print leaked: {shown}"
+        );
+        assert!(
+            !shown.contains("hunter2"),
+            "a stray debug print leaked: {shown}"
+        );
+        assert!(shown.contains("***"));
+        // the two blanking paths must agree, or the logged event json would drift
+        assert_eq!(shown, format!("{:?}", secret_bearing().redacted()));
+        // everything that is not a secret still prints
+        assert!(shown.contains("0xvault") && shown.contains("key_1"));
+    }
+
+    #[test]
+    fn defaults_are_valid() {
+        Config::default()
+            .validate()
+            .expect("the defaults are valid");
+    }
+
+    fn rejects(config: Config, field: &str) {
+        let err = config
+            .validate()
+            .expect_err("validate should reject this config");
+        assert!(err.contains(field), "the error must name {field}: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_ceiling_above_one_hundred_percent() {
+        rejects(
+            Config {
+                max_fee_bps: 10_001,
+                ..Config::default()
+            },
+            "max_fee_bps",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_platform_fee_above_the_ceiling() {
+        rejects(
+            Config {
+                platform_fee_bps: 31,
+                max_fee_bps: 30,
+                ..Config::default()
+            },
+            "platform_fee_bps",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_ecdsa_key_name() {
+        rejects(
+            Config {
+                ecdsa_key_name: String::new(),
+                ..Config::default()
+            },
+            "ecdsa_key_name",
+        );
+    }
+
+    /// The read-modify-write footgun: writing the public view back would brick rpc access.
+    #[test]
+    fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
+        rejects(secret_bearing().redacted(), "rpc_urls");
     }
 }
