@@ -60,6 +60,29 @@ impl Default for Config {
     }
 }
 
+/// What a blanked secret reads as. Values only, so a reader still learns which chains are
+/// configured.
+const REDACTED: &str = "***";
+
+impl Config {
+    /// The only view the public may see. An rpc url *is* its api key (an Alchemy url
+    /// carries the key in the path), so the values are blanked and the chain ids kept.
+    /// This is the single redaction point: any field added later that can hold a secret
+    /// must be blanked here, and every public surface must route through it.
+    pub fn redacted(&self) -> Config {
+        Config {
+            rpc_urls: self
+                .rpc_urls
+                .keys()
+                .map(|chain| (*chain, REDACTED.to_string()))
+                .collect(),
+            // vault addresses and the ecdsa key *name* are public by nature: an address is
+            // on-chain already, and the name selects a key it never reveals
+            ..self.clone()
+        }
+    }
+}
+
 fn encode(config: &Config) -> Vec<u8> {
     candid::encode_one(config).expect("config encodes")
 }
@@ -97,9 +120,10 @@ pub fn get() -> Config {
 /// authorization; this is the storage path.
 pub fn set(new: Config) -> Result<(), String> {
     // the log first, because it is the step that can refuse: the event records THAT the
-    // config changed and to what, while the cell below stays the operative copy
+    // config changed and to what, while the cell below stays the operative copy. The log
+    // is world-readable through `events_page`, so what goes in it is the redacted view.
     log::append_event(Event::ConfigChanged {
-        json: format!("{new:?}"),
+        json: format!("{:?}", new.redacted()),
     })?;
     // out of stable memory is not a caller error, so it traps instead of returning Err:
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
@@ -137,5 +161,40 @@ mod tests {
         assert!(c.rpc_urls.is_empty());
         assert!(c.vault_addresses.is_empty());
         assert_eq!(c.ecdsa_key_name, "dfx_test_key");
+    }
+
+    /// An rpc url embeds its api key, so the public view must blank the values and keep
+    /// the chain ids, and must touch nothing else.
+    #[test]
+    fn redacted_blanks_rpc_urls_and_nothing_else() {
+        let full = Config {
+            platform_fee_bps: 10,
+            rpc_urls: BTreeMap::from([
+                (
+                    1,
+                    "https://eth-mainnet.g.alchemy.com/v2/secret-key".to_string(),
+                ),
+                (8453, "https://base.example/rpc?key=hunter2".to_string()),
+            ]),
+            // a vault address is public on-chain data, not a secret: it must survive
+            vault_addresses: BTreeMap::from([(1, "0xvault".to_string())]),
+            ecdsa_key_name: "key_1".to_string(),
+            ..Config::default()
+        };
+        let public = full.redacted();
+
+        assert_eq!(
+            public.rpc_urls,
+            BTreeMap::from([(1, "***".to_string()), (8453, "***".to_string())]),
+            "every value blanked, every chain id kept"
+        );
+        // put the original urls back: if that restores the whole record, nothing else moved
+        assert_eq!(
+            Config {
+                rpc_urls: full.rpc_urls.clone(),
+                ..public
+            },
+            full
+        );
     }
 }

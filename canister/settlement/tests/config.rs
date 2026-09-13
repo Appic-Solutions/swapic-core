@@ -4,9 +4,27 @@ use candid::{decode_one, encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement::config::Config;
 use settlement::events::{Event, EventEnvelope};
+use std::collections::BTreeMap;
+
+/// Stands in for a real provider url, which is a secret because the key is part of it.
+const SECRET_RPC: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 
 fn get_config(pic: &PocketIc, canister: Principal, sender: Principal) -> Config {
     common::query(pic, canister, sender, "get_config", encode_one(()).unwrap())
+}
+
+fn get_config_full(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> Result<Config, String> {
+    common::query(
+        pic,
+        canister,
+        sender,
+        "get_config_full",
+        encode_one(()).unwrap(),
+    )
 }
 
 fn set_config(
@@ -39,6 +57,14 @@ fn with_fee(bps: u16) -> Config {
     }
 }
 
+/// A config carrying a secret, which is what a real deploy looks like.
+fn with_secret_rpc() -> Config {
+    Config {
+        rpc_urls: BTreeMap::from([(1, SECRET_RPC.to_string())]),
+        ..with_fee(10)
+    }
+}
+
 #[test]
 fn admin_set_config_writes_the_value_and_logs_the_change() {
     let (pic, canister, admin) = common::setup();
@@ -53,7 +79,7 @@ fn admin_set_config_writes_the_value_and_logs_the_change() {
     assert_eq!(
         logged[0].event,
         Event::ConfigChanged {
-            json: format!("{new:?}")
+            json: format!("{:?}", new.redacted())
         },
         "the event carries the config that was written"
     );
@@ -75,11 +101,12 @@ fn stranger_set_config_is_rejected_and_writes_nothing() {
 }
 
 /// The config is not replayed from the log, so this is the only thing that proves the
-/// stable cell is carrying it across.
+/// stable cell is carrying it across. It sets a secret too, because the cell must keep
+/// the full config: redaction is a view, not what gets stored.
 #[test]
 fn config_survives_upgrade() {
     let (pic, canister, admin) = common::setup();
-    let new = with_fee(10);
+    let new = with_secret_rpc();
     set_config(&pic, canister, admin, &new).unwrap();
 
     pic.upgrade_canister(
@@ -90,5 +117,59 @@ fn config_survives_upgrade() {
     )
     .unwrap();
 
-    assert_eq!(get_config(&pic, canister, admin), new);
+    assert_eq!(get_config_full(&pic, canister, admin).unwrap(), new);
+    assert_eq!(get_config(&pic, canister, admin), new.redacted());
+}
+
+#[test]
+fn public_get_config_redacts_rpc_urls() {
+    let (pic, canister, admin) = common::setup();
+    let stranger = Principal::from_slice(&[9; 29]);
+    let new = with_secret_rpc();
+    set_config(&pic, canister, admin, &new).unwrap();
+
+    let public = get_config(&pic, canister, stranger);
+    assert_eq!(
+        public.rpc_urls,
+        BTreeMap::from([(1, "***".to_string())]),
+        "the chain id stays visible, the key does not"
+    );
+    assert_eq!(public, new.redacted(), "and nothing else is hidden");
+}
+
+#[test]
+fn get_config_full_gives_a_controller_the_real_urls() {
+    let (pic, canister, admin) = common::setup();
+    let new = with_secret_rpc();
+    set_config(&pic, canister, admin, &new).unwrap();
+
+    assert_eq!(get_config_full(&pic, canister, admin).unwrap(), new);
+}
+
+#[test]
+fn get_config_full_rejects_a_stranger() {
+    let (pic, canister, admin) = common::setup();
+    let stranger = Principal::from_slice(&[9; 29]);
+    set_config(&pic, canister, admin, &with_secret_rpc()).unwrap();
+
+    assert!(get_config_full(&pic, canister, stranger).is_err());
+}
+
+/// `events_page` is a public query, so anything in the log is public.
+#[test]
+fn config_changed_event_carries_no_rpc_secret() {
+    let (pic, canister, admin) = common::setup();
+    let new = with_secret_rpc();
+    set_config(&pic, canister, admin, &new).unwrap();
+
+    let logged = events(&pic, canister, admin);
+    let Event::ConfigChanged { json } = &logged[0].event else {
+        panic!("a config change logs a ConfigChanged event");
+    };
+    assert!(
+        !json.contains(SECRET_RPC) && !json.contains("secret-key"),
+        "the world-readable log leaked an rpc secret: {json}"
+    );
+    assert!(json.contains("***"), "and it says so: {json}");
+    assert_eq!(*json, format!("{:?}", new.redacted()));
 }

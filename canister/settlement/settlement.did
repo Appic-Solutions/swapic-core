@@ -77,13 +77,21 @@ type EventEnvelope = record {
   time_ns : nat64;
   parent_hash : blob;
 };
-type Result = variant { Ok; Err : text };
+type Result = variant { Ok : Config; Err : text };
+type Result_1 = variant { Ok; Err : text };
 service : () -> {
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec EventEnvelope) query;
+  // Public, so it answers with the redacted view; `get_config_full` is the ops door onto
+  // the real thing.
   get_config : () -> (Config) query;
-  set_config : (Config) -> (Result);
+  // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
+  get_config_full : () -> (Result) query;
+  // Controller-only, and it takes the whole record, so editing one knob is a
+  // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
+  // or the write puts "***" into `rpc_urls` and the canister loses its rpc access.
+  set_config : (Config) -> (Result_1);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

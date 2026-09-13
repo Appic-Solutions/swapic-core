@@ -47,11 +47,23 @@ fn verify_replay() -> bool {
     log::verify_replay()
 }
 
+/// Public, so it answers with the redacted view; `get_config_full` is the ops door onto
+/// the real thing.
 #[query]
 fn get_config() -> config::Config {
-    config::get()
+    config::get().redacted()
 }
 
+/// The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
+#[query]
+fn get_config_full() -> Result<config::Config, String> {
+    require_controller()?;
+    Ok(config::get())
+}
+
+/// Controller-only, and it takes the whole record, so editing one knob is a
+/// read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
+/// or the write puts "***" into `rpc_urls` and the canister loses its rpc access.
 #[update]
 fn set_config(new: config::Config) -> Result<(), String> {
     require_controller()?;
