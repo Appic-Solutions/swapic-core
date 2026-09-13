@@ -1,7 +1,11 @@
 use crate::events::{Choice, Event, EventEnvelope, Hash32};
+use candid::CandidType;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+// CandidType and Deserialize on the two swap types: `get_swap` answers with a SwapState,
+// and the folded status is what Plan 3 and the indexer read a swap's progress from.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum SwapStatus {
     FundsReceived,
     Executing,
@@ -21,7 +25,7 @@ impl SwapStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct SwapState {
     pub quote_bytes: Vec<u8>,
     pub status: SwapStatus,

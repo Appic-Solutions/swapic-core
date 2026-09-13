@@ -299,10 +299,22 @@ pub fn get_pending(quote_hash: &Hash32) -> Option<Quote> {
     PENDING.with(|p| p.borrow().get(quote_hash).map(|(q, _)| q.clone()))
 }
 
+/// Drops the quotes nobody can pay any more: past their expiry plus the window a permit
+/// signed against them stays valid for. Keyed on `expires_at_s` and deliberately not on
+/// the registration time beside it, which a re-registration resets. Returns how many went.
+pub fn sweep_expired(now_s: u64, permit_deadline_s: u64) -> usize {
+    PENDING.with(|p| {
+        let mut pending = p.borrow_mut();
+        let before = pending.len();
+        pending.retain(|_, (q, _)| now_s <= q.expires_at_s.saturating_add(permit_deadline_s));
+        before - pending.len()
+    })
+}
+
 /// Tests share one PENDING when the harness runs them on a single thread, so the store
 /// tests start from a known map instead of assuming an empty one.
 #[cfg(test)]
-fn clear_pending() {
+pub(crate) fn clear_pending() {
     PENDING.with(|p| p.borrow_mut().clear());
 }
 
