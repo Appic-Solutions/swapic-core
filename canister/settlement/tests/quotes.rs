@@ -1,12 +1,12 @@
 mod common;
 
 use candid::{decode_one, encode_args, encode_one, Principal};
-use pocket_ic::PocketIc;
-use settlement::events::Hash32;
-use settlement::quote::{GasMode, Quote};
+use pocket_ic::{PocketIc, Time};
+use settlement::events::{Event, EventEnvelope, Hash32};
+use settlement::quote::{GasMode, Quote, MAX_QUOTE_LIFETIME_S};
 
 /// The same fixture as `quote.rs`'s unit tests, field for field. The golden assert in
-/// `the_quoter_opens_a_quote_and_gets_the_golden_hash` is what keeps the two identical.
+/// `the_quoter_registers_a_quote_and_gets_the_golden_hash` keeps the two identical.
 fn fixed_quote() -> Quote {
     Quote {
         version: 1,
@@ -68,14 +68,19 @@ fn set_roles(
     decode_one(&raw).unwrap()
 }
 
-fn open_gasless(
+fn register_quote(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
     quote: &Quote,
 ) -> Result<Hash32, String> {
     let raw = pic
-        .update_call(canister, sender, "open_gasless", encode_one(quote).unwrap())
+        .update_call(
+            canister,
+            sender,
+            "register_quote",
+            encode_one(quote).unwrap(),
+        )
         .unwrap();
     decode_one(&raw).unwrap()
 }
@@ -105,22 +110,39 @@ fn event_count(pic: &PocketIc, canister: Principal) -> u64 {
     )
 }
 
-/// A canister with both roles handed out.
+fn events(pic: &PocketIc, canister: Principal) -> Vec<EventEnvelope> {
+    common::query(
+        pic,
+        canister,
+        stranger(),
+        "events_page",
+        encode_args((0u64, 100u64)).unwrap(),
+    )
+}
+
+/// A canister with both roles handed out, its clock inside the fixture's validity window.
+/// The fixture's `expires_at_s` is frozen by the cross-repo golden, so the clock moves to
+/// the quote rather than the quote moving to the clock.
 fn with_roles() -> (PocketIc, Principal, Principal) {
     let (pic, canister, admin) = common::setup();
     set_roles(&pic, canister, admin, quoter(), watcher()).unwrap();
+    pic.set_time(Time::from_nanos_since_unix_epoch(
+        (fixed_quote().expires_at_s - 60) * 1_000_000_000,
+    ));
     (pic, canister, admin)
 }
 
 /// Unset roles must refuse rather than fall open, and they must refuse the controller
 /// too: being able to *set* the quoter is not being the quoter.
 #[test]
-fn open_gasless_refuses_everyone_while_the_roles_are_unset() {
+fn register_quote_refuses_everyone_while_the_roles_are_unset() {
     let (pic, canister, admin) = common::setup();
     for caller in [admin, quoter(), stranger()] {
         let err =
-            open_gasless(&pic, canister, caller, &fixed_quote()).expect_err("no role is set yet");
+            register_quote(&pic, canister, caller, &fixed_quote()).expect_err("no role is set yet");
         assert!(err.contains("not set"), "say the role is unset: {err}");
+        let err = get_pending(&pic, canister, caller, [0; 32]).expect_err("nor is the reader open");
+        assert!(err.contains("not set"), "say the roles are unset: {err}");
     }
 }
 
@@ -128,7 +150,7 @@ fn open_gasless_refuses_everyone_while_the_roles_are_unset() {
 fn set_roles_refuses_a_stranger_and_changes_nothing() {
     let (pic, canister, _) = common::setup();
     assert!(set_roles(&pic, canister, stranger(), stranger(), watcher()).is_err());
-    assert!(open_gasless(&pic, canister, stranger(), &fixed_quote()).is_err());
+    assert!(register_quote(&pic, canister, stranger(), &fixed_quote()).is_err());
 }
 
 /// Rotation is the point of holding the roles in a writable cell: a second `set_roles`
@@ -139,9 +161,9 @@ fn set_roles_rotates_the_quoter_and_the_old_one_loses_access() {
     let next = Principal::from_slice(&[4; 29]);
     set_roles(&pic, canister, admin, next, watcher()).unwrap();
 
-    assert!(open_gasless(&pic, canister, next, &fixed_quote()).is_ok());
+    assert!(register_quote(&pic, canister, next, &fixed_quote()).is_ok());
     assert!(
-        open_gasless(&pic, canister, quoter(), &fixed_quote()).is_err(),
+        register_quote(&pic, canister, quoter(), &fixed_quote()).is_err(),
         "the replaced quoter is out"
     );
 }
@@ -162,25 +184,56 @@ fn set_roles_refuses_the_anonymous_principal() {
 /// The cross-repo contract, end to end: what the endpoint returns is the golden hash that
 /// swapic-backend's quoter computes on its own side.
 #[test]
-fn the_quoter_opens_a_quote_and_gets_the_golden_hash() {
+fn the_quoter_registers_a_quote_and_gets_the_golden_hash() {
     let (pic, canister, _) = with_roles();
-    let hash = open_gasless(&pic, canister, quoter(), &fixed_quote()).unwrap();
+    let before = event_count(&pic, canister);
+    let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
     assert_eq!(hash, golden_hash());
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash).unwrap(),
         Some(fixed_quote())
     );
-    // pre-money: an opened quote is not something that happened to money
-    assert_eq!(event_count(&pic, canister), 0, "the log stays empty");
+    // pre-money: a registered quote is not something that happened to money
+    assert_eq!(
+        event_count(&pic, canister),
+        before,
+        "registering writes no event"
+    );
+}
+
+/// A rotation changes who may move money, so it leaves an audit line naming both
+/// principals in the world-readable log.
+#[test]
+fn set_roles_lands_a_roles_changed_event() {
+    let (pic, canister, _) = with_roles();
+    let logged = events(&pic, canister);
+    assert_eq!(logged.len(), 1, "one rotation, one event");
+    assert_eq!(
+        logged[0].event,
+        Event::RolesChanged {
+            quoter: quoter().to_text(),
+            watcher: watcher().to_text(),
+        }
+    );
+}
+
+/// A refused rotation must leave no audit line either: the event and the cell move
+/// together or not at all.
+#[test]
+fn a_refused_set_roles_writes_no_event() {
+    let (pic, canister, admin) = common::setup();
+    assert!(set_roles(&pic, canister, stranger(), quoter(), watcher()).is_err());
+    assert!(set_roles(&pic, canister, admin, Principal::anonymous(), watcher()).is_err());
+    assert!(events(&pic, canister).is_empty());
 }
 
 #[test]
-fn open_gasless_refuses_a_stranger_and_the_watcher() {
+fn register_quote_refuses_a_stranger_and_the_watcher() {
     let (pic, canister, admin) = with_roles();
     for caller in [stranger(), watcher(), admin] {
         assert!(
-            open_gasless(&pic, canister, caller, &fixed_quote()).is_err(),
-            "only the quoter opens quotes"
+            register_quote(&pic, canister, caller, &fixed_quote()).is_err(),
+            "only the quoter registers quotes"
         );
     }
     assert_eq!(
@@ -191,17 +244,34 @@ fn open_gasless_refuses_a_stranger_and_the_watcher() {
 }
 
 #[test]
-fn open_gasless_refuses_a_quote_that_has_already_expired() {
+fn register_quote_refuses_a_quote_that_has_already_expired() {
     let (pic, canister, _) = with_roles();
     let stale = Quote {
         expires_at_s: now_s(&pic) - 1,
         ..fixed_quote()
     };
-    let err = open_gasless(&pic, canister, quoter(), &stale).expect_err("the quote is stale");
+    let err = register_quote(&pic, canister, quoter(), &stale).expect_err("the quote is stale");
     assert!(err.contains("expired"), "say why: {err}");
 
     // and the fixture is live on this clock, so the happy path above is not an accident
     assert!(now_s(&pic) < fixed_quote().expires_at_s);
+}
+
+/// The far end of the window, through the endpoint's own clock: a quote that would sit in
+/// the store for a year cannot take a slot.
+#[test]
+fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
+    let (pic, canister, _) = with_roles();
+    let immortal = Quote {
+        expires_at_s: now_s(&pic) + MAX_QUOTE_LIFETIME_S + 60,
+        ..fixed_quote()
+    };
+    let err =
+        register_quote(&pic, canister, quoter(), &immortal).expect_err("that is too far ahead");
+    assert!(
+        err.contains(&MAX_QUOTE_LIFETIME_S.to_string()),
+        "say why: {err}"
+    );
 }
 
 /// A pending quote carries the user's destination and refund addresses, so it is not
@@ -210,7 +280,7 @@ fn open_gasless_refuses_a_quote_that_has_already_expired() {
 #[test]
 fn get_pending_answers_both_services_and_refuses_a_stranger() {
     let (pic, canister, admin) = with_roles();
-    let hash = open_gasless(&pic, canister, quoter(), &fixed_quote()).unwrap();
+    let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
 
     for caller in [quoter(), watcher()] {
         assert_eq!(
@@ -239,7 +309,7 @@ fn get_pending_answers_both_services_and_refuses_a_stranger() {
 #[test]
 fn roles_survive_an_upgrade_and_the_pending_store_does_not() {
     let (pic, canister, admin) = with_roles();
-    let hash = open_gasless(&pic, canister, quoter(), &fixed_quote()).unwrap();
+    let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
 
     pic.upgrade_canister(
         canister,
@@ -256,8 +326,8 @@ fn roles_survive_an_upgrade_and_the_pending_store_does_not() {
     );
     // still the quoter, without a second set_roles
     assert_eq!(
-        open_gasless(&pic, canister, quoter(), &fixed_quote()).unwrap(),
+        register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap(),
         hash
     );
-    assert!(open_gasless(&pic, canister, stranger(), &fixed_quote()).is_err());
+    assert!(register_quote(&pic, canister, stranger(), &fixed_quote()).is_err());
 }

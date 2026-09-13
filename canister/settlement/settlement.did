@@ -56,6 +56,8 @@ type Event = variant {
   };
   RefundStarted : record { quote_hash : blob; reason : text };
   DecisionRequired : record { quote_hash : blob; reason : text };
+  // Principals as text, so the audit line reads without a decoder.
+  RolesChanged : record { watcher : text; quoter : text };
   FeeAccrued : record { quote_hash : blob; amount : nat };
   TxConfirmed : record {
     attempt : nat32;
@@ -81,7 +83,18 @@ type EventEnvelope = record {
 // `quote_bytes` is the one place that mapping is written.
 type GasMode = variant { Legacy; Gasless };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
-// ever hashes into a swap id. The field order here IS the canonical order.
+// ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
+// order is frozen and is NOT the order a candid tool prints this record in:
+// 
+// `version u8 | src_chain u64-be | src_token (u32-be len + utf8) | amount_in u128-be |
+// dst_chain u64 | dst_token | expected_out u128 | min_out u128 | dst_address |
+// refund_address (None encodes as empty) | auto_refund u8 |
+// gas_mode u8 (Gasless=0, Legacy=1) | rail | expires_at_s u64 | nonce u64`
+// 
+// Every integer is big-endian, every string is a u32-be byte length then utf8, and each
+// of the two one-byte fields is 0 or 1. Reproduce those bytes and you reproduce the
+// hash; `tests/golden/quote_hash_v1.txt` is the vector to check a reimplementation
+// against.
 type Quote = record {
   dst_address : text;
   refund_address : opt text;
@@ -115,10 +128,11 @@ service : () -> {
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
   get_pending : (blob) -> (Result_1) query;
-  // Quoter-only. Pre-money: it records a quote the quoter has just handed a user so the
-  // funds that arrive later can be matched to it, and returns the hash the user's deposit
-  // must carry. Nothing of value moves here, so nothing is written to the log.
-  open_gasless : (Quote) -> (Result_2);
+  // Quoter-only, and it takes a quote of either gas mode. Pre-money: it records a quote
+  // the quoter has just handed a user so the funds that arrive later can be matched to it,
+  // and returns the hash the user's deposit must carry. Nothing of value moves here, so
+  // nothing is written to the log.
+  register_quote : (Quote) -> (Result_2);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and the canister loses its rpc access.

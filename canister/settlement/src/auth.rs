@@ -1,3 +1,4 @@
+use crate::events::Event;
 use crate::log::{self, Memory, AUTH_MEMORY};
 use candid::{CandidType, Principal};
 use ic_stable_structures::StableCell;
@@ -51,12 +52,12 @@ pub fn get() -> Roles {
     ROLES.with(|r| r.borrow().clone())
 }
 
-/// Writes both copies. The caller does the authorization; this is the storage path.
-/// Not logged: roles are deploy-time truth held in the cell, like the config, and the
-/// event enum is a hash-chained, cross-repo contract that this task does not extend.
+/// Writes both copies and records the change in the log. The caller does the
+/// authorization; this is the storage path.
 pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
-    // the anonymous principal is every unauthenticated caller at once, so a role held by
-    // it is a role held by the world
+    // before anything is written: a rejected pair must leave no event and no cell write.
+    // The anonymous principal is every unauthenticated caller at once, so a role held by
+    // it is a role held by the world.
     for (name, p) in [("quoter", quoter), ("watcher", watcher)] {
         if p == Principal::anonymous() {
             return Err(format!("{name} cannot be the anonymous principal"));
@@ -66,7 +67,15 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
         quoter: Some(quoter),
         watcher: Some(watcher),
     };
-    // out of stable memory is not a caller error, so it traps instead of returning Err
+    // the log first, because it is the step that can refuse: a rotation is the one thing
+    // that changes who may move money, so it is audited, and the cell below stays the
+    // operative copy. Principals as text, which is what an operator reads in an alert.
+    log::append_event(Event::RolesChanged {
+        quoter: quoter.to_text(),
+        watcher: watcher.to_text(),
+    })?;
+    // out of stable memory is not a caller error, so it traps instead of returning Err:
+    // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     STORED.with(|s| {
         s.borrow_mut()
             .set(encode(&roles))
@@ -86,14 +95,16 @@ pub fn require_watcher() -> Result<(), String> {
 
 /// Either service. One error for both, so a refusal says nothing about which role the
 /// caller failed to be.
-pub fn require_quoter_or_watcher() -> Result<(), String> {
-    let roles = get();
-    let caller = ic_cdk::api::caller();
+fn check_either(roles: &Roles, caller: Principal) -> Result<(), String> {
     match (roles.quoter, roles.watcher) {
         (None, None) => Err("quoter and watcher roles are not set".to_string()),
         (q, w) if q == Some(caller) || w == Some(caller) => Ok(()),
         _ => Err("caller is not the quoter or the watcher".to_string()),
     }
+}
+
+pub fn require_quoter_or_watcher() -> Result<(), String> {
+    check_either(&get(), ic_cdk::api::caller())
 }
 
 #[cfg(test)]
@@ -115,6 +126,23 @@ mod tests {
 
         let wrong = check(Some(p(2)), p(9), "quoter").expect_err("the wrong caller refuses");
         assert!(wrong.contains("quoter"), "{wrong}");
+    }
+
+    /// The either-service rule, including the arm a fresh install sits in: unset roles
+    /// refuse both services rather than falling open to everyone.
+    #[test]
+    fn check_either_refuses_when_neither_role_is_set() {
+        let unset = check_either(&Roles::default(), p(2)).expect_err("nothing is set yet");
+        assert!(unset.contains("not set"), "{unset}");
+
+        let set = Roles {
+            quoter: Some(p(2)),
+            watcher: Some(p(3)),
+        };
+        assert_eq!(check_either(&set, p(2)), Ok(()), "the quoter passes");
+        assert_eq!(check_either(&set, p(3)), Ok(()), "so does the watcher");
+        let wrong = check_either(&set, p(9)).expect_err("a stranger does not");
+        assert!(!wrong.contains("not set"), "a set role is not an unset one");
     }
 
     /// An error a stranger reads must not name the principal that would have worked.

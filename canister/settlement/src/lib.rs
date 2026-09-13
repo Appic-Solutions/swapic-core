@@ -84,17 +84,17 @@ fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
     auth::set_roles(quoter, watcher)
 }
 
-/// Quoter-only. Pre-money: it records a quote the quoter has just handed a user so the
-/// funds that arrive later can be matched to it, and returns the hash the user's deposit
-/// must carry. Nothing of value moves here, so nothing is written to the log.
+/// Quoter-only, and it takes a quote of either gas mode. Pre-money: it records a quote
+/// the quoter has just handed a user so the funds that arrive later can be matched to it,
+/// and returns the hash the user's deposit must carry. Nothing of value moves here, so
+/// nothing is written to the log.
 #[update]
-fn open_gasless(quote: quote::Quote) -> Result<events::Hash32, String> {
+fn register_quote(quote: quote::Quote) -> Result<events::Hash32, String> {
     auth::require_quoter()?;
-    // deliberately no `gas_mode == Gasless` gate: the name is the flow this endpoint was
-    // built for, but the store is a hash-to-quote lookup and the mode only starts to
-    // matter when funds arrive. Do not add one.
+    // deliberately no `gas_mode` gate: the store is a hash-to-quote lookup and the mode
+    // only starts to matter when funds arrive. Do not add one.
     // seconds, to match the quote's own unit
-    quote::open(quote, ic_cdk::api::time() / 1_000_000_000)
+    quote::register(quote, ic_cdk::api::time() / 1_000_000_000)
 }
 
 /// Quoter or watcher. Not public: a pending quote carries the user's destination and

@@ -206,7 +206,9 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
         ),
         // always legal; variants are named rather than matched by `_` so a new one
         // has to be classified here instead of silently defaulting to legal
-        Event::ConfigChanged { .. } | Event::PocketFunded { .. } => Ok(()),
+        Event::ConfigChanged { .. } | Event::PocketFunded { .. } | Event::RolesChanged { .. } => {
+            Ok(())
+        }
     }
 }
 
@@ -332,7 +334,9 @@ pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
             let to = state.pockets.entry(*to_chain).or_default();
             to.available = to.available.saturating_add(*amount);
         }
-        Event::ConfigChanged { .. } => {}
+        // audit lines: they record a change to deploy-time truth that lives in its own
+        // stable cell, so the folded swap state is untouched
+        Event::ConfigChanged { .. } | Event::RolesChanged { .. } => {}
     }
 }
 

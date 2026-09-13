@@ -6,7 +6,7 @@ pub type Hash32 = [u8; 32];
 
 // update together with the enum and samples(); the exhaustive match in event_bytes is the
 // compile-time check, this is the golden-count check
-pub const EVENT_VARIANT_COUNT: usize = 18;
+pub const EVENT_VARIANT_COUNT: usize = 19;
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum Event {
@@ -99,6 +99,11 @@ pub enum Event {
         quote_hash: Hash32,
         chain_id: u64,
         amount: u128,
+    },
+    /// Principals as text, so the audit line reads without a decoder.
+    RolesChanged {
+        quoter: String,
+        watcher: String,
     },
 }
 
@@ -306,6 +311,11 @@ pub fn event_bytes(event: &Event) -> Vec<u8> {
             b.extend_from_slice(&chain_id.to_be_bytes());
             b.extend_from_slice(&amount.to_be_bytes());
         }
+        Event::RolesChanged { quoter, watcher } => {
+            put_tag(&mut b, 18);
+            put_str(&mut b, quoter);
+            put_str(&mut b, watcher);
+        }
     }
     b
 }
@@ -451,6 +461,10 @@ mod tests {
                 quote_hash: [17; 32],
                 chain_id: 42161,
                 amount: 250,
+            },
+            Event::RolesChanged {
+                quoter: "aaaaa-aa".into(),
+                watcher: "2vxsx-fae".into(),
             },
         ]
     }

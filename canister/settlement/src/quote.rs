@@ -23,7 +23,18 @@ pub enum GasMode {
 }
 
 /// What the off-chain quoter handed the user, and the only thing the settlement canister
-/// ever hashes into a swap id. The field order here IS the canonical order.
+/// ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
+/// order is frozen and is NOT the order a candid tool prints this record in:
+///
+/// `version u8 | src_chain u64-be | src_token (u32-be len + utf8) | amount_in u128-be |
+/// dst_chain u64 | dst_token | expected_out u128 | min_out u128 | dst_address |
+/// refund_address (None encodes as empty) | auto_refund u8 |
+/// gas_mode u8 (Gasless=0, Legacy=1) | rail | expires_at_s u64 | nonce u64`
+///
+/// Every integer is big-endian, every string is a u32-be byte length then utf8, and each
+/// of the two one-byte fields is 0 or 1. Reproduce those bytes and you reproduce the
+/// hash; `tests/golden/quote_hash_v1.txt` is the vector to check a reimplementation
+/// against.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct Quote {
     pub version: u8,
@@ -45,7 +56,7 @@ pub struct Quote {
 
 impl Quote {
     /// What a quote must satisfy before the canister will hold on to it. Called at the
-    /// `open` chokepoint, so nothing that fails here reaches the pending store.
+    /// `register` chokepoint, so nothing that fails here reaches the pending store.
     pub fn validate(&self) -> Result<(), String> {
         if self.version != QUOTE_VERSION {
             return Err(format!(
@@ -236,17 +247,26 @@ pub fn parse_quote(bytes: &[u8]) -> Result<Quote, String> {
     })
 }
 
+/// How many quotes may sit in the pending store at once. The store is heap, and the
+/// quoter is the only writer, so this is a backstop against a compromised or looping
+/// quoter growing the canister until it traps, not a business limit.
+pub const MAX_PENDING: usize = 10_000;
+
+/// The furthest ahead a quote may expire. Without it a quote with an expiry decades out
+/// would hold its slot against the cap forever.
+pub const MAX_QUOTE_LIFETIME_S: u64 = 86_400;
+
 thread_local! {
-    // Pre-money state, and heap-only BY DESIGN: an open quote is a promise the quoter made,
-    // not something that happened to money, so it is neither in the event log nor in stable
-    // memory. An upgrade drops the map and the quoter re-opens whatever is still live.
+    // Pre-money state, and heap-only BY DESIGN: a registered quote is a promise the quoter
+    // made, not something that happened to money, so it is neither in the event log nor in
+    // stable memory. An upgrade drops the map and the quoter re-registers what is live.
     static PENDING: RefCell<BTreeMap<Hash32, (Quote, u64)>> =
         const { RefCell::new(BTreeMap::new()) };
 }
 
-/// Records a quote against its hash. `now_s` is the caller's clock, in seconds, so the
-/// expiry rule is testable without a canister.
-pub fn open(quote: Quote, now_s: u64) -> Result<Hash32, String> {
+/// Records a quote against its hash. `now_s` is the caller's clock, in seconds, so every
+/// rule here is testable without a canister.
+pub fn register(quote: Quote, now_s: u64) -> Result<Hash32, String> {
     quote.validate()?;
     // the quote is good through the whole of its expiry second
     if now_s > quote.expires_at_s {
@@ -255,15 +275,35 @@ pub fn open(quote: Quote, now_s: u64) -> Result<Hash32, String> {
             quote.expires_at_s
         ));
     }
+    if quote.expires_at_s > now_s.saturating_add(MAX_QUOTE_LIFETIME_S) {
+        return Err(format!(
+            "quote expires at {}, more than {MAX_QUOTE_LIFETIME_S}s ahead of {now_s}",
+            quote.expires_at_s
+        ));
+    }
     let hash = quote_hash(&quote);
-    // same quote twice is not an error: the quoter re-opens after an upgrade, and the
-    // hash covers every field, so an overwrite can only replace a quote with itself
-    PENDING.with(|p| p.borrow_mut().insert(hash, (quote, now_s)));
-    Ok(hash)
+    PENDING.with(|p| {
+        let mut pending = p.borrow_mut();
+        // a re-registration is always allowed, cap or no cap: the quoter replays its live
+        // quotes after an upgrade, and refusing those would strand swaps that already
+        // exist. The hash covers every field, so an overwrite replaces a quote with itself.
+        if pending.len() >= MAX_PENDING && !pending.contains_key(&hash) {
+            return Err(format!("pending store is full at {MAX_PENDING} quotes"));
+        }
+        pending.insert(hash, (quote, now_s));
+        Ok(hash)
+    })
 }
 
 pub fn get_pending(quote_hash: &Hash32) -> Option<Quote> {
     PENDING.with(|p| p.borrow().get(quote_hash).map(|(q, _)| q.clone()))
+}
+
+/// Tests share one PENDING when the harness runs them on a single thread, so the store
+/// tests start from a known map instead of assuming an empty one.
+#[cfg(test)]
+fn clear_pending() {
+    PENDING.with(|p| p.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -296,6 +336,25 @@ mod tests {
     /// round-trip sample set.
     fn one_field_changed() -> Vec<(&'static str, Quote)> {
         let q = fixed_quote();
+        // exhaustive destructure: a new field breaks this line, so the list below cannot
+        // silently miss one and leave `QUOTE_FIELD_COUNT` undercounting
+        let Quote {
+            version: _,
+            src_chain: _,
+            src_token: _,
+            amount_in: _,
+            dst_chain: _,
+            dst_token: _,
+            expected_out: _,
+            min_out: _,
+            dst_address: _,
+            refund_address: _,
+            auto_refund: _,
+            gas_mode: _,
+            rail: _,
+            expires_at_s: _,
+            nonce: _,
+        } = &q;
         vec![
             (
                 "version",
@@ -592,8 +651,8 @@ mod tests {
         );
     }
 
-    /// Each test thread has its own PENDING, and `--test-threads=1` shares one, so the
-    /// store tests pick nonces nothing else uses rather than assuming an empty map.
+    /// A live quote and the clock it is live on. Every store test calls `clear_pending`
+    /// first, because a single-threaded harness gives them all one map.
     fn pending_quote(nonce: u64) -> Quote {
         Quote {
             nonce,
@@ -601,32 +660,39 @@ mod tests {
         }
     }
 
+    fn just_before_expiry(q: &Quote) -> u64 {
+        q.expires_at_s - 1
+    }
+
     #[test]
-    fn open_refuses_a_quote_that_has_already_expired() {
+    fn register_refuses_a_quote_that_has_already_expired() {
+        clear_pending();
         let q = pending_quote(9_001);
-        let err = open(q.clone(), q.expires_at_s + 1).expect_err("expired quotes are refused");
+        let err = register(q.clone(), q.expires_at_s + 1).expect_err("expired quotes are refused");
         assert!(err.contains("expired"), "say why: {err}");
         assert_eq!(get_pending(&quote_hash(&q)), None, "and nothing was stored");
     }
 
     #[test]
-    fn open_refuses_a_quote_that_does_not_validate() {
+    fn register_refuses_a_quote_that_does_not_validate() {
+        clear_pending();
         let q = Quote {
             refund_address: Some(String::new()),
             ..pending_quote(9_002)
         };
-        assert!(open(q.clone(), 1).is_err());
+        assert!(register(q.clone(), just_before_expiry(&q)).is_err());
         assert_eq!(get_pending(&quote_hash(&q)), None);
     }
 
     #[test]
-    fn open_stores_the_quote_under_its_hash_and_a_reopen_overwrites() {
+    fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
+        clear_pending();
         let q = pending_quote(9_003);
-        let h = open(q.clone(), q.expires_at_s - 1).expect("a live quote opens");
+        let h = register(q.clone(), just_before_expiry(&q)).expect("a live quote registers");
         assert_eq!(h, quote_hash(&q));
         assert_eq!(get_pending(&h), Some(q.clone()));
-        // the quoter re-opens after an upgrade, so the same quote twice is not an error
-        assert_eq!(open(q.clone(), q.expires_at_s - 1), Ok(h));
+        // the quoter re-registers after an upgrade, so the same quote twice is not an error
+        assert_eq!(register(q.clone(), just_before_expiry(&q)), Ok(h));
         assert_eq!(get_pending(&h), Some(q));
         assert_eq!(get_pending(&[0; 32]), None);
     }
@@ -635,8 +701,55 @@ mod tests {
     /// still good.
     #[test]
     fn a_quote_is_live_up_to_and_including_its_expiry_second() {
+        clear_pending();
         let q = pending_quote(9_004);
-        assert!(open(q.clone(), q.expires_at_s).is_ok());
-        assert!(open(q.clone(), q.expires_at_s + 1).is_err());
+        assert!(register(q.clone(), q.expires_at_s).is_ok());
+        assert!(register(q.clone(), q.expires_at_s + 1).is_err());
+    }
+
+    /// An immortal quote would hold a slot against the cap forever, so the far end of the
+    /// window is bounded as well as the near one.
+    #[test]
+    fn register_refuses_a_quote_that_expires_too_far_ahead() {
+        clear_pending();
+        let q = pending_quote(9_005);
+        let far = q.expires_at_s - MAX_QUOTE_LIFETIME_S - 1;
+        let err = register(q.clone(), far).expect_err("that is too long to hold a slot");
+        assert!(
+            err.contains(&MAX_QUOTE_LIFETIME_S.to_string()),
+            "say why: {err}"
+        );
+        assert_eq!(get_pending(&quote_hash(&q)), None);
+        // and the edge of the window is inside it
+        assert!(register(q.clone(), far + 1).is_ok());
+    }
+
+    /// The backstop against a looping quoter: a full store refuses a new quote but must
+    /// still take a re-registration, which is how the quoter replays after an upgrade.
+    #[test]
+    fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
+        clear_pending();
+        // small quotes, distinct only by nonce, so the fill is cheap
+        let tiny = |nonce: u64| Quote {
+            src_token: String::new(),
+            dst_token: String::new(),
+            dst_address: String::new(),
+            rail: String::new(),
+            nonce,
+            ..fixed_quote()
+        };
+        let now = just_before_expiry(&tiny(0));
+        for nonce in 0..MAX_PENDING as u64 {
+            register(tiny(nonce), now).expect("fills to the cap");
+        }
+
+        let overflow = tiny(MAX_PENDING as u64);
+        let err = register(overflow.clone(), now).expect_err("the store is full");
+        assert!(err.contains("full"), "say why: {err}");
+        assert_eq!(get_pending(&quote_hash(&overflow)), None);
+
+        // the one thing a full store must still accept
+        let repeat = tiny(0);
+        assert_eq!(register(repeat.clone(), now), Ok(quote_hash(&repeat)));
     }
 }
