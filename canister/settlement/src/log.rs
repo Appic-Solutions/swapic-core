@@ -12,6 +12,7 @@ pub(crate) type Memory = VirtualMemory<DefaultMemoryImpl>;
 const INDEX_MEMORY: MemoryId = MemoryId::new(0);
 const DATA_MEMORY: MemoryId = MemoryId::new(1);
 pub(crate) const CONFIG_MEMORY: MemoryId = MemoryId::new(2);
+pub(crate) const AUTH_MEMORY: MemoryId = MemoryId::new(3);
 
 /// Longest page a query will return, so one call can never walk the whole log.
 const MAX_PAGE: u64 = 500;
