@@ -4,7 +4,9 @@ use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
+use settlement_api::types::errors::{AppendError, GuardError, TestAppendError};
 use settlement_api::types::events::{Event, EventType};
+use settlement_api::types::swap::TransitionError;
 
 const QUOTE: [u8; 32] = [7; 32];
 
@@ -60,7 +62,7 @@ fn verify(pic: &PocketIc, canister: Principal, who: Principal, method: &str) -> 
 
 /// The test-only door that flips one bit of the fold's chain head and leaves the log alone.
 /// Calling it twice puts the head back.
-fn skew(pic: &PocketIc, canister: Principal, who: Principal) -> Result<(), String> {
+fn skew(pic: &PocketIc, canister: Principal, who: Principal) -> Result<(), GuardError> {
     test_skew_state(pic, canister, who)
 }
 
@@ -79,7 +81,11 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     // a rejected event must leave no trace in the log
     let dup = &swap_sequence()[1];
     let err = append(&pic, canister, admin, dup).expect_err("guard rejects");
-    assert!(err.contains("already has funds"), "unexpected error: {err}");
+    assert_eq!(
+        err,
+        TestAppendError::Append(AppendError::Transition(TransitionError::SwapExists(QUOTE))),
+        "the swap already has funds"
+    );
     assert_eq!(
         count(&pic, canister, admin),
         total,
@@ -137,7 +143,13 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     // genesis: the state's head is the zero hash, and nothing else is admissible
     skew(&pic, canister, admin).unwrap();
     let err = append(&pic, canister, admin, first).expect_err("the head diverged");
-    assert!(err.contains("diverged"), "say what went wrong: {err}");
+    assert!(
+        matches!(
+            err,
+            TestAppendError::Append(AppendError::ChainDiverged { .. })
+        ),
+        "say what went wrong: {err:?}"
+    );
     assert_eq!(count(&pic, canister, admin), 0, "and nothing was written");
 
     // the same flip puts the head back, so what refused above was the head check and not
@@ -159,7 +171,13 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
         amount: Nat::from(1_u64),
     };
     let err = append(&pic, canister, admin, &more).expect_err("the head diverged");
-    assert!(err.contains("diverged"), "say what went wrong: {err}");
+    assert!(
+        matches!(
+            err,
+            TestAppendError::Append(AppendError::ChainDiverged { .. })
+        ),
+        "say what went wrong: {err:?}"
+    );
     assert_eq!(count(&pic, canister, admin), total, "the log is untouched");
 
     // put the head back and the canister is whole again: the skew only ever moved the fold

@@ -142,7 +142,7 @@ fn an_amount_above_u128_max_is_refused() {
     };
     assert_eq!(
         types::EventType::try_from(wire),
-        Err(EventError::AmountTooLarge { field: "amount" })
+        Err(DomainEventError::AmountTooLarge { field: "amount" })
     );
 }
 
@@ -158,14 +158,14 @@ fn text_over_the_cap_is_refused_naming_the_field() {
     let long = "a".repeat(MAX_TEXT_BYTES + 1);
     assert_eq!(
         types::EventType::try_from(refunded(long.clone(), "0xuser".into())),
-        Err(EventError::TextTooLong {
+        Err(DomainEventError::TextTooLong {
             field: "token",
             len: MAX_TEXT_BYTES + 1
         })
     );
     assert_eq!(
         types::EventType::try_from(refunded("USDT".into(), long)),
-        Err(EventError::TextTooLong {
+        Err(DomainEventError::TextTooLong {
             field: "to",
             len: MAX_TEXT_BYTES + 1
         })

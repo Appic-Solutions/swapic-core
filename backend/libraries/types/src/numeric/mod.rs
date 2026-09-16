@@ -2,6 +2,7 @@
 mod tests;
 
 use crate::checked_amount::CheckedAmountOf;
+use candid::Nat;
 use minicbor::{Decode, Encode};
 use std::fmt;
 use std::time::Duration;
@@ -10,6 +11,15 @@ pub enum TokenTag {}
 /// An amount of any token in its smallest denomination: quote amounts, event amounts,
 /// pocket balances and fees.
 pub type TokenAmount = CheckedAmountOf<TokenTag>;
+
+impl TokenAmount {
+    /// An amount a canonical preimage can hold: `None` above `u128::MAX`.
+    pub fn from_canonical_nat(value: Nat) -> Option<Self> {
+        Self::try_from(value)
+            .ok()
+            .filter(|amount| amount.try_into_u128().is_some())
+    }
+}
 
 pub enum UsdTag {}
 /// Whole US dollars.

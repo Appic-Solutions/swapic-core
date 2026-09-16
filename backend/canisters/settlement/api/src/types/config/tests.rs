@@ -54,7 +54,7 @@ fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
     let err = types::Config::try_from(public).unwrap_err();
     assert_eq!(
         err,
-        ConfigError::RedactedRpcUrl {
+        types::ConfigError::RedactedRpcUrl {
             chain: ChainId::ETHEREUM
         }
     );
@@ -84,7 +84,7 @@ fn a_timeout_too_long_for_a_duration_is_refused() {
     };
     assert_eq!(
         types::Config::try_from(wire),
-        Err(ConfigError::DurationTooLong {
+        Err(types::ConfigError::DurationTooLong {
             field: "decision_timeout_min"
         })
     );
@@ -98,9 +98,30 @@ fn a_vault_address_over_the_cap_is_refused() {
     };
     assert_eq!(
         types::Config::try_from(wire),
-        Err(ConfigError::VaultAddressTooLong {
+        Err(types::ConfigError::VaultAddressTooLong {
             chain: ChainId::BASE,
             len: 257
         })
+    );
+}
+
+#[test]
+fn a_config_error_names_its_knob_on_the_wire() {
+    let redacted = Config::from(types::Config::try_from(secret_bearing()).unwrap());
+    let err = types::Config::try_from(redacted).unwrap_err();
+    assert_eq!(
+        ConfigError::from(err),
+        ConfigError::RedactedRpcUrl { chain_id: 1 }
+    );
+    let incoherent = types::Config {
+        platform_fee: types::BasisPoints::new(40),
+        ..types::Config::default()
+    };
+    assert_eq!(
+        ConfigError::from(incoherent.validate().unwrap_err()),
+        ConfigError::PlatformFeeAboveMax {
+            platform_fee_bps: 40,
+            max_fee_bps: 30
+        }
     );
 }

@@ -1,5 +1,6 @@
 use crate::storage::memory::{pending_quotes_memory, Memory};
 use ic_stable_structures::StableBTreeMap;
+use settlement_api::types::errors::RegisterQuoteError;
 use std::cell::RefCell;
 use std::time::Duration;
 use thiserror::Error;
@@ -36,6 +37,26 @@ pub enum RegisterError {
     },
     #[error("pending store is full at {MAX_PENDING} quotes")]
     StoreFull,
+}
+
+impl From<RegisterError> for RegisterQuoteError {
+    fn from(error: RegisterError) -> Self {
+        match error {
+            RegisterError::InvalidQuote(error) => Self::InvalidQuote(error.into()),
+            RegisterError::Expired { expires_at, now } => Self::Expired {
+                expires_at_s: expires_at.get(),
+                now_s: now.get(),
+            },
+            RegisterError::ExpiresTooFarAhead { expires_at, now } => Self::ExpiresTooFarAhead {
+                expires_at_s: expires_at.get(),
+                now_s: now.get(),
+                max_lifetime_s: MAX_QUOTE_LIFETIME.as_secs(),
+            },
+            RegisterError::StoreFull => Self::StoreFull {
+                capacity: MAX_PENDING,
+            },
+        }
+    }
 }
 
 /// Writes the store's header in an update context, so no query is ever the first to grow

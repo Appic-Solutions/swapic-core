@@ -1,6 +1,7 @@
 use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{decode_one, encode_one, Nat, Principal};
+use settlement_api::types::errors::TestAppendError;
 use settlement_api::types::events::EventType;
 
 #[test]
@@ -13,7 +14,9 @@ fn events_survive_upgrade_and_replay_matches() {
     let raw = pic
         .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
         .unwrap();
-    decode_one::<Result<u64, String>>(&raw).unwrap().unwrap();
+    decode_one::<Result<u64, TestAppendError>>(&raw)
+        .unwrap()
+        .unwrap();
 
     // the stable fold was built incrementally by append_event, and the audit compares it
     // against a fresh fold of the log, both before the upgrade and after it
@@ -63,7 +66,9 @@ fn test_append_rejects_non_controller() {
             encode_one(&event).unwrap(),
         )
         .unwrap();
-    assert!(decode_one::<Result<u64, String>>(&raw).unwrap().is_err());
+    assert!(decode_one::<Result<u64, TestAppendError>>(&raw)
+        .unwrap()
+        .is_err());
 
     // a rejected caller writes nothing
     let raw = pic

@@ -3,7 +3,8 @@ use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
-use settlement_api::types::config::Config;
+use settlement_api::types::config::{Config, ConfigError};
+use settlement_api::types::errors::SetConfigError;
 use settlement_api::types::events::{Event, EventType};
 use std::collections::BTreeMap;
 
@@ -163,9 +164,10 @@ fn set_config_rejects_a_round_tripped_redacted_config() {
     let mut round_tripped = get_config(&pic, canister, admin);
     round_tripped.platform_fee_bps = 20;
     let err = set_config(&pic, canister, admin, &round_tripped).unwrap_err();
-    assert!(
-        err.contains("rpc_urls"),
-        "the error must name the field: {err}"
+    assert_eq!(
+        err,
+        SetConfigError::InvalidConfig(ConfigError::RedactedRpcUrl { chain_id: 1 }),
+        "the error must name the field"
     );
 
     // the real url is still in place and the rejected write left no event behind
@@ -182,9 +184,13 @@ fn set_config_rejects_an_incoherent_fee_and_writes_nothing() {
         ..Config::default()
     };
     let err = set_config(&pic, canister, admin, &bad).unwrap_err();
-    assert!(
-        err.contains("platform_fee_bps"),
-        "the error must name the field: {err}"
+    assert_eq!(
+        err,
+        SetConfigError::InvalidConfig(ConfigError::PlatformFeeAboveMax {
+            platform_fee_bps: 40,
+            max_fee_bps: 30
+        }),
+        "the error must name the field"
     );
 
     assert_eq!(get_config(&pic, canister, admin), Config::default());

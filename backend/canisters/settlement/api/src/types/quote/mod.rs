@@ -1,6 +1,5 @@
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::quote::QuoteError;
 use types::{ChainId, TokenAmount, UnixSeconds};
 
 /// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
@@ -84,7 +83,7 @@ impl From<types::Quote> for Quote {
 }
 
 impl TryFrom<Quote> for types::Quote {
-    type Error = QuoteError;
+    type Error = types::QuoteError;
 
     fn try_from(quote: Quote) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -110,19 +109,91 @@ impl TryFrom<Quote> for types::Quote {
     }
 }
 
-/// A quote amount: at most `u128::MAX`, the width the preimage writes.
-fn amount(field: &'static str, value: Nat) -> Result<TokenAmount, QuoteError> {
-    TokenAmount::try_from(value)
-        .ok()
-        .filter(|amount| amount.try_into_u128().is_some())
-        .ok_or(QuoteError::AmountTooLarge { field })
+fn amount(field: &'static str, value: Nat) -> Result<TokenAmount, types::QuoteError> {
+    TokenAmount::from_canonical_nat(value).ok_or(types::QuoteError::AmountTooLarge { field })
 }
 
 fn text<T: std::str::FromStr<Err = types::address::TextTooLong>>(
     field: &'static str,
     value: &str,
-) -> Result<T, QuoteError> {
-    value.parse().map_err(QuoteError::text_too_long(field))
+) -> Result<T, types::QuoteError> {
+    value
+        .parse()
+        .map_err(types::QuoteError::text_too_long(field))
+}
+
+/// Why a quote was refused, naming the field wherever one is at fault.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum QuoteError {
+    UnsupportedVersion(u8),
+    EmptyRefundAddress,
+    AmountTooLarge {
+        field: String,
+    },
+    TextTooLong {
+        field: String,
+        len: u64,
+    },
+    UnknownRail(String),
+    Truncated {
+        field: String,
+        at: u64,
+        wanted: u64,
+        len: u64,
+    },
+    NotABool {
+        field: String,
+        value: u8,
+    },
+    NotAGasMode(u8),
+    NotUtf8 {
+        field: String,
+    },
+    TrailingBytes {
+        consumed: u64,
+        len: u64,
+    },
+}
+
+impl From<types::QuoteError> for QuoteError {
+    fn from(error: types::QuoteError) -> Self {
+        use types::QuoteError as Domain;
+        match error {
+            Domain::UnsupportedVersion(version) => Self::UnsupportedVersion(version),
+            Domain::EmptyRefundAddress => Self::EmptyRefundAddress,
+            Domain::AmountTooLarge { field } => Self::AmountTooLarge {
+                field: field.to_string(),
+            },
+            Domain::TextTooLong { field, len } => Self::TextTooLong {
+                field: field.to_string(),
+                len: crate::types::wire_len(len),
+            },
+            Domain::UnknownRail(types::rail::UnknownRail(rail)) => Self::UnknownRail(rail),
+            Domain::Truncated {
+                field,
+                at,
+                wanted,
+                len,
+            } => Self::Truncated {
+                field: field.to_string(),
+                at: crate::types::wire_len(at),
+                wanted: crate::types::wire_len(wanted),
+                len: crate::types::wire_len(len),
+            },
+            Domain::NotABool { field, value } => Self::NotABool {
+                field: field.to_string(),
+                value,
+            },
+            Domain::NotAGasMode(mode) => Self::NotAGasMode(mode),
+            Domain::NotUtf8 { field } => Self::NotUtf8 {
+                field: field.to_string(),
+            },
+            Domain::TrailingBytes { consumed, len } => Self::TrailingBytes {
+                consumed: crate::types::wire_len(consumed),
+                len: crate::types::wire_len(len),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

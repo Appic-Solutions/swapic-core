@@ -6,6 +6,7 @@ use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
+use settlement_api::types::errors::{GuardError, RegisterQuoteError, SetRolesError};
 use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote};
 use settlement_api::types::swap::{Swap, SwapStatus};
@@ -36,13 +37,13 @@ fn advance(pic: &PocketIc, seconds: u64) {
     }
 }
 
-fn set_roles(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), String> {
+fn set_roles(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), SetRolesError> {
     settlement::set_roles(pic, canister, sender, quoter(), watcher())
 }
 
 /// The test-only door that moves the fold's chain head off the log's, which is exactly
 /// what the replay audit halts on.
-fn skew_state(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), String> {
+fn skew_state(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), GuardError> {
     test_skew_state(pic, canister, sender)
 }
 
@@ -50,12 +51,16 @@ fn halted(pic: &PocketIc, canister: Principal) -> bool {
     settlement::halted(pic, canister, stranger())
 }
 
-fn register_quote(pic: &PocketIc, canister: Principal, quote: &Quote) -> Result<Hash32, String> {
+fn register_quote(
+    pic: &PocketIc,
+    canister: Principal,
+    quote: &Quote,
+) -> Result<Hash32, RegisterQuoteError> {
     settlement::register_quote(pic, canister, quoter(), quote)
 }
 
 fn get_pending(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Quote> {
-    let answer: Result<Option<Quote>, String> =
+    let answer: Result<Option<Quote>, GuardError> =
         settlement::get_pending(pic, canister, quoter(), hash);
     answer.expect("the quoter may read the store")
 }

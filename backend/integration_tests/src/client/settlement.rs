@@ -9,6 +9,7 @@ use settlement_api::queries::{
     event_count, events_page, get_config, get_config_full, get_pending, get_swap, halted,
     verify_chain, verify_replay,
 };
+use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{register_quote, set_config, set_halted, set_roles};
 
@@ -185,7 +186,7 @@ pub fn append(
     canister: Principal,
     sender: Principal,
     event: &EventType,
-) -> Result<u64, String> {
+) -> Result<u64, TestAppendError> {
     update(
         pic,
         canister,
@@ -201,7 +202,7 @@ pub fn test_skew_state(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
-) -> Result<(), String> {
+) -> Result<(), GuardError> {
     update(
         pic,
         canister,

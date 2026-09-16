@@ -83,3 +83,15 @@ fn unix_seconds_add_whole_seconds_without_overflowing() {
         None
     );
 }
+
+#[test]
+fn a_canonical_amount_stops_at_u128_max() {
+    assert_eq!(
+        TokenAmount::from_canonical_nat(Nat::from(u128::MAX)),
+        Some(TokenAmount::from(u128::MAX))
+    );
+    assert_eq!(
+        TokenAmount::from_canonical_nat(Nat::from(u128::MAX) + Nat::from(1_u8)),
+        None
+    );
+}

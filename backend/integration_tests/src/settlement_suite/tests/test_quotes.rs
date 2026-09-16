@@ -3,8 +3,9 @@ use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::{PocketIc, Time};
+use settlement_api::types::errors::{GuardError, RegisterQuoteError, Role, SetRolesError};
 use settlement_api::types::events::{Event, EventType, Hash32};
-use settlement_api::types::quote::{GasMode, Quote};
+use settlement_api::types::quote::{GasMode, Quote, QuoteError};
 use types::address::MAX_TEXT_BYTES;
 use types::quote::MAX_QUOTE_LIFETIME;
 
@@ -88,9 +89,13 @@ fn register_quote_refuses_everyone_while_the_roles_are_unset() {
     for caller in [admin, quoter(), stranger()] {
         let err =
             register_quote(&pic, canister, caller, &fixed_quote()).expect_err("no role is set yet");
-        assert!(err.contains("not set"), "say the role is unset: {err}");
+        assert_eq!(
+            err,
+            RegisterQuoteError::Guard(GuardError::RoleNotSet(Role::Quoter)),
+            "say the role is unset"
+        );
         let err = get_pending(&pic, canister, caller, [0; 32]).expect_err("nor is the reader open");
-        assert!(err.contains("not set"), "say the roles are unset: {err}");
+        assert_eq!(err, GuardError::RolesNotSet, "say the roles are unset");
     }
 }
 
@@ -123,10 +128,10 @@ fn set_roles_refuses_the_anonymous_principal() {
     let (pic, canister, admin) = setup();
     let err = set_roles(&pic, canister, admin, Principal::anonymous(), watcher())
         .expect_err("anonymous is not a service identity");
-    assert!(err.contains("anonymous"), "say why: {err}");
+    assert_eq!(err, SetRolesError::AnonymousRole(Role::Quoter), "say why");
     let err = set_roles(&pic, canister, admin, quoter(), Principal::anonymous())
         .expect_err("either slot");
-    assert!(err.contains("anonymous"), "say why: {err}");
+    assert_eq!(err, SetRolesError::AnonymousRole(Role::Watcher), "say why");
 }
 
 /// The cross-repo contract, end to end: what the endpoint returns is the golden hash that
@@ -199,7 +204,10 @@ fn register_quote_refuses_a_quote_that_has_already_expired() {
         ..fixed_quote()
     };
     let err = register_quote(&pic, canister, quoter(), &stale).expect_err("the quote is stale");
-    assert!(err.contains("expired"), "say why: {err}");
+    assert!(
+        matches!(err, RegisterQuoteError::Expired { expires_at_s, .. } if expires_at_s == stale.expires_at_s),
+        "say why: {err:?}"
+    );
 
     // and the fixture is live on this clock, so the happy path above is not an accident
     assert!(now_s(&pic) < fixed_quote().expires_at_s);
@@ -217,8 +225,14 @@ fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
     let err =
         register_quote(&pic, canister, quoter(), &immortal).expect_err("that is too far ahead");
     assert!(
-        err.contains(&MAX_QUOTE_LIFETIME_S.to_string()),
-        "say why: {err}"
+        matches!(
+            err,
+            RegisterQuoteError::ExpiresTooFarAhead {
+                max_lifetime_s: MAX_QUOTE_LIFETIME_S,
+                ..
+            }
+        ),
+        "say why: {err:?}"
     );
 }
 
@@ -232,7 +246,14 @@ fn register_quote_refuses_a_string_over_the_byte_cap() {
         ..fixed_quote()
     };
     let err = register_quote(&pic, canister, quoter(), &over).expect_err("one byte over the cap");
-    assert!(err.contains("dst_address"), "name the field: {err}");
+    assert_eq!(
+        err,
+        RegisterQuoteError::InvalidQuote(QuoteError::TextTooLong {
+            field: "dst_address".to_string(),
+            len: MAX_TEXT_BYTES as u64 + 1
+        }),
+        "name the field"
+    );
     // refused at conversion, so it never had a swap id to be stored under
     assert!(types::Quote::try_from(over).is_err());
     assert_eq!(

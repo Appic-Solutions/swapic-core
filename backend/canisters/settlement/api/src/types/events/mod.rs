@@ -1,7 +1,7 @@
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 use types::address::TextTooLong;
-use types::events::EventError;
+use types::events::EventError as DomainEventError;
 use types::{Attempt, BlockNumber, ChainId, QuoteHash, TokenAmount, TxHash};
 
 pub type Hash32 = [u8; 32];
@@ -301,7 +301,7 @@ impl From<types::EventType> for EventType {
 }
 
 impl TryFrom<EventType> for types::EventType {
-    type Error = EventError;
+    type Error = DomainEventError;
 
     fn try_from(payload: EventType) -> Result<Self, Self::Error> {
         Ok(match payload {
@@ -454,21 +454,40 @@ impl TryFrom<EventType> for types::EventType {
     }
 }
 
-/// An event amount: at most `u128::MAX`, the width the preimage writes.
-fn amount(value: Nat) -> Result<TokenAmount, EventError> {
-    TokenAmount::try_from(value)
-        .ok()
-        .filter(|amount| amount.try_into_u128().is_some())
-        .ok_or(EventError::AmountTooLarge { field: "amount" })
+/// Why a wire event is not a domain event, naming the field at fault.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum EventError {
+    AmountTooLarge { field: String },
+    TextTooLong { field: String, len: u64 },
+}
+
+impl From<types::events::EventError> for EventError {
+    fn from(error: types::events::EventError) -> Self {
+        use types::events::EventError as Domain;
+        match error {
+            Domain::AmountTooLarge { field } => Self::AmountTooLarge {
+                field: field.to_string(),
+            },
+            Domain::TextTooLong { field, len } => Self::TextTooLong {
+                field: field.to_string(),
+                len: crate::types::wire_len(len),
+            },
+        }
+    }
+}
+
+fn amount(value: Nat) -> Result<TokenAmount, DomainEventError> {
+    TokenAmount::from_canonical_nat(value)
+        .ok_or(DomainEventError::AmountTooLarge { field: "amount" })
 }
 
 fn text<T: std::str::FromStr<Err = TextTooLong>>(
     field: &'static str,
     value: &str,
-) -> Result<T, EventError> {
+) -> Result<T, DomainEventError> {
     value
         .parse()
-        .map_err(|TextTooLong { len }| EventError::TextTooLong { field, len })
+        .map_err(|TextTooLong { len }| DomainEventError::TextTooLong { field, len })
 }
 
 #[cfg(test)]

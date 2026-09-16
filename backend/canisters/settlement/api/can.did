@@ -1,3 +1,11 @@
+// Why an event was not appended. Nothing was written.
+type AppendError = variant {
+  ChainDiverged : record { log_head : blob; state_head : blob };
+  LogFull;
+  Transition : TransitionError;
+  IndexMismatch : record { sealed : nat64; log_len : nat64 };
+  OutOfStableMemory : record { current_pages : nat64; delta_pages : nat64 };
+};
 type Choice = variant { Requote; Refund };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
@@ -19,6 +27,20 @@ type Config = record {
   chain_data_max_age_s : nat64;
   max_swap_usd : nat;
   max_batch_items : nat32;
+};
+// Why a config was refused, naming the knob at fault.
+type ConfigError = variant {
+  EmptyEcdsaKeyName;
+  MaxFeeAboveHundredPercent : nat16;
+  VaultAddressTooLong : record { len : nat64; chain_id : nat64 };
+  PlatformFeeAboveMax : record {
+    max_fee_bps : nat16;
+    platform_fee_bps : nat16;
+  };
+  RedactedRpcUrl : record { chain_id : nat64 };
+  TimerIntervalTooLong : record { field : text; interval_s : nat64 };
+  AmountTooLarge : record { field : text };
+  DurationTooLong : record { field : text };
 };
 // One entry of the log. `time_ns` is IC time in nanoseconds.
 type Event = record {
@@ -84,6 +106,22 @@ type EventType = variant {
 };
 // Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 type GasMode = variant { Legacy; Gasless };
+// Why a caller was refused before anything ran. A refusal names the role and never a
+// principal.
+type GuardError = variant {
+  NotController;
+  RolesNotSet;
+  CallerNotRole : Role;
+  CallerNotQuoterOrWatcher;
+  Halted;
+  RoleNotSet : Role;
+};
+// Why a pocket cannot make a move.
+type PocketError = variant {
+  Overflow;
+  InsufficientReserved : record { requested : nat; "reserved" : nat };
+  InsufficientAvailable : record { requested : nat; available : nat };
+};
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
 // order is frozen and is NOT the order a candid tool prints this record in:
@@ -115,10 +153,51 @@ type Quote = record {
   expected_out : nat;
   dst_token : text;
 };
-type Result = variant { Ok : Config; Err : text };
-type Result_1 = variant { Ok : opt Quote; Err : text };
-type Result_2 = variant { Ok : blob; Err : text };
-type Result_3 = variant { Ok; Err : text };
+// Why a quote was refused, naming the field wherever one is at fault.
+type QuoteError = variant {
+  NotUtf8 : record { field : text };
+  TextTooLong : record { len : nat64; field : text };
+  EmptyRefundAddress;
+  UnknownRail : text;
+  NotABool : record { field : text; value : nat8 };
+  NotAGasMode : nat8;
+  UnsupportedVersion : nat8;
+  TrailingBytes : record { len : nat64; consumed : nat64 };
+  Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
+  AmountTooLarge : record { field : text };
+};
+// Why `register_quote` stored nothing.
+type RegisterQuoteError = variant {
+  ExpiresTooFarAhead : record {
+    now_s : nat64;
+    expires_at_s : nat64;
+    max_lifetime_s : nat64;
+  };
+  Guard : GuardError;
+  StoreFull : record { capacity : nat64 };
+  InvalidQuote : QuoteError;
+  Expired : record { now_s : nat64; expires_at_s : nat64 };
+};
+type Result = variant { Ok : Config; Err : GuardError };
+type Result_1 = variant { Ok : opt Quote; Err : GuardError };
+type Result_2 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_3 = variant { Ok; Err : SetConfigError };
+type Result_4 = variant { Ok; Err : GuardError };
+type Result_5 = variant { Ok; Err : SetRolesError };
+// A service role the canister hands out.
+type Role = variant { Quoter; Watcher };
+// Why `set_config` wrote nothing.
+type SetConfigError = variant {
+  InvalidConfig : ConfigError;
+  Guard : GuardError;
+  Append : AppendError;
+};
+// Why `set_roles` wrote nothing.
+type SetRolesError = variant {
+  Guard : GuardError;
+  AnonymousRole : Role;
+  Append : AppendError;
+};
 // The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 type Swap = record {
   status : SwapStatus;
@@ -143,6 +222,25 @@ type SwapStatus = variant {
   Executing;
   Frozen;
 };
+// Why an event cannot move the state it was offered to.
+type TransitionError = variant {
+  WaitingForUser;
+  NotRefunding : SwapStatus;
+  Pocket : PocketError;
+  SwapExists : blob;
+  AttemptStillOpen : nat32;
+  UnknownSwap : blob;
+  NotExecuting : SwapStatus;
+  SwapClosed : SwapStatus;
+  FeesOverflow;
+  AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };
+  AttemptNotOpen : nat32;
+  CannotStartRefund : SwapStatus;
+  NotInFlight : SwapStatus;
+  NotWaitingForUser : SwapStatus;
+  AlreadyPaid;
+  UnknownPocket : nat64;
+};
 service : () -> {
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
@@ -161,21 +259,20 @@ service : () -> {
   // True once a replay audit has found the log and the live state disagree. Nothing clears
   // it but a controller, and money endpoints refuse while it is set.
   halted : () -> (bool) query;
-  // Quoter-only, and it takes a quote of either gas mode. Pre-money: it records a quote
-  // the quoter has just handed a user so the funds that arrive later can be matched to it,
-  // and returns the hash the user's deposit must carry. Nothing of value moves here, so
-  // nothing is written to the log.
+  // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
+  // so the funds that arrive later can be matched to it, and returns the hash the deposit
+  // must carry. Pre-money, so nothing is written to the log.
   register_quote : (Quote) -> (Result_2);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
-  // or the write puts "***" into `rpc_urls` and the canister loses its rpc access.
+  // or the write puts "***" into `rpc_urls` and is refused.
   set_config : (Config) -> (Result_3);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
-  set_halted : (bool) -> (Result_3);
+  set_halted : (bool) -> (Result_4);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_3);
+  set_roles : (principal, principal) -> (Result_5);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

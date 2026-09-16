@@ -6,7 +6,45 @@ use ic_stable_structures::StableCell;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::fmt;
+use thiserror::Error;
 use types::EventType;
+
+use super::events::AppendError;
+
+/// A service role the canister hands out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Quoter,
+    Watcher,
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Role::Quoter => "quoter",
+            Role::Watcher => "watcher",
+        })
+    }
+}
+
+impl From<Role> for settlement_api::types::errors::Role {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Quoter => Self::Quoter,
+            Role::Watcher => Self::Watcher,
+        }
+    }
+}
+
+/// Why a role rotation was refused. Nothing was written.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RolesError {
+    #[error("{0} cannot be the anonymous principal")]
+    AnonymousRole(Role),
+    #[error(transparent)]
+    Append(#[from] AppendError),
+}
 
 /// The two service principals the canister answers to: the quoter opens quotes, the
 /// watcher reads them. Both are unset until a controller calls `set_roles`, and every
@@ -50,13 +88,13 @@ pub fn get() -> Roles {
 
 /// Writes the cell and records the change in the log. The caller does the authorization;
 /// this is the storage path.
-pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
+pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), RolesError> {
     // before anything is written: a rejected pair must leave no event and no cell write.
     // The anonymous principal is every unauthenticated caller at once, so a role held by
     // it is a role held by the world.
-    for (name, p) in [("quoter", quoter), ("watcher", watcher)] {
-        if p == Principal::anonymous() {
-            return Err(format!("{name} cannot be the anonymous principal"));
+    for (role, principal) in [(Role::Quoter, quoter), (Role::Watcher, watcher)] {
+        if principal == Principal::anonymous() {
+            return Err(RolesError::AnonymousRole(role));
         }
     }
     // the log first, because it is the step that can refuse: a rotation changes who may
@@ -64,8 +102,7 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
     events::append_event(EventType::RolesChanged {
         quoter: quoter.to_text(),
         watcher: watcher.to_text(),
-    })
-    .map_err(|e| e.to_string())?;
+    })?;
     let roles = Roles {
         quoter: Some(quoter),
         watcher: Some(watcher),

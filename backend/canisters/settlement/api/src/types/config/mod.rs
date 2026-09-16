@@ -3,7 +3,6 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong};
-use types::config::ConfigError;
 use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -105,14 +104,14 @@ impl From<types::Config> for Config {
 }
 
 impl TryFrom<Config> for types::Config {
-    type Error = ConfigError;
+    type Error = types::ConfigError;
 
     fn try_from(config: Config) -> Result<Self, Self::Error> {
         Ok(Self {
             platform_fee: BasisPoints::new(config.platform_fee_bps),
             max_fee: BasisPoints::new(config.max_fee_bps),
             max_swap: UsdAmount::try_from(config.max_swap_usd).map_err(|_| {
-                ConfigError::AmountTooLarge {
+                types::ConfigError::AmountTooLarge {
                     field: "max_swap_usd",
                 }
             })?,
@@ -125,7 +124,7 @@ impl TryFrom<Config> for types::Config {
                 .decision_timeout_min
                 .checked_mul(60)
                 .map(Duration::from_secs)
-                .ok_or(ConfigError::DurationTooLong {
+                .ok_or(types::ConfigError::DurationTooLong {
                     field: "decision_timeout_min",
                 })?,
             rail_status_max_age: Duration::from_secs(config.rail_status_max_age_s),
@@ -144,7 +143,7 @@ impl TryFrom<Config> for types::Config {
                     let chain = ChainId::new(chain);
                     url.parse()
                         .map(|url| (chain, url))
-                        .map_err(|RedactedRpcUrl| ConfigError::RedactedRpcUrl { chain })
+                        .map_err(|RedactedRpcUrl| types::ConfigError::RedactedRpcUrl { chain })
                 })
                 .collect::<Result<_, _>>()?,
             vault_addresses: config
@@ -153,12 +152,79 @@ impl TryFrom<Config> for types::Config {
                 .map(|(chain, address)| {
                     let chain = ChainId::new(chain);
                     address.parse().map(|address| (chain, address)).map_err(
-                        |TextTooLong { len }| ConfigError::VaultAddressTooLong { chain, len },
+                        |TextTooLong { len }| types::ConfigError::VaultAddressTooLong {
+                            chain,
+                            len,
+                        },
                     )
                 })
                 .collect::<Result<_, _>>()?,
             ecdsa_key_name: config.ecdsa_key_name,
         })
+    }
+}
+
+/// Why a config was refused, naming the knob at fault.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigError {
+    MaxFeeAboveHundredPercent(u16),
+    PlatformFeeAboveMax {
+        platform_fee_bps: u16,
+        max_fee_bps: u16,
+    },
+    EmptyEcdsaKeyName,
+    TimerIntervalTooLong {
+        field: String,
+        interval_s: u64,
+    },
+    AmountTooLarge {
+        field: String,
+    },
+    DurationTooLong {
+        field: String,
+    },
+    RedactedRpcUrl {
+        chain_id: u64,
+    },
+    VaultAddressTooLong {
+        chain_id: u64,
+        len: u64,
+    },
+}
+
+impl From<types::ConfigError> for ConfigError {
+    fn from(error: types::ConfigError) -> Self {
+        use types::ConfigError as Domain;
+        match error {
+            Domain::MaxFeeAboveHundredPercent(max_fee) => {
+                Self::MaxFeeAboveHundredPercent(max_fee.get())
+            }
+            Domain::PlatformFeeAboveMax {
+                platform_fee,
+                max_fee,
+            } => Self::PlatformFeeAboveMax {
+                platform_fee_bps: platform_fee.get(),
+                max_fee_bps: max_fee.get(),
+            },
+            Domain::EmptyEcdsaKeyName => Self::EmptyEcdsaKeyName,
+            Domain::TimerIntervalTooLong { field, interval } => Self::TimerIntervalTooLong {
+                field: field.to_string(),
+                interval_s: interval.as_secs(),
+            },
+            Domain::AmountTooLarge { field } => Self::AmountTooLarge {
+                field: field.to_string(),
+            },
+            Domain::DurationTooLong { field } => Self::DurationTooLong {
+                field: field.to_string(),
+            },
+            Domain::RedactedRpcUrl { chain } => Self::RedactedRpcUrl {
+                chain_id: chain.get(),
+            },
+            Domain::VaultAddressTooLong { chain, len } => Self::VaultAddressTooLong {
+                chain_id: chain.get(),
+                len: crate::types::wire_len(len),
+            },
+        }
     }
 }
 

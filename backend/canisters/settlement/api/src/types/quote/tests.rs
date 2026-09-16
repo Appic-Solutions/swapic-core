@@ -70,7 +70,7 @@ fn an_amount_above_u128_max_is_refused_naming_the_field() {
         set(&mut quote, too_large.clone());
         assert_eq!(
             types::Quote::try_from(quote),
-            Err(QuoteError::AmountTooLarge { field })
+            Err(types::QuoteError::AmountTooLarge { field })
         );
         let mut at_max = fixed_quote();
         set(&mut at_max, Nat::from(u128::MAX));
@@ -95,7 +95,7 @@ fn text_over_the_cap_is_refused_naming_the_field() {
         set(&mut over, "a".repeat(MAX_TEXT_BYTES + 1));
         assert_eq!(
             types::Quote::try_from(over),
-            Err(QuoteError::TextTooLong {
+            Err(types::QuoteError::TextTooLong {
                 field,
                 len: MAX_TEXT_BYTES + 1
             })
@@ -118,6 +118,30 @@ fn a_rail_must_be_one_of_the_known_ids() {
     };
     assert_eq!(
         types::Quote::try_from(unknown),
-        Err(QuoteError::UnknownRail(UnknownRail("CCTP_V2_FAST".into())))
+        Err(types::QuoteError::UnknownRail(UnknownRail(
+            "CCTP_V2_FAST".into()
+        )))
+    );
+}
+
+#[test]
+fn a_quote_error_names_its_field_on_the_wire() {
+    let wire = |quote: Quote| QuoteError::from(types::Quote::try_from(quote).unwrap_err());
+    assert_eq!(
+        wire(Quote {
+            dst_address: "a".repeat(MAX_TEXT_BYTES + 1),
+            ..fixed_quote()
+        }),
+        QuoteError::TextTooLong {
+            field: "dst_address".into(),
+            len: MAX_TEXT_BYTES as u64 + 1
+        }
+    );
+    assert_eq!(
+        wire(Quote {
+            rail: "cctp".into(),
+            ..fixed_quote()
+        }),
+        QuoteError::UnknownRail("cctp".into())
     );
 }

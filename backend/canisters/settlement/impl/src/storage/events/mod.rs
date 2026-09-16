@@ -90,6 +90,30 @@ pub enum AppendError {
     Transition(#[from] TransitionError),
 }
 
+impl From<AppendError> for settlement_api::types::errors::AppendError {
+    fn from(error: AppendError) -> Self {
+        match error {
+            AppendError::ChainDiverged { log, state } => Self::ChainDiverged {
+                log_head: log.into_bytes(),
+                state_head: state.into_bytes(),
+            },
+            AppendError::IndexMismatch { log_len, sealed } => Self::IndexMismatch {
+                log_len,
+                sealed: sealed.get(),
+            },
+            AppendError::LogFull => Self::LogFull,
+            AppendError::OutOfStableMemory {
+                current_pages,
+                delta_pages,
+            } => Self::OutOfStableMemory {
+                current_pages,
+                delta_pages,
+            },
+            AppendError::Transition(error) => Self::Transition(error.into()),
+        }
+    }
+}
+
 /// Writes the headers of the log and of the fold, in an update context, so no query is
 /// ever the first to grow their memory.
 pub fn init() {

@@ -1,5 +1,5 @@
-//! Domain types of the settlement canister. Everything here is pure: no canister calls,
-//! and every rule a value must satisfy is checked where the value is built.
+//! Domain types of the settlement canister: identifiers, amounts, the canonical codecs,
+//! and the rules values must satisfy. Everything here is pure, with no canister calls.
 
 pub mod address;
 pub mod canonical;
