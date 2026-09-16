@@ -25,4 +25,4 @@ pub use numeric::{
 };
 pub use quote::{GasMode, Quote, QuoteError};
 pub use rail::Rail;
-pub use swap::{Pocket, Swap, SwapStatus};
+pub use swap::{Pocket, PocketError, Swap, SwapStatus, TransitionError};

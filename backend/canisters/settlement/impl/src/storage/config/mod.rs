@@ -40,7 +40,8 @@ pub fn set(new: Config) -> Result<IntervalChanges, String> {
     // and the config's Debug prints every rpc url as `***`.
     events::append_event(EventType::ConfigChanged {
         json: format!("{new:?}"),
-    })?;
+    })
+    .map_err(|e| e.to_string())?;
     // out of stable memory is not a caller error, so it traps instead of returning Err:
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     STORED.with(|s| s.borrow_mut().set(new.clone()).expect("config cell write"));

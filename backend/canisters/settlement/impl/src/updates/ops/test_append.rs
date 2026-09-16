@@ -9,4 +9,6 @@ pub fn test_append(payload: EventType) -> Result<u64, String> {
     require_controller()?;
     let payload = types::EventType::try_from(payload).map_err(|e| e.to_string())?;
     events::append_event(payload)
+        .map(|index| index.get())
+        .map_err(|e| e.to_string())
 }

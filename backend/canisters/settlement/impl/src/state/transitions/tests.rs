@@ -1,5 +1,12 @@
 use super::*;
-use types::{BlockNumber, Timestamp, TxHash};
+use crate::state::LedgerMeta;
+use types::events::Choice;
+use types::{
+    Attempt, BlockNumber, ChainId, Pocket, PocketError, QuoteHash, Swap, SwapStatus, Timestamp,
+    TokenAmount, TxHash,
+};
+
+type HeapState = State<MemoryStore>;
 
 const BASE: ChainId = ChainId::BASE;
 const ARBITRUM: ChainId = ChainId::ARBITRUM;
@@ -44,23 +51,32 @@ fn confirmed(qh: QuoteHash, attempt: u32) -> EventType {
 }
 
 /// Seals `payload` as the next event of `state` at `nanos`.
-fn next_event(state: &AppState, nanos: u64, payload: EventType) -> Event {
+fn next_event(state: &HeapState, nanos: u64, payload: EventType) -> Event {
+    let meta = state.meta();
     Event::seal(
-        state.next_event_index,
+        meta.next_event_index,
         Timestamp::from_nanos(nanos),
-        state.last_event_hash,
+        meta.last_event_hash,
         payload,
     )
 }
 
-fn fold(events: Vec<EventType>) -> AppState {
-    let mut state = AppState::default();
+fn fold(events: Vec<EventType>) -> HeapState {
+    let mut state = HeapState::default();
     for e in events {
-        check_transition(&state, &e).expect("guard admits");
+        state.check(&e).expect("guard admits");
         let event = next_event(&state, 1, e);
-        apply(&mut state, &event);
+        apply_state_transition(&mut state, &event);
     }
     state
+}
+
+fn swap(state: &HeapState, qh: QuoteHash) -> Swap {
+    state.swap(&qh).expect("the swap exists")
+}
+
+fn pocket(state: &HeapState, chain_id: ChainId) -> Pocket {
+    state.pocket(&chain_id).expect("the pocket exists")
 }
 
 #[test]
@@ -79,7 +95,7 @@ fn happy_path_reaches_done() {
         confirmed(qh, 2),
         EventType::SwapDone { quote_hash: qh },
     ]);
-    let swap = &state.swaps[&qh];
+    let swap = swap(&state, qh);
     assert_eq!(swap.status, SwapStatus::Done);
     assert_eq!(swap.last_attempt, Some(Attempt::new(2)));
     assert_eq!(swap.amount_paid, amount(99));
@@ -89,17 +105,27 @@ fn happy_path_reaches_done() {
 fn cannot_sign_next_attempt_while_one_is_open() {
     let qh = qh(1);
     let mut state = fold(vec![funds(qh), signed(qh, 1)]);
-    assert!(check_transition(&state, &signed(qh, 2)).is_err());
+    assert_eq!(
+        state.check(&signed(qh, 2)),
+        Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
+    );
     // closing attempt 1 unblocks attempt 2
     let env = next_event(&state, 1, confirmed(qh, 1));
-    apply(&mut state, &env);
-    assert!(check_transition(&state, &signed(qh, 2)).is_ok());
+    apply_state_transition(&mut state, &env);
+    assert!(state.check(&signed(qh, 2)).is_ok());
 }
 
 #[test]
 fn attempt_numbers_are_strictly_sequential() {
     let state = fold(vec![funds(qh(1))]);
-    assert!(check_transition(&state, &signed(qh(1), 2)).is_err()); // skips 1
+    // skips 1
+    assert_eq!(
+        state.check(&signed(qh(1), 2)),
+        Err(TransitionError::AttemptOutOfSequence {
+            attempt: Attempt::new(2),
+            expected: Some(Attempt::FIRST)
+        })
+    );
 }
 
 #[test]
@@ -112,24 +138,30 @@ fn closed_swap_rejects_new_signatures() {
             reason: "sanctions".into(),
         },
     ]);
-    assert!(check_transition(&state, &signed(qh, 1)).is_err());
+    assert_eq!(
+        state.check(&signed(qh, 1)),
+        Err(TransitionError::SwapClosed(SwapStatus::Frozen))
+    );
 }
 
 #[test]
 fn duplicate_funds_received_rejected() {
     let state = fold(vec![funds(qh(1))]);
-    assert!(check_transition(&state, &funds(qh(1))).is_err());
+    assert_eq!(
+        state.check(&funds(qh(1))),
+        Err(TransitionError::SwapExists(qh(1)))
+    );
 }
 
 #[test]
 fn replay_is_deterministic() {
     let qh = qh(1);
     let events: Vec<Event> = {
-        let mut state = AppState::default();
+        let mut state = HeapState::default();
         let mut out = vec![];
         for e in vec![funds(qh), signed(qh, 1), confirmed(qh, 1)] {
             let env = next_event(&state, 7, e);
-            apply(&mut state, &env);
+            apply_state_transition(&mut state, &env);
             out.push(env);
         }
         out
@@ -154,8 +186,8 @@ fn pocket_reserve_moves_available_to_reserved() {
             amount: amount(400),
         },
     ]);
-    assert_eq!(state.pockets[&BASE].available, amount(600));
-    assert_eq!(state.pockets[&BASE].reserved, amount(400));
+    assert_eq!(pocket(&state, BASE).available, amount(600));
+    assert_eq!(pocket(&state, BASE).reserved, amount(400));
 }
 
 fn failed(qh: QuoteHash, attempt: u32) -> EventType {
@@ -192,24 +224,30 @@ fn second_paid_in_stable_rejected() {
     let mut events = vec![funds(qh), signed(qh, 1), confirmed(qh, 1), paid(qh, 99)];
     events.extend(decide(qh, Choice::Requote));
     let state = fold(events);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Executing);
-    assert!(check_transition(&state, &paid(qh, 50)).is_err());
-    assert_eq!(state.swaps[&qh].amount_paid, amount(99));
+    assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
+    assert_eq!(
+        state.check(&paid(qh, 50)),
+        Err(TransitionError::AlreadyPaid)
+    );
+    assert_eq!(swap(&state, qh).amount_paid, amount(99));
 }
 
 #[test]
 fn waiting_for_user_blocks_signing() {
     let qh = qh(1);
     let mut state = fold(vec![funds(qh), signed(qh, 1), confirmed(qh, 1), ask(qh)]);
-    assert!(check_transition(&state, &signed(qh, 2)).is_err());
+    assert_eq!(
+        state.check(&signed(qh, 2)),
+        Err(TransitionError::WaitingForUser)
+    );
     // answering the question unblocks the next attempt
     let resume = EventType::DecisionMade {
         quote_hash: qh,
         choice: Choice::Requote,
     };
     let env = next_event(&state, 1, resume);
-    apply(&mut state, &env);
-    assert!(check_transition(&state, &signed(qh, 2)).is_ok());
+    apply_state_transition(&mut state, &env);
+    assert!(state.check(&signed(qh, 2)).is_ok());
 }
 
 #[test]
@@ -221,48 +259,48 @@ fn done_swap_rejects_freeze() {
         confirmed(qh, 1),
         EventType::SwapDone { quote_hash: qh },
     ]);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Done);
-    assert!(check_transition(
-        &state,
-        &EventType::Frozen {
-            quote_hash: qh,
-            reason: "sanctions".into(),
-        }
-    )
-    .is_err());
+    assert_eq!(swap(&state, qh).status, SwapStatus::Done);
+    let freeze = EventType::Frozen {
+        quote_hash: qh,
+        reason: "sanctions".into(),
+    };
+    assert_eq!(
+        state.check(&freeze),
+        Err(TransitionError::SwapClosed(SwapStatus::Done))
+    );
 }
 
 #[test]
 fn fee_needs_a_swap_but_config_and_funding_do_not() {
-    let state = AppState::default();
-    assert!(check_transition(
-        &state,
-        &EventType::FeeAccrued {
-            quote_hash: qh(9),
-            amount: amount(7),
-        }
-    )
-    .is_err());
-    assert!(check_transition(&state, &EventType::ConfigChanged { json: "{}".into() }).is_ok());
-    assert!(check_transition(
-        &state,
-        &EventType::PocketFunded {
+    let state = HeapState::default();
+    let fee = EventType::FeeAccrued {
+        quote_hash: qh(9),
+        amount: amount(7),
+    };
+    assert_eq!(state.check(&fee), Err(TransitionError::UnknownSwap(qh(9))));
+    assert!(state
+        .check(&EventType::ConfigChanged { json: "{}".into() })
+        .is_ok());
+    assert!(state
+        .check(&EventType::PocketFunded {
             chain_id: BASE,
             amount: amount(1),
-        }
-    )
-    .is_ok());
+        })
+        .is_ok());
 }
 
 #[test]
 fn tx_failed_closes_the_attempt() {
     let qh = qh(1);
     let state = fold(vec![funds(qh), signed(qh, 1), failed(qh, 1)]);
-    assert_eq!(state.swaps[&qh].open_attempt, None);
-    assert_eq!(state.swaps[&qh].last_attempt, Some(Attempt::FIRST));
+    assert_eq!(swap(&state, qh).open_attempt, None);
+    assert_eq!(swap(&state, qh).last_attempt, Some(Attempt::FIRST));
     // a failed attempt still counts, so the retry is number 2
-    assert!(check_transition(&state, &signed(qh, 1)).is_err());
-    assert!(check_transition(&state, &signed(qh, 2)).is_ok());
+    assert!(matches!(
+        state.check(&signed(qh, 1)),
+        Err(TransitionError::AttemptOutOfSequence { .. })
+    ));
+    assert!(state.check(&signed(qh, 2)).is_ok());
 }
 
 #[test]
@@ -284,9 +322,12 @@ fn refund_path_reaches_refunded() {
             to: "0xuser".parse().unwrap(),
         },
     ]);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Refunded);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Refunded);
     // Refunded is terminal
-    assert!(check_transition(&state, &signed(qh, 2)).is_err());
+    assert_eq!(
+        state.check(&signed(qh, 2)),
+        Err(TransitionError::SwapClosed(SwapStatus::Refunded))
+    );
 }
 
 #[test]
@@ -309,18 +350,21 @@ fn pocket_release_returns_reserved_to_available() {
             amount: amount(150),
         },
     ]);
-    assert_eq!(state.pockets[&BASE].available, amount(750));
-    assert_eq!(state.pockets[&BASE].reserved, amount(250));
+    assert_eq!(pocket(&state, BASE).available, amount(750));
+    assert_eq!(pocket(&state, BASE).reserved, amount(250));
     // cannot release more than is reserved
-    assert!(check_transition(
-        &state,
-        &EventType::PocketReleased {
-            quote_hash: qh,
-            chain_id: BASE,
-            amount: amount(300),
-        }
-    )
-    .is_err());
+    let release = EventType::PocketReleased {
+        quote_hash: qh,
+        chain_id: BASE,
+        amount: amount(300),
+    };
+    assert_eq!(
+        state.check(&release),
+        Err(TransitionError::Pocket(PocketError::InsufficientReserved {
+            reserved: amount(250),
+            requested: amount(300)
+        }))
+    );
 }
 
 fn ask(qh: QuoteHash) -> EventType {
@@ -343,8 +387,8 @@ fn refund_stops_the_waiting_clock() {
             reason: "timeout".into(),
         },
     ]);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Refunding);
-    assert_eq!(state.swaps[&qh].waiting_since, None);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Refunding);
+    assert_eq!(swap(&state, qh).waiting_since, None);
 }
 
 #[test]
@@ -358,8 +402,8 @@ fn freeze_stops_the_waiting_clock() {
             reason: "sanctions".into(),
         },
     ]);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Frozen);
-    assert_eq!(state.swaps[&qh].waiting_since, None);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Frozen);
+    assert_eq!(swap(&state, qh).waiting_since, None);
 }
 
 #[test]
@@ -367,7 +411,7 @@ fn second_decision_request_rejected() {
     let qh = qh(1);
     let state = fold(vec![funds(qh), ask(qh)]);
     // re-asking would silently re-arm the deadline
-    assert!(check_transition(&state, &ask(qh)).is_err());
+    assert_eq!(state.check(&ask(qh)), Err(TransitionError::WaitingForUser));
 }
 
 #[test]
@@ -376,8 +420,8 @@ fn decision_to_refund_reaches_refunding() {
     let mut events = vec![funds(qh)];
     events.extend(decide(qh, Choice::Refund));
     let state = fold(events);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Refunding);
-    assert_eq!(state.swaps[&qh].waiting_since, None);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Refunding);
+    assert_eq!(swap(&state, qh).waiting_since, None);
 }
 
 // Unlike a release, a spend does not return the value: the pocket total drops.
@@ -401,7 +445,7 @@ fn pocket_spend_debits_reserved_without_returning_it() {
             amount: amount(250),
         },
     ]);
-    let p = &state.pockets[&BASE];
+    let p = pocket(&state, BASE);
     assert_eq!(p.available, amount(600));
     assert_eq!(p.reserved, amount(150));
     assert_eq!(
@@ -410,15 +454,18 @@ fn pocket_spend_debits_reserved_without_returning_it() {
         "250 left the pocket system"
     );
     // cannot spend more than is reserved
-    assert!(check_transition(
-        &state,
-        &EventType::PocketSpent {
-            quote_hash: qh,
-            chain_id: BASE,
-            amount: amount(200),
-        }
-    )
-    .is_err());
+    let spend = EventType::PocketSpent {
+        quote_hash: qh,
+        chain_id: BASE,
+        amount: amount(200),
+    };
+    assert_eq!(
+        state.check(&spend),
+        Err(TransitionError::Pocket(PocketError::InsufficientReserved {
+            reserved: amount(150),
+            requested: amount(200)
+        }))
+    );
 }
 
 #[test]
@@ -427,15 +474,15 @@ fn pocket_reserve_for_unknown_swap_rejected() {
         chain_id: BASE,
         amount: amount(1000),
     }]);
-    assert!(check_transition(
-        &state,
-        &EventType::PocketReserved {
-            quote_hash: qh(9),
-            chain_id: BASE,
-            amount: amount(400),
-        }
-    )
-    .is_err());
+    let reserve = EventType::PocketReserved {
+        quote_hash: qh(9),
+        chain_id: BASE,
+        amount: amount(400),
+    };
+    assert_eq!(
+        state.check(&reserve),
+        Err(TransitionError::UnknownSwap(qh(9)))
+    );
 }
 
 #[test]
@@ -452,19 +499,24 @@ fn pocket_rebalance_moves_available_between_chains() {
             route: "cctp".into(),
         },
     ]);
-    assert_eq!(state.pockets[&BASE].available, amount(750));
-    assert_eq!(state.pockets[&ARBITRUM].available, amount(250));
+    assert_eq!(pocket(&state, BASE).available, amount(750));
+    assert_eq!(pocket(&state, ARBITRUM).available, amount(250));
     // the source chain cannot send what it does not have
-    assert!(check_transition(
-        &state,
-        &EventType::PocketRebalanced {
-            from_chain: BASE,
-            to_chain: ARBITRUM,
-            amount: amount(751),
-            route: "cctp".into(),
-        }
-    )
-    .is_err());
+    let rebalance = EventType::PocketRebalanced {
+        from_chain: BASE,
+        to_chain: ARBITRUM,
+        amount: amount(751),
+        route: "cctp".into(),
+    };
+    assert_eq!(
+        state.check(&rebalance),
+        Err(TransitionError::Pocket(
+            PocketError::InsufficientAvailable {
+                available: amount(750),
+                requested: amount(751)
+            }
+        ))
+    );
 }
 
 // The waiting clock is the only place apply reads the event timestamp, so seal this one
@@ -474,12 +526,12 @@ fn decision_sets_then_clears_the_waiting_clock() {
     let qh = qh(1);
     let mut state = fold(vec![funds(qh)]);
     let pause = ask(qh);
-    check_transition(&state, &pause).expect("guard admits pause");
+    state.check(&pause).expect("guard admits pause");
     let env = next_event(&state, 777, pause);
-    apply(&mut state, &env);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::WaitingForUser);
+    apply_state_transition(&mut state, &env);
+    assert_eq!(swap(&state, qh).status, SwapStatus::WaitingForUser);
     assert_eq!(
-        state.swaps[&qh].waiting_since,
+        swap(&state, qh).waiting_since,
         Some(Timestamp::from_nanos(777))
     );
 
@@ -487,9 +539,86 @@ fn decision_sets_then_clears_the_waiting_clock() {
         quote_hash: qh,
         choice: Choice::Requote,
     };
-    check_transition(&state, &resume).expect("guard admits resume");
+    state.check(&resume).expect("guard admits resume");
     let env = next_event(&state, 900, resume);
-    apply(&mut state, &env);
-    assert_eq!(state.swaps[&qh].status, SwapStatus::Executing);
-    assert_eq!(state.swaps[&qh].waiting_since, None);
+    apply_state_transition(&mut state, &env);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
+    assert_eq!(swap(&state, qh).waiting_since, None);
+}
+
+/// A rebalance onto its own chain withdraws, then funds the same pocket back: the guard
+/// runs the two steps in the order the fold does, so neither panics nor double-counts.
+#[test]
+fn a_rebalance_onto_the_same_chain_nets_to_nothing() {
+    let state = fold(vec![
+        EventType::PocketFunded {
+            chain_id: BASE,
+            amount: amount(1000),
+        },
+        EventType::PocketRebalanced {
+            from_chain: BASE,
+            to_chain: BASE,
+            amount: amount(1000),
+            route: "loop".into(),
+        },
+    ]);
+    assert_eq!(pocket(&state, BASE).available, amount(1000));
+}
+
+/// Every overflow the fold could hit is refused by the guard first, so applying never
+/// panics on an event the guard admitted. No log of u128 amounts gets near u256::MAX, so
+/// the balances are placed there directly.
+#[test]
+fn the_guard_refuses_what_would_overflow_the_fold() {
+    let qh = qh(1);
+    let mut store = MemoryStore::default();
+    store.put_swap(qh, swap(&fold(vec![funds(qh)]), qh));
+    store.put_meta(LedgerMeta {
+        fees_accrued: TokenAmount::MAX,
+        ..LedgerMeta::default()
+    });
+    store.put_pocket(
+        BASE,
+        Pocket {
+            available: TokenAmount::MAX,
+            reserved: TokenAmount::ZERO,
+        },
+    );
+    let state = State::new(store);
+    let fee = EventType::FeeAccrued {
+        quote_hash: qh,
+        amount: amount(1),
+    };
+    assert_eq!(state.check(&fee), Err(TransitionError::FeesOverflow));
+    let fund = EventType::PocketFunded {
+        chain_id: BASE,
+        amount: amount(1),
+    };
+    assert_eq!(
+        state.check(&fund),
+        Err(TransitionError::Pocket(PocketError::Overflow))
+    );
+}
+
+/// The two stores a fold can land in agree event for event, so the audit can compare them.
+#[test]
+fn replay_rebuilds_exactly_the_incremental_state() {
+    let qh = qh(1);
+    let mut state = HeapState::default();
+    let mut log = vec![];
+    for payload in [
+        EventType::PocketFunded {
+            chain_id: BASE,
+            amount: amount(1000),
+        },
+        funds(qh),
+        signed(qh, 1),
+        ask(qh),
+    ] {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(&state, 42, payload);
+        apply_state_transition(&mut state, &event);
+        log.push(event);
+    }
+    assert_eq!(replay(log), state);
 }

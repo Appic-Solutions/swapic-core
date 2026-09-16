@@ -64,7 +64,8 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
     events::append_event(EventType::RolesChanged {
         quoter: quoter.to_text(),
         watcher: watcher.to_text(),
-    })?;
+    })
+    .map_err(|e| e.to_string())?;
     // out of stable memory is not a caller error, so it traps instead of returning Err:
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     STORED.with(|s| {

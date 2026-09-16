@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::halt::set_halted;
-use types::{ChainId, GasMode, Rail, Swap, TokenAmount, UnixSeconds};
+use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
 fn quote(auto_refund: bool, nonce: u64) -> Quote {
     Quote {
@@ -59,19 +59,12 @@ fn waiting(bytes: Vec<u8>, since_ns: u64) -> Swap {
     }
 }
 
-fn state_of(swaps: Vec<(QuoteHash, Swap)>) -> AppState {
-    AppState {
-        swaps: swaps.into_iter().collect(),
-        ..AppState::default()
-    }
-}
-
 const MINUTE_NS: u64 = 60 * 1_000_000_000;
 
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-fn due_at(state: &AppState, now_ns: u64) -> (Vec<QuoteHash>, usize) {
-    due_refunds(state, Timestamp::from_nanos(now_ns), TIMEOUT)
+fn due_at(swaps: &[(QuoteHash, Swap)], now_ns: u64) -> (Vec<QuoteHash>, usize) {
+    due_refunds(swaps.to_vec(), Timestamp::from_nanos(now_ns), TIMEOUT)
 }
 
 /// The dual refund policy, at the point the timer decides: only a swap whose quote says
@@ -80,7 +73,7 @@ fn due_at(state: &AppState, now_ns: u64) -> (Vec<QuoteHash>, usize) {
 fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
     let auto = quote_bytes(&quote(true, 1));
     let manual = quote_bytes(&quote(false, 2));
-    let state = state_of(vec![
+    let swaps = vec![
         (qh(1), waiting(auto.clone(), 0)),
         (qh(2), waiting(manual, 0)),
         // asked for a refund, but not yet timed out
@@ -94,8 +87,8 @@ fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
                 ..waiting(auto, 0)
             },
         ),
-    ]);
-    let (due, skipped) = due_at(&state, 30 * MINUTE_NS + 1);
+    ];
+    let (due, skipped) = due_at(&swaps, 30 * MINUTE_NS + 1);
     assert_eq!(due, vec![qh(1)]);
     assert_eq!(skipped, 0);
 }
@@ -103,22 +96,22 @@ fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
 /// "Older than the timeout" is strict: the deadline second itself is still the user's.
 #[test]
 fn due_refunds_fires_the_moment_after_the_timeout_and_not_before() {
-    let state = state_of(vec![(qh(1), waiting(quote_bytes(&quote(true, 1)), 100))]);
+    let swaps = vec![(qh(1), waiting(quote_bytes(&quote(true, 1)), 100))];
     let timeout = 30 * MINUTE_NS;
-    assert!(due_at(&state, 100 + timeout).0.is_empty());
-    assert_eq!(due_at(&state, 100 + timeout + 1).0, vec![qh(1)]);
+    assert!(due_at(&swaps, 100 + timeout).0.is_empty());
+    assert_eq!(due_at(&swaps, 100 + timeout + 1).0, vec![qh(1)]);
 }
 
 /// `quote_bytes` reaches the log from a caller, so the sweep has to survive bytes it
 /// cannot read. It counts them and moves on rather than trapping the whole pass.
 #[test]
 fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
-    let state = state_of(vec![
+    let swaps = vec![
         (qh(1), waiting(vec![], 0)),
         (qh(2), waiting(vec![0xff; 9], 0)),
         (qh(3), waiting(quote_bytes(&quote(true, 1)), 0)),
-    ]);
-    let (due, skipped) = due_at(&state, 30 * MINUTE_NS + 1);
+    ];
+    let (due, skipped) = due_at(&swaps, 30 * MINUTE_NS + 1);
     assert_eq!(due, vec![qh(3)], "the readable one is still refunded");
     assert_eq!(skipped, 2);
 }

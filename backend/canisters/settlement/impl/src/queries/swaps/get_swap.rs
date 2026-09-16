@@ -1,3 +1,4 @@
+use crate::state::Store;
 use crate::storage::events;
 use ic_cdk::query;
 pub use settlement_api::types::events::Hash32;
@@ -9,5 +10,5 @@ use types::QuoteHash;
 #[query]
 pub fn get_swap(quote_hash: Hash32) -> Option<Swap> {
     let quote_hash = QuoteHash::new(quote_hash);
-    events::with_state(|s| s.swaps.get(&quote_hash).cloned()).map(Swap::from)
+    events::read_state(|state| state.store().swap(&quote_hash)).map(Swap::from)
 }

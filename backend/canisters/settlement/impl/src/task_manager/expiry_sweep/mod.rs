@@ -1,9 +1,9 @@
-use crate::state::{pending_quotes, AppState};
+use crate::state::{pending_quotes, Store};
 use crate::storage::halt::is_halted;
 use crate::storage::{config, events};
 use std::time::Duration;
 use types::events::EventType;
-use types::{Quote, QuoteHash, SwapStatus, Timestamp};
+use types::{Quote, QuoteHash, Swap, SwapStatus, Timestamp};
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
 /// without a canister and without reading the event log back.
@@ -31,10 +31,10 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let (due, unreadable) =
-        events::with_state(|state| due_refunds(state, now, config.decision_timeout));
+    let swaps = events::read_state(|state| state.store().swaps());
+    let (due, unreadable) = due_refunds(swaps, now, config.decision_timeout);
     swept.skipped = unreadable;
-    // collected first, then appended: `with_state` holds a shared borrow of the state that
+    // collected first, then appended: `read_state` holds a shared borrow of the state that
     // `append_event` takes mutably, so appending inside that closure would panic
     for quote_hash in due {
         let appended = events::append_event(EventType::RefundStarted {
@@ -53,10 +53,14 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
 /// Which waiting swaps have run out of time and whose quote asked for an automatic refund,
 /// plus a count of the ones whose `quote_bytes` did not parse. Pure and total: an
 /// unreadable quote is counted and stepped over, never a panic.
-fn due_refunds(state: &AppState, now: Timestamp, timeout: Duration) -> (Vec<QuoteHash>, usize) {
+fn due_refunds(
+    swaps: impl IntoIterator<Item = (QuoteHash, Swap)>,
+    now: Timestamp,
+    timeout: Duration,
+) -> (Vec<QuoteHash>, usize) {
     let mut due = Vec::new();
     let mut unreadable = 0;
-    for (quote_hash, swap) in &state.swaps {
+    for (quote_hash, swap) in swaps {
         if swap.status != SwapStatus::WaitingForUser {
             continue;
         }
@@ -72,7 +76,7 @@ fn due_refunds(state: &AppState, now: Timestamp, timeout: Duration) -> (Vec<Quot
             continue;
         }
         match Quote::parse(&swap.quote_bytes) {
-            Ok(quote) if quote.auto_refund => due.push(*quote_hash),
+            Ok(quote) if quote.auto_refund => due.push(quote_hash),
             // the other half of the dual refund policy: this user asked to be consulted,
             // so the swap keeps waiting however long that takes
             Ok(_) => {}
