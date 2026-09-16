@@ -1,25 +1,25 @@
 use crate::client::settlement::{self, events_page, get_pending, register_quote, set_roles};
 use crate::settlement_suite::init::setup;
 use crate::wasms;
-use candid::{encode_one, Principal};
+use candid::{encode_one, Nat, Principal};
 use pocket_ic::{PocketIc, Time};
 use settlement_api::types::events::{Event, EventEnvelope, Hash32};
-use settlement_api::types::quote::{
-    quote_hash, GasMode, Quote, MAX_QUOTE_LIFETIME_S, MAX_QUOTE_STRING_BYTES,
-};
+use settlement_api::types::quote::{GasMode, Quote};
+use types::address::MAX_TEXT_BYTES;
+use types::quote::MAX_QUOTE_LIFETIME;
 
-/// The same fixture as `types/quote/tests.rs`'s unit tests, field for field. The golden assert in
+/// The same fixture as the types crate's `quote/tests.rs`, field for field. The golden assert in
 /// `the_quoter_registers_a_quote_and_gets_the_golden_hash` keeps the two identical.
 fn fixed_quote() -> Quote {
     Quote {
         version: 1,
         src_chain: 8453,
         src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-        amount_in: 25_000_000,
+        amount_in: Nat::from(25_000_000_u32),
         dst_chain: 42161,
         dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".into(),
-        expected_out: 24_990_000,
-        min_out: 24_900_000,
+        expected_out: Nat::from(24_990_000_u32),
+        min_out: Nat::from(24_900_000_u32),
         dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
         refund_address: None,
         auto_refund: true,
@@ -32,8 +32,10 @@ fn fixed_quote() -> Quote {
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../canisters/settlement/api/golden/quote_hash_v1.txt"
+    "/../libraries/types/golden/quote_hash_v1.txt"
 );
+
+const MAX_QUOTE_LIFETIME_S: u64 = MAX_QUOTE_LIFETIME.as_secs();
 
 fn golden_hash() -> Hash32 {
     let hex = std::fs::read_to_string(GOLDEN).expect("golden vector, committed");
@@ -226,19 +228,21 @@ fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
 fn register_quote_refuses_a_string_over_the_byte_cap() {
     let (pic, canister, _) = with_roles();
     let over = Quote {
-        dst_address: "a".repeat(MAX_QUOTE_STRING_BYTES + 1),
+        dst_address: "a".repeat(MAX_TEXT_BYTES + 1),
         ..fixed_quote()
     };
     let err = register_quote(&pic, canister, quoter(), &over).expect_err("one byte over the cap");
     assert!(err.contains("dst_address"), "name the field: {err}");
+    // refused at conversion, so it never had a swap id to be stored under
+    assert!(types::Quote::try_from(over).is_err());
     assert_eq!(
-        get_pending(&pic, canister, quoter(), quote_hash(&over)).unwrap(),
+        get_pending(&pic, canister, quoter(), golden_hash()).unwrap(),
         None,
         "and nothing was stored"
     );
 
     let at_cap = Quote {
-        dst_address: "a".repeat(MAX_QUOTE_STRING_BYTES),
+        dst_address: "a".repeat(MAX_TEXT_BYTES),
         ..fixed_quote()
     };
     let hash = register_quote(&pic, canister, quoter(), &at_cap).expect("the cap itself registers");

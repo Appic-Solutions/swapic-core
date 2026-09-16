@@ -937,6 +937,7 @@ dependencies = [
  "hex",
  "pocket-ic",
  "settlement_api",
+ "types",
 ]
 
 [[package]]
@@ -1831,6 +1832,8 @@ dependencies = [
  "ic-stable-structures",
  "serde",
  "settlement_api",
+ "thiserror 2.0.20",
+ "types",
 ]
 
 [[package]]
@@ -1842,6 +1845,7 @@ dependencies = [
  "ic-stable-structures",
  "serde",
  "sha2",
+ "types",
 ]
 
 [[package]]
@@ -2354,6 +2358,7 @@ dependencies = [
  "minicbor",
  "num-bigint",
  "proptest",
+ "sha2",
  "thiserror 2.0.20",
 ]
 

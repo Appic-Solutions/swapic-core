@@ -1,6 +1,5 @@
-// pub(crate) because the quote codec writes the same length-prefixed strings: one
-// definition of "u32-be length then bytes" so the two canonical layouts cannot drift.
-pub(crate) fn put_len(b: &mut Vec<u8>, len: usize) {
+// The length-prefixed primitives of the event preimage: a u32-be length then the bytes.
+fn put_len(b: &mut Vec<u8>, len: usize) {
     let n = u32::try_from(len).expect("field length fits u32");
     b.extend_from_slice(&n.to_be_bytes());
 }

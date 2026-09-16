@@ -10,6 +10,7 @@ ethnum = { workspace = true }
 hex = { workspace = true }
 minicbor = { workspace = true }
 num-bigint = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -2,10 +2,12 @@
 //! and every rule a value must satisfy is checked where the value is built.
 
 pub mod address;
+pub mod canonical;
 pub mod chain;
 pub mod checked_amount;
 pub mod hash;
 pub mod numeric;
+pub mod quote;
 pub mod rail;
 
 pub use address::{Address, RpcUrl, TokenId};
@@ -16,4 +18,5 @@ pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds,
     UsdAmount,
 };
+pub use quote::{GasMode, Quote, QuoteError};
 pub use rail::Rail;

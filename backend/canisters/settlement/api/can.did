@@ -79,8 +79,7 @@ type EventEnvelope = record {
   time_ns : nat64;
   parent_hash : blob;
 };
-// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1;
-// `quote_bytes` is the one place that mapping is written.
+// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 type GasMode = variant { Legacy; Gasless };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
@@ -92,9 +91,10 @@ type GasMode = variant { Legacy; Gasless };
 // gas_mode u8 (Gasless=0, Legacy=1) | rail | expires_at_s u64 | nonce u64`
 // 
 // Every integer is big-endian, every string is a u32-be byte length then utf8, and each
-// of the two one-byte fields is 0 or 1. Reproduce those bytes and you reproduce the
-// hash; `backend/canisters/settlement/api/golden/quote_hash_v1.txt` is the vector to
-// check a reimplementation against.
+// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, and
+// the rail is one of `cctp_v2_fast`, `cctp_v2_standard`, `eco`. Reproduce those bytes and
+// you reproduce the hash; `backend/libraries/types/golden/quote_hash_v1.txt` is the vector
+// to check a reimplementation against.
 type Quote = record {
   dst_address : text;
   refund_address : opt text;

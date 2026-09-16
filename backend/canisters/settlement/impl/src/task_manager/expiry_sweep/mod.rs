@@ -2,8 +2,9 @@ use crate::state::{pending_quotes, AppState};
 use crate::storage::halt::is_halted;
 use crate::storage::{config, events};
 use settlement_api::types::events::{Event, Hash32};
-use settlement_api::types::quote;
 use settlement_api::types::swap::SwapStatus;
+use std::time::Duration;
+use types::{Quote, UnixSeconds};
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
 /// without a canister and without reading the event log back.
@@ -23,7 +24,10 @@ pub struct Sweep {
 pub fn run_expiry_sweep(now_s: u64) -> Sweep {
     let config = config::get();
     let mut swept = Sweep {
-        dropped: pending_quotes::sweep_expired(now_s, config.permit_deadline_s),
+        dropped: pending_quotes::sweep_expired(
+            UnixSeconds::new(now_s),
+            Duration::from_secs(config.permit_deadline_s),
+        ),
         ..Sweep::default()
     };
     // a halted canister's log and state disagree, so it appends nothing: dropping a stale
@@ -72,7 +76,7 @@ fn due_refunds(state: &AppState, now_ns: u64, timeout_ns: u64) -> (Vec<Hash32>, 
         if now_ns <= since_ns.saturating_add(timeout_ns) {
             continue;
         }
-        match quote::parse_quote(&swap.quote_bytes) {
+        match Quote::parse(&swap.quote_bytes) {
             Ok(quote) if quote.auto_refund => due.push(*quote_hash),
             // the other half of the dual refund policy: this user asked to be consulted,
             // so the swap keeps waiting however long that takes

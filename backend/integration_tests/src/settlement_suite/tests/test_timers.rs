@@ -3,11 +3,11 @@ use crate::client::settlement::{
 };
 use crate::settlement_suite::init::setup;
 use crate::wasms;
-use candid::{encode_one, Principal};
+use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
 use settlement_api::types::events::{Event, EventEnvelope, Hash32};
-use settlement_api::types::quote::{quote_bytes, quote_hash, GasMode, Quote};
+use settlement_api::types::quote::{GasMode, Quote};
 use settlement_api::types::swap::{SwapState, SwapStatus};
 use std::time::Duration;
 
@@ -79,11 +79,11 @@ fn quote_expiring_in(pic: &PocketIc, ttl_s: u64, auto_refund: bool, nonce: u64) 
         version: 1,
         src_chain: 8453,
         src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-        amount_in: 25_000_000,
+        amount_in: Nat::from(25_000_000_u32),
         dst_chain: 42161,
         dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".into(),
-        expected_out: 24_990_000,
-        min_out: 24_900_000,
+        expected_out: Nat::from(24_990_000_u32),
+        min_out: Nat::from(24_900_000_u32),
         dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
         refund_address: None,
         auto_refund,
@@ -103,18 +103,22 @@ fn waiting_swap(
     auto_refund: bool,
     nonce: u64,
 ) -> Hash32 {
-    let q = quote_expiring_in(pic, 60, auto_refund, nonce);
-    let hash = quote_hash(&q);
+    let q = types::Quote::try_from(quote_expiring_in(pic, 60, auto_refund, nonce))
+        .expect("a valid quote");
+    let hash = q.hash().into_bytes();
     append(
         pic,
         canister,
         admin,
         &Event::FundsReceived {
             quote_hash: hash,
-            quote_bytes: quote_bytes(&q),
-            chain_id: q.src_chain,
-            token: q.src_token.clone(),
-            amount: q.amount_in,
+            quote_bytes: q.canonical_bytes(),
+            chain_id: q.src_chain.get(),
+            token: q.src_token.to_string(),
+            amount: q
+                .amount_in
+                .try_into_u128()
+                .expect("a quote amount fits u128"),
             tx_ref: format!("0xdeposit{nonce}"),
         },
     )

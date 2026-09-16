@@ -7,10 +7,10 @@ and the settlement canister.
 
 - `contracts/`: the Vault, a Foundry project.
 - `backend/canisters/settlement/api`: the canister's candid types, per-endpoint
-  `Args`/`Response` aliases, `can.did`, and the golden vectors in `golden/`.
+  `Args`/`Response` aliases, `can.did`, and the event golden vector in `golden/`.
 - `backend/canisters/settlement/impl`: the canister itself (`lifecycle`, `queries`,
   `updates`, `guards`, `state`, `storage`, `task_manager`).
 - `backend/integration_tests`: the pocket-ic suite, driven through a typed client.
-- `backend/libraries/types`: the domain types: checked amounts, identifiers, and the
-  rules each value must satisfy.
+- `backend/libraries/types`: the domain types: checked amounts, identifiers, the rules
+  each value must satisfy, the canonical quote codec, and its golden vector in `golden/`.
 - `scripts/`: `build-canister.sh`, `generate-did.sh`, `run-integration-tests.sh`.
