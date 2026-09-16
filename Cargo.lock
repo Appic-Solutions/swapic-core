@@ -897,6 +897,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "integration_tests"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "hex",
+ "pocket-ic",
+ "settlement_api",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1685,7 +1695,17 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-stable-structures",
- "pocket-ic",
+ "serde",
+ "settlement_api",
+]
+
+[[package]]
+name = "settlement_api"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "hex",
+ "ic-stable-structures",
  "serde",
  "sha2",
 ]

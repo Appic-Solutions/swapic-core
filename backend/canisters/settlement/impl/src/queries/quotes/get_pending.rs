@@ -1,0 +1,13 @@
+use crate::guards;
+use crate::state::pending_quotes;
+use ic_cdk::query;
+pub use settlement_api::types::events::Hash32;
+pub use settlement_api::types::quote::Quote;
+
+/// Quoter or watcher. Not public: a pending quote carries the user's destination and
+/// refund addresses.
+#[query]
+pub fn get_pending(quote_hash: Hash32) -> Result<Option<Quote>, String> {
+    guards::require_quoter_or_watcher()?;
+    Ok(pending_quotes::get_pending(&quote_hash))
+}

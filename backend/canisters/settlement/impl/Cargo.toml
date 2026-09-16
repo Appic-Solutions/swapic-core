@@ -1,0 +1,21 @@
+[package]
+name = "settlement"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[features]
+inttest = []
+
+[dependencies]
+settlement_api = { path = "../api" }
+
+candid = { workspace = true }
+hex = { workspace = true }
+ic-cdk = { workspace = true }
+ic-cdk-timers = { workspace = true }
+ic-stable-structures = { workspace = true }
+serde = { workspace = true }

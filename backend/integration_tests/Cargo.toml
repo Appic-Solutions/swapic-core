@@ -1,0 +1,12 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+candid = { workspace = true }
+hex = { workspace = true }
+pocket-ic = { workspace = true }
+
+settlement_api = { path = "../canisters/settlement/api" }

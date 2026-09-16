@@ -2,9 +2,9 @@
   "canisters": {
     "settlement": {
       "type": "custom",
-      "wasm": "target/wasm32-unknown-unknown/release/settlement.wasm",
-      "candid": "canister/settlement/settlement.did",
-      "build": "make wasm"
+      "wasm": "backend/canisters/settlement/target/wasm32-unknown-unknown/release/settlement.wasm",
+      "candid": "backend/canisters/settlement/api/can.did",
+      "build": "scripts/build-canister.sh settlement"
     }
   }
 }

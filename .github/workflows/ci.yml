@@ -26,14 +26,16 @@ jobs:
       - uses: dfinity/setup-dfx@e50c04f104ee4285ec010f10609483cf41e4d365 # main @ 2024-04-01; repo publishes no tags or releases
         with:
           # paired pin: dfx 0.29.2 bundles pocket-ic-server 9.0.3, which must stay
-          # on the same major as the pocket-ic crate 9.x dev-dependency. Bump both or neither.
+          # on the same major as the pocket-ic crate 9.x, a regular dependency of the
+          # test-only integration_tests crate. Bump both or neither.
           dfx-version: "0.29.2"
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: make test
+      - run: scripts/run-integration-tests.sh
+      - run: cargo test --locked -p settlement_api -p settlement
       # pinned like dfx above: extractor output is version-dependent, so an unpinned
       # install could fail the diff below on a clean tree
       - run: cargo install candid-extractor --locked --version 0.1.6
       # the committed did must match the production wasm, which also proves the
-      # test-endpoints door never reaches the public interface
-      - run: make did && git diff --exit-code canister/settlement/settlement.did
+      # inttest door never reaches the public interface
+      - run: scripts/generate-did.sh settlement && git diff --exit-code backend/canisters/settlement/api/can.did

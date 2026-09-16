@@ -1,0 +1,14 @@
+[package]
+name = "settlement_api"
+version = "0.1.0"
+description = "Candid types and endpoint signatures of the settlement canister."
+edition = "2021"
+
+[dependencies]
+candid = { workspace = true }
+ic-stable-structures = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
