@@ -1,4 +1,4 @@
-use crate::events::{chain_is_valid, seal, Event, EventEnvelope};
+use crate::events::{chain_is_valid, seal, Event, EventEnvelope, Hash32};
 use crate::state::{apply, check_transition, replay, AppState};
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::storable::Bound;
@@ -51,11 +51,48 @@ pub(crate) fn memory(id: MemoryId) -> Memory {
     MEMORY.with(|m| m.borrow().get(id))
 }
 
+/// The chain head the log actually ends with: the last envelope's hash, or the zero hash
+/// at genesis, which is the anchor `chain_is_valid` checks index 0 against.
+fn log_head() -> Result<Hash32, String> {
+    EVENTS.with(|e| {
+        let log = e.borrow();
+        match log.len().checked_sub(1) {
+            None => Ok([0u8; 32]),
+            Some(last) => log.get(last).map(|env| env.hash).ok_or_else(|| {
+                format!(
+                    "log says it holds {} entries but {last} is missing",
+                    last + 1
+                )
+            }),
+        }
+    })
+}
+
+/// Enough of a hash to tell two chain heads apart in an error message, without printing
+/// sixty-four characters of it.
+fn short(hash: &Hash32) -> String {
+    hex::encode(&hash[..4])
+}
+
 /// The one and only path that writes an event: guard, seal, stable append, apply, all
 /// within a single message. Nothing else may touch EVENTS or STATE.
 pub fn append_event(event: Event) -> Result<u64, String> {
     STATE.with(|cell| {
         let mut state = cell.borrow_mut();
+        // the head the heap thinks the chain is on must be the head the log actually ends
+        // with, checked before anything is sealed: `seal` takes its parent hash from the
+        // state, so a diverged head would write an envelope linking to a parent the log does
+        // not have and fork the chain permanently. The index check below cannot see this
+        // shape, because the index would still be exactly right. Checked first, because a
+        // state whose head is wrong is not one worth asking a transition question of.
+        let head = log_head()?;
+        if head != state.last_event_hash {
+            return Err(format!(
+                "log head is {} but the state carries {}: the chain diverged",
+                short(&head),
+                short(&state.last_event_hash)
+            ));
+        }
         check_transition(&state, &event)?;
         let envelope = seal(
             state.next_event_index,
@@ -86,6 +123,15 @@ pub fn append_event(event: Event) -> Result<u64, String> {
 /// Read-only view of the live state. There is deliberately no mutable twin.
 pub fn with_state<R>(f: impl FnOnce(&AppState) -> R) -> R {
     STATE.with(|s| f(&s.borrow()))
+}
+
+/// Test-only: moves the heap's idea of the chain head off the log's, and touches the log
+/// not at all. That is the one divergence shape the append-time head check exists for, and
+/// no legitimate call can produce it, so it cannot be reached from a test any other way.
+/// Flipping the same bit a second time puts the head back.
+#[cfg(feature = "test-endpoints")]
+pub fn test_skew_chain_head() {
+    STATE.with(|s| s.borrow_mut().last_event_hash[0] ^= 1);
 }
 
 /// Called from `init` and `post_upgrade`: the heap is a cache, the log is the record.

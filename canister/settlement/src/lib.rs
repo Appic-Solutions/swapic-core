@@ -151,4 +151,17 @@ fn test_append(event: events::Event) -> Result<u64, String> {
     log::append_event(event)
 }
 
+/// Test-only door onto the append chokepoint's head check: it flips one bit of the heap's
+/// chain head and leaves the log untouched, which is the heap-versus-log divergence the
+/// check and the replay audit exist for and which nothing else can produce. Behind the same
+/// build feature and controller check as `test_append`, so neither reaches the production
+/// interface. Calling it twice puts the head back.
+#[cfg(feature = "test-endpoints")]
+#[ic_cdk::update]
+fn test_skew_state() -> Result<(), String> {
+    require_controller()?;
+    log::test_skew_chain_head();
+    Ok(())
+}
+
 ic_cdk::export_candid!();
