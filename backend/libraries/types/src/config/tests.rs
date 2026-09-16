@@ -1,4 +1,5 @@
 use super::*;
+use ic_stable_structures::Storable;
 
 /// The defaults are spec numbers, not preferences: this test is the spec.
 #[test]

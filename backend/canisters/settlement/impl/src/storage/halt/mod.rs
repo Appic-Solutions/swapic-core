@@ -3,11 +3,16 @@ use ic_stable_structures::StableCell;
 use std::cell::RefCell;
 
 thread_local! {
-    // The halt flag: stable, because a halted canister must stay halted across the upgrade
-    // that an operator reaches for first. There is no heap cache to drift from it.
+    // A halted canister must stay halted across the upgrade an operator reaches for first.
     static HALTED: RefCell<StableCell<bool, Memory>> = RefCell::new(
         StableCell::init(halt_memory(), false).expect("halt cell init"),
     );
+}
+
+/// On a fresh install writes the flag to the cell, in an update context, so no query is
+/// ever the first to grow its memory.
+pub fn init() {
+    HALTED.with(|_| ());
 }
 
 pub fn is_halted() -> bool {

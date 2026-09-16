@@ -1,8 +1,10 @@
 use crate::storage::events;
 use crate::storage::memory::{roles_memory, Memory};
 use candid::{CandidType, Principal};
+use ic_stable_structures::storable::{Bound, Storable};
 use ic_stable_structures::StableCell;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use types::EventType;
 
@@ -15,36 +17,39 @@ pub struct Roles {
     pub watcher: Option<Principal>,
 }
 
-fn encode(roles: &Roles) -> Vec<u8> {
-    candid::encode_one(roles).expect("roles encode")
+/// Stored as candid. Roles that no longer decode trap, which leaves an upgrade on the wasm
+/// that wrote them rather than quietly locking both services out.
+impl Storable for Roles {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(candid::encode_one(self).expect("BUG: roles always encode as candid"))
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        candid::decode_one(&bytes).expect("roles decode")
+    }
+
+    const BOUND: Bound = Bound::Unbounded;
 }
 
 thread_local! {
-    // Same two-copy shape as the config: STORED is the record, ROLES is the cheap read.
-    static ROLES: RefCell<Roles> = RefCell::new(Roles::default());
-
-    static STORED: RefCell<StableCell<Vec<u8>, Memory>> = RefCell::new(
-        StableCell::init(roles_memory(), encode(&Roles::default()))
-            .expect("roles cell init"),
+    // Deploy-time truth rather than a fold of the log, so it has a cell of its own.
+    static ROLES: RefCell<StableCell<Roles, Memory>> = RefCell::new(
+        StableCell::init(roles_memory(), Roles::default()).expect("roles cell init"),
     );
 }
 
-/// Called from `init` and `post_upgrade`: roles are deploy-time truth, not a fold of the
-/// log. Update contexts only, because the first touch of the cell grows stable memory.
-pub fn load() {
-    // roles that no longer decode trap the upgrade, which leaves the canister on its
-    // working wasm; falling back to "unset" would quietly lock both services out
-    let stored: Roles = candid::decode_one(STORED.with(|s| s.borrow().get().clone()).as_slice())
-        .expect("roles decode");
-    ROLES.with(|r| *r.borrow_mut() = stored);
+/// On a fresh install writes the unset roles to the cell, in an update context, so no
+/// query is ever the first to grow its memory.
+pub fn init() {
+    ROLES.with(|_| ());
 }
 
 pub fn get() -> Roles {
-    ROLES.with(|r| r.borrow().clone())
+    ROLES.with(|r| r.borrow().get().clone())
 }
 
-/// Writes both copies and records the change in the log. The caller does the
-/// authorization; this is the storage path.
+/// Writes the cell and records the change in the log. The caller does the authorization;
+/// this is the storage path.
 pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
     // before anything is written: a rejected pair must leave no event and no cell write.
     // The anonymous principal is every unauthenticated caller at once, so a role held by
@@ -54,25 +59,19 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
             return Err(format!("{name} cannot be the anonymous principal"));
         }
     }
-    let roles = Roles {
-        quoter: Some(quoter),
-        watcher: Some(watcher),
-    };
-    // the log first, because it is the step that can refuse: a rotation is the one thing
-    // that changes who may move money, so it is audited, and the cell below stays the
-    // operative copy. Principals as text, which is what an operator reads in an alert.
+    // the log first, because it is the step that can refuse: a rotation changes who may
+    // move money, so it is audited. Principals as text, which is what an operator reads.
     events::append_event(EventType::RolesChanged {
         quoter: quoter.to_text(),
         watcher: watcher.to_text(),
     })
     .map_err(|e| e.to_string())?;
+    let roles = Roles {
+        quoter: Some(quoter),
+        watcher: Some(watcher),
+    };
     // out of stable memory is not a caller error, so it traps instead of returning Err:
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
-    STORED.with(|s| {
-        s.borrow_mut()
-            .set(encode(&roles))
-            .expect("roles cell write")
-    });
-    ROLES.with(|r| *r.borrow_mut() = roles);
+    ROLES.with(|r| r.borrow_mut().set(roles).expect("roles cell write"));
     Ok(())
 }

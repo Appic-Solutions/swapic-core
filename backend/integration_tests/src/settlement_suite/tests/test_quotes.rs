@@ -282,10 +282,10 @@ fn get_pending_answers_both_services_and_refuses_a_stranger() {
     }
 }
 
-/// The roles are in a stable cell and the pending store deliberately is not: the two
-/// halves of that decision, pinned in one test.
+/// Everything the canister holds is in stable memory: the roles and the pending store both
+/// come through an upgrade untouched.
 #[test]
-fn roles_survive_an_upgrade_and_the_pending_store_does_not() {
+fn roles_and_the_pending_store_survive_an_upgrade() {
     let (pic, canister, admin) = with_roles();
     let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
 
@@ -299,10 +299,10 @@ fn roles_survive_an_upgrade_and_the_pending_store_does_not() {
 
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash).unwrap(),
-        None,
-        "pre-money state is rebuilt empty; the quoter re-opens what is still live"
+        Some(fixed_quote()),
+        "the pending store is stable, so the quote is still there"
     );
-    // still the quoter, without a second set_roles
+    // still the quoter, without a second set_roles, and a re-registration is still fine
     assert_eq!(
         register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap(),
         hash

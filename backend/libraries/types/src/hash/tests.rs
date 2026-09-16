@@ -24,3 +24,12 @@ fn cbor_writes_a_byte_string() {
     assert_eq!(&bytes[..2], &[0x58, 32]);
     assert_eq!(minicbor::decode::<TxHash>(&bytes).unwrap(), hash);
 }
+
+#[test]
+fn a_stored_hash_is_its_raw_bytes() {
+    use ic_stable_structures::Storable;
+
+    let hash = QuoteHash::new([3; 32]);
+    assert_eq!(hash.to_bytes().as_ref(), &[3; 32]);
+    assert_eq!(QuoteHash::from_bytes(hash.to_bytes()), hash);
+}

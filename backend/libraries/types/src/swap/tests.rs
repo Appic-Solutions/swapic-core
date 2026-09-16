@@ -111,3 +111,24 @@ fn a_pocket_never_overflows_silently() {
     assert_eq!(full.release(amount(1)), Err(PocketError::Overflow));
     assert_eq!(full.reserve(amount(1)), Err(PocketError::Overflow));
 }
+
+/// Swaps and pockets live in stable maps, so both must survive their encoding exactly.
+#[test]
+fn swaps_and_pockets_round_trip_through_storage() {
+    use ic_stable_structures::Storable;
+
+    let swap = Swap {
+        quote_bytes: vec![0xde, 0xad],
+        last_attempt: Some(Attempt::new(3)),
+        open_attempt: Some(Attempt::new(3)),
+        amount_paid: TokenAmount::from(u128::MAX),
+        waiting_since: Some(Timestamp::from_nanos(7)),
+        ..swap(SwapStatus::WaitingForUser)
+    };
+    assert_eq!(Swap::from_bytes(swap.to_bytes()), swap);
+    let pocket = Pocket {
+        available: TokenAmount::MAX,
+        reserved: amount(1),
+    };
+    assert_eq!(Pocket::from_bytes(pocket.to_bytes()), pocket);
+}

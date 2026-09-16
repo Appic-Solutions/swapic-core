@@ -4,9 +4,7 @@ mod tests;
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
-use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use thiserror::Error;
@@ -168,16 +166,4 @@ impl Config {
     }
 }
 
-/// Stored as minicbor. A stored config that no longer decodes traps, which leaves an
-/// upgrade on the wasm that wrote it rather than silently dropping the deploy's urls.
-impl Storable for Config {
-    fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(minicbor::to_vec(self).expect("BUG: encoding a config into a Vec is infallible"))
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        minicbor::decode(&bytes).unwrap_or_else(|e| panic!("failed to decode the config: {e}"))
-    }
-
-    const BOUND: Bound = Bound::Unbounded;
-}
+crate::storable_as_cbor!(Config);

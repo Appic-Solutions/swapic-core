@@ -1,19 +1,22 @@
+use crate::storage::memory::{pending_quotes_memory, Memory};
+use ic_stable_structures::StableBTreeMap;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::time::Duration;
 use thiserror::Error;
 use types::quote::{QuoteError, MAX_QUOTE_LIFETIME};
 use types::{Quote, QuoteHash, UnixSeconds};
 
-/// How many quotes may sit in the pending store at once. The store is heap, and the
-/// quoter is the only writer, so this is a backstop against a compromised or looping
-/// quoter growing the canister until it traps, not a business limit.
-pub const MAX_PENDING: usize = 10_000;
+/// How many quotes may sit in the pending store at once. The quoter is the only writer, so
+/// this is a backstop against a compromised or looping quoter filling stable memory, not a
+/// business limit.
+pub const MAX_PENDING: u64 = 10_000;
 
 thread_local! {
-    // Pre-money state, and heap-only BY DESIGN: a registered quote is a promise the quoter
-    // made, not something that happened to money, so it is neither in the event log nor in
-    // stable memory. An upgrade drops the map and the quoter re-registers what is live.
-    static PENDING: RefCell<BTreeMap<QuoteHash, Quote>> = const { RefCell::new(BTreeMap::new()) };
+    // Pre-money: a registered quote is a promise the quoter made, not something that
+    // happened to money, so it is not in the event log. It is in stable memory like
+    // everything else, so an upgrade keeps it.
+    static PENDING: RefCell<StableBTreeMap<QuoteHash, Quote, Memory>> =
+        RefCell::new(StableBTreeMap::init(pending_quotes_memory()));
 }
 
 /// Why a quote was not registered.
@@ -35,6 +38,12 @@ pub enum RegisterError {
     StoreFull,
 }
 
+/// Writes the store's header in an update context, so no query is ever the first to grow
+/// its memory.
+pub fn init() {
+    PENDING.with(|_| ());
+}
+
 /// Records a quote against its hash. `now` is the caller's clock, so every rule here is
 /// testable without a canister.
 pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
@@ -54,9 +63,8 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
     let hash = quote.hash();
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
-        // a re-registration is always allowed, cap or no cap: the quoter replays its live
-        // quotes after an upgrade, and refusing those would strand swaps that already
-        // exist. The hash covers every field, so an overwrite replaces a quote with itself.
+        // a re-registration is always allowed, cap or no cap: the hash covers every field,
+        // so an overwrite replaces a quote with itself
         if pending.len() >= MAX_PENDING && !pending.contains_key(&hash) {
             return Err(RegisterError::StoreFull);
         }
@@ -66,32 +74,44 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
 }
 
 pub fn get_pending(quote_hash: &QuoteHash) -> Option<Quote> {
-    PENDING.with(|p| p.borrow().get(quote_hash).cloned())
+    PENDING.with(|p| p.borrow().get(quote_hash))
 }
 
 /// Drops the quotes nobody can pay any more: past their expiry plus the window a permit
 /// signed against them stays valid for. Keyed on the expiry, never on when the quote was
-/// registered, which a re-registration resets. Returns how many went.
-pub fn sweep_expired(now: UnixSeconds, permit_deadline: std::time::Duration) -> usize {
+/// registered. Returns how many went.
+pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration) -> usize {
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
-        let before = pending.len();
         // a deadline past u64::MAX seconds never closes
-        pending.retain(|_, quote| {
-            quote
-                .expires_at
-                .checked_add(permit_deadline)
-                .is_none_or(|deadline| now <= deadline)
-        });
-        before - pending.len()
+        let stale: Vec<QuoteHash> = pending
+            .iter()
+            .filter(|(_, quote)| {
+                quote
+                    .expires_at
+                    .checked_add(permit_deadline)
+                    .is_some_and(|deadline| now > deadline)
+            })
+            .map(|(hash, _)| hash)
+            .collect();
+        for hash in &stale {
+            pending.remove(hash);
+        }
+        stale.len()
     })
 }
 
-/// Tests share one PENDING when the harness runs them on a single thread, so the store
+/// Tests share one store when the harness runs them on a single thread, so the store
 /// tests start from a known map instead of assuming an empty one.
 #[cfg(test)]
 pub(crate) fn clear_pending() {
-    PENDING.with(|p| p.borrow_mut().clear());
+    PENDING.with(|p| {
+        let mut pending = p.borrow_mut();
+        let all: Vec<QuoteHash> = pending.iter().map(|(hash, _)| hash).collect();
+        for hash in all {
+            pending.remove(&hash);
+        }
+    });
 }
 
 #[cfg(test)]

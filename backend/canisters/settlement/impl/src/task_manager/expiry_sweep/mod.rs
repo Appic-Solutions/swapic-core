@@ -34,8 +34,8 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     let swaps = events::read_state(|state| state.store().swaps());
     let (due, unreadable) = due_refunds(swaps, now, config.decision_timeout);
     swept.skipped = unreadable;
-    // collected first, then appended: `read_state` holds a shared borrow of the state that
-    // `append_event` takes mutably, so appending inside that closure would panic
+    // decided first, then appended, so every refund of the pass is judged against the same
+    // fold and one append cannot change which swaps the pass sees
     for quote_hash in due {
         let appended = events::append_event(EventType::RefundStarted {
             quote_hash,

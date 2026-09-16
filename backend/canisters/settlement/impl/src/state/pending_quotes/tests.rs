@@ -180,7 +180,7 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
 }
 
 /// The backstop against a looping quoter: a full store refuses a new quote but must
-/// still take a re-registration, which is how the quoter replays after an upgrade.
+/// still take a re-registration of one it holds.
 #[test]
 fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
     clear_pending();
@@ -194,11 +194,11 @@ fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
         ..fixed_quote()
     };
     let now = just_before_expiry(&tiny(0));
-    for nonce in 0..MAX_PENDING as u64 {
+    for nonce in 0..MAX_PENDING {
         register(tiny(nonce), now).expect("fills to the cap");
     }
 
-    let overflow = tiny(MAX_PENDING as u64);
+    let overflow = tiny(MAX_PENDING);
     assert_eq!(
         register(overflow.clone(), now),
         Err(RegisterError::StoreFull)

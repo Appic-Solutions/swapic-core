@@ -40,7 +40,7 @@ fn set_roles(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(
     settlement::set_roles(pic, canister, sender, quoter(), watcher())
 }
 
-/// The test-only door that moves the heap's chain head off the log's, which is exactly
+/// The test-only door that moves the fold's chain head off the log's, which is exactly
 /// what the replay audit halts on.
 fn skew_state(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), String> {
     test_skew_state(pic, canister, sender)

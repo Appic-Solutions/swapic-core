@@ -195,7 +195,7 @@ pub fn append(
     )
 }
 
-/// The test-only door that flips one bit of the heap's chain head and leaves the log alone.
+/// The test-only door that flips one bit of the fold's chain head and leaves the log alone.
 /// Calling it twice puts the head back.
 pub fn test_skew_state(
     pic: &PocketIc,

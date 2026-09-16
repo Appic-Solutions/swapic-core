@@ -393,3 +393,16 @@ fn quote_hash_matches_golden_vector() {
         "canonical layout changed: breaking, and swapic-backend's mirror breaks with it"
     );
 }
+
+/// Pending quotes live in a stable map, so every awkward shape must survive storage.
+#[test]
+fn every_quote_shape_round_trips_through_storage() {
+    use ic_stable_structures::Storable;
+
+    let mut all = vec![fixed_quote()];
+    all.extend(one_field_changed().into_iter().map(|(_, q)| q));
+    all.extend(edge_quotes());
+    for q in all {
+        assert_eq!(Quote::from_bytes(q.to_bytes()), q);
+    }
+}

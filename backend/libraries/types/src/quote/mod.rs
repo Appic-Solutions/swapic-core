@@ -7,6 +7,7 @@ use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
 use crate::rail::{Rail, UnknownRail};
+use minicbor::{Decode, Encode};
 use sha2::Digest;
 use std::time::Duration;
 use thiserror::Error;
@@ -24,9 +25,12 @@ pub const QUOTE_FIELD_COUNT: usize = 15;
 pub const MAX_QUOTE_LIFETIME: Duration = Duration::from_secs(86_400);
 
 /// Who pays the source-side gas. One byte in the preimage: Gasless 0, Legacy 1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
 pub enum GasMode {
+    #[n(0)]
     Gasless,
+    #[n(1)]
     Legacy,
 }
 
@@ -55,22 +59,37 @@ pub enum GasMode {
 /// Integers are big-endian and text is a u32 big-endian byte length then utf8. The order
 /// is frozen. `backend/libraries/types/golden/quote_hash_v1.txt` is the vector to check a
 /// reimplementation against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Quote {
+    #[n(0)]
     pub version: u8,
+    #[n(1)]
     pub src_chain: ChainId,
+    #[n(2)]
     pub src_token: TokenId,
+    #[n(3)]
     pub amount_in: TokenAmount,
+    #[n(4)]
     pub dst_chain: ChainId,
+    #[n(5)]
     pub dst_token: TokenId,
+    #[n(6)]
     pub expected_out: TokenAmount,
+    #[n(7)]
     pub min_out: TokenAmount,
+    #[n(8)]
     pub dst_address: Address,
+    #[n(9)]
     pub refund_address: Option<Address>,
+    #[n(10)]
     pub auto_refund: bool,
+    #[n(11)]
     pub gas_mode: GasMode,
+    #[n(12)]
     pub rail: Rail,
+    #[n(13)]
     pub expires_at: UnixSeconds,
+    #[n(14)]
     pub nonce: u64,
 }
 
@@ -283,3 +302,5 @@ impl<'a> Reader<'a> {
         }
     }
 }
+
+crate::storable_as_cbor!(Quote);

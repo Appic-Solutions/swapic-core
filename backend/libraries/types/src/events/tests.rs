@@ -1,4 +1,5 @@
 use super::*;
+use ic_stable_structures::Storable;
 
 fn quote(byte: u8) -> QuoteHash {
     QuoteHash::new([byte; 32])

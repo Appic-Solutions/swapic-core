@@ -1,3 +1,4 @@
+use minicbor::{Decode, Encode};
 use std::collections::BTreeMap;
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Pocket, QuoteHash, Swap, SwapStatus,
@@ -23,16 +24,21 @@ pub trait Store {
 }
 
 /// What the fold keeps besides swaps and pockets.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct LedgerMeta {
+    #[n(0)]
     pub fees_accrued: TokenAmount,
     /// The index the next event is sealed at.
+    #[n(1)]
     pub next_event_index: EventIndex,
     /// The chain head the next event links to.
+    #[n(2)]
     pub last_event_hash: EventHash,
 }
 
-/// A [`Store`] on the heap.
+types::storable_as_cbor!(LedgerMeta);
+
+/// A [`Store`] on the heap: what unit tests and the replay audit fold into.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryStore {
     swaps: BTreeMap<QuoteHash, Swap>,
@@ -98,6 +104,13 @@ impl<S: Store> State<S> {
 
     pub fn meta(&self) -> LedgerMeta {
         self.store.meta()
+    }
+
+    /// Whether two folds hold the same swaps, pockets and meta, whatever their stores.
+    pub fn matches<T: Store>(&self, other: &State<T>) -> bool {
+        self.meta() == other.meta()
+            && self.store.pockets() == other.store.pockets()
+            && self.store.swaps() == other.store.swaps()
     }
 
     pub fn swap(&self, quote_hash: &QuoteHash) -> Result<Swap, TransitionError> {

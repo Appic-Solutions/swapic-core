@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests;
 
+use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
+use std::borrow::Cow;
 use std::fmt;
 
 macro_rules! hash_type {
@@ -37,6 +39,27 @@ macro_rules! hash_type {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{}", hex::encode(self.0))
             }
+        }
+
+        /// The 32 raw bytes, so a stable map orders by them.
+        impl Storable for $name {
+            fn to_bytes(&self) -> Cow<'_, [u8]> {
+                Cow::Borrowed(&self.0)
+            }
+
+            fn from_bytes(bytes: Cow<[u8]>) -> Self {
+                Self(
+                    bytes
+                        .as_ref()
+                        .try_into()
+                        .expect("BUG: a stored hash is written as exactly 32 bytes"),
+                )
+            }
+
+            const BOUND: Bound = Bound::Bounded {
+                max_size: 32,
+                is_fixed_size: true,
+            };
         }
 
         impl fmt::Debug for $name {

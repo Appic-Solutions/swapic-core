@@ -1,5 +1,5 @@
 use crate::client::pocket::query;
-use crate::client::settlement::{append, event_count, events_page, test_skew_state};
+use crate::client::settlement::{append, event_count, events_page, get_swap, test_skew_state};
 use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
@@ -58,7 +58,7 @@ fn verify(pic: &PocketIc, canister: Principal, who: Principal, method: &str) -> 
     query(pic, canister, who, method, encode_one(()).unwrap())
 }
 
-/// The test-only door that flips one bit of the heap's chain head and leaves the log alone.
+/// The test-only door that flips one bit of the fold's chain head and leaves the log alone.
 /// Calling it twice puts the head back.
 fn skew(pic: &PocketIc, canister: Principal, who: Principal) -> Result<(), String> {
     test_skew_state(pic, canister, who)
@@ -99,6 +99,8 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
 
+    let swap = get_swap(&pic, canister, admin, QUOTE).expect("the swap exists");
+
     pic.upgrade_canister(
         canister,
         wasms::settlement(),
@@ -107,6 +109,11 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     )
     .unwrap();
 
+    assert_eq!(
+        get_swap(&pic, canister, admin, QUOTE),
+        Some(swap),
+        "the fold is stable memory, so it comes through the upgrade without a replay"
+    );
     assert_eq!(count(&pic, canister, admin), total);
     assert!(verify(&pic, canister, admin, "verify_chain"));
     assert!(verify(&pic, canister, admin, "verify_replay"));
@@ -117,7 +124,7 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     );
 }
 
-/// The divergence the index check cannot see: the heap's chain head moved while the log
+/// The divergence the index check cannot see: the fold's chain head moved while the log
 /// stayed put, so the next event would seal on a parent hash the log does not end with and
 /// fork the chain at an index that looks perfectly right. Both ends are covered, genesis
 /// where the head is the zero hash and a log with events in it, because the genesis arm is
@@ -155,14 +162,14 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     assert!(err.contains("diverged"), "say what went wrong: {err}");
     assert_eq!(count(&pic, canister, admin), total, "the log is untouched");
 
-    // put the head back and the canister is whole again: the skew only ever moved the heap
+    // put the head back and the canister is whole again: the skew only ever moved the fold
     skew(&pic, canister, admin).unwrap();
     assert!(verify(&pic, canister, admin, "verify_chain"));
     assert!(verify(&pic, canister, admin, "verify_replay"));
     assert!(append(&pic, canister, admin, &more).is_ok());
 }
 
-/// The skew door is as controller-only as `test_append`: a stranger cannot corrupt the heap.
+/// The skew door is as controller-only as `test_append`: a stranger cannot corrupt the fold.
 #[test]
 fn test_skew_state_rejects_non_controller() {
     let (pic, canister, admin) = setup();

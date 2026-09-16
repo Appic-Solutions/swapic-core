@@ -6,10 +6,9 @@ use crate::canonical::CanonicalWriter;
 use crate::chain::ChainId;
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::numeric::{Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount};
-use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
 use sha2::Digest;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 use thiserror::Error;
 
 /// The number of [`EventType`] variants. The exhaustive match in
@@ -471,18 +470,6 @@ pub fn chain_is_valid<E: Borrow<Event>>(events: impl IntoIterator<Item = E>) -> 
     true
 }
 
-/// Stored as minicbor. The hash chain never reads these bytes, so a storage change cannot
-/// move a hash; a stored event that no longer decodes traps, which leaves an upgrade on
-/// the wasm that wrote it.
-impl Storable for Event {
-    fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(minicbor::to_vec(self).expect("BUG: encoding an event into a Vec is infallible"))
-    }
-
-    fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        minicbor::decode(&bytes)
-            .unwrap_or_else(|e| panic!("failed to decode event {}: {e}", hex::encode(&bytes)))
-    }
-
-    const BOUND: Bound = Bound::Unbounded;
-}
+// Stored as minicbor. The hash chain never reads these bytes, so a storage change cannot
+// move a hash.
+crate::storable_as_cbor!(Event);

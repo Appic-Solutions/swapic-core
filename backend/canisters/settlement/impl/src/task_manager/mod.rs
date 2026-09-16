@@ -1,5 +1,4 @@
 use crate::storage::config;
-use crate::storage::halt::is_halted;
 use expiry_sweep::run_expiry_sweep;
 use ic_cdk_timers::TimerId;
 use replay_audit::run_replay_audit;
@@ -12,8 +11,8 @@ pub mod expiry_sweep;
 pub mod replay_audit;
 
 thread_local! {
-    // The live timers, one slot each, so a restart replaces a timer instead of doubling it
-    // and each one restarts without touching the other.
+    // Heap by necessity: a timer id is a runtime handle that an upgrade invalidates anyway.
+    // One slot per timer, so a restart replaces a timer instead of doubling it.
     static EXPIRY_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
@@ -27,9 +26,6 @@ fn interval(every: Duration) -> Duration {
 /// Wires both timers. Called from `init` and `post_upgrade`, because timers live in the
 /// heap and an upgrade clears them.
 pub fn start_timers() {
-    // touch the halt cell here, in an update context, so no query is ever the first to
-    // grow its stable memory
-    let _ = is_halted();
     restart_expiry_timer();
     restart_audit_timer();
 }

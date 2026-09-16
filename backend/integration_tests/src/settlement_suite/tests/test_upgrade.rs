@@ -15,8 +15,8 @@ fn events_survive_upgrade_and_replay_matches() {
         .unwrap();
     decode_one::<Result<u64, String>>(&raw).unwrap().unwrap();
 
-    // before the upgrade the live state was built incrementally by append_event, so this
-    // compares that against a fresh fold; after the upgrade it would compare a fold to itself
+    // the stable fold was built incrementally by append_event, and the audit compares it
+    // against a fresh fold of the log, both before the upgrade and after it
     let raw = pic
         .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
         .unwrap();

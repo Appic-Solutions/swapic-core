@@ -5,19 +5,30 @@ use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{Attempt, Timestamp, TokenAmount};
+use minicbor::{Decode, Encode};
 use thiserror::Error;
 
 /// Where a swap is in its lifecycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
 pub enum SwapStatus {
+    #[n(0)]
     FundsReceived,
+    #[n(1)]
     Executing,
+    #[n(2)]
     PaidInStable,
+    #[n(3)]
     Delivering,
+    #[n(4)]
     WaitingForUser,
+    #[n(5)]
     Done,
+    #[n(6)]
     Refunding,
+    #[n(7)]
     Refunded,
+    #[n(8)]
     Frozen,
 }
 
@@ -29,21 +40,30 @@ impl SwapStatus {
 }
 
 /// The folded state of one swap.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Swap {
     /// The canonical preimage of the quote the funds arrived for.
+    #[cbor(n(0), with = "minicbor::bytes")]
     pub quote_bytes: Vec<u8>,
+    #[n(1)]
     pub status: SwapStatus,
     /// The latest attempt signed, open or not.
+    #[n(2)]
     pub last_attempt: Option<Attempt>,
     /// The attempt signed and not yet confirmed or failed.
+    #[n(3)]
     pub open_attempt: Option<Attempt>,
+    #[n(4)]
     pub src_chain: ChainId,
+    #[n(5)]
     pub src_token: TokenId,
+    #[n(6)]
     pub amount_in: TokenAmount,
     /// Zero until the swap is paid in stable.
+    #[n(7)]
     pub amount_paid: TokenAmount,
     /// When the swap paused on the user, while it waits.
+    #[n(8)]
     pub waiting_since: Option<Timestamp>,
 }
 
@@ -176,11 +196,13 @@ impl Swap {
 }
 
 /// One chain's liquidity.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Pocket {
     /// Free to reserve or rebalance.
+    #[n(0)]
     pub available: TokenAmount,
     /// Set aside for swaps in flight.
+    #[n(1)]
     pub reserved: TokenAmount,
 }
 
@@ -264,3 +286,6 @@ impl Pocket {
 fn add(balance: TokenAmount, amount: TokenAmount) -> Result<TokenAmount, PocketError> {
     balance.checked_add(amount).ok_or(PocketError::Overflow)
 }
+
+crate::storable_as_cbor!(Swap);
+crate::storable_as_cbor!(Pocket);

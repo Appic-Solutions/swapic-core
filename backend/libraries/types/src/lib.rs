@@ -11,6 +11,7 @@ pub mod hash;
 pub mod numeric;
 pub mod quote;
 pub mod rail;
+pub mod storable;
 pub mod swap;
 
 pub use address::{Address, RpcUrl, TokenId};
