@@ -3,18 +3,24 @@ members = [
     "backend/canisters/settlement/api",
     "backend/canisters/settlement/impl",
     "backend/integration_tests",
+    "backend/libraries/types",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 candid = "0.10"
+ethnum = "1.5"
 hex = "0.4"
 ic-cdk = "0.17"
 ic-cdk-timers = "0.11"
 ic-stable-structures = "0.6"
+minicbor = { version = "2", features = ["alloc", "derive"] }
+num-bigint = "0.4"
 pocket-ic = "9"
+proptest = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+thiserror = "2"
 
 [profile.release]
 lto = true

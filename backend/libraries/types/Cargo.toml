@@ -1,0 +1,16 @@
+[package]
+name = "types"
+version = "0.1.0"
+description = "Domain types of the settlement canister: checked amounts, identifiers, and their rules."
+edition = "2021"
+
+[dependencies]
+candid = { workspace = true }
+ethnum = { workspace = true }
+hex = { workspace = true }
+minicbor = { workspace = true }
+num-bigint = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

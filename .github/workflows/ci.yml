@@ -32,7 +32,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: scripts/run-integration-tests.sh
-      - run: cargo test --locked -p settlement_api -p settlement
+      - run: cargo test --locked -p types -p settlement_api -p settlement
       # pinned like dfx above: extractor output is version-dependent, so an unpinned
       # install could fail the diff below on a clean tree
       - run: cargo install candid-extractor --locked --version 0.1.6

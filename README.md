@@ -11,4 +11,6 @@ and the settlement canister.
 - `backend/canisters/settlement/impl`: the canister itself (`lifecycle`, `queries`,
   `updates`, `guards`, `state`, `storage`, `task_manager`).
 - `backend/integration_tests`: the pocket-ic suite, driven through a typed client.
+- `backend/libraries/types`: the domain types: checked amounts, identifiers, and the
+  rules each value must satisfy.
 - `scripts/`: `build-canister.sh`, `generate-did.sh`, `run-integration-tests.sh`.
