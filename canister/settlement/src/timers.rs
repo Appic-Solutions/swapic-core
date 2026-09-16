@@ -4,7 +4,8 @@ use crate::state::{AppState, SwapStatus};
 use crate::{config, quote};
 use ic_cdk_timers::TimerId;
 use ic_stable_structures::StableCell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::thread::LocalKey;
 use std::time::Duration;
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
@@ -27,8 +28,10 @@ thread_local! {
         StableCell::init(log::memory(HALT_MEMORY), false).expect("halt cell init"),
     );
 
-    // The live timers, so `start_timers` can replace them instead of doubling them.
-    static TIMERS: RefCell<Vec<TimerId>> = const { RefCell::new(Vec::new()) };
+    // The live timers, one slot each, so a restart replaces a timer instead of doubling it
+    // and each one restarts without touching the other.
+    static EXPIRY_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
 pub fn is_halted() -> bool {
@@ -58,28 +61,43 @@ fn interval(seconds: u64) -> Duration {
 }
 
 /// Wires both timers. Called from `init` and `post_upgrade`, because timers live in the
-/// heap and an upgrade clears them, and from `set_config` when an interval changed.
+/// heap and an upgrade clears them.
 pub fn start_timers() {
     // touch the halt cell here, in an update context, so no query is ever the first to
     // grow its stable memory
     let _ = is_halted();
-    let config = config::get();
-    // idempotent: a second call replaces the timers rather than doubling the sweep rate
-    TIMERS.with(|t| {
-        for id in t.borrow_mut().drain(..) {
-            ic_cdk_timers::clear_timer(id);
-        }
-    });
-    let expiry =
-        ic_cdk_timers::set_timer_interval(interval(config.expiry_check_interval_s), || {
+    restart_expiry_timer();
+    restart_audit_timer();
+}
+
+/// Puts the expiry timer on the configured interval. `set_config` calls it only when that
+/// interval changed, because a restart pushes the next sweep a whole interval out.
+pub fn restart_expiry_timer() {
+    let every = interval(config::get().expiry_check_interval_s);
+    restart(&EXPIRY_TIMER, || {
+        ic_cdk_timers::set_timer_interval(every, || {
             // seconds, to match the quote expiries the sweep compares against
             run_expiry_sweep(ic_cdk::api::time() / 1_000_000_000);
-        });
-    let audit = ic_cdk_timers::set_timer_interval(
-        interval(config.replay_audit_interval_s),
-        run_replay_audit,
-    );
-    TIMERS.with(|t| *t.borrow_mut() = vec![expiry, audit]);
+        })
+    });
+}
+
+/// Puts the audit timer on the configured interval. `set_config` calls it only when that
+/// interval changed, because a restart pushes the next audit a whole interval out.
+pub fn restart_audit_timer() {
+    let every = interval(config::get().replay_audit_interval_s);
+    restart(&AUDIT_TIMER, || {
+        ic_cdk_timers::set_timer_interval(every, run_replay_audit)
+    });
+}
+
+/// Clears the timer in `slot`, if any, and puts the one `start` sets in its place, so a
+/// second restart replaces the timer rather than doubling its rate.
+fn restart(slot: &'static LocalKey<Cell<Option<TimerId>>>, start: impl FnOnce() -> TimerId) {
+    if let Some(old) = slot.take() {
+        ic_cdk_timers::clear_timer(old);
+    }
+    slot.set(Some(start()));
 }
 
 /// One pass of the expiry timer. `now_s` is the caller's clock, so the whole pass is

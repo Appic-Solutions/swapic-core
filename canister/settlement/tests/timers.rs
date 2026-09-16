@@ -314,15 +314,16 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
 }
 
 /// `set_config` rewires both timers on the spot, and each call replaces the timers the one
-/// before it set. Every generation runs at its own cadence, so a timer the drain missed
-/// would show up as a sweep or an audit at a cadence nobody configured any more.
+/// before it set. Both intervals move on every call and every generation runs at its own
+/// cadence, so a timer a restart missed would show up as a sweep or an audit at a cadence
+/// nobody configured any more.
 #[test]
 fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     let (pic, canister, admin) = common::setup();
     set_roles(&pic, canister, admin).unwrap();
     // init wired an expiry pass every 60s and an audit every 21_600s
     let fast = Config {
-        expiry_check_interval_s: 60,
+        expiry_check_interval_s: 120,
         replay_audit_interval_s: 60,
         ..Config::default()
     };
@@ -342,9 +343,12 @@ fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     advance(&pic, 600);
     assert!(
         get_pending(&pic, canister, pending).is_some(),
-        "no 60s expiry timer is left, from init or from the first set_config"
+        "no expiry timer is left from init (60s) or from the first set_config (120s)"
     );
-    assert!(!halted(&pic, canister), "and no 60s audit timer either");
+    assert!(
+        !halted(&pic, canister),
+        "and no 60s audit timer from the first set_config"
+    );
 
     // the new expiry cadence is live without an upgrade
     advance(&pic, 3_100);
@@ -379,6 +383,71 @@ fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
     // a restarted audit would not be due until about 42_600s
     advance(&pic, 700);
     assert!(halted(&pic, canister), "the audit ran on init's schedule");
+}
+
+/// Each timer restarts only for its own interval: an expiry tweak must not push the audit
+/// out, or tweaks more frequent than the audit interval would keep it from ever running.
+#[test]
+fn an_expiry_only_change_keeps_the_audit_on_schedule() {
+    let (pic, canister, admin) = common::setup();
+    // init wired the audit for 21_600s from now
+    advance(&pic, 21_000);
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            expiry_check_interval_s: 120,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    skew_state(&pic, canister, admin).unwrap();
+
+    // a restarted audit would not be due until about 42_600s
+    advance(&pic, 700);
+    assert!(halted(&pic, canister), "the audit ran on init's schedule");
+}
+
+/// The mirror: an audit-only change takes effect at once and leaves the expiry timer on
+/// the schedule it already had.
+#[test]
+fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
+    let (pic, canister, admin) = common::setup();
+    set_roles(&pic, canister, admin).unwrap();
+    let slow_sweep = Config {
+        expiry_check_interval_s: 600,
+        ..Config::default()
+    };
+    set_config(&pic, canister, admin, &slow_sweep).unwrap();
+    // droppable by any sweep past 130s, and the next one is due at 600s
+    let q = quote_expiring_in(&pic, 10, true, 1);
+    let pending = register_quote(&pic, canister, &q).unwrap();
+
+    advance(&pic, 500);
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            replay_audit_interval_s: 120,
+            ..slow_sweep
+        },
+    )
+    .unwrap();
+
+    // a restarted sweep would not be due until about 1_100s
+    advance(&pic, 150);
+    assert_eq!(
+        get_pending(&pic, canister, pending),
+        None,
+        "the sweep ran on its own schedule"
+    );
+
+    // init's audit is not due for hours, so a halt now is the new 120s audit
+    skew_state(&pic, canister, admin).unwrap();
+    advance(&pic, 130);
+    assert!(halted(&pic, canister), "the new audit interval is live");
 }
 
 #[test]

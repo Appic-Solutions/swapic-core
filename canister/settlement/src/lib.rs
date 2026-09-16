@@ -78,11 +78,15 @@ fn get_config_full() -> Result<config::Config, String> {
 #[update]
 fn set_config(new: config::Config) -> Result<(), String> {
     require_controller()?;
-    // only on an interval change, since a restart pushes the next audit a whole interval
-    // out; after the write, so the timers read the new intervals, and a trap here rolls
-    // back the event and the write with it
-    if config::set(new)? {
-        timers::start_timers();
+    let changed = config::set(new)?;
+    // after the write, so a timer reads its new interval, and only the timer whose interval
+    // moved, since a restart pushes its next run a whole interval out. A trap here rolls
+    // back the event and the write with it.
+    if changed.expiry {
+        timers::restart_expiry_timer();
+    }
+    if changed.audit {
+        timers::restart_audit_timer();
     }
     Ok(())
 }

@@ -67,6 +67,13 @@ impl Default for Config {
 /// out, but nothing legitimate waits this long, and a tight bound fails at set time.
 pub const MAX_TIMER_INTERVAL_S: u64 = 31_536_000;
 
+/// Which timer intervals a config write moved, so `set_config` restarts only those timers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IntervalChanges {
+    pub expiry: bool,
+    pub audit: bool,
+}
+
 /// What a blanked secret reads as. Values only, so a reader still learns which chains are
 /// configured.
 const REDACTED: &str = "***";
@@ -131,11 +138,12 @@ impl Config {
         }
     }
 
-    /// Whether the two configs wire the timers differently, which is when `set_config`
-    /// has to restart them.
-    pub fn timer_intervals_differ(&self, other: &Config) -> bool {
-        self.expiry_check_interval_s != other.expiry_check_interval_s
-            || self.replay_audit_interval_s != other.replay_audit_interval_s
+    /// Which timer intervals `new` moves, one flag per timer.
+    pub fn interval_changes(&self, new: &Config) -> IntervalChanges {
+        IntervalChanges {
+            expiry: self.expiry_check_interval_s != new.expiry_check_interval_s,
+            audit: self.replay_audit_interval_s != new.replay_audit_interval_s,
+        }
     }
 
     /// What a stored config must satisfy. Called at the write chokepoint, so nothing that
@@ -264,12 +272,12 @@ pub fn get() -> Config {
 }
 
 /// Writes the cell and the heap copy, and records the change in the log. Callers do the
-/// authorization; this is the storage path. Returns whether a timer interval changed, so
-/// the caller knows to rewire the timers.
-pub fn set(new: Config) -> Result<bool, String> {
+/// authorization; this is the storage path. Returns which timer intervals changed, so the
+/// caller restarts only those timers.
+pub fn set(new: Config) -> Result<IntervalChanges, String> {
     // before anything is written: a rejected config must leave no event and no cell write
     new.validate()?;
-    let intervals_changed = get().timer_intervals_differ(&new);
+    let changed = get().interval_changes(&new);
     // the log first, because it is the step that can refuse: the event records THAT the
     // config changed and to what, while the cell below stays the operative copy. The log
     // is world-readable through `events_page`, so what goes in it is the redacted view.
@@ -280,7 +288,7 @@ pub fn set(new: Config) -> Result<bool, String> {
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     STORED.with(|s| s.borrow_mut().set(encode(&new)).expect("config cell write"));
     CONFIG.with(|c| *c.borrow_mut() = new);
-    Ok(intervals_changed)
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -428,23 +436,27 @@ mod tests {
     }
 
     #[test]
-    fn only_a_timer_interval_change_counts_as_a_timer_change() {
+    fn interval_changes_flags_each_timer_for_its_own_interval_only() {
         let base = Config::default();
+        let changes = |new: Config| {
+            let c = base.interval_changes(&new);
+            (c.expiry, c.audit)
+        };
         let fee_only = Config {
             platform_fee_bps: 10,
             ..Config::default()
         };
-        assert!(!base.timer_intervals_differ(&fee_only));
+        assert_eq!(changes(fee_only), (false, false));
         let expiry = Config {
             expiry_check_interval_s: 61,
             ..Config::default()
         };
-        assert!(base.timer_intervals_differ(&expiry));
+        assert_eq!(changes(expiry), (true, false));
         let audit = Config {
             replay_audit_interval_s: 21_601,
             ..Config::default()
         };
-        assert!(base.timer_intervals_differ(&audit));
+        assert_eq!(changes(audit), (false, true));
     }
 
     #[test]
