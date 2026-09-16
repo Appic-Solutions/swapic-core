@@ -2,6 +2,7 @@ mod common;
 
 use candid::{decode_one, encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
+use settlement::config::Config;
 use settlement::events::{Event, EventEnvelope, Hash32};
 use settlement::quote::{quote_bytes, quote_hash, GasMode, Quote};
 use settlement::state::{SwapState, SwapStatus};
@@ -52,6 +53,27 @@ fn set_halted(
 ) -> Result<(), String> {
     let raw = pic
         .update_call(canister, sender, "set_halted", encode_one(halted).unwrap())
+        .unwrap();
+    decode_one(&raw).unwrap()
+}
+
+fn set_config(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    new: &Config,
+) -> Result<(), String> {
+    let raw = pic
+        .update_call(canister, sender, "set_config", encode_one(new).unwrap())
+        .unwrap();
+    decode_one(&raw).unwrap()
+}
+
+/// The test-only door that moves the heap's chain head off the log's, which is exactly
+/// what the replay audit halts on.
+fn skew_state(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), String> {
+    let raw = pic
+        .update_call(canister, sender, "test_skew_state", encode_one(()).unwrap())
         .unwrap();
     decode_one(&raw).unwrap()
 }
@@ -289,6 +311,50 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
         get_swap(&pic, canister, swap).unwrap().status,
         SwapStatus::Refunding
     );
+}
+
+/// `set_config` rewires both timers on the spot, and each call replaces the timers the one
+/// before it set. Every generation runs at its own cadence, so a timer the drain missed
+/// would show up as a sweep or an audit at a cadence nobody configured any more.
+#[test]
+fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
+    let (pic, canister, admin) = common::setup();
+    set_roles(&pic, canister, admin).unwrap();
+    // init wired an expiry pass every 60s and an audit every 21_600s
+    let fast = Config {
+        expiry_check_interval_s: 60,
+        replay_audit_interval_s: 60,
+        ..Config::default()
+    };
+    set_config(&pic, canister, admin, &fast).unwrap();
+    let slow = Config {
+        expiry_check_interval_s: 3_600,
+        replay_audit_interval_s: 43_200,
+        ..Config::default()
+    };
+    set_config(&pic, canister, admin, &slow).unwrap();
+
+    // a quote any sweep past 130s would drop, and a divergence any audit would halt on
+    let q = quote_expiring_in(&pic, 10, true, 1);
+    let pending = register_quote(&pic, canister, &q).unwrap();
+    skew_state(&pic, canister, admin).unwrap();
+
+    advance(&pic, 600);
+    assert!(
+        get_pending(&pic, canister, pending).is_some(),
+        "no 60s expiry timer is left, from init or from the first set_config"
+    );
+    assert!(!halted(&pic, canister), "and no 60s audit timer either");
+
+    // the new expiry cadence is live without an upgrade
+    advance(&pic, 3_100);
+    assert_eq!(get_pending(&pic, canister, pending), None);
+
+    advance(&pic, 18_000);
+    assert!(!halted(&pic, canister), "init's 21_600s audit is gone too");
+
+    advance(&pic, 21_600);
+    assert!(halted(&pic, canister), "and the 43_200s audit is live");
 }
 
 #[test]

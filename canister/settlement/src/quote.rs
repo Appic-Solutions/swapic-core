@@ -14,6 +14,10 @@ pub const QUOTE_VERSION: u8 = 1;
 // compile-time check, this is the test-coverage check
 pub const QUOTE_FIELD_COUNT: usize = 15;
 
+/// The longest any string field of a quote may be, in bytes. Generous for any address or
+/// rail id, and it bounds what one pending entry can hold.
+pub const MAX_QUOTE_STRING_BYTES: usize = 256;
+
 /// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1;
 /// `quote_bytes` is the one place that mapping is written.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +75,23 @@ impl Quote {
                 "refund_address is an empty string: leave it absent to mean no refund address"
                     .to_string(),
             );
+        }
+        for (field, value) in [
+            ("src_token", self.src_token.as_str()),
+            ("dst_token", self.dst_token.as_str()),
+            ("dst_address", self.dst_address.as_str()),
+            ("rail", self.rail.as_str()),
+            (
+                "refund_address",
+                self.refund_address.as_deref().unwrap_or(""),
+            ),
+        ] {
+            if value.len() > MAX_QUOTE_STRING_BYTES {
+                return Err(format!(
+                    "{field} is {} bytes, above the cap of {MAX_QUOTE_STRING_BYTES}",
+                    value.len()
+                ));
+            }
         }
         Ok(())
     }
@@ -694,6 +715,45 @@ mod tests {
         };
         assert!(register(q.clone(), just_before_expiry(&q)).is_err());
         assert_eq!(get_pending(&quote_hash(&q)), None);
+    }
+
+    #[test]
+    fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
+        clear_pending();
+        type SetField = fn(&mut Quote, String);
+        let fields: [(&str, SetField); 5] = [
+            ("src_token", |q, s| q.src_token = s),
+            ("dst_token", |q, s| q.dst_token = s),
+            ("dst_address", |q, s| q.dst_address = s),
+            ("rail", |q, s| q.rail = s),
+            ("refund_address", |q, s| q.refund_address = Some(s)),
+        ];
+        for (field, set) in fields {
+            let mut over = pending_quote(9_006);
+            set(&mut over, "a".repeat(MAX_QUOTE_STRING_BYTES + 1));
+            let err = register(over.clone(), just_before_expiry(&over))
+                .expect_err("one byte over the cap");
+            assert!(err.contains(field), "name the field: {err}");
+            assert_eq!(
+                get_pending(&quote_hash(&over)),
+                None,
+                "and nothing was stored"
+            );
+
+            let mut at_cap = pending_quote(9_006);
+            set(&mut at_cap, "a".repeat(MAX_QUOTE_STRING_BYTES));
+            assert!(
+                register(at_cap.clone(), just_before_expiry(&at_cap)).is_ok(),
+                "{field} at the cap is allowed"
+            );
+        }
+
+        // bytes, not chars: 129 two-byte chars is under the cap in chars and over it in bytes
+        let wide = Quote {
+            dst_address: "é".repeat(129),
+            ..pending_quote(9_007)
+        };
+        assert!(register(wide.clone(), just_before_expiry(&wide)).is_err());
     }
 
     #[test]

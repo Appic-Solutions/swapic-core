@@ -63,6 +63,10 @@ impl Default for Config {
     }
 }
 
+/// The longest a timer interval may be: one year. The timers crate only traps centuries
+/// out, but nothing legitimate waits this long, and a tight bound fails at set time.
+pub const MAX_TIMER_INTERVAL_S: u64 = 31_536_000;
+
 /// What a blanked secret reads as. Values only, so a reader still learns which chains are
 /// configured.
 const REDACTED: &str = "***";
@@ -145,6 +149,16 @@ impl Config {
         }
         if self.ecdsa_key_name.is_empty() {
             return Err("ecdsa_key_name is empty".to_string());
+        }
+        for (field, seconds) in [
+            ("expiry_check_interval_s", self.expiry_check_interval_s),
+            ("replay_audit_interval_s", self.replay_audit_interval_s),
+        ] {
+            if seconds > MAX_TIMER_INTERVAL_S {
+                return Err(format!(
+                    "{field} is {seconds}, above the one-year cap of {MAX_TIMER_INTERVAL_S}"
+                ));
+            }
         }
         // the read-modify-write guard: storing the public view back would put "***" where
         // a provider url belongs and cut the canister off from its rpc
@@ -402,5 +416,30 @@ mod tests {
     #[test]
     fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
         rejects(secret_bearing().redacted(), "rpc_urls");
+    }
+
+    #[test]
+    fn validate_rejects_a_timer_interval_above_a_year() {
+        rejects(
+            Config {
+                expiry_check_interval_s: MAX_TIMER_INTERVAL_S + 1,
+                ..Config::default()
+            },
+            "expiry_check_interval_s",
+        );
+        rejects(
+            Config {
+                replay_audit_interval_s: MAX_TIMER_INTERVAL_S + 1,
+                ..Config::default()
+            },
+            "replay_audit_interval_s",
+        );
+        Config {
+            expiry_check_interval_s: MAX_TIMER_INTERVAL_S,
+            replay_audit_interval_s: MAX_TIMER_INTERVAL_S,
+            ..Config::default()
+        }
+        .validate()
+        .expect("a year exactly is allowed");
     }
 }

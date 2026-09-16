@@ -78,7 +78,11 @@ fn get_config_full() -> Result<config::Config, String> {
 #[update]
 fn set_config(new: config::Config) -> Result<(), String> {
     require_controller()?;
-    config::set(new)
+    config::set(new)?;
+    // after the write, so the timers read the new intervals; a trap here rolls back the
+    // event and the write with it
+    timers::start_timers();
+    Ok(())
 }
 
 /// Controller-only, and it sets both roles at once: a deploy hands out the pair, and

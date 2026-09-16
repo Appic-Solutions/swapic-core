@@ -3,7 +3,7 @@ mod common;
 use candid::{decode_one, encode_args, encode_one, Principal};
 use pocket_ic::{PocketIc, Time};
 use settlement::events::{Event, EventEnvelope, Hash32};
-use settlement::quote::{GasMode, Quote, MAX_QUOTE_LIFETIME_S};
+use settlement::quote::{quote_hash, GasMode, Quote, MAX_QUOTE_LIFETIME_S, MAX_QUOTE_STRING_BYTES};
 
 /// The same fixture as `quote.rs`'s unit tests, field for field. The golden assert in
 /// `the_quoter_registers_a_quote_and_gets_the_golden_hash` keeps the two identical.
@@ -271,6 +271,34 @@ fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
     assert!(
         err.contains(&MAX_QUOTE_LIFETIME_S.to_string()),
         "say why: {err}"
+    );
+}
+
+/// The byte cap through the endpoint: one byte over is refused naming the field and stores
+/// nothing, and the cap itself registers.
+#[test]
+fn register_quote_refuses_a_string_over_the_byte_cap() {
+    let (pic, canister, _) = with_roles();
+    let over = Quote {
+        dst_address: "a".repeat(MAX_QUOTE_STRING_BYTES + 1),
+        ..fixed_quote()
+    };
+    let err = register_quote(&pic, canister, quoter(), &over).expect_err("one byte over the cap");
+    assert!(err.contains("dst_address"), "name the field: {err}");
+    assert_eq!(
+        get_pending(&pic, canister, quoter(), quote_hash(&over)).unwrap(),
+        None,
+        "and nothing was stored"
+    );
+
+    let at_cap = Quote {
+        dst_address: "a".repeat(MAX_QUOTE_STRING_BYTES),
+        ..fixed_quote()
+    };
+    let hash = register_quote(&pic, canister, quoter(), &at_cap).expect("the cap itself registers");
+    assert_eq!(
+        get_pending(&pic, canister, quoter(), hash).unwrap(),
+        Some(at_cap)
     );
 }
 
