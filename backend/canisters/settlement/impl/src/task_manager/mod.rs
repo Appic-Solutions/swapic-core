@@ -20,8 +20,8 @@ thread_local! {
 
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
 /// nothing, so every configured interval is clamped to at least a second.
-fn interval(seconds: u64) -> Duration {
-    Duration::from_secs(seconds.max(1))
+fn interval(every: Duration) -> Duration {
+    every.max(Duration::from_secs(1))
 }
 
 /// Wires both timers. Called from `init` and `post_upgrade`, because timers live in the
@@ -37,7 +37,7 @@ pub fn start_timers() {
 /// Puts the expiry timer on the configured interval. `set_config` calls it only when that
 /// interval changed, because a restart pushes the next sweep a whole interval out.
 pub fn restart_expiry_timer() {
-    let every = interval(config::get().expiry_check_interval_s);
+    let every = interval(config::get().expiry_check_interval);
     restart(&EXPIRY_TIMER, || {
         ic_cdk_timers::set_timer_interval(every, || {
             run_expiry_sweep(Timestamp::from_nanos(ic_cdk::api::time()));
@@ -48,7 +48,7 @@ pub fn restart_expiry_timer() {
 /// Puts the audit timer on the configured interval. `set_config` calls it only when that
 /// interval changed, because a restart pushes the next audit a whole interval out.
 pub fn restart_audit_timer() {
-    let every = interval(config::get().replay_audit_interval_s);
+    let every = interval(config::get().replay_audit_interval);
     restart(&AUDIT_TIMER, || {
         ic_cdk_timers::set_timer_interval(every, run_replay_audit)
     });

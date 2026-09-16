@@ -23,10 +23,7 @@ pub struct Sweep {
 pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     let config = config::get();
     let mut swept = Sweep {
-        dropped: pending_quotes::sweep_expired(
-            now.as_secs(),
-            Duration::from_secs(config.permit_deadline_s),
-        ),
+        dropped: pending_quotes::sweep_expired(now.as_secs(), config.permit_deadline),
         ..Sweep::default()
     };
     // a halted canister's log and state disagree, so it appends nothing: dropping a stale
@@ -34,8 +31,8 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let timeout = Duration::from_secs(config.decision_timeout_min.saturating_mul(60));
-    let (due, unreadable) = events::with_state(|state| due_refunds(state, now, timeout));
+    let (due, unreadable) =
+        events::with_state(|state| due_refunds(state, now, config.decision_timeout));
     swept.skipped = unreadable;
     // collected first, then appended: `with_state` holds a shared borrow of the state that
     // `append_event` takes mutably, so appending inside that closure would panic

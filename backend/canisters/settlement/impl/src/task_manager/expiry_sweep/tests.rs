@@ -129,7 +129,7 @@ fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
 fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
     pending_quotes::clear_pending();
     let q = quote(true, 3_001);
-    let deadline = config::get().permit_deadline_s;
+    let deadline = config::get().permit_deadline.as_secs();
     let hash = registered_at(&q, expires_at_s(&q) - 5);
 
     assert_eq!(run_expiry_sweep(at(expires_at_s(&q) + deadline)).dropped, 0);
@@ -172,7 +172,9 @@ fn a_halted_sweep_still_drops_stale_quotes() {
     let q = quote(true, 3_003);
     let hash = registered_at(&q, expires_at_s(&q));
 
-    let swept = run_expiry_sweep(at(expires_at_s(&q) + config::get().permit_deadline_s + 1));
+    let swept = run_expiry_sweep(at(expires_at_s(&q)
+        + config::get().permit_deadline.as_secs()
+        + 1));
     assert_eq!(swept.dropped, 1);
     assert_eq!(swept.refunds, 0);
     assert_eq!(pending_quotes::get_pending(&hash), None);

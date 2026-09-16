@@ -10,6 +10,7 @@ pub use settlement_api::types::config::Config;
 #[update]
 pub fn set_config(new: Config) -> Result<(), String> {
     require_controller()?;
+    let new = types::Config::try_from(new).map_err(|e| e.to_string())?;
     let changed = config::set(new)?;
     // after the write, so a timer reads its new interval, and only the timer whose interval
     // moved, since a restart pushes its next run a whole interval out. A trap here rolls

@@ -7,5 +7,5 @@ pub use settlement_api::types::config::Config;
 #[query]
 pub fn get_config_full() -> Result<Config, String> {
     require_controller()?;
-    Ok(config::get())
+    Ok(Config::unredacted(config::get()))
 }

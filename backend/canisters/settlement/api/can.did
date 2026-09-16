@@ -17,7 +17,7 @@ type Config = record {
   quote_ttl_s : nat64;
   decision_timeout_min : nat64;
   chain_data_max_age_s : nat64;
-  max_swap_usd : nat64;
+  max_swap_usd : nat;
   max_batch_items : nat32;
 };
 // One entry of the log. `time_ns` is IC time in nanoseconds.

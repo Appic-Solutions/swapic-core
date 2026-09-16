@@ -14,6 +14,26 @@ fn events(pic: &PocketIc, canister: Principal, sender: Principal) -> Vec<Event> 
     events_page(pic, canister, sender, 0, 100)
 }
 
+/// The public view of `config`, built independently of the canister: every rpc url
+/// blanked, every chain id and every other field as written.
+fn redacted(config: &Config) -> Config {
+    Config {
+        rpc_urls: config
+            .rpc_urls
+            .keys()
+            .map(|chain| (*chain, "***".to_string()))
+            .collect(),
+        ..config.clone()
+    }
+}
+
+/// What the log records for a config write: the domain config's Debug, whose rpc urls
+/// print as `***`.
+fn logged_json(config: &Config) -> String {
+    let config = types::Config::try_from(config.clone()).expect("a valid config");
+    format!("{config:?}")
+}
+
 /// The knob the launch config actually moves.
 fn with_fee(bps: u16) -> Config {
     Config {
@@ -56,7 +76,7 @@ fn admin_set_config_writes_the_value_and_logs_the_change() {
     assert_eq!(
         logged[0].payload,
         EventType::ConfigChanged {
-            json: format!("{:?}", new.redacted())
+            json: logged_json(&new)
         },
         "the event carries the config that was written"
     );
@@ -95,7 +115,7 @@ fn config_survives_upgrade() {
     .unwrap();
 
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), new);
-    assert_eq!(get_config(&pic, canister, admin), new.redacted());
+    assert_eq!(get_config(&pic, canister, admin), redacted(&new));
 }
 
 #[test]
@@ -111,7 +131,7 @@ fn public_get_config_redacts_rpc_urls() {
         BTreeMap::from([(1, "***".to_string())]),
         "the chain id stays visible, the key does not"
     );
-    assert_eq!(public, new.redacted(), "and nothing else is hidden");
+    assert_eq!(public, redacted(&new), "and nothing else is hidden");
 }
 
 #[test]
@@ -187,5 +207,5 @@ fn config_changed_event_carries_no_rpc_secret() {
         "the world-readable log leaked an rpc secret: {json}"
     );
     assert!(json.contains("***"), "and it says so: {json}");
-    assert_eq!(*json, format!("{:?}", new.redacted()));
+    assert_eq!(*json, logged_json(&new));
 }

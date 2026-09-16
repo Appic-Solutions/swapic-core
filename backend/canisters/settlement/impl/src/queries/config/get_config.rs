@@ -6,5 +6,5 @@ pub use settlement_api::types::config::Config;
 /// the real thing.
 #[query]
 pub fn get_config() -> Config {
-    config::get().redacted()
+    Config::from(config::get())
 }
