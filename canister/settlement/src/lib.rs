@@ -78,10 +78,12 @@ fn get_config_full() -> Result<config::Config, String> {
 #[update]
 fn set_config(new: config::Config) -> Result<(), String> {
     require_controller()?;
-    config::set(new)?;
-    // after the write, so the timers read the new intervals; a trap here rolls back the
-    // event and the write with it
-    timers::start_timers();
+    // only on an interval change, since a restart pushes the next audit a whole interval
+    // out; after the write, so the timers read the new intervals, and a trap here rolls
+    // back the event and the write with it
+    if config::set(new)? {
+        timers::start_timers();
+    }
     Ok(())
 }
 

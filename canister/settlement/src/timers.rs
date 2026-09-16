@@ -58,7 +58,7 @@ fn interval(seconds: u64) -> Duration {
 }
 
 /// Wires both timers. Called from `init` and `post_upgrade`, because timers live in the
-/// heap and an upgrade clears them, and from `set_config`, so new intervals apply at once.
+/// heap and an upgrade clears them, and from `set_config` when an interval changed.
 pub fn start_timers() {
     // touch the halt cell here, in an update context, so no query is ever the first to
     // grow its stable memory

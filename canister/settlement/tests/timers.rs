@@ -357,6 +357,30 @@ fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     assert!(halted(&pic, canister), "and the 43_200s audit is live");
 }
 
+/// A config change that moves no interval must not restart the timers, or every such
+/// edit would push the next audit a whole interval out.
+#[test]
+fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
+    let (pic, canister, admin) = common::setup();
+    // init wired the audit for 21_600s from now
+    advance(&pic, 21_000);
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            platform_fee_bps: 10,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    skew_state(&pic, canister, admin).unwrap();
+
+    // a restarted audit would not be due until about 42_600s
+    advance(&pic, 700);
+    assert!(halted(&pic, canister), "the audit ran on init's schedule");
+}
+
 #[test]
 fn set_halted_refuses_a_stranger() {
     let (pic, canister, admin) = common::setup();

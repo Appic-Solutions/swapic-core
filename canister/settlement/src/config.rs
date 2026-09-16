@@ -131,6 +131,13 @@ impl Config {
         }
     }
 
+    /// Whether the two configs wire the timers differently, which is when `set_config`
+    /// has to restart them.
+    pub fn timer_intervals_differ(&self, other: &Config) -> bool {
+        self.expiry_check_interval_s != other.expiry_check_interval_s
+            || self.replay_audit_interval_s != other.replay_audit_interval_s
+    }
+
     /// What a stored config must satisfy. Called at the write chokepoint, so nothing that
     /// fails here reaches the cell or the log. The fee relation is the record-coherence
     /// half only; the fee computation clamps against `max_fee_bps` on its own.
@@ -257,10 +264,12 @@ pub fn get() -> Config {
 }
 
 /// Writes the cell and the heap copy, and records the change in the log. Callers do the
-/// authorization; this is the storage path.
-pub fn set(new: Config) -> Result<(), String> {
+/// authorization; this is the storage path. Returns whether a timer interval changed, so
+/// the caller knows to rewire the timers.
+pub fn set(new: Config) -> Result<bool, String> {
     // before anything is written: a rejected config must leave no event and no cell write
     new.validate()?;
+    let intervals_changed = get().timer_intervals_differ(&new);
     // the log first, because it is the step that can refuse: the event records THAT the
     // config changed and to what, while the cell below stays the operative copy. The log
     // is world-readable through `events_page`, so what goes in it is the redacted view.
@@ -271,7 +280,7 @@ pub fn set(new: Config) -> Result<(), String> {
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     STORED.with(|s| s.borrow_mut().set(encode(&new)).expect("config cell write"));
     CONFIG.with(|c| *c.borrow_mut() = new);
-    Ok(())
+    Ok(intervals_changed)
 }
 
 #[cfg(test)]
@@ -416,6 +425,26 @@ mod tests {
     #[test]
     fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
         rejects(secret_bearing().redacted(), "rpc_urls");
+    }
+
+    #[test]
+    fn only_a_timer_interval_change_counts_as_a_timer_change() {
+        let base = Config::default();
+        let fee_only = Config {
+            platform_fee_bps: 10,
+            ..Config::default()
+        };
+        assert!(!base.timer_intervals_differ(&fee_only));
+        let expiry = Config {
+            expiry_check_interval_s: 61,
+            ..Config::default()
+        };
+        assert!(base.timer_intervals_differ(&expiry));
+        let audit = Config {
+            replay_audit_interval_s: 21_601,
+            ..Config::default()
+        };
+        assert!(base.timer_intervals_differ(&audit));
     }
 
     #[test]
