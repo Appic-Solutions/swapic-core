@@ -1,14 +1,14 @@
 use crate::settlement_suite::init::setup;
 use crate::wasms;
-use candid::{decode_one, encode_one, Principal};
-use settlement_api::types::events::Event;
+use candid::{decode_one, encode_one, Nat, Principal};
+use settlement_api::types::events::EventType;
 
 #[test]
 fn events_survive_upgrade_and_replay_matches() {
     let (pic, canister, admin) = setup();
-    let event = Event::PocketFunded {
+    let event = EventType::PocketFunded {
         chain_id: 8453,
-        amount: 1000,
+        amount: Nat::from(1000_u64),
     };
     let raw = pic
         .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
@@ -51,9 +51,9 @@ fn events_survive_upgrade_and_replay_matches() {
 fn test_append_rejects_non_controller() {
     let (pic, canister, _) = setup();
     let stranger = Principal::from_slice(&[9; 29]);
-    let event = Event::PocketFunded {
+    let event = EventType::PocketFunded {
         chain_id: 8453,
-        amount: 1,
+        amount: Nat::from(1_u64),
     };
     let raw = pic
         .update_call(

@@ -66,3 +66,9 @@ impl EventHash {
     /// The parent of the first event.
     pub const ZERO: Self = Self([0; 32]);
 }
+
+impl Default for EventHash {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}

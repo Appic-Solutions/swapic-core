@@ -9,7 +9,7 @@ use settlement_api::queries::{
     event_count, events_page, get_config, get_config_full, get_pending, get_swap, halted,
     verify_chain, verify_replay,
 };
-use settlement_api::types::events::Event;
+use settlement_api::types::events::EventType;
 use settlement_api::updates::{register_quote, set_config, set_halted, set_roles};
 
 pub fn event_count(
@@ -184,7 +184,7 @@ pub fn append(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
-    event: &Event,
+    event: &EventType,
 ) -> Result<u64, String> {
     update(
         pic,

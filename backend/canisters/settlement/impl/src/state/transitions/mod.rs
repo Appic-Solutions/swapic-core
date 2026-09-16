@@ -1,15 +1,15 @@
-use crate::state::{AppState, Pocket};
-use settlement_api::types::events::{Choice, Event, EventEnvelope, Hash32};
-use settlement_api::types::swap::{SwapState, SwapStatus};
+use crate::state::AppState;
+use types::events::{Choice, Event, EventType};
+use types::{Attempt, ChainId, Pocket, QuoteHash, Swap, SwapStatus, TokenAmount};
 
-fn swap<'a>(state: &'a AppState, quote_hash: &Hash32) -> Result<&'a SwapState, String> {
+fn swap<'a>(state: &'a AppState, quote_hash: &QuoteHash) -> Result<&'a Swap, String> {
     state
         .swaps
         .get(quote_hash)
         .ok_or_else(|| "unknown swap".to_string())
 }
 
-fn pocket<'a>(state: &'a AppState, chain_id: &u64) -> Result<&'a Pocket, String> {
+fn pocket<'a>(state: &'a AppState, chain_id: &ChainId) -> Result<&'a Pocket, String> {
     state
         .pockets
         .get(chain_id)
@@ -25,16 +25,16 @@ fn require(ok: bool, msg: &str) -> Result<(), String> {
 }
 
 /// Every rule that can reject an event lives here; `apply` assumes it already passed.
-/// The match is exhaustive with no wildcard arm, so a new `Event` variant fails to
+/// The match is exhaustive with no wildcard arm, so a new `EventType` variant fails to
 /// compile until someone decides what its rule is.
-pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
+pub fn check_transition(state: &AppState, event: &EventType) -> Result<(), String> {
     match event {
-        Event::FundsReceived { quote_hash, .. } => require(
+        EventType::FundsReceived { quote_hash, .. } => require(
             !state.swaps.contains_key(quote_hash),
             "swap already has funds",
         ),
         // the sign-before-send law: one open attempt at a time, numbered without gaps
-        Event::TxSigned {
+        EventType::TxSigned {
             quote_hash,
             attempt,
             ..
@@ -47,17 +47,15 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
                 "swap is waiting for the user",
             )?;
             require(s.open_attempt.is_none(), "an attempt is still open")?;
-            require(
-                *attempt == s.attempts.saturating_add(1),
-                "attempt out of sequence",
-            )
+            let next = s.last_attempt.map_or(Some(Attempt::FIRST), Attempt::next);
+            require(next == Some(*attempt), "attempt out of sequence")
         }
-        Event::TxConfirmed {
+        EventType::TxConfirmed {
             quote_hash,
             attempt,
             ..
         }
-        | Event::TxFailed {
+        | EventType::TxFailed {
             quote_hash,
             attempt,
             ..
@@ -65,17 +63,20 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
             let s = swap(state, quote_hash)?;
             require(s.open_attempt == Some(*attempt), "attempt is not open")
         }
-        Event::PaidInStable { quote_hash, .. } => {
+        EventType::PaidInStable { quote_hash, .. } => {
             let s = swap(state, quote_hash)?;
             require(
                 matches!(s.status, SwapStatus::Executing | SwapStatus::FundsReceived),
                 "swap is not executing",
             )?;
             // fires at most once per swap, so a requote cannot overwrite the recorded amount
-            require(s.amount_paid == 0, "swap is already paid in stable")?;
+            require(
+                s.amount_paid == TokenAmount::ZERO,
+                "swap is already paid in stable",
+            )?;
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
-        Event::DecisionRequired { quote_hash, .. } => {
+        EventType::DecisionRequired { quote_hash, .. } => {
             let s = swap(state, quote_hash)?;
             require(!s.status.is_closed(), "swap is closed")?;
             // one open question at a time: re-asking would silently re-arm the deadline
@@ -84,23 +85,23 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
                 "swap is already waiting for the user",
             )
         }
-        Event::DecisionMade { quote_hash, .. } => require(
+        EventType::DecisionMade { quote_hash, .. } => require(
             swap(state, quote_hash)?.status == SwapStatus::WaitingForUser,
             "swap is not waiting for the user",
         ),
-        Event::RefundStarted { quote_hash, .. } => {
+        EventType::RefundStarted { quote_hash, .. } => {
             let s = swap(state, quote_hash)?;
             require(
                 !s.status.is_closed() && s.status != SwapStatus::Refunding,
                 "swap cannot start a refund",
             )
         }
-        Event::Refunded { quote_hash, .. } => {
+        EventType::Refunded { quote_hash, .. } => {
             let s = swap(state, quote_hash)?;
             require(s.status == SwapStatus::Refunding, "swap is not refunding")?;
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
-        Event::SwapDone { quote_hash } => {
+        EventType::SwapDone { quote_hash } => {
             let s = swap(state, quote_hash)?;
             require(
                 matches!(
@@ -111,14 +112,14 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
             )?;
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
-        Event::Frozen { quote_hash, .. } => {
+        EventType::Frozen { quote_hash, .. } => {
             let s = swap(state, quote_hash)?;
             require(!s.status.is_closed(), "swap is closed")?;
             require(s.open_attempt.is_none(), "an attempt is still open")
         }
-        Event::FeeAccrued { quote_hash, .. } => swap(state, quote_hash).map(|_| ()),
+        EventType::FeeAccrued { quote_hash, .. } => swap(state, quote_hash).map(|_| ()),
         // the three per-swap pocket moves all name a swap, so all three check it exists
-        Event::PocketReserved {
+        EventType::PocketReserved {
             quote_hash,
             chain_id,
             amount,
@@ -129,7 +130,7 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
                 "pocket is short",
             )
         }
-        Event::PocketReleased {
+        EventType::PocketReleased {
             quote_hash,
             chain_id,
             amount,
@@ -140,7 +141,7 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
                 "pocket reservation is short",
             )
         }
-        Event::PocketSpent {
+        EventType::PocketSpent {
             quote_hash,
             chain_id,
             amount,
@@ -151,7 +152,7 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
                 "pocket reservation is short",
             )
         }
-        Event::PocketRebalanced {
+        EventType::PocketRebalanced {
             from_chain, amount, ..
         } => require(
             pocket(state, from_chain)?.available >= *amount,
@@ -159,25 +160,37 @@ pub fn check_transition(state: &AppState, event: &Event) -> Result<(), String> {
         ),
         // always legal; variants are named rather than matched by `_` so a new one
         // has to be classified here instead of silently defaulting to legal
-        Event::ConfigChanged { .. } | Event::PocketFunded { .. } | Event::RolesChanged { .. } => {
-            Ok(())
-        }
+        EventType::ConfigChanged { .. }
+        | EventType::PocketFunded { .. }
+        | EventType::RolesChanged { .. } => Ok(()),
     }
 }
 
-fn with_swap(state: &mut AppState, quote_hash: &Hash32, f: impl FnOnce(&mut SwapState)) {
+fn with_swap(state: &mut AppState, quote_hash: &QuoteHash, f: impl FnOnce(&mut Swap)) {
     if let Some(s) = state.swaps.get_mut(quote_hash) {
         f(s);
     }
 }
 
-/// Pure and total: no ic-cdk calls, and every arithmetic op saturates, so no event the
-/// guard admitted can panic here. Rejection belongs in `check_transition`, not here.
-pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
-    state.next_event_index = envelope.index.saturating_add(1);
-    state.last_event_hash = envelope.hash;
-    match &envelope.event {
-        Event::FundsReceived {
+fn add(a: TokenAmount, b: TokenAmount) -> TokenAmount {
+    a.checked_add(b)
+        .expect("BUG: a sum of u128 amounts stays far below u256::MAX")
+}
+
+fn sub(a: TokenAmount, b: TokenAmount) -> TokenAmount {
+    a.checked_sub(b)
+        .expect("BUG: check_transition refuses to take more than a pocket holds")
+}
+
+/// Pure: no ic-cdk calls. Rejection belongs in `check_transition`, not here.
+pub fn apply(state: &mut AppState, event: &Event) {
+    state.next_event_index = event
+        .index
+        .next()
+        .expect("BUG: a log cannot hold u64::MAX events");
+    state.last_event_hash = event.hash;
+    match &event.payload {
+        EventType::FundsReceived {
             quote_hash,
             quote_bytes,
             chain_id,
@@ -187,25 +200,25 @@ pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
         } => {
             state.swaps.insert(
                 *quote_hash,
-                SwapState {
+                Swap {
                     quote_bytes: quote_bytes.clone(),
                     status: SwapStatus::FundsReceived,
-                    attempts: 0,
+                    last_attempt: None,
                     open_attempt: None,
                     src_chain: *chain_id,
                     src_token: token.clone(),
                     amount_in: *amount,
-                    amount_paid: 0,
-                    waiting_since_ns: None,
+                    amount_paid: TokenAmount::ZERO,
+                    waiting_since: None,
                 },
             );
         }
-        Event::TxSigned {
+        EventType::TxSigned {
             quote_hash,
             attempt,
             ..
         } => with_swap(state, quote_hash, |s| {
-            s.attempts = *attempt;
+            s.last_attempt = Some(*attempt);
             s.open_attempt = Some(*attempt);
             match s.status {
                 SwapStatus::FundsReceived => s.status = SwapStatus::Executing,
@@ -213,90 +226,90 @@ pub fn apply(state: &mut AppState, envelope: &EventEnvelope) {
                 _ => {}
             }
         }),
-        Event::TxConfirmed { quote_hash, .. } | Event::TxFailed { quote_hash, .. } => {
+        EventType::TxConfirmed { quote_hash, .. } | EventType::TxFailed { quote_hash, .. } => {
             with_swap(state, quote_hash, |s| s.open_attempt = None)
         }
-        Event::PaidInStable {
+        EventType::PaidInStable {
             quote_hash, amount, ..
         } => with_swap(state, quote_hash, |s| {
             s.status = SwapStatus::PaidInStable;
             s.amount_paid = *amount;
         }),
-        Event::DecisionRequired { quote_hash, .. } => with_swap(state, quote_hash, |s| {
+        EventType::DecisionRequired { quote_hash, .. } => with_swap(state, quote_hash, |s| {
             s.status = SwapStatus::WaitingForUser;
-            s.waiting_since_ns = Some(envelope.time_ns);
+            s.waiting_since = Some(event.timestamp);
         }),
-        Event::DecisionMade { quote_hash, choice } => with_swap(state, quote_hash, |s| {
-            s.waiting_since_ns = None;
+        EventType::DecisionMade { quote_hash, choice } => with_swap(state, quote_hash, |s| {
+            s.waiting_since = None;
             s.status = match choice {
                 Choice::Requote => SwapStatus::Executing,
                 Choice::Refund => SwapStatus::Refunding,
             };
         }),
         // a refund answers any open question, so the waiting clock stops with it
-        Event::RefundStarted { quote_hash, .. } => with_swap(state, quote_hash, |s| {
+        EventType::RefundStarted { quote_hash, .. } => with_swap(state, quote_hash, |s| {
             s.status = SwapStatus::Refunding;
-            s.waiting_since_ns = None;
+            s.waiting_since = None;
         }),
-        Event::Refunded { quote_hash, .. } => {
+        EventType::Refunded { quote_hash, .. } => {
             with_swap(state, quote_hash, |s| s.status = SwapStatus::Refunded)
         }
-        Event::SwapDone { quote_hash } => {
+        EventType::SwapDone { quote_hash } => {
             with_swap(state, quote_hash, |s| s.status = SwapStatus::Done)
         }
-        Event::Frozen { quote_hash, .. } => with_swap(state, quote_hash, |s| {
+        EventType::Frozen { quote_hash, .. } => with_swap(state, quote_hash, |s| {
             s.status = SwapStatus::Frozen;
-            s.waiting_since_ns = None;
+            s.waiting_since = None;
         }),
-        Event::FeeAccrued { amount, .. } => {
-            state.fees_accrued = state.fees_accrued.saturating_add(*amount);
+        EventType::FeeAccrued { amount, .. } => {
+            state.fees_accrued = add(state.fees_accrued, *amount);
         }
-        Event::PocketFunded { chain_id, amount } => {
+        EventType::PocketFunded { chain_id, amount } => {
             let p = state.pockets.entry(*chain_id).or_default();
-            p.available = p.available.saturating_add(*amount);
+            p.available = add(p.available, *amount);
         }
-        Event::PocketReserved {
+        EventType::PocketReserved {
             chain_id, amount, ..
         } => {
             let p = state.pockets.entry(*chain_id).or_default();
-            p.available = p.available.saturating_sub(*amount);
-            p.reserved = p.reserved.saturating_add(*amount);
+            p.available = sub(p.available, *amount);
+            p.reserved = add(p.reserved, *amount);
         }
-        Event::PocketReleased {
+        EventType::PocketReleased {
             chain_id, amount, ..
         } => {
             let p = state.pockets.entry(*chain_id).or_default();
-            p.reserved = p.reserved.saturating_sub(*amount);
-            p.available = p.available.saturating_add(*amount);
+            p.reserved = sub(p.reserved, *amount);
+            p.available = add(p.available, *amount);
         }
         // the settle debit: the value left the pocket on-chain, so it does not come back
-        Event::PocketSpent {
+        EventType::PocketSpent {
             chain_id, amount, ..
         } => {
             let p = state.pockets.entry(*chain_id).or_default();
-            p.reserved = p.reserved.saturating_sub(*amount);
+            p.reserved = sub(p.reserved, *amount);
         }
-        Event::PocketRebalanced {
+        EventType::PocketRebalanced {
             from_chain,
             to_chain,
             amount,
             ..
         } => {
             let from = state.pockets.entry(*from_chain).or_default();
-            from.available = from.available.saturating_sub(*amount);
+            from.available = sub(from.available, *amount);
             let to = state.pockets.entry(*to_chain).or_default();
-            to.available = to.available.saturating_add(*amount);
+            to.available = add(to.available, *amount);
         }
         // audit lines: they record a change to deploy-time truth that lives in its own
         // stable cell, so the folded swap state is untouched
-        Event::ConfigChanged { .. } | Event::RolesChanged { .. } => {}
+        EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => {}
     }
 }
 
-pub fn replay(events: impl Iterator<Item = EventEnvelope>) -> AppState {
+pub fn replay(events: impl Iterator<Item = Event>) -> AppState {
     let mut state = AppState::default();
-    for envelope in events {
-        apply(&mut state, &envelope);
+    for event in events {
+        apply(&mut state, &event);
     }
     state
 }

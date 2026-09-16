@@ -4,13 +4,13 @@ use crate::wasms;
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
-use settlement_api::types::events::{Event, EventEnvelope};
+use settlement_api::types::events::{Event, EventType};
 use std::collections::BTreeMap;
 
 /// Stands in for a real provider url, which is a secret because the key is part of it.
 const SECRET_RPC: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 
-fn events(pic: &PocketIc, canister: Principal, sender: Principal) -> Vec<EventEnvelope> {
+fn events(pic: &PocketIc, canister: Principal, sender: Principal) -> Vec<Event> {
     events_page(pic, canister, sender, 0, 100)
 }
 
@@ -54,8 +54,8 @@ fn admin_set_config_writes_the_value_and_logs_the_change() {
     let logged = events(&pic, canister, admin);
     assert_eq!(logged.len(), 1, "one config change, one event");
     assert_eq!(
-        logged[0].event,
-        Event::ConfigChanged {
+        logged[0].payload,
+        EventType::ConfigChanged {
             json: format!("{:?}", new.redacted())
         },
         "the event carries the config that was written"
@@ -179,7 +179,7 @@ fn config_changed_event_carries_no_rpc_secret() {
     set_config(&pic, canister, admin, &new).unwrap();
 
     let logged = events(&pic, canister, admin);
-    let Event::ConfigChanged { json } = &logged[0].event else {
+    let EventType::ConfigChanged { json } = &logged[0].payload else {
         panic!("a config change logs a ConfigChanged event");
     };
     assert!(

@@ -2,47 +2,47 @@ use crate::client::pocket::query;
 use crate::client::settlement::{append, event_count, events_page, test_skew_state};
 use crate::settlement_suite::init::setup;
 use crate::wasms;
-use candid::{encode_one, Principal};
+use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
-use settlement_api::types::events::{Event, EventEnvelope};
+use settlement_api::types::events::{Event, EventType};
 
 const QUOTE: [u8; 32] = [7; 32];
 
-fn swap_sequence() -> Vec<Event> {
+fn swap_sequence() -> Vec<EventType> {
     vec![
-        Event::PocketFunded {
+        EventType::PocketFunded {
             chain_id: 8453,
-            amount: 1_000_000,
+            amount: Nat::from(1_000_000_u64),
         },
         // the first event carrying blob fields through stable storage
-        Event::FundsReceived {
+        EventType::FundsReceived {
             quote_hash: QUOTE,
             quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
             chain_id: 8453,
             token: "USDC".into(),
-            amount: 1000,
+            amount: Nat::from(1000_u64),
             tx_ref: "0xfeed".into(),
         },
-        Event::TxSigned {
+        EventType::TxSigned {
             quote_hash: QUOTE,
             attempt: 1,
             chain_id: 8453,
             tx_hash: [1; 32],
             raw_tx: vec![0x02, 0xf8, 0x6b],
         },
-        Event::TxConfirmed {
+        EventType::TxConfirmed {
             quote_hash: QUOTE,
             attempt: 1,
             chain_id: 8453,
             tx_hash: [1; 32],
             block: 19_000_000,
         },
-        Event::PaidInStable {
+        EventType::PaidInStable {
             quote_hash: QUOTE,
             chain_id: 42161,
-            amount: 999,
+            amount: Nat::from(999_u64),
         },
-        Event::SwapDone { quote_hash: QUOTE },
+        EventType::SwapDone { quote_hash: QUOTE },
     ]
 }
 
@@ -50,13 +50,7 @@ fn count(pic: &PocketIc, canister: Principal, who: Principal) -> u64 {
     event_count(pic, canister, who)
 }
 
-fn page(
-    pic: &PocketIc,
-    canister: Principal,
-    who: Principal,
-    start: u64,
-    len: u64,
-) -> Vec<EventEnvelope> {
+fn page(pic: &PocketIc, canister: Principal, who: Principal, start: u64, len: u64) -> Vec<Event> {
     events_page(pic, canister, who, start, len)
 }
 
@@ -100,7 +94,7 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     assert_eq!(full.len() as u64, total);
     for (i, env) in full.iter().enumerate() {
         assert_eq!(env.index, i as u64);
-        assert_eq!(env.event, events[i]);
+        assert_eq!(env.payload, events[i]);
     }
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
@@ -153,9 +147,9 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
 
     // and the same divergence over a log that already holds a whole swap
     skew(&pic, canister, admin).unwrap();
-    let more = Event::PocketFunded {
+    let more = EventType::PocketFunded {
         chain_id: 8453,
-        amount: 1,
+        amount: Nat::from(1_u64),
     };
     let err = append(&pic, canister, admin, &more).expect_err("the head diverged");
     assert!(err.contains("diverged"), "say what went wrong: {err}");

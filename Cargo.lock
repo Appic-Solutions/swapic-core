@@ -1841,10 +1841,7 @@ name = "settlement_api"
 version = "0.1.0"
 dependencies = [
  "candid",
- "hex",
- "ic-stable-structures",
  "serde",
- "sha2",
  "types",
 ]
 
@@ -2355,6 +2352,7 @@ dependencies = [
  "candid",
  "ethnum",
  "hex",
+ "ic-stable-structures",
  "minicbor",
  "num-bigint",
  "proptest",

@@ -3,7 +3,7 @@ use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::{PocketIc, Time};
-use settlement_api::types::events::{Event, EventEnvelope, Hash32};
+use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote};
 use types::address::MAX_TEXT_BYTES;
 use types::quote::MAX_QUOTE_LIFETIME;
@@ -64,7 +64,7 @@ fn event_count(pic: &PocketIc, canister: Principal) -> u64 {
     settlement::event_count(pic, canister, stranger())
 }
 
-fn events(pic: &PocketIc, canister: Principal) -> Vec<EventEnvelope> {
+fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
     events_page(pic, canister, stranger(), 0, 100)
 }
 
@@ -157,8 +157,8 @@ fn set_roles_lands_a_roles_changed_event() {
     let logged = events(&pic, canister);
     assert_eq!(logged.len(), 1, "one rotation, one event");
     assert_eq!(
-        logged[0].event,
-        Event::RolesChanged {
+        logged[0].payload,
+        EventType::RolesChanged {
             quoter: quoter().to_text(),
             watcher: watcher().to_text(),
         }

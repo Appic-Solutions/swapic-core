@@ -1,271 +1,173 @@
 use super::*;
+use types::address::MAX_TEXT_BYTES;
+use types::{EventHash, EventIndex, Timestamp};
 
-/// One fixed sample of every variant, in tag order, for the golden file.
-fn samples() -> Vec<Event> {
+/// One wire sample of every variant.
+fn samples() -> Vec<EventType> {
     vec![
-        Event::ConfigChanged {
-            json: "{\"fee_bps\":30}".into(),
-        },
-        Event::FundsReceived {
+        EventType::ConfigChanged { json: "{}".into() },
+        EventType::FundsReceived {
             quote_hash: [1; 32],
-            quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
+            quote_bytes: vec![0xde, 0xad],
             chain_id: 8453,
             token: "USDC".into(),
-            amount: 1_000_000,
+            amount: Nat::from(u128::MAX),
             tx_ref: "0xfeed".into(),
         },
-        Event::TxSigned {
+        EventType::TxSigned {
             quote_hash: [2; 32],
             attempt: 1,
             chain_id: 42161,
             tx_hash: [3; 32],
-            raw_tx: vec![0x02, 0xf8, 0x6b],
+            raw_tx: vec![0x02],
         },
-        Event::TxConfirmed {
+        EventType::TxConfirmed {
             quote_hash: [4; 32],
             attempt: 2,
             chain_id: 1,
             tx_hash: [5; 32],
             block: 19_000_000,
         },
-        Event::TxFailed {
+        EventType::TxFailed {
             quote_hash: [6; 32],
             attempt: 3,
             reason: "reverted".into(),
         },
-        Event::PaidInStable {
+        EventType::PaidInStable {
             quote_hash: [7; 32],
             chain_id: 8453,
-            amount: 999_999,
+            amount: Nat::from(999_999_u32),
         },
-        Event::DecisionRequired {
+        EventType::DecisionRequired {
             quote_hash: [8; 32],
             reason: "slippage".into(),
         },
-        Event::DecisionMade {
+        EventType::DecisionMade {
             quote_hash: [9; 32],
             choice: Choice::Refund,
         },
-        Event::RefundStarted {
+        EventType::RefundStarted {
             quote_hash: [10; 32],
             reason: "timeout".into(),
         },
-        Event::Refunded {
+        EventType::Refunded {
             quote_hash: [11; 32],
             chain_id: 137,
             token: "USDT".into(),
-            amount: 42,
-            // empty string: length prefix must still be written
-            to: String::new(),
+            amount: Nat::from(42_u8),
+            to: "0xUser".into(),
         },
-        Event::SwapDone {
+        EventType::SwapDone {
             quote_hash: [12; 32],
         },
-        Event::Frozen {
+        EventType::Frozen {
             quote_hash: [13; 32],
-            // multibyte utf8: length is bytes, not chars
-            reason: "griefed \u{2603}".into(),
+            reason: "griefed".into(),
         },
-        Event::FeeAccrued {
+        EventType::FeeAccrued {
             quote_hash: [14; 32],
-            amount: 7,
+            amount: Nat::from(7_u8),
         },
-        Event::PocketFunded {
+        EventType::PocketFunded {
             chain_id: 10,
-            // high word set: proves the u128 is 16 bytes, not a truncated u64
-            amount: 1u128 << 70,
+            amount: Nat::from(1u128 << 70),
         },
-        Event::PocketReserved {
+        EventType::PocketReserved {
             quote_hash: [15; 32],
             chain_id: 8453,
-            amount: 3,
+            amount: Nat::from(3_u8),
         },
-        Event::PocketRebalanced {
+        EventType::PocketRebalanced {
             from_chain: 8453,
             to_chain: 42161,
-            amount: 250,
+            amount: Nat::from(250_u8),
             route: "cctp".into(),
         },
-        Event::PocketReleased {
+        EventType::PocketReleased {
             quote_hash: [16; 32],
             chain_id: 8453,
-            amount: 150,
+            amount: Nat::from(150_u8),
         },
-        Event::PocketSpent {
+        EventType::PocketSpent {
             quote_hash: [17; 32],
             chain_id: 42161,
-            amount: 250,
+            amount: Nat::from(250_u8),
         },
-        Event::RolesChanged {
+        EventType::RolesChanged {
             quoter: "aaaaa-aa".into(),
             watcher: "2vxsx-fae".into(),
         },
     ]
 }
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/event_bytes_v1.txt");
-
-fn tag_of(line: &str) -> &str {
-    line.get(..4).unwrap_or("????")
-}
-
 #[test]
-fn choice_encodes_one_byte() {
-    let q = event_bytes(&Event::DecisionMade {
-        quote_hash: [0; 32],
-        choice: Choice::Requote,
-    });
-    let r = event_bytes(&Event::DecisionMade {
-        quote_hash: [0; 32],
-        choice: Choice::Refund,
-    });
-    assert_eq!(q.len(), 35, "tag + hash + one choice byte");
-    assert_eq!(q.len(), r.len());
-    assert_eq!(*q.last().unwrap(), 0, "Requote encodes 0");
-    assert_eq!(*r.last().unwrap(), 1, "Refund encodes 1");
-}
-
-#[test]
-fn event_bytes_matches_golden_vectors() {
-    let s = samples();
-    assert_eq!(
-        s.len(),
-        EVENT_VARIANT_COUNT,
-        "samples() must cover every variant"
-    );
-    let got: Vec<String> = s.iter().map(|e| hex::encode(event_bytes(e))).collect();
-
-    // regeneration is opt-in and never green, so a blessing is always a deliberate diff
-    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
-        let dir = std::path::Path::new(GOLDEN).parent().unwrap();
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(GOLDEN, got.join("\n") + "\n").unwrap();
-        panic!("golden regenerated, inspect the diff and rerun: {GOLDEN}");
-    }
-
-    let raw = std::fs::read_to_string(GOLDEN).unwrap_or_else(|e| {
-        panic!("golden missing or unreadable ({e}); regenerate with UPDATE_GOLDEN=1: {GOLDEN}")
-    });
-    let want: Vec<&str> = raw.lines().collect();
-    assert_eq!(
-        want.len(),
-        got.len(),
-        "golden has {} lines but samples() has {}: {GOLDEN}",
-        want.len(),
-        got.len()
-    );
-    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-        assert_eq!(
-            g,
-            w,
-            "canonical layout changed: breaking. first differing line {i} (tag {})",
-            tag_of(g)
-        );
-    }
-}
-
-// Storage is candid, and a variant that fails to decode would trap post_upgrade and
-// strand the canister on its current wasm. This walks the same Storable impl that
-// replay runs, over every variant, so the append-only storage rule is CI-enforced.
-#[test]
-fn every_variant_round_trips_through_storage() {
-    use ic_stable_structures::Storable;
-
-    let s = samples();
-    assert_eq!(
-        s.len(),
-        EVENT_VARIANT_COUNT,
-        "samples() must cover every variant"
-    );
-    for (i, event) in s.into_iter().enumerate() {
-        let env = seal(i as u64, 1_700_000_000, [i as u8; 32], event);
-        let back = EventEnvelope::from_bytes(env.to_bytes());
-        assert_eq!(back, env, "variant {i} does not survive stable storage");
+fn every_variant_survives_the_wire_both_ways() {
+    let samples = samples();
+    assert_eq!(samples.len(), types::events::EVENT_VARIANT_COUNT);
+    for wire in samples {
+        let domain = types::EventType::try_from(wire.clone()).unwrap();
+        assert_eq!(EventType::from(domain), wire);
     }
 }
 
 #[test]
-fn hash_changes_when_any_field_changes() {
-    let a = event_hash(
-        1,
-        2,
-        &[0; 32],
-        &Event::SwapDone {
-            quote_hash: [1; 32],
-        },
-    );
-    assert_ne!(
-        a,
-        event_hash(
-            2,
-            2,
-            &[0; 32],
-            &Event::SwapDone {
-                quote_hash: [1; 32]
-            }
-        )
-    );
-    assert_ne!(
-        a,
-        event_hash(
-            1,
-            3,
-            &[0; 32],
-            &Event::SwapDone {
-                quote_hash: [1; 32]
-            }
-        )
-    );
-    assert_ne!(
-        a,
-        event_hash(
-            1,
-            2,
-            &[9; 32],
-            &Event::SwapDone {
-                quote_hash: [1; 32]
-            }
-        )
-    );
-    assert_ne!(
-        a,
-        event_hash(
-            1,
-            2,
-            &[0; 32],
-            &Event::SwapDone {
-                quote_hash: [2; 32]
-            }
-        )
-    );
-}
-
-#[test]
-fn chain_links_and_detects_tampering() {
-    let e0 = seal(
-        0,
-        100,
-        [0; 32],
-        Event::PocketFunded {
-            chain_id: 8453,
-            amount: 5,
-        },
-    );
-    let e1 = seal(
-        1,
-        200,
-        e0.hash,
-        Event::SwapDone {
-            quote_hash: [1; 32],
-        },
-    );
-    assert!(chain_is_valid(&[e0.clone(), e1.clone()]));
-    let mut bad = e1.clone();
-    bad.event = Event::SwapDone {
-        quote_hash: [2; 32],
+fn an_event_reads_back_with_its_place_in_the_chain() {
+    let payload = types::EventType::SwapDone {
+        quote_hash: QuoteHash::new([1; 32]),
     };
-    assert!(!chain_is_valid(&[e0.clone(), bad]));
-    let mut unlinked = e1;
-    unlinked.parent_hash = [7; 32];
-    assert!(!chain_is_valid(&[e0, unlinked]));
+    let sealed = types::Event::seal(
+        EventIndex::new(4),
+        Timestamp::from_nanos(1_700_000_000),
+        EventHash::new([9; 32]),
+        payload,
+    );
+    let wire = Event::from(sealed.clone());
+    assert_eq!(wire.index, 4);
+    assert_eq!(wire.time_ns, 1_700_000_000);
+    assert_eq!(wire.parent_hash, [9; 32]);
+    assert_eq!(wire.hash, sealed.hash.into_bytes());
+    assert_eq!(
+        wire.payload,
+        EventType::SwapDone {
+            quote_hash: [1; 32]
+        }
+    );
+}
+
+#[test]
+fn an_amount_above_u128_max_is_refused() {
+    let wire = EventType::PocketFunded {
+        chain_id: 8453,
+        amount: Nat::from(u128::MAX) + Nat::from(1_u8),
+    };
+    assert_eq!(
+        types::EventType::try_from(wire),
+        Err(EventError::AmountTooLarge { field: "amount" })
+    );
+}
+
+#[test]
+fn text_over_the_cap_is_refused_naming_the_field() {
+    let refunded = |token: String, to: String| EventType::Refunded {
+        quote_hash: [1; 32],
+        chain_id: 137,
+        token,
+        amount: Nat::from(1_u8),
+        to,
+    };
+    let long = "a".repeat(MAX_TEXT_BYTES + 1);
+    assert_eq!(
+        types::EventType::try_from(refunded(long.clone(), "0xuser".into())),
+        Err(EventError::TextTooLong {
+            field: "token",
+            len: MAX_TEXT_BYTES + 1
+        })
+    );
+    assert_eq!(
+        types::EventType::try_from(refunded("USDT".into(), long)),
+        Err(EventError::TextTooLong {
+            field: "to",
+            len: MAX_TEXT_BYTES + 1
+        })
+    );
 }

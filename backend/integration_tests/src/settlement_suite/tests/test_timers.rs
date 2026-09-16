@@ -6,9 +6,9 @@ use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
-use settlement_api::types::events::{Event, EventEnvelope, Hash32};
+use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote};
-use settlement_api::types::swap::{SwapState, SwapStatus};
+use settlement_api::types::swap::{Swap, SwapStatus};
 use std::time::Duration;
 
 fn quoter() -> Principal {
@@ -60,11 +60,11 @@ fn get_pending(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Quot
     answer.expect("the quoter may read the store")
 }
 
-fn get_swap(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<SwapState> {
+fn get_swap(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Swap> {
     settlement::get_swap(pic, canister, stranger(), hash)
 }
 
-fn events(pic: &PocketIc, canister: Principal) -> Vec<EventEnvelope> {
+fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
     events_page(pic, canister, stranger(), 0, 100)
 }
 
@@ -110,15 +110,12 @@ fn waiting_swap(
         pic,
         canister,
         admin,
-        &Event::FundsReceived {
+        &EventType::FundsReceived {
             quote_hash: hash,
             quote_bytes: q.canonical_bytes(),
             chain_id: q.src_chain.get(),
             token: q.src_token.to_string(),
-            amount: q
-                .amount_in
-                .try_into_u128()
-                .expect("a quote amount fits u128"),
+            amount: q.amount_in.into(),
             tx_ref: format!("0xdeposit{nonce}"),
         },
     )
@@ -127,7 +124,7 @@ fn waiting_swap(
         pic,
         canister,
         admin,
-        &Event::DecisionRequired {
+        &EventType::DecisionRequired {
             quote_hash: hash,
             reason: "slippage".into(),
         },
@@ -183,8 +180,8 @@ fn decision_timeout_auto_refunds_only_the_quotes_that_asked_for_it() {
     let logged = events(&pic, canister);
     assert_eq!(logged.len(), before + 1, "one timeout, one event");
     assert_eq!(
-        logged.last().unwrap().event,
-        Event::RefundStarted {
+        logged.last().unwrap().payload,
+        EventType::RefundStarted {
             quote_hash: auto,
             reason: "decision timeout".to_string(),
         }
@@ -424,7 +421,7 @@ fn get_swap_answers_from_the_folded_state() {
     let hash = waiting_swap(&pic, canister, admin, true, 1);
     let swap = get_swap(&pic, canister, hash).expect("the swap exists");
     assert_eq!(swap.status, SwapStatus::WaitingForUser);
-    assert_eq!(swap.amount_in, 25_000_000);
+    assert_eq!(swap.amount_in, Nat::from(25_000_000_u32));
     assert_eq!(swap.src_chain, 8453);
     assert!(swap.waiting_since_ns.is_some(), "the clock is running");
 }

@@ -6,6 +6,7 @@ use replay_audit::run_replay_audit;
 use std::cell::Cell;
 use std::thread::LocalKey;
 use std::time::Duration;
+use types::Timestamp;
 
 pub mod expiry_sweep;
 pub mod replay_audit;
@@ -39,8 +40,7 @@ pub fn restart_expiry_timer() {
     let every = interval(config::get().expiry_check_interval_s);
     restart(&EXPIRY_TIMER, || {
         ic_cdk_timers::set_timer_interval(every, || {
-            // seconds, to match the quote expiries the sweep compares against
-            run_expiry_sweep(ic_cdk::api::time() / 1_000_000_000);
+            run_expiry_sweep(Timestamp::from_nanos(ic_cdk::api::time()));
         })
     });
 }

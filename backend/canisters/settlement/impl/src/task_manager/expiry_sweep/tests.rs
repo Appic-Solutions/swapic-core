@@ -1,7 +1,6 @@
 use super::*;
 use crate::storage::halt::set_halted;
-use settlement_api::types::swap::SwapState;
-use types::{ChainId, GasMode, QuoteHash, Rail, TokenAmount};
+use types::{ChainId, GasMode, Rail, Swap, TokenAmount, UnixSeconds};
 
 fn quote(auto_refund: bool, nonce: u64) -> Quote {
     Quote {
@@ -35,23 +34,32 @@ fn registered_at(q: &Quote, now_s: u64) -> QuoteHash {
     pending_quotes::register(q.clone(), UnixSeconds::new(now_s)).expect("a live quote registers")
 }
 
+/// The canister clock at a whole second.
+fn at(secs: u64) -> Timestamp {
+    Timestamp::from_secs(secs).unwrap()
+}
+
+fn qh(byte: u8) -> QuoteHash {
+    QuoteHash::new([byte; 32])
+}
+
 /// A swap parked on a user decision since `since_ns`, carrying `bytes` as the quote the
 /// sweep will read `auto_refund` out of.
-fn waiting(bytes: Vec<u8>, since_ns: u64) -> SwapState {
-    SwapState {
+fn waiting(bytes: Vec<u8>, since_ns: u64) -> Swap {
+    Swap {
         quote_bytes: bytes,
         status: SwapStatus::WaitingForUser,
-        attempts: 0,
+        last_attempt: None,
         open_attempt: None,
-        src_chain: 8453,
-        src_token: "usdc".into(),
-        amount_in: 25_000_000,
-        amount_paid: 0,
-        waiting_since_ns: Some(since_ns),
+        src_chain: ChainId::BASE,
+        src_token: "usdc".parse().unwrap(),
+        amount_in: TokenAmount::from(25_000_000_u32),
+        amount_paid: TokenAmount::ZERO,
+        waiting_since: Some(Timestamp::from_nanos(since_ns)),
     }
 }
 
-fn state_of(swaps: Vec<(Hash32, SwapState)>) -> AppState {
+fn state_of(swaps: Vec<(QuoteHash, Swap)>) -> AppState {
     AppState {
         swaps: swaps.into_iter().collect(),
         ..AppState::default()
@@ -60,6 +68,12 @@ fn state_of(swaps: Vec<(Hash32, SwapState)>) -> AppState {
 
 const MINUTE_NS: u64 = 60 * 1_000_000_000;
 
+const TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+fn due_at(state: &AppState, now_ns: u64) -> (Vec<QuoteHash>, usize) {
+    due_refunds(state, Timestamp::from_nanos(now_ns), TIMEOUT)
+}
+
 /// The dual refund policy, at the point the timer decides: only a swap whose quote says
 /// `auto_refund` is refunded on its own. The others keep waiting for a human.
 #[test]
@@ -67,35 +81,32 @@ fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
     let auto = quote_bytes(&quote(true, 1));
     let manual = quote_bytes(&quote(false, 2));
     let state = state_of(vec![
-        ([1; 32], waiting(auto.clone(), 0)),
-        ([2; 32], waiting(manual, 0)),
+        (qh(1), waiting(auto.clone(), 0)),
+        (qh(2), waiting(manual, 0)),
         // asked for a refund, but not yet timed out
-        ([3; 32], waiting(auto.clone(), 25 * MINUTE_NS)),
+        (qh(3), waiting(auto.clone(), 25 * MINUTE_NS)),
         // not waiting for anyone
         (
-            [4; 32],
-            SwapState {
+            qh(4),
+            Swap {
                 status: SwapStatus::Executing,
-                waiting_since_ns: None,
+                waiting_since: None,
                 ..waiting(auto, 0)
             },
         ),
     ]);
-    let (due, skipped) = due_refunds(&state, 30 * MINUTE_NS + 1, 30 * MINUTE_NS);
-    assert_eq!(due, vec![[1; 32]]);
+    let (due, skipped) = due_at(&state, 30 * MINUTE_NS + 1);
+    assert_eq!(due, vec![qh(1)]);
     assert_eq!(skipped, 0);
 }
 
 /// "Older than the timeout" is strict: the deadline second itself is still the user's.
 #[test]
 fn due_refunds_fires_the_moment_after_the_timeout_and_not_before() {
-    let state = state_of(vec![([1; 32], waiting(quote_bytes(&quote(true, 1)), 100))]);
+    let state = state_of(vec![(qh(1), waiting(quote_bytes(&quote(true, 1)), 100))]);
     let timeout = 30 * MINUTE_NS;
-    assert!(due_refunds(&state, 100 + timeout, timeout).0.is_empty());
-    assert_eq!(
-        due_refunds(&state, 100 + timeout + 1, timeout).0,
-        vec![[1; 32]]
-    );
+    assert!(due_at(&state, 100 + timeout).0.is_empty());
+    assert_eq!(due_at(&state, 100 + timeout + 1).0, vec![qh(1)]);
 }
 
 /// `quote_bytes` reaches the log from a caller, so the sweep has to survive bytes it
@@ -103,12 +114,12 @@ fn due_refunds_fires_the_moment_after_the_timeout_and_not_before() {
 #[test]
 fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
     let state = state_of(vec![
-        ([1; 32], waiting(vec![], 0)),
-        ([2; 32], waiting(vec![0xff; 9], 0)),
-        ([3; 32], waiting(quote_bytes(&quote(true, 1)), 0)),
+        (qh(1), waiting(vec![], 0)),
+        (qh(2), waiting(vec![0xff; 9], 0)),
+        (qh(3), waiting(quote_bytes(&quote(true, 1)), 0)),
     ]);
-    let (due, skipped) = due_refunds(&state, 30 * MINUTE_NS + 1, 30 * MINUTE_NS);
-    assert_eq!(due, vec![[3; 32]], "the readable one is still refunded");
+    let (due, skipped) = due_at(&state, 30 * MINUTE_NS + 1);
+    assert_eq!(due, vec![qh(3)], "the readable one is still refunded");
     assert_eq!(skipped, 2);
 }
 
@@ -121,13 +132,16 @@ fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
     let deadline = config::get().permit_deadline_s;
     let hash = registered_at(&q, expires_at_s(&q) - 5);
 
-    assert_eq!(run_expiry_sweep(expires_at_s(&q) + deadline).dropped, 0);
+    assert_eq!(run_expiry_sweep(at(expires_at_s(&q) + deadline)).dropped, 0);
     assert!(
         pending_quotes::get_pending(&hash).is_some(),
         "the window is still open"
     );
 
-    assert_eq!(run_expiry_sweep(expires_at_s(&q) + deadline + 1).dropped, 1);
+    assert_eq!(
+        run_expiry_sweep(at(expires_at_s(&q) + deadline + 1)).dropped,
+        1
+    );
     assert_eq!(pending_quotes::get_pending(&hash), None);
 }
 
@@ -145,7 +159,7 @@ fn the_sweep_keys_eviction_on_the_expiry_and_not_on_the_registration() {
 
     // long past the permit window measured from the registration, and nowhere near it
     // measured from the expiry
-    assert_eq!(run_expiry_sweep(opened_at + 3_000).dropped, 0);
+    assert_eq!(run_expiry_sweep(at(opened_at + 3_000)).dropped, 0);
     assert!(pending_quotes::get_pending(&hash).is_some());
 }
 
@@ -158,7 +172,7 @@ fn a_halted_sweep_still_drops_stale_quotes() {
     let q = quote(true, 3_003);
     let hash = registered_at(&q, expires_at_s(&q));
 
-    let swept = run_expiry_sweep(expires_at_s(&q) + config::get().permit_deadline_s + 1);
+    let swept = run_expiry_sweep(at(expires_at_s(&q) + config::get().permit_deadline_s + 1));
     assert_eq!(swept.dropped, 1);
     assert_eq!(swept.refunds, 0);
     assert_eq!(pending_quotes::get_pending(&hash), None);

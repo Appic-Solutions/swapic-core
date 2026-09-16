@@ -3,8 +3,8 @@ use crate::storage::memory::{roles_memory, Memory};
 use candid::{CandidType, Principal};
 use ic_stable_structures::StableCell;
 use serde::Deserialize;
-use settlement_api::types::events::Event;
 use std::cell::RefCell;
+use types::EventType;
 
 /// The two service principals the canister answers to: the quoter opens quotes, the
 /// watcher reads them. Both are unset until a controller calls `set_roles`, and every
@@ -61,7 +61,7 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), String> {
     // the log first, because it is the step that can refuse: a rotation is the one thing
     // that changes who may move money, so it is audited, and the cell below stays the
     // operative copy. Principals as text, which is what an operator reads in an alert.
-    events::append_event(Event::RolesChanged {
+    events::append_event(EventType::RolesChanged {
         quoter: quoter.to_text(),
         watcher: watcher.to_text(),
     })?;

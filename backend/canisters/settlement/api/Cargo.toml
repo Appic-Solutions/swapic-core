@@ -8,9 +8,4 @@ edition = "2021"
 types = { path = "../../../libraries/types" }
 
 candid = { workspace = true }
-ic-stable-structures = { workspace = true }
 serde = { workspace = true }
-sha2 = { workspace = true }
-
-[dev-dependencies]
-hex = { workspace = true }

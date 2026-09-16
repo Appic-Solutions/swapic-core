@@ -175,6 +175,12 @@ impl<Unit> fmt::Display for CheckedAmountOf<Unit> {
     }
 }
 
+impl<Unit> Default for CheckedAmountOf<Unit> {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 impl<Unit> Clone for CheckedAmountOf<Unit> {
     fn clone(&self) -> Self {
         *self

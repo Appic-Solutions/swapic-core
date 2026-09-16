@@ -2,8 +2,8 @@ use crate::storage::events;
 use crate::storage::memory::{config_memory, Memory};
 use ic_stable_structures::StableCell;
 use settlement_api::types::config::{Config, IntervalChanges};
-use settlement_api::types::events::Event;
 use std::cell::RefCell;
+use types::EventType;
 
 fn encode(config: &Config) -> Vec<u8> {
     candid::encode_one(config).expect("config encodes")
@@ -48,7 +48,7 @@ pub fn set(new: Config) -> Result<IntervalChanges, String> {
     // the log first, because it is the step that can refuse: the event records THAT the
     // config changed and to what, while the cell below stays the operative copy. The log
     // is world-readable through `events_page`, so what goes in it is the redacted view.
-    events::append_event(Event::ConfigChanged {
+    events::append_event(EventType::ConfigChanged {
         json: format!("{:?}", new.redacted()),
     })?;
     // out of stable memory is not a caller error, so it traps instead of returning Err:

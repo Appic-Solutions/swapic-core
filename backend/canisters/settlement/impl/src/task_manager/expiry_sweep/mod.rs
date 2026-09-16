@@ -1,10 +1,9 @@
 use crate::state::{pending_quotes, AppState};
 use crate::storage::halt::is_halted;
 use crate::storage::{config, events};
-use settlement_api::types::events::{Event, Hash32};
-use settlement_api::types::swap::SwapStatus;
 use std::time::Duration;
-use types::{Quote, UnixSeconds};
+use types::events::EventType;
+use types::{Quote, QuoteHash, SwapStatus, Timestamp};
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
 /// without a canister and without reading the event log back.
@@ -19,13 +18,13 @@ pub struct Sweep {
     pub skipped: usize,
 }
 
-/// One pass of the expiry timer. `now_s` is the caller's clock, so the whole pass is
+/// One pass of the expiry timer. `now` is the caller's clock, so the whole pass is
 /// testable without a canister.
-pub fn run_expiry_sweep(now_s: u64) -> Sweep {
+pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     let config = config::get();
     let mut swept = Sweep {
         dropped: pending_quotes::sweep_expired(
-            UnixSeconds::new(now_s),
+            now.as_secs(),
             Duration::from_secs(config.permit_deadline_s),
         ),
         ..Sweep::default()
@@ -35,18 +34,13 @@ pub fn run_expiry_sweep(now_s: u64) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let timeout_ns = config
-        .decision_timeout_min
-        .saturating_mul(60)
-        .saturating_mul(1_000_000_000);
-    let (due, unreadable) = events::with_state(|state| {
-        due_refunds(state, now_s.saturating_mul(1_000_000_000), timeout_ns)
-    });
+    let timeout = Duration::from_secs(config.decision_timeout_min.saturating_mul(60));
+    let (due, unreadable) = events::with_state(|state| due_refunds(state, now, timeout));
     swept.skipped = unreadable;
     // collected first, then appended: `with_state` holds a shared borrow of the state that
     // `append_event` takes mutably, so appending inside that closure would panic
     for quote_hash in due {
-        let appended = events::append_event(Event::RefundStarted {
+        let appended = events::append_event(EventType::RefundStarted {
             quote_hash,
             reason: "decision timeout".to_string(),
         });
@@ -62,18 +56,22 @@ pub fn run_expiry_sweep(now_s: u64) -> Sweep {
 /// Which waiting swaps have run out of time and whose quote asked for an automatic refund,
 /// plus a count of the ones whose `quote_bytes` did not parse. Pure and total: an
 /// unreadable quote is counted and stepped over, never a panic.
-fn due_refunds(state: &AppState, now_ns: u64, timeout_ns: u64) -> (Vec<Hash32>, usize) {
+fn due_refunds(state: &AppState, now: Timestamp, timeout: Duration) -> (Vec<QuoteHash>, usize) {
     let mut due = Vec::new();
     let mut unreadable = 0;
     for (quote_hash, swap) in &state.swaps {
         if swap.status != SwapStatus::WaitingForUser {
             continue;
         }
-        let Some(since_ns) = swap.waiting_since_ns else {
+        let Some(since) = swap.waiting_since else {
             continue;
         };
-        // older than the timeout, so the deadline second itself is still the user's
-        if now_ns <= since_ns.saturating_add(timeout_ns) {
+        // older than the timeout, so the deadline itself is still the user's; a deadline
+        // past what a timestamp can hold never comes
+        if since
+            .checked_add(timeout)
+            .is_none_or(|deadline| now <= deadline)
+        {
             continue;
         }
         match Quote::parse(&swap.quote_bytes) {

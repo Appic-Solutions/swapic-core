@@ -2,15 +2,16 @@ use crate::state::transitions::{apply, check_transition, replay};
 use crate::state::AppState;
 use crate::storage::memory::{events_data_memory, events_index_memory, Memory};
 use ic_stable_structures::StableLog;
-use settlement_api::types::events::{chain_is_valid, seal, Event, EventEnvelope, Hash32};
 use std::cell::RefCell;
+use types::events::{chain_is_valid, Event, EventType};
+use types::{EventHash, Timestamp};
 
 /// Longest page a query will return, so one call can never walk the whole log.
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
     // The log is the record; both statics are private so `append_event` is the only writer.
-    static EVENTS: RefCell<StableLog<EventEnvelope, Memory, Memory>> = RefCell::new(
+    static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
     );
 
@@ -20,12 +21,12 @@ thread_local! {
 
 /// The chain head the log actually ends with: the last envelope's hash, or the zero hash
 /// at genesis, which is the anchor `chain_is_valid` checks index 0 against.
-fn log_head() -> Result<Hash32, String> {
+fn log_head() -> Result<EventHash, String> {
     EVENTS.with(|e| {
         let log = e.borrow();
         match log.len().checked_sub(1) {
-            None => Ok([0u8; 32]),
-            Some(last) => log.get(last).map(|env| env.hash).ok_or_else(|| {
+            None => Ok(EventHash::ZERO),
+            Some(last) => log.get(last).map(|event| event.hash).ok_or_else(|| {
                 format!(
                     "log says it holds {} entries but {last} is missing",
                     last + 1
@@ -37,13 +38,13 @@ fn log_head() -> Result<Hash32, String> {
 
 /// Enough of a hash to tell two chain heads apart in an error message, without printing
 /// sixty-four characters of it.
-fn short(hash: &Hash32) -> String {
-    hex::encode(&hash[..4])
+fn short(hash: &EventHash) -> String {
+    hex::encode(&hash.as_ref()[..4])
 }
 
 /// The one and only path that writes an event: guard, seal, stable append, apply, all
 /// within a single message. Nothing else may touch EVENTS or STATE.
-pub fn append_event(event: Event) -> Result<u64, String> {
+pub fn append_event(payload: EventType) -> Result<u64, String> {
     STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         // the head the heap thinks the chain is on must be the head the log actually ends
@@ -60,30 +61,30 @@ pub fn append_event(event: Event) -> Result<u64, String> {
                 short(&state.last_event_hash)
             ));
         }
-        check_transition(&state, &event)?;
-        let envelope = seal(
+        check_transition(&state, &payload)?;
+        let event = Event::seal(
             state.next_event_index,
-            ic_cdk::api::time(),
+            Timestamp::from_nanos(ic_cdk::api::time()),
             state.last_event_hash,
-            event,
+            payload,
         );
         // the sealed index must be the slot the log is about to write, or the chain forks;
         // checked before the write, because returning Err after one would commit an event
         // that was never applied
         let next_slot = EVENTS.with(|e| e.borrow().len());
-        if next_slot != envelope.index {
+        if next_slot != event.index.get() {
             return Err(format!(
                 "log is at {next_slot} but the event sealed as {}",
-                envelope.index
+                event.index
             ));
         }
         EVENTS
-            .with(|e| e.borrow_mut().append(&envelope))
+            .with(|e| e.borrow_mut().append(&event))
             .map_err(|e| format!("stable append failed: {e:?}"))?;
         // the append is the last fallible step and `apply` is total, so once the message
         // commits the log and the state agree; if anything traps, the IC rolls back both
-        apply(&mut state, &envelope);
-        Ok(envelope.index)
+        apply(&mut state, &event);
+        Ok(event.index.get())
     })
 }
 
@@ -98,7 +99,12 @@ pub fn with_state<R>(f: impl FnOnce(&AppState) -> R) -> R {
 /// Flipping the same bit a second time puts the head back.
 #[cfg(feature = "inttest")]
 pub fn test_skew_chain_head() {
-    STATE.with(|s| s.borrow_mut().last_event_hash[0] ^= 1);
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let mut head = state.last_event_hash.into_bytes();
+        head[0] ^= 1;
+        state.last_event_hash = EventHash::new(head);
+    });
 }
 
 /// Called from `init` and `post_upgrade`: the heap is a cache, the log is the record.
@@ -111,7 +117,7 @@ pub fn event_count() -> u64 {
     EVENTS.with(|e| e.borrow().len())
 }
 
-pub fn events_page(start: u64, len: u64) -> Vec<EventEnvelope> {
+pub fn events_page(start: u64, len: u64) -> Vec<Event> {
     let end = start.saturating_add(len.min(MAX_PAGE));
     EVENTS.with(|e| {
         let log = e.borrow();

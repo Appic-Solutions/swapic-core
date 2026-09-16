@@ -20,7 +20,17 @@ type Config = record {
   max_swap_usd : nat64;
   max_batch_items : nat32;
 };
-type Event = variant {
+// One entry of the log. `time_ns` is IC time in nanoseconds.
+type Event = record {
+  hash : blob;
+  index : nat64;
+  time_ns : nat64;
+  payload : EventType;
+  parent_hash : blob;
+};
+// What happened. The event hash is computed over a canonical encoding of the variant,
+// never over this candid layout.
+type EventType = variant {
   PocketFunded : record { chain_id : nat64; amount : nat };
   PaidInStable : record { quote_hash : blob; chain_id : nat64; amount : nat };
   FundsReceived : record {
@@ -72,13 +82,6 @@ type Event = variant {
   PocketReserved : record { quote_hash : blob; chain_id : nat64; amount : nat };
   PocketSpent : record { quote_hash : blob; chain_id : nat64; amount : nat };
 };
-type EventEnvelope = record {
-  hash : blob;
-  event : Event;
-  index : nat64;
-  time_ns : nat64;
-  parent_hash : blob;
-};
 // Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 type GasMode = variant { Legacy; Gasless };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
@@ -116,17 +119,19 @@ type Result = variant { Ok : Config; Err : text };
 type Result_1 = variant { Ok : opt Quote; Err : text };
 type Result_2 = variant { Ok : blob; Err : text };
 type Result_3 = variant { Ok; Err : text };
-type SwapState = record {
+// The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
+type Swap = record {
   status : SwapStatus;
   quote_bytes : blob;
-  attempts : nat32;
   src_token : text;
   waiting_since_ns : opt nat64;
   amount_paid : nat;
   src_chain : nat64;
   amount_in : nat;
   open_attempt : opt nat32;
+  last_attempt : opt nat32;
 };
+// Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
 type SwapStatus = variant {
   PaidInStable;
   Refunding;
@@ -141,7 +146,7 @@ type SwapStatus = variant {
 service : () -> {
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
-  events_page : (nat64, nat64) -> (vec EventEnvelope) query;
+  events_page : (nat64, nat64) -> (vec Event) query;
   // Public, so it answers with the redacted view; `get_config_full` is the ops door onto
   // the real thing.
   get_config : () -> (Config) query;
@@ -152,7 +157,7 @@ service : () -> {
   get_pending : (blob) -> (Result_1) query;
   // The folded state of one swap. Public: every field of it is already in the
   // world-readable event log, `quote_bytes` included.
-  get_swap : (blob) -> (opt SwapState) query;
+  get_swap : (blob) -> (opt Swap) query;
   // True once a replay audit has found the log and the live state disagree. Nothing clears
   // it but a controller, and money endpoints refuse while it is set.
   halted : () -> (bool) query;

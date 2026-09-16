@@ -69,7 +69,7 @@ impl Attempt {
 }
 
 /// The position of an event in the log, counted from zero.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 #[cbor(transparent)]
 pub struct EventIndex(#[n(0)] u64);
 
