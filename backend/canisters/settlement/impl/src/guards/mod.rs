@@ -1,38 +1,11 @@
+//! The endpoint-edge checks. They answer in the wire's own `GuardError`, since a refusal
+//! is only ever returned to the caller, and a refusal names the role and never a
+//! principal: a stranger learns whether a role is configured, nothing about who holds it.
+
 use crate::storage::halt::is_halted;
-use crate::storage::roles::{self, Role, Roles};
+use crate::storage::roles::{self, Roles};
 use candid::Principal;
-use thiserror::Error;
-
-/// Why a caller was refused before anything ran. A refusal names the role and never a
-/// principal: a stranger learns whether a role is configured, nothing about who holds it.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum GuardError {
-    #[error("caller is not a controller")]
-    NotController,
-    #[error("{0} role is not set")]
-    RoleNotSet(Role),
-    #[error("caller is not the {0}")]
-    CallerNotRole(Role),
-    #[error("quoter and watcher roles are not set")]
-    RolesNotSet,
-    #[error("caller is not the quoter or the watcher")]
-    CallerNotQuoterOrWatcher,
-    #[error("canister is halted: a replay audit found the log and the state disagree")]
-    Halted,
-}
-
-impl From<GuardError> for settlement_api::types::errors::GuardError {
-    fn from(error: GuardError) -> Self {
-        match error {
-            GuardError::NotController => Self::NotController,
-            GuardError::RoleNotSet(role) => Self::RoleNotSet(role.into()),
-            GuardError::CallerNotRole(role) => Self::CallerNotRole(role.into()),
-            GuardError::RolesNotSet => Self::RolesNotSet,
-            GuardError::CallerNotQuoterOrWatcher => Self::CallerNotQuoterOrWatcher,
-            GuardError::Halted => Self::Halted,
-        }
-    }
-}
+use settlement_api::types::errors::{GuardError, Role};
 
 /// The ops rule: controllers only. The two service rules live below.
 pub fn require_controller() -> Result<(), GuardError> {

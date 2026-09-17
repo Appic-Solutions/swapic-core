@@ -10,7 +10,7 @@ pub use settlement_api::types::errors::SetConfigError;
 /// or the write puts "***" into `rpc_urls` and is refused.
 #[update]
 pub fn set_config(new: Config) -> Result<(), SetConfigError> {
-    require_controller().map_err(|e| SetConfigError::Guard(e.into()))?;
+    require_controller().map_err(SetConfigError::Guard)?;
     let new = types::Config::try_from(new).map_err(|e| SetConfigError::InvalidConfig(e.into()))?;
     let changed = config::set(new).map_err(|e| match e {
         StoreError::Invalid(e) => SetConfigError::InvalidConfig(e.into()),

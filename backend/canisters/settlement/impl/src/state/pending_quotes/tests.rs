@@ -148,7 +148,8 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
     let h = register(q.clone(), just_before_expiry(&q)).expect("a live quote registers");
     assert_eq!(h, q.hash().unwrap());
     assert_eq!(get_pending(&h), Some(q.clone()));
-    // the quoter re-registers after an upgrade, so the same quote twice is not an error
+    // the store is stable and keeps a bare `Quote`, so an upgrade loses nothing and a repeat
+    // is the quoter retrying: the same quote twice overwrites itself, and is not an error
     assert_eq!(register(q.clone(), just_before_expiry(&q)), Ok(h));
     assert_eq!(get_pending(&h), Some(q));
     assert_eq!(get_pending(&QuoteHash::new([0; 32])), None);

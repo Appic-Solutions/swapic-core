@@ -140,8 +140,9 @@ fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
     assert_eq!(pending_quotes::get_pending(&hash), None);
 }
 
-/// Eviction is keyed on `expires_at_s`, never on when the quote was registered: a
-/// re-registration resets the latter, and a long-lived quote is not stale at 120s.
+/// Eviction is keyed on `expires_at_s`, never on when the quote was registered: the stable
+/// store keeps a bare `Quote` with no registration time in it, and a long-lived quote is
+/// not stale 120s after it was registered.
 #[test]
 fn the_sweep_keys_eviction_on_the_expiry_and_not_on_the_registration() {
     pending_quotes::clear();

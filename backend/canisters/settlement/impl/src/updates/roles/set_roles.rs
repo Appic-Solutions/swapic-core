@@ -8,9 +8,9 @@ pub use settlement_api::types::errors::SetRolesError;
 /// there is no path that leaves one of them stale.
 #[update]
 pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), SetRolesError> {
-    require_controller().map_err(|e| SetRolesError::Guard(e.into()))?;
+    require_controller().map_err(SetRolesError::Guard)?;
     roles::set_roles(quoter, watcher).map_err(|e| match e {
-        RolesError::AnonymousRole(role) => SetRolesError::AnonymousRole(role.into()),
+        RolesError::AnonymousRole(role) => SetRolesError::AnonymousRole(role),
         RolesError::Append(e) => SetRolesError::Append(e.into()),
     })
 }

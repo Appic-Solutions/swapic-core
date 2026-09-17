@@ -11,7 +11,7 @@ use types::Timestamp;
 /// must carry. Pre-money, so nothing is written to the log.
 #[update]
 pub fn register_quote(quote: Quote) -> Result<Hash32, RegisterQuoteError> {
-    guards::require_quoter().map_err(|e| RegisterQuoteError::Guard(e.into()))?;
+    guards::require_quoter().map_err(RegisterQuoteError::Guard)?;
     let quote =
         types::Quote::try_from(quote).map_err(|e| RegisterQuoteError::InvalidQuote(e.into()))?;
     // deliberately no `gas_mode` gate: the mode only matters once funds arrive

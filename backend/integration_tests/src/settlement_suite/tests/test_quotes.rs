@@ -8,6 +8,7 @@ use pocket_ic::{PocketIc, Time};
 use settlement_api::types::errors::{GuardError, RegisterQuoteError, Role, SetRolesError};
 use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote, QuoteError};
+use sha2::{Digest, Sha256};
 use types::address::MAX_TEXT_BYTES;
 use types::quote::MAX_QUOTE_LIFETIME;
 
@@ -44,6 +45,37 @@ fn golden_hash() -> Hash32 {
     let hex = std::fs::read_to_string(GOLDEN).expect("golden vector, committed");
     let bytes = hex::decode(hex.trim()).expect("golden vector is hex");
     bytes.try_into().expect("golden vector is 32 bytes")
+}
+
+/// The swap id a wire quote would have: sha256 over its canonical preimage, written here
+/// byte by byte from the layout rather than through the types crate, so it exists even for
+/// a quote the canister refuses to convert.
+fn hash_by_hand(q: &Quote) -> Hash32 {
+    let mut preimage = Vec::new();
+    let text = |preimage: &mut Vec<u8>, s: &str| {
+        preimage.extend_from_slice(&u32::try_from(s.len()).unwrap().to_be_bytes());
+        preimage.extend_from_slice(s.as_bytes());
+    };
+    let amount = |n: &Nat| u128::try_from(&n.0).expect("a u128 amount").to_be_bytes();
+    preimage.push(q.version);
+    preimage.extend_from_slice(&q.src_chain.to_be_bytes());
+    text(&mut preimage, &q.src_token);
+    preimage.extend_from_slice(&amount(&q.amount_in));
+    preimage.extend_from_slice(&q.dst_chain.to_be_bytes());
+    text(&mut preimage, &q.dst_token);
+    preimage.extend_from_slice(&amount(&q.expected_out));
+    preimage.extend_from_slice(&amount(&q.min_out));
+    text(&mut preimage, &q.dst_address);
+    text(&mut preimage, q.refund_address.as_deref().unwrap_or(""));
+    preimage.push(u8::from(q.auto_refund));
+    preimage.push(match q.gas_mode {
+        GasMode::Gasless => 0,
+        GasMode::Legacy => 1,
+    });
+    text(&mut preimage, &q.rail);
+    preimage.extend_from_slice(&q.expires_at_s.to_be_bytes());
+    preimage.extend_from_slice(&q.nonce.to_be_bytes());
+    Sha256::digest(preimage).into()
 }
 
 fn quoter() -> Principal {
@@ -256,12 +288,14 @@ fn register_quote_refuses_a_string_over_the_byte_cap() {
         }),
         "name the field"
     );
-    // refused at conversion, so it never had a swap id to be stored under
-    assert!(types::Quote::try_from(over).is_err());
+    // refused at conversion, so the canister never computed an id for it: the id it would
+    // have is built by hand, and the builder is checked against the golden first
+    assert!(types::Quote::try_from(over.clone()).is_err());
+    assert_eq!(hash_by_hand(&fixed_quote()), golden_hash());
     assert_eq!(
-        get_pending(&pic, canister, quoter(), golden_hash()).unwrap(),
+        get_pending(&pic, canister, quoter(), hash_by_hand(&over)).unwrap(),
         None,
-        "and nothing was stored"
+        "and nothing was stored under the id it would have had"
     );
 
     let at_cap = Quote {

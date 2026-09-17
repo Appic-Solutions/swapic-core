@@ -7,7 +7,7 @@ pub use settlement_api::types::events::EventType;
 /// else.
 #[ic_cdk::update]
 pub fn test_append(payload: EventType) -> Result<u64, TestAppendError> {
-    require_controller().map_err(|e| TestAppendError::Guard(e.into()))?;
+    require_controller().map_err(TestAppendError::Guard)?;
     let payload =
         types::EventType::try_from(payload).map_err(|e| TestAppendError::InvalidEvent(e.into()))?;
     events::append_event(payload)

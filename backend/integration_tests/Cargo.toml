@@ -9,6 +9,7 @@ candid = { workspace = true }
 hex = { workspace = true }
 pocket-ic = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 settlement_api = { path = "../canisters/settlement/api" }
 types = { path = "../libraries/types" }

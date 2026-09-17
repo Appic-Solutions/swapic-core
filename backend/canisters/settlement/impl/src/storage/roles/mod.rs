@@ -4,43 +4,18 @@ use candid::{CandidType, Principal};
 use ic_stable_structures::storable::{Bound, Storable};
 use ic_stable_structures::StableCell;
 use serde::Deserialize;
+use settlement_api::types::errors::Role;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::fmt;
 use thiserror::Error;
 use types::EventType;
 
 use super::events::AppendError;
 
-/// A service role the canister hands out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role {
-    Quoter,
-    Watcher,
-}
-
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Role::Quoter => "quoter",
-            Role::Watcher => "watcher",
-        })
-    }
-}
-
-impl From<Role> for settlement_api::types::errors::Role {
-    fn from(role: Role) -> Self {
-        match role {
-            Role::Quoter => Self::Quoter,
-            Role::Watcher => Self::Watcher,
-        }
-    }
-}
-
 /// Why a role rotation was refused. Nothing was written.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RolesError {
-    #[error("{0} cannot be the anonymous principal")]
+    #[error("the {0:?} cannot be the anonymous principal")]
     AnonymousRole(Role),
     #[error(transparent)]
     Append(#[from] AppendError),

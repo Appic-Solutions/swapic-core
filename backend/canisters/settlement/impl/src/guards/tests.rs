@@ -49,7 +49,7 @@ fn check_either_refuses_when_neither_role_is_set() {
 fn a_refusal_names_the_role_and_never_a_principal() {
     let holder = p(2);
     let err = check(Some(holder), p(9), Role::Quoter).unwrap_err();
-    let shown = format!("{err} {err:?}");
+    let shown = format!("{err:?}");
     assert!(
         !shown.contains(&holder.to_text()),
         "leaked the holder: {shown}"
@@ -58,5 +58,5 @@ fn a_refusal_names_the_role_and_never_a_principal() {
         !shown.contains(&p(9).to_text()),
         "echoed the caller: {shown}"
     );
-    assert!(shown.contains("quoter"), "names the role: {shown}");
+    assert!(shown.contains("Quoter"), "names the role: {shown}");
 }
