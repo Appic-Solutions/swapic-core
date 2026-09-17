@@ -161,6 +161,12 @@ impl Timestamp {
         let nanos = u64::try_from(duration.as_nanos()).ok()?;
         self.0.checked_add(nanos).map(Self)
     }
+
+    /// `None` before the epoch.
+    pub fn checked_sub(self, duration: Duration) -> Option<Self> {
+        let nanos = u64::try_from(duration.as_nanos()).ok()?;
+        self.0.checked_sub(nanos).map(Self)
+    }
 }
 
 /// Whole seconds since the Unix epoch: the precision a quote's expiry is signed at.

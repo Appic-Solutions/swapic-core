@@ -123,6 +123,32 @@ fn a_pocket_never_overflows_silently() {
     assert_eq!(full.reserve(amount(1)), Err(PocketError::Overflow));
 }
 
+/// The waiting index walks its keys oldest first: a stored key orders by when the wait began,
+/// then by swap id, in its bytes as well as in `Ord`.
+#[test]
+fn waiting_keys_order_by_wait_then_swap_and_round_trip() {
+    use ic_stable_structures::Storable;
+
+    let key = |nanos: u64, byte: u8| WaitingKey {
+        since: Timestamp::from_nanos(nanos),
+        quote_hash: QuoteHash::new([byte; 32]),
+    };
+    let keys = [
+        key(1, 9),
+        key(255, 0),
+        key(256, 0),
+        key(256, 1),
+        key(u64::MAX, 0),
+    ];
+    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    let bytes: Vec<_> = keys.iter().map(|k| k.to_bytes().into_owned()).collect();
+    assert!(bytes.windows(2).all(|pair| pair[0] < pair[1]));
+    for k in keys {
+        assert_eq!(k.to_bytes().len(), 40);
+        assert_eq!(WaitingKey::from_bytes(k.to_bytes()), k);
+    }
+}
+
 /// Swaps and pockets live in stable maps, so both must survive their encoding exactly.
 #[test]
 fn swaps_and_pockets_round_trip_through_storage() {

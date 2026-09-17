@@ -1,6 +1,8 @@
 use super::*;
 use crate::storage::halt::set_halted;
-use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
+use crate::storage::on_fresh_memory;
+use types::events::Choice;
+use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds, WaitingKey};
 
 fn quote(auto_refund: bool, nonce: u64) -> Quote {
     Quote {
@@ -172,4 +174,147 @@ fn a_halted_sweep_still_drops_stale_quotes() {
     assert_eq!(swept.refunds, 0);
     assert_eq!(pending_quotes::get_pending(&hash), None);
     set_halted(false);
+}
+
+fn append_at(payload: EventType, at: Timestamp) {
+    events::append_event_at(payload, at).expect("the fold admits it");
+}
+
+/// Funds a swap for `q` at `at` and returns its id.
+fn funded(q: &Quote, at: Timestamp) -> QuoteHash {
+    let quote_hash = q.hash().unwrap();
+    append_at(
+        EventType::FundsReceived {
+            quote_hash,
+            quote_bytes: quote_bytes(q),
+            chain_id: q.src_chain,
+            token: q.src_token.clone(),
+            amount: q.amount_in,
+            tx_ref: format!("0xdeposit{}", q.nonce),
+        },
+        at,
+    );
+    quote_hash
+}
+
+fn ask_at(quote_hash: QuoteHash, at: Timestamp) {
+    append_at(
+        EventType::DecisionRequired {
+            quote_hash,
+            reason: "slippage".into(),
+        },
+        at,
+    );
+}
+
+fn status(quote_hash: &QuoteHash) -> SwapStatus {
+    events::read_state(|state| state.swap(quote_hash).unwrap().status)
+}
+
+/// The sweep reads the waiting index, so hundreds of closed swaps and swaps that stopped
+/// waiting cost it nothing, and it refunds exactly the timed-out waiting swaps whose quote
+/// asked for it, once.
+#[test]
+fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones() {
+    on_fresh_memory(|| {
+        let timeout = config::get().decision_timeout;
+        let start = at(1_700_000_000);
+        let later = |secs| start.checked_add(Duration::from_secs(secs)).unwrap();
+
+        let closed: Vec<QuoteHash> = (0..300)
+            .map(|nonce| {
+                let quote_hash = funded(&quote(true, nonce), start);
+                append_at(
+                    EventType::Frozen {
+                        quote_hash,
+                        reason: "settled".into(),
+                    },
+                    start,
+                );
+                quote_hash
+            })
+            .collect();
+        // waited, then stopped: an answer, a refund by hand, a freeze
+        let answered = funded(&quote(true, 1_000), start);
+        ask_at(answered, start);
+        append_at(
+            EventType::DecisionMade {
+                quote_hash: answered,
+                choice: Choice::Requote,
+            },
+            later(1),
+        );
+        let refunded = funded(&quote(true, 1_001), start);
+        ask_at(refunded, start);
+        append_at(
+            EventType::RefundStarted {
+                quote_hash: refunded,
+                reason: "operator".into(),
+            },
+            later(1),
+        );
+        let frozen = funded(&quote(true, 1_002), start);
+        ask_at(frozen, start);
+        append_at(
+            EventType::Frozen {
+                quote_hash: frozen,
+                reason: "sanctions".into(),
+            },
+            later(1),
+        );
+        // still waiting: two timed out with auto_refund, one timed out without, one young
+        let due = [2_000, 2_001].map(|nonce| funded(&quote(true, nonce), start));
+        let manual = funded(&quote(false, 2_002), start);
+        let young = funded(&quote(true, 2_003), start);
+        for quote_hash in due.into_iter().chain([manual]) {
+            ask_at(quote_hash, start);
+        }
+        ask_at(young, later(600));
+
+        let now = start.checked_add(timeout).unwrap();
+        let first_moment = Timestamp::from_nanos(now.as_nanos() + 1);
+        assert_eq!(
+            run_expiry_sweep(now).refunds,
+            0,
+            "the deadline itself is still the user's"
+        );
+        assert_eq!(
+            run_expiry_sweep(first_moment),
+            Sweep {
+                dropped: 0,
+                refunds: 2,
+                skipped: 0
+            }
+        );
+
+        for quote_hash in &due {
+            assert_eq!(status(quote_hash), SwapStatus::Refunding);
+        }
+        assert_eq!(status(&manual), SwapStatus::WaitingForUser);
+        assert_eq!(status(&young), SwapStatus::WaitingForUser);
+        assert_eq!(status(&answered), SwapStatus::Executing);
+        assert_eq!(status(&refunded), SwapStatus::Refunding);
+        assert!(closed
+            .iter()
+            .chain([&frozen])
+            .all(|q| status(q) == SwapStatus::Frozen));
+        let mut still_waiting = vec![
+            WaitingKey {
+                since: start,
+                quote_hash: manual,
+            },
+            WaitingKey {
+                since: later(600),
+                quote_hash: young,
+            },
+        ];
+        still_waiting.sort();
+        assert_eq!(
+            events::read_state(|state| state.store().waiting()),
+            still_waiting
+        );
+
+        assert_eq!(run_expiry_sweep(first_moment).refunds, 0, "and only once");
+        assert!(events::verify_replay());
+    });
 }

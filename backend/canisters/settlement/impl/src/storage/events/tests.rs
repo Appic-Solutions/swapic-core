@@ -3,8 +3,12 @@ use crate::state::transitions::ReplayError;
 use crate::state::MemoryStore;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
+use crate::task_manager::expiry_sweep::run_expiry_sweep;
 use crate::task_manager::replay_audit::run_replay_audit;
-use types::{Attempt, SwapStatus, TokenAmount, TxHash};
+use types::events::Choice;
+use types::{
+    Attempt, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds, WaitingKey,
+};
 
 fn fold_both(payloads: Vec<EventType>) -> (State<StableStore>, State<MemoryStore>) {
     let mut stable = State::new(StableStore(()));
@@ -173,5 +177,148 @@ fn replay_audit_halts_on_a_fold_that_replays_cleanly_but_differs() {
         assert!(!verify_replay());
         run_replay_audit();
         assert!(is_halted());
+    });
+}
+
+/// The waiting index as a scan of every swap would build it.
+fn scanned_waiting(store: &impl Store) -> Vec<WaitingKey> {
+    let mut keys: Vec<WaitingKey> = store
+        .swaps()
+        .into_iter()
+        .filter_map(|(quote_hash, swap)| {
+            swap.waiting_since
+                .map(|since| WaitingKey { since, quote_hash })
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn waiting_key(nanos: u64, quote_hash: QuoteHash) -> WaitingKey {
+    WaitingKey {
+        since: Timestamp::from_nanos(nanos),
+        quote_hash,
+    }
+}
+
+/// Every transition that starts or stops a waiting clock keeps the index equal to a full
+/// scan, in the stable store as each event lands and in the heap fold the audit rebuilds.
+#[test]
+fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
+    on_fresh_memory(|| {
+        let [a, b, c, d] = [1, 2, 3, 4].map(|byte| QuoteHash::new([byte; 32]));
+        let ask = |quote_hash| EventType::DecisionRequired {
+            quote_hash,
+            reason: "slippage".into(),
+        };
+        let decide = |quote_hash, choice| EventType::DecisionMade { quote_hash, choice };
+        let refund = |quote_hash| EventType::RefundStarted {
+            quote_hash,
+            reason: "operator".into(),
+        };
+        let freeze = |quote_hash| EventType::Frozen {
+            quote_hash,
+            reason: "sanctions".into(),
+        };
+        let steps = vec![
+            (1, funds(a)),
+            (2, funds(b)),
+            (3, funds(c)),
+            (4, funds(d)),
+            (10, ask(a)),
+            // two waits that begin at the same instant are two keys
+            (11, ask(b)),
+            (11, ask(c)),
+            // an answer stops the clock, and a later question starts a new one
+            (20, decide(a, Choice::Requote)),
+            (21, ask(a)),
+            // a refund and a freeze stop it too
+            (30, refund(b)),
+            (31, freeze(c)),
+            // neither touches a swap that was not waiting
+            (32, refund(d)),
+            (33, freeze(d)),
+            (40, decide(a, Choice::Refund)),
+            (50, ask(a)),
+        ];
+        for (nanos, payload) in steps {
+            append_event_at(payload.clone(), Timestamp::from_nanos(nanos))
+                .expect("the fold admits it");
+            let (index, scan) =
+                read_state(|state| (state.store().waiting(), scanned_waiting(state.store())));
+            assert_eq!(index, scan, "after {payload:?} at {nanos}");
+            if nanos == 11 && payload == ask(c) {
+                assert_eq!(
+                    index,
+                    vec![waiting_key(10, a), waiting_key(11, b), waiting_key(11, c)]
+                );
+            }
+        }
+        assert_eq!(
+            read_state(|state| state.store().waiting()),
+            vec![waiting_key(50, a)]
+        );
+
+        let heap = log_replay().expect("the log folds");
+        assert_eq!(heap.store().waiting(), scanned_waiting(heap.store()));
+        assert!(verify_replay(), "and the audit compares the two indexes");
+    });
+}
+
+/// The index is part of the fold, so an entry no event made is a divergence the audit
+/// halts on.
+#[test]
+fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
+    on_fresh_memory(|| {
+        let quote = QuoteHash::new([5; 32]);
+        append(funds(quote));
+        assert!(verify_replay());
+        StableStore(()).put_waiting(waiting_key(7, quote));
+
+        assert!(!verify_replay());
+        run_replay_audit();
+        assert!(is_halted());
+    });
+}
+
+/// The sweep finds timed-out swaps through the index alone: a waiting swap planted in the
+/// swaps map with no index entry is invisible to it, which is what keeps a pass from
+/// reading every swap ever recorded.
+#[test]
+fn the_expiry_sweep_reads_the_index_and_not_the_swaps() {
+    on_fresh_memory(|| {
+        let quote_hash = QuoteHash::new([4; 32]);
+        append(funds(quote_hash));
+        let auto_refund = Quote {
+            version: 1,
+            src_chain: ChainId::BASE,
+            src_token: "usdc".parse().unwrap(),
+            amount_in: TokenAmount::from(1_u32),
+            dst_chain: ChainId::ARBITRUM,
+            dst_token: "usdc".parse().unwrap(),
+            expected_out: TokenAmount::from(1_u32),
+            min_out: TokenAmount::from(1_u32),
+            dst_address: "0xuser".parse().unwrap(),
+            refund_address: None,
+            auto_refund: true,
+            gas_mode: GasMode::Gasless,
+            rail: Rail::CctpV2Fast,
+            expires_at: UnixSeconds::new(1),
+            nonce: 1,
+        };
+        let mut swap = StableStore(()).swap(&quote_hash).unwrap();
+        swap.quote_bytes = auto_refund.canonical_bytes().unwrap();
+        swap.status = SwapStatus::WaitingForUser;
+        swap.waiting_since = Some(Timestamp::from_nanos(0));
+        StableStore(()).put_swap(quote_hash, swap);
+
+        // a scan would find it timed out, readable and asking for a refund
+        let long_after = Timestamp::from_nanos(u64::MAX);
+        let swept = run_expiry_sweep(long_after);
+        assert_eq!((swept.refunds, swept.skipped), (0, 0));
+        assert_eq!(
+            read_state(|state| state.swap(&quote_hash).unwrap().status),
+            SwapStatus::WaitingForUser
+        );
     });
 }

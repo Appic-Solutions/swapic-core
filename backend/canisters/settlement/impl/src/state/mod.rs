@@ -1,8 +1,8 @@
 use minicbor::{Decode, Encode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Pocket, QuoteHash, Swap, SwapStatus,
-    Timestamp, TokenAmount, TransitionError,
+    Timestamp, TokenAmount, TransitionError, WaitingKey,
 };
 
 pub mod pending_quotes;
@@ -21,6 +21,15 @@ pub trait Store {
     fn pockets(&self) -> Vec<(ChainId, Pocket)>;
     fn meta(&self) -> LedgerMeta;
     fn put_meta(&mut self, meta: LedgerMeta);
+    /// Indexes a swap that began waiting for its user.
+    fn put_waiting(&mut self, key: WaitingKey);
+    fn remove_waiting(&mut self, key: &WaitingKey);
+    /// Every waiting swap, longest wait first.
+    fn waiting(&self) -> Vec<WaitingKey>;
+    /// The swaps that began waiting before `cutoff`, longest wait first. Walks the index
+    /// from its first key and stops at the first one that is not older, so the cost is the
+    /// swaps returned, not the swaps ever recorded.
+    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash>;
 }
 
 /// What the fold keeps besides swaps and pockets.
@@ -44,6 +53,7 @@ pub struct MemoryStore {
     swaps: BTreeMap<QuoteHash, Swap>,
     pockets: BTreeMap<ChainId, Pocket>,
     meta: LedgerMeta,
+    waiting: BTreeSet<WaitingKey>,
 }
 
 impl Store for MemoryStore {
@@ -84,6 +94,26 @@ impl Store for MemoryStore {
     fn put_meta(&mut self, meta: LedgerMeta) {
         self.meta = meta;
     }
+
+    fn put_waiting(&mut self, key: WaitingKey) {
+        self.waiting.insert(key);
+    }
+
+    fn remove_waiting(&mut self, key: &WaitingKey) {
+        self.waiting.remove(key);
+    }
+
+    fn waiting(&self) -> Vec<WaitingKey> {
+        self.waiting.iter().copied().collect()
+    }
+
+    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash> {
+        self.waiting
+            .iter()
+            .take_while(|key| key.since < cutoff)
+            .map(|key| key.quote_hash)
+            .collect()
+    }
 }
 
 /// The fold of the event log. [`State::check`] decides whether an event may happen, and
@@ -101,10 +131,12 @@ impl State<MemoryStore> {
             swaps,
             pockets,
             meta,
+            waiting,
         } = &self.store;
         let other_pockets = other.store.pockets();
         let other_swaps = other.store.swaps();
         *meta == other.meta()
+            && waiting.iter().eq(other.store.waiting().iter())
             && pockets
                 .iter()
                 .eq(other_pockets.iter().map(|(chain, pocket)| (chain, pocket)))
@@ -144,13 +176,25 @@ impl<S: Store> State<S> {
         self.store.pocket(chain_id).unwrap_or_default()
     }
 
-    fn update_swap(&mut self, quote_hash: &QuoteHash, update: impl FnOnce(&mut Swap)) {
+    fn update_swap<R>(&mut self, quote_hash: &QuoteHash, update: impl FnOnce(&mut Swap) -> R) -> R {
         let mut swap = self
             .store
             .swap(quote_hash)
             .expect("BUG: State::check refuses every event on an unknown swap but FundsReceived");
-        update(&mut swap);
+        let result = update(&mut swap);
         self.store.put_swap(*quote_hash, swap);
+        result
+    }
+
+    /// Drops a swap from the waiting index once its clock has stopped. A swap that was not
+    /// waiting had no clock and no entry.
+    fn stop_waiting(&mut self, quote_hash: &QuoteHash, stopped: Option<Timestamp>) {
+        if let Some(since) = stopped {
+            self.store.remove_waiting(&WaitingKey {
+                since,
+                quote_hash: *quote_hash,
+            });
+        }
     }
 
     fn record_event(&mut self, index: EventIndex, hash: EventHash) {
@@ -212,29 +256,36 @@ impl<S: Store> State<S> {
         });
     }
 
+    /// The one step that starts a waiting clock, so the one step that indexes a swap.
     fn record_decision_required(&mut self, quote_hash: &QuoteHash, at: Timestamp) {
         self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::WaitingForUser;
             swap.waiting_since = Some(at);
         });
+        self.store.put_waiting(WaitingKey {
+            since: at,
+            quote_hash: *quote_hash,
+        });
     }
 
     fn record_decision_made(&mut self, quote_hash: &QuoteHash, choice: Choice) {
-        self.update_swap(quote_hash, |swap| {
-            swap.waiting_since = None;
+        let stopped = self.update_swap(quote_hash, |swap| {
             swap.status = match choice {
                 Choice::Requote => SwapStatus::Executing,
                 Choice::Refund => SwapStatus::Refunding,
             };
+            swap.waiting_since.take()
         });
+        self.stop_waiting(quote_hash, stopped);
     }
 
     /// A refund answers any open question, so the waiting clock stops with it.
     fn record_refund_started(&mut self, quote_hash: &QuoteHash) {
-        self.update_swap(quote_hash, |swap| {
+        let stopped = self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::Refunding;
-            swap.waiting_since = None;
+            swap.waiting_since.take()
         });
+        self.stop_waiting(quote_hash, stopped);
     }
 
     fn record_refunded(&mut self, quote_hash: &QuoteHash) {
@@ -246,10 +297,11 @@ impl<S: Store> State<S> {
     }
 
     fn record_frozen(&mut self, quote_hash: &QuoteHash) {
-        self.update_swap(quote_hash, |swap| {
+        let stopped = self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::Frozen;
-            swap.waiting_since = None;
+            swap.waiting_since.take()
         });
+        self.stop_waiting(quote_hash, stopped);
     }
 
     fn record_fee_accrued(&mut self, amount: TokenAmount) {

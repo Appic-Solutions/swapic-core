@@ -20,6 +20,7 @@ const SWAPS_MEMORY_ID: MemoryId = MemoryId::new(6);
 const POCKETS_MEMORY_ID: MemoryId = MemoryId::new(7);
 const LEDGER_META_MEMORY_ID: MemoryId = MemoryId::new(8);
 const PENDING_QUOTES_MEMORY_ID: MemoryId = MemoryId::new(9);
+const WAITING_MEMORY_ID: MemoryId = MemoryId::new(10);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -59,4 +60,8 @@ pub fn ledger_meta_memory() -> Memory {
 
 pub fn pending_quotes_memory() -> Memory {
     memory(PENDING_QUOTES_MEMORY_ID)
+}
+
+pub fn waiting_memory() -> Memory {
+    memory(WAITING_MEMORY_ID)
 }

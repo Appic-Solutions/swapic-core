@@ -31,16 +31,22 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let swaps = events::read_state(|state| state.store().swaps());
-    let (due, unreadable) = due_refunds(swaps, now, config.decision_timeout);
+    let (due, unreadable) = due_refunds(
+        timed_out_waiting(now, config.decision_timeout),
+        now,
+        config.decision_timeout,
+    );
     swept.skipped = unreadable;
     // decided first, then appended, so every refund of the pass is judged against the same
     // fold and one append cannot change which swaps the pass sees
     for quote_hash in due {
-        let appended = events::append_event(EventType::RefundStarted {
-            quote_hash,
-            reason: "decision timeout".to_string(),
-        });
+        let appended = events::append_event_at(
+            EventType::RefundStarted {
+                quote_hash,
+                reason: "decision timeout".to_string(),
+            },
+            now,
+        );
         match appended {
             Ok(_) => swept.refunds += 1,
             // the guard refusing one swap is not a reason to abandon the others
@@ -50,9 +56,28 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     swept
 }
 
+/// The swaps whose wait began more than `timeout` before `now`, read off the waiting index
+/// rather than a scan of every swap, so a pass costs what is waiting, not what ever settled.
+fn timed_out_waiting(now: Timestamp, timeout: Duration) -> Vec<(QuoteHash, Swap)> {
+    // a clock less than a whole timeout past the epoch has no wait that old
+    let Some(cutoff) = now.checked_sub(timeout) else {
+        return Vec::new();
+    };
+    events::read_state(|state| {
+        let store = state.store();
+        // an index entry always has its swap: the same record step writes both
+        store
+            .waiting_since_before(cutoff)
+            .into_iter()
+            .filter_map(|quote_hash| store.swap(&quote_hash).map(|swap| (quote_hash, swap)))
+            .collect()
+    })
+}
+
 /// Which waiting swaps have run out of time and whose quote asked for an automatic refund,
 /// plus a count of the ones whose `quote_bytes` did not parse. Pure and total: an
-/// unreadable quote is counted and stepped over, never a panic.
+/// unreadable quote is counted and stepped over, never a panic. The sweep hands it the
+/// index's timed-out entries only; the policy holds for whatever it is handed.
 fn due_refunds(
     swaps: impl IntoIterator<Item = (QuoteHash, Swap)>,
     now: Timestamp,

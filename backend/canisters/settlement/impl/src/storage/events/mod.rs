@@ -2,21 +2,23 @@ use crate::state::transitions::{apply_state_transition, replay};
 use crate::state::{LedgerMeta, State, Store};
 use crate::storage::memory::{
     events_data_memory, events_index_memory, ledger_meta_memory, pockets_memory, swaps_memory,
-    Memory,
+    waiting_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
-use ic_stable_structures::{StableBTreeMap, StableCell, StableLog};
+use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
 use std::cell::RefCell;
 use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, Event, EventType};
-use types::{ChainId, EventHash, EventIndex, Pocket, QuoteHash, Swap, Timestamp, TransitionError};
+use types::{
+    ChainId, EventHash, EventIndex, Pocket, QuoteHash, Swap, Timestamp, TransitionError, WaitingKey,
+};
 
 /// Longest page a query will return, so one call can never walk the whole log.
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
-    // The log is the record and the three below are its fold. All four are private, so
+    // The log is the record and the four below are its fold. All five are private, so
     // `append_event` is the only writer of any of them.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
@@ -32,6 +34,10 @@ thread_local! {
         StableCell::init(ledger_meta_memory(), LedgerMeta::default())
             .expect("ledger meta cell init"),
     );
+
+    // The swaps waiting for their user, so the expiry sweep reads those and not every swap.
+    static WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
+        RefCell::new(StableBTreeSet::init(waiting_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so only `append_event`
@@ -70,6 +76,29 @@ impl Store for StableStore {
     fn put_meta(&mut self, meta: LedgerMeta) {
         // out of stable memory is not a caller error, so it traps, rolling back the message
         LEDGER_META.with(|cell| cell.borrow_mut().set(meta).expect("ledger meta cell write"));
+    }
+
+    fn put_waiting(&mut self, key: WaitingKey) {
+        WAITING.with(|waiting| waiting.borrow_mut().insert(key));
+    }
+
+    fn remove_waiting(&mut self, key: &WaitingKey) {
+        WAITING.with(|waiting| waiting.borrow_mut().remove(key));
+    }
+
+    fn waiting(&self) -> Vec<WaitingKey> {
+        WAITING.with(|waiting| waiting.borrow().iter().collect())
+    }
+
+    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash> {
+        WAITING.with(|waiting| {
+            waiting
+                .borrow()
+                .iter()
+                .take_while(|key| key.since < cutoff)
+                .map(|key| key.quote_hash)
+                .collect()
+        })
     }
 }
 
@@ -125,6 +154,7 @@ pub fn init() {
     SWAPS.with(|_| ());
     POCKETS.with(|_| ());
     LEDGER_META.with(|_| ());
+    WAITING.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

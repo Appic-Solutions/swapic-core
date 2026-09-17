@@ -68,6 +68,24 @@ fn timestamps_add_durations_without_overflowing() {
 }
 
 #[test]
+fn timestamps_subtract_durations_down_to_the_epoch() {
+    let t = Timestamp::from_nanos(1_800_000_000_100);
+    assert_eq!(
+        t.checked_sub(Duration::from_secs(30 * 60)),
+        Some(Timestamp::from_nanos(100))
+    );
+    assert_eq!(
+        Timestamp::from_nanos(0).checked_sub(Duration::ZERO),
+        Some(Timestamp::from_nanos(0))
+    );
+    assert_eq!(
+        Timestamp::from_nanos(99).checked_sub(Duration::from_nanos(100)),
+        None
+    );
+    assert_eq!(t.checked_sub(Duration::MAX), None);
+}
+
+#[test]
 fn unix_seconds_add_whole_seconds_without_overflowing() {
     let s = UnixSeconds::new(1_800_000_000);
     assert_eq!(

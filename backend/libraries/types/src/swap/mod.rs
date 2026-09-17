@@ -5,7 +5,9 @@ use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{Attempt, Timestamp, TokenAmount};
+use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
+use std::borrow::Cow;
 use thiserror::Error;
 
 /// Where a swap is in its lifecycle.
@@ -196,6 +198,44 @@ impl Swap {
             status => Err(TransitionError::NotInFlight(status)),
         }
     }
+}
+
+/// A swap waiting for its user, as the waiting index keys it: by when the wait began, then
+/// by swap id, so a walk from the first key meets the longest wait first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WaitingKey {
+    pub since: Timestamp,
+    pub quote_hash: QuoteHash,
+}
+
+/// Forty bytes: the eight big-endian bytes of `since`, then the hash, so byte order and key
+/// order agree.
+impl Storable for WaitingKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::with_capacity(40);
+        bytes.extend_from_slice(&self.since.as_nanos().to_be_bytes());
+        bytes.extend_from_slice(self.quote_hash.as_ref());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let (since, quote_hash) = bytes
+            .split_first_chunk::<8>()
+            .expect("BUG: a stored waiting key is written as exactly 40 bytes");
+        Self {
+            since: Timestamp::from_nanos(u64::from_be_bytes(*since)),
+            quote_hash: QuoteHash::new(
+                quote_hash
+                    .try_into()
+                    .expect("BUG: a stored waiting key is written as exactly 40 bytes"),
+            ),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 40,
+        is_fixed_size: true,
+    };
 }
 
 /// One chain's liquidity.
