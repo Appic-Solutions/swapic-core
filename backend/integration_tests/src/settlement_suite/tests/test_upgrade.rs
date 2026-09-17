@@ -8,6 +8,10 @@ use settlement_api::types::events::EventType;
 #[test]
 fn events_survive_upgrade_and_replay_matches() {
     let (pic, canister, admin) = setup();
+    let raw = pic
+        .query_call(canister, admin, "event_count", encode_one(()).unwrap())
+        .unwrap();
+    let installed = decode_one::<u64>(&raw).unwrap();
     let event = EventType::PocketFunded {
         chain_id: 8453,
         amount: Nat::from(1000_u64),
@@ -40,7 +44,7 @@ fn events_survive_upgrade_and_replay_matches() {
     let raw = pic
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
         .unwrap();
-    assert_eq!(decode_one::<u64>(&raw).unwrap(), 1);
+    assert_eq!(decode_one::<u64>(&raw).unwrap(), installed + 1);
     let raw = pic
         .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
         .unwrap();
@@ -55,6 +59,10 @@ fn events_survive_upgrade_and_replay_matches() {
 fn test_append_rejects_non_controller() {
     let (pic, canister, _) = setup();
     let stranger = Principal::from_slice(&[9; 29]);
+    let raw = pic
+        .query_call(canister, stranger, "event_count", encode_one(()).unwrap())
+        .unwrap();
+    let installed = decode_one::<u64>(&raw).unwrap();
     let event = EventType::PocketFunded {
         chain_id: 8453,
         amount: Nat::from(1_u64),
@@ -75,7 +83,7 @@ fn test_append_rejects_non_controller() {
     let raw = pic
         .query_call(canister, stranger, "event_count", encode_one(()).unwrap())
         .unwrap();
-    assert_eq!(decode_one::<u64>(&raw).unwrap(), 0);
+    assert_eq!(decode_one::<u64>(&raw).unwrap(), installed);
 }
 
 /// An upgrade over a fold out of step with its log would take and then refuse every
@@ -84,6 +92,10 @@ fn test_append_rejects_non_controller() {
 #[test]
 fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
     let (pic, canister, admin) = setup();
+    let raw = pic
+        .query_call(canister, admin, "event_count", encode_one(()).unwrap())
+        .unwrap();
+    let installed = decode_one::<u64>(&raw).unwrap();
     let event = EventType::PocketFunded {
         chain_id: 8453,
         amount: Nat::from(1000_u64),
@@ -114,7 +126,7 @@ fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
     let raw = pic
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
         .unwrap();
-    assert_eq!(decode_one::<u64>(&raw).unwrap(), 1);
+    assert_eq!(decode_one::<u64>(&raw).unwrap(), installed + 1);
     test_skew_state(&pic, canister, admin).unwrap();
 
     pic.upgrade_canister(

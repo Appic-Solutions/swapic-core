@@ -69,12 +69,14 @@ fn skew(pic: &PocketIc, canister: Principal, who: Principal) -> Result<(), Guard
 #[test]
 fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     let (pic, canister, admin) = setup();
+    // the install's config and roles events come first
+    let installed = count(&pic, canister, admin);
 
     let events = swap_sequence();
-    let total = events.len() as u64;
-    for (i, event) in events.iter().enumerate() {
+    let total = installed + events.len() as u64;
+    for (i, event) in (installed..).zip(&events) {
         let index = append(&pic, canister, admin, event).expect("guard admits");
-        assert_eq!(index, i as u64, "events are numbered without gaps");
+        assert_eq!(index, i, "events are numbered without gaps");
     }
     assert_eq!(count(&pic, canister, admin), total);
 
@@ -98,10 +100,14 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     // paging boundaries: the exact range, a start past the end, and more than exists
     let full = page(&pic, canister, admin, 0, total);
     assert_eq!(full.len() as u64, total);
-    for (i, env) in full.iter().enumerate() {
-        assert_eq!(env.index, i as u64);
-        assert_eq!(env.payload, events[i]);
+    for (i, env) in (0..).zip(&full) {
+        assert_eq!(env.index, i);
     }
+    let swap_events: Vec<EventType> = full[installed as usize..]
+        .iter()
+        .map(|env| env.payload.clone())
+        .collect();
+    assert_eq!(swap_events, events);
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
 
@@ -132,15 +138,17 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
 
 /// The divergence the index check cannot see: the fold's chain head moved while the log
 /// stayed put, so the next event would seal on a parent hash the log does not end with and
-/// fork the chain at an index that looks perfectly right. Both ends are covered, genesis
-/// where the head is the zero hash and a log with events in it, because the genesis arm is
-/// the one a `len > 0` read would skip.
+/// fork the chain at an index that looks perfectly right. Covered on the log the install
+/// wrote and on one that also holds a whole swap. An install always writes its config and
+/// roles events, so the genesis arm, where the head is the zero hash, is covered by the
+/// storage unit test `the_fold_check_passes_a_fold_in_step_and_names_what_is_not`.
 #[test]
 fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     let (pic, canister, admin) = setup();
     let first = &swap_sequence()[0];
+    let installed = count(&pic, canister, admin);
 
-    // genesis: the state's head is the zero hash, and nothing else is admissible
+    // the install's log: the fold's head is flipped, and nothing is admissible
     skew(&pic, canister, admin).unwrap();
     let err = append(&pic, canister, admin, first).expect_err("the head diverged");
     assert!(
@@ -150,19 +158,23 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
         ),
         "say what went wrong: {err:?}"
     );
-    assert_eq!(count(&pic, canister, admin), 0, "and nothing was written");
+    assert_eq!(
+        count(&pic, canister, admin),
+        installed,
+        "and nothing was written"
+    );
 
     // the same flip puts the head back, so what refused above was the head check and not
     // the transition guard
     skew(&pic, canister, admin).unwrap();
     let events = swap_sequence();
-    for (i, event) in events.iter().enumerate() {
+    for (i, event) in (installed..).zip(&events) {
         assert_eq!(
             append(&pic, canister, admin, event).expect("the head lines up again"),
-            i as u64
+            i
         );
     }
-    let total = events.len() as u64;
+    let total = installed + events.len() as u64;
 
     // and the same divergence over a log that already holds a whole swap
     skew(&pic, canister, admin).unwrap();

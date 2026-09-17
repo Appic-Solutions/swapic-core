@@ -126,6 +126,14 @@ type GuardError = variant {
   Halted;
   RoleNotSet : Role;
 };
+// What an install starts from: the whole config and both service roles, so a canister is
+// never live on default knobs or without its quoter and watcher. Each is validated as
+// `set_config` and `set_roles` validate it, and anything invalid fails the install.
+type InitArg = record {
+  watcher : principal;
+  config : Config;
+  quoter : principal;
+};
 // Why a pocket cannot make a move.
 type PocketError = variant {
   Overflow;
@@ -256,7 +264,7 @@ type TransitionError = variant {
   AlreadyPaid;
   UnknownPocket : nat64;
 };
-service : () -> {
+service : (InitArg) -> {
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in
   // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.

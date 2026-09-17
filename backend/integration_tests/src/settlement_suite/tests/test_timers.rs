@@ -1,24 +1,16 @@
 use crate::client::settlement::{
     self, append, events_page, set_config, set_halted, test_skew_state,
 };
-use crate::settlement_suite::init::setup;
+use crate::settlement_suite::init::{quoter, setup};
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
-use settlement_api::types::errors::{GuardError, RegisterQuoteError, SetRolesError};
+use settlement_api::types::errors::{GuardError, RegisterQuoteError};
 use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote};
 use settlement_api::types::swap::{Swap, SwapStatus};
 use std::time::Duration;
-
-fn quoter() -> Principal {
-    Principal::from_slice(&[2; 29])
-}
-
-fn watcher() -> Principal {
-    Principal::from_slice(&[3; 29])
-}
 
 fn stranger() -> Principal {
     Principal::from_slice(&[9; 29])
@@ -35,10 +27,6 @@ fn advance(pic: &PocketIc, seconds: u64) {
     for _ in 0..3 {
         pic.tick();
     }
-}
-
-fn set_roles(pic: &PocketIc, canister: Principal, sender: Principal) -> Result<(), SetRolesError> {
-    settlement::set_roles(pic, canister, sender, quoter(), watcher())
 }
 
 /// The test-only door that moves the fold's chain head off the log's, which is exactly
@@ -142,8 +130,7 @@ fn waiting_swap(
 /// `permit_deadline_s` a signed permit stays good for, and the sweep runs on its own.
 #[test]
 fn expired_pending_quote_is_swept() {
-    let (pic, canister, admin) = setup();
-    set_roles(&pic, canister, admin).unwrap();
+    let (pic, canister, _) = setup();
     let q = quote_expiring_in(&pic, 10, true, 1);
     let hash = register_quote(&pic, canister, &q).unwrap();
     assert_eq!(get_pending(&pic, canister, hash), Some(q));
@@ -226,7 +213,6 @@ fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
 #[test]
 fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
     let (pic, canister, admin) = setup();
-    set_roles(&pic, canister, admin).unwrap();
     let q = quote_expiring_in(&pic, 10, true, 1);
     let pending = register_quote(&pic, canister, &q).unwrap();
     let swap = waiting_swap(&pic, canister, admin, true, 2);
@@ -257,7 +243,6 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
 #[test]
 fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     let (pic, canister, admin) = setup();
-    set_roles(&pic, canister, admin).unwrap();
     // init wired an expiry pass every 60s and an audit every 21_600s
     let fast = Config {
         expiry_check_interval_s: 120,
@@ -351,7 +336,6 @@ fn an_expiry_only_change_keeps_the_audit_on_schedule() {
 #[test]
 fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
     let (pic, canister, admin) = setup();
-    set_roles(&pic, canister, admin).unwrap();
     let slow_sweep = Config {
         expiry_check_interval_s: 600,
         ..Config::default()

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod errors;
 pub mod events;
+pub mod init;
 pub mod quote;
 pub mod swap;
 

@@ -6,6 +6,7 @@ pub mod storage;
 pub mod task_manager;
 pub mod updates;
 
+use lifecycle::*;
 use queries::*;
 use updates::*;
 

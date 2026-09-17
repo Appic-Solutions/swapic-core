@@ -1,7 +1,7 @@
 use crate::client::settlement::{
     self, clear_pending_quotes, events_page, get_pending, register_quote, set_roles,
 };
-use crate::settlement_suite::init::setup;
+use crate::settlement_suite::init::{quoter, setup, watcher};
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::{PocketIc, Time};
@@ -78,14 +78,6 @@ fn hash_by_hand(q: &Quote) -> Hash32 {
     Sha256::digest(preimage).into()
 }
 
-fn quoter() -> Principal {
-    Principal::from_slice(&[2; 29])
-}
-
-fn watcher() -> Principal {
-    Principal::from_slice(&[3; 29])
-}
-
 fn stranger() -> Principal {
     Principal::from_slice(&[9; 29])
 }
@@ -103,34 +95,34 @@ fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
     events_page(pic, canister, stranger(), 0, 100)
 }
 
-/// A canister with both roles handed out, its clock inside the fixture's validity window.
-/// The fixture's `expires_at_s` is frozen by the cross-repo golden, so the clock moves to
-/// the quote rather than the quote moving to the clock.
+/// A canister with both roles handed out at install, its clock inside the fixture's
+/// validity window. The fixture's `expires_at_s` is frozen by the cross-repo golden, so the
+/// clock moves to the quote rather than the quote moving to the clock.
 fn with_roles() -> (PocketIc, Principal, Principal) {
     let (pic, canister, admin) = setup();
-    set_roles(&pic, canister, admin, quoter(), watcher()).unwrap();
     pic.set_time(Time::from_nanos_since_unix_epoch(
         (fixed_quote().expires_at_s - 60) * 1_000_000_000,
     ));
     (pic, canister, admin)
 }
 
-/// Unset roles must refuse rather than fall open, and they must refuse the controller
-/// too: being able to *set* the quoter is not being the quoter.
+/// The install names both roles, so a fresh canister is never without them, and they
+/// refuse the controller too: being able to *set* the quoter is not being the quoter.
 #[test]
-fn register_quote_refuses_everyone_while_the_roles_are_unset() {
-    let (pic, canister, admin) = setup();
-    for caller in [admin, quoter(), stranger()] {
-        let err =
-            register_quote(&pic, canister, caller, &fixed_quote()).expect_err("no role is set yet");
+fn register_quote_refuses_everyone_but_the_quoter_the_install_named() {
+    let (pic, canister, admin) = with_roles();
+    for caller in [admin, stranger()] {
+        let err = register_quote(&pic, canister, caller, &fixed_quote())
+            .expect_err("only the installed quoter registers");
         assert_eq!(
             err,
-            RegisterQuoteError::Guard(GuardError::RoleNotSet(Role::Quoter)),
-            "say the role is unset"
+            RegisterQuoteError::Guard(GuardError::CallerNotRole(Role::Quoter)),
+            "say the caller is not the quoter"
         );
         let err = get_pending(&pic, canister, caller, [0; 32]).expect_err("nor is the reader open");
-        assert_eq!(err, GuardError::RolesNotSet, "say the roles are unset");
+        assert_eq!(err, GuardError::CallerNotQuoterOrWatcher);
     }
+    assert!(register_quote(&pic, canister, quoter(), &fixed_quote()).is_ok());
 }
 
 #[test]
@@ -192,13 +184,16 @@ fn the_quoter_registers_a_quote_and_gets_the_golden_hash() {
 /// principals in the world-readable log.
 #[test]
 fn set_roles_lands_a_roles_changed_event() {
-    let (pic, canister, _) = with_roles();
+    let (pic, canister, admin) = with_roles();
+    let before = events(&pic, canister).len();
+    let next = Principal::from_slice(&[4; 29]);
+    set_roles(&pic, canister, admin, next, watcher()).unwrap();
     let logged = events(&pic, canister);
-    assert_eq!(logged.len(), 1, "one rotation, one event");
+    assert_eq!(logged.len(), before + 1, "one rotation, one event");
     assert_eq!(
-        logged[0].payload,
+        logged.last().unwrap().payload,
         EventType::RolesChanged {
-            quoter: quoter().to_text(),
+            quoter: next.to_text(),
             watcher: watcher().to_text(),
         }
     );
@@ -209,9 +204,10 @@ fn set_roles_lands_a_roles_changed_event() {
 #[test]
 fn a_refused_set_roles_writes_no_event() {
     let (pic, canister, admin) = setup();
+    let before = events(&pic, canister);
     assert!(set_roles(&pic, canister, stranger(), quoter(), watcher()).is_err());
     assert!(set_roles(&pic, canister, admin, Principal::anonymous(), watcher()).is_err());
-    assert!(events(&pic, canister).is_empty());
+    assert_eq!(events(&pic, canister), before);
 }
 
 #[test]
