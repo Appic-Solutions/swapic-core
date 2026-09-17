@@ -1,16 +1,19 @@
 use candid::{CandidType, Nat};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
-use types::address::{RedactedRpcUrl, TextTooLong};
+use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
 use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 /// address maps and the key name are what a deploy fills in.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+#[derive(CandidType, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Config {
     pub platform_fee_bps: u16,
     pub max_fee_bps: u16,
+    // a decimal string in the ConfigChanged JSON, so no reader rounds it
+    #[serde(serialize_with = "nat_as_decimal")]
     pub max_swap_usd: Nat,
     pub quote_ttl_s: u64,
     pub permit_deadline_s: u64,
@@ -32,6 +35,60 @@ impl Default for Config {
     fn default() -> Self {
         Self::unredacted(types::Config::default())
     }
+}
+
+/// Every rpc url prints as `***`: the full config crosses the wire in `get_config_full`
+/// and `set_config`, and a stray `{:?}` of either must not print the api keys.
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // exhaustive: a new field fails to compile until it decides how it prints
+        let Config {
+            platform_fee_bps,
+            max_fee_bps,
+            max_swap_usd,
+            quote_ttl_s,
+            permit_deadline_s,
+            chain_data_max_age_s,
+            batch_window_ms,
+            max_batch_items,
+            decision_timeout_min,
+            rail_status_max_age_s,
+            simulate_before_sign,
+            expiry_check_interval_s,
+            replay_audit_interval_s,
+            confirmations,
+            rpc_urls,
+            vault_addresses,
+            ecdsa_key_name,
+        } = self;
+        let rpc_urls: BTreeMap<&u64, &str> =
+            rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
+        f.debug_struct("Config")
+            .field("platform_fee_bps", platform_fee_bps)
+            .field("max_fee_bps", max_fee_bps)
+            .field("max_swap_usd", max_swap_usd)
+            .field("quote_ttl_s", quote_ttl_s)
+            .field("permit_deadline_s", permit_deadline_s)
+            .field("chain_data_max_age_s", chain_data_max_age_s)
+            .field("batch_window_ms", batch_window_ms)
+            .field("max_batch_items", max_batch_items)
+            .field("decision_timeout_min", decision_timeout_min)
+            .field("rail_status_max_age_s", rail_status_max_age_s)
+            .field("simulate_before_sign", simulate_before_sign)
+            .field("expiry_check_interval_s", expiry_check_interval_s)
+            .field("replay_audit_interval_s", replay_audit_interval_s)
+            .field("confirmations", confirmations)
+            .field("rpc_urls", &rpc_urls)
+            .field("vault_addresses", vault_addresses)
+            .field("ecdsa_key_name", ecdsa_key_name)
+            .finish()
+    }
+}
+
+/// A `Nat` as a string of its plain decimal digits. candid's `Display` groups them with
+/// underscores, and a JSON number past 2^53 loses digits in most readers.
+fn nat_as_decimal<S: Serializer>(value: &Nat, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.0.to_str_radix(10))
 }
 
 impl Config {

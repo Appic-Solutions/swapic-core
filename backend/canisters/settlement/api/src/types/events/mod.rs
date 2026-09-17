@@ -10,6 +10,8 @@ pub type Hash32 = [u8; 32];
 /// never over this candid layout.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum EventType {
+    /// `json` is the public view of the config written: JSON of `Config` with every rpc url
+    /// as `"***"` and `max_swap_usd` as a decimal string.
     ConfigChanged {
         json: String,
     },

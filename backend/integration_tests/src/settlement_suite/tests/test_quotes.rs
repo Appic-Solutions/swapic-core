@@ -1,4 +1,6 @@
-use crate::client::settlement::{self, events_page, get_pending, register_quote, set_roles};
+use crate::client::settlement::{
+    self, clear_pending_quotes, events_page, get_pending, register_quote, set_roles,
+};
 use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{encode_one, Nat, Principal};
@@ -329,4 +331,44 @@ fn roles_and_the_pending_store_survive_an_upgrade() {
         hash
     );
     assert!(register_quote(&pic, canister, stranger(), &fixed_quote()).is_err());
+}
+
+/// The pending store survives upgrades, so a store a compromised quoter filled is cleared in
+/// place. Only a controller may: the quoter, the watcher and a stranger are refused and the
+/// store is untouched. A clear answers how many quotes went, writes no event, and the
+/// quoter registers again after it.
+#[test]
+fn only_a_controller_clears_the_pending_store_and_registration_works_after() {
+    let (pic, canister, admin) = with_roles();
+    let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
+    let other = Quote {
+        nonce: 8,
+        ..fixed_quote()
+    };
+    let other_hash = register_quote(&pic, canister, quoter(), &other).unwrap();
+    let before = event_count(&pic, canister);
+
+    for caller in [quoter(), watcher(), stranger()] {
+        assert_eq!(
+            clear_pending_quotes(&pic, canister, caller),
+            Err(GuardError::NotController)
+        );
+    }
+    assert_eq!(
+        get_pending(&pic, canister, quoter(), hash).unwrap(),
+        Some(fixed_quote()),
+        "a refused clear leaves the store alone"
+    );
+
+    assert_eq!(clear_pending_quotes(&pic, canister, admin), Ok(2));
+    for gone in [hash, other_hash] {
+        assert_eq!(get_pending(&pic, canister, quoter(), gone).unwrap(), None);
+    }
+    assert_eq!(event_count(&pic, canister), before, "pre-money: no event");
+
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &fixed_quote()),
+        Ok(hash)
+    );
+    assert_eq!(clear_pending_quotes(&pic, canister, admin), Ok(1));
 }

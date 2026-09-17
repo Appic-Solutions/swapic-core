@@ -33,6 +33,14 @@ pub fn get() -> Config {
     CONFIG.with(|c| c.borrow().get().clone())
 }
 
+/// The line a config write leaves in the world-readable log: compact JSON of the redacted
+/// wire view, so it reads in the field names and units operators set.
+pub fn change_json(config: &Config) -> String {
+    serde_json::to_string(&settlement_api::types::config::Config::from(config.clone())).expect(
+        "BUG: the wire config is integers, strings, and maps keyed by integers, all of which JSON holds",
+    )
+}
+
 /// Writes the cell and records the change in the log. Callers do the authorization; this
 /// is the storage path. Returns which timer intervals changed, so the caller restarts only
 /// those timers.
@@ -41,12 +49,15 @@ pub fn set(new: Config) -> Result<IntervalChanges, SetConfigError> {
     new.validate()?;
     let changed = get().interval_changes(&new);
     // the log first, because it is the step that can refuse. The log is world-readable,
-    // and the config's Debug prints every rpc url as `***`.
+    // and the redacted view prints every rpc url as `***`.
     events::append_event(EventType::ConfigChanged {
-        json: format!("{new:?}"),
+        json: change_json(&new),
     })?;
     // out of stable memory is not a caller error, so it traps instead of returning Err:
     // a trap rolls the append above back with it, and an `Ok(Err(_))` would not
     CONFIG.with(|c| c.borrow_mut().set(new).expect("config cell write"));
     Ok(changed)
 }
+
+#[cfg(test)]
+mod tests;

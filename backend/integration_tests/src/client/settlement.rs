@@ -11,7 +11,9 @@ use settlement_api::queries::{
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
-use settlement_api::updates::{register_quote, set_config, set_halted, set_roles};
+use settlement_api::updates::{
+    clear_pending_quotes, register_quote, set_config, set_halted, set_roles,
+};
 
 pub fn event_count(
     pic: &PocketIc,
@@ -134,6 +136,20 @@ pub fn register_quote(
         sender,
         "register_quote",
         encode_one(quote).unwrap(),
+    )
+}
+
+pub fn clear_pending_quotes(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> clear_pending_quotes::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "clear_pending_quotes",
+        encode_one(()).unwrap(),
     )
 }
 

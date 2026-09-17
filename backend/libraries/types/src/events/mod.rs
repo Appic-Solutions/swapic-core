@@ -23,7 +23,10 @@ pub const EVENT_VARIANT_COUNT: usize = 19;
 /// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum EventType {
-    /// A controller wrote a new config; `json` is its public view.
+    /// A controller wrote a new config. `json` is its public view as operators set it:
+    /// compact JSON of the wire `Config`, candid field names in declaration order, maps in
+    /// ascending chain id order, `max_swap_usd` as a decimal string, and every rpc url as
+    /// `"***"`. It is hashed into the chain, so the shape never changes.
     #[n(0)]
     ConfigChanged {
         #[n(0)]

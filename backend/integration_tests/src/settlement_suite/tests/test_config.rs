@@ -28,11 +28,10 @@ fn redacted(config: &Config) -> Config {
     }
 }
 
-/// What the log records for a config write: the domain config's Debug, whose rpc urls
-/// print as `***`.
+/// What the log records for a config write: JSON of the public view, built here from the
+/// wire config the test wrote rather than through the canister's own conversion.
 fn logged_json(config: &Config) -> String {
-    let config = types::Config::try_from(config.clone()).expect("a valid config");
-    format!("{config:?}")
+    serde_json::to_string(&redacted(config)).expect("a config is plain JSON")
 }
 
 /// The knob the launch config actually moves.

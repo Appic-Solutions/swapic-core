@@ -124,17 +124,15 @@ pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration) -> usize {
     })
 }
 
-/// Tests share one store when the harness runs them on a single thread, so the store
-/// tests start from a known map instead of assuming an empty one.
-#[cfg(test)]
-pub(crate) fn clear_pending() {
+/// Empties the store and answers how many quotes it held. The store survives upgrades, so
+/// this is how a store a looping or compromised quoter filled is recovered in place.
+pub fn clear() -> u64 {
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
-        let all: Vec<QuoteHash> = pending.iter().map(|(hash, _)| hash).collect();
-        for hash in all {
-            pending.remove(&hash);
-        }
-    });
+        let held = pending.len();
+        pending.clear_new();
+        held
+    })
 }
 
 #[cfg(test)]

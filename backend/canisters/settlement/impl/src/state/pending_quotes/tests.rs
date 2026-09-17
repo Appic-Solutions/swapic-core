@@ -34,8 +34,8 @@ fn fixed_quote() -> Quote {
     }
 }
 
-/// A live quote and the clock it is live on. Every store test calls `clear_pending`
-/// first, because a single-threaded harness gives them all one map.
+/// A live quote and the clock it is live on. Every store test calls `clear` first,
+/// because a single-threaded harness gives them all one map.
 fn pending_quote(nonce: u64) -> Quote {
     Quote {
         nonce,
@@ -57,7 +57,7 @@ fn just_before_expiry(q: &Quote) -> UnixSeconds {
 
 #[test]
 fn register_refuses_a_quote_that_has_already_expired() {
-    clear_pending();
+    clear();
     let q = pending_quote(9_001);
     let now = seconds_after(&q, 1);
     assert_eq!(
@@ -76,7 +76,7 @@ fn register_refuses_a_quote_that_has_already_expired() {
 
 #[test]
 fn register_refuses_a_quote_that_does_not_validate() {
-    clear_pending();
+    clear();
     let q = Quote {
         refund_address: Some("".parse().unwrap()),
         ..pending_quote(9_002)
@@ -95,7 +95,7 @@ fn register_refuses_a_quote_that_does_not_validate() {
 fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
     use settlement_api::types::quote::Quote as WireQuote;
 
-    clear_pending();
+    clear();
     let wire = |nonce| WireQuote::from(pending_quote(nonce));
     type SetField = fn(&mut WireQuote, String);
     let fields: [(&str, SetField); 4] = [
@@ -143,7 +143,7 @@ fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
 
 #[test]
 fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
-    clear_pending();
+    clear();
     let q = pending_quote(9_003);
     let h = register(q.clone(), just_before_expiry(&q)).expect("a live quote registers");
     assert_eq!(h, q.hash().unwrap());
@@ -158,7 +158,7 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
 /// still good.
 #[test]
 fn a_quote_is_live_up_to_and_including_its_expiry_second() {
-    clear_pending();
+    clear();
     let q = pending_quote(9_004);
     assert!(register(q.clone(), q.expires_at).is_ok());
     assert!(register(q.clone(), seconds_after(&q, 1)).is_err());
@@ -168,7 +168,7 @@ fn a_quote_is_live_up_to_and_including_its_expiry_second() {
 /// window is bounded as well as the near one.
 #[test]
 fn register_refuses_a_quote_that_expires_too_far_ahead() {
-    clear_pending();
+    clear();
     let q = pending_quote(9_005);
     let far = seconds_before(&q, MAX_QUOTE_LIFETIME.as_secs() + 1);
     assert_eq!(
@@ -183,24 +183,32 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
     assert!(register(q.clone(), seconds_before(&q, MAX_QUOTE_LIFETIME.as_secs())).is_ok());
 }
 
-/// The backstop against a looping quoter: a full store refuses a new quote but must
-/// still take a re-registration of one it holds.
-#[test]
-fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
-    clear_pending();
-    // small quotes, distinct only by nonce, so the fill is cheap
-    let tiny = |nonce: u64| Quote {
+/// Small quotes, distinct only by nonce, so a fill to the cap is cheap.
+fn tiny(nonce: u64) -> Quote {
+    Quote {
         src_token: "a".parse().unwrap(),
         dst_token: "b".parse().unwrap(),
         dst_address: "c".parse().unwrap(),
         rail: Rail::Eco,
         nonce,
         ..fixed_quote()
-    };
+    }
+}
+
+fn fill_to_the_cap() -> UnixSeconds {
     let now = just_before_expiry(&tiny(0));
     for nonce in 0..MAX_PENDING {
         register(tiny(nonce), now).expect("fills to the cap");
     }
+    now
+}
+
+/// The backstop against a looping quoter: a full store refuses a new quote but must
+/// still take a re-registration of one it holds.
+#[test]
+fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
+    clear();
+    let now = fill_to_the_cap();
 
     let overflow = tiny(MAX_PENDING);
     assert_eq!(
@@ -217,7 +225,7 @@ fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
 /// A permit deadline that reaches past the last representable second never closes.
 #[test]
 fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
-    clear_pending();
+    clear();
     let q = Quote {
         expires_at: UnixSeconds::new(u64::MAX - 10),
         ..pending_quote(9_008)
@@ -228,4 +236,20 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
         0
     );
     assert!(get_pending(&q.hash().unwrap()).is_some());
+}
+
+/// The recovery for a store a looping or compromised quoter filled, which an upgrade no
+/// longer empties: a clear answers how many quotes went, and the quoter registers again.
+#[test]
+fn clear_empties_a_full_store_and_registration_works_again() {
+    clear();
+    let now = fill_to_the_cap();
+    let next = tiny(MAX_PENDING);
+    assert_eq!(register(next.clone(), now), Err(RegisterError::StoreFull));
+
+    assert_eq!(clear(), MAX_PENDING);
+    assert_eq!(get_pending(&tiny(0).hash().unwrap()), None);
+    assert_eq!(register(next.clone(), now), Ok(next.hash().unwrap()));
+    assert_eq!(clear(), 1);
+    assert_eq!(clear(), 0, "an empty store clears to nothing");
 }

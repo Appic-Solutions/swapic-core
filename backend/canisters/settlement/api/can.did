@@ -107,6 +107,8 @@ type EventType = variant {
     tx_hash : blob;
   };
   DecisionMade : record { quote_hash : blob; choice : Choice };
+  // `json` is the public view of the config written: JSON of `Config` with every rpc url
+  // as `"***"` and `max_swap_usd` as a decimal string.
   ConfigChanged : record { json : text };
   Frozen : record { quote_hash : blob; reason : text };
   PocketReserved : record { quote_hash : blob; chain_id : nat64; amount : nat };
@@ -188,12 +190,13 @@ type RegisterQuoteError = variant {
   InvalidQuote : QuoteError;
   Expired : record { now_s : nat64; expires_at_s : nat64 };
 };
-type Result = variant { Ok : Config; Err : GuardError };
-type Result_1 = variant { Ok : opt Quote; Err : GuardError };
-type Result_2 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_3 = variant { Ok; Err : SetConfigError };
-type Result_4 = variant { Ok; Err : GuardError };
-type Result_5 = variant { Ok; Err : SetRolesError };
+type Result = variant { Ok : nat64; Err : GuardError };
+type Result_1 = variant { Ok : Config; Err : GuardError };
+type Result_2 = variant { Ok : opt Quote; Err : GuardError };
+type Result_3 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_4 = variant { Ok; Err : SetConfigError };
+type Result_5 = variant { Ok; Err : GuardError };
+type Result_6 = variant { Ok; Err : SetRolesError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -254,6 +257,10 @@ type TransitionError = variant {
   UnknownPocket : nat64;
 };
 service : () -> {
+  // Controller-only. Empties the pending store and answers how many quotes it held: the
+  // store survives upgrades, so a store a compromised quoter filled is recovered here, in
+  // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.
+  clear_pending_quotes : () -> (Result);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
@@ -261,10 +268,10 @@ service : () -> {
   // the real thing.
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
-  get_config_full : () -> (Result) query;
+  get_config_full : () -> (Result_1) query;
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
-  get_pending : (blob) -> (Result_1) query;
+  get_pending : (blob) -> (Result_2) query;
   // The folded state of one swap. Public: every field of it is already in the
   // world-readable event log, `quote_bytes` included.
   get_swap : (blob) -> (opt Swap) query;
@@ -274,17 +281,17 @@ service : () -> {
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log.
-  register_quote : (Quote) -> (Result_2);
+  register_quote : (Quote) -> (Result_3);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_3);
+  set_config : (Config) -> (Result_4);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
-  set_halted : (bool) -> (Result_4);
+  set_halted : (bool) -> (Result_5);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_5);
+  set_roles : (principal, principal) -> (Result_6);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

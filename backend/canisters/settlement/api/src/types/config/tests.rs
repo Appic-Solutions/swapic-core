@@ -39,6 +39,27 @@ fn redacted_blanks_rpc_urls_and_nothing_else() {
     );
 }
 
+/// The full config crosses the wire in `get_config_full` and `set_config`, so a stray debug
+/// print of either must not show a key: every url blanks, every chain id and every other
+/// knob stays.
+#[test]
+fn debug_never_prints_an_rpc_url() {
+    let full = secret_bearing();
+    let shown = format!("{full:?} {full:#?}");
+    assert!(!shown.contains(SECRET), "leaked: {shown}");
+    assert!(!shown.contains("hunter2"), "leaked: {shown}");
+    assert!(!shown.contains("https://"), "leaked: {shown}");
+    assert!(
+        shown.contains("rpc_urls: {1: \"***\", 8453: \"***\"}"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("0xvault")
+            && shown.contains("key_1")
+            && shown.contains("platform_fee_bps: 10")
+    );
+}
+
 /// The ops view carries the urls exactly as they were written.
 #[test]
 fn unredacted_round_trips_the_whole_config() {

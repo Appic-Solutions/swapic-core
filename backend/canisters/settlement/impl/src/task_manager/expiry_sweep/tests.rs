@@ -122,7 +122,7 @@ fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
 /// inside it.
 #[test]
 fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
-    pending_quotes::clear_pending();
+    pending_quotes::clear();
     let q = quote(true, 3_001);
     let deadline = config::get().permit_deadline.as_secs();
     let hash = registered_at(&q, expires_at_s(&q) - 5);
@@ -144,7 +144,7 @@ fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
 /// re-registration resets the latter, and a long-lived quote is not stale at 120s.
 #[test]
 fn the_sweep_keys_eviction_on_the_expiry_and_not_on_the_registration() {
-    pending_quotes::clear_pending();
+    pending_quotes::clear();
     let q = Quote {
         expires_at: UnixSeconds::new(1_800_003_600),
         ..quote(true, 3_002)
@@ -162,7 +162,7 @@ fn the_sweep_keys_eviction_on_the_expiry_and_not_on_the_registration() {
 /// keeps being swept.
 #[test]
 fn a_halted_sweep_still_drops_stale_quotes() {
-    pending_quotes::clear_pending();
+    pending_quotes::clear();
     set_halted(true);
     let q = quote(true, 3_003);
     let hash = registered_at(&q, expires_at_s(&q));

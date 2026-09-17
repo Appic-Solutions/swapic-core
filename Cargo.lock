@@ -936,6 +936,7 @@ dependencies = [
  "candid",
  "hex",
  "pocket-ic",
+ "serde_json",
  "settlement_api",
  "types",
 ]
@@ -1831,6 +1832,7 @@ dependencies = [
  "ic-cdk-timers",
  "ic-stable-structures",
  "serde",
+ "serde_json",
  "settlement_api",
  "thiserror 2.0.20",
  "types",
