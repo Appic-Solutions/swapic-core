@@ -1,6 +1,7 @@
 use crate::state::{MemoryStore, State, Store};
+use thiserror::Error;
 use types::events::{Event, EventType};
-use types::TransitionError;
+use types::{EventHash, EventIndex, TransitionError};
 
 impl<S: Store> State<S> {
     /// Every rule that can refuse an event. The match is exhaustive with no wildcard arm,
@@ -192,13 +193,59 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
     }
 }
 
-/// Folds a log into a fresh heap state.
-pub fn replay(events: impl IntoIterator<Item = Event>) -> State<MemoryStore> {
+/// Why a log does not fold. The replay stopped at `index` and applied nothing from there.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReplayError {
+    #[error("event {found} sits where event {expected} belongs")]
+    OutOfSequence {
+        expected: EventIndex,
+        found: EventIndex,
+    },
+    #[error("event {index} links to {parent} but the fold ends with {head}")]
+    Unlinked {
+        index: EventIndex,
+        parent: EventHash,
+        head: EventHash,
+    },
+    #[error("event {index} has no successor index")]
+    LogFull { index: EventIndex },
+    #[error("event {index} is refused: {error}")]
+    Refused {
+        index: EventIndex,
+        error: TransitionError,
+    },
+}
+
+/// Folds a log into a fresh heap state, admitting each event the way `append_event` did:
+/// in sequence, linked to the head, and through [`State::check`]. A log a bug or a later
+/// wasm made inconsistent is an `Err`, never a panic, so the audit can halt on it.
+pub fn replay(events: impl IntoIterator<Item = Event>) -> Result<State<MemoryStore>, ReplayError> {
     let mut state = State::default();
     for event in events {
+        let meta = state.meta();
+        let index = event.index;
+        if index != meta.next_event_index {
+            return Err(ReplayError::OutOfSequence {
+                expected: meta.next_event_index,
+                found: index,
+            });
+        }
+        if event.parent_hash != meta.last_event_hash {
+            return Err(ReplayError::Unlinked {
+                index,
+                parent: event.parent_hash,
+                head: meta.last_event_hash,
+            });
+        }
+        if index.next().is_none() {
+            return Err(ReplayError::LogFull { index });
+        }
+        state
+            .check(&event.payload)
+            .map_err(|error| ReplayError::Refused { index, error })?;
         apply_state_transition(&mut state, &event);
     }
-    state
+    Ok(state)
 }
 
 #[cfg(test)]

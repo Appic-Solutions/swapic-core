@@ -139,9 +139,18 @@ fn log_head() -> EventHash {
     })
 }
 
-/// The one and only path that writes an event: guard, seal, append, apply, all within a
-/// single message, so a trap anywhere rolls back the log and the fold together.
+/// The one and only path that writes an event, sealed at the canister's clock.
 pub fn append_event(payload: EventType) -> Result<EventIndex, AppendError> {
+    append_event_at(payload, Timestamp::from_nanos(ic_cdk::api::time()))
+}
+
+/// [`append_event`] sealed at `timestamp`: a caller that already read the clock seals on
+/// the same reading, and a unit test runs without a canister. Guard, seal, append, apply,
+/// all within a single message, so a trap anywhere rolls back the log and the fold together.
+pub fn append_event_at(
+    payload: EventType,
+    timestamp: Timestamp,
+) -> Result<EventIndex, AppendError> {
     let mut state = State::new(StableStore(()));
     let meta = state.meta();
     // the head the fold links to must be the head the log ends with, checked before
@@ -168,12 +177,7 @@ pub fn append_event(payload: EventType) -> Result<EventIndex, AppendError> {
             sealed: index,
         });
     }
-    let event = Event::seal(
-        index,
-        Timestamp::from_nanos(ic_cdk::api::time()),
-        meta.last_event_hash,
-        payload,
-    );
+    let event = Event::seal(index, timestamp, meta.last_event_hash, payload);
     EVENTS.with(|e| e.borrow_mut().append(&event)).map_err(
         |WriteError::GrowFailed {
              current_size,
@@ -222,10 +226,13 @@ pub fn verify_chain() -> bool {
 }
 
 /// The audit that matters: folding the log onto the heap must reproduce the stable fold
-/// exactly.
+/// exactly. A log the heap fold refuses is a divergence too, so it answers false rather
+/// than trapping before the audit can halt.
 pub fn verify_replay() -> bool {
-    let rebuilt = EVENTS.with(|e| replay(e.borrow().iter()));
-    read_state(|live| live.matches(&rebuilt))
+    match EVENTS.with(|e| replay(e.borrow().iter())) {
+        Ok(rebuilt) => read_state(|live| rebuilt.matches(live)),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

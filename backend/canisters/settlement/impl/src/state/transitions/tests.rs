@@ -2,8 +2,8 @@ use super::*;
 use crate::state::LedgerMeta;
 use types::events::Choice;
 use types::{
-    Attempt, BlockNumber, ChainId, Pocket, PocketError, QuoteHash, Swap, SwapStatus, Timestamp,
-    TokenAmount, TxHash,
+    Attempt, BlockNumber, ChainId, EventHash, EventIndex, Pocket, PocketError, QuoteHash, Swap,
+    SwapStatus, Timestamp, TokenAmount, TxHash,
 };
 
 type HeapState = State<MemoryStore>;
@@ -167,8 +167,8 @@ fn replay_is_deterministic() {
         out
     };
     assert_eq!(
-        replay(events.clone().into_iter()),
-        replay(events.into_iter())
+        replay(events.clone().into_iter()).unwrap(),
+        replay(events.into_iter()).unwrap()
     );
 }
 
@@ -620,5 +620,59 @@ fn replay_rebuilds_exactly_the_incremental_state() {
         apply_state_transition(&mut state, &event);
         log.push(event);
     }
-    assert_eq!(replay(log), state);
+    assert_eq!(replay(log), Ok(state));
+}
+
+/// The replay admits a log the way `append_event` did, so a log a bug or a later wasm
+/// broke is an `Err` naming the event, never a panic in the fold.
+#[test]
+fn replay_refuses_a_log_append_event_could_not_have_written() {
+    let qh = qh(1);
+    let mut state = HeapState::default();
+    let mut log = vec![];
+    for payload in [funds(qh), signed(qh, 1)] {
+        let event = next_event(&state, 1, payload);
+        apply_state_transition(&mut state, &event);
+        log.push(event);
+    }
+
+    // an event the rules refuse: attempt 1 is still open
+    let mut refused = log.clone();
+    refused.push(next_event(&state, 1, signed(qh, 2)));
+    assert_eq!(
+        replay(refused),
+        Err(ReplayError::Refused {
+            index: EventIndex::new(2),
+            error: TransitionError::AttemptStillOpen(Attempt::FIRST)
+        })
+    );
+
+    // an event on a swap the log never funded
+    let orphan = next_event(&HeapState::default(), 1, signed(qh, 1));
+    assert_eq!(
+        replay([orphan]),
+        Err(ReplayError::Refused {
+            index: EventIndex::ZERO,
+            error: TransitionError::UnknownSwap(qh)
+        })
+    );
+
+    // a gap in the numbering
+    let mut gap = log.clone();
+    gap.remove(0);
+    assert_eq!(
+        replay(gap),
+        Err(ReplayError::OutOfSequence {
+            expected: EventIndex::ZERO,
+            found: EventIndex::new(1)
+        })
+    );
+
+    // a link to a parent the fold does not end with
+    let mut unlinked = log.clone();
+    unlinked[1].parent_hash = EventHash::new([7; 32]);
+    assert!(matches!(
+        replay(unlinked),
+        Err(ReplayError::Unlinked { .. })
+    ));
 }

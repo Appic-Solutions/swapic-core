@@ -15,3 +15,13 @@ pub fn init() {
     halt::init();
     pending_quotes::init();
 }
+
+/// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing
+/// behind for the next test, however the harness schedules them. A failed assertion inside
+/// fails the calling test with its own message.
+#[cfg(test)]
+pub(crate) fn on_fresh_memory<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    std::thread::spawn(f)
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}

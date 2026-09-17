@@ -93,6 +93,27 @@ pub struct State<S> {
     store: S,
 }
 
+impl State<MemoryStore> {
+    /// Whether `other` holds exactly this heap fold, whatever its store. The destructure has
+    /// no `..`, so a collection added to the store fails to compile until it is compared.
+    pub fn matches<T: Store>(&self, other: &State<T>) -> bool {
+        let MemoryStore {
+            swaps,
+            pockets,
+            meta,
+        } = &self.store;
+        let other_pockets = other.store.pockets();
+        let other_swaps = other.store.swaps();
+        *meta == other.meta()
+            && pockets
+                .iter()
+                .eq(other_pockets.iter().map(|(chain, pocket)| (chain, pocket)))
+            && swaps
+                .iter()
+                .eq(other_swaps.iter().map(|(hash, swap)| (hash, swap)))
+    }
+}
+
 impl<S: Store> State<S> {
     pub fn new(store: S) -> Self {
         Self { store }
@@ -104,13 +125,6 @@ impl<S: Store> State<S> {
 
     pub fn meta(&self) -> LedgerMeta {
         self.store.meta()
-    }
-
-    /// Whether two folds hold the same swaps, pockets and meta, whatever their stores.
-    pub fn matches<T: Store>(&self, other: &State<T>) -> bool {
-        self.meta() == other.meta()
-            && self.store.pockets() == other.store.pockets()
-            && self.store.swaps() == other.store.swaps()
     }
 
     pub fn swap(&self, quote_hash: &QuoteHash) -> Result<Swap, TransitionError> {
