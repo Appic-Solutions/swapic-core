@@ -20,7 +20,7 @@ fn swap(status: SwapStatus) -> Swap {
         src_chain: ChainId::BASE,
         src_token: "usdc".parse().unwrap(),
         amount_in: amount(100),
-        amount_paid: TokenAmount::ZERO,
+        amount_paid: None,
         waiting_since: None,
     }
 }
@@ -65,6 +65,17 @@ fn attempts_run_one_two_three_without_gaps() {
     s.last_attempt = Some(Attempt::new(u32::MAX));
     assert_eq!(s.next_attempt(), None);
     assert!(s.ensure_next_attempt(Attempt::new(u32::MAX)).is_err());
+}
+
+/// Paid is a fact, not an amount: a payment of zero is still the one payment.
+#[test]
+fn a_swap_paid_zero_is_paid() {
+    assert_eq!(swap(SwapStatus::Executing).ensure_unpaid(), Ok(()));
+    let paid_zero = Swap {
+        amount_paid: Some(TokenAmount::ZERO),
+        ..swap(SwapStatus::Executing)
+    };
+    assert_eq!(paid_zero.ensure_unpaid(), Err(TransitionError::AlreadyPaid));
 }
 
 #[test]
@@ -121,7 +132,7 @@ fn swaps_and_pockets_round_trip_through_storage() {
         quote_bytes: vec![0xde, 0xad],
         last_attempt: Some(Attempt::new(3)),
         open_attempt: Some(Attempt::new(3)),
-        amount_paid: TokenAmount::from(u128::MAX),
+        amount_paid: Some(TokenAmount::from(u128::MAX)),
         waiting_since: Some(Timestamp::from_nanos(7)),
         ..swap(SwapStatus::WaitingForUser)
     };

@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::address::{Address, TokenId, MAX_TEXT_BYTES};
-use crate::canonical::CanonicalWriter;
+use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::numeric::{Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount};
@@ -246,10 +246,37 @@ pub enum EventError {
 }
 
 impl EventType {
+    /// The token amount the event carries, if it carries one. Exhaustive, so a new variant
+    /// decides whether it moves value.
+    pub fn amount(&self) -> Option<TokenAmount> {
+        match self {
+            EventType::FundsReceived { amount, .. }
+            | EventType::PaidInStable { amount, .. }
+            | EventType::Refunded { amount, .. }
+            | EventType::FeeAccrued { amount, .. }
+            | EventType::PocketFunded { amount, .. }
+            | EventType::PocketReserved { amount, .. }
+            | EventType::PocketRebalanced { amount, .. }
+            | EventType::PocketReleased { amount, .. }
+            | EventType::PocketSpent { amount, .. } => Some(*amount),
+            EventType::ConfigChanged { .. }
+            | EventType::TxSigned { .. }
+            | EventType::TxConfirmed { .. }
+            | EventType::TxFailed { .. }
+            | EventType::DecisionRequired { .. }
+            | EventType::DecisionMade { .. }
+            | EventType::RefundStarted { .. }
+            | EventType::SwapDone { .. }
+            | EventType::Frozen { .. }
+            | EventType::RolesChanged { .. } => None,
+        }
+    }
+
     /// The canonical preimage: a u16 tag, then the variant's fields in declaration order,
     /// in the primitives of [`crate::canonical`]. `Choice` is one byte. Nothing here depends
-    /// on minicbor or candid, so no storage or interface change can move a hash.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    /// on minicbor or candid, so no storage or interface change can move a hash. An amount
+    /// above `u128::MAX` has no preimage.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CanonicalError> {
         let mut w = CanonicalWriter::default();
         // exhaustive, no wildcard arm: a new variant fails to compile until it has a layout
         match self {
@@ -408,7 +435,7 @@ impl EventType {
                 w.put_u16(18).put_text(quoter).put_text(watcher);
             }
         }
-        w.into_bytes()
+        w.finish()
     }
 }
 
@@ -418,36 +445,37 @@ pub fn event_hash(
     timestamp: Timestamp,
     parent_hash: &EventHash,
     payload: &EventType,
-) -> EventHash {
+) -> Result<EventHash, CanonicalError> {
     let mut h = sha2::Sha256::new();
     h.update(index.get().to_be_bytes());
     h.update(timestamp.as_nanos().to_be_bytes());
     h.update(parent_hash.as_ref());
-    h.update(payload.canonical_bytes());
-    EventHash::new(h.finalize().into())
+    h.update(payload.canonical_bytes()?);
+    Ok(EventHash::new(h.finalize().into()))
 }
 
 impl Event {
-    /// The event at `index` on top of `parent_hash`, with its link hash.
+    /// The event at `index` on top of `parent_hash`, with its link hash, or the reason the
+    /// payload has no preimage to hash.
     pub fn seal(
         index: EventIndex,
         timestamp: Timestamp,
         parent_hash: EventHash,
         payload: EventType,
-    ) -> Event {
-        Event {
+    ) -> Result<Event, CanonicalError> {
+        Ok(Event {
             index,
             timestamp,
             parent_hash,
-            hash: event_hash(index, timestamp, &parent_hash, &payload),
+            hash: event_hash(index, timestamp, &parent_hash, &payload)?,
             payload,
-        }
+        })
     }
 }
 
 /// Genesis-anchored: index 0 links to [`EventHash::ZERO`] and every link after it holds.
 /// Takes anything iterable, by value or by reference, so a stable log streams through the
-/// same rule a slice does.
+/// same rule a slice does. An event with no preimage is not a valid link.
 pub fn chain_is_valid<E: Borrow<Event>>(events: impl IntoIterator<Item = E>) -> bool {
     let mut parent_hash = EventHash::ZERO;
     for (index, event) in (0..).map(EventIndex::new).zip(events) {
@@ -455,14 +483,13 @@ pub fn chain_is_valid<E: Borrow<Event>>(events: impl IntoIterator<Item = E>) -> 
         if event.index != index || event.parent_hash != parent_hash {
             return false;
         }
-        if event.hash
-            != event_hash(
-                event.index,
-                event.timestamp,
-                &event.parent_hash,
-                &event.payload,
-            )
-        {
+        let hash = event_hash(
+            event.index,
+            event.timestamp,
+            &event.parent_hash,
+            &event.payload,
+        );
+        if hash != Ok(event.hash) {
             return false;
         }
         parent_hash = event.hash;

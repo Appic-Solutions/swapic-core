@@ -1,7 +1,7 @@
 use super::*;
 
 fn take(w: &mut CanonicalWriter) -> Vec<u8> {
-    std::mem::take(w).into_bytes()
+    std::mem::take(w).finish().unwrap()
 }
 
 #[test]
@@ -34,4 +34,23 @@ fn text_and_bytes_carry_a_byte_length_even_when_empty() {
 fn a_hash_is_raw() {
     let mut w = CanonicalWriter::default();
     assert_eq!(take(w.put_hash(&[9; 32])), [9; 32]);
+}
+
+/// Above `u128::MAX` an amount has no 16 bytes: the preimage is an error naming it, and
+/// the fields around it change nothing about that.
+#[test]
+fn an_amount_above_u128_max_fails_the_preimage_instead_of_panicking() {
+    let too_large = TokenAmount::from(u128::MAX)
+        .checked_add(TokenAmount::ONE)
+        .unwrap();
+    let mut w = CanonicalWriter::default();
+    w.put_u8(1)
+        .put_amount(too_large)
+        .put_amount(TokenAmount::MAX)
+        .put_text("after");
+    assert_eq!(w.finish(), Err(CanonicalError::AmountTooLarge(too_large)));
+
+    let mut at_max = CanonicalWriter::default();
+    at_max.put_amount(TokenAmount::from(u128::MAX));
+    assert_eq!(at_max.finish(), Ok(u128::MAX.to_be_bytes().to_vec()));
 }

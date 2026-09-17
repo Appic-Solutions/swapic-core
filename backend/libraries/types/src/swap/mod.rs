@@ -59,9 +59,9 @@ pub struct Swap {
     pub src_token: TokenId,
     #[n(6)]
     pub amount_in: TokenAmount,
-    /// Zero until the swap is paid in stable.
+    /// `None` until the swap is paid in stable, so a payment of zero still counts as paid.
     #[n(7)]
-    pub amount_paid: TokenAmount,
+    pub amount_paid: Option<TokenAmount>,
     /// When the swap paused on the user, while it waits.
     #[n(8)]
     pub waiting_since: Option<Timestamp>,
@@ -103,6 +103,8 @@ pub enum TransitionError {
     NotInFlight(SwapStatus),
     #[error("accrued fees would overflow")]
     FeesOverflow,
+    #[error("amount {0} is above u128::MAX, which no event can carry")]
+    AmountOutOfRange(TokenAmount),
     #[error(transparent)]
     Pocket(#[from] PocketError),
 }
@@ -165,9 +167,10 @@ impl Swap {
         }
     }
 
-    /// A swap is paid in stable at most once, so a requote cannot overwrite the amount.
+    /// A swap is paid in stable at most once, so a requote cannot overwrite the amount,
+    /// whatever the amount was.
     pub fn ensure_unpaid(&self) -> Result<(), TransitionError> {
-        if self.amount_paid != TokenAmount::ZERO {
+        if self.amount_paid.is_some() {
             return Err(TransitionError::AlreadyPaid);
         }
         Ok(())

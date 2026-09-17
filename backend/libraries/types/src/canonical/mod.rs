@@ -7,11 +7,24 @@
 mod tests;
 
 use crate::numeric::TokenAmount;
+use thiserror::Error;
 
-/// Builds a canonical preimage, one typed field at a time.
+/// A value the canonical layout has no bytes for.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CanonicalError {
+    #[error("amount {0} is above u128::MAX, the most a 16-byte amount field holds")]
+    AmountTooLarge(TokenAmount),
+    #[error("{len} bytes do not fit a u32 length prefix")]
+    TooLong { len: usize },
+}
+
+/// Builds a canonical preimage, one typed field at a time. A field with no encoding is
+/// kept as the first error and [`CanonicalWriter::finish`] returns it, so a layout reads
+/// as one chain of puts and never panics.
 #[derive(Default)]
 pub struct CanonicalWriter {
     bytes: Vec<u8>,
+    error: Option<CanonicalError>,
 }
 
 impl CanonicalWriter {
@@ -44,12 +57,12 @@ impl CanonicalWriter {
         self
     }
 
-    /// Sixteen bytes.
+    /// Sixteen bytes. Above `u128::MAX` there are none, and `finish` fails.
     pub fn put_amount(&mut self, amount: TokenAmount) -> &mut Self {
-        let amount = amount.try_into_u128().expect(
-            "BUG: every conversion into a canonical amount field rejects values above u128::MAX",
-        );
-        self.bytes.extend_from_slice(&amount.to_be_bytes());
+        match amount.try_into_u128() {
+            Some(value) => self.bytes.extend_from_slice(&value.to_be_bytes()),
+            None => self.fail(CanonicalError::AmountTooLarge(amount)),
+        }
         self
     }
 
@@ -59,13 +72,16 @@ impl CanonicalWriter {
         self
     }
 
-    /// A u32 length, then the bytes.
+    /// A u32 length, then the bytes. At 4 GiB and over there is no length, and `finish`
+    /// fails.
     pub fn put_bytes(&mut self, bytes: &[u8]) -> &mut Self {
-        let len = u32::try_from(bytes.len()).expect(
-            "BUG: no canonical field reaches 4 GiB, the canister's own message limit is 2 MiB",
-        );
-        self.put_u32(len);
-        self.bytes.extend_from_slice(bytes);
+        match u32::try_from(bytes.len()) {
+            Ok(len) => {
+                self.put_u32(len);
+                self.bytes.extend_from_slice(bytes);
+            }
+            Err(_) => self.fail(CanonicalError::TooLong { len: bytes.len() }),
+        }
         self
     }
 
@@ -74,7 +90,15 @@ impl CanonicalWriter {
         self.put_bytes(text.as_bytes())
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    /// The preimage, or the first field that had no encoding.
+    pub fn finish(self) -> Result<Vec<u8>, CanonicalError> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.bytes),
+        }
+    }
+
+    fn fail(&mut self, error: CanonicalError) {
+        self.error.get_or_insert(error);
     }
 }

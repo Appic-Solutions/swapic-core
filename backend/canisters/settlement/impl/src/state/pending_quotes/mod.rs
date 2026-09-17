@@ -81,7 +81,9 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
     {
         return Err(RegisterError::ExpiresTooFarAhead { expires_at, now });
     }
-    let hash = quote.hash();
+    let hash = quote.hash().expect(
+        "BUG: Quote::validate refuses every amount above u128::MAX, and text is capped at 256 bytes",
+    );
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
         // a re-registration is always allowed, cap or no cap: the hash covers every field,

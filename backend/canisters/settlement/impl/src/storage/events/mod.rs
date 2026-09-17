@@ -8,6 +8,7 @@ use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableCell, StableLog};
 use std::cell::RefCell;
 use thiserror::Error;
+use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, Event, EventType};
 use types::{ChainId, EventHash, EventIndex, Pocket, QuoteHash, Swap, Timestamp, TransitionError};
 
@@ -88,6 +89,8 @@ pub enum AppendError {
     },
     #[error(transparent)]
     Transition(#[from] TransitionError),
+    #[error(transparent)]
+    Canonical(#[from] CanonicalError),
 }
 
 impl From<AppendError> for settlement_api::types::errors::AppendError {
@@ -110,6 +113,7 @@ impl From<AppendError> for settlement_api::types::errors::AppendError {
                 delta_pages,
             },
             AppendError::Transition(error) => Self::Transition(error.into()),
+            AppendError::Canonical(error) => Self::Canonical(error.into()),
         }
     }
 }
@@ -177,7 +181,9 @@ pub fn append_event_at(
             sealed: index,
         });
     }
-    let event = Event::seal(index, timestamp, meta.last_event_hash, payload);
+    // the guard refuses every amount without a preimage, so this is only the residue, and
+    // it is refused before the write like everything above
+    let event = Event::seal(index, timestamp, meta.last_event_hash, payload)?;
     EVENTS.with(|e| e.borrow_mut().append(&event)).map_err(
         |WriteError::GrowFailed {
              current_size,

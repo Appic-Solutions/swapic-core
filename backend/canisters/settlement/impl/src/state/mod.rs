@@ -182,7 +182,7 @@ impl<S: Store> State<S> {
                 src_chain,
                 src_token,
                 amount_in,
-                amount_paid: TokenAmount::ZERO,
+                amount_paid: None,
                 waiting_since: None,
             },
         );
@@ -208,7 +208,7 @@ impl<S: Store> State<S> {
     fn record_paid_in_stable(&mut self, quote_hash: &QuoteHash, amount: TokenAmount) {
         self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::PaidInStable;
-            swap.amount_paid = amount;
+            swap.amount_paid = Some(amount);
         });
     }
 

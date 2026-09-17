@@ -454,6 +454,25 @@ impl TryFrom<EventType> for types::EventType {
     }
 }
 
+/// A value the canonical preimage has no bytes for.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CanonicalError {
+    AmountTooLarge(Nat),
+    TooLong { len: u64 },
+}
+
+impl From<types::canonical::CanonicalError> for CanonicalError {
+    fn from(error: types::canonical::CanonicalError) -> Self {
+        use types::canonical::CanonicalError as Domain;
+        match error {
+            Domain::AmountTooLarge(amount) => Self::AmountTooLarge(amount.into()),
+            Domain::TooLong { len } => Self::TooLong {
+                len: crate::types::wire_len(len),
+            },
+        }
+    }
+}
+
 /// Why a wire event is not a domain event, naming the field at fault.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EventError {

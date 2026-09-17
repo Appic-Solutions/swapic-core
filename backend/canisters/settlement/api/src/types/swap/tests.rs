@@ -22,6 +22,10 @@ fn a_transition_error_keeps_what_it_names_on_the_wire() {
         TransitionError::UnknownPocket(8453)
     );
     assert_eq!(
+        TransitionError::from(types::TransitionError::AmountOutOfRange(TokenAmount::MAX)),
+        TransitionError::AmountOutOfRange(Nat::from(TokenAmount::MAX))
+    );
+    assert_eq!(
         TransitionError::from(types::TransitionError::Pocket(
             types::PocketError::InsufficientReserved {
                 reserved: TokenAmount::from(250_u32),
@@ -45,7 +49,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
         src_chain: ChainId::BASE,
         src_token: "USDC".parse().unwrap(),
         amount_in: TokenAmount::from(u128::MAX),
-        amount_paid: TokenAmount::ZERO,
+        amount_paid: Some(TokenAmount::ZERO),
         waiting_since: Some(types::Timestamp::from_nanos(777)),
     };
     assert_eq!(
@@ -58,7 +62,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
             src_chain: 8453,
             src_token: "USDC".into(),
             amount_in: Nat::from(u128::MAX),
-            amount_paid: Nat::from(0_u8),
+            amount_paid: Some(Nat::from(0_u8)),
             waiting_since_ns: Some(777),
         }
     );

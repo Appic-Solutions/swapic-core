@@ -124,4 +124,16 @@ fn a_config_error_names_its_knob_on_the_wire() {
             max_fee_bps: 30
         }
     );
+    let empty_vault = Config {
+        vault_addresses: BTreeMap::from([(8453, String::new())]),
+        ..Config::default()
+    };
+    let err = types::Config::try_from(empty_vault)
+        .unwrap()
+        .validate()
+        .unwrap_err();
+    assert_eq!(
+        ConfigError::from(err),
+        ConfigError::EmptyVaultAddress { chain_id: 8453 }
+    );
 }

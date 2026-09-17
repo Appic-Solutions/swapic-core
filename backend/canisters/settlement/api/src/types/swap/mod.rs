@@ -26,7 +26,8 @@ pub struct Swap {
     pub src_chain: u64,
     pub src_token: String,
     pub amount_in: Nat,
-    pub amount_paid: Nat,
+    /// Absent until the swap is paid in stable.
+    pub amount_paid: Option<Nat>,
     pub waiting_since_ns: Option<u64>,
 }
 
@@ -57,7 +58,7 @@ impl From<types::Swap> for Swap {
             src_chain: swap.src_chain.get(),
             src_token: swap.src_token.to_string(),
             amount_in: swap.amount_in.into(),
-            amount_paid: swap.amount_paid.into(),
+            amount_paid: swap.amount_paid.map(Nat::from),
             waiting_since_ns: swap.waiting_since.map(|since| since.as_nanos()),
         }
     }
@@ -81,6 +82,7 @@ pub enum TransitionError {
     NotRefunding(SwapStatus),
     NotInFlight(SwapStatus),
     FeesOverflow,
+    AmountOutOfRange(Nat),
     Pocket(PocketError),
 }
 
@@ -114,6 +116,7 @@ impl From<types::TransitionError> for TransitionError {
             Domain::NotRefunding(status) => Self::NotRefunding(status.into()),
             Domain::NotInFlight(status) => Self::NotInFlight(status.into()),
             Domain::FeesOverflow => Self::FeesOverflow,
+            Domain::AmountOutOfRange(amount) => Self::AmountOutOfRange(amount.into()),
             Domain::Pocket(error) => Self::Pocket(error.into()),
         }
     }

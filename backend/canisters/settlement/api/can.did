@@ -4,7 +4,13 @@ type AppendError = variant {
   LogFull;
   Transition : TransitionError;
   IndexMismatch : record { sealed : nat64; log_len : nat64 };
+  Canonical : CanonicalError;
   OutOfStableMemory : record { current_pages : nat64; delta_pages : nat64 };
+};
+// A value the canonical preimage has no bytes for.
+type CanonicalError = variant {
+  TooLong : record { len : nat64 };
+  AmountTooLarge : nat;
 };
 type Choice = variant { Requote; Refund };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -37,10 +43,12 @@ type ConfigError = variant {
     max_fee_bps : nat16;
     platform_fee_bps : nat16;
   };
+  EmptyVaultAddress : record { chain_id : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
   AmountTooLarge : record { field : text };
   DurationTooLong : record { field : text };
+  EmptyRpcUrl : record { chain_id : nat64 };
 };
 // One entry of the log. `time_ns` is IC time in nanoseconds.
 type Event = record {
@@ -132,8 +140,9 @@ type PocketError = variant {
 // gas_mode u8 (Gasless=0, Legacy=1) | rail | expires_at_s u64 | nonce u64`
 // 
 // Every integer is big-endian, every string is a u32-be byte length then utf8, and each
-// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, and
-// the rail is one of `cctp_v2_fast`, `cctp_v2_standard`, `eco`. Reproduce those bytes and
+// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, the
+// two tokens and `dst_address` must not be empty, and the rail is one of `cctp_v2_fast`,
+// `cctp_v2_standard`, `eco`. Reproduce those bytes and
 // you reproduce the hash; `backend/libraries/types/golden/quote_hash_v1.txt` is the vector
 // to check a reimplementation against.
 type Quote = record {
@@ -162,6 +171,7 @@ type QuoteError = variant {
   NotABool : record { field : text; value : nat8 };
   NotAGasMode : nat8;
   UnsupportedVersion : nat8;
+  EmptyText : record { field : text };
   TrailingBytes : record { len : nat64; consumed : nat64 };
   Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
   AmountTooLarge : record { field : text };
@@ -204,7 +214,8 @@ type Swap = record {
   quote_bytes : blob;
   src_token : text;
   waiting_since_ns : opt nat64;
-  amount_paid : nat;
+  // Absent until the swap is paid in stable.
+  amount_paid : opt nat;
   src_chain : nat64;
   amount_in : nat;
   open_attempt : opt nat32;
@@ -234,6 +245,7 @@ type TransitionError = variant {
   SwapClosed : SwapStatus;
   FeesOverflow;
   AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };
+  AmountOutOfRange : nat;
   AttemptNotOpen : nat32;
   CannotStartRefund : SwapStatus;
   NotInFlight : SwapStatus;

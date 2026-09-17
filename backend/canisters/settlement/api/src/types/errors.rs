@@ -2,7 +2,7 @@
 //! composition of them with the domain errors.
 
 use crate::types::config::ConfigError;
-use crate::types::events::{EventError, Hash32};
+use crate::types::events::{CanonicalError, EventError, Hash32};
 use crate::types::quote::QuoteError;
 use crate::types::swap::TransitionError;
 use candid::CandidType;
@@ -44,6 +44,7 @@ pub enum AppendError {
         delta_pages: u64,
     },
     Transition(TransitionError),
+    Canonical(CanonicalError),
 }
 
 /// Why `register_quote` stored nothing.

@@ -110,14 +110,14 @@ fn waiting_swap(
 ) -> Hash32 {
     let q = types::Quote::try_from(quote_expiring_in(pic, 60, auto_refund, nonce))
         .expect("a valid quote");
-    let hash = q.hash().into_bytes();
+    let hash = q.hash().expect("a valid quote has an id").into_bytes();
     append(
         pic,
         canister,
         admin,
         &EventType::FundsReceived {
             quote_hash: hash,
-            quote_bytes: q.canonical_bytes(),
+            quote_bytes: q.canonical_bytes().expect("a valid quote has a preimage"),
             chain_id: q.src_chain.get(),
             token: q.src_token.to_string(),
             amount: q.amount_in.into(),

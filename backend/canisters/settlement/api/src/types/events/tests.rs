@@ -120,7 +120,8 @@ fn an_event_reads_back_with_its_place_in_the_chain() {
         Timestamp::from_nanos(1_700_000_000),
         EventHash::new([9; 32]),
         payload,
-    );
+    )
+    .unwrap();
     let wire = Event::from(sealed.clone());
     assert_eq!(wire.index, 4);
     assert_eq!(wire.time_ns, 1_700_000_000);

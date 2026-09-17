@@ -67,7 +67,11 @@ fn register_refuses_a_quote_that_has_already_expired() {
             now
         })
     );
-    assert_eq!(get_pending(&q.hash()), None, "and nothing was stored");
+    assert_eq!(
+        get_pending(&q.hash().unwrap()),
+        None,
+        "and nothing was stored"
+    );
 }
 
 #[test]
@@ -81,7 +85,7 @@ fn register_refuses_a_quote_that_does_not_validate() {
         register(q.clone(), just_before_expiry(&q)),
         Err(RegisterError::InvalidQuote(QuoteError::EmptyRefundAddress))
     );
-    assert_eq!(get_pending(&q.hash()), None);
+    assert_eq!(get_pending(&q.hash().unwrap()), None);
 }
 
 /// Text reaches the store through the wire conversion, which is where the byte cap is
@@ -142,7 +146,7 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
     clear_pending();
     let q = pending_quote(9_003);
     let h = register(q.clone(), just_before_expiry(&q)).expect("a live quote registers");
-    assert_eq!(h, q.hash());
+    assert_eq!(h, q.hash().unwrap());
     assert_eq!(get_pending(&h), Some(q.clone()));
     // the quoter re-registers after an upgrade, so the same quote twice is not an error
     assert_eq!(register(q.clone(), just_before_expiry(&q)), Ok(h));
@@ -174,7 +178,7 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
             now: far
         })
     );
-    assert_eq!(get_pending(&q.hash()), None);
+    assert_eq!(get_pending(&q.hash().unwrap()), None);
     // and the edge of the window is inside it
     assert!(register(q.clone(), seconds_before(&q, MAX_QUOTE_LIFETIME.as_secs())).is_ok());
 }
@@ -186,9 +190,9 @@ fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
     clear_pending();
     // small quotes, distinct only by nonce, so the fill is cheap
     let tiny = |nonce: u64| Quote {
-        src_token: "".parse().unwrap(),
-        dst_token: "".parse().unwrap(),
-        dst_address: "".parse().unwrap(),
+        src_token: "a".parse().unwrap(),
+        dst_token: "b".parse().unwrap(),
+        dst_address: "c".parse().unwrap(),
         rail: Rail::Eco,
         nonce,
         ..fixed_quote()
@@ -203,11 +207,11 @@ fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
         register(overflow.clone(), now),
         Err(RegisterError::StoreFull)
     );
-    assert_eq!(get_pending(&overflow.hash()), None);
+    assert_eq!(get_pending(&overflow.hash().unwrap()), None);
 
     // the one thing a full store must still accept
     let repeat = tiny(0);
-    assert_eq!(register(repeat.clone(), now), Ok(repeat.hash()));
+    assert_eq!(register(repeat.clone(), now), Ok(repeat.hash().unwrap()));
 }
 
 /// A permit deadline that reaches past the last representable second never closes.
@@ -223,5 +227,5 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
         sweep_expired(UnixSeconds::new(u64::MAX), Duration::from_secs(120)),
         0
     );
-    assert!(get_pending(&q.hash()).is_some());
+    assert!(get_pending(&q.hash().unwrap()).is_some());
 }

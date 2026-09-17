@@ -23,7 +23,7 @@ fn quote(auto_refund: bool, nonce: u64) -> Quote {
 }
 
 fn quote_bytes(q: &Quote) -> Vec<u8> {
-    q.canonical_bytes()
+    q.canonical_bytes().unwrap()
 }
 
 fn expires_at_s(q: &Quote) -> u64 {
@@ -54,7 +54,7 @@ fn waiting(bytes: Vec<u8>, since_ns: u64) -> Swap {
         src_chain: ChainId::BASE,
         src_token: "usdc".parse().unwrap(),
         amount_in: TokenAmount::from(25_000_000_u32),
-        amount_paid: TokenAmount::ZERO,
+        amount_paid: None,
         waiting_since: Some(Timestamp::from_nanos(since_ns)),
     }
 }

@@ -88,6 +88,10 @@ pub enum ConfigError {
     RedactedRpcUrl { chain: ChainId },
     #[error("vault_addresses[{chain}] is {len} bytes, above the cap of 256")]
     VaultAddressTooLong { chain: ChainId, len: usize },
+    #[error("vault_addresses[{chain}] is empty")]
+    EmptyVaultAddress { chain: ChainId },
+    #[error("rpc_urls[{chain}] is empty")]
+    EmptyRpcUrl { chain: ChainId },
 }
 
 /// Which timer intervals a config write moved, so only those timers restart.
@@ -153,6 +157,21 @@ impl Config {
             if interval > MAX_TIMER_INTERVAL {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
             }
+        }
+        // a chain listed with nothing behind it is a deploy mistake, not a way to unset it
+        if let Some(chain) = self
+            .vault_addresses
+            .iter()
+            .find_map(|(chain, address)| address.as_str().is_empty().then_some(*chain))
+        {
+            return Err(ConfigError::EmptyVaultAddress { chain });
+        }
+        if let Some(chain) = self
+            .rpc_urls
+            .iter()
+            .find_map(|(chain, url)| url.expose().is_empty().then_some(*chain))
+        {
+            return Err(ConfigError::EmptyRpcUrl { chain });
         }
         Ok(())
     }

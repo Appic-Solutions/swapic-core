@@ -197,7 +197,7 @@ const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/quote_hash_v1.
 
 #[test]
 fn any_field_change_changes_the_hash() {
-    let base = fixed_quote().hash();
+    let base = fixed_quote().hash().unwrap();
     let changed = one_field_changed();
     assert_eq!(
         changed.len(),
@@ -206,7 +206,7 @@ fn any_field_change_changes_the_hash() {
     );
     let mut seen = std::collections::BTreeSet::new();
     for (field, q) in changed {
-        let h = q.hash();
+        let h = q.hash().unwrap();
         assert_ne!(base, h, "moving {field} left the hash alone");
         assert!(seen.insert(h), "two different quotes hash alike ({field})");
     }
@@ -220,7 +220,7 @@ fn the_preimage_is_exactly_as_long_as_the_layout_says() {
     // + (4+42) dst_token + 16 expected_out + 16 min_out + (4+42) dst_address
     // + (4+0) refund_address + 1 auto_refund + 1 gas_mode + (4+12) rail
     // + 8 expires_at + 8 nonce
-    assert_eq!(fixed_quote().canonical_bytes().len(), 241);
+    assert_eq!(fixed_quote().canonical_bytes().unwrap().len(), 241);
 }
 
 #[test]
@@ -229,8 +229,9 @@ fn gas_mode_encodes_one_byte() {
         gas_mode: GasMode::Gasless,
         ..fixed_quote()
     }
-    .canonical_bytes();
-    let legacy = fixed_quote().canonical_bytes();
+    .canonical_bytes()
+    .unwrap();
+    let legacy = fixed_quote().canonical_bytes().unwrap();
     assert_eq!(gasless.len(), legacy.len(), "one byte either way");
     // the byte sits after the refund_address prefix, before the rail
     let at = gasless.len() - 8 - 8 - (4 + 12) - 1;
@@ -252,7 +253,53 @@ fn none_and_empty_refund_address_share_a_preimage() {
     none.validate().expect("an absent refund address is fine");
     assert_eq!(empty.validate(), Err(QuoteError::EmptyRefundAddress));
     // and the reader resolves it the one way that survives a round trip
-    assert_eq!(Quote::parse(&none.canonical_bytes()).unwrap(), none);
+    assert_eq!(
+        Quote::parse(&none.canonical_bytes().unwrap()).unwrap(),
+        none
+    );
+}
+
+/// A quote that names no token or no destination cannot be settled, so it never takes a
+/// pending slot. An absent refund address stays legal: it has a meaning of its own.
+#[test]
+fn validate_refuses_empty_text_naming_the_field() {
+    type SetField = fn(&mut Quote);
+    let fields: [(&str, SetField); 3] = [
+        ("src_token", |q| q.src_token = text("")),
+        ("dst_token", |q| q.dst_token = text("")),
+        ("dst_address", |q| q.dst_address = text("")),
+    ];
+    for (field, empty) in fields {
+        let mut quote = fixed_quote();
+        empty(&mut quote);
+        assert_eq!(quote.validate(), Err(QuoteError::EmptyText { field }));
+    }
+}
+
+/// An amount the preimage cannot hold is a typed refusal at validation, and hashing such a
+/// quote is an error rather than a panic.
+#[test]
+fn validate_refuses_an_amount_above_u128_max_and_hash_does_not_panic() {
+    let too_large = TokenAmount::from(u128::MAX)
+        .checked_add(TokenAmount::ONE)
+        .unwrap();
+    type SetField = fn(&mut Quote, TokenAmount);
+    let fields: [(&str, SetField); 3] = [
+        ("amount_in", |q, a| q.amount_in = a),
+        ("expected_out", |q, a| q.expected_out = a),
+        ("min_out", |q, a| q.min_out = a),
+    ];
+    for (field, set) in fields {
+        let mut quote = fixed_quote();
+        set(&mut quote, too_large);
+        assert_eq!(quote.validate(), Err(QuoteError::AmountTooLarge { field }));
+        assert_eq!(quote.hash(), Err(CanonicalError::AmountTooLarge(too_large)));
+
+        let mut at_max = fixed_quote();
+        set(&mut at_max, TokenAmount::from(u128::MAX));
+        assert_eq!(at_max.validate(), Ok(()), "{field} at u128::MAX");
+        assert!(at_max.hash().is_ok());
+    }
 }
 
 #[test]
@@ -270,16 +317,20 @@ fn parse_round_trips_every_field_variation() {
     all.extend(one_field_changed().into_iter().map(|(_, q)| q));
     all.extend(edge_quotes());
     for q in all {
-        let bytes = q.canonical_bytes();
+        let bytes = q.canonical_bytes().unwrap();
         let back = Quote::parse(&bytes).unwrap_or_else(|e| panic!("{e} for {q:?}"));
         assert_eq!(back, q, "round trip lost a field");
-        assert_eq!(back.canonical_bytes(), bytes, "and the re-encode drifted");
+        assert_eq!(
+            back.canonical_bytes().unwrap(),
+            bytes,
+            "and the re-encode drifted"
+        );
     }
 }
 
 #[test]
 fn parse_rejects_a_truncated_preimage() {
-    let bytes = fixed_quote().canonical_bytes();
+    let bytes = fixed_quote().canonical_bytes().unwrap();
     for cut in [0, 1, 40, 100, bytes.len() - 1] {
         let err = Quote::parse(&bytes[..cut]).expect_err("truncated bytes are not a quote");
         assert!(
@@ -291,7 +342,7 @@ fn parse_rejects_a_truncated_preimage() {
 
 #[test]
 fn parse_rejects_trailing_bytes() {
-    let mut bytes = fixed_quote().canonical_bytes();
+    let mut bytes = fixed_quote().canonical_bytes().unwrap();
     bytes.push(0);
     assert_eq!(
         Quote::parse(&bytes),
@@ -304,7 +355,7 @@ fn parse_rejects_trailing_bytes() {
 
 #[test]
 fn parse_rejects_bytes_outside_the_layout() {
-    let base = fixed_quote().canonical_bytes();
+    let base = fixed_quote().canonical_bytes().unwrap();
     let auto_refund_at = base.len() - 8 - 8 - (4 + 12) - 1 - 1;
 
     let mut bad_bool = base.clone();
@@ -339,7 +390,7 @@ fn parse_rejects_bytes_outside_the_layout() {
 /// not parse, and the error names the field.
 #[test]
 fn parse_rejects_a_rail_that_is_not_one() {
-    let mut bytes = fixed_quote().canonical_bytes();
+    let mut bytes = fixed_quote().canonical_bytes().unwrap();
     // "cctp_v2_fast" becomes "cctp_v2_fasT", same length
     let rail_last = bytes.len() - 8 - 8 - 1;
     bytes[rail_last] = b'T';
@@ -358,7 +409,7 @@ fn parse_rejects_text_over_the_cap() {
         dst_address: text(&"a".repeat(MAX_TEXT_BYTES)),
         ..fixed_quote()
     };
-    let mut bytes = long.canonical_bytes();
+    let mut bytes = long.canonical_bytes().unwrap();
     // splice one more byte into dst_address and bump its length prefix
     let prefix_at = 1 + 8 + (4 + 42) + 16 + 8 + (4 + 42) + 16 + 16;
     bytes[prefix_at..prefix_at + 4].copy_from_slice(&257u32.to_be_bytes());
@@ -374,7 +425,7 @@ fn parse_rejects_text_over_the_cap() {
 
 #[test]
 fn quote_hash_matches_golden_vector() {
-    let got = fixed_quote().hash().to_string();
+    let got = fixed_quote().hash().unwrap().to_string();
 
     // regeneration is opt-in and never green, so a blessing is always a deliberate diff
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {

@@ -17,7 +17,8 @@ fn fold_both(payloads: Vec<EventType>) -> (State<StableStore>, State<MemoryStore
             Timestamp::from_nanos(i),
             meta.last_event_hash,
             payload,
-        );
+        )
+        .unwrap();
         apply_state_transition(&mut stable, &event);
         apply_state_transition(&mut heap, &event);
     }
@@ -99,7 +100,7 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
             src_chain: ChainId::BASE,
             src_token: "USDC".parse().unwrap(),
             amount_in: TokenAmount::from(1_u32),
-            amount_paid: TokenAmount::ZERO,
+            amount_paid: None,
             waiting_since: None,
         };
         StableStore(()).put_swap(quote, ghost);

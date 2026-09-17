@@ -34,7 +34,7 @@ const GOLDEN: &str = concat!(
 fn the_wire_fixture_hashes_to_the_golden_vector() {
     let quote = types::Quote::try_from(fixed_quote()).unwrap();
     let want = std::fs::read_to_string(GOLDEN).expect("golden vector, committed");
-    assert_eq!(quote.hash().to_string(), want.trim());
+    assert_eq!(quote.hash().unwrap().to_string(), want.trim());
 }
 
 #[test]
@@ -143,5 +143,11 @@ fn a_quote_error_names_its_field_on_the_wire() {
             ..fixed_quote()
         }),
         QuoteError::UnknownRail("cctp".into())
+    );
+    assert_eq!(
+        QuoteError::from(types::QuoteError::EmptyText { field: "dst_token" }),
+        QuoteError::EmptyText {
+            field: "dst_token".into()
+        }
     );
 }

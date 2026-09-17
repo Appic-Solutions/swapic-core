@@ -19,8 +19,9 @@ pub enum GasMode {
 /// gas_mode u8 (Gasless=0, Legacy=1) | rail | expires_at_s u64 | nonce u64`
 ///
 /// Every integer is big-endian, every string is a u32-be byte length then utf8, and each
-/// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, and
-/// the rail is one of `cctp_v2_fast`, `cctp_v2_standard`, `eco`. Reproduce those bytes and
+/// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, the
+/// two tokens and `dst_address` must not be empty, and the rail is one of `cctp_v2_fast`,
+/// `cctp_v2_standard`, `eco`. Reproduce those bytes and
 /// you reproduce the hash; `backend/libraries/types/golden/quote_hash_v1.txt` is the vector
 /// to check a reimplementation against.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
@@ -127,6 +128,9 @@ fn text<T: std::str::FromStr<Err = types::address::TextTooLong>>(
 pub enum QuoteError {
     UnsupportedVersion(u8),
     EmptyRefundAddress,
+    EmptyText {
+        field: String,
+    },
     AmountTooLarge {
         field: String,
     },
@@ -161,6 +165,9 @@ impl From<types::QuoteError> for QuoteError {
         match error {
             Domain::UnsupportedVersion(version) => Self::UnsupportedVersion(version),
             Domain::EmptyRefundAddress => Self::EmptyRefundAddress,
+            Domain::EmptyText { field } => Self::EmptyText {
+                field: field.to_string(),
+            },
             Domain::AmountTooLarge { field } => Self::AmountTooLarge {
                 field: field.to_string(),
             },

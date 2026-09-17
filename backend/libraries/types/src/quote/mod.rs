@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
-use crate::canonical::CanonicalWriter;
+use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
@@ -100,6 +100,8 @@ pub enum QuoteError {
     UnsupportedVersion(u8),
     #[error("refund_address is an empty string: leave it absent to mean no refund address")]
     EmptyRefundAddress,
+    #[error("{field} is empty")]
+    EmptyText { field: &'static str },
     #[error("{field} is above u128::MAX")]
     AmountTooLarge { field: &'static str },
     #[error("{field} is {len} bytes, above the cap of {MAX_TEXT_BYTES}")]
@@ -131,10 +133,29 @@ impl QuoteError {
 }
 
 impl Quote {
-    /// What a quote must satisfy before the canister holds on to it.
+    /// What a quote must satisfy before the canister holds on to it. A valid quote always
+    /// has a canonical preimage.
     pub fn validate(&self) -> Result<(), QuoteError> {
         if self.version != QUOTE_VERSION {
             return Err(QuoteError::UnsupportedVersion(self.version));
+        }
+        for (field, text) in [
+            ("src_token", self.src_token.as_str()),
+            ("dst_token", self.dst_token.as_str()),
+            ("dst_address", self.dst_address.as_str()),
+        ] {
+            if text.is_empty() {
+                return Err(QuoteError::EmptyText { field });
+            }
+        }
+        for (field, amount) in [
+            ("amount_in", self.amount_in),
+            ("expected_out", self.expected_out),
+            ("min_out", self.min_out),
+        ] {
+            if amount.try_into_u128().is_none() {
+                return Err(QuoteError::AmountTooLarge { field });
+            }
         }
         // an empty refund address writes the same bytes as an absent one, so only the
         // absent one is accepted
@@ -148,8 +169,11 @@ impl Quote {
         Ok(())
     }
 
-    /// The canonical preimage. [`Quote::parse`] is its exact inverse.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    /// The canonical preimage, or the amount it has no bytes for. Over validated quotes
+    /// [`Quote::parse`] is its inverse: `parse(canonical_bytes(q)) == q` for every `q` that
+    /// passes [`Quote::validate`]. Outside them it is not: an empty refund address writes
+    /// the bytes of an absent one.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CanonicalError> {
         // exhaustive: a new field fails to compile until the layout decides where it goes
         let Quote {
             version,
@@ -187,17 +211,21 @@ impl Quote {
             .put_text(rail.as_str())
             .put_u64(expires_at.get())
             .put_u64(*nonce);
-        w.into_bytes()
+        w.finish()
     }
 
-    /// The swap id: sha256 over the canonical preimage and nothing else.
-    pub fn hash(&self) -> QuoteHash {
-        QuoteHash::new(sha2::Sha256::digest(self.canonical_bytes()).into())
+    /// The swap id: sha256 over the canonical preimage and nothing else. A quote with no
+    /// preimage has no id.
+    pub fn hash(&self) -> Result<QuoteHash, CanonicalError> {
+        Ok(QuoteHash::new(
+            sha2::Sha256::digest(self.canonical_bytes()?).into(),
+        ))
     }
 
     /// Reads a canonical preimage back. Strict: every byte must be one the writer could
     /// have produced, so parsing then encoding gives back the input. The version is
-    /// carried, not interpreted; [`Quote::validate`] refuses one the canister cannot read.
+    /// carried, not interpreted, and empty text is read as it stands; [`Quote::validate`]
+    /// refuses what the canister will not hold.
     pub fn parse(bytes: &[u8]) -> Result<Quote, QuoteError> {
         let mut r = Reader { bytes, at: 0 };
         let quote = Quote {

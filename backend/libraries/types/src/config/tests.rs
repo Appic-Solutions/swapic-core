@@ -175,6 +175,47 @@ fn validate_rejects_a_timer_interval_above_a_year() {
     .expect("a year exactly is allowed");
 }
 
+#[test]
+fn validate_rejects_an_empty_vault_address() {
+    let config = Config {
+        vault_addresses: BTreeMap::from([
+            (ChainId::ETHEREUM, "0xvault".parse().unwrap()),
+            (ChainId::BASE, "".parse().unwrap()),
+        ]),
+        ..Config::default()
+    };
+    let err = config.validate().unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::EmptyVaultAddress {
+            chain: ChainId::BASE
+        }
+    );
+    assert!(err.to_string().contains("vault_addresses[8453]"), "{err}");
+}
+
+#[test]
+fn validate_rejects_an_empty_rpc_url() {
+    let config = Config {
+        rpc_urls: BTreeMap::from([
+            (ChainId::ETHEREUM, SECRET.parse().unwrap()),
+            (ChainId::ARBITRUM, "".parse().unwrap()),
+        ]),
+        ..Config::default()
+    };
+    let err = config.validate().unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::EmptyRpcUrl {
+            chain: ChainId::ARBITRUM
+        }
+    );
+    assert!(err.to_string().contains("rpc_urls[42161]"), "{err}");
+    secret_bearing()
+        .validate()
+        .expect("real urls and addresses pass");
+}
+
 /// The stored copy is the operative one, so it must keep the real urls.
 #[test]
 fn storage_keeps_the_secrets() {

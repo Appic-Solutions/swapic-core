@@ -8,6 +8,13 @@ impl<S: Store> State<S> {
     /// so a new variant fails to compile until someone decides its rule. Every checked
     /// computation [`apply_state_transition`] relies on is run here first.
     pub fn check(&self, event: &EventType) -> Result<(), TransitionError> {
+        // before any rule: an amount no 16-byte canonical field holds could never be sealed
+        if let Some(amount) = event
+            .amount()
+            .filter(|amount| amount.try_into_u128().is_none())
+        {
+            return Err(TransitionError::AmountOutOfRange(amount));
+        }
         match event {
             EventType::FundsReceived { quote_hash, .. } => match self.store().swap(quote_hash) {
                 Some(_) => Err(TransitionError::SwapExists(*quote_hash)),

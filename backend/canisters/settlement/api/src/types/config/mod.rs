@@ -190,6 +190,12 @@ pub enum ConfigError {
         chain_id: u64,
         len: u64,
     },
+    EmptyVaultAddress {
+        chain_id: u64,
+    },
+    EmptyRpcUrl {
+        chain_id: u64,
+    },
 }
 
 impl From<types::ConfigError> for ConfigError {
@@ -223,6 +229,12 @@ impl From<types::ConfigError> for ConfigError {
             Domain::VaultAddressTooLong { chain, len } => Self::VaultAddressTooLong {
                 chain_id: chain.get(),
                 len: crate::types::wire_len(len),
+            },
+            Domain::EmptyVaultAddress { chain } => Self::EmptyVaultAddress {
+                chain_id: chain.get(),
+            },
+            Domain::EmptyRpcUrl { chain } => Self::EmptyRpcUrl {
+                chain_id: chain.get(),
             },
         }
     }

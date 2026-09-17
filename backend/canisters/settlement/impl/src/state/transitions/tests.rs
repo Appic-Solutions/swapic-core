@@ -59,6 +59,7 @@ fn next_event(state: &HeapState, nanos: u64, payload: EventType) -> Event {
         meta.last_event_hash,
         payload,
     )
+    .expect("the payload has a preimage")
 }
 
 fn fold(events: Vec<EventType>) -> HeapState {
@@ -98,7 +99,7 @@ fn happy_path_reaches_done() {
     let swap = swap(&state, qh);
     assert_eq!(swap.status, SwapStatus::Done);
     assert_eq!(swap.last_attempt, Some(Attempt::new(2)));
-    assert_eq!(swap.amount_paid, amount(99));
+    assert_eq!(swap.amount_paid, Some(amount(99)));
 }
 
 #[test]
@@ -229,7 +230,43 @@ fn second_paid_in_stable_rejected() {
         state.check(&paid(qh, 50)),
         Err(TransitionError::AlreadyPaid)
     );
-    assert_eq!(swap(&state, qh).amount_paid, amount(99));
+    assert_eq!(swap(&state, qh).amount_paid, Some(amount(99)));
+}
+
+/// Paid is a fact, not an amount: a payment of zero followed by a requote must not open the
+/// door to a second payment that overwrites the first.
+#[test]
+fn a_zero_payment_still_refuses_a_second_after_a_requote() {
+    let qh = qh(1);
+    let mut events = vec![funds(qh), signed(qh, 1), confirmed(qh, 1), paid(qh, 0)];
+    events.extend(decide(qh, Choice::Requote));
+    let state = fold(events);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
+    assert_eq!(swap(&state, qh).amount_paid, Some(TokenAmount::ZERO));
+    assert_eq!(
+        state.check(&paid(qh, 50)),
+        Err(TransitionError::AlreadyPaid)
+    );
+}
+
+/// No event can carry an amount a 16-byte canonical field cannot hold, so the guard
+/// refuses it with a typed error before anything could try to seal it.
+#[test]
+fn check_refuses_an_amount_no_canonical_field_holds() {
+    let state = HeapState::default();
+    let fund = EventType::PocketFunded {
+        chain_id: BASE,
+        amount: TokenAmount::MAX,
+    };
+    assert_eq!(
+        state.check(&fund),
+        Err(TransitionError::AmountOutOfRange(TokenAmount::MAX))
+    );
+    let at_max = EventType::PocketFunded {
+        chain_id: BASE,
+        amount: amount(u128::MAX),
+    };
+    assert_eq!(state.check(&at_max), Ok(()));
 }
 
 #[test]

@@ -137,12 +137,14 @@ fn choice_encodes_one_byte() {
         quote_hash: quote(0),
         choice: Choice::Requote,
     }
-    .canonical_bytes();
+    .canonical_bytes()
+    .unwrap();
     let r = EventType::DecisionMade {
         quote_hash: quote(0),
         choice: Choice::Refund,
     }
-    .canonical_bytes();
+    .canonical_bytes()
+    .unwrap();
     assert_eq!(q.len(), 35, "tag + hash + one choice byte");
     assert_eq!(q.len(), r.len());
     assert_eq!(*q.last().unwrap(), 0, "Requote encodes 0");
@@ -157,7 +159,10 @@ fn event_bytes_matches_golden_vectors() {
         EVENT_VARIANT_COUNT,
         "samples() must cover every variant"
     );
-    let got: Vec<String> = s.iter().map(|e| hex::encode(e.canonical_bytes())).collect();
+    let got: Vec<String> = s
+        .iter()
+        .map(|e| hex::encode(e.canonical_bytes().unwrap()))
+        .collect();
 
     // regeneration is opt-in and never green, so a blessing is always a deliberate diff
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
@@ -205,7 +210,8 @@ fn every_variant_round_trips_through_storage() {
             Timestamp::from_nanos(1_700_000_000),
             EventHash::new([i; 32]),
             payload,
-        );
+        )
+        .unwrap();
         let back = Event::from_bytes(event.to_bytes());
         assert_eq!(back, event, "variant {i} does not survive stable storage");
     }
@@ -220,7 +226,7 @@ fn every_variant_stores_under_its_canonical_tag() {
         let mut d = minicbor::Decoder::new(&cbor);
         d.array().unwrap();
         let index = d.u16().unwrap();
-        let tag = u16::from_be_bytes(payload.canonical_bytes()[..2].try_into().unwrap());
+        let tag = u16::from_be_bytes(payload.canonical_bytes().unwrap()[..2].try_into().unwrap());
         assert_eq!(index, tag, "{payload:?}");
     }
 }
@@ -234,6 +240,7 @@ fn hash_changes_when_any_field_changes() {
             &EventHash::new([parent; 32]),
             &payload,
         )
+        .unwrap()
     };
     let a = at(1, 2, 0, swap_done(1));
     assert_ne!(a, at(2, 2, 0, swap_done(1)));
@@ -252,13 +259,15 @@ fn chain_links_and_detects_tampering() {
             chain_id: ChainId::BASE,
             amount: amount(5),
         },
-    );
+    )
+    .unwrap();
     let e1 = Event::seal(
         EventIndex::new(1),
         Timestamp::from_nanos(200),
         e0.hash,
         swap_done(1),
-    );
+    )
+    .unwrap();
     assert!(chain_is_valid(&[e0.clone(), e1.clone()]));
     let mut bad = e1.clone();
     bad.payload = swap_done(2);
@@ -266,4 +275,84 @@ fn chain_links_and_detects_tampering() {
     let mut unlinked = e1;
     unlinked.parent_hash = EventHash::new([7; 32]);
     assert!(!chain_is_valid(&[e0, unlinked]));
+}
+
+fn above_u128() -> TokenAmount {
+    amount(u128::MAX).checked_add(TokenAmount::ONE).unwrap()
+}
+
+/// An amount no 16-byte field holds has no preimage, so there is no hash to seal: an error
+/// naming the amount, not a panic inside `append_event`.
+#[test]
+fn seal_refuses_an_amount_above_u128_max() {
+    for too_large in [above_u128(), TokenAmount::MAX] {
+        let payload = EventType::PocketFunded {
+            chain_id: ChainId::BASE,
+            amount: too_large,
+        };
+        assert_eq!(
+            payload.canonical_bytes(),
+            Err(CanonicalError::AmountTooLarge(too_large))
+        );
+        assert_eq!(
+            Event::seal(
+                EventIndex::ZERO,
+                Timestamp::from_nanos(1),
+                EventHash::ZERO,
+                payload
+            ),
+            Err(CanonicalError::AmountTooLarge(too_large))
+        );
+    }
+}
+
+/// A stored event whose payload has no preimage cannot be a link, so the chain check says
+/// false rather than trapping the audit.
+#[test]
+fn chain_check_is_false_for_an_event_with_no_preimage() {
+    let mut e0 = Event::seal(
+        EventIndex::ZERO,
+        Timestamp::from_nanos(100),
+        EventHash::ZERO,
+        EventType::PocketFunded {
+            chain_id: ChainId::BASE,
+            amount: amount(5),
+        },
+    )
+    .unwrap();
+    e0.payload = EventType::PocketFunded {
+        chain_id: ChainId::BASE,
+        amount: TokenAmount::MAX,
+    };
+    assert!(!chain_is_valid(&[e0]));
+}
+
+/// `amount` names exactly the variants whose preimage carries an amount field.
+#[test]
+fn amount_is_the_one_amount_field_of_each_variant() {
+    for payload in samples() {
+        let found = payload.amount();
+        let mut without = payload.clone();
+        let moved = match &mut without {
+            EventType::FundsReceived { amount, .. }
+            | EventType::PaidInStable { amount, .. }
+            | EventType::Refunded { amount, .. }
+            | EventType::FeeAccrued { amount, .. }
+            | EventType::PocketFunded { amount, .. }
+            | EventType::PocketReserved { amount, .. }
+            | EventType::PocketRebalanced { amount, .. }
+            | EventType::PocketReleased { amount, .. }
+            | EventType::PocketSpent { amount, .. } => {
+                *amount = TokenAmount::MAX;
+                true
+            }
+            _ => false,
+        };
+        assert_eq!(found.is_some(), moved, "{payload:?}");
+        assert_eq!(
+            without.canonical_bytes().is_err(),
+            moved,
+            "the amount is in the preimage: {payload:?}"
+        );
+    }
 }
