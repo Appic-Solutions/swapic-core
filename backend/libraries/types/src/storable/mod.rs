@@ -1,7 +1,14 @@
 //! Stable storage encodings shared by the domain types.
+//!
+//! A stable map or log decodes a value only when it is read, so an upgrade that changes a
+//! stored layout goes through and then traps on every read. `golden/storage_v1.txt` pins
+//! the bytes of every stored type, and the test here decodes them with the current types.
+
+#[cfg(test)]
+mod tests;
 
 /// Implements `Storable` for a minicbor type as its unbounded minicbor bytes. A stored
-/// value that no longer decodes traps, which leaves an upgrade on the wasm that wrote it.
+/// value that no longer decodes traps the read.
 #[macro_export]
 macro_rules! storable_as_cbor {
     ($t:ty) => {

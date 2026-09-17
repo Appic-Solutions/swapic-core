@@ -7,6 +7,8 @@ use std::str::FromStr;
 use thiserror::Error;
 
 /// The bridge a swap settles over.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 #[cbor(index_only)]
 pub enum Rail {

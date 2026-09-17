@@ -1830,7 +1830,6 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-stable-structures",
- "minicbor",
  "serde",
  "settlement_api",
  "thiserror 2.0.20",

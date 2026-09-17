@@ -15,6 +15,9 @@ pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
 
 /// Every knob the canister reads at runtime. `Debug` is safe to log: [`RpcUrl`] prints
 /// as `***`.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Config {
     /// The fee the platform charges, at most `max_fee`.

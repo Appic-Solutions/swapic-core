@@ -8,6 +8,7 @@ pub mod checked_amount;
 pub mod config;
 pub mod events;
 pub mod hash;
+pub mod ledger;
 pub mod numeric;
 pub mod quote;
 pub mod rail;
@@ -20,6 +21,7 @@ pub use checked_amount::CheckedAmountOf;
 pub use config::{Config, ConfigError};
 pub use events::{Choice, Event, EventType};
 pub use hash::{EventHash, QuoteHash, TxHash};
+pub use ledger::LedgerMeta;
 pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds,
     UsdAmount,

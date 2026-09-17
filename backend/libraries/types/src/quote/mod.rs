@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
@@ -25,6 +25,8 @@ pub const QUOTE_FIELD_COUNT: usize = 15;
 pub const MAX_QUOTE_LIFETIME: Duration = Duration::from_secs(86_400);
 
 /// Who pays the source-side gas. One byte in the preimage: Gasless 0, Legacy 1.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(index_only)]
 pub enum GasMode {
@@ -59,6 +61,9 @@ pub enum GasMode {
 /// Integers are big-endian and text is a u32 big-endian byte length then utf8. The order
 /// is frozen. `backend/libraries/types/golden/quote_hash_v1.txt` is the vector to check a
 /// reimplementation against.
+///
+/// Pending quotes are stored as minicbor, a layout apart from the preimage: `#[n]` indices
+/// are append-only, never renumbered or reused, and a new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Quote {
     #[n(0)]

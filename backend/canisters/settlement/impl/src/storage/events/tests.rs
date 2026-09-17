@@ -6,6 +6,7 @@ use crate::storage::on_fresh_memory;
 use crate::task_manager::expiry_sweep::run_expiry_sweep;
 use crate::task_manager::replay_audit::run_replay_audit;
 use types::events::Choice;
+use types::LedgerMeta;
 use types::{
     Attempt, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds, WaitingKey,
 };
@@ -320,5 +321,73 @@ fn the_expiry_sweep_reads_the_index_and_not_the_swaps() {
             read_state(|state| state.swap(&quote_hash).unwrap().status),
             SwapStatus::WaitingForUser
         );
+    });
+}
+
+/// The O(1) rule `post_upgrade` refuses an upgrade on and `append_event` refuses to write
+/// on: the fold seals next at the log's length, linked to the log's last hash.
+#[test]
+fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
+    on_fresh_memory(|| {
+        assert_eq!(
+            ensure_fold_in_step(),
+            Ok(()),
+            "genesis: no events, zero head"
+        );
+        let zero = StableStore(()).meta();
+        StableStore(()).put_meta(LedgerMeta {
+            last_event_hash: EventHash::new([7; 32]),
+            ..zero
+        });
+        assert_eq!(
+            ensure_fold_in_step(),
+            Err(FoldOutOfStep::Head {
+                log: EventHash::ZERO,
+                fold: EventHash::new([7; 32])
+            }),
+            "an empty log ends with the zero hash"
+        );
+        StableStore(()).put_meta(zero);
+
+        append(funds(QuoteHash::new([1; 32])));
+        append(funds(QuoteHash::new([2; 32])));
+        assert_eq!(ensure_fold_in_step(), Ok(()));
+        let meta = StableStore(()).meta();
+
+        StableStore(()).put_meta(LedgerMeta {
+            next_event_index: EventIndex::new(3),
+            ..meta
+        });
+        assert_eq!(
+            ensure_fold_in_step(),
+            Err(FoldOutOfStep::Length {
+                log_len: 2,
+                next_event_index: EventIndex::new(3)
+            })
+        );
+        assert_eq!(
+            append_event_at(funds(QuoteHash::new([3; 32])), Timestamp::from_nanos(1)),
+            Err(AppendError::IndexMismatch {
+                log_len: 2,
+                sealed: EventIndex::new(3)
+            })
+        );
+
+        StableStore(()).put_meta(LedgerMeta {
+            last_event_hash: EventHash::new([7; 32]),
+            ..meta
+        });
+        assert_eq!(
+            ensure_fold_in_step(),
+            Err(FoldOutOfStep::Head {
+                log: meta.last_event_hash,
+                fold: EventHash::new([7; 32])
+            })
+        );
+        assert!(matches!(
+            append_event_at(funds(QuoteHash::new([3; 32])), Timestamp::from_nanos(1)),
+            Err(AppendError::ChainDiverged { .. })
+        ));
+        assert_eq!(event_count(), 2, "a refused append writes nothing");
     });
 }

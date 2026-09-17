@@ -1,8 +1,7 @@
-use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, Pocket, QuoteHash, Swap, SwapStatus,
-    Timestamp, TokenAmount, TransitionError, WaitingKey,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap,
+    SwapStatus, Timestamp, TokenAmount, TransitionError, WaitingKey,
 };
 
 pub mod pending_quotes;
@@ -31,21 +30,6 @@ pub trait Store {
     /// swaps returned, not the swaps ever recorded.
     fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash>;
 }
-
-/// What the fold keeps besides swaps and pockets.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
-pub struct LedgerMeta {
-    #[n(0)]
-    pub fees_accrued: TokenAmount,
-    /// The index the next event is sealed at.
-    #[n(1)]
-    pub next_event_index: EventIndex,
-    /// The chain head the next event links to.
-    #[n(2)]
-    pub last_event_hash: EventHash,
-}
-
-types::storable_as_cbor!(LedgerMeta);
 
 /// A [`Store`] on the heap: what unit tests and the replay audit fold into.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

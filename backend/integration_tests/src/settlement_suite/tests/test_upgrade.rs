@@ -1,3 +1,4 @@
+use crate::client::settlement::test_skew_state;
 use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{decode_one, encode_one, Nat, Principal};
@@ -75,4 +76,56 @@ fn test_append_rejects_non_controller() {
         .query_call(canister, stranger, "event_count", encode_one(()).unwrap())
         .unwrap();
     assert_eq!(decode_one::<u64>(&raw).unwrap(), 0);
+}
+
+/// An upgrade over a fold out of step with its log would take and then refuse every
+/// append, so `post_upgrade` refuses it: the upgrade fails and the old wasm keeps running on
+/// untouched memory. Putting the fold back in step lets the same upgrade through.
+#[test]
+fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
+    let (pic, canister, admin) = setup();
+    let event = EventType::PocketFunded {
+        chain_id: 8453,
+        amount: Nat::from(1000_u64),
+    };
+    let raw = pic
+        .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
+        .unwrap();
+    decode_one::<Result<u64, TestAppendError>>(&raw)
+        .unwrap()
+        .unwrap();
+    test_skew_state(&pic, canister, admin).unwrap();
+
+    let err = pic
+        .upgrade_canister(
+            canister,
+            wasms::settlement(),
+            encode_one(()).unwrap(),
+            Some(admin),
+        )
+        .expect_err("the fold links to a head the log does not end with");
+    assert!(
+        err.reject_message.contains("out of step"),
+        "say why: {}",
+        err.reject_message
+    );
+
+    // still the old wasm and the old memory: the event is there and the skew is too
+    let raw = pic
+        .query_call(canister, admin, "event_count", encode_one(()).unwrap())
+        .unwrap();
+    assert_eq!(decode_one::<u64>(&raw).unwrap(), 1);
+    test_skew_state(&pic, canister, admin).unwrap();
+
+    pic.upgrade_canister(
+        canister,
+        wasms::settlement(),
+        encode_one(()).unwrap(),
+        Some(admin),
+    )
+    .expect("a fold in step upgrades");
+    let raw = pic
+        .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
+        .unwrap();
+    assert!(decode_one::<bool>(&raw).unwrap());
 }

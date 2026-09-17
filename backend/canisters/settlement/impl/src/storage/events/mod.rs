@@ -1,5 +1,5 @@
 use crate::state::transitions::{apply_state_transition, replay};
-use crate::state::{LedgerMeta, State, Store};
+use crate::state::{State, Store};
 use crate::storage::memory::{
     events_data_memory, events_index_memory, ledger_meta_memory, pockets_memory, swaps_memory,
     waiting_memory, Memory,
@@ -11,7 +11,8 @@ use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, Event, EventType};
 use types::{
-    ChainId, EventHash, EventIndex, Pocket, QuoteHash, Swap, Timestamp, TransitionError, WaitingKey,
+    ChainId, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap, Timestamp,
+    TransitionError, WaitingKey,
 };
 
 /// Longest page a query will return, so one call can never walk the whole log.
@@ -122,6 +123,35 @@ pub enum AppendError {
     Canonical(#[from] CanonicalError),
 }
 
+/// Why the stable fold is out of step with the log it is the fold of.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum FoldOutOfStep {
+    #[error(
+        "the log holds {log_len} events but the fold expects to seal event {next_event_index}"
+    )]
+    Length {
+        log_len: u64,
+        next_event_index: EventIndex,
+    },
+    #[error("the log ends with {log} but the fold links to {fold}")]
+    Head { log: EventHash, fold: EventHash },
+}
+
+impl From<FoldOutOfStep> for AppendError {
+    fn from(error: FoldOutOfStep) -> Self {
+        match error {
+            FoldOutOfStep::Length {
+                log_len,
+                next_event_index,
+            } => Self::IndexMismatch {
+                log_len,
+                sealed: next_event_index,
+            },
+            FoldOutOfStep::Head { log, fold } => Self::ChainDiverged { log, state: fold },
+        }
+    }
+}
+
 impl From<AppendError> for settlement_api::types::errors::AppendError {
     fn from(error: AppendError) -> Self {
         match error {
@@ -158,7 +188,8 @@ pub fn init() {
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at
-/// genesis, which is the anchor `chain_is_valid` checks index 0 against.
+/// genesis, which is the anchor `chain_is_valid` checks index 0 against. Decodes the last
+/// event, and only that one.
 fn log_head() -> EventHash {
     EVENTS.with(|e| {
         let log = e.borrow();
@@ -178,6 +209,28 @@ pub fn append_event(payload: EventType) -> Result<EventIndex, AppendError> {
     append_event_at(payload, Timestamp::from_nanos(ic_cdk::api::time()))
 }
 
+/// In O(1), whether the fold is in step with its log: the index it seals next is the log's
+/// length, and the head it links to is the log's last hash, the zero hash on an empty log.
+/// `post_upgrade` refuses an upgrade on it, and `append_event` refuses to write on it.
+pub fn ensure_fold_in_step() -> Result<(), FoldOutOfStep> {
+    let meta = StableStore(()).meta();
+    let log_len = EVENTS.with(|e| e.borrow().len());
+    if meta.next_event_index.get() != log_len {
+        return Err(FoldOutOfStep::Length {
+            log_len,
+            next_event_index: meta.next_event_index,
+        });
+    }
+    let head = log_head();
+    if head != meta.last_event_hash {
+        return Err(FoldOutOfStep::Head {
+            log: head,
+            fold: meta.last_event_hash,
+        });
+    }
+    Ok(())
+}
+
 /// [`append_event`] sealed at `timestamp`: a caller that already read the clock seals on
 /// the same reading, and a unit test runs without a canister. Guard, seal, append, apply,
 /// all within a single message, so a trap anywhere rolls back the log and the fold together.
@@ -185,31 +238,16 @@ pub fn append_event_at(
     payload: EventType,
     timestamp: Timestamp,
 ) -> Result<EventIndex, AppendError> {
+    // checked before anything is sealed: a head the log does not end with would seal on a
+    // parent the log does not have and fork the chain at an index that still looks right,
+    // and an index off the log's length would write one slot and apply another
+    ensure_fold_in_step()?;
     let mut state = State::new(StableStore(()));
-    let meta = state.meta();
-    // the head the fold links to must be the head the log ends with, checked before
-    // anything is sealed: a diverged head would seal on a parent the log does not have and
-    // fork the chain at an index that still looks right
-    let head = log_head();
-    if head != meta.last_event_hash {
-        return Err(AppendError::ChainDiverged {
-            log: head,
-            state: meta.last_event_hash,
-        });
-    }
     state.check(&payload)?;
+    let meta = state.meta();
     let index = meta.next_event_index;
     if index.next().is_none() {
         return Err(AppendError::LogFull);
-    }
-    // the sealed index must be the slot the log is about to write, checked before the
-    // write, because returning Err after one would commit an event never applied
-    let log_len = EVENTS.with(|e| e.borrow().len());
-    if log_len != index.get() {
-        return Err(AppendError::IndexMismatch {
-            log_len,
-            sealed: index,
-        });
     }
     // the guard refuses every amount without a preimage, so this is only the residue, and
     // it is refused before the write like everything above

@@ -1,9 +1,8 @@
 use super::*;
-use crate::state::LedgerMeta;
 use types::events::Choice;
 use types::{
-    Attempt, BlockNumber, ChainId, EventHash, EventIndex, Pocket, PocketError, QuoteHash, Swap,
-    SwapStatus, Timestamp, TokenAmount, TxHash,
+    Attempt, BlockNumber, ChainId, EventHash, EventIndex, LedgerMeta, Pocket, PocketError,
+    QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TxHash,
 };
 
 type HeapState = State<MemoryStore>;

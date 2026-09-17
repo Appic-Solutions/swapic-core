@@ -16,8 +16,8 @@ fn amount(value: u128) -> TokenAmount {
     TokenAmount::from(value)
 }
 
-/// One fixed sample of every variant, in tag order, for the golden file.
-fn samples() -> Vec<EventType> {
+/// One fixed sample of every variant, in tag order, for the golden files.
+pub(crate) fn samples() -> Vec<EventType> {
     vec![
         EventType::ConfigChanged {
             json: "{\"fee_bps\":30}".into(),
@@ -193,9 +193,9 @@ fn event_bytes_matches_golden_vectors() {
     }
 }
 
-/// A variant that fails to decode would trap post_upgrade and strand the canister on its
-/// current wasm. This walks the same `Storable` impl the stable log uses, over every
-/// variant, so the append-only storage rule is CI-enforced.
+/// The stable log decodes an event only when it is read, so a variant that no longer
+/// decodes would upgrade cleanly and then trap every read of it. This walks the same
+/// `Storable` impl the stable log uses, over every variant; `storage_v1.txt` pins the bytes.
 #[test]
 fn every_variant_round_trips_through_storage() {
     let s = samples();

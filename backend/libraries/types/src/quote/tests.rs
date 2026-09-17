@@ -9,7 +9,7 @@ where
 
 /// The cross-repo fixture: swapic-backend's mirror builds this same quote field for
 /// field and must hash it to the same golden line.
-fn fixed_quote() -> Quote {
+pub(crate) fn fixed_quote() -> Quote {
     Quote {
         version: 1,
         src_chain: ChainId::BASE,

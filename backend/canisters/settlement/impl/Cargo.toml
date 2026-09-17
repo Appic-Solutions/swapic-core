@@ -19,6 +19,5 @@ hex = { workspace = true }
 ic-cdk = { workspace = true }
 ic-cdk-timers = { workspace = true }
 ic-stable-structures = { workspace = true }
-minicbor = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

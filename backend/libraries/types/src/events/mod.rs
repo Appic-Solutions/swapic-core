@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::address::{Address, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
@@ -18,6 +18,9 @@ pub const EVENT_VARIANT_COUNT: usize = 19;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum EventType {
     /// A controller wrote a new config; `json` is its public view.
@@ -212,6 +215,8 @@ pub enum EventType {
 }
 
 /// The user's answer to a paused swap. One byte in the preimage: Requote 0, Refund 1.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(index_only)]
 pub enum Choice {
@@ -222,6 +227,9 @@ pub enum Choice {
 }
 
 /// One entry of the log: the payload, where it sits, and its link in the hash chain.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Event {
     #[n(0)]

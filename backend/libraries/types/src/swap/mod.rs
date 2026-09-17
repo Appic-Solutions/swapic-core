@@ -11,6 +11,8 @@ use std::borrow::Cow;
 use thiserror::Error;
 
 /// Where a swap is in its lifecycle.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(index_only)]
 pub enum SwapStatus {
@@ -42,6 +44,9 @@ impl SwapStatus {
 }
 
 /// The folded state of one swap.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Swap {
     /// The canonical preimage of the quote the funds arrived for.
@@ -239,6 +244,9 @@ impl Storable for WaitingKey {
 }
 
 /// One chain's liquidity.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Pocket {
     /// Free to reserve or rebalance.
