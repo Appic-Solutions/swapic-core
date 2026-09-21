@@ -108,8 +108,9 @@ pub enum EventType {
         quoter: String,
         watcher: String,
     },
-    /// A waiting index entry no event could have produced was dropped. Only a divergence
-    /// has one, so this line is the repair's explanation.
+    /// A swap's waiting index entries were made to agree with the swap: what no event could
+    /// have produced was dropped, and the wait the swap is in is there. Only a divergence
+    /// needs one, so this line is the repair's explanation.
     WaitingRepaired {
         quote_hash: Hash32,
     },

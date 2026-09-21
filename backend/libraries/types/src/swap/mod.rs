@@ -5,7 +5,7 @@ use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{Attempt, Timestamp, TokenAmount};
-use crate::quote::QuoteError;
+use crate::quote::{Quote, QuoteError};
 use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
 use std::borrow::Cow;
@@ -127,6 +127,19 @@ pub enum TransitionError {
 }
 
 impl Swap {
+    /// The wait the auto-refund index holds for this swap, if it holds one: the instant the
+    /// swap paused on its user, when it is waiting, its quote asks for an automatic refund,
+    /// and the clock is running. The index is the queue the expiry timer works through, so
+    /// a swap that waits for a human is not in it, and neither is one whose bytes an older
+    /// wasm recorded and this one does not read.
+    pub fn auto_refund_wait(&self) -> Option<Timestamp> {
+        if self.status != SwapStatus::WaitingForUser {
+            return None;
+        }
+        let auto_refund = Quote::parse(&self.quote_bytes).is_ok_and(|quote| quote.auto_refund);
+        self.waiting_since.filter(|_| auto_refund)
+    }
+
     /// The number the next attempt must carry: one, then one past the last.
     pub fn next_attempt(&self) -> Option<Attempt> {
         self.last_attempt

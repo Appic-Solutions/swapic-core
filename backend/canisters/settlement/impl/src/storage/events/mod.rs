@@ -89,19 +89,22 @@ impl Store for StableStore {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
-    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash) {
+    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
         // read the keys out before removing any: the set is borrowed for the walk
         let doomed: Vec<WaitingKey> = AUTO_REFUND_WAITING.with(|waiting| {
             waiting
                 .borrow()
                 .iter()
-                .filter(|key| key.quote_hash == *quote_hash)
+                .filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied)
                 .collect()
         });
         AUTO_REFUND_WAITING.with(|waiting| {
             let mut waiting = waiting.borrow_mut();
             for key in &doomed {
                 waiting.remove(key);
+            }
+            if let Some(key) = implied {
+                waiting.insert(key);
             }
         });
     }

@@ -2,7 +2,7 @@ use super::*;
 use types::events::Choice;
 use types::{
     Attempt, BlockNumber, ChainId, EventHash, EventIndex, GasMode, LedgerMeta, Pocket, PocketError,
-    QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash, UnixSeconds,
+    QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash, UnixSeconds, WaitingKey,
 };
 
 type HeapState = State<MemoryStore>;
@@ -898,4 +898,70 @@ fn replay_refuses_a_log_append_event_could_not_have_written() {
         replay(unlinked),
         Err(ReplayError::Unlinked { .. })
     ));
+}
+
+/// The repair makes a swap's index entries agree with the swap: every entry the swap does
+/// not imply goes, the one it does stays or comes back, and a swap whose entries already
+/// agree is left as it is. So it is admitted on any swap, or on none, and it can never
+/// strand a wait.
+#[test]
+fn a_repair_makes_the_index_agree_with_the_swap() {
+    let [waiting, settled, manual] = [swap_id(1), swap_id(2), manual_swap_id(3)];
+    let orphan = qh(9);
+    let key = |nanos: u64, quote_hash| WaitingKey {
+        since: Timestamp::from_nanos(nanos),
+        quote_hash,
+    };
+    let mut state = fold(vec![funds(1), funds(2), funds_manual(3)]);
+    for (nanos, quote_hash) in [(100, waiting), (101, manual)] {
+        let pause = ask(quote_hash);
+        state.check(&pause).expect("guard admits pause");
+        let event = next_event(&state, nanos, pause);
+        apply_state_transition(&mut state, &event);
+    }
+    assert_eq!(
+        state.store().auto_refund_waiting(),
+        vec![key(100, waiting)],
+        "the consult-me wait is in no index"
+    );
+
+    // entries no event produced: the real wait under an instant it never had, a swap that
+    // never waited, the consult-me swap, and no swap at all
+    let mut store = state.into_store();
+    for planted in [
+        key(1, waiting),
+        key(2, settled),
+        key(3, manual),
+        key(4, orphan),
+    ] {
+        store.put_auto_refund_waiting(planted);
+    }
+    let mut state = State::new(store);
+    let repair = |state: &mut HeapState, quote_hash| {
+        let repair = EventType::WaitingRepaired { quote_hash };
+        assert_eq!(
+            state.check(&repair),
+            Ok(()),
+            "admitted on any swap, or none"
+        );
+        let event = next_event(state, 200, repair);
+        apply_state_transition(state, &event);
+    };
+    for quote_hash in [waiting, settled, manual, orphan] {
+        repair(&mut state, quote_hash);
+    }
+    assert_eq!(
+        state.store().auto_refund_waiting(),
+        vec![key(100, waiting)],
+        "the one wait the swap implies, and nothing else"
+    );
+
+    // where the index already agrees the repair changes nothing, and a lost entry comes back
+    repair(&mut state, waiting);
+    assert_eq!(state.store().auto_refund_waiting(), vec![key(100, waiting)]);
+    let mut store = state.into_store();
+    store.remove_auto_refund_waiting(&key(100, waiting));
+    let mut state = State::new(store);
+    repair(&mut state, waiting);
+    assert_eq!(state.store().auto_refund_waiting(), vec![key(100, waiting)]);
 }

@@ -1,7 +1,7 @@
 use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, Quote, QuoteHash, Swap,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap,
     SwapStatus, Timestamp, TokenAmount, TransitionError, WaitingKey,
 };
 
@@ -26,11 +26,11 @@ pub trait Store {
     /// and nothing in it is work the timer can do.
     fn put_auto_refund_waiting(&mut self, key: WaitingKey);
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
-    /// Drops every indexed wait naming `quote_hash`, whatever instant its key carries. The
-    /// index is keyed by wait first, so a swap is found by a walk and not by a seek: only
-    /// the repair of a divergence needs this, and a diverged entry may carry an instant its
-    /// swap never had.
-    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash);
+    /// Makes the index hold, for `quote_hash`, exactly `implied`: drops every other entry
+    /// naming it, and writes `implied` if it is missing. The index is keyed by wait first,
+    /// so a swap's entries are found by a walk and not by a seek: only the repair of a
+    /// divergence needs this, and a diverged entry may carry an instant its swap never had.
+    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>);
     /// Every indexed wait, longest wait first.
     fn auto_refund_waiting(&self) -> Vec<WaitingKey>;
     /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
@@ -101,15 +101,18 @@ impl Store for MemoryStore {
         self.auto_refund_waiting.remove(key);
     }
 
-    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash) {
+    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
         let doomed: Vec<WaitingKey> = self
             .auto_refund_waiting
             .iter()
-            .filter(|key| key.quote_hash == *quote_hash)
+            .filter(|key| key.quote_hash == *quote_hash && Some(**key) != implied)
             .copied()
             .collect();
         for key in &doomed {
             self.auto_refund_waiting.remove(key);
+        }
+        if let Some(key) = implied {
+            self.auto_refund_waiting.insert(key);
         }
     }
 
@@ -280,26 +283,36 @@ impl<S: Store> State<S> {
     /// queue the expiry timer works through, and a swap that waits for a human is not work
     /// the timer can do. Its wait is on the swap itself either way, so `get_swap` shows it.
     fn record_decision_required(&mut self, quote_hash: &QuoteHash, at: Timestamp) {
-        let auto_refund = self.update_swap(quote_hash, |swap| {
+        let indexed = self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::WaitingForUser;
             swap.waiting_since = Some(at);
             // the FundsReceived guard binds the swap id to these bytes, so they parse.
             // Bytes an older wasm recorded that do not are a swap that waits for a human.
-            Quote::parse(&swap.quote_bytes).is_ok_and(|quote| quote.auto_refund)
+            swap.auto_refund_wait()
         });
-        if auto_refund {
+        if let Some(since) = indexed {
             self.store.put_auto_refund_waiting(WaitingKey {
-                since: at,
+                since,
                 quote_hash: *quote_hash,
             });
         }
     }
 
-    /// Drops the waiting index entries of a swap that is not waiting for its user, which is
-    /// a fold no event could have produced. Found by swap id rather than by key, because a
-    /// diverged entry may carry an instant the swap never waited since.
+    /// Makes the index agree with the swap: drops every entry naming it that the swap does
+    /// not imply, and writes the one it does. On the fold of a log the index already
+    /// agrees, so the line changes nothing there; on an index no event could have produced
+    /// it is the repair. Found by swap id rather than by key, because a diverged entry may
+    /// carry an instant the swap never waited since.
     fn record_waiting_repaired(&mut self, quote_hash: &QuoteHash) {
-        self.store.remove_auto_refund_waiting_for(quote_hash);
+        let implied = self
+            .store
+            .swap(quote_hash)
+            .and_then(|swap| swap.auto_refund_wait())
+            .map(|since| WaitingKey {
+                since,
+                quote_hash: *quote_hash,
+            });
+        self.store.repair_auto_refund_waiting(quote_hash, implied);
     }
 
     fn record_decision_made(&mut self, quote_hash: &QuoteHash, choice: Choice) {

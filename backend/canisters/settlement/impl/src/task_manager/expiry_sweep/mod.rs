@@ -13,13 +13,14 @@ pub struct Sweep {
     pub dropped: usize,
     /// decision timeouts that became a `RefundStarted`
     pub refunds: usize,
-    /// timed-out swaps the pass stepped over: `quote_bytes` that did not parse, or an
-    /// append the guard refused. Counted, never fatal, because the sweep must be total.
+    /// appends the pass could not make: a refund or a repair the log refused. Counted,
+    /// never fatal, because the sweep must be total.
     pub skipped: usize,
-    /// index entries the pass repaired through a logged `WaitingRepaired`, because their
-    /// swap is not waiting any more. Only a fold no event could have produced has any, and
-    /// the pass tidies rather than trips. An entry whose repair the log refused stays in the
-    /// index for the next pass and is counted in `skipped`.
+    /// index entries the pass repaired through a logged `WaitingRepaired`, because the swap
+    /// is not in the wait the entry says: no such swap, or not waiting, or waiting for a
+    /// human, or waiting since another instant. Only a fold no event could have produced
+    /// has any, and the pass tidies rather than trips. An entry whose repair the log refused
+    /// stays in the index for the next pass and is counted in `skipped`.
     pub stale: usize,
     /// whether either pass stopped at its cap with work still due, so the next tick has
     /// more to do. A pass is bounded; the timer is what makes it total.
@@ -53,8 +54,9 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
         config.max_refunds_per_sweep.as_usize(),
     );
     swept.more |= head.more;
-    // the index is the queue, so an entry that is no longer work is dropped from it rather
-    // than stepped over: left in place it would hold a slot of every pass's cap for good.
+    // the index is the queue, so an entry that is not work the timer can do is repaired
+    // rather than stepped over: left in place it would hold a slot of every pass's cap for
+    // good, and a cap's worth of them would starve every refund behind them.
     // The drop is a logged event like every other write to the fold, so the repair is in the
     // record the deep audit compares against instead of quietly erasing what it would find
     for key in &head.stale {
@@ -94,9 +96,11 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
 /// What one pass found at the head of the waiting index.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Head {
-    /// entries whose swap is still waiting for its user, oldest wait first
+    /// entries that are the wait their swap is in: waiting for its user, asking for an
+    /// automatic refund, since the instant the key says. Oldest wait first
     waiting: Vec<(QuoteHash, Swap)>,
-    /// entries whose swap stopped waiting, or that name no swap at all
+    /// entries that are not: the swap stopped waiting or never did, waits for a human,
+    /// waits since another instant, or is no swap at all
     stale: Vec<WaitingKey>,
     /// whether a further timed-out entry sat behind the cap
     more: bool,
@@ -122,10 +126,11 @@ fn timed_out_waiting(now: Timestamp, timeout: Duration, cap: usize) -> Head {
             ..Head::default()
         };
         for key in keys {
-            // the same record step writes the entry and the swap, and every step that stops
-            // a wait removes the entry, so only a divergence lands in the stale half
+            // the one record step that indexes a swap writes the key its wait implies, and
+            // every step that stops the wait removes it, so only a divergence lands in the
+            // stale half: an entry that differs from the swap's own wait in any way
             match store.swap(&key.quote_hash) {
-                Some(swap) if swap.status == SwapStatus::WaitingForUser => {
+                Some(swap) if swap.auto_refund_wait() == Some(key.since) => {
                     head.waiting.push((key.quote_hash, swap))
                 }
                 _ => head.stale.push(key),

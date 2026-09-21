@@ -215,8 +215,9 @@ pub enum EventType {
         #[n(1)]
         watcher: String,
     },
-    /// A waiting index entry the fold could not have produced was dropped. Only a
-    /// divergence has one, so this line is the repair's explanation: without it the fold
+    /// A swap's waiting index entries were made to agree with the swap: what the fold could
+    /// not have produced was dropped, and the wait the swap is in is there. Only a
+    /// divergence needs one, so this line is the repair's explanation: without it the fold
     /// would stop being the fold of the log.
     #[n(19)]
     WaitingRepaired {

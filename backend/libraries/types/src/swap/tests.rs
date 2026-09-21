@@ -181,3 +181,59 @@ fn a_waiting_key_round_trips_through_minicbor() {
     let bytes = minicbor::to_vec(key).unwrap();
     assert_eq!(minicbor::decode::<WaitingKey>(&bytes).unwrap(), key);
 }
+
+/// The wait the auto-refund index holds for a swap is the one the timer can act on: the
+/// swap waits for its user, its quote asks for an automatic refund, and the clock runs. A
+/// swap that waits for a human, or whose bytes do not read as a quote, or whose clock is
+/// not running, is not the timer's work and has none.
+#[test]
+fn auto_refund_wait_is_the_wait_the_timer_can_act_on() {
+    use crate::quote::tests::fixed_quote;
+    use crate::quote::Quote;
+
+    let since = Timestamp::from_nanos(7);
+    let waiting = |quote: &Quote| Swap {
+        quote_bytes: quote.canonical_bytes().unwrap(),
+        waiting_since: Some(since),
+        ..swap(SwapStatus::WaitingForUser)
+    };
+    let auto = fixed_quote();
+    assert!(auto.auto_refund, "the fixture asks for an automatic refund");
+    let manual = Quote {
+        auto_refund: false,
+        ..fixed_quote()
+    };
+    assert_eq!(waiting(&auto).auto_refund_wait(), Some(since));
+    assert_eq!(
+        waiting(&manual).auto_refund_wait(),
+        None,
+        "waits for a human"
+    );
+    assert_eq!(
+        Swap {
+            quote_bytes: vec![0xff; 9],
+            ..waiting(&auto)
+        }
+        .auto_refund_wait(),
+        None,
+        "bytes that are no quote"
+    );
+    assert_eq!(
+        Swap {
+            waiting_since: None,
+            ..waiting(&auto)
+        }
+        .auto_refund_wait(),
+        None,
+        "no clock running"
+    );
+    assert_eq!(
+        Swap {
+            status: SwapStatus::Executing,
+            ..waiting(&auto)
+        }
+        .auto_refund_wait(),
+        None,
+        "not waiting"
+    );
+}

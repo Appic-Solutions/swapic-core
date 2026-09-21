@@ -154,16 +154,14 @@ impl<S: Store> State<S> {
                 destination.fund(*amount)?;
                 Ok(())
             }
-            // the repair of a divergence, so it is admitted on what it repairs and not on
-            // the index: a swap that is not waiting for its user, or no swap at all. The
-            // entry it drops is in no log, so a replay never holds it, and a rule that read
-            // the index would refuse on replay the very line that explains the repair. An
-            // entry whose swap really is waiting is the index doing its job, and dropping it
-            // would strand the wait.
-            EventType::WaitingRepaired { quote_hash } => match self.store().swap(quote_hash) {
-                Some(swap) => swap.ensure_not_waiting(),
-                None => Ok(()),
-            },
+            // the repair of a divergence: it makes a swap's index entries agree with the
+            // swap, dropping what the swap does not imply and keeping what it does. Admitted
+            // on nothing, because nothing here could tell: the entry it drops is in no log,
+            // so a rule that read the index would refuse on replay the very line that
+            // explains the repair, and the swap alone cannot tell a stale entry from the
+            // wait the swap is really in. Where the index already agrees the repair changes
+            // nothing, so it can never strand a wait.
+            EventType::WaitingRepaired { .. } => Ok(()),
             // always legal; named rather than matched by `_` so a new variant has to be
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
