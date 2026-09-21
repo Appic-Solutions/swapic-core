@@ -9,11 +9,11 @@ use settlement_api::queries::{
     event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
     get_pending, get_swap, halted, verify_chain, verify_replay,
 };
-use settlement_api::types::errors::{GuardError, TestAppendError, TestRpcError};
+use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
     audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
-    set_config, set_halted, set_roles, test_send, test_sign,
+    set_config, set_halted, set_roles, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
 };
 
 pub fn event_count(
@@ -318,7 +318,7 @@ pub fn test_rpc_batch(
     chain_id: u64,
     methods: &[String],
     max_bytes: u64,
-) -> Result<Vec<String>, TestRpcError> {
+) -> test_rpc_batch_api::Response {
     update(
         pic,
         canister,

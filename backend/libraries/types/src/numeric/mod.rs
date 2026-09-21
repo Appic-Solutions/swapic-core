@@ -7,8 +7,6 @@ use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
 use std::borrow::Cow;
 use std::fmt;
-use std::num::ParseIntError;
-use std::str::FromStr;
 use std::time::Duration;
 
 pub enum TokenTag {}
@@ -149,14 +147,6 @@ impl Nonce {
     /// The nonce after this one, or `None` past `u64::MAX`.
     pub fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
-    }
-}
-
-impl FromStr for Nonce {
-    type Err = ParseIntError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        text.parse().map(Self)
     }
 }
 

@@ -16,13 +16,19 @@ pub async fn test_send(
     gas_limit: u64,
 ) -> Result<Hash32, TxError> {
     require_controller().map_err(TxError::Guard)?;
-    let to = to.parse().map_err(|_| TxError::PurposeNeedsASwap {
-        purpose: format!("{to} is not an address"),
-    })?;
+    // the door's own refusal: `PurposeNeedsASwap` means a cancel was asked to sign against
+    // a swap's attempt, and a mistyped address in a test is not that
+    let parsed =
+        to.parse().map_err(
+            |reason: types::evm::EvmAddressError| TxError::NotAnAddress {
+                to: to.clone(),
+                reason: reason.into(),
+            },
+        )?;
     tx::create_and_send(
         TxPurpose::Payout(QuoteHash::new(quote_hash)),
         ChainId::new(chain_id),
-        to,
+        parsed,
         Wei::ZERO,
         vec![0xde, 0xad, 0xbe, 0xef],
         GasAmount::from(gas_limit),

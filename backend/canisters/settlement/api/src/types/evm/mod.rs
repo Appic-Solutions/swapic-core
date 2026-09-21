@@ -11,6 +11,16 @@ pub struct EcdsaSignature {
     pub y_parity: bool,
 }
 
+impl From<types::EcdsaSignature> for EcdsaSignature {
+    fn from(signature: types::EcdsaSignature) -> Self {
+        Self {
+            r: *signature.r(),
+            s: *signature.s(),
+            y_parity: signature.y_parity(),
+        }
+    }
+}
+
 /// Why a key or a signature is not one this canister can use. A refused management call is
 /// reported rather than trapped: the interface specification says a rejected signing
 /// request may leave the signature in the system anyway, so a caller that retries has to

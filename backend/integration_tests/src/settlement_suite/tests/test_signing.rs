@@ -40,14 +40,12 @@ fn digest(seed: &[u8]) -> [u8; 32] {
 /// computed here rather than asked of the canister.
 fn address_of(key: &libsecp256k1::PublicKey) -> String {
     let uncompressed = key.serialize();
-    let hash: [u8; 32] = sha3_keccak(&uncompressed[1..]);
+    // keccak-256, which is NOT sha3-256: they differ in their padding, and an address
+    // derived with the other one belongs to nobody
+    let hash: [u8; 32] = alloy_primitives::keccak256(&uncompressed[1..]).into();
     let mut address = [0u8; 20];
     address.copy_from_slice(&hash[12..]);
     format!("0x{}", hex::encode(address))
-}
-
-fn sha3_keccak(bytes: &[u8]) -> [u8; 32] {
-    alloy_primitives::keccak256(bytes).into()
 }
 
 /// The point of the parity trial: a signature the canister reports must recover, with the

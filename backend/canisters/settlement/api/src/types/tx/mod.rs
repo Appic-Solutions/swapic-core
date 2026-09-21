@@ -1,5 +1,5 @@
 use crate::types::errors::{AppendError, GuardError};
-use crate::types::events::Hash32;
+use crate::types::events::{EvmAddressError, Hash32};
 use crate::types::evm::EcdsaError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
@@ -28,6 +28,11 @@ pub enum TxError {
     /// A transaction is signed against a swap's attempt, and this purpose names no swap.
     PurposeNeedsASwap {
         purpose: String,
+    },
+    /// The text the caller gave as the transaction's destination is not an address.
+    NotAnAddress {
+        to: String,
+        reason: EvmAddressError,
     },
     /// The swap has used every attempt number there is.
     NoAttemptLeft {

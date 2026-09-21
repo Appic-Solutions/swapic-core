@@ -130,24 +130,106 @@ fn samples() -> Vec<EventType> {
     ]
 }
 
-/// An address that is not an address at all is refused at the edge, naming the field.
+/// An address that is not an address at all is refused at the edge, naming the field AND
+/// which of the four rules the text broke. A caller replaying a log with a tampered address
+/// is otherwise told the text is too long, which is false for three of the four.
 #[test]
 fn a_transaction_to_something_that_is_not_an_address_is_refused() {
-    let wire = EventType::TxCreated {
+    let to_address = |to: &str| {
+        types::EventType::try_from(EventType::TxCreated {
+            purpose: TxPurpose::Burn([19; 32]),
+            chain_id: 8453,
+            nonce: 7,
+            to: to.into(),
+            value_wei: Nat::from(0_u8),
+            data: vec![],
+            gas_limit: Nat::from(1_u8),
+            max_fee_wei_per_gas: Nat::from(1_u8),
+            max_priority_fee_wei_per_gas: Nat::from(1_u8),
+        })
+    };
+    use types::evm::EvmAddressError as Reason;
+    for (to, reason) in [
+        ("not an address", Reason::NoPrefix),
+        ("0xabc", Reason::WrongLength { len: 3 }),
+        ("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", Reason::NotHex),
+        (
+            "0x833589fcD6EDb6E08f4c7C32D4f71b54bdA02913",
+            Reason::BadChecksum,
+        ),
+    ] {
+        assert_eq!(
+            to_address(to),
+            Err(types::events::EventError::NotAnAddress {
+                field: "to",
+                reason,
+            }),
+            "{to}"
+        );
+    }
+}
+
+/// Every amount field of a transaction answers for itself: "amount is above u128::MAX" is
+/// not an answer about a gas limit or a fee, and the field is exactly what the error type
+/// exists to name.
+#[test]
+fn every_amount_field_of_a_transaction_names_itself() {
+    // above the 256 bits the domain amount holds, so the edge refuses it by name
+    let huge = Nat::from(u128::MAX) * Nat::from(u128::MAX) * Nat::from(4_u8);
+    let created = |value_wei: Nat, gas_limit: Nat, max_fee: Nat, tip: Nat| EventType::TxCreated {
         purpose: TxPurpose::Burn([19; 32]),
         chain_id: 8453,
         nonce: 7,
-        to: "not an address".into(),
-        value_wei: Nat::from(0_u8),
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
+        value_wei,
         data: vec![],
-        gas_limit: Nat::from(1_u8),
-        max_fee_wei_per_gas: Nat::from(1_u8),
-        max_priority_fee_wei_per_gas: Nat::from(1_u8),
+        gas_limit,
+        max_fee_wei_per_gas: max_fee,
+        max_priority_fee_wei_per_gas: tip,
     };
-    assert!(matches!(
-        types::EventType::try_from(wire),
-        Err(types::events::EventError::TextTooLong { field: "to", .. })
-    ));
+    let one = || Nat::from(1_u8);
+    assert!(types::EventType::try_from(created(one(), one(), one(), one())).is_ok());
+    for (field, wire) in [
+        ("value_wei", created(huge.clone(), one(), one(), one())),
+        ("gas_limit", created(one(), huge.clone(), one(), one())),
+        (
+            "max_fee_wei_per_gas",
+            created(one(), one(), huge.clone(), one()),
+        ),
+        (
+            "max_priority_fee_wei_per_gas",
+            created(one(), one(), one(), huge.clone()),
+        ),
+    ] {
+        assert_eq!(
+            types::EventType::try_from(wire),
+            Err(types::events::EventError::AmountTooLarge { field }),
+            "{field}"
+        );
+    }
+
+    let replaced = |max_fee: Nat, tip: Nat| EventType::TxReplaced {
+        purpose: TxPurpose::Cancel(42161),
+        chain_id: 42161,
+        nonce: 8,
+        max_fee_wei_per_gas: max_fee,
+        max_priority_fee_wei_per_gas: tip,
+        tx_hash: [20; 32],
+        raw_tx: vec![],
+    };
+    for (field, wire) in [
+        ("max_fee_wei_per_gas", replaced(huge.clone(), one())),
+        (
+            "max_priority_fee_wei_per_gas",
+            replaced(one(), huge.clone()),
+        ),
+    ] {
+        assert_eq!(
+            types::EventType::try_from(wire),
+            Err(types::events::EventError::AmountTooLarge { field }),
+            "{field}"
+        );
+    }
 }
 
 #[test]

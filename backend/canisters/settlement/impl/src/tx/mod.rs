@@ -32,7 +32,7 @@ use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, Nonce, NonceKey,
+    Attempt, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, NonceKey,
     OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
 };
 
@@ -771,16 +771,6 @@ fn parse_receipt(value: &Value, ours: &[TxHash]) -> Result<Receipt, NotOurReceip
         return Err(NotOurReceipt::AnotherTransaction);
     }
     Ok(receipt)
-}
-
-/// The entry a swap's open attempt is in, for the engine and for the tests.
-pub fn open_entry(chain_id: ChainId, nonce: Nonce) -> Option<OutboxEntry> {
-    outbox::get(NonceKey { chain_id, nonce })
-}
-
-/// The swap an outbox entry belongs to, for a caller that has one.
-pub fn quote_hash_of(entry: &OutboxEntry) -> Option<QuoteHash> {
-    entry.purpose.quote_hash()
 }
 
 impl From<TxError> for settlement_api::types::tx::TxError {

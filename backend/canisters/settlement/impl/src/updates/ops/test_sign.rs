@@ -12,10 +12,6 @@ pub async fn test_sign(hash: Hash32) -> Result<EcdsaSignature, SignError> {
     require_controller().map_err(SignError::Guard)?;
     ecdsa::sign(TxHash::new(hash))
         .await
-        .map(|signature| EcdsaSignature {
-            r: *signature.r(),
-            s: *signature.s(),
-            y_parity: signature.y_parity(),
-        })
+        .map(EcdsaSignature::from)
         .map_err(|e| SignError::Ecdsa(e.into()))
 }

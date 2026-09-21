@@ -42,8 +42,13 @@ pub fn is_empty() -> bool {
     OUTBOX.with(|outbox| outbox.borrow().is_empty())
 }
 
-/// Every chain that has an entry, in chain id order. The key orders by chain first, so
-/// this is a walk of the map and never of the chains the config lists.
+/// Every chain that has an entry, in chain id order. The key orders by chain first, so this
+/// is a walk of the map and never of the chains the config lists.
+///
+/// It is one walk of the whole outbox, which is what a pass opens with. The outbox holds
+/// only what has not landed yet, so it is small by construction: an entry leaves the moment
+/// its attempt closes, and the number of nonces in flight is bounded by how fast this
+/// canister can sign.
 pub fn chains() -> Vec<ChainId> {
     let mut chains: Vec<ChainId> = Vec::new();
     OUTBOX.with(|outbox| {
@@ -56,8 +61,8 @@ pub fn chains() -> Vec<ChainId> {
     chains
 }
 
-/// At most `limit` of the chain's entries in `status`, oldest nonce first, so a pass costs
-/// the batch it works on and never the whole outbox.
+/// At most `limit` of the chain's entries in `status`, oldest nonce first, so the work a
+/// pass does is bounded by the batch and not by the outbox.
 pub fn by_status(chain_id: ChainId, status: OutboxStatus, limit: usize) -> Vec<OutboxEntry> {
     let range = NonceKey {
         chain_id,

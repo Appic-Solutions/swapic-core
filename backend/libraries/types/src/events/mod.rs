@@ -4,7 +4,7 @@ pub(crate) mod tests;
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
-use crate::evm::EvmAddress;
+use crate::evm::{EvmAddress, EvmAddressError};
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::numeric::{
     Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei, WeiPerGas,
@@ -382,12 +382,27 @@ pub enum EventError {
     AmountTooLarge { field: &'static str },
     #[error("{field} is {len} bytes, above the cap of {MAX_TEXT_BYTES}")]
     TextTooLong { field: &'static str, len: usize },
+    #[error("{field} is not an address: {reason}")]
+    NotAnAddress {
+        field: &'static str,
+        reason: EvmAddressError,
+    },
 }
 
 impl EventError {
     /// Names `field` in a text length failure.
     pub fn text_too_long(field: &'static str) -> impl FnOnce(TextTooLong) -> Self {
         move |TextTooLong { len }| Self::TextTooLong { field, len }
+    }
+
+    /// Names `field` in an amount that no canonical preimage holds.
+    pub fn amount_too_large(field: &'static str) -> Self {
+        Self::AmountTooLarge { field }
+    }
+
+    /// Names `field` in an address failure, carrying the reason the text is not one.
+    pub fn not_an_address(field: &'static str) -> impl FnOnce(EvmAddressError) -> Self {
+        move |reason| Self::NotAnAddress { field, reason }
     }
 }
 

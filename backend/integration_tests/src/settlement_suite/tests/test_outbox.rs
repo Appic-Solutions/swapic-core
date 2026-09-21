@@ -301,9 +301,9 @@ fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
             encode_args((swap_id(1), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
         )
         .unwrap();
-    // one round runs both messages up to their signature
-    pic.tick();
-    for _ in 0..10 {
+    // enough rounds for both messages to run to their signature and back: the first takes
+    // both of them past the append that allocates, which is the interleaving under test
+    for _ in 0..11 {
         pic.tick();
     }
     let first: Result<Hash32, TxError> =

@@ -199,11 +199,10 @@ pub struct Eip1559Tx {
 }
 
 /// A 256-bit amount as RLP writes an integer: big-endian, without leading zeros, and zero
-/// as no bytes at all.
+/// as no bytes at all. The same rule as [`trim_word`], which is the one implementation of
+/// it, because a signature word and an amount are both a 32-byte integer here.
 fn rlp_amount<Unit>(amount: crate::checked_amount::CheckedAmountOf<Unit>, out: &mut dyn BufMut) {
-    let bytes = amount.to_be_bytes();
-    let start = bytes.iter().position(|byte| *byte != 0).unwrap_or(32);
-    bytes[start..].encode(out);
+    trim_word(&amount.to_be_bytes()).encode(out);
 }
 
 impl Eip1559Tx {
@@ -286,15 +285,6 @@ pub struct SignedTx {
 }
 
 impl SignedTx {
-    /// Rebuilds a signed transaction from bytes already recorded in the log, so a
-    /// rebroadcast sends exactly what was signed.
-    pub fn from_raw(raw: Vec<u8>) -> Self {
-        Self {
-            hash: TxHash::new(keccak256(&raw).into()),
-            raw,
-        }
-    }
-
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }

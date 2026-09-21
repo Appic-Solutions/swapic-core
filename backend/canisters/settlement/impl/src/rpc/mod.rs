@@ -23,7 +23,7 @@ use types::{ChainId, RpcUrl};
 
 /// Pay-as-you-go pricing: charges what the call consumed rather than what it reserved, and
 /// it is the only version that prices an unreplicated call as one.
-pub const PRICING_VERSION_PAY_AS_YOU_GO: u32 = 2;
+const PRICING_VERSION_PAY_AS_YOU_GO: u32 = 2;
 
 /// The largest subnet this canister could be placed on. Every reservation is sized for it,
 /// so a move to the 34-node fiduciary subnet cannot leave a call short of cycles.
@@ -45,18 +45,35 @@ fn assert_outcall_policy(request: &HttpRequest) {
 /// The management canister's `http_request` argument, with the two fields `ic-cdk 0.17`
 /// does not carry. Candid matches record fields by name, so the callee reads the fields it
 /// knows and this one stays a plain record.
-#[derive(CandidType, Clone, Debug, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub url: String,
-    pub max_response_bytes: Option<u64>,
-    pub method: HttpMethod,
-    pub headers: Vec<HttpHeader>,
-    pub body: Option<Vec<u8>>,
-    pub transform: Option<TransformContext>,
+#[derive(CandidType, Clone, PartialEq, Eq)]
+struct HttpRequest {
+    url: String,
+    max_response_bytes: Option<u64>,
+    method: HttpMethod,
+    headers: Vec<HttpHeader>,
+    body: Option<Vec<u8>>,
+    transform: Option<TransformContext>,
     /// `Some(false)`: one replica makes the request, not all of them.
-    pub is_replicated: Option<bool>,
+    is_replicated: Option<bool>,
     /// `opt nat32` on the wire, per interface specification 0.68.0.
-    pub pricing_version: Option<u32>,
+    pricing_version: Option<u32>,
+}
+
+/// The url is a secret: it carries the provider's api key, and every other type that holds
+/// one prints `***`. Written by hand rather than derived so a `{request:?}` a future
+/// caller adds cannot be the one place it leaks.
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("url", &"***")
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("method", &self.method)
+            .field("headers", &self.headers)
+            .field("body", &self.body)
+            .field("is_replicated", &self.is_replicated)
+            .field("pricing_version", &self.pricing_version)
+            .finish()
+    }
 }
 
 /// Why a read of a chain answered nothing usable.
@@ -68,8 +85,18 @@ pub enum RpcError {
     Unreachable { message: String },
     #[error("the provider answered http {status}")]
     Http { status: u16, body: String },
-    #[error("the answer is not the json-rpc this canister reads: {0}")]
-    Json(String),
+    #[error("a batch of {calls} is answered by an array, and this is not one: {reason}")]
+    NotAnArray { calls: usize, reason: String },
+    #[error("{asked} calls were answered by {answered} replies")]
+    WrongReplyCount { asked: usize, answered: usize },
+    #[error("a reply carries the id {id:?}, which this batch of {calls} never asked for")]
+    UnknownReplyId { id: Option<u64>, calls: usize },
+    #[error("id {id} was answered twice")]
+    DuplicateReplyId { id: usize },
+    #[error("{method} was not answered")]
+    Unanswered { method: String },
+    #[error("{method} answered neither a result nor an error")]
+    NeitherResultNorError { method: String },
     #[error("{method} answered an error: {message}")]
     Rpc { method: String, message: String },
 }
@@ -114,7 +141,7 @@ fn cycles_for(request_bytes: u64, max_response_bytes: u64) -> u128 {
 
 /// One POST, unreplicated, with the cycles the call reserves. The body of a 2xx answer, or
 /// why there is none.
-pub async fn http_post(
+async fn http_post(
     url: &RpcUrl,
     body: Vec<u8>,
     max_response_bytes: u64,
@@ -164,13 +191,6 @@ fn url_for(chain_id: ChainId) -> Result<RpcUrl, RpcError> {
         .ok_or(RpcError::NoUrl(chain_id))
 }
 
-/// One JSON-RPC call as a request body, numbered zero.
-fn single_body(method: &str, params: &Value) -> Vec<u8> {
-    json!({"jsonrpc": "2.0", "id": 0, "method": method, "params": params})
-        .to_string()
-        .into_bytes()
-}
-
 /// A batch as one request body: an array with one entry per call, numbered from zero in
 /// call order, which is what the replies are sorted back into.
 fn batch_body(calls: &[(&str, Value)]) -> Vec<u8> {
@@ -201,7 +221,9 @@ fn reply_result(reply: &Value, method: &str) -> Result<Value, RpcError> {
     reply
         .get("result")
         .cloned()
-        .ok_or_else(|| RpcError::Json(format!("{method} answered neither a result nor an error")))
+        .ok_or_else(|| RpcError::NeitherResultNorError {
+            method: method.to_string(),
+        })
 }
 
 /// The results of a batch reply, in the order the calls were made, each call answering for
@@ -227,18 +249,15 @@ fn parse_batch(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
 /// The replies of a batch, put back into call order. The server may answer in any order,
 /// so the ids are the order: every id from zero to the last must appear exactly once.
 fn sort_replies(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
-    let replies: Vec<Value> = serde_json::from_slice(body).map_err(|e| {
-        RpcError::Json(format!(
-            "a batch of {} is answered by an array: {e}",
-            methods.len()
-        ))
+    let replies: Vec<Value> = serde_json::from_slice(body).map_err(|e| RpcError::NotAnArray {
+        calls: methods.len(),
+        reason: e.to_string(),
     })?;
     if replies.len() != methods.len() {
-        return Err(RpcError::Json(format!(
-            "{} calls were answered by {} replies",
-            methods.len(),
-            replies.len()
-        )));
+        return Err(RpcError::WrongReplyCount {
+            asked: methods.len(),
+            answered: replies.len(),
+        });
     }
     let mut sorted: Vec<Option<&Value>> = vec![None; methods.len()];
     for reply in &replies {
@@ -247,44 +266,23 @@ fn sort_replies(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
             .and_then(Value::as_u64)
             .and_then(|id| usize::try_from(id).ok())
             .filter(|id| *id < methods.len())
-            .ok_or_else(|| {
-                RpcError::Json(format!(
-                    "a reply carries no id this batch asked for: {reply}"
-                ))
+            .ok_or_else(|| RpcError::UnknownReplyId {
+                id: reply.get("id").and_then(Value::as_u64),
+                calls: methods.len(),
             })?;
         if sorted[id].replace(reply).is_some() {
-            return Err(RpcError::Json(format!("id {id} was answered twice")));
+            return Err(RpcError::DuplicateReplyId { id });
         }
     }
     sorted
         .into_iter()
         .zip(methods)
         .map(|(reply, method)| {
-            reply
-                .cloned()
-                .ok_or_else(|| RpcError::Json(format!("{method} was not answered")))
+            reply.cloned().ok_or_else(|| RpcError::Unanswered {
+                method: method.to_string(),
+            })
         })
         .collect()
-}
-
-/// The result of a single reply.
-fn parse_single(body: &[u8], method: &str) -> Result<Value, RpcError> {
-    let reply: Value = serde_json::from_slice(body)
-        .map_err(|e| RpcError::Json(format!("{method} is answered by an object: {e}")))?;
-    reply_result(&reply, method)
-}
-
-/// One JSON-RPC call on a chain. `max_bytes` is the cap on the answer, and it is the
-/// caller's job to make it tight.
-pub async fn rpc_one(
-    chain_id: ChainId,
-    method: &str,
-    params: Value,
-    max_bytes: u64,
-) -> Result<Value, RpcError> {
-    let url = url_for(chain_id)?;
-    let body = http_post(&url, single_body(method, &params), max_bytes).await?;
-    parse_single(&body, method)
 }
 
 /// Several JSON-RPC calls in ONE request, answered in call order. A batch is how a decision
@@ -324,7 +322,21 @@ impl From<RpcError> for settlement_api::types::rpc::RpcError {
             },
             RpcError::Unreachable { message } => Self::Unreachable { message },
             RpcError::Http { status, body } => Self::Http { status, body },
-            RpcError::Json(message) => Self::Json { message },
+            RpcError::NotAnArray { calls, reason } => Self::NotAnArray {
+                calls: calls as u64,
+                reason,
+            },
+            RpcError::WrongReplyCount { asked, answered } => Self::WrongReplyCount {
+                asked: asked as u64,
+                answered: answered as u64,
+            },
+            RpcError::UnknownReplyId { id, calls } => Self::UnknownReplyId {
+                id,
+                calls: calls as u64,
+            },
+            RpcError::DuplicateReplyId { id } => Self::DuplicateReplyId { id: id as u64 },
+            RpcError::Unanswered { method } => Self::Unanswered { method },
+            RpcError::NeitherResultNorError { method } => Self::NeitherResultNorError { method },
             RpcError::Rpc { method, message } => Self::Rpc { method, message },
         }
     }

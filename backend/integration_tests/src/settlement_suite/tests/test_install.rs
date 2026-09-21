@@ -11,7 +11,6 @@ use settlement_api::types::events::EventType;
 use settlement_api::types::init::InitArg;
 use settlement_api::types::quote::{GasMode, Quote};
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 /// An install the canister refuses.
 fn refused_install(pic: &PocketIc, canister: Principal, admin: Principal, arg: &InitArg) -> String {
@@ -103,9 +102,8 @@ fn an_install_with_an_invalid_arg_is_refused() {
         ..init_arg()
     };
     refused_install(&pic, canister, admin, &anonymous_watcher);
-    // the refused install's instructions count against the next one for a few minutes
-    pic.advance_time(Duration::from_secs(600));
-    pic.tick();
+    // the refused install's instructions still count against the next one; `install` ticks
+    // through that rate limit itself, so there is nothing to wait out by hand here
     install(&pic, canister, admin, &init_arg()).expect("a valid arg installs");
     assert_eq!(event_count(&pic, canister, admin), 2);
 }

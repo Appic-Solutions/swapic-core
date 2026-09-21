@@ -8,8 +8,15 @@ use types::{
 
 pub type Hash32 = [u8; 32];
 
-/// Every wire amount is the `amount` field of its event.
+/// The wire amounts named `amount`. Every other amount field names itself through
+/// [`DomainEventError::amount_too_large`], because "amount is above u128::MAX" is not an
+/// answer about a gas limit.
 const AMOUNT_TOO_LARGE: DomainEventError = DomainEventError::AmountTooLarge { field: "amount" };
+
+/// The wire error a field named `field` answers when its value is above `u128::MAX`.
+fn too_large(field: &'static str) -> DomainEventError {
+    DomainEventError::amount_too_large(field)
+}
 
 /// What happened. The event hash is computed over a canonical encoding of the variant,
 /// never over this candid layout.
@@ -606,16 +613,14 @@ impl TryFrom<EventType> for types::EventType {
                 purpose: purpose.into(),
                 chain_id: ChainId::new(chain_id),
                 nonce: Nonce::new(nonce),
-                to: to.parse().map_err(|_| DomainEventError::TextTooLong {
-                    field: "to",
-                    len: to.len(),
-                })?,
-                value: Wei::try_from(value_wei).map_err(|_| AMOUNT_TOO_LARGE)?,
+                to: to.parse().map_err(DomainEventError::not_an_address("to"))?,
+                value: Wei::try_from(value_wei).map_err(|_| too_large("value_wei"))?,
                 data,
-                gas_limit: GasAmount::try_from(gas_limit).map_err(|_| AMOUNT_TOO_LARGE)?,
-                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas).map_err(|_| AMOUNT_TOO_LARGE)?,
+                gas_limit: GasAmount::try_from(gas_limit).map_err(|_| too_large("gas_limit"))?,
+                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas)
+                    .map_err(|_| too_large("max_fee_wei_per_gas"))?,
                 max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
-                    .map_err(|_| AMOUNT_TOO_LARGE)?,
+                    .map_err(|_| too_large("max_priority_fee_wei_per_gas"))?,
             },
             EventType::TxReplaced {
                 purpose,
@@ -629,9 +634,10 @@ impl TryFrom<EventType> for types::EventType {
                 purpose: purpose.into(),
                 chain_id: ChainId::new(chain_id),
                 nonce: Nonce::new(nonce),
-                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas).map_err(|_| AMOUNT_TOO_LARGE)?,
+                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas)
+                    .map_err(|_| too_large("max_fee_wei_per_gas"))?,
                 max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
-                    .map_err(|_| AMOUNT_TOO_LARGE)?,
+                    .map_err(|_| too_large("max_priority_fee_wei_per_gas"))?,
                 tx_hash: TxHash::new(tx_hash),
                 raw_tx,
             },
@@ -715,8 +721,43 @@ impl From<types::canonical::CanonicalError> for CanonicalError {
 /// Why a wire event is not a domain event, naming the field at fault.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EventError {
-    AmountTooLarge { field: String },
-    TextTooLong { field: String, len: u64 },
+    AmountTooLarge {
+        field: String,
+    },
+    TextTooLong {
+        field: String,
+        len: u64,
+    },
+    /// The text in `field` is not an EVM address, and `reason` says which way.
+    NotAnAddress {
+        field: String,
+        reason: EvmAddressError,
+    },
+}
+
+/// Why a text is not an EVM address. Mirrors `types::evm::EvmAddressError` so a caller
+/// replaying a log is told which of the four rules the text broke, rather than being told
+/// something that is false for three of them.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum EvmAddressError {
+    NoPrefix,
+    WrongLength { len: u64 },
+    NotHex,
+    BadChecksum,
+}
+
+impl From<types::evm::EvmAddressError> for EvmAddressError {
+    fn from(error: types::evm::EvmAddressError) -> Self {
+        use types::evm::EvmAddressError as Domain;
+        match error {
+            Domain::NoPrefix => Self::NoPrefix,
+            Domain::WrongLength { len } => Self::WrongLength {
+                len: crate::types::wire_len(len),
+            },
+            Domain::NotHex => Self::NotHex,
+            Domain::BadChecksum => Self::BadChecksum,
+        }
+    }
 }
 
 impl From<types::events::EventError> for EventError {
@@ -729,6 +770,10 @@ impl From<types::events::EventError> for EventError {
             Domain::TextTooLong { field, len } => Self::TextTooLong {
                 field: field.to_string(),
                 len: crate::types::wire_len(len),
+            },
+            Domain::NotAnAddress { field, reason } => Self::NotAnAddress {
+                field: field.to_string(),
+                reason: reason.into(),
             },
         }
     }

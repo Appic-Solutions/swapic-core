@@ -54,18 +54,6 @@ fn a_batch_body_is_one_array_with_an_id_per_call() {
     );
 }
 
-/// A single call is a plain object, never an array of one: a provider that answers an
-/// object to an array, or the other way round, is a provider this canister would misread.
-#[test]
-fn a_single_call_is_not_wrapped_in_an_array() {
-    let body = single_body("eth_chainId", &json!([]));
-    let sent: Value = serde_json::from_slice(&body).expect("the body is json");
-    assert_eq!(
-        sent,
-        json!({"jsonrpc": "2.0", "id": 0, "method": "eth_chainId", "params": []})
-    );
-}
-
 /// JSON-RPC lets a server answer a batch in any order, so the ids are the order and the
 /// array is not.
 #[test]
@@ -100,54 +88,129 @@ fn a_reply_carrying_an_error_names_the_method_that_answered_it() {
     );
 }
 
-/// Every way a batch reply can fail to be the batch that was asked for.
+/// Every way a batch reply can fail to be the batch that was asked for, each pinned to the
+/// failure it is. One error carrying a sentence for six different cases cannot be asserted:
+/// a test can only say "something went wrong", which passes when the wrong thing does.
 #[test]
-fn a_reply_that_is_not_the_batch_asked_for_is_a_json_error() {
-    let cases = [
-        json!([{"jsonrpc": "2.0", "id": 0, "result": "0x1"}]),
-        json!([
-            {"jsonrpc": "2.0", "id": 0, "result": "0x1"},
-            {"jsonrpc": "2.0", "id": 0, "result": "0x2"},
-        ]),
-        json!([
+fn every_way_a_reply_is_not_the_batch_asked_for_names_itself() {
+    let two = ["a", "b"];
+    let batch = |answered: Value| parse_batch(answered.to_string().as_bytes(), &two);
+
+    assert!(
+        matches!(
+            parse_batch(b"not json at all", &["a"]),
+            Err(RpcError::NotAnArray { calls: 1, .. })
+        ),
+        "a body that is not json is not the array a batch is answered by"
+    );
+    assert!(
+        matches!(
+            batch(json!({"jsonrpc": "2.0", "id": 0, "result": "0x1"})),
+            Err(RpcError::NotAnArray { calls: 2, .. })
+        ),
+        "and neither is one object"
+    );
+    assert_eq!(
+        batch(json!([{"jsonrpc": "2.0", "id": 0, "result": "0x1"}])),
+        Err(RpcError::WrongReplyCount {
+            asked: 2,
+            answered: 1
+        })
+    );
+    assert_eq!(
+        batch(json!([
             {"jsonrpc": "2.0", "id": 0, "result": "0x1"},
             {"jsonrpc": "2.0", "id": 7, "result": "0x2"},
-        ]),
-        json!({"jsonrpc": "2.0", "id": 0, "result": "0x1"}),
-        json!([
+        ])),
+        Err(RpcError::UnknownReplyId {
+            id: Some(7),
+            calls: 2
+        })
+    );
+    assert_eq!(
+        batch(json!([
+            {"jsonrpc": "2.0", "id": 0, "result": "0x1"},
+            {"jsonrpc": "2.0", "result": "0x2"},
+        ])),
+        Err(RpcError::UnknownReplyId { id: None, calls: 2 }),
+        "a reply with no id at all says which batch it was not part of"
+    );
+    assert_eq!(
+        batch(json!([
+            {"jsonrpc": "2.0", "id": 0, "result": "0x1"},
+            {"jsonrpc": "2.0", "id": 0, "result": "0x2"},
+        ])),
+        Err(RpcError::DuplicateReplyId { id: 0 }),
+        "one id answered twice leaves the other call unanswered"
+    );
+    assert_eq!(
+        parse_batch(
+            json!([
+                {"jsonrpc": "2.0", "id": 0, "result": "0x1"},
+                {"jsonrpc": "2.0", "id": 0, "result": "0x2"},
+            ])
+            .to_string()
+            .as_bytes(),
+            &["a", "a"],
+        ),
+        Err(RpcError::DuplicateReplyId { id: 0 })
+    );
+    assert_eq!(
+        batch(json!([
             {"jsonrpc": "2.0", "id": 0},
             {"jsonrpc": "2.0", "id": 1, "result": "0x2"},
-        ]),
-    ];
-    for answered in cases {
-        assert!(
-            matches!(
-                parse_batch(answered.to_string().as_bytes(), &["a", "b"]),
-                Err(RpcError::Json(_))
-            ),
-            "{answered} was read as a batch of two"
-        );
-    }
-    assert!(matches!(
-        parse_batch(b"not json at all", &["a"]),
-        Err(RpcError::Json(_))
-    ));
+        ])),
+        Err(RpcError::NeitherResultNorError {
+            method: "a".to_string()
+        }),
+        "a reply that is neither an answer nor a refusal names the call it came back for"
+    );
 }
 
-/// A single reply is read by the same rules, and its error names its own method.
+/// A reply carrying an id nothing asked for leaves the call it displaced unanswered, which
+/// is its own refusal: the id check catches that shape first, so this is the one that a
+/// reply count and a full set of ids still cannot rule out.
 #[test]
-fn a_single_reply_answers_its_result_or_names_its_method() {
-    let ok = json!({"jsonrpc": "2.0", "id": 0, "result": "0x1"});
-    assert_eq!(
-        parse_single(ok.to_string().as_bytes(), "eth_chainId"),
-        Ok(json!("0x1"))
+fn a_call_with_no_reply_of_its_own_names_itself() {
+    let sorted = sort_replies(
+        json!([
+            {"jsonrpc": "2.0", "id": 1, "result": "0x2"},
+            {"jsonrpc": "2.0", "id": 1, "result": "0x2"},
+        ])
+        .to_string()
+        .as_bytes(),
+        &["a", "b"],
     );
+    assert_eq!(sorted, Err(RpcError::DuplicateReplyId { id: 1 }));
+
+    // `Unanswered` is what the last step answers when a slot is still empty, which the
+    // checks above make unreachable from a well-formed array; it is the rule that says so
+    assert_eq!(
+        sort_replies(b"[]", &["only"]),
+        Err(RpcError::WrongReplyCount {
+            asked: 1,
+            answered: 0
+        })
+    );
+}
+
+/// One reply is read by the same rules, and its error names its own method.
+#[test]
+fn a_reply_answers_its_result_or_names_its_method() {
+    let ok = json!({"jsonrpc": "2.0", "id": 0, "result": "0x1"});
+    assert_eq!(reply_result(&ok, "eth_chainId"), Ok(json!("0x1")));
     let failed = json!({"jsonrpc": "2.0", "id": 0, "error": {"message": "nope"}});
     assert_eq!(
-        parse_single(failed.to_string().as_bytes(), "eth_chainId"),
+        reply_result(&failed, "eth_chainId"),
         Err(RpcError::Rpc {
             method: "eth_chainId".to_string(),
             message: "nope".to_string(),
+        })
+    );
+    assert_eq!(
+        reply_result(&json!({"jsonrpc": "2.0", "id": 0}), "eth_chainId"),
+        Err(RpcError::NeitherResultNorError {
+            method: "eth_chainId".to_string()
         })
     );
 }
