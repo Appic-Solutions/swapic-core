@@ -20,7 +20,9 @@ impl<S: Store> State<S> {
             // the swap id must be the hash of the preimage recorded with it: the sweep reads
             // `auto_refund` out of those bytes to decide refund policy, so a pair that does
             // not bind would refund a user who asked to be consulted, or leave a swap
-            // waiting forever
+            // waiting forever. The preimage must also be a quote this canister would hold:
+            // parsing is the layout and `validate` is the rest, so the log cannot record a
+            // version this wasm does not read, or the empty fields `register_quote` refuses
             EventType::FundsReceived {
                 quote_hash,
                 quote_bytes,
@@ -29,7 +31,7 @@ impl<S: Store> State<S> {
                 if self.store().swap(quote_hash).is_some() {
                     return Err(TransitionError::SwapExists(*quote_hash));
                 }
-                Quote::parse(quote_bytes)?;
+                Quote::parse(quote_bytes)?.validate()?;
                 let computed = quote_hash_of(quote_bytes);
                 if computed != *quote_hash {
                     return Err(TransitionError::QuoteHashMismatch {

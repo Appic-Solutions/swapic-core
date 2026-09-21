@@ -9,6 +9,7 @@ use crate::task_manager::expiry_sweep::run_expiry_sweep;
 use crate::task_manager::replay_audit::{run_audit_replay, run_replay_audit};
 use types::config::AuditChunk;
 use types::events::Choice;
+use types::quote::QuoteError;
 use types::LedgerMeta;
 use types::{
     Attempt, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds, WaitingKey,
@@ -122,6 +123,56 @@ fn an_append_of_a_mismatched_quote_pair_writes_nothing() {
 
         append(funds(1));
         assert_eq!(event_count(), 1, "and the matching pair still lands");
+    });
+}
+
+/// The preimage the log records is a quote this canister would hold, not merely one it can
+/// parse: `record_decision_required` reads the refund policy out of exactly these bytes, and
+/// `register_quote` refuses the same quotes at the other door.
+#[test]
+fn an_append_of_a_preimage_that_does_not_validate_writes_nothing() {
+    on_fresh_memory(|| {
+        let funds_for = |q: &Quote| {
+            let quote_bytes = q.canonical_bytes().expect("the fixture has a preimage");
+            EventType::FundsReceived {
+                quote_hash: types::quote::quote_hash_of(&quote_bytes),
+                quote_bytes,
+                chain_id: q.src_chain,
+                token: q.src_token.clone(),
+                amount: q.amount_in,
+                tx_ref: "0xdeposit".into(),
+            }
+        };
+        let refused = [
+            (
+                Quote {
+                    version: 2,
+                    ..crate::state::transitions::tests::quote(1)
+                },
+                QuoteError::UnsupportedVersion(2),
+            ),
+            (
+                Quote {
+                    src_token: "".parse().unwrap(),
+                    ..crate::state::transitions::tests::quote(2)
+                },
+                QuoteError::EmptyText { field: "src_token" },
+            ),
+        ];
+        for (invalid, error) in refused {
+            let payload = funds_for(&invalid);
+            assert_eq!(
+                append_event_at(payload, Timestamp::from_nanos(1)),
+                Err(AppendError::Transition(TransitionError::UnparseableQuote(
+                    error
+                )))
+            );
+            assert_eq!(event_count(), 0, "and nothing was written");
+            assert_eq!(ensure_fold_in_step(), Ok(()));
+        }
+
+        append(funds(1));
+        assert_eq!(event_count(), 1, "a quote that validates still lands");
     });
 }
 
