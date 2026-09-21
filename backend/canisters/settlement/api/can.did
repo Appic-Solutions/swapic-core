@@ -75,7 +75,12 @@ type ConfigError = variant {
   EmptyVaultAddress : record { chain_id : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
-  DurationAboveCap : record { field : text; cap_s : nat64; duration_s : nat64 };
+  // In milliseconds, so the one knob set in milliseconds is reported as it was set.
+  DurationAboveCap : record {
+    field : text;
+    cap_ms : nat64;
+    duration_ms : nat64;
+  };
   AmountTooLarge : record { field : text };
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };

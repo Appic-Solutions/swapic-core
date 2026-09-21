@@ -440,3 +440,58 @@ fn storage_keeps_the_secrets() {
     assert_eq!(back, config);
     assert_eq!(back.rpc_urls[&ChainId::ETHEREUM].expose(), SECRET);
 }
+
+/// A duration knob is refused with the value it was set to, not a rounding of it: a
+/// batching window of 60.5s is half a second over its cap, and the error says so.
+#[test]
+fn a_duration_error_keeps_its_milliseconds() {
+    let err = Config {
+        batch_window: Duration::from_millis(60_500),
+        ..Config::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::DurationAboveCap {
+            field: "batch_window_ms",
+            duration: Duration::from_millis(60_500),
+            cap: MAX_BATCH_WINDOW
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "batch_window_ms is 60.5s, above the cap of 60s"
+    );
+}
+
+/// A batch of nothing is no batch at all, and an unbounded one is the trap the caps exist
+/// to prevent, so the batch size is held to the same rule as the per-pass caps.
+#[test]
+fn validate_rejects_a_batch_size_outside_its_range() {
+    let batch = |items| Config {
+        max_batch_items: items,
+        ..Config::default()
+    };
+    assert_eq!(
+        batch(0).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "max_batch_items",
+            cap: 0,
+            ceiling: MAX_BATCH_ITEMS
+        })
+    );
+    let over = MAX_BATCH_ITEMS + 1;
+    assert_eq!(
+        batch(over).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "max_batch_items",
+            cap: over,
+            ceiling: MAX_BATCH_ITEMS
+        })
+    );
+    batch(MAX_BATCH_ITEMS)
+        .validate()
+        .expect("the ceiling itself is allowed");
+    batch(1).validate().expect("one item a batch is allowed");
+}

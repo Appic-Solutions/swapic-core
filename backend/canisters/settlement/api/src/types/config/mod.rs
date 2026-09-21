@@ -258,10 +258,11 @@ pub enum ConfigError {
         interval_s: u64,
         floor_s: u64,
     },
+    /// In milliseconds, so the one knob set in milliseconds is reported as it was set.
     DurationAboveCap {
         field: String,
-        duration_s: u64,
-        cap_s: u64,
+        duration_ms: u64,
+        cap_ms: u64,
     },
     CapOutOfRange {
         field: String,
@@ -287,6 +288,12 @@ pub enum ConfigError {
     EmptyRpcUrl {
         chain_id: u64,
     },
+}
+
+/// Whole milliseconds, for an error to carry. A duration past `u64::MAX` of them, which is
+/// five hundred million years, reports as `u64::MAX`.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl From<types::ConfigError> for ConfigError {
@@ -323,8 +330,8 @@ impl From<types::ConfigError> for ConfigError {
                 cap,
             } => Self::DurationAboveCap {
                 field: field.to_string(),
-                duration_s: duration.as_secs(),
-                cap_s: cap.as_secs(),
+                duration_ms: millis(duration),
+                cap_ms: millis(cap),
             },
             Domain::CapOutOfRange {
                 field,

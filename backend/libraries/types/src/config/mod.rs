@@ -28,6 +28,10 @@ pub const MAX_SHORT_DURATION: Duration = Duration::from_secs(86_400);
 /// work back to send it together, which nobody gains by measuring in hours.
 pub const MAX_BATCH_WINDOW: Duration = Duration::from_secs(60);
 
+/// The most items one batch may send. A batch of nothing sends nothing, and an unbounded
+/// one is the trap every cap here exists to prevent.
+pub const MAX_BATCH_ITEMS: u32 = 1_000;
+
 /// A cap on the work one timer pass may do, carrying its default and its ceiling in the
 /// type, so no caller can invent a third pair.
 ///
@@ -145,6 +149,7 @@ pub struct Config {
     pub chain_data_max_age: Duration,
     #[n(6)]
     pub batch_window: Duration,
+    /// The most items one batch sends, 1 to [`MAX_BATCH_ITEMS`].
     #[n(7)]
     pub max_batch_items: u32,
     /// How long a paused swap waits for its user.
@@ -205,7 +210,8 @@ pub enum ConfigError {
         interval: Duration,
         floor: Duration,
     },
-    #[error("{field} is {}s, above the cap of {}s", duration.as_secs(), cap.as_secs())]
+    // `Duration`'s `Debug` keeps the fraction, so a window of 60.5s is not reported as 60s
+    #[error("{field} is {duration:?}, above the cap of {cap:?}")]
     DurationAboveCap {
         field: &'static str,
         duration: Duration,
@@ -350,6 +356,14 @@ impl Config {
         self.max_evictions_per_sweep
             .validate("max_evictions_per_sweep")?;
         self.audit_chunk_events.validate("audit_chunk_events")?;
+        // the batch size is a cap like the three above, held to the same rule
+        if self.max_batch_items == 0 || self.max_batch_items > MAX_BATCH_ITEMS {
+            return Err(ConfigError::CapOutOfRange {
+                field: "max_batch_items",
+                cap: self.max_batch_items,
+                ceiling: MAX_BATCH_ITEMS,
+            });
+        }
         // a chain listed with nothing behind it is a deploy mistake, not a way to unset it
         if let Some(chain) = self
             .vault_addresses

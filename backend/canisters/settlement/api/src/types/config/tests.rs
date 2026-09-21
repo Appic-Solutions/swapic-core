@@ -126,7 +126,8 @@ fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
     );
 }
 
-/// A duration knob above its cap is refused by name too, with the cap it broke.
+/// A duration knob above its cap is refused by name too, with the cap it broke, and in
+/// milliseconds, so the one knob set in milliseconds is reported as it was set.
 #[test]
 fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
     let domain = types::Config::try_from(Config {
@@ -138,8 +139,39 @@ fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
         ConfigError::from(domain.validate().unwrap_err()),
         ConfigError::DurationAboveCap {
             field: "permit_deadline_s".to_string(),
-            duration_s: 86_401,
-            cap_s: 86_400
+            duration_ms: 86_401_000,
+            cap_ms: 86_400_000
+        }
+    );
+    let domain = types::Config::try_from(Config {
+        batch_window_ms: 60_500,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(domain.validate().unwrap_err()),
+        ConfigError::DurationAboveCap {
+            field: "batch_window_ms".to_string(),
+            duration_ms: 60_500,
+            cap_ms: 60_000
+        }
+    );
+}
+
+/// The batch size is a cap like the per-pass ones, and a bad one names its knob.
+#[test]
+fn a_batch_size_outside_its_range_names_its_knob_on_the_wire() {
+    let domain = types::Config::try_from(Config {
+        max_batch_items: 0,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(domain.validate().unwrap_err()),
+        ConfigError::CapOutOfRange {
+            field: "max_batch_items".to_string(),
+            cap: 0,
+            ceiling: 1_000
         }
     );
 }
