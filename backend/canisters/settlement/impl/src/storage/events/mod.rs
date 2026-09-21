@@ -2,7 +2,7 @@ use crate::state::transitions::{apply_state_transition, replay, replay_into, Rep
 use crate::state::{MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
-    pockets_memory, swaps_memory, Memory,
+    nonces_memory, pockets_memory, swaps_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -11,7 +11,7 @@ use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::{
-    ChainId, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap, Timestamp,
+    ChainId, EventHash, EventIndex, LedgerMeta, Nonce, Pocket, QuoteHash, Swap, Timestamp,
     TransitionError, WaitingKey,
 };
 
@@ -41,6 +41,12 @@ thread_local! {
     // an automatic refund. So a pass reads those and not every swap, nor every waiting swap.
     static AUTO_REFUND_WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
         RefCell::new(StableBTreeSet::init(auto_refund_waiting_memory()));
+
+    // The nonce allocator, one counter per chain. Part of the fold: every counter is the
+    // number of `TxCreated` lines the log holds for its chain, so a replay reproduces it
+    // and the deep audit compares it.
+    static NONCES: RefCell<StableBTreeMap<ChainId, Nonce, Memory>> =
+        RefCell::new(StableBTreeMap::init(nonces_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -87,6 +93,20 @@ impl Store for StableStore {
 
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
+    }
+
+    fn next_nonce(&self, chain_id: &ChainId) -> Nonce {
+        NONCES
+            .with(|nonces| nonces.borrow().get(chain_id))
+            .unwrap_or(Nonce::ZERO)
+    }
+
+    fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce) {
+        NONCES.with(|nonces| nonces.borrow_mut().insert(chain_id, nonce));
+    }
+
+    fn nonces(&self) -> Vec<(ChainId, Nonce)> {
+        NONCES.with(|nonces| nonces.borrow().iter().collect())
     }
 
     fn waiting_keys(
@@ -189,6 +209,7 @@ pub fn init() {
     POCKETS.with(|_| ());
     LEDGER_META.with(|_| ());
     AUTO_REFUND_WAITING.with(|_| ());
+    NONCES.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

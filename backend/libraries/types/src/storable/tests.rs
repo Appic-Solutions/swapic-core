@@ -1,14 +1,16 @@
 use crate::chain::ChainId;
 use crate::chain_data::ChainReading;
 use crate::config::{AuditChunk, Config, EvictionsPerSweep, RefundsPerSweep};
+use crate::events::TxPurpose;
 use crate::events::{Event, EVENT_VARIANT_COUNT};
+use crate::hash::TxHash;
 use crate::hash::{EventHash, QuoteHash};
 use crate::ledger::LedgerMeta;
-use crate::numeric::{
-    Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds, WeiPerGas,
-};
+use crate::numeric::{Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds};
+use crate::numeric::{Nonce, WeiPerGas};
 use crate::quote::ExpiryKey;
 use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
+use crate::tx::{OutboxEntry, OutboxKey, OutboxStatus};
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -166,6 +168,35 @@ fn samples() -> Vec<Sample> {
                 priority_fee: WeiPerGas::from(100_000_000_u64),
             }
             .pushed_at(Timestamp::from_nanos(1_700_000_000_123_456_789)),
+        ),
+        sample(
+            "outbox entry",
+            OutboxEntry {
+                purpose: TxPurpose::Burn(QuoteHash::new([0x5c; 32])),
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(7),
+                attempt: Some(Attempt::new(2)),
+                hashes: vec![TxHash::new([0x5d; 32]), TxHash::new([0x5e; 32])],
+                raw_tx: vec![0x02, 0xf8, 0x6b],
+                max_fee: WeiPerGas::from(2_000_000_000_u64),
+                max_priority_fee: WeiPerGas::from(100_000_000_u64),
+                status: OutboxStatus::Sent,
+                created_at: Timestamp::from_nanos(1_700_000_000_123_456_789),
+                last_sent_at: Some(Timestamp::from_nanos(1_700_000_001_000_000_000)),
+                to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    .parse()
+                    .unwrap(),
+                value: crate::numeric::Wei::ZERO,
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+                gas_limit: crate::numeric::GasAmount::from(120_000_u32),
+            },
+        ),
+        sample(
+            "outbox key",
+            OutboxKey {
+                chain_id: ChainId::ARBITRUM,
+                nonce: Nonce::new(9),
+            },
         ),
     ]);
     all

@@ -17,6 +17,7 @@ pub mod quote;
 pub mod rail;
 pub mod storable;
 pub mod swap;
+pub mod tx;
 
 pub use address::{Address, RpcUrl, TokenId};
 pub use chain::ChainId;
@@ -34,3 +35,4 @@ pub use numeric::{
 pub use quote::{ExpiryKey, GasMode, Quote, QuoteError};
 pub use rail::Rail;
 pub use swap::{Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
+pub use tx::{OutboxEntry, OutboxKey, OutboxStatus};

@@ -1,8 +1,9 @@
 use super::*;
-use types::events::Choice;
+use types::events::{Choice, TxPurpose};
 use types::{
-    Attempt, BlockNumber, ChainId, EventHash, EventIndex, GasMode, LedgerMeta, Pocket, PocketError,
-    QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash, UnixSeconds, WaitingKey,
+    Attempt, BlockNumber, ChainId, EventHash, EventIndex, GasAmount, GasMode, LedgerMeta, Nonce,
+    Pocket, PocketError, QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash,
+    UnixSeconds, WaitingKey, Wei, WeiPerGas,
 };
 
 type HeapState = State<MemoryStore>;
@@ -964,4 +965,206 @@ fn a_repair_makes_the_index_agree_with_the_swap() {
     let mut state = State::new(store);
     repair(&mut state, waiting);
     assert_eq!(state.store().auto_refund_waiting(), vec![key(100, waiting)]);
+}
+
+/// A transaction the nonce allocator would admit, at `nonce` on `chain`.
+fn created(purpose: TxPurpose, chain: ChainId, nonce: u64) -> EventType {
+    EventType::TxCreated {
+        purpose,
+        chain_id: chain,
+        nonce: Nonce::new(nonce),
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap(),
+        value: Wei::ZERO,
+        data: vec![0xde, 0xad, 0xbe, 0xef],
+        gas_limit: GasAmount::from(120_000_u32),
+        max_fee: WeiPerGas::from(2_000_000_000_u64),
+        max_priority_fee: WeiPerGas::from(100_000_000_u64),
+    }
+}
+
+fn replaced(purpose: TxPurpose, chain: ChainId, nonce: u64) -> EventType {
+    EventType::TxReplaced {
+        purpose,
+        chain_id: chain,
+        nonce: Nonce::new(nonce),
+        max_fee: WeiPerGas::from(4_000_000_000_u64),
+        max_priority_fee: WeiPerGas::from(200_000_000_u64),
+        tx_hash: TxHash::new([7; 32]),
+        raw_tx: vec![0x02, 0xf8, 0x6b],
+    }
+}
+
+/// Rule A4, the one that makes a double spend of a nonce impossible: the allocator counts
+/// from zero on each chain, hands out one number at a time, and counts each chain
+/// separately.
+#[test]
+fn the_nonce_allocator_hands_out_one_number_at_a_time_per_chain() {
+    let qh = swap_id(1);
+    let burn = TxPurpose::Burn(qh);
+    let state = fold(vec![
+        funds(1),
+        created(burn, BASE, 0),
+        created(burn, BASE, 1),
+    ]);
+    assert_eq!(state.next_nonce(&BASE), Nonce::new(2));
+    assert_eq!(
+        state.next_nonce(&ARBITRUM),
+        Nonce::ZERO,
+        "a chain nothing was sent on starts at zero"
+    );
+
+    // the next one on Base must be 2, and nothing else
+    for wrong in [0, 1, 3, u64::MAX] {
+        assert_eq!(
+            state.check(&created(burn, BASE, wrong)),
+            Err(TransitionError::NonceOutOfSequence {
+                chain_id: BASE,
+                nonce: Nonce::new(wrong),
+                expected: Nonce::new(2),
+            })
+        );
+    }
+    assert_eq!(state.check(&created(burn, BASE, 2)), Ok(()));
+    // and each chain counts on its own
+    assert_eq!(state.check(&created(burn, ARBITRUM, 0)), Ok(()));
+    assert_eq!(
+        state.check(&created(burn, ARBITRUM, 1)),
+        Err(TransitionError::NonceOutOfSequence {
+            chain_id: ARBITRUM,
+            nonce: Nonce::new(1),
+            expected: Nonce::ZERO,
+        })
+    );
+}
+
+/// A transaction is created for a swap that can still send one: a swap that never received
+/// funds, or that is closed, or that is waiting for its user, would strand the nonce it
+/// allocated.
+#[test]
+fn a_transaction_is_created_only_for_a_swap_that_can_send_one() {
+    let qh = swap_id(1);
+    let burn = TxPurpose::Burn(qh);
+    let empty = HeapState::default();
+    assert_eq!(
+        empty.check(&created(burn, BASE, 0)),
+        Err(TransitionError::UnknownSwap(qh))
+    );
+
+    let done = fold(vec![
+        funds(1),
+        signed(qh, 1),
+        confirmed(qh, 1),
+        EventType::SwapDone { quote_hash: qh },
+    ]);
+    assert_eq!(
+        done.check(&created(burn, BASE, 0)),
+        Err(TransitionError::SwapClosed(SwapStatus::Done))
+    );
+
+    let waiting = fold(vec![
+        funds(1),
+        EventType::DecisionRequired {
+            quote_hash: qh,
+            reason: "slippage".into(),
+        },
+    ]);
+    assert_eq!(
+        waiting.check(&created(burn, BASE, 0)),
+        Err(TransitionError::WaitingForUser)
+    );
+
+    // a cancel names no swap, so no swap has to exist for one
+    assert_eq!(
+        empty.check(&created(TxPurpose::Cancel(BASE), BASE, 0)),
+        Ok(())
+    );
+}
+
+/// A replacement keeps the nonce of the transaction it replaces: it must name one already
+/// allocated on that chain, and it allocates nothing itself.
+#[test]
+fn a_replacement_keeps_an_allocated_nonce_and_allocates_none() {
+    let qh = swap_id(1);
+    let burn = TxPurpose::Burn(qh);
+    let state = fold(vec![
+        funds(1),
+        created(burn, BASE, 0),
+        signed(qh, 1),
+        replaced(burn, BASE, 0),
+    ]);
+    assert_eq!(
+        state.next_nonce(&BASE),
+        Nonce::new(1),
+        "a replacement allocates nothing"
+    );
+    assert_eq!(
+        swap(&state, qh).open_attempt,
+        Some(Attempt::FIRST),
+        "the attempt the replacement re-sent is still open"
+    );
+
+    for never_allocated in [1, 2, u64::MAX] {
+        assert_eq!(
+            state.check(&replaced(burn, BASE, never_allocated)),
+            Err(TransitionError::NonceNeverAllocated {
+                chain_id: BASE,
+                nonce: Nonce::new(never_allocated),
+                next: Nonce::new(1),
+            })
+        );
+    }
+}
+
+/// A replacement is a re-send of something in flight, so there has to be something in
+/// flight: a swap with no open attempt has nothing to replace.
+#[test]
+fn a_replacement_needs_an_open_attempt_to_replace() {
+    let qh = swap_id(1);
+    let burn = TxPurpose::Burn(qh);
+    let state = fold(vec![funds(1), created(burn, BASE, 0)]);
+    assert_eq!(
+        state.check(&replaced(burn, BASE, 0)),
+        Err(TransitionError::NoOpenAttempt(qh))
+    );
+}
+
+/// A value, a gas limit or a fee no sixteen-byte field holds has no preimage, so it is
+/// refused by the guard rather than failing at the seal.
+#[test]
+fn a_transaction_field_above_the_preimage_range_is_refused() {
+    let qh = swap_id(1);
+    let state = fold(vec![funds(1)]);
+    let field = |value: Wei, gas_limit: GasAmount, max_fee: WeiPerGas, tip: WeiPerGas| {
+        EventType::TxCreated {
+            purpose: TxPurpose::Burn(qh),
+            chain_id: BASE,
+            nonce: Nonce::ZERO,
+            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                .parse()
+                .unwrap(),
+            value,
+            data: vec![],
+            gas_limit,
+            max_fee,
+            max_priority_fee: tip,
+        }
+    };
+    let (gas, fee) = (GasAmount::from(120_000_u32), WeiPerGas::from(1_u8));
+    assert_eq!(state.check(&field(Wei::ZERO, gas, fee, fee)), Ok(()));
+    for broken in [
+        field(Wei::MAX, gas, fee, fee),
+        field(Wei::ZERO, GasAmount::MAX, fee, fee),
+        field(Wei::ZERO, gas, WeiPerGas::MAX, fee),
+        field(Wei::ZERO, gas, fee, WeiPerGas::MAX),
+    ] {
+        assert!(
+            matches!(
+                state.check(&broken),
+                Err(TransitionError::AmountOutOfRange(_))
+            ),
+            "a field above the range was admitted"
+        );
+    }
 }

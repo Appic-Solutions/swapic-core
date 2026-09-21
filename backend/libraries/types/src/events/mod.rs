@@ -4,8 +4,11 @@ pub(crate) mod tests;
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
+use crate::evm::EvmAddress;
 use crate::hash::{EventHash, QuoteHash, TxHash};
-use crate::numeric::{Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount};
+use crate::numeric::{
+    Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei, WeiPerGas,
+};
 use minicbor::{Decode, Encode};
 use sha2::Digest;
 use std::borrow::Borrow;
@@ -14,7 +17,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 20;
+pub const EVENT_VARIANT_COUNT: usize = 22;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -224,6 +227,106 @@ pub enum EventType {
         #[n(0)]
         quote_hash: QuoteHash,
     },
+    /// A nonce was allocated to an outbound transaction, with every field that transaction
+    /// will carry. Appended before the signature is asked for and before any other await,
+    /// so the guard `nonce == next_nonce[chain_id]` is what makes two transactions unable
+    /// to share a nonce (rule A4).
+    #[n(20)]
+    TxCreated {
+        #[n(0)]
+        purpose: TxPurpose,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        to: EvmAddress,
+        #[n(4)]
+        value: Wei,
+        #[cbor(n(5), with = "minicbor::bytes")]
+        data: Vec<u8>,
+        #[n(6)]
+        gas_limit: GasAmount,
+        #[n(7)]
+        max_fee: WeiPerGas,
+        #[n(8)]
+        max_priority_fee: WeiPerGas,
+    },
+    /// An open transaction was re-sent at the same nonce with a higher fee, because it was
+    /// not landing (rule A5: an allocated nonce is never abandoned). Carries the bytes
+    /// actually broadcast, so the log holds every transaction this canister ever put on a
+    /// chain and not only the first of them.
+    #[n(21)]
+    TxReplaced {
+        #[n(0)]
+        purpose: TxPurpose,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        max_fee: WeiPerGas,
+        #[n(4)]
+        max_priority_fee: WeiPerGas,
+        #[n(5)]
+        tx_hash: TxHash,
+        #[cbor(n(6), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
+}
+
+/// Why an outbound transaction exists. Every transaction this canister sends is one of
+/// these, and all but the last name the swap they belong to.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum TxPurpose {
+    /// The source leg: value leaves for the rail.
+    #[n(0)]
+    Burn(#[n(0)] QuoteHash),
+    /// The destination leg: the rail's value arrives.
+    #[n(1)]
+    Mint(#[n(0)] QuoteHash),
+    /// The user is paid.
+    #[n(2)]
+    Payout(#[n(0)] QuoteHash),
+    /// The user is paid back.
+    #[n(3)]
+    Refund(#[n(0)] QuoteHash),
+    /// A permit is used to pull the user's funds without their gas.
+    #[n(4)]
+    GaslessPull(#[n(0)] QuoteHash),
+    /// A same-nonce zero-value self-transfer, which abandons nothing: it spends a nonce
+    /// whose transaction is no longer wanted (rule A5).
+    #[n(5)]
+    Cancel(#[n(0)] ChainId),
+}
+
+impl TxPurpose {
+    /// The swap this transaction belongs to, if it belongs to one.
+    pub fn quote_hash(&self) -> Option<QuoteHash> {
+        match self {
+            Self::Burn(hash)
+            | Self::Mint(hash)
+            | Self::Payout(hash)
+            | Self::Refund(hash)
+            | Self::GaslessPull(hash) => Some(*hash),
+            Self::Cancel(_) => None,
+        }
+    }
+
+    /// One byte and then its argument: a swap id for the five that name one, the chain id
+    /// for the cancel. The tag makes the two shapes unambiguous.
+    fn write_canonical(&self, w: &mut CanonicalWriter) {
+        match self {
+            Self::Burn(hash) => w.put_u8(0).put_hash(hash.as_ref()),
+            Self::Mint(hash) => w.put_u8(1).put_hash(hash.as_ref()),
+            Self::Payout(hash) => w.put_u8(2).put_hash(hash.as_ref()),
+            Self::Refund(hash) => w.put_u8(3).put_hash(hash.as_ref()),
+            Self::GaslessPull(hash) => w.put_u8(4).put_hash(hash.as_ref()),
+            Self::Cancel(chain_id) => w.put_u8(5).put_u64(chain_id.get()),
+        };
+    }
 }
 
 /// The user's answer to a paused swap. One byte in the preimage: Requote 0, Refund 1.
@@ -296,7 +399,11 @@ impl EventType {
             | EventType::SwapDone { .. }
             | EventType::Frozen { .. }
             | EventType::RolesChanged { .. }
-            | EventType::WaitingRepaired { .. } => None,
+            | EventType::WaitingRepaired { .. }
+            // a transaction's value, gas and fees are not token amounts: `State::check`
+            // holds them to the same 16-byte range the preimage writes them in
+            | EventType::TxCreated { .. }
+            | EventType::TxReplaced { .. } => None,
         }
     }
 
@@ -464,6 +571,46 @@ impl EventType {
             }
             EventType::WaitingRepaired { quote_hash } => {
                 w.put_u16(19).put_hash(quote_hash.as_ref());
+            }
+            EventType::TxCreated {
+                purpose,
+                chain_id,
+                nonce,
+                to,
+                value,
+                data,
+                gas_limit,
+                max_fee,
+                max_priority_fee,
+            } => {
+                w.put_u16(20);
+                purpose.write_canonical(&mut w);
+                w.put_u64(chain_id.get())
+                    .put_u64(nonce.get())
+                    .put_address(to.as_bytes())
+                    .put_amount(*value)
+                    .put_bytes(data)
+                    .put_amount(*gas_limit)
+                    .put_amount(*max_fee)
+                    .put_amount(*max_priority_fee);
+            }
+            EventType::TxReplaced {
+                purpose,
+                chain_id,
+                nonce,
+                max_fee,
+                max_priority_fee,
+                tx_hash,
+                raw_tx,
+            } => {
+                w.put_u16(21);
+                purpose.write_canonical(&mut w);
+                w.put_u64(chain_id.get())
+                    .put_u64(nonce.get())
+                    .put_amount(*max_fee)
+                    .put_amount(*max_priority_fee)
+                    .put_hash(tx_hash.as_ref())
+                    .put_bytes(raw_tx);
             }
         }
         w.finish()

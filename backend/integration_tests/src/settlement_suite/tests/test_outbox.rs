@@ -1,0 +1,602 @@
+//! The nonce allocator, the sign-before-send order, and the outbox that gets the bytes
+//! onto a chain.
+//!
+//! Every test here runs on a network holding pocket-ic's test threshold keys, because a
+//! transaction that is not signed is not a transaction.
+
+use crate::client::settlement::{
+    append, derive_evm_address, events_page, push_chain_data, set_halted, test_send,
+};
+use crate::settlement_suite::init::{install, quoter, upgrade, watcher};
+use candid::{encode_args, Nat, Principal};
+use pocket_ic::common::rest::{
+    CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse, MockCanisterHttpResponse,
+};
+use pocket_ic::{PocketIc, PocketIcBuilder};
+use serde_json::{json, Value};
+use settlement_api::types::chain_data::ChainData;
+use settlement_api::types::config::Config;
+use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
+use settlement_api::types::init::InitArg;
+use settlement_api::types::tx::TxError;
+use std::collections::BTreeMap;
+use std::time::Duration;
+use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
+
+const BASE: u64 = 8453;
+const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const GAS_LIMIT: u64 = 120_000;
+
+/// The batch window the default config is on, which is how long a queued transaction waits
+/// before the outbox pass takes it.
+const BATCH_WINDOW: Duration = Duration::from_secs(2);
+
+/// A quote whose swap the tests send transactions for, one per nonce.
+fn quote(nonce: u64) -> types::Quote {
+    types::Quote {
+        version: 1,
+        src_chain: ChainId::BASE,
+        src_token: "USDC".parse().unwrap(),
+        amount_in: TokenAmount::from(1_000_u32),
+        dst_chain: ChainId::ARBITRUM,
+        dst_token: "USDC".parse().unwrap(),
+        expected_out: TokenAmount::from(999_u32),
+        min_out: TokenAmount::from(990_u32),
+        dst_address: "0xuser".parse().unwrap(),
+        refund_address: None,
+        auto_refund: true,
+        gas_mode: GasMode::Gasless,
+        rail: Rail::CctpV2Fast,
+        expires_at: UnixSeconds::new(1_800_000_000),
+        nonce,
+    }
+}
+
+fn swap_id(nonce: u64) -> Hash32 {
+    quote(nonce)
+        .hash()
+        .expect("a valid quote has a preimage")
+        .into_bytes()
+}
+
+fn funds(nonce: u64) -> EventType {
+    let quote = quote(nonce);
+    EventType::FundsReceived {
+        quote_hash: swap_id(nonce),
+        quote_bytes: quote
+            .canonical_bytes()
+            .expect("a valid quote has a preimage"),
+        chain_id: BASE,
+        token: quote.src_token.to_string(),
+        amount: quote.amount_in.into(),
+        tx_ref: "0xfeed".into(),
+    }
+}
+
+/// A canister on a network holding the test threshold keys, with a provider for Base, a
+/// fresh chain reading, and `count` funded swaps ready to send from.
+fn setup_with_swaps(count: u64) -> (PocketIc, Principal, Principal) {
+    let pic = PocketIcBuilder::new()
+        .with_ii_subnet()
+        .with_application_subnet()
+        .build();
+    let admin = Principal::from_slice(&[1; 29]);
+    let subnet = pic.topology().get_app_subnets()[0];
+    let canister = pic.create_canister_on_subnet(Some(admin), None, subnet);
+    pic.add_cycles(canister, 1_000_000_000_000_000);
+    let arg = InitArg {
+        config: Config {
+            rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
+            ..Config::default()
+        },
+        quoter: quoter(),
+        watcher: watcher(),
+    };
+    install(&pic, canister, admin, &arg).expect("the arg installs");
+    derive_evm_address(&pic, canister, admin).expect("the test key derives an address");
+    push_reading(&pic, canister);
+    for nonce in 0..count {
+        append(&pic, canister, admin, &funds(nonce)).expect("the swap is funded");
+    }
+    (pic, canister, admin)
+}
+
+/// Keeps the chain reading young: a transaction is priced from it, and the default
+/// `chain_data_max_age` is ten seconds.
+fn push_reading(pic: &PocketIc, canister: Principal) {
+    push_chain_data(
+        pic,
+        canister,
+        watcher(),
+        BASE,
+        &ChainData {
+            block: 19_000_000,
+            base_fee_wei_per_gas: Nat::from(1_000_000_000_u64),
+            priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+    )
+    .expect("the watcher may push");
+}
+
+fn send(
+    pic: &PocketIc,
+    canister: Principal,
+    admin: Principal,
+    nonce: u64,
+) -> Result<Hash32, TxError> {
+    test_send(pic, canister, admin, swap_id(nonce), BASE, VAULT, GAS_LIMIT)
+}
+
+fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
+    events_page(pic, canister, Principal::anonymous(), 0, 500)
+}
+
+/// Moves the clock, keeps the chain reading young at the new time the way a live watcher
+/// would, then gives the canister the rounds a one-shot pass and its outcall need.
+fn advance(pic: &PocketIc, canister: Principal, by: Duration) {
+    pic.advance_time(by);
+    push_reading(pic, canister);
+    for _ in 0..4 {
+        pic.tick();
+    }
+}
+
+/// The methods one pending outcall asks for, in order.
+fn methods(request: &CanisterHttpRequest) -> Vec<String> {
+    let body: Value = serde_json::from_slice(&request.body).expect("the body is json");
+    body.as_array()
+        .expect("a batch is an array")
+        .iter()
+        .map(|call| {
+            call["method"]
+                .as_str()
+                .expect("a call names a method")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The parameters of the `n`th call of one pending outcall.
+fn params(request: &CanisterHttpRequest, n: usize) -> Value {
+    let body: Value = serde_json::from_slice(&request.body).expect("the body is json");
+    body[n]["params"].clone()
+}
+
+fn reply(pic: &PocketIc, request: &CanisterHttpRequest, results: Vec<Value>) {
+    let body: Vec<Value> = results
+        .into_iter()
+        .enumerate()
+        .map(|(id, result)| json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        .collect();
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: request.subnet_id,
+        request_id: request.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: Value::Array(body).to_string().into_bytes(),
+        }),
+        additional_responses: vec![],
+    });
+    // the pass continues where its await left off, and what it does next may be another
+    // await of its own: a signature takes several rounds. An outcall left unanswered
+    // across a clock jump times out, so every answer is delivered, and worked through,
+    // before the test moves on.
+    for _ in 0..12 {
+        pic.tick();
+    }
+}
+
+/// Answers whatever the pending outcall asks: a hash for every broadcast, the head block
+/// and `receipt` for every receipt asked for.
+fn answer_pending(pic: &PocketIc, latest: u64, receipt: &Value) -> Vec<String> {
+    let pending = pic.get_canister_http();
+    let mut asked = Vec::new();
+    for request in pending {
+        let asked_for = methods(&request);
+        let results = asked_for
+            .iter()
+            .map(|method| match method.as_str() {
+                "eth_blockNumber" => json!(format!("0x{latest:x}")),
+                "eth_getTransactionReceipt" => receipt.clone(),
+                _ => json!("0x1111111111111111111111111111111111111111111111111111111111111111"),
+            })
+            .collect();
+        reply(pic, &request, results);
+        asked.extend(asked_for);
+    }
+    asked
+}
+
+fn receipt(block: u64, success: bool, tx_hash: Hash32) -> Value {
+    json!({
+        "transactionHash": format!("0x{}", hex::encode(tx_hash)),
+        "blockNumber": format!("0x{block:x}"),
+        "status": if success { "0x1" } else { "0x0" },
+    })
+}
+
+/// A `TxCreated` for the first swap at `nonce`, which the allocator admits only at the
+/// number it is at.
+fn created_at(nonce: u64) -> EventType {
+    EventType::TxCreated {
+        purpose: TxPurpose::Payout(swap_id(0)),
+        chain_id: BASE,
+        nonce,
+        to: VAULT.to_string(),
+        value_wei: Nat::from(0_u8),
+        data: vec![],
+        gas_limit: Nat::from(GAS_LIMIT),
+        max_fee_wei_per_gas: Nat::from(1_u8),
+        max_priority_fee_wei_per_gas: Nat::from(1_u8),
+    }
+}
+
+fn tx_created(events: &[Event]) -> Vec<(u64, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventType::TxCreated {
+                chain_id, nonce, ..
+            } => Some((*chain_id, *nonce)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tx_signed(events: &[Event]) -> Vec<Vec<u8>> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventType::TxSigned { raw_tx, .. } => Some(raw_tx.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every payload of `kind` in the log, where `kind` says which variant to keep.
+fn of_kind(events: Vec<Event>, kind: fn(&EventType) -> bool) -> Vec<EventType> {
+    events
+        .into_iter()
+        .map(|event| event.payload)
+        .filter(kind)
+        .collect()
+}
+
+fn is_confirmed(payload: &EventType) -> bool {
+    matches!(payload, EventType::TxConfirmed { .. })
+}
+
+fn is_failed(payload: &EventType) -> bool {
+    matches!(payload, EventType::TxFailed { .. })
+}
+
+fn is_replaced(payload: &EventType) -> bool {
+    matches!(payload, EventType::TxReplaced { .. })
+}
+
+/// The test rule A4 exists for: two sends that are both in flight at the signature come
+/// back with two different nonces, and the log holds no two `TxCreated` at one nonce.
+/// `TxCreated` is appended before the first await, so the interleaving cannot reach it.
+#[test]
+fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
+    let (pic, canister, admin) = setup_with_swaps(2);
+    let first = pic
+        .submit_call(
+            canister,
+            admin,
+            "test_send",
+            encode_args((swap_id(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
+        )
+        .unwrap();
+    let second = pic
+        .submit_call(
+            canister,
+            admin,
+            "test_send",
+            encode_args((swap_id(1), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
+        )
+        .unwrap();
+    // one round runs both messages up to their signature
+    pic.tick();
+    for _ in 0..10 {
+        pic.tick();
+    }
+    let first: Result<Hash32, TxError> =
+        candid::decode_one(&pic.await_call(first).expect("the first send returns")).unwrap();
+    let second: Result<Hash32, TxError> =
+        candid::decode_one(&pic.await_call(second).expect("the second send returns")).unwrap();
+    assert!(first.is_ok(), "{first:?}");
+    assert!(second.is_ok(), "{second:?}");
+    assert_ne!(first, second, "two transactions, two hashes");
+
+    let created = tx_created(&events(&pic, canister));
+    assert_eq!(
+        created,
+        vec![(BASE, 0), (BASE, 1)],
+        "the allocator handed out one number each"
+    );
+}
+
+/// The guard, from the outside: a `TxCreated` carrying anything but the number the
+/// allocator is at is refused, and it allocates nothing.
+#[test]
+fn a_transaction_created_off_the_allocator_is_refused() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let refused = append(&pic, canister, admin, &created_at(1));
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        tx_created(&events(&pic, canister)).is_empty(),
+        "a refused allocation allocates nothing"
+    );
+
+    // and the number the allocator is at is accepted
+    assert!(append(&pic, canister, admin, &created_at(0)).is_ok());
+    assert_eq!(tx_created(&events(&pic, canister)), vec![(BASE, 0)]);
+}
+
+/// Rule A6: the signature is recorded before anything is broadcast, and what goes out is
+/// what was recorded, byte for byte.
+#[test]
+fn the_bytes_broadcast_are_the_bytes_the_log_recorded() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+
+    let signed = tx_signed(&events(&pic, canister));
+    assert_eq!(signed.len(), 1, "one transaction, one signature");
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "nothing is broadcast before the signature is recorded"
+    );
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chain, one batch");
+    assert_eq!(methods(&pending[0]), vec!["eth_sendRawTransaction"]);
+    assert_eq!(
+        params(&pending[0], 0),
+        json!([format!("0x{}", hex::encode(&signed[0]))]),
+        "the broadcast is the recorded bytes"
+    );
+}
+
+/// A transaction nobody has mined goes out again unchanged: the same bytes, no new
+/// signature, and no new line in the log.
+#[test]
+fn a_missing_receipt_rebroadcasts_the_same_bytes_with_no_new_signature() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    reply(&pic, &pending[0], vec![json!("0xabc")]);
+
+    let before = events(&pic, canister).len();
+    let signed = tx_signed(&events(&pic, canister));
+
+    // the next pass reads a receipt that is not there yet, and the one after the
+    // rebroadcast window sends the same bytes again
+    advance(&pic, canister, BATCH_WINDOW);
+    let asked = answer_pending(&pic, 19_000_001, &json!(null));
+    assert_eq!(
+        asked,
+        vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+        "the head and one receipt, in one batch"
+    );
+
+    advance(&pic, canister, Duration::from_secs(31));
+    answer_pending(&pic, 19_000_002, &json!(null));
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    let sends: Vec<&CanisterHttpRequest> = pending
+        .iter()
+        .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
+        .collect();
+    assert_eq!(sends.len(), 1, "the transaction went out again");
+    assert_eq!(
+        params(sends[0], 0),
+        json!([format!("0x{}", hex::encode(&signed[0]))]),
+        "the same bytes"
+    );
+    assert_eq!(
+        tx_signed(&events(&pic, canister)),
+        signed,
+        "a rebroadcast signs nothing"
+    );
+    assert_eq!(
+        events(&pic, canister).len(),
+        before,
+        "a rebroadcast writes nothing to the log"
+    );
+}
+
+/// A receipt is not a confirmation until it is deep enough, and at depth it closes the
+/// attempt.
+#[test]
+fn a_receipt_closes_the_attempt_only_once_it_is_deep_enough() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    // mined in a block the head has not reached: two moments of the chain, not a
+    // confirmation
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_000, &receipt(19_000_005, true, tx_hash));
+    assert!(
+        of_kind(events(&pic, canister), is_confirmed).is_empty(),
+        "nothing is confirmed by a receipt ahead of the head"
+    );
+
+    // Base is configured at a depth of one, so the receipt's own block is enough
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_005, &receipt(19_000_005, true, tx_hash));
+    let confirmed = of_kind(events(&pic, canister), is_confirmed);
+    assert_eq!(confirmed.len(), 1, "the attempt closed exactly once");
+    assert!(matches!(
+        confirmed[0],
+        EventType::TxConfirmed { block, .. } if block == 19_000_005
+    ));
+
+    // the entry left the outbox, so nothing is read for it again
+    advance(&pic, canister, Duration::from_secs(300));
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "a closed attempt is no longer in the outbox"
+    );
+}
+
+/// A transaction that reverted did not do what it was sent to do, and that closes the
+/// attempt as a failure rather than a confirmation.
+#[test]
+fn a_reverted_receipt_fails_the_attempt() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_005, &receipt(19_000_005, false, tx_hash));
+    assert_eq!(
+        of_kind(events(&pic, canister), is_failed).len(),
+        1,
+        "the attempt failed exactly once"
+    );
+}
+
+/// Rule A5: a transaction that is not landing is replaced at the same nonce with a higher
+/// fee, and the replacement's receipt closes the attempt. The nonce is never abandoned.
+#[test]
+fn a_stuck_transaction_is_replaced_at_the_same_nonce_with_a_higher_fee() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let first_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    // nothing mined yet, and the transaction is still young
+    answer_pending(&pic, 19_000_000, &json!(null));
+
+    // long past the stuck window, with nothing mined
+    advance(&pic, canister, Duration::from_secs(200));
+    answer_pending(&pic, 19_000_001, &json!(null));
+
+    let replaced = of_kind(events(&pic, canister), is_replaced);
+    assert_eq!(replaced.len(), 1, "one replacement");
+    let EventType::TxReplaced {
+        nonce,
+        chain_id,
+        max_fee_wei_per_gas,
+        tx_hash: replacement_hash,
+        ..
+    } = replaced[0].clone()
+    else {
+        unreachable!()
+    };
+    assert_eq!((chain_id, nonce), (BASE, 0), "the same nonce");
+    assert!(
+        max_fee_wei_per_gas > 2_100_000_000_u64,
+        "a replacement pays more than the transaction it replaces"
+    );
+    assert_ne!(
+        replacement_hash, first_hash,
+        "the replacement is another transaction"
+    );
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0)],
+        "a replacement allocates no nonce"
+    );
+
+    // the replacement goes out, and its receipt closes the attempt
+    advance(&pic, canister, BATCH_WINDOW);
+    let asked = answer_pending(&pic, 19_000_002, &json!(null));
+    assert!(asked.contains(&"eth_sendRawTransaction".to_string()));
+
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(
+        &pic,
+        19_000_010,
+        &receipt(19_000_010, true, replacement_hash),
+    );
+    assert_eq!(
+        of_kind(events(&pic, canister), is_confirmed).len(),
+        1,
+        "the replacement's receipt closed it"
+    );
+}
+
+/// Rule A9: the pass that sends a queued transaction lives in the heap, and an upgrade
+/// clears it. A transaction signed before the upgrade still goes out after it.
+#[test]
+fn the_flush_pass_is_re_armed_after_an_upgrade_with_a_queued_entry() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    let signed = tx_signed(&events(&pic, canister));
+
+    // upgraded before the window closes, so nothing has gone out yet
+    assert!(pic.get_canister_http().is_empty());
+    upgrade(&pic, canister, admin).expect("the upgrade goes through");
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "the queued transaction went out anyway");
+    assert_eq!(
+        params(&pending[0], 0),
+        json!([format!("0x{}", hex::encode(&signed[0]))]),
+        "and it is the transaction the log recorded"
+    );
+}
+
+/// A replacement is a new transaction, signed and broadcast, so the halt switch stops it
+/// like every other path that creates one. What is already out there is still watched: the
+/// receipts keep being read, because an operator investigating a divergence needs to see
+/// what the chains did with what this canister already signed.
+#[test]
+fn a_halted_canister_replaces_nothing_and_still_reads_its_receipts() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+    answer_pending(&pic, 19_000_000, &json!(null));
+
+    set_halted(&pic, canister, admin, true).expect("a controller may halt");
+
+    // long past the stuck window, with nothing mined
+    advance(&pic, canister, Duration::from_secs(200));
+    let asked = answer_pending(&pic, 19_000_001, &json!(null));
+    assert!(
+        asked.contains(&"eth_getTransactionReceipt".to_string()),
+        "a halted canister still reads what it already sent"
+    );
+    assert!(
+        of_kind(events(&pic, canister), is_replaced).is_empty(),
+        "a halted canister signs no replacement"
+    );
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0)],
+        "and the nonce it allocated is still allocated"
+    );
+
+    // once the halt is lifted the replacement happens, so nothing was abandoned
+    set_halted(&pic, canister, admin, false).expect("a controller may resume");
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_002, &json!(null));
+    assert_eq!(
+        of_kind(events(&pic, canister), is_replaced).len(),
+        1,
+        "the transaction was waiting, not abandoned"
+    );
+
+    // and the receipt that closes the attempt still closes it: the replacement goes out
+    // on the next pass, and the pass after it reads a receipt for every hash this nonce
+    // has ever carried, so the one that landed is found whichever it was
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_009, &json!(null));
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_010, &receipt(19_000_010, true, tx_hash));
+    assert_eq!(
+        of_kind(events(&pic, canister), is_confirmed).len(),
+        1,
+        "the original transaction landed after all"
+    );
+}

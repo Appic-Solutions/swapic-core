@@ -100,7 +100,48 @@ fn samples() -> Vec<EventType> {
         EventType::WaitingRepaired {
             quote_hash: [18; 32],
         },
+        EventType::TxCreated {
+            purpose: TxPurpose::Burn([19; 32]),
+            chain_id: 8453,
+            nonce: 7,
+            // the wire address is checksummed, and it crosses back as written
+            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
+            value_wei: Nat::from(0_u8),
+            data: vec![0xa9, 0x05, 0x9c, 0xbb],
+            gas_limit: Nat::from(120_000_u32),
+            max_fee_wei_per_gas: Nat::from(2_000_000_000_u64),
+            max_priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+        EventType::TxReplaced {
+            purpose: TxPurpose::Cancel(42161),
+            chain_id: 42161,
+            nonce: 8,
+            max_fee_wei_per_gas: Nat::from(4_000_000_000_u64),
+            max_priority_fee_wei_per_gas: Nat::from(200_000_000_u64),
+            tx_hash: [20; 32],
+            raw_tx: vec![0x02, 0xf8, 0x6b],
+        },
     ]
+}
+
+/// An address that is not an address at all is refused at the edge, naming the field.
+#[test]
+fn a_transaction_to_something_that_is_not_an_address_is_refused() {
+    let wire = EventType::TxCreated {
+        purpose: TxPurpose::Burn([19; 32]),
+        chain_id: 8453,
+        nonce: 7,
+        to: "not an address".into(),
+        value_wei: Nat::from(0_u8),
+        data: vec![],
+        gas_limit: Nat::from(1_u8),
+        max_fee_wei_per_gas: Nat::from(1_u8),
+        max_priority_fee_wei_per_gas: Nat::from(1_u8),
+    };
+    assert!(matches!(
+        types::EventType::try_from(wire),
+        Err(types::events::EventError::TextTooLong { field: "to", .. })
+    ));
 }
 
 #[test]

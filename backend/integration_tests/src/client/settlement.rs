@@ -13,7 +13,7 @@ use settlement_api::types::errors::{GuardError, TestAppendError, TestRpcError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
     audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
-    set_config, set_halted, set_roles, test_sign,
+    set_config, set_halted, set_roles, test_send, test_sign,
 };
 
 pub fn event_count(
@@ -287,6 +287,25 @@ pub fn test_sign(
         sender,
         "test_sign",
         encode_one(hash).unwrap(),
+    )
+}
+
+/// The test door onto one transaction: create, sign and queue a payout for `quote_hash`.
+pub fn test_send(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    quote_hash: settlement_api::types::events::Hash32,
+    chain_id: u64,
+    to: &str,
+    gas_limit: u64,
+) -> test_send::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "test_send",
+        encode_args((quote_hash, chain_id, to.to_string(), gas_limit)).unwrap(),
     )
 }
 

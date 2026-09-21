@@ -4,7 +4,7 @@ mod tests;
 use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
-use crate::numeric::{Attempt, Timestamp, TokenAmount};
+use crate::numeric::{Attempt, Nonce, Timestamp, TokenAmount};
 use crate::quote::{Quote, QuoteError};
 use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
@@ -99,6 +99,20 @@ pub enum TransitionError {
     },
     #[error("attempt {0} is not open")]
     AttemptNotOpen(Attempt),
+    #[error("swap {0} has no open attempt to replace")]
+    NoOpenAttempt(QuoteHash),
+    #[error("nonce {nonce} on chain {chain_id} is not the {expected} the allocator is at")]
+    NonceOutOfSequence {
+        chain_id: ChainId,
+        nonce: Nonce,
+        expected: Nonce,
+    },
+    #[error("nonce {nonce} on chain {chain_id} was never allocated: the allocator is at {next}")]
+    NonceNeverAllocated {
+        chain_id: ChainId,
+        nonce: Nonce,
+        next: Nonce,
+    },
     #[error("swap is not executing ({0:?})")]
     NotExecuting(SwapStatus),
     #[error("swap is already paid in stable")]

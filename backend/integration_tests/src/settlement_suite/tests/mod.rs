@@ -1,6 +1,7 @@
 mod test_chain_data;
 mod test_config;
 mod test_install;
+mod test_outbox;
 mod test_quotes;
 mod test_rpc;
 mod test_signing;

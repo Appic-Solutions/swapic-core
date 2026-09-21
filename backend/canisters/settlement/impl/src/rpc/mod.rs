@@ -204,10 +204,29 @@ fn reply_result(reply: &Value, method: &str) -> Result<Value, RpcError> {
         .ok_or_else(|| RpcError::Json(format!("{method} answered neither a result nor an error")))
 }
 
-/// The results of a batch reply, in the order the calls were made. The server may answer in
-/// any order, so the ids are the order: every id from zero to the last must appear exactly
-/// once.
+/// The results of a batch reply, in the order the calls were made, each call answering for
+/// itself. One call a provider refuses does not throw away the answers to the others,
+/// which is what a batch of broadcasts or receipts needs.
+fn parse_batch_each(
+    body: &[u8],
+    methods: &[&str],
+) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+    Ok(sort_replies(body, methods)?
+        .into_iter()
+        .zip(methods)
+        .map(|(reply, method)| reply_result(&reply, method))
+        .collect())
+}
+
+/// The results of a batch reply, in the order the calls were made, refusing the whole
+/// batch on the first call that answered an error.
 fn parse_batch(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
+    parse_batch_each(body, methods)?.into_iter().collect()
+}
+
+/// The replies of a batch, put back into call order. The server may answer in any order,
+/// so the ids are the order: every id from zero to the last must appear exactly once.
+fn sort_replies(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
     let replies: Vec<Value> = serde_json::from_slice(body).map_err(|e| {
         RpcError::Json(format!(
             "a batch of {} is answered by an array: {e}",
@@ -241,9 +260,9 @@ fn parse_batch(body: &[u8], methods: &[&str]) -> Result<Vec<Value>, RpcError> {
         .into_iter()
         .zip(methods)
         .map(|(reply, method)| {
-            let reply =
-                reply.ok_or_else(|| RpcError::Json(format!("{method} was not answered")))?;
-            reply_result(reply, method)
+            reply
+                .cloned()
+                .ok_or_else(|| RpcError::Json(format!("{method} was not answered")))
         })
         .collect()
 }
@@ -270,7 +289,8 @@ pub async fn rpc_one(
 
 /// Several JSON-RPC calls in ONE request, answered in call order. A batch is how a decision
 /// that needs several reads pays for one outcall instead of one per read, and it is the
-/// only way those reads see the same moment of the chain.
+/// only way those reads see the same moment of the chain. One call answering an error
+/// refuses the whole batch, which is what a decision wants.
 pub async fn rpc_batch(
     chain_id: ChainId,
     calls: &[(&str, Value)],
@@ -280,6 +300,20 @@ pub async fn rpc_batch(
     let methods: Vec<&str> = calls.iter().map(|(method, _)| *method).collect();
     let body = http_post(&url, batch_body(calls), max_bytes).await?;
     parse_batch(&body, &methods)
+}
+
+/// [`rpc_batch`] where each call answers for itself: the outer error is the transport, and
+/// an inner one is that call alone. What a batch of broadcasts needs, where one provider
+/// saying "already known" must not throw away the others.
+pub async fn rpc_batch_each(
+    chain_id: ChainId,
+    calls: &[(&str, Value)],
+    max_bytes: u64,
+) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+    let url = url_for(chain_id)?;
+    let methods: Vec<&str> = calls.iter().map(|(method, _)| *method).collect();
+    let body = http_post(&url, batch_body(calls), max_bytes).await?;
+    parse_batch_each(&body, &methods)
 }
 
 impl From<RpcError> for settlement_api::types::rpc::RpcError {

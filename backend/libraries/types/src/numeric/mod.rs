@@ -3,7 +3,9 @@ mod tests;
 
 use crate::checked_amount::CheckedAmountOf;
 use candid::Nat;
+use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
+use std::borrow::Cow;
 use std::fmt;
 use std::num::ParseIntError;
 use std::str::FromStr;
@@ -156,6 +158,27 @@ impl FromStr for Nonce {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         text.parse().map(Self)
     }
+}
+
+/// Eight big-endian bytes, so a stable map orders nonces by their value.
+impl Storable for Nonce {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_be_bytes().to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Self(u64::from_be_bytes(
+            bytes
+                .as_ref()
+                .try_into()
+                .expect("BUG: a stored nonce is written as exactly 8 bytes"),
+        ))
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 8,
+        is_fixed_size: true,
+    };
 }
 
 /// A fraction in hundredths of a percent.

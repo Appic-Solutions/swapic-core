@@ -1,8 +1,19 @@
 use crate::state::{MemoryStore, State, Store};
 use thiserror::Error;
-use types::events::{Event, EventType};
+use types::checked_amount::CheckedAmountOf;
+use types::events::{Event, EventType, TxPurpose};
 use types::quote::quote_hash_of;
-use types::{EventHash, EventIndex, Quote, TransitionError};
+use types::{ChainId, EventHash, EventIndex, Nonce, Quote, TransitionError};
+
+/// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
+/// unit it counts. Checked here so an event with no preimage is refused by the guard
+/// rather than failing at the seal.
+fn in_preimage_range<Unit>(amount: CheckedAmountOf<Unit>) -> Result<(), TransitionError> {
+    if amount.try_into_u128().is_none() {
+        return Err(TransitionError::AmountOutOfRange(amount.change_units()));
+    }
+    Ok(())
+}
 
 impl<S: Store> State<S> {
     /// Every rule that can refuse an event. The match is exhaustive with no wildcard arm,
@@ -154,6 +165,48 @@ impl<S: Store> State<S> {
                 destination.fund(*amount)?;
                 Ok(())
             }
+            // rule A4, the one line that makes a double spend of a nonce impossible: the
+            // number the allocator is at is the only number a transaction may carry, so
+            // two transactions cannot share one however their calls interleave. The swap
+            // rules are `TxSigned`'s, checked here as well because a transaction created
+            // for a swap that can never sign it would strand the nonce it allocated.
+            EventType::TxCreated {
+                purpose,
+                chain_id,
+                nonce,
+                value,
+                gas_limit,
+                max_fee,
+                max_priority_fee,
+                ..
+            } => {
+                in_preimage_range(*value)?;
+                in_preimage_range(*gas_limit)?;
+                in_preimage_range(*max_fee)?;
+                in_preimage_range(*max_priority_fee)?;
+                self.ensure_can_send(purpose)?;
+                self.ensure_next_nonce(*chain_id, *nonce)
+            }
+            // a replacement keeps the nonce of what it replaces, so it allocates nothing
+            // and must name a nonce the allocator already handed out (rule A5)
+            EventType::TxReplaced {
+                purpose,
+                chain_id,
+                nonce,
+                max_fee,
+                max_priority_fee,
+                ..
+            } => {
+                in_preimage_range(*max_fee)?;
+                in_preimage_range(*max_priority_fee)?;
+                if let Some(quote_hash) = purpose.quote_hash() {
+                    let swap = self.swap(&quote_hash)?;
+                    if swap.open_attempt.is_none() {
+                        return Err(TransitionError::NoOpenAttempt(quote_hash));
+                    }
+                }
+                self.ensure_allocated_nonce(*chain_id, *nonce)
+            }
             // the repair of a divergence: it makes a swap's index entries agree with the
             // swap, dropping what the swap does not imply and keeping what it does. Admitted
             // on nothing, because nothing here could tell: the entry it drops is in no log,
@@ -166,6 +219,50 @@ impl<S: Store> State<S> {
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
         }
+    }
+}
+
+impl<S: Store> State<S> {
+    /// Whether a transaction may be created for `purpose`: a swap it names has to exist
+    /// and be one an attempt can still be signed for. A cancel names no swap.
+    fn ensure_can_send(&self, purpose: &TxPurpose) -> Result<(), TransitionError> {
+        let Some(quote_hash) = purpose.quote_hash() else {
+            return Ok(());
+        };
+        let swap = self.swap(&quote_hash)?;
+        swap.ensure_not_closed()?;
+        swap.ensure_not_waiting()
+    }
+
+    /// Rule A4: the nonce a transaction carries is the one the allocator is at, and the
+    /// allocator must have a successor to move to.
+    fn ensure_next_nonce(&self, chain_id: ChainId, nonce: Nonce) -> Result<(), TransitionError> {
+        let expected = self.next_nonce(&chain_id);
+        if nonce != expected || nonce.next().is_none() {
+            return Err(TransitionError::NonceOutOfSequence {
+                chain_id,
+                nonce,
+                expected,
+            });
+        }
+        Ok(())
+    }
+
+    /// A nonce the allocator has already handed out on `chain_id`.
+    fn ensure_allocated_nonce(
+        &self,
+        chain_id: ChainId,
+        nonce: Nonce,
+    ) -> Result<(), TransitionError> {
+        let next = self.next_nonce(&chain_id);
+        if nonce >= next {
+            return Err(TransitionError::NonceNeverAllocated {
+                chain_id,
+                nonce,
+                next,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -229,8 +326,14 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             ..
         } => state.record_pocket_rebalanced(*from_chain, *to_chain, *amount),
         EventType::WaitingRepaired { quote_hash } => state.record_waiting_repaired(quote_hash),
-        // audit lines for deploy-time truth that lives in its own stable cell
-        EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => {}
+        EventType::TxCreated {
+            chain_id, nonce, ..
+        } => state.record_nonce_allocated(*chain_id, *nonce),
+        // audit lines for deploy-time truth that lives in its own stable cell, and for a
+        // re-send that allocates nothing and closes nothing
+        EventType::ConfigChanged { .. }
+        | EventType::RolesChanged { .. }
+        | EventType::TxReplaced { .. } => {}
     }
 }
 

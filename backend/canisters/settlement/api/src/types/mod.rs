@@ -7,6 +7,7 @@ pub mod init;
 pub mod quote;
 pub mod rpc;
 pub mod swap;
+pub mod tx;
 
 /// A length or position as the wire carries it.
 pub(crate) fn wire_len(len: usize) -> u64 {

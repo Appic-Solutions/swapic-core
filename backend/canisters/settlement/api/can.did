@@ -174,7 +174,31 @@ type EventType = variant {
   // `json` is the public view of the config written: JSON of `Config` with every rpc url
   // as `"***"` and `max_swap_usd` as a decimal string.
   ConfigChanged : record { json : text };
+  // A nonce was allocated to an outbound transaction, before the signature was asked
+  // for. `to` is an EIP-55 address.
+  TxCreated : record {
+    to : text;
+    max_priority_fee_wei_per_gas : nat;
+    data : blob;
+    max_fee_wei_per_gas : nat;
+    chain_id : nat64;
+    nonce : nat64;
+    value_wei : nat;
+    gas_limit : nat;
+    purpose : TxPurpose;
+  };
   Frozen : record { quote_hash : blob; reason : text };
+  // An open transaction was re-sent at the same nonce with a higher fee, with the bytes
+  // that were broadcast.
+  TxReplaced : record {
+    max_priority_fee_wei_per_gas : nat;
+    max_fee_wei_per_gas : nat;
+    chain_id : nat64;
+    nonce : nat64;
+    raw_tx : blob;
+    tx_hash : blob;
+    purpose : TxPurpose;
+  };
   PocketReserved : record { quote_hash : blob; chain_id : nat64; amount : nat };
   PocketSpent : record { quote_hash : blob; chain_id : nat64; amount : nat };
 };
@@ -328,6 +352,11 @@ type SwapStatus = variant {
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
   CannotAskWhileRefunding;
+  NonceNeverAllocated : record {
+    next : nat64;
+    chain_id : nat64;
+    nonce : nat64;
+  };
   WaitingForUser;
   NotRefunding : SwapStatus;
   Pocket : PocketError;
@@ -335,8 +364,14 @@ type TransitionError = variant {
   AttemptStillOpen : nat32;
   UnknownSwap : blob;
   NotExecuting : SwapStatus;
+  NoOpenAttempt : blob;
   QuoteHashMismatch : record { computed : blob; declared : blob };
   UnparseableQuote : QuoteError;
+  NonceOutOfSequence : record {
+    expected : nat64;
+    chain_id : nat64;
+    nonce : nat64;
+  };
   SwapClosed : SwapStatus;
   FeesOverflow;
   AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };
@@ -347,6 +382,15 @@ type TransitionError = variant {
   NotWaitingForUser : SwapStatus;
   AlreadyPaid;
   UnknownPocket : nat64;
+};
+// Why an outbound transaction exists. All but the last name the swap they belong to.
+type TxPurpose = variant {
+  Payout : blob;
+  Burn : blob;
+  Mint : blob;
+  Refund : blob;
+  GaslessPull : blob;
+  Cancel : nat64;
 };
 service : (InitArg) -> {
   // Controller-only. One step of the deep check: folds up to `max_events` more of the log

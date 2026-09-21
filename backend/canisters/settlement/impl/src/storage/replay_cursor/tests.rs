@@ -66,11 +66,15 @@ fn a_fresh_canister_starts_the_deep_audit_at_genesis() {
 /// `storage_v1.txt` pins the other stored layouts: the wasm that upgrades over a saved fold
 /// reads it with the types it has, so a field that moves must fail here, before anything is
 /// deployed, and never on the read after an upgrade.
+///
+/// The array grew from four elements to five when the fold gained the nonce allocator:
+/// `8184` became `8185` and an empty map was appended, which is what appending a field to
+/// the fold looks like. Nothing before it moved.
 const PINNED: &str =
-    "8184a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef04\
+    "8185a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef04\
     03f619210564555344431a017d78401a017d51301b17979cfe3d85cd15a119a4b182c2494000000000000000\
     0018fa8307135820abababababababababababababababababababababababababababababababab81821b17\
-    979cfe3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+    979cfe3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aa0";
 
 #[test]
 fn a_saved_fold_decodes_from_its_pinned_bytes() {

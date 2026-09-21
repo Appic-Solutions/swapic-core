@@ -13,6 +13,8 @@ use crate::hash::TxHash;
 use crate::numeric::{GasAmount, Nonce, Wei, WeiPerGas};
 use alloy_primitives::keccak256;
 use alloy_rlp::{BufMut, Encodable, Header};
+use minicbor::decode::{self, Decoder};
+use minicbor::encode::{self, Encoder, Write};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
@@ -128,6 +130,29 @@ impl fmt::Debug for EvmAddress {
 impl AsRef<[u8]> for EvmAddress {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// Stored as its twenty raw bytes, which is what it is.
+impl<C> minicbor::Encode<C> for EvmAddress {
+    fn encode<W: Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), encode::Error<W::Error>> {
+        e.bytes(&self.0)?.ok()
+    }
+}
+
+impl<'b, C> minicbor::Decode<'b, C> for EvmAddress {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, decode::Error> {
+        let bytes = d.bytes()?;
+        <[u8; 20]>::try_from(bytes).map(Self).map_err(|_| {
+            decode::Error::message(format!(
+                "EvmAddress: {} bytes, and an address is 20",
+                bytes.len()
+            ))
+        })
     }
 }
 

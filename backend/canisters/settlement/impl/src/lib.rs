@@ -6,6 +6,7 @@ pub mod rpc;
 pub mod state;
 pub mod storage;
 pub mod task_manager;
+pub mod tx;
 pub mod updates;
 
 use lifecycle::*;

@@ -75,8 +75,22 @@ pub enum TransitionError {
     WaitingForUser,
     NotWaitingForUser(SwapStatus),
     AttemptStillOpen(u32),
-    AttemptOutOfSequence { attempt: u32, expected: Option<u32> },
+    AttemptOutOfSequence {
+        attempt: u32,
+        expected: Option<u32>,
+    },
     AttemptNotOpen(u32),
+    NoOpenAttempt(Hash32),
+    NonceOutOfSequence {
+        chain_id: u64,
+        nonce: u64,
+        expected: u64,
+    },
+    NonceNeverAllocated {
+        chain_id: u64,
+        nonce: u64,
+        next: u64,
+    },
     NotExecuting(SwapStatus),
     AlreadyPaid,
     CannotStartRefund(SwapStatus),
@@ -86,7 +100,10 @@ pub enum TransitionError {
     FeesOverflow,
     AmountOutOfRange(Nat),
     UnparseableQuote(QuoteError),
-    QuoteHashMismatch { declared: Hash32, computed: Hash32 },
+    QuoteHashMismatch {
+        declared: Hash32,
+        computed: Hash32,
+    },
     Pocket(PocketError),
 }
 
@@ -114,6 +131,25 @@ impl From<types::TransitionError> for TransitionError {
                 expected: expected.map(|attempt| attempt.get()),
             },
             Domain::AttemptNotOpen(attempt) => Self::AttemptNotOpen(attempt.get()),
+            Domain::NoOpenAttempt(quote_hash) => Self::NoOpenAttempt(quote_hash.into_bytes()),
+            Domain::NonceOutOfSequence {
+                chain_id,
+                nonce,
+                expected,
+            } => Self::NonceOutOfSequence {
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                expected: expected.get(),
+            },
+            Domain::NonceNeverAllocated {
+                chain_id,
+                nonce,
+                next,
+            } => Self::NonceNeverAllocated {
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                next: next.get(),
+            },
             Domain::NotExecuting(status) => Self::NotExecuting(status.into()),
             Domain::AlreadyPaid => Self::AlreadyPaid,
             Domain::CannotStartRefund(status) => Self::CannotStartRefund(status.into()),

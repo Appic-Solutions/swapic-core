@@ -8,6 +8,7 @@ use std::time::Duration;
 use types::Timestamp;
 
 pub mod expiry_sweep;
+pub mod outbox;
 pub mod replay_audit;
 
 thread_local! {

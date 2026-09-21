@@ -119,6 +119,28 @@ pub(crate) fn samples() -> Vec<EventType> {
         EventType::WaitingRepaired {
             quote_hash: quote(18),
         },
+        EventType::TxCreated {
+            purpose: TxPurpose::Burn(quote(19)),
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(7),
+            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                .parse()
+                .unwrap(),
+            value: Wei::ZERO,
+            data: vec![0xa9, 0x05, 0x9c, 0xbb],
+            gas_limit: GasAmount::from(120_000_u32),
+            max_fee: WeiPerGas::from(2_000_000_000_u64),
+            max_priority_fee: WeiPerGas::from(100_000_000_u64),
+        },
+        EventType::TxReplaced {
+            purpose: TxPurpose::Cancel(ChainId::ARBITRUM),
+            chain_id: ChainId::ARBITRUM,
+            nonce: Nonce::new(8),
+            max_fee: WeiPerGas::from(4_000_000_000_u64),
+            max_priority_fee: WeiPerGas::from(200_000_000_u64),
+            tx_hash: TxHash::new([20; 32]),
+            raw_tx: vec![0x02, 0xf8, 0x6b],
+        },
     ]
 }
 
@@ -379,6 +401,32 @@ fn chain_check_is_false_for_an_event_with_no_preimage() {
         amount: TokenAmount::MAX,
     };
     assert!(!chain_is_valid(&[e0]));
+}
+
+/// A purpose is one byte and its argument, and no two purposes share a preimage.
+#[test]
+fn every_purpose_has_its_own_preimage() {
+    let hash = quote(1);
+    let purposes = [
+        TxPurpose::Burn(hash),
+        TxPurpose::Mint(hash),
+        TxPurpose::Payout(hash),
+        TxPurpose::Refund(hash),
+        TxPurpose::GaslessPull(hash),
+        TxPurpose::Cancel(ChainId::BASE),
+    ];
+    let mut seen = Vec::new();
+    for purpose in purposes {
+        assert_eq!(
+            purpose.quote_hash().is_none(),
+            purpose == TxPurpose::Cancel(ChainId::BASE)
+        );
+        let mut w = CanonicalWriter::default();
+        purpose.write_canonical(&mut w);
+        let bytes = w.finish().unwrap();
+        assert!(!seen.contains(&bytes), "{purpose:?} shares a preimage");
+        seen.push(bytes);
+    }
 }
 
 /// `amount` names exactly the variants whose preimage carries an amount field.

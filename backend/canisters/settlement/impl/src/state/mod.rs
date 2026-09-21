@@ -1,7 +1,7 @@
 use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Nonce, Pocket, QuoteHash, Swap,
     SwapStatus, Timestamp, TokenAmount, TransitionError, WaitingKey,
 };
 
@@ -21,6 +21,13 @@ pub trait Store {
     fn pockets(&self) -> Vec<(ChainId, Pocket)>;
     fn meta(&self) -> LedgerMeta;
     fn put_meta(&mut self, meta: LedgerMeta);
+    /// The number the next transaction on `chain_id` must carry. A chain nothing was ever
+    /// sent on is at zero: the allocator counts the transactions this canister created and
+    /// never reads a chain to decide (rule A4).
+    fn next_nonce(&self, chain_id: &ChainId) -> Nonce;
+    fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce);
+    /// Every chain the allocator has handed out a nonce on, in chain id order.
+    fn nonces(&self) -> Vec<(ChainId, Nonce)>;
     /// Indexes a waiting swap whose quote asks for an automatic refund. A swap that waits
     /// for a human is not indexed: the index is the queue the expiry timer works through,
     /// and nothing in it is work the timer can do.
@@ -80,6 +87,8 @@ pub struct MemoryStore {
     meta: LedgerMeta,
     #[n(3)]
     auto_refund_waiting: BTreeSet<WaitingKey>,
+    #[n(4)]
+    nonces: BTreeMap<ChainId, Nonce>,
 }
 
 impl Store for MemoryStore {
@@ -119,6 +128,18 @@ impl Store for MemoryStore {
 
     fn put_meta(&mut self, meta: LedgerMeta) {
         self.meta = meta;
+    }
+
+    fn next_nonce(&self, chain_id: &ChainId) -> Nonce {
+        self.nonces.get(chain_id).copied().unwrap_or(Nonce::ZERO)
+    }
+
+    fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce) {
+        self.nonces.insert(chain_id, nonce);
+    }
+
+    fn nonces(&self) -> Vec<(ChainId, Nonce)> {
+        self.nonces.iter().map(|(chain, n)| (*chain, *n)).collect()
     }
 
     fn put_auto_refund_waiting(&mut self, key: WaitingKey) {
@@ -161,10 +182,15 @@ impl State<MemoryStore> {
             pockets,
             meta,
             auto_refund_waiting,
+            nonces,
         } = &self.store;
         let other_pockets = other.store.pockets();
         let other_swaps = other.store.swaps();
+        let other_nonces = other.store.nonces();
         *meta == other.meta()
+            && nonces
+                .iter()
+                .eq(other_nonces.iter().map(|(chain, nonce)| (chain, nonce)))
             && auto_refund_waiting
                 .iter()
                 .eq(other.store.auto_refund_waiting().iter())
@@ -193,6 +219,11 @@ impl<S: Store> State<S> {
 
     pub fn meta(&self) -> LedgerMeta {
         self.store.meta()
+    }
+
+    /// The number the next transaction on `chain_id` must carry.
+    pub fn next_nonce(&self, chain_id: &ChainId) -> Nonce {
+        self.store.next_nonce(chain_id)
     }
 
     pub fn swap(&self, quote_hash: &QuoteHash) -> Result<Swap, TransitionError> {
@@ -364,6 +395,17 @@ impl<S: Store> State<S> {
             swap.waiting_since.take()
         });
         self.stop_waiting(quote_hash, stopped);
+    }
+
+    /// The allocation rule: the nonce the event carries was the next one, so the next one
+    /// is now the one after it. A nonce past `u64::MAX` is refused by the guard.
+    fn record_nonce_allocated(&mut self, chain_id: ChainId, nonce: Nonce) {
+        self.store.put_next_nonce(
+            chain_id,
+            nonce
+                .next()
+                .expect("BUG: State::check refuses a nonce without a successor"),
+        );
     }
 
     fn record_fee_accrued(&mut self, amount: TokenAmount) {

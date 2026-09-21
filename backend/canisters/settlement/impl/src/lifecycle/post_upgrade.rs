@@ -20,4 +20,7 @@ fn post_upgrade() {
     }
     // timers live in the heap, so an upgrade clears them and they are wired again here
     task_manager::start_timers();
+    // rule A9: a transaction signed before the upgrade is still in flight, and the one-shot
+    // pass that would have sent it went with the old heap
+    task_manager::outbox::arm_if_work_is_pending();
 }

@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::checked_amount::CheckedAmountOf;
 use crate::numeric::TokenAmount;
 use thiserror::Error;
 
@@ -57,11 +58,12 @@ impl CanonicalWriter {
         self
     }
 
-    /// Sixteen bytes. Above `u128::MAX` there are none, and `finish` fails.
-    pub fn put_amount(&mut self, amount: TokenAmount) -> &mut Self {
+    /// Sixteen bytes, whatever the amount counts. Above `u128::MAX` there are none, and
+    /// `finish` fails.
+    pub fn put_amount<Unit>(&mut self, amount: CheckedAmountOf<Unit>) -> &mut Self {
         match amount.try_into_u128() {
             Some(value) => self.bytes.extend_from_slice(&value.to_be_bytes()),
-            None => self.fail(CanonicalError::AmountTooLarge(amount)),
+            None => self.fail(CanonicalError::AmountTooLarge(amount.change_units())),
         }
         self
     }
@@ -69,6 +71,12 @@ impl CanonicalWriter {
     /// The 32 raw bytes, without a length.
     pub fn put_hash(&mut self, hash: &[u8; 32]) -> &mut Self {
         self.bytes.extend_from_slice(hash);
+        self
+    }
+
+    /// The 20 raw bytes of an EVM address, without a length.
+    pub fn put_address(&mut self, address: &[u8; 20]) -> &mut Self {
+        self.bytes.extend_from_slice(address);
         self
     }
 

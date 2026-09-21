@@ -5,6 +5,7 @@ pub mod ecdsa_address;
 pub mod events;
 pub mod halt;
 pub mod memory;
+pub mod outbox;
 pub mod replay_cursor;
 pub mod roles;
 
@@ -21,6 +22,7 @@ pub fn init() {
     audit_cursor::init();
     chain_data::init();
     ecdsa_address::init();
+    outbox::init();
     replay_cursor::init();
 }
 

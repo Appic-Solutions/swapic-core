@@ -2,7 +2,9 @@ use crate::types::swap::TransitionError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 use types::events::EventError as DomainEventError;
-use types::{Attempt, BlockNumber, ChainId, QuoteHash, TokenAmount, TxHash};
+use types::{
+    Attempt, BlockNumber, ChainId, GasAmount, Nonce, QuoteHash, TokenAmount, TxHash, Wei, WeiPerGas,
+};
 
 pub type Hash32 = [u8; 32];
 
@@ -116,6 +118,68 @@ pub enum EventType {
     WaitingRepaired {
         quote_hash: Hash32,
     },
+    /// A nonce was allocated to an outbound transaction, before the signature was asked
+    /// for. `to` is an EIP-55 address.
+    TxCreated {
+        purpose: TxPurpose,
+        chain_id: u64,
+        nonce: u64,
+        to: String,
+        value_wei: Nat,
+        data: Vec<u8>,
+        gas_limit: Nat,
+        max_fee_wei_per_gas: Nat,
+        max_priority_fee_wei_per_gas: Nat,
+    },
+    /// An open transaction was re-sent at the same nonce with a higher fee, with the bytes
+    /// that were broadcast.
+    TxReplaced {
+        purpose: TxPurpose,
+        chain_id: u64,
+        nonce: u64,
+        max_fee_wei_per_gas: Nat,
+        max_priority_fee_wei_per_gas: Nat,
+        tx_hash: Hash32,
+        raw_tx: Vec<u8>,
+    },
+}
+
+/// Why an outbound transaction exists. All but the last name the swap they belong to.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxPurpose {
+    Burn(Hash32),
+    Mint(Hash32),
+    Payout(Hash32),
+    Refund(Hash32),
+    GaslessPull(Hash32),
+    Cancel(u64),
+}
+
+impl From<types::events::TxPurpose> for TxPurpose {
+    fn from(purpose: types::events::TxPurpose) -> Self {
+        use types::events::TxPurpose as Domain;
+        match purpose {
+            Domain::Burn(hash) => Self::Burn(hash.into_bytes()),
+            Domain::Mint(hash) => Self::Mint(hash.into_bytes()),
+            Domain::Payout(hash) => Self::Payout(hash.into_bytes()),
+            Domain::Refund(hash) => Self::Refund(hash.into_bytes()),
+            Domain::GaslessPull(hash) => Self::GaslessPull(hash.into_bytes()),
+            Domain::Cancel(chain_id) => Self::Cancel(chain_id.get()),
+        }
+    }
+}
+
+impl From<TxPurpose> for types::events::TxPurpose {
+    fn from(purpose: TxPurpose) -> Self {
+        match purpose {
+            TxPurpose::Burn(hash) => Self::Burn(QuoteHash::new(hash)),
+            TxPurpose::Mint(hash) => Self::Mint(QuoteHash::new(hash)),
+            TxPurpose::Payout(hash) => Self::Payout(QuoteHash::new(hash)),
+            TxPurpose::Refund(hash) => Self::Refund(QuoteHash::new(hash)),
+            TxPurpose::GaslessPull(hash) => Self::GaslessPull(QuoteHash::new(hash)),
+            TxPurpose::Cancel(chain_id) => Self::Cancel(ChainId::new(chain_id)),
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -310,6 +374,44 @@ impl From<types::EventType> for EventType {
             Domain::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
                 quote_hash: quote_hash.into_bytes(),
             },
+            Domain::TxCreated {
+                purpose,
+                chain_id,
+                nonce,
+                to,
+                value,
+                data,
+                gas_limit,
+                max_fee,
+                max_priority_fee,
+            } => Self::TxCreated {
+                purpose: purpose.into(),
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                to: to.to_string(),
+                value_wei: value.into(),
+                data,
+                gas_limit: gas_limit.into(),
+                max_fee_wei_per_gas: max_fee.into(),
+                max_priority_fee_wei_per_gas: max_priority_fee.into(),
+            },
+            Domain::TxReplaced {
+                purpose,
+                chain_id,
+                nonce,
+                max_fee,
+                max_priority_fee,
+                tx_hash,
+                raw_tx,
+            } => Self::TxReplaced {
+                purpose: purpose.into(),
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                max_fee_wei_per_gas: max_fee.into(),
+                max_priority_fee_wei_per_gas: max_priority_fee.into(),
+                tx_hash: tx_hash.into_bytes(),
+                raw_tx,
+            },
         }
     }
 }
@@ -470,6 +572,49 @@ impl TryFrom<EventType> for types::EventType {
             EventType::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
             EventType::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
                 quote_hash: QuoteHash::new(quote_hash),
+            },
+            EventType::TxCreated {
+                purpose,
+                chain_id,
+                nonce,
+                to,
+                value_wei,
+                data,
+                gas_limit,
+                max_fee_wei_per_gas,
+                max_priority_fee_wei_per_gas,
+            } => Self::TxCreated {
+                purpose: purpose.into(),
+                chain_id: ChainId::new(chain_id),
+                nonce: Nonce::new(nonce),
+                to: to.parse().map_err(|_| DomainEventError::TextTooLong {
+                    field: "to",
+                    len: to.len(),
+                })?,
+                value: Wei::try_from(value_wei).map_err(|_| AMOUNT_TOO_LARGE)?,
+                data,
+                gas_limit: GasAmount::try_from(gas_limit).map_err(|_| AMOUNT_TOO_LARGE)?,
+                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas).map_err(|_| AMOUNT_TOO_LARGE)?,
+                max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
+                    .map_err(|_| AMOUNT_TOO_LARGE)?,
+            },
+            EventType::TxReplaced {
+                purpose,
+                chain_id,
+                nonce,
+                max_fee_wei_per_gas,
+                max_priority_fee_wei_per_gas,
+                tx_hash,
+                raw_tx,
+            } => Self::TxReplaced {
+                purpose: purpose.into(),
+                chain_id: ChainId::new(chain_id),
+                nonce: Nonce::new(nonce),
+                max_fee: WeiPerGas::try_from(max_fee_wei_per_gas).map_err(|_| AMOUNT_TOO_LARGE)?,
+                max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
+                    .map_err(|_| AMOUNT_TOO_LARGE)?,
+                tx_hash: TxHash::new(tx_hash),
+                raw_tx,
             },
         })
     }

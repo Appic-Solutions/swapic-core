@@ -13,6 +13,8 @@ mod roles;
 
 pub use chain::push_chain_data;
 pub use config::set_config;
-pub use ops::{audit_replay_step, derive_evm_address, set_halted, test_rpc_batch, test_sign};
+pub use ops::{
+    audit_replay_step, derive_evm_address, set_halted, test_rpc_batch, test_send, test_sign,
+};
 pub use quotes::{clear_pending_quotes, register_quote};
 pub use roles::set_roles;
