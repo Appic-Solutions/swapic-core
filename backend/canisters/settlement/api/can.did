@@ -250,6 +250,7 @@ type SwapStatus = variant {
 };
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
+  CannotAskWhileRefunding;
   WaitingForUser;
   NotRefunding : SwapStatus;
   Pocket : PocketError;

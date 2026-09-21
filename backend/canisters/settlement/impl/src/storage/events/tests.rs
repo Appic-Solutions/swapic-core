@@ -232,7 +232,7 @@ fn waiting_key(nanos: u64, quote_hash: QuoteHash) -> WaitingKey {
 #[test]
 fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
     on_fresh_memory(|| {
-        let [a, b, c, d] = [1, 2, 3, 4].map(swap_id);
+        let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(swap_id);
         let ask = |quote_hash| EventType::DecisionRequired {
             quote_hash,
             reason: "slippage".into(),
@@ -251,6 +251,7 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             (2, funds(2)),
             (3, funds(3)),
             (4, funds(4)),
+            (5, funds(5)),
             (10, ask(a)),
             // two waits that begin at the same instant are two keys
             (11, ask(b)),
@@ -265,7 +266,8 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             (32, refund(d)),
             (33, freeze(d)),
             (40, decide(a, Choice::Refund)),
-            (50, ask(a)),
+            // a refund is one way, so the last wait begins on a swap that is not refunding
+            (50, ask(e)),
         ];
         for (nanos, payload) in steps {
             append_event_at(payload.clone(), Timestamp::from_nanos(nanos))
@@ -282,7 +284,7 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
         }
         assert_eq!(
             read_state(|state| state.store().waiting()),
-            vec![waiting_key(50, a)]
+            vec![waiting_key(50, e)]
         );
 
         let heap = log_replay().expect("the log folds");

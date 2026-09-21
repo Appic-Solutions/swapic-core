@@ -68,11 +68,15 @@ impl<S: Store> State<S> {
                 swap.ensure_unpaid()?;
                 swap.ensure_no_open_attempt()
             }
-            // one open question at a time: re-asking would silently re-arm the deadline
+            // one open question at a time: re-asking would silently re-arm the deadline.
+            // A refund is one way, and a question with an attempt in flight would be
+            // answered while that attempt is still deciding itself on the chain.
             EventType::DecisionRequired { quote_hash, .. } => {
                 let swap = self.swap(quote_hash)?;
                 swap.ensure_not_closed()?;
-                swap.ensure_not_waiting()
+                swap.ensure_not_refunding()?;
+                swap.ensure_not_waiting()?;
+                swap.ensure_no_open_attempt()
             }
             EventType::DecisionMade { quote_hash, .. } => self.swap(quote_hash)?.ensure_waiting(),
             EventType::RefundStarted { quote_hash, .. } => {

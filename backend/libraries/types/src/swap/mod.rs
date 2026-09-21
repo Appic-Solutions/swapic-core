@@ -105,6 +105,8 @@ pub enum TransitionError {
     AlreadyPaid,
     #[error("swap cannot start a refund ({0:?})")]
     CannotStartRefund(SwapStatus),
+    #[error("swap is refunding, and a refund is never turned back into a delivery")]
+    CannotAskWhileRefunding,
     #[error("swap is not refunding ({0:?})")]
     NotRefunding(SwapStatus),
     #[error("swap is not in flight ({0:?})")]
@@ -194,6 +196,16 @@ impl Swap {
     pub fn ensure_can_start_refund(&self) -> Result<(), TransitionError> {
         if self.status.is_closed() || self.status == SwapStatus::Refunding {
             return Err(TransitionError::CannotStartRefund(self.status));
+        }
+        Ok(())
+    }
+
+    /// A refund is one way: once the money is on its way back, no question put to the user
+    /// can turn it into a delivery. A refund attempt that failed is retried as another
+    /// refund attempt, which needs no question.
+    pub fn ensure_not_refunding(&self) -> Result<(), TransitionError> {
+        if self.status == SwapStatus::Refunding {
+            return Err(TransitionError::CannotAskWhileRefunding);
         }
         Ok(())
     }

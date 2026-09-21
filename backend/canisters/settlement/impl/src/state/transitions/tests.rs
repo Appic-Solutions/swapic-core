@@ -536,6 +536,80 @@ fn second_decision_request_rejected() {
     assert_eq!(state.check(&ask(qh)), Err(TransitionError::WaitingForUser));
 }
 
+/// The sequence that used to turn a refund into a delivery: the refund is in flight, the
+/// swap is asked a question, the user requotes, and the refund that lands is recorded as a
+/// delivery. It is refused at the question, which is the only step that could start it.
+#[test]
+fn a_refund_in_flight_cannot_be_turned_back_into_a_delivery() {
+    let qh = swap_id(1);
+    let state = fold(vec![
+        funds(1),
+        EventType::RefundStarted {
+            quote_hash: qh,
+            reason: "decision timeout".into(),
+        },
+        signed(qh, 1),
+    ]);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Refunding);
+    assert_eq!(
+        state.check(&ask(qh)),
+        Err(TransitionError::CannotAskWhileRefunding),
+        "the refund is on its way back to the user"
+    );
+
+    // and once the refund attempt has landed, the swap is still refunding and still unaskable
+    let mut state = state;
+    let event = next_event(&state, 1, confirmed(qh, 1));
+    apply_state_transition(&mut state, &event);
+    assert_eq!(
+        state.check(&ask(qh)),
+        Err(TransitionError::CannotAskWhileRefunding)
+    );
+}
+
+/// A question put while an attempt is in flight would be answered while the chain is still
+/// deciding that attempt, so the answer would race the transaction.
+#[test]
+fn a_swap_with_an_attempt_in_flight_is_not_asked() {
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1), signed(qh, 1)]);
+    assert_eq!(
+        state.check(&ask(qh)),
+        Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
+    );
+    // closing the attempt opens the question
+    let event = next_event(&state, 1, failed(qh, 1));
+    apply_state_transition(&mut state, &event);
+    assert!(state.check(&ask(qh)).is_ok());
+}
+
+/// A refund that failed is retried as the next refund attempt, so refusing the question
+/// takes nothing away from the refund path.
+#[test]
+fn a_failed_refund_attempt_is_retried_as_the_next_attempt() {
+    let qh = swap_id(1);
+    let state = fold(vec![
+        funds(1),
+        EventType::RefundStarted {
+            quote_hash: qh,
+            reason: "decision timeout".into(),
+        },
+        signed(qh, 1),
+        failed(qh, 1),
+        signed(qh, 2),
+        confirmed(qh, 2),
+        EventType::Refunded {
+            quote_hash: qh,
+            chain_id: BASE,
+            token: "usdc".parse().unwrap(),
+            amount: amount(100),
+            to: "0xuser".parse().unwrap(),
+        },
+    ]);
+    assert_eq!(swap(&state, qh).status, SwapStatus::Refunded);
+    assert_eq!(swap(&state, qh).last_attempt, Some(Attempt::new(2)));
+}
+
 #[test]
 fn decision_to_refund_reaches_refunding() {
     let qh = swap_id(1);
@@ -735,6 +809,8 @@ fn replay_rebuilds_exactly_the_incremental_state() {
         },
         funds(1),
         signed(qh, 1),
+        // the attempt closes before the question: a swap with one in flight is not asked
+        confirmed(qh, 1),
         ask(qh),
     ] {
         state.check(&payload).expect("guard admits");
