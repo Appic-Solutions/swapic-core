@@ -5,6 +5,9 @@ description = "Domain types of the settlement canister: checked amounts, identif
 edition = "2021"
 
 [dependencies]
+alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
+alloy-sol-types = { workspace = true }
 candid = { workspace = true }
 ethnum = { workspace = true }
 hex = { workspace = true }

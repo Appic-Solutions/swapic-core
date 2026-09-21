@@ -5,6 +5,8 @@ use crate::checked_amount::CheckedAmountOf;
 use candid::Nat;
 use minicbor::{Decode, Encode};
 use std::fmt;
+use std::num::ParseIntError;
+use std::str::FromStr;
 use std::time::Duration;
 
 pub enum TokenTag {}
@@ -123,6 +125,39 @@ impl EventIndex {
     }
 }
 
+/// The transaction count of an account on one chain: the number the next transaction from
+/// it must carry. Allocated by the canister and never read from a chain to decide (rule
+/// A4), so two transactions can never share one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[cbor(transparent)]
+pub struct Nonce(#[n(0)] u64);
+
+impl Nonce {
+    /// The nonce of an account that has never sent anything.
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(nonce: u64) -> Self {
+        Self(nonce)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The nonce after this one, or `None` past `u64::MAX`.
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+impl FromStr for Nonce {
+    type Err = ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse().map(Self)
+    }
+}
+
 /// A fraction in hundredths of a percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 #[cbor(transparent)]
@@ -228,4 +263,6 @@ macro_rules! display_inner {
     )*};
 }
 
-display_inner! { BlockNumber, BlockDepth, Attempt, EventIndex, BasisPoints, Timestamp, UnixSeconds }
+display_inner! {
+    BlockNumber, BlockDepth, Attempt, EventIndex, BasisPoints, Timestamp, UnixSeconds, Nonce
+}

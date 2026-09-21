@@ -8,6 +8,11 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+# one alloy release train, pinned together: primitives and sol-types share their
+# encoding, and a mixed pair encodes a different call
+alloy-primitives = { version = "1.7", default-features = false, features = ["std"] }
+alloy-rlp = { version = "0.3", default-features = false }
+alloy-sol-types = { version = "1.7", default-features = false, features = ["std"] }
 candid = "0.10"
 ethnum = "1.5"
 hex = "0.4"
