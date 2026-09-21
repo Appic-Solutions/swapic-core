@@ -270,7 +270,7 @@ fn replay_is_deterministic() {
     let events: Vec<Event> = {
         let mut state = HeapState::default();
         let mut out = vec![];
-        for e in vec![funds(1), signed(qh, 1), confirmed(qh, 1)] {
+        for e in [funds(1), signed(qh, 1), confirmed(qh, 1)] {
             let env = next_event(&state, 7, e);
             apply_state_transition(&mut state, &env);
             out.push(env);
