@@ -6,14 +6,14 @@ use crate::client::pocket::{query, update};
 use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
-    event_count, events_page, get_chain_data, get_config, get_config_full, get_pending, get_swap,
-    halted, verify_chain, verify_replay,
+    event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
+    get_pending, get_swap, halted, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError, TestRpcError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, clear_pending_quotes, push_chain_data, register_quote, set_config,
-    set_halted, set_roles,
+    audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
+    set_config, set_halted, set_roles, test_sign,
 };
 
 pub fn event_count(
@@ -241,6 +241,52 @@ pub fn audit_replay_step(
         sender,
         "audit_replay_step",
         encode_one(max_events).unwrap(),
+    )
+}
+
+/// The canister's own EVM address, or nothing before it has been derived.
+pub fn evm_address(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> evm_address::Response {
+    query(
+        pic,
+        canister,
+        sender,
+        "evm_address",
+        encode_one(()).unwrap(),
+    )
+}
+
+/// Derives the canister's EVM address, or answers the one already derived.
+pub fn derive_evm_address(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> derive_evm_address::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "derive_evm_address",
+        encode_one(()).unwrap(),
+    )
+}
+
+/// The test door onto one threshold signature.
+pub fn test_sign(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    hash: test_sign::Args,
+) -> test_sign::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "test_sign",
+        encode_one(hash).unwrap(),
     )
 }
 

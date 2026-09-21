@@ -25,6 +25,9 @@ const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
 const PENDING_EXPIRY_MEMORY_ID: MemoryId = MemoryId::new(12);
 const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
+// 15 to 19 are reserved for the rest of Plan 3: nonces, outbox, attestation inbox,
+// in-flight markers, sanctions
+const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -84,4 +87,8 @@ pub fn replay_cursor_memory() -> Memory {
 
 pub fn chain_data_memory() -> Memory {
     memory(CHAIN_DATA_MEMORY_ID)
+}
+
+pub fn ecdsa_address_memory() -> Memory {
+    memory(ECDSA_ADDRESS_MEMORY_ID)
 }

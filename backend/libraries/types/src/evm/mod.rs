@@ -60,6 +60,15 @@ impl EvmAddress {
         word
     }
 
+    /// The address of a secp256k1 public key: the twenty low bytes of the keccak of the
+    /// uncompressed key without its `0x04` prefix byte.
+    pub fn from_public_key(uncompressed: &[u8; 65]) -> Self {
+        let hash = keccak256(&uncompressed[1..]);
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[12..]);
+        Self(address)
+    }
+
     /// The EIP-55 mixed-case form: a digit's case is the corresponding nibble of the
     /// keccak of the lowercase digits.
     fn checksummed(&self) -> String {

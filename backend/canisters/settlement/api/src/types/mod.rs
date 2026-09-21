@@ -2,6 +2,7 @@ pub mod chain_data;
 pub mod config;
 pub mod errors;
 pub mod events;
+pub mod evm;
 pub mod init;
 pub mod quote;
 pub mod rpc;

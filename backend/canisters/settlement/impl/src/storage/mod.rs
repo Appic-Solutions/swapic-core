@@ -1,6 +1,7 @@
 pub mod audit_cursor;
 pub mod chain_data;
 pub mod config;
+pub mod ecdsa_address;
 pub mod events;
 pub mod halt;
 pub mod memory;
@@ -19,6 +20,7 @@ pub fn init() {
     pending_quotes::init();
     audit_cursor::init();
     chain_data::init();
+    ecdsa_address::init();
     replay_cursor::init();
 }
 

@@ -56,6 +56,21 @@ fn hex32(text: &str) -> [u8; 32] {
         .expect("a fixture word is 32 bytes")
 }
 
+/// The address of a key is the keccak rule, and the key here is the one whose address
+/// `cast wallet address` prints: `cast wallet public-key --private-key 0xac09...ff80`.
+#[test]
+fn an_address_is_derived_from_its_public_key() {
+    let mut uncompressed = [0u8; 65];
+    uncompressed[0] = 0x04;
+    hex::decode_to_slice(
+        "8318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed7535\
+         47f11ca8696646f2f3acb08e31016afac23e630c5d11f59f61fef57b0d2aa5",
+        &mut uncompressed[1..],
+    )
+    .expect("the fixture key is hex");
+    assert_eq!(EvmAddress::from_public_key(&uncompressed), address(SIGNER));
+}
+
 /// Addresses print in their EIP-55 checksum, whatever case they arrived in, and the
 /// checksums here are `cast to-check-sum-address`.
 #[test]

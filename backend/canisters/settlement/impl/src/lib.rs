@@ -1,3 +1,4 @@
+pub mod ecdsa;
 pub mod guards;
 pub mod lifecycle;
 pub mod queries;

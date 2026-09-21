@@ -4,6 +4,7 @@
 use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
 use crate::types::events::{CanonicalError, EventError, Hash32};
+use crate::types::evm::EcdsaError;
 use crate::types::quote::QuoteError;
 use crate::types::rpc::RpcError;
 use crate::types::swap::TransitionError;
@@ -89,6 +90,13 @@ pub enum SetRolesError {
     Guard(GuardError),
     AnonymousRole(Role),
     Append(AppendError),
+}
+
+/// Why a call that needs the canister's threshold key answered nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum SignError {
+    Guard(GuardError),
+    Ecdsa(EcdsaError),
 }
 
 /// Why the test-only `test_rpc_batch` read nothing.
