@@ -296,6 +296,7 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
                 dropped: 0,
                 refunds: 2,
                 skipped: 0,
+                stale: 0,
                 more: false
             }
         );
@@ -311,23 +312,96 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
             .iter()
             .chain([&frozen])
             .all(|q| status(q) == SwapStatus::Frozen));
-        let mut still_waiting = vec![
-            WaitingKey {
-                since: start,
-                quote_hash: manual,
-            },
-            WaitingKey {
+        assert_eq!(
+            events::read_state(|state| state.store().auto_refund_waiting()),
+            vec![WaitingKey {
                 since: later(600),
                 quote_hash: young,
-            },
-        ];
-        still_waiting.sort();
+            }],
+            "the index holds the waits a timer can act on, so the manual one is not in it"
+        );
         assert_eq!(
-            events::read_state(|state| state.store().waiting()),
-            still_waiting
+            events::read_state(|state| state.swap(&manual).unwrap().waiting_since),
+            Some(start),
+            "and the manual swap still carries its wait, for whoever asks it"
         );
 
         assert_eq!(run_expiry_sweep(first_moment).refunds, 0, "and only once");
+        assert!(events::verify_replay());
+    });
+}
+
+/// What the cap put at risk, and why only auto-refundable swaps are indexed: a swap that
+/// waits for a human never leaves the index on its own, so a cap's worth of them at the head
+/// of it would starve every automatic refund behind them for good. The earlier test could not
+/// see this, because every due swap in its fixture asked for an automatic refund.
+#[test]
+fn consult_me_waiters_older_than_every_auto_refund_one_do_not_hold_up_the_cap() {
+    on_fresh_memory(|| {
+        let cap = 3;
+        set_caps(cap as u32, 200);
+        let timeout = config::get().decision_timeout;
+        let start = at(1_700_000_000);
+        let asked_at = |n: u64| Timestamp::from_nanos(start.as_nanos() + n);
+
+        // a cap's worth of consult-me swaps, every one of them older than every auto one
+        let manual: Vec<QuoteHash> = (0..cap as u64)
+            .map(|nonce| {
+                let quote_hash = funded(&quote(false, 100 + nonce), start);
+                ask_at(quote_hash, asked_at(nonce));
+                quote_hash
+            })
+            .collect();
+        let auto: Vec<QuoteHash> = (0..cap as u64)
+            .map(|nonce| {
+                let quote_hash = funded(&quote(true, 200 + nonce), start);
+                ask_at(quote_hash, asked_at(100 + nonce));
+                quote_hash
+            })
+            .collect();
+
+        let now = Timestamp::from_nanos(
+            asked_at(200)
+                .checked_add(timeout)
+                .expect("a timeout inside the clock")
+                .as_nanos(),
+        );
+        let swept = run_expiry_sweep(now);
+        assert_eq!(
+            (swept.refunds, swept.stale, swept.more),
+            (cap, 0, false),
+            "one tick reaches every automatic refund"
+        );
+        assert!(auto.iter().all(|q| status(q) == SwapStatus::Refunding));
+        assert!(manual
+            .iter()
+            .all(|q| status(q) == SwapStatus::WaitingForUser));
+        assert!(events::verify_replay());
+    });
+}
+
+/// The other half of the dual policy, through the timer: a swap whose quote asks for a human
+/// is never refunded on its own, however long it waits.
+#[test]
+fn a_swap_that_waits_for_a_human_is_never_refunded_by_the_timer() {
+    on_fresh_memory(|| {
+        let start = at(1_700_000_000);
+        let manual = funded(&quote(false, 7), start);
+        ask_at(manual, start);
+        assert!(
+            events::read_state(|state| state.store().auto_refund_waiting()).is_empty(),
+            "it is in no index"
+        );
+
+        for now in [
+            start.checked_add(config::get().decision_timeout).unwrap(),
+            at(1_800_000_000),
+            Timestamp::from_nanos(u64::MAX),
+        ] {
+            let swept = run_expiry_sweep(now);
+            assert_eq!((swept.refunds, swept.stale, swept.more), (0, 0, false));
+        }
+        assert_eq!(status(&manual), SwapStatus::WaitingForUser);
         assert!(events::verify_replay());
     });
 }

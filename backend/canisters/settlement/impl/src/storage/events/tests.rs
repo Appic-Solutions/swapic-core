@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::transitions::tests::{funds, swap_id};
+use crate::state::transitions::tests::{funds, funds_manual, manual_swap_id, swap_id};
 use crate::state::transitions::ReplayError;
 use crate::state::MemoryStore;
 use crate::storage::audit_cursor;
@@ -303,11 +303,13 @@ fn replay_audit_halts_on_a_fold_that_replays_cleanly_but_differs() {
     });
 }
 
-/// The waiting index as a scan of every swap would build it.
+/// The auto-refund waiting index as a scan of every swap would build it: waiting, and asking
+/// for an automatic refund.
 fn scanned_waiting(store: &impl Store) -> Vec<WaitingKey> {
     let mut keys: Vec<WaitingKey> = store
         .swaps()
         .into_iter()
+        .filter(|(_, swap)| Quote::parse(&swap.quote_bytes).is_ok_and(|quote| quote.auto_refund))
         .filter_map(|(quote_hash, swap)| {
             swap.waiting_since
                 .map(|since| WaitingKey { since, quote_hash })
@@ -330,6 +332,8 @@ fn waiting_key(nanos: u64, quote_hash: QuoteHash) -> WaitingKey {
 fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
     on_fresh_memory(|| {
         let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(swap_id);
+        // waits like the others and belongs in no index: its quote asks for a human
+        let manual = manual_swap_id(6);
         let ask = |quote_hash| EventType::DecisionRequired {
             quote_hash,
             reason: "slippage".into(),
@@ -349,6 +353,7 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             (3, funds(3)),
             (4, funds(4)),
             (5, funds(5)),
+            (6, funds_manual(6)),
             (10, ask(a)),
             // two waits that begin at the same instant are two keys
             (11, ask(b)),
@@ -365,12 +370,18 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             (40, decide(a, Choice::Refund)),
             // a refund is one way, so the last wait begins on a swap that is not refunding
             (50, ask(e)),
+            // and a wait no timer can act on enters no index
+            (51, ask(manual)),
         ];
         for (nanos, payload) in steps {
             append_event_at(payload.clone(), Timestamp::from_nanos(nanos))
                 .expect("the fold admits it");
-            let (index, scan) =
-                read_state(|state| (state.store().waiting(), scanned_waiting(state.store())));
+            let (index, scan) = read_state(|state| {
+                (
+                    state.store().auto_refund_waiting(),
+                    scanned_waiting(state.store()),
+                )
+            });
             assert_eq!(index, scan, "after {payload:?} at {nanos}");
             if nanos == 11 && payload == ask(c) {
                 assert_eq!(
@@ -380,12 +391,21 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             }
         }
         assert_eq!(
-            read_state(|state| state.store().waiting()),
-            vec![waiting_key(50, e)]
+            read_state(|state| state.store().auto_refund_waiting()),
+            vec![waiting_key(50, e)],
+            "the consult-me wait is not in the index"
+        );
+        assert_eq!(
+            read_state(|state| state.swap(&manual).unwrap().waiting_since),
+            Some(Timestamp::from_nanos(51)),
+            "and it is on the swap, where a caller reads it"
         );
 
         let heap = log_replay().expect("the log folds");
-        assert_eq!(heap.store().waiting(), scanned_waiting(heap.store()));
+        assert_eq!(
+            heap.store().auto_refund_waiting(),
+            scanned_waiting(heap.store())
+        );
         assert!(verify_replay(), "and the audit compares the two indexes");
     });
 }
@@ -398,7 +418,7 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
         let quote = swap_id(5);
         append(funds(5));
         assert!(verify_replay());
-        StableStore(()).put_waiting(waiting_key(7, quote));
+        StableStore(()).put_auto_refund_waiting(waiting_key(7, quote));
 
         assert!(!verify_replay());
         run_replay_audit();
@@ -407,6 +427,29 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
             "a bounded pass checks the chain and the head, not the whole fold"
         );
         assert!(deep_check_halts());
+    });
+}
+
+/// The index is the queue, so an entry whose swap is not waiting any more is dropped by the
+/// pass that meets it: left in place it would hold a slot of every pass's cap for good. Only
+/// a fold no event could have produced has such an entry, so this is the sweep tidying up
+/// after a divergence, and the comparison the deep check makes is what judges the divergence.
+#[test]
+fn the_sweep_drops_an_index_entry_whose_swap_stopped_waiting() {
+    on_fresh_memory(|| {
+        append(funds(1));
+        // a swap that never waited, and an entry naming no swap at all
+        StableStore(()).put_auto_refund_waiting(waiting_key(1, swap_id(1)));
+        StableStore(()).put_auto_refund_waiting(waiting_key(2, QuoteHash::new([9; 32])));
+        assert!(!verify_replay(), "neither entry is a fold of the log");
+
+        let swept = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
+        assert_eq!((swept.stale, swept.refunds, swept.skipped), (2, 0, 0));
+        assert!(read_state(|state| state.store().auto_refund_waiting()).is_empty());
+        assert!(
+            verify_replay(),
+            "and with them gone the fold is the fold of the log again"
+        );
     });
 }
 

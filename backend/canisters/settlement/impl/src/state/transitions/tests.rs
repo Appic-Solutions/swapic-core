@@ -42,19 +42,44 @@ pub(crate) fn quote(nonce: u64) -> Quote {
     }
 }
 
+/// The quote at `nonce`, asking to be consulted rather than refunded on its own.
+pub(crate) fn manual_quote(nonce: u64) -> Quote {
+    Quote {
+        auto_refund: false,
+        ..quote(nonce)
+    }
+}
+
 /// The swap id of the quote at `nonce`.
 pub(crate) fn swap_id(nonce: u64) -> QuoteHash {
-    quote(nonce).hash().expect("a fixture quote has an id")
+    id_of(&quote(nonce))
+}
+
+/// The swap id of the consult-me quote at `nonce`.
+pub(crate) fn manual_swap_id(nonce: u64) -> QuoteHash {
+    id_of(&manual_quote(nonce))
+}
+
+fn id_of(q: &Quote) -> QuoteHash {
+    q.hash().expect("a fixture quote has an id")
 }
 
 /// The event that funds the swap of the quote at `nonce`.
 pub(crate) fn funds(nonce: u64) -> EventType {
-    let q = quote(nonce);
+    funds_of(&quote(nonce), nonce)
+}
+
+/// The event that funds the swap of the consult-me quote at `nonce`.
+pub(crate) fn funds_manual(nonce: u64) -> EventType {
+    funds_of(&manual_quote(nonce), nonce)
+}
+
+fn funds_of(q: &Quote, nonce: u64) -> EventType {
     EventType::FundsReceived {
-        quote_hash: swap_id(nonce),
+        quote_hash: id_of(q),
         quote_bytes: q.canonical_bytes().expect("a fixture quote has a preimage"),
         chain_id: q.src_chain,
-        token: q.src_token,
+        token: q.src_token.clone(),
         amount: q.amount_in,
         tx_ref: format!("0xabc{nonce}"),
     }

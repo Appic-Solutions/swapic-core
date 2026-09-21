@@ -3,7 +3,7 @@ use crate::storage::halt::is_halted;
 use crate::storage::{config, events};
 use std::time::Duration;
 use types::events::EventType;
-use types::{Quote, QuoteHash, Swap, SwapStatus, Timestamp};
+use types::{Quote, QuoteHash, Swap, SwapStatus, Timestamp, WaitingKey};
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
 /// without a canister and without reading the event log back.
@@ -16,6 +16,9 @@ pub struct Sweep {
     /// timed-out swaps the pass stepped over: `quote_bytes` that did not parse, or an
     /// append the guard refused. Counted, never fatal, because the sweep must be total.
     pub skipped: usize,
+    /// index entries the pass dropped because their swap is not waiting any more. Only a
+    /// fold no event could have produced has any, and the pass tidies rather than trips.
+    pub stale: usize,
     /// whether either pass stopped at its cap with work still due, so the next tick has
     /// more to do. A pass is bounded; the timer is what makes it total.
     pub more: bool,
@@ -42,13 +45,19 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let (timed_out, more_waiting) = timed_out_waiting(
+    let head = timed_out_waiting(
         now,
         config.decision_timeout,
         config.max_refunds_per_sweep.as_usize(),
     );
-    swept.more |= more_waiting;
-    let (due, unreadable) = due_refunds(timed_out, now, config.decision_timeout);
+    swept.more |= head.more;
+    swept.stale = head.stale.len();
+    // the index is the queue, so an entry that is no longer work is dropped from it rather
+    // than stepped over: left in place it would hold a slot of every pass's cap for good
+    for key in &head.stale {
+        events::drop_stale_waiting(key);
+    }
+    let (due, unreadable) = due_refunds(head.waiting, now, config.decision_timeout);
     swept.skipped = unreadable;
     // decided first, then appended, so every refund of the pass is judged against the same
     // fold and one append cannot change which swaps the pass sees
@@ -69,31 +78,47 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     swept
 }
 
-/// The `cap` longest-waiting swaps whose wait began more than `timeout` before `now`, and
-/// whether a further one was waiting behind them. Read off the waiting index rather than a
-/// scan of every swap, so a pass costs what it takes, not what ever settled.
-fn timed_out_waiting(
-    now: Timestamp,
-    timeout: Duration,
-    cap: usize,
-) -> (Vec<(QuoteHash, Swap)>, bool) {
+/// What one pass found at the head of the waiting index.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Head {
+    /// entries whose swap is still waiting for its user, oldest wait first
+    waiting: Vec<(QuoteHash, Swap)>,
+    /// entries whose swap stopped waiting, or that name no swap at all
+    stale: Vec<WaitingKey>,
+    /// whether a further timed-out entry sat behind the cap
+    more: bool,
+}
+
+/// The `cap` oldest indexed waits that began more than `timeout` before `now`, split into the
+/// ones that are still work and the ones that are not. Read off the index rather than a scan
+/// of every swap, so a pass costs what it takes, not what ever settled.
+fn timed_out_waiting(now: Timestamp, timeout: Duration, cap: usize) -> Head {
     // a clock less than a whole timeout past the epoch has no wait that old
     let Some(cutoff) = now.checked_sub(timeout) else {
-        return (Vec::new(), false);
+        return Head::default();
     };
     events::read_state(|state| {
         let store = state.store();
         // one key past the cap: the extra key is the evidence that work remains, and the
         // index is ordered by wait, so the keys taken are the oldest waits there are
-        let mut keys = store.waiting_since_before(cutoff, cap.saturating_add(1));
+        let mut keys = store.auto_refund_waiting_since_before(cutoff, cap.saturating_add(1));
         let more = keys.len() > cap;
         keys.truncate(cap);
-        // an index entry always has its swap: the same record step writes both
-        let swaps = keys
-            .into_iter()
-            .filter_map(|quote_hash| store.swap(&quote_hash).map(|swap| (quote_hash, swap)))
-            .collect();
-        (swaps, more)
+        let mut head = Head {
+            more,
+            ..Head::default()
+        };
+        for key in keys {
+            // the same record step writes the entry and the swap, and every step that stops
+            // a wait removes the entry, so only a divergence lands in the stale half
+            match store.swap(&key.quote_hash) {
+                Some(swap) if swap.status == SwapStatus::WaitingForUser => {
+                    head.waiting.push((key.quote_hash, swap))
+                }
+                _ => head.stale.push(key),
+            }
+        }
+        head
     })
 }
 

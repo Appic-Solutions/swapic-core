@@ -1,8 +1,8 @@
 use crate::state::transitions::{apply_state_transition, replay, ReplayError};
 use crate::state::{State, Store};
 use crate::storage::memory::{
-    events_data_memory, events_index_memory, ledger_meta_memory, pockets_memory, swaps_memory,
-    waiting_memory, Memory,
+    auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
+    pockets_memory, swaps_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -19,8 +19,10 @@ use types::{
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
-    // The log is the record and the four below are its fold. All five are private, so
-    // `append_event` is the only writer of any of them.
+    // The log is the record and the four below are its fold. All five are private: every
+    // write to them but one goes through `append_event`, and the exception is
+    // `drop_stale_waiting` below, which only has something to do on a fold no event could
+    // have produced.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
     );
@@ -36,13 +38,14 @@ thread_local! {
             .expect("ledger meta cell init"),
     );
 
-    // The swaps waiting for their user, so the expiry sweep reads those and not every swap.
-    static WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
-        RefCell::new(StableBTreeSet::init(waiting_memory()));
+    // The waiting swaps the expiry timer can act on: waiting for their user, and asking for
+    // an automatic refund. So a pass reads those and not every swap, nor every waiting swap.
+    static AUTO_REFUND_WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
+        RefCell::new(StableBTreeSet::init(auto_refund_waiting_memory()));
 }
 
-/// The fold in stable memory. Only this module can build one, so only `append_event`
-/// ever holds it mutably.
+/// The fold in stable memory. Only this module can build one, so the only writers of it are
+/// `append_event` and the one narrow exception `drop_stale_waiting` documents.
 pub struct StableStore(());
 
 impl Store for StableStore {
@@ -79,26 +82,25 @@ impl Store for StableStore {
         LEDGER_META.with(|cell| cell.borrow_mut().set(meta).expect("ledger meta cell write"));
     }
 
-    fn put_waiting(&mut self, key: WaitingKey) {
-        WAITING.with(|waiting| waiting.borrow_mut().insert(key));
+    fn put_auto_refund_waiting(&mut self, key: WaitingKey) {
+        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().insert(key));
     }
 
-    fn remove_waiting(&mut self, key: &WaitingKey) {
-        WAITING.with(|waiting| waiting.borrow_mut().remove(key));
+    fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
+        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
-    fn waiting(&self) -> Vec<WaitingKey> {
-        WAITING.with(|waiting| waiting.borrow().iter().collect())
+    fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
+        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow().iter().collect())
     }
 
-    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash> {
-        WAITING.with(|waiting| {
+    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
+        AUTO_REFUND_WAITING.with(|waiting| {
             waiting
                 .borrow()
                 .iter()
                 .take_while(|key| key.since < cutoff)
                 .take(limit)
-                .map(|key| key.quote_hash)
                 .collect()
         })
     }
@@ -185,7 +187,7 @@ pub fn init() {
     SWAPS.with(|_| ());
     POCKETS.with(|_| ());
     LEDGER_META.with(|_| ());
-    WAITING.with(|_| ());
+    AUTO_REFUND_WAITING.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at
@@ -271,6 +273,15 @@ pub fn append_event_at(
 /// Read-only view of the fold. There is deliberately no mutable twin.
 pub fn read_state<R>(f: impl FnOnce(&State<StableStore>) -> R) -> R {
     f(&State::new(StableStore(())))
+}
+
+/// Drops one entry from the auto-refund waiting index. The only write to the fold that does
+/// not go through `append_event`, and it is narrow on purpose: every transition that stops a
+/// wait removes the entry with it, so an entry whose swap is not waiting any more is a fold
+/// no event could have produced. Keeping the index to what it claims to hold is what keeps a
+/// bounded refund pass from spending its cap on entries no refund can ever reach.
+pub fn drop_stale_waiting(key: &WaitingKey) {
+    StableStore(()).remove_auto_refund_waiting(key);
 }
 
 /// Test-only: moves the fold's idea of the chain head off the log's, and touches the log

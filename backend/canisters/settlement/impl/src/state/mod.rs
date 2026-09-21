@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, Quote, QuoteHash, Swap,
     SwapStatus, Timestamp, TokenAmount, TransitionError, WaitingKey,
 };
 
@@ -20,16 +20,17 @@ pub trait Store {
     fn pockets(&self) -> Vec<(ChainId, Pocket)>;
     fn meta(&self) -> LedgerMeta;
     fn put_meta(&mut self, meta: LedgerMeta);
-    /// Indexes a swap that began waiting for its user.
-    fn put_waiting(&mut self, key: WaitingKey);
-    fn remove_waiting(&mut self, key: &WaitingKey);
-    /// Every waiting swap, longest wait first.
-    fn waiting(&self) -> Vec<WaitingKey>;
-    /// The swaps that began waiting before `cutoff`, longest wait first, at most `limit` of
-    /// them. Walks the index from its first key and stops at the first one that is not
-    /// older, or at `limit`, so the cost is the swaps returned and never the swaps ever
-    /// recorded.
-    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash>;
+    /// Indexes a waiting swap whose quote asks for an automatic refund. A swap that waits
+    /// for a human is not indexed: the index is the queue the expiry timer works through,
+    /// and nothing in it is work the timer can do.
+    fn put_auto_refund_waiting(&mut self, key: WaitingKey);
+    fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
+    /// Every indexed wait, longest wait first.
+    fn auto_refund_waiting(&self) -> Vec<WaitingKey>;
+    /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
+    /// Walks the index from its first key and stops at the first one that is not older, or at
+    /// `limit`, so the cost is the keys returned and never the swaps ever recorded.
+    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey>;
 }
 
 /// A [`Store`] on the heap: what unit tests and the replay audit fold into.
@@ -38,7 +39,7 @@ pub struct MemoryStore {
     swaps: BTreeMap<QuoteHash, Swap>,
     pockets: BTreeMap<ChainId, Pocket>,
     meta: LedgerMeta,
-    waiting: BTreeSet<WaitingKey>,
+    auto_refund_waiting: BTreeSet<WaitingKey>,
 }
 
 impl Store for MemoryStore {
@@ -80,24 +81,24 @@ impl Store for MemoryStore {
         self.meta = meta;
     }
 
-    fn put_waiting(&mut self, key: WaitingKey) {
-        self.waiting.insert(key);
+    fn put_auto_refund_waiting(&mut self, key: WaitingKey) {
+        self.auto_refund_waiting.insert(key);
     }
 
-    fn remove_waiting(&mut self, key: &WaitingKey) {
-        self.waiting.remove(key);
+    fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
+        self.auto_refund_waiting.remove(key);
     }
 
-    fn waiting(&self) -> Vec<WaitingKey> {
-        self.waiting.iter().copied().collect()
+    fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
+        self.auto_refund_waiting.iter().copied().collect()
     }
 
-    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash> {
-        self.waiting
+    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
+        self.auto_refund_waiting
             .iter()
             .take_while(|key| key.since < cutoff)
             .take(limit)
-            .map(|key| key.quote_hash)
+            .copied()
             .collect()
     }
 }
@@ -117,12 +118,14 @@ impl State<MemoryStore> {
             swaps,
             pockets,
             meta,
-            waiting,
+            auto_refund_waiting,
         } = &self.store;
         let other_pockets = other.store.pockets();
         let other_swaps = other.store.swaps();
         *meta == other.meta()
-            && waiting.iter().eq(other.store.waiting().iter())
+            && auto_refund_waiting
+                .iter()
+                .eq(other.store.auto_refund_waiting().iter())
             && pockets
                 .iter()
                 .eq(other_pockets.iter().map(|(chain, pocket)| (chain, pocket)))
@@ -173,10 +176,11 @@ impl<S: Store> State<S> {
     }
 
     /// Drops a swap from the waiting index once its clock has stopped. A swap that was not
-    /// waiting had no clock and no entry.
+    /// waiting had no clock and no entry, and a swap that waited for a human had a clock and
+    /// no entry: removing a key the index does not hold is nothing.
     fn stop_waiting(&mut self, quote_hash: &QuoteHash, stopped: Option<Timestamp>) {
         if let Some(since) = stopped {
-            self.store.remove_waiting(&WaitingKey {
+            self.store.remove_auto_refund_waiting(&WaitingKey {
                 since,
                 quote_hash: *quote_hash,
             });
@@ -242,16 +246,24 @@ impl<S: Store> State<S> {
         });
     }
 
-    /// The one step that starts a waiting clock, so the one step that indexes a swap.
+    /// The one step that starts a waiting clock, so the one step that indexes a swap. Only a
+    /// swap whose quote asks for an automatic refund goes into the index: the index is the
+    /// queue the expiry timer works through, and a swap that waits for a human is not work
+    /// the timer can do. Its wait is on the swap itself either way, so `get_swap` shows it.
     fn record_decision_required(&mut self, quote_hash: &QuoteHash, at: Timestamp) {
-        self.update_swap(quote_hash, |swap| {
+        let auto_refund = self.update_swap(quote_hash, |swap| {
             swap.status = SwapStatus::WaitingForUser;
             swap.waiting_since = Some(at);
+            // the FundsReceived guard binds the swap id to these bytes, so they parse.
+            // Bytes an older wasm recorded that do not are a swap that waits for a human.
+            Quote::parse(&swap.quote_bytes).is_ok_and(|quote| quote.auto_refund)
         });
-        self.store.put_waiting(WaitingKey {
-            since: at,
-            quote_hash: *quote_hash,
-        });
+        if auto_refund {
+            self.store.put_auto_refund_waiting(WaitingKey {
+                since: at,
+                quote_hash: *quote_hash,
+            });
+        }
     }
 
     fn record_decision_made(&mut self, quote_hash: &QuoteHash, choice: Choice) {
