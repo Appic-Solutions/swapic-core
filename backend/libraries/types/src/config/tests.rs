@@ -404,6 +404,34 @@ fn a_cap_at_its_default_is_absent_from_storage_and_reads_back_as_the_default() {
     assert_eq!(Config::from_bytes(both.to_bytes()), both);
 }
 
+/// The other way a cap reads back as its default: a null where the knob sits, which is what
+/// an encoder that keeps every index writes for a knob it does not set. The golden file
+/// cannot pin this shape, because a golden line must encode back to itself and a cap at its
+/// default encodes as its value, so the decode is checked here instead.
+#[test]
+fn a_cap_stored_as_null_reads_back_as_the_default() {
+    let mixed = Config {
+        max_evictions_per_sweep: EvictionsPerSweep::new(7),
+        ..Config::default()
+    };
+    let mut bytes = mixed.to_bytes().into_owned();
+    // the two elements the record ends with: the refund cap at its default, written out
+    // because a later knob is set, then the eviction cap
+    let tail = bytes.split_off(bytes.len() - 3);
+    assert_eq!(
+        tail,
+        [0x18, RefundsPerSweep::DEFAULT.get() as u8, 0x07],
+        "the stored shape this test rewrites"
+    );
+    // the same record with that knob absent rather than spelled out
+    bytes.extend_from_slice(&[0xf6, 0x07]);
+    assert_eq!(
+        Config::from_bytes(Cow::Owned(bytes)),
+        mixed,
+        "a null where a cap sits is that cap's default"
+    );
+}
+
 /// The stored copy is the operative one, so it must keep the real urls.
 #[test]
 fn storage_keeps_the_secrets() {

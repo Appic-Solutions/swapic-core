@@ -1,5 +1,5 @@
 use crate::chain::ChainId;
-use crate::config::Config;
+use crate::config::{AuditChunk, Config, EvictionsPerSweep, RefundsPerSweep};
 use crate::events::{Event, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash};
 use crate::ledger::LedgerMeta;
@@ -46,9 +46,10 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 
 /// Every type a stable structure holds, keys included, one sample per line of the golden
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
-/// unpaid), a pocket, the ledger meta, a pending quote, the config, and the four key
-/// types. Every field of a sample differs from its neighbours, so a field that moves to
-/// another index decodes to a different value instead of passing unnoticed.
+/// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
+/// default, and an interior cap set), and the four key types. Every field of a sample
+/// differs from its neighbours, so a field that moves to another index decodes to a
+/// different value instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
     assert_eq!(
@@ -103,6 +104,19 @@ fn samples() -> Vec<Sample> {
         ecdsa_key_name: "key_1".to_string(),
         ..Config::default()
     };
+    // every cap of the sample above holds its default, so its bytes stop where the caps
+    // begin and pin only that one shape. This one sets an interior cap: the cap before it
+    // is written out at its default and the cap after it is still omitted, which is the
+    // other shape a stored config takes. The third, a null where a knob sits, is no golden
+    // line, because a line must encode back to itself and an unset cap encodes as its
+    // value; `config/tests.rs` decodes that one by hand.
+    let mixed_caps = Config {
+        max_refunds_per_sweep: RefundsPerSweep::DEFAULT,
+        max_evictions_per_sweep: EvictionsPerSweep::new(1_234),
+        audit_chunk_events: AuditChunk::DEFAULT,
+        ecdsa_key_name: "key_1".to_string(),
+        ..Config::default()
+    };
     all.extend([
         sample("swap paid", paid),
         sample("swap unpaid", unpaid),
@@ -124,6 +138,7 @@ fn samples() -> Vec<Sample> {
         ),
         sample("pending quote", crate::quote::tests::fixed_quote()),
         sample("config", config),
+        sample("config mixed caps", mixed_caps),
         sample("quote hash key", QuoteHash::new([0x5a; 32])),
         sample("chain id key", ChainId::ARBITRUM),
         sample(
