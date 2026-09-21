@@ -14,10 +14,13 @@ use crate::storage::{config, outbox};
 use crate::tx;
 use ic_cdk_timers::TimerId;
 use std::cell::Cell;
+use types::Timestamp;
 
 thread_local! {
-    // Heap by necessity, like every other timer id: an upgrade invalidates it anyway.
-    static FLUSH_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    // Heap by necessity, like every other timer id: an upgrade invalidates it anyway. The
+    // instant beside the id is when that timer was armed to fire, which is what says
+    // whether it still lies ahead: see `still_waiting`.
+    static FLUSH_TIMER: Cell<Option<(TimerId, Timestamp)>> = const { Cell::new(None) };
     // A7: set while a pass is running, cleared when its guard drops.
     static RUNNING: Cell<bool> = const { Cell::new(false) };
 }
@@ -44,22 +47,32 @@ impl Drop for PassGuard {
     }
 }
 
-/// Puts the next pass on the batch window, unless one is already waiting. Called when a
+/// Whether the recorded timer still lies ahead, which is the only state in which arming
+/// another one would be arming a second pass.
+///
+/// A recorded id alone cannot say. The callback runs as its own message, so anything it
+/// does before its first await is undone if it traps, and a callback that cleared the slot
+/// and then trapped would put back the id of a timer that has already fired: `arm` would
+/// see it forever and no pass would ever run again. The instant the timer was armed for is
+/// not undone by anything, because it is written when the timer is created, so it is what
+/// the decision is made on. Arming a second timer for an instant that has passed costs at
+/// worst one extra pass, and a pass with nothing to do returns immediately.
+fn still_waiting(due: Option<Timestamp>, now: Timestamp) -> bool {
+    due.is_some_and(|due| due > now)
+}
+
+/// Puts the next pass on the batch window, unless one is already on its way. Called when a
 /// transaction is queued, and again at the end of every pass that leaves work behind.
 pub fn arm() {
-    let already_armed = FLUSH_TIMER.with(|timer| {
-        let armed = timer.get();
-        armed.is_some()
-    });
-    if already_armed {
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
+    let due = FLUSH_TIMER.with(|timer| timer.get()).map(|(_, due)| due);
+    if still_waiting(due, now) {
         return;
     }
     let window = config::get().batch_window;
-    let timer = ic_cdk_timers::set_timer(window, || {
-        FLUSH_TIMER.with(|timer| timer.set(None));
-        ic_cdk::spawn(run());
-    });
-    FLUSH_TIMER.with(|slot| slot.set(Some(timer)));
+    let timer = ic_cdk_timers::set_timer(window, || ic_cdk::spawn(run()));
+    let due = Timestamp::from_nanos(now.as_nanos().saturating_add(window.as_nanos() as u64));
+    FLUSH_TIMER.with(|slot| slot.set(Some((timer, due))));
 }
 
 /// Whether a pass still has work: bytes on their way to a chain, or a nonce that was

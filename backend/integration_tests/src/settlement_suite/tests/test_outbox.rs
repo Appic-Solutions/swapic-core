@@ -940,3 +940,100 @@ fn a_nonce_the_provider_calls_too_low_goes_to_the_receipt_reader() {
         "the entry is being watched, not broadcast again"
     );
 }
+
+/// The cap on an outcall's answer follows the batch that outcall is for. A fixed cap is a
+/// cliff: one batch above it is rejected by the system, every later pass builds the same
+/// oversized batch, and nothing on that chain ever broadcasts or ever closes again.
+#[test]
+fn the_outcall_caps_follow_the_batch_they_are_for() {
+    let (pic, canister, admin) = setup_with_swaps(2);
+    let first = send(&pic, canister, admin, 0).expect("the first send goes through");
+    send(&pic, canister, admin, 1).expect("the second send goes through");
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chain, one batch");
+    assert_eq!(methods(&pending[0]).len(), 2, "two broadcasts in it");
+    let two_sends = pending[0]
+        .max_response_bytes
+        .expect("every outcall reserves a cap");
+    reply(&pic, &pending[0], vec![json!("0xabc"), json!("0xdef")]);
+
+    // the receipt batch is the head plus one receipt per hash, and its cap is sized for a
+    // real receipt: a vault execute or a CCTP depositForBurn carries several kilobytes of
+    // logs, not the few hundred bytes a transaction hash is
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    let two_receipts = pending
+        .iter()
+        .find(|request| methods(request).contains(&"eth_getTransactionReceipt".to_string()))
+        .expect("the receipts are asked for")
+        .max_response_bytes
+        .expect("every outcall reserves a cap");
+    assert!(
+        two_receipts > two_sends * 4,
+        "a receipt is orders of magnitude bigger than a transaction hash: {two_receipts} \
+         against {two_sends}"
+    );
+
+    // the first transaction lands, so the next pass reads receipts for one entry, and the
+    // cap shrinks with it: it is the batch's own and not a constant the batch fits inside
+    answer_pending(&pic, 19_000_005, &receipt(19_000_005, true, first));
+    assert_eq!(
+        of_kind(events(&pic, canister), is_confirmed).len(),
+        1,
+        "one of the two closed"
+    );
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    let one_receipt = pending
+        .iter()
+        .find(|request| methods(request).contains(&"eth_getTransactionReceipt".to_string()))
+        .expect("the entry still open is still watched")
+        .max_response_bytes
+        .expect("every outcall reserves a cap");
+    assert!(
+        one_receipt < two_receipts && one_receipt * 2 > two_receipts,
+        "one receipt reserves about half of what two reserve: {one_receipt} against \
+         {two_receipts}"
+    );
+}
+
+/// The halt switch is the emergency stop of a canister that custodies funds, so nothing new
+/// reaches a chain while it is on. A transaction signed seconds before an operator halts is
+/// still in the queue, and it waits there: the nonce is not abandoned, and lifting the halt
+/// sends it.
+#[test]
+fn a_halted_canister_broadcasts_nothing_new() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let signed = {
+        send(&pic, canister, admin, 0).expect("the send goes through");
+        tx_signed(&events(&pic, canister))
+    };
+    set_halted(&pic, canister, admin, true).expect("a controller may halt");
+
+    advance(&pic, canister, BATCH_WINDOW);
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "a halted canister hands nothing to a provider"
+    );
+    advance(&pic, canister, Duration::from_secs(300));
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "and it does not start later either"
+    );
+
+    set_halted(&pic, canister, admin, false).expect("a controller may resume");
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the transaction was waiting, not abandoned"
+    );
+    assert_eq!(
+        params(&pending[0], 0),
+        json!([format!("0x{}", hex::encode(&signed[0]))]),
+        "and it is the transaction the log recorded"
+    );
+}

@@ -346,3 +346,91 @@ fn raw_bytes_cross_the_wire_prefixed() {
     assert_eq!(hex0x(&[0x02, 0xf8, 0x6b]), "0x02f86b");
     assert_eq!(hex0x(&[]), "0x");
 }
+
+/// An entry in the outbox with `hashes` transactions broadcast at its nonce.
+fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
+    OutboxEntry {
+        purpose: TxPurpose::Payout(QuoteHash::new([1; 32])),
+        chain_id: ChainId::BASE,
+        nonce: types::Nonce::new(nonce),
+        attempt: Some(Attempt::FIRST),
+        hashes: (0..hashes)
+            .map(|i| TxHash::new([i as u8; 32]))
+            .collect::<Vec<_>>(),
+        raw_tx: vec![0x02],
+        max_fee: WeiPerGas::from(2_000_000_000_u64),
+        max_priority_fee: WeiPerGas::from(100_000_000_u64),
+        status: OutboxStatus::Sent,
+        created_at: at(1),
+        last_sent_at: Some(at(1)),
+        first_sent_at: Some(at(1)),
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap(),
+        value: types::Wei::ZERO,
+        data: vec![],
+        gas_limit: GasAmount::from(120_000_u32),
+    }
+}
+
+/// The receipts a pass asks for are split so one outcall holds the answer, and an entry
+/// never straddles two calls: the reader slices each entry's receipts out of one answer in
+/// call order, so a split through an entry would read another entry's receipts as its own.
+#[test]
+fn the_receipt_batch_is_split_so_one_outcall_holds_the_answer() {
+    let one_each: Vec<OutboxEntry> = (0..RECEIPTS_PER_CALL as u64 + 1)
+        .map(|nonce| entry_with(nonce, 1))
+        .collect();
+    let chunks = receipt_chunks(one_each);
+    assert_eq!(chunks.len(), 2, "one over the limit is two calls");
+    assert_eq!(chunks[0].len(), RECEIPTS_PER_CALL);
+    assert_eq!(chunks[1].len(), 1);
+
+    // an entry that has been replaced carries several hashes, and all of them are looked
+    // up in the same call as each other
+    let replaced: Vec<OutboxEntry> = (0..8).map(|nonce| entry_with(nonce, 5)).collect();
+    let chunks = receipt_chunks(replaced);
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![6, 2],
+        "six entries of five hashes fill a call of thirty-two"
+    );
+    for chunk in &chunks {
+        let receipts: usize = chunk.iter().map(|entry| entry.hashes.len()).sum();
+        assert!(
+            receipts <= RECEIPTS_PER_CALL,
+            "{receipts} receipts in one call"
+        );
+    }
+
+    // an entry longer than a whole call goes alone rather than being cut in half
+    let long = receipt_chunks(vec![entry_with(0, RECEIPTS_PER_CALL + 4), entry_with(1, 1)]);
+    assert_eq!(long.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 1]);
+
+    assert!(receipt_chunks(vec![]).is_empty(), "no entries, no calls");
+}
+
+/// Both caps are the batch's own and not a constant the batch has to fit inside: a fixed
+/// cap is a cliff, because one batch above it is rejected by the system, every later pass
+/// builds the same batch, and nothing on that chain ever closes again.
+#[test]
+fn the_outcall_caps_are_derived_from_the_batch() {
+    assert_eq!(send_cap(1), MAX_SEND_BYTES_PER_ITEM);
+    assert_eq!(
+        send_cap(types::config::MAX_BATCH_ITEMS as usize),
+        MAX_SEND_BYTES_PER_ITEM * u64::from(types::config::MAX_BATCH_ITEMS),
+        "even the largest batch a config may ask for reserves room for its own answer"
+    );
+    assert_eq!(
+        receipt_cap(1),
+        MAX_BLOCK_NUMBER_BYTES + MAX_RECEIPT_BYTES_PER_ITEM
+    );
+    assert_eq!(
+        receipt_cap(RECEIPTS_PER_CALL),
+        MAX_BLOCK_NUMBER_BYTES + MAX_RECEIPT_BYTES_PER_ITEM * RECEIPTS_PER_CALL as u64
+    );
+    assert!(
+        receipt_cap(RECEIPTS_PER_CALL) < 2 * 1024 * 1024,
+        "a full call stays inside what one outcall may answer"
+    );
+}

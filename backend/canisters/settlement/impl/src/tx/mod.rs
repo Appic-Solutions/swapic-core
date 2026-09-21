@@ -57,12 +57,31 @@ const STUCK_AFTER: Duration = Duration::from_secs(120);
 /// config write can raise it; the knob belongs with the engine's gas policy in a later plan.
 const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 
-/// The most a provider's answer to one batch may be: a receipt is a few hundred bytes of
-/// logs at worst, and the cap is what the outcall reserves against.
-const MAX_RECEIPT_BYTES: u64 = 32_768;
+/// The most one `eth_getTransactionReceipt` reply may be.
+///
+/// Sized from the biggest receipt this canister ever asks for, a CCTP v2 `depositForBurn`.
+/// That call emits three logs: the USDC `Transfer`, `DepositForBurn` from the token
+/// messenger, and `MessageSent(bytes)` from the message transmitter, whose payload is the
+/// whole 376-byte burn message (a 148-byte header and a 228-byte burn body), which is 752
+/// hex characters plus its ABI offset and length words. With the receipt's own envelope,
+/// whose `logsBloom` alone is 514 characters of JSON, and the two dozen scalar fields, that
+/// is about four kilobytes. Eight is that with room for a fourth log, and a vault `execute`
+/// receipt is smaller.
+const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
 
-/// The most a batch of broadcasts may answer: a transaction hash each, or an error.
-const MAX_SEND_BYTES: u64 = 8_192;
+/// The most an `eth_blockNumber` reply may be: a hex height and the JSON-RPC envelope
+/// around it.
+const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
+
+/// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and
+/// a batch bigger than one outcall can hold is not an error the canister recovers from: the
+/// system rejects the call, every later pass builds the same batch, and nothing on that
+/// chain closes again. So the batch is split to fit rather than sized and hoped for.
+const RECEIPTS_PER_CALL: usize = 32;
+
+/// The most one `eth_sendRawTransaction` reply may be: a 32-byte hash as text, or a
+/// JSON-RPC error object carrying a provider's message.
+const MAX_SEND_BYTES_PER_ITEM: u64 = 1_024;
 
 /// How deep a receipt must be on a chain the config does not list a depth for. One is the
 /// safe floor rather than a free pass: `is_confirmed` counts the receipt's own block as the
@@ -383,6 +402,12 @@ fn nonce_already_spent(message: &str) -> bool {
 /// already mined. All three mean the same thing for the queue, that there is nothing left
 /// to broadcast and the receipt reader takes it from here.
 pub async fn flush() {
+    // the emergency stop: a halted canister hands nothing new to a provider, whether it was
+    // queued before the halt or re-queued during it. Nothing is abandoned, because the
+    // entry keeps its nonce and its bytes and goes out when the halt lifts.
+    if require_not_halted().is_err() {
+        return;
+    }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let limit = config::get().max_batch_items as usize;
     for chain_id in outbox::chains() {
@@ -394,7 +419,10 @@ pub async fn flush() {
             .iter()
             .map(|entry| ("eth_sendRawTransaction", json!([hex0x(&entry.raw_tx)])))
             .collect();
-        let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, MAX_SEND_BYTES).await else {
+        // the cap is the batch's own, so a `max_batch_items` a controller raised cannot
+        // put a batch on the wire that the answer will not fit inside
+        let cap = send_cap(calls.len());
+        let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, cap).await else {
             // the provider is unreachable: every entry stays queued
             continue;
         };
@@ -437,71 +465,110 @@ pub async fn check_open() {
     let limit = config.max_batch_items as usize;
     for chain_id in outbox::chains() {
         let open = outbox::by_status(chain_id, OutboxStatus::Sent, limit);
-        if open.is_empty() {
-            continue;
-        }
-        let mut calls: Vec<(&str, Value)> = vec![("eth_blockNumber", json!([]))];
-        for entry in &open {
-            for hash in &entry.hashes {
-                calls.push(("eth_getTransactionReceipt", json!([hex0x(hash.as_ref())])));
-            }
-        }
-        let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, MAX_RECEIPT_BYTES).await else {
-            continue;
-        };
-        let Some(latest) = answers.first().and_then(|answer| {
-            answer
-                .as_ref()
-                .ok()
-                .and_then(|value| value.as_str())
-                .and_then(parse_block_number)
-        }) else {
-            continue;
-        };
         let depth = confirmations(&config, chain_id);
-        // `rpc_batch_each` answers exactly one result per call, in call order, so the head
-        // is at 0 and each entry's receipts follow in the order the calls were built
-        let mut receipts_from = 1;
-        for entry in open {
-            let receipts = &answers[receipts_from..receipts_from + entry.hashes.len()];
-            receipts_from += entry.hashes.len();
-            let landed = receipts
-                .iter()
-                .filter_map(|answer| answer.as_ref().ok())
-                .find_map(|value| parse_receipt(value, &entry.hashes).ok());
-            match landed {
-                // rule A10: only a receipt at the configured depth closes an attempt, and
-                // that holds however the transaction ended. A reverted receipt closed at
-                // once would free the swap to be re-signed at a fresh nonce, and a one-block
-                // reorg that drops the revert and includes the replacement then pays twice.
-                Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
-                    let Receipt {
-                        tx_hash,
-                        block,
-                        success,
-                    } = receipt;
-                    if success {
-                        close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
-                            quote_hash,
-                            attempt,
-                            chain_id,
+        // split so the answer fits one outcall: the head comes with every chunk, so each
+        // chunk's receipts are read against a height from the same answer
+        for chunk in receipt_chunks(open) {
+            let receipt_calls: usize = chunk.iter().map(|entry| entry.hashes.len()).sum();
+            let mut calls: Vec<(&str, Value)> = vec![("eth_blockNumber", json!([]))];
+            for entry in &chunk {
+                for hash in &entry.hashes {
+                    calls.push(("eth_getTransactionReceipt", json!([hex0x(hash.as_ref())])));
+                }
+            }
+            let cap = receipt_cap(receipt_calls);
+            let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, cap).await else {
+                continue;
+            };
+            let Some(latest) = answers.first().and_then(|answer| {
+                answer
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.as_str())
+                    .and_then(parse_block_number)
+            }) else {
+                continue;
+            };
+            // `rpc_batch_each` answers exactly one result per call, in call order, so the head
+            // is at 0 and each entry's receipts follow in the order the calls were built
+            let mut receipts_from = 1;
+            for entry in chunk {
+                let receipts = &answers[receipts_from..receipts_from + entry.hashes.len()];
+                receipts_from += entry.hashes.len();
+                let landed = receipts
+                    .iter()
+                    .filter_map(|answer| answer.as_ref().ok())
+                    .find_map(|value| parse_receipt(value, &entry.hashes).ok());
+                match landed {
+                    // rule A10: only a receipt at the configured depth closes an attempt, and
+                    // that holds however the transaction ended. A reverted receipt closed at
+                    // once would free the swap to be re-signed at a fresh nonce, and a one-block
+                    // reorg that drops the revert and includes the replacement then pays twice.
+                    Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
+                        let Receipt {
                             tx_hash,
                             block,
-                        });
-                    } else {
-                        close(&entry, |quote_hash, attempt| EventType::TxFailed {
-                            quote_hash,
-                            attempt,
-                            reason: "the transaction reverted on the chain".to_string(),
-                        });
+                            success,
+                        } = receipt;
+                        if success {
+                            close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
+                                quote_hash,
+                                attempt,
+                                chain_id,
+                                tx_hash,
+                                block,
+                            });
+                        } else {
+                            close(&entry, |quote_hash, attempt| EventType::TxFailed {
+                                quote_hash,
+                                attempt,
+                                reason: "the transaction reverted on the chain".to_string(),
+                            });
+                        }
                     }
+                    // mined but not deep enough: nothing to do but wait
+                    Some(_) => {}
+                    None => push_again(&entry, chain_id, now).await,
                 }
-                // mined but not deep enough: nothing to do but wait
-                Some(_) => {}
-                None => push_again(&entry, chain_id, now).await,
             }
         }
     }
+}
+
+/// The open entries split into groups small enough that one outcall holds the answer.
+///
+/// An entry never straddles two calls, because the reader slices each entry's receipts out
+/// of one answer in call order. An entry whose own hash list is longer than a chunk goes
+/// alone and the cap is sized for it: the fee ceiling bounds how many replacements a nonce
+/// can collect, so that list is short by construction.
+fn receipt_chunks(open: Vec<OutboxEntry>) -> Vec<Vec<OutboxEntry>> {
+    let mut chunks: Vec<Vec<OutboxEntry>> = Vec::new();
+    let mut room = 0;
+    for entry in open {
+        let wanted = entry.hashes.len();
+        match chunks.last_mut() {
+            Some(chunk) if wanted <= room => {
+                room -= wanted;
+                chunk.push(entry);
+            }
+            _ => {
+                room = RECEIPTS_PER_CALL.saturating_sub(wanted);
+                chunks.push(vec![entry]);
+            }
+        }
+    }
+    chunks
+}
+
+/// What one chunk's answer may be: the head block, and a real receipt for every hash asked
+/// for.
+fn receipt_cap(receipts: usize) -> u64 {
+    MAX_BLOCK_NUMBER_BYTES + MAX_RECEIPT_BYTES_PER_ITEM * receipts as u64
+}
+
+/// What one batch of broadcasts may answer: a hash or an error for each transaction in it.
+fn send_cap(sends: usize) -> u64 {
+    MAX_SEND_BYTES_PER_ITEM * sends as u64
 }
 
 /// How deep a receipt on `chain_id` must be before it closes an attempt.
