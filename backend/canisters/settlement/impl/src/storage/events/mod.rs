@@ -89,8 +89,15 @@ impl Store for StableStore {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
-    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R {
-        AUTO_REFUND_WAITING.with(|waiting| f(&mut waiting.borrow().iter()))
+    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey> {
+        AUTO_REFUND_WAITING.with(|waiting| {
+            waiting
+                .borrow()
+                .iter()
+                .take_while(|key| before.is_none_or(|cutoff| key.since < cutoff))
+                .take(limit)
+                .collect()
+        })
     }
 }
 

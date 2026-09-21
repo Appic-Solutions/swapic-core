@@ -1,7 +1,6 @@
-use crate::types::{amount, text};
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::{ChainId, UnixSeconds};
+use types::{ChainId, TokenAmount, UnixSeconds};
 
 /// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,19 +91,35 @@ impl TryFrom<Quote> for types::Quote {
         Ok(Self {
             version: quote.version,
             src_chain: ChainId::new(quote.src_chain),
-            src_token: text(&quote.src_token).map_err(QuoteError::text_too_long("src_token"))?,
-            amount_in: amount(quote.amount_in).ok_or(AmountTooLarge { field: "amount_in" })?,
+            src_token: quote
+                .src_token
+                .parse()
+                .map_err(QuoteError::text_too_long("src_token"))?,
+            amount_in: TokenAmount::from_canonical_nat(quote.amount_in)
+                .ok_or(AmountTooLarge { field: "amount_in" })?,
             dst_chain: ChainId::new(quote.dst_chain),
-            dst_token: text(&quote.dst_token).map_err(QuoteError::text_too_long("dst_token"))?,
-            expected_out: amount(quote.expected_out).ok_or(AmountTooLarge {
-                field: "expected_out",
-            })?,
-            min_out: amount(quote.min_out).ok_or(AmountTooLarge { field: "min_out" })?,
-            dst_address: text(&quote.dst_address)
+            dst_token: quote
+                .dst_token
+                .parse()
+                .map_err(QuoteError::text_too_long("dst_token"))?,
+            expected_out: TokenAmount::from_canonical_nat(quote.expected_out).ok_or(
+                AmountTooLarge {
+                    field: "expected_out",
+                },
+            )?,
+            min_out: TokenAmount::from_canonical_nat(quote.min_out)
+                .ok_or(AmountTooLarge { field: "min_out" })?,
+            dst_address: quote
+                .dst_address
+                .parse()
                 .map_err(QuoteError::text_too_long("dst_address"))?,
             refund_address: quote
                 .refund_address
-                .map(|address| text(&address).map_err(QuoteError::text_too_long("refund_address")))
+                .map(|address| {
+                    address
+                        .parse()
+                        .map_err(QuoteError::text_too_long("refund_address"))
+                })
                 .transpose()?,
             auto_refund: quote.auto_refund,
             gas_mode: quote.gas_mode.into(),

@@ -26,38 +26,34 @@ pub trait Store {
     /// and nothing in it is work the timer can do.
     fn put_auto_refund_waiting(&mut self, key: WaitingKey);
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
-    /// Runs `f` over every indexed wait, longest wait first, without materializing the
-    /// index: the one walk the three readers below are written over.
-    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R;
+    /// The first `limit` indexed waits, longest wait first, stopping early at the first one
+    /// that began at `before` or later. The one walk of the index, and the readers below are
+    /// written over it. Answers owned keys, so no caller ever runs with the index borrowed.
+    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey>;
 
     /// Every indexed wait, longest wait first.
     fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
-        self.waiting_keys(|keys| keys.collect())
+        self.waiting_keys(None, usize::MAX)
     }
 
-    /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
-    /// Stops at the first key that is not older, or at `limit`, so the cost is the keys
-    /// returned and never the swaps ever recorded.
+    /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them:
+    /// the cost is the keys returned and never the swaps ever recorded.
     fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
-        self.waiting_keys(|keys| {
-            keys.take_while(|key| key.since < cutoff)
-                .take(limit)
-                .collect()
-        })
+        self.waiting_keys(Some(cutoff), limit)
     }
 
     /// Makes the index hold, for `quote_hash`, exactly `implied`: drops every other entry
     /// naming it, and writes `implied` if it is missing. The index is keyed by wait first,
-    /// so a swap's entries are found by a walk and not by a seek: only the repair of a
-    /// divergence needs this, and a diverged entry may carry an instant its swap never had.
+    /// so a swap's entries are found by a walk of the whole index and not by a seek: only
+    /// the repair of a divergence needs this, and a diverged entry may carry an instant its
+    /// swap never had.
     fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
-        // the keys come out before any is removed: the walk holds the index borrowed
-        let doomed: Vec<WaitingKey> = self.waiting_keys(|keys| {
-            keys.filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied)
-                .collect()
-        });
-        for key in &doomed {
-            self.remove_auto_refund_waiting(key);
+        let doomed = self
+            .auto_refund_waiting()
+            .into_iter()
+            .filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied);
+        for key in doomed {
+            self.remove_auto_refund_waiting(&key);
         }
         if let Some(key) = implied {
             self.put_auto_refund_waiting(key);
@@ -127,8 +123,13 @@ impl Store for MemoryStore {
         self.auto_refund_waiting.remove(key);
     }
 
-    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R {
-        f(&mut self.auto_refund_waiting.iter().copied())
+    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey> {
+        self.auto_refund_waiting
+            .iter()
+            .take_while(|key| before.is_none_or(|cutoff| key.since < cutoff))
+            .take(limit)
+            .copied()
+            .collect()
     }
 }
 

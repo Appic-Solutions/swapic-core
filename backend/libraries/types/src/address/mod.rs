@@ -34,11 +34,8 @@ macro_rules! text_type {
         /// decoded from storage or a fixture can exceed it either.
         impl<'b, C> Decode<'b, C> for $name {
             fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, decode::Error> {
-                d.str()?.parse().map_err(|TextTooLong { len }| {
-                    decode::Error::message(format!(
-                        "{}: {len} bytes, above the cap of {MAX_TEXT_BYTES}",
-                        stringify!($name)
-                    ))
+                d.str()?.parse().map_err(|error: TextTooLong| {
+                    decode::Error::message(format!("{}: {error}", stringify!($name)))
                 })
             }
         }
