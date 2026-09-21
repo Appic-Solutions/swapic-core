@@ -5,6 +5,7 @@ use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
 use crate::types::events::{CanonicalError, EventError, Hash32};
 use crate::types::quote::QuoteError;
+use crate::types::rpc::RpcError;
 use crate::types::swap::TransitionError;
 use candid::CandidType;
 use serde::Deserialize;
@@ -88,6 +89,13 @@ pub enum SetRolesError {
     Guard(GuardError),
     AnonymousRole(Role),
     Append(AppendError),
+}
+
+/// Why the test-only `test_rpc_batch` read nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum TestRpcError {
+    Guard(GuardError),
+    Rpc(RpcError),
 }
 
 /// Why the test-only `test_append` wrote nothing.

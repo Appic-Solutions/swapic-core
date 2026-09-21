@@ -13,6 +13,6 @@ mod roles;
 
 pub use chain::push_chain_data;
 pub use config::set_config;
-pub use ops::{audit_replay_step, set_halted};
+pub use ops::{audit_replay_step, set_halted, test_rpc_batch};
 pub use quotes::{clear_pending_quotes, register_quote};
 pub use roles::set_roles;

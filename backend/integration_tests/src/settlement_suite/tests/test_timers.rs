@@ -1,9 +1,8 @@
 use crate::client::settlement::{
     self, append, events_page, set_config, set_halted, test_skew_state,
 };
-use crate::settlement_suite::init::{quoter, setup};
-use crate::wasms;
-use candid::{encode_one, Nat, Principal};
+use crate::settlement_suite::init::{quoter, setup, upgrade};
+use candid::{Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
 use settlement_api::types::errors::{GuardError, RegisterQuoteError};
@@ -427,13 +426,7 @@ fn the_halt_flag_survives_an_upgrade() {
     let (pic, canister, admin) = setup();
     set_halted(&pic, canister, admin, true).unwrap();
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     assert!(halted(&pic, canister), "a redeploy is not an investigation");
     set_halted(&pic, canister, admin, false).unwrap();

@@ -1,9 +1,8 @@
 use crate::client::settlement::{
     self, clear_pending_quotes, events_page, get_pending, register_quote, set_roles,
 };
-use crate::settlement_suite::init::{quoter, setup, watcher};
-use crate::wasms;
-use candid::{encode_one, Nat, Principal};
+use crate::settlement_suite::init::{quoter, setup, upgrade, watcher};
+use candid::{Nat, Principal};
 use pocket_ic::{PocketIc, Time};
 use settlement_api::types::errors::{GuardError, RegisterQuoteError, Role, SetRolesError};
 use settlement_api::types::events::{Event, EventType, Hash32};
@@ -342,13 +341,7 @@ fn roles_and_the_pending_store_survive_an_upgrade() {
     let (pic, canister, admin) = with_roles();
     let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash).unwrap(),

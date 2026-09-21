@@ -1,7 +1,6 @@
 use crate::client::pocket::query;
 use crate::client::settlement::{append, event_count, events_page, get_swap, test_skew_state};
-use crate::settlement_suite::init::setup;
-use crate::wasms;
+use crate::settlement_suite::init::{setup, upgrade};
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, GuardError, TestAppendError};
@@ -150,13 +149,7 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
 
     let swap = get_swap(&pic, canister, admin, quote_hash()).expect("the swap exists");
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     assert_eq!(
         get_swap(&pic, canister, admin, quote_hash()),

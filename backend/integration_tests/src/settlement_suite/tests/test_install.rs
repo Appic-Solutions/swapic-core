@@ -2,8 +2,7 @@ use crate::client::settlement::{
     event_count, events_page, get_config_full, get_pending, register_quote, verify_chain,
     verify_replay,
 };
-use crate::settlement_suite::init::{empty_canister, init_arg, quoter, watcher};
-use crate::wasms;
+use crate::settlement_suite::init::{empty_canister, init_arg, install, quoter, watcher};
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
@@ -14,26 +13,11 @@ use settlement_api::types::quote::{GasMode, Quote};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-fn install(pic: &PocketIc, canister: Principal, admin: Principal, arg: &InitArg) {
-    pic.install_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(arg).unwrap(),
-        Some(admin),
-    );
-}
-
-/// An install the canister refuses. `install_canister` panics on a refusal, so this goes
-/// through the fallible reinstall, which on a canister with no code is an install.
+/// An install the canister refuses.
 fn refused_install(pic: &PocketIc, canister: Principal, admin: Principal, arg: &InitArg) -> String {
-    pic.reinstall_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(arg).unwrap(),
-        Some(admin),
-    )
-    .expect_err("the install is refused")
-    .reject_message
+    install(pic, canister, admin, arg)
+        .expect_err("the install is refused")
+        .reject_message
 }
 
 fn quote_live_at(pic: &PocketIc) -> Quote {
@@ -122,7 +106,7 @@ fn an_install_with_an_invalid_arg_is_refused() {
     // the refused install's instructions count against the next one for a few minutes
     pic.advance_time(Duration::from_secs(600));
     pic.tick();
-    install(&pic, canister, admin, &init_arg());
+    install(&pic, canister, admin, &init_arg()).expect("a valid arg installs");
     assert_eq!(event_count(&pic, canister, admin), 2);
 }
 
@@ -142,7 +126,7 @@ fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
         config: config.clone(),
         ..init_arg()
     };
-    install(&pic, canister, admin, &arg);
+    install(&pic, canister, admin, &arg).expect("a valid arg installs");
 
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), config);
 

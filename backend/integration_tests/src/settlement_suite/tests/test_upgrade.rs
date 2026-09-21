@@ -1,6 +1,5 @@
 use crate::client::settlement::{append, audit_replay_step, event_count, test_skew_state};
-use crate::settlement_suite::init::setup;
-use crate::wasms;
+use crate::settlement_suite::init::{setup, upgrade};
 use candid::{decode_one, encode_one, Nat, Principal};
 use settlement_api::types::errors::TestAppendError;
 use settlement_api::types::events::EventType;
@@ -33,13 +32,7 @@ fn events_survive_upgrade_and_replay_matches() {
         "incremental apply matches a fresh fold"
     );
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     let raw = pic
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
@@ -108,13 +101,7 @@ fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
         .unwrap();
     test_skew_state(&pic, canister, admin).unwrap();
 
-    let err = pic
-        .upgrade_canister(
-            canister,
-            wasms::settlement(),
-            encode_one(()).unwrap(),
-            Some(admin),
-        )
+    let err = upgrade(&pic, canister, admin)
         .expect_err("the fold links to a head the log does not end with");
     assert!(
         err.reject_message.contains("out of step"),
@@ -129,13 +116,7 @@ fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
     assert_eq!(decode_one::<u64>(&raw).unwrap(), installed + 1);
     test_skew_state(&pic, canister, admin).unwrap();
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .expect("a fold in step upgrades");
+    upgrade(&pic, canister, admin).expect("a fold in step upgrades");
     let raw = pic
         .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
         .unwrap();
@@ -161,13 +142,7 @@ fn the_replay_cursor_survives_an_upgrade() {
     let before = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
     assert_eq!((before.folded_so_far, before.finished), (2, false));
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     let after = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
     assert_eq!(

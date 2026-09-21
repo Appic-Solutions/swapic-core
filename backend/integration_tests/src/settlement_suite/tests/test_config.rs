@@ -1,7 +1,6 @@
 use crate::client::settlement::{events_page, get_config, get_config_full, set_config};
-use crate::settlement_suite::init::setup;
-use crate::wasms;
-use candid::{encode_one, Principal};
+use crate::settlement_suite::init::{setup, upgrade};
+use candid::Principal;
 use pocket_ic::PocketIc;
 use settlement_api::types::config::{Config, ConfigError};
 use settlement_api::types::errors::SetConfigError;
@@ -107,13 +106,7 @@ fn config_survives_upgrade() {
     let new = with_secret_rpc();
     set_config(&pic, canister, admin, &new).unwrap();
 
-    pic.upgrade_canister(
-        canister,
-        wasms::settlement(),
-        encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .unwrap();
+    upgrade(&pic, canister, admin).unwrap();
 
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), new);
     assert_eq!(get_config(&pic, canister, admin), redacted(&new));

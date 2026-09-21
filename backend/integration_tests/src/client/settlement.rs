@@ -9,7 +9,7 @@ use settlement_api::queries::{
     event_count, events_page, get_chain_data, get_config, get_config_full, get_pending, get_swap,
     halted, verify_chain, verify_replay,
 };
-use settlement_api::types::errors::{GuardError, TestAppendError};
+use settlement_api::types::errors::{GuardError, TestAppendError, TestRpcError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
     audit_replay_step, clear_pending_quotes, push_chain_data, register_quote, set_config,
@@ -241,6 +241,25 @@ pub fn audit_replay_step(
         sender,
         "audit_replay_step",
         encode_one(max_events).unwrap(),
+    )
+}
+
+/// The test door onto one unreplicated JSON-RPC batch; every call goes out with empty
+/// params.
+pub fn test_rpc_batch(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    chain_id: u64,
+    methods: &[String],
+    max_bytes: u64,
+) -> Result<Vec<String>, TestRpcError> {
+    update(
+        pic,
+        canister,
+        sender,
+        "test_rpc_batch",
+        encode_args((chain_id, methods, max_bytes)).unwrap(),
     )
 }
 

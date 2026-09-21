@@ -1,5 +1,5 @@
 use crate::client::settlement::{get_chain_data, push_chain_data};
-use crate::settlement_suite::init::{quoter, setup, watcher};
+use crate::settlement_suite::init::{quoter, setup, upgrade, watcher};
 use candid::{Nat, Principal};
 use settlement_api::types::chain_data::{ChainData, ChainDataEntry};
 use settlement_api::types::errors::{GuardError, PushChainDataError, Role};
@@ -111,12 +111,6 @@ fn the_chain_data_cache_survives_an_upgrade() {
     let (pic, canister, admin) = setup();
     push_chain_data(&pic, canister, watcher(), BASE, &reading(19_000_000)).unwrap();
     let before: Option<ChainDataEntry> = get_chain_data(&pic, canister, stranger(), BASE);
-    pic.upgrade_canister(
-        canister,
-        crate::wasms::settlement(),
-        candid::encode_one(()).unwrap(),
-        Some(admin),
-    )
-    .expect("the upgrade goes through");
+    upgrade(&pic, canister, admin).expect("the upgrade goes through");
     assert_eq!(get_chain_data(&pic, canister, stranger(), BASE), before);
 }
