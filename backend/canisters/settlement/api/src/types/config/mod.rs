@@ -249,6 +249,12 @@ pub enum ConfigError {
         max_fee_bps: u16,
     },
     EmptyEcdsaKeyName,
+    /// The canister has already derived its EVM address under the key name it holds, and
+    /// every vault on every chain is configured to obey that address.
+    EcdsaKeyNameFixed {
+        current: String,
+        requested: String,
+    },
     TimerIntervalTooLong {
         field: String,
         interval_s: u64,
@@ -311,6 +317,9 @@ impl From<types::ConfigError> for ConfigError {
                 max_fee_bps: max_fee.get(),
             },
             Domain::EmptyEcdsaKeyName => Self::EmptyEcdsaKeyName,
+            Domain::EcdsaKeyNameFixed { current, requested } => {
+                Self::EcdsaKeyNameFixed { current, requested }
+            }
             Domain::TimerIntervalTooLong { field, interval } => Self::TimerIntervalTooLong {
                 field: field.to_string(),
                 interval_s: interval.as_secs(),

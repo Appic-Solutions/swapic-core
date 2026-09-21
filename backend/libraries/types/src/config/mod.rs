@@ -199,6 +199,11 @@ pub enum ConfigError {
     },
     #[error("ecdsa_key_name is empty")]
     EmptyEcdsaKeyName,
+    #[error(
+        "ecdsa_key_name is {requested}, but this canister has already derived its address \
+         under {current}"
+    )]
+    EcdsaKeyNameFixed { current: String, requested: String },
     #[error("{field} is {}s, above the one-year cap of {}s", interval.as_secs(), MAX_TIMER_INTERVAL.as_secs())]
     TimerIntervalTooLong {
         field: &'static str,

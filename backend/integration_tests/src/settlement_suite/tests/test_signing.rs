@@ -5,12 +5,15 @@
 //! `dfx_test_key` gets a rejected management call, and that is exactly the shape a
 //! signing subnet under load has.
 
-use crate::client::settlement::{derive_evm_address, evm_address, test_sign};
+use crate::client::settlement::{
+    derive_evm_address, evm_address, get_config_full, set_config, test_sign,
+};
 use crate::settlement_suite::init::{init_arg, install, setup, upgrade};
 use candid::Principal;
 use libsecp256k1::{recover, Message, RecoveryId, Signature};
 use pocket_ic::{PocketIc, PocketIcBuilder};
-use settlement_api::types::errors::SignError;
+use settlement_api::types::config::{Config, ConfigError};
+use settlement_api::types::errors::{SetConfigError, SignError};
 use settlement_api::types::evm::EcdsaError;
 use sha2::Digest;
 
@@ -151,4 +154,58 @@ fn the_signing_doors_refuse_a_stranger() {
         test_sign(&pic, canister, stranger, digest(b"stranger")),
         Err(SignError::Guard(_))
     ));
+}
+
+/// The key name is deploy-time truth that stops being editable the moment it has been
+/// acted on. Every vault on every chain is configured to obey the address derived from the
+/// named key, and the canister's gas account is that address, so a controller who changes
+/// the name afterwards would leave the canister signing under a key nothing on any chain
+/// recognises. The write is refused, by name, on the wire.
+#[test]
+fn the_key_name_cannot_move_once_the_address_is_derived() {
+    let (pic, canister, admin) = setup_with_keys();
+    let before = get_config_full(&pic, canister, admin).expect("a controller may read it");
+    assert_eq!(before.ecdsa_key_name, "dfx_test_key");
+
+    // a name change before anything has been derived is an ordinary config write
+    let renamed = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        ..before.clone()
+    };
+    assert_eq!(set_config(&pic, canister, admin, &renamed), Ok(()));
+    assert_eq!(set_config(&pic, canister, admin, &before), Ok(()));
+
+    derive_evm_address(&pic, canister, admin).expect("the test key derives an address");
+    let address = evm_address(&pic, canister, Principal::anonymous());
+    assert!(address.is_some());
+
+    assert_eq!(
+        set_config(&pic, canister, admin, &renamed),
+        Err(SetConfigError::InvalidConfig(
+            ConfigError::EcdsaKeyNameFixed {
+                current: "dfx_test_key".to_string(),
+                requested: "key_1".to_string(),
+            }
+        )),
+        "the address is derived, so the name it was derived under is fixed"
+    );
+    assert_eq!(
+        get_config_full(&pic, canister, admin)
+            .expect("a controller may read it")
+            .ecdsa_key_name,
+        "dfx_test_key",
+        "a refused write leaves the config alone"
+    );
+    assert_eq!(
+        evm_address(&pic, canister, Principal::anonymous()),
+        address,
+        "and leaves the address alone"
+    );
+
+    // every other knob still moves
+    let other_knob = Config {
+        max_batch_items: 25,
+        ..before
+    };
+    assert_eq!(set_config(&pic, canister, admin, &other_knob), Ok(()));
 }

@@ -73,6 +73,9 @@ type Config = record {
 };
 // Why a config was refused, naming the knob at fault.
 type ConfigError = variant {
+  // The canister has already derived its EVM address under the key name it holds, and
+  // every vault on every chain is configured to obey that address.
+  EcdsaKeyNameFixed : record { requested : text; current : text };
   EmptyEcdsaKeyName;
   MaxFeeAboveHundredPercent : nat16;
   VaultAddressTooLong : record { len : nat64; chain_id : nat64 };

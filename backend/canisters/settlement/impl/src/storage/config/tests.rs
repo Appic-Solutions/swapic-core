@@ -33,3 +33,45 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");
 }
+
+/// The key name decides which threshold key every signature is made under, and the address
+/// every vault on every chain is configured to obey is derived from that key. Changing it
+/// after the derivation would sign under one key while the cache, the `evm_address` query
+/// and the vaults all still name the other: every signature would fail the parity trial,
+/// and each attempt would spend a nonce getting there. So the name is fixed once the
+/// address exists.
+#[test]
+fn the_key_name_is_fixed_once_the_address_is_derived() {
+    crate::storage::on_fresh_memory(|| {
+        crate::storage::init();
+        let key_1 = Config {
+            ecdsa_key_name: "key_1".to_string(),
+            ..Config::default()
+        };
+        let other = Config {
+            ecdsa_key_name: "dfx_test_key".to_string(),
+            ..Config::default()
+        };
+        test_set(key_1.clone());
+
+        // before the derivation the name is a deploy-time choice like any other
+        assert_eq!(ensure_key_name_is_not_moving(&other), Ok(()));
+
+        crate::storage::ecdsa_address::set(types::EvmAddress::new([7; 20]));
+        assert_eq!(
+            ensure_key_name_is_not_moving(&other),
+            Err(SetConfigError::Invalid(ConfigError::EcdsaKeyNameFixed {
+                current: "key_1".to_string(),
+                requested: "dfx_test_key".to_string(),
+            })),
+            "the address was derived under key_1 and cannot be re-derived under another"
+        );
+
+        // every other knob still moves, because the rule is about the name alone
+        let same_name = Config {
+            max_batch_items: 25,
+            ..key_1
+        };
+        assert_eq!(ensure_key_name_is_not_moving(&same_name), Ok(()));
+    });
+}
