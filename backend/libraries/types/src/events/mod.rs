@@ -14,7 +14,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 19;
+pub const EVENT_VARIANT_COUNT: usize = 20;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -215,6 +215,14 @@ pub enum EventType {
         #[n(1)]
         watcher: String,
     },
+    /// A waiting index entry the fold could not have produced was dropped. Only a
+    /// divergence has one, so this line is the repair's explanation: without it the fold
+    /// would stop being the fold of the log.
+    #[n(19)]
+    WaitingRepaired {
+        #[n(0)]
+        quote_hash: QuoteHash,
+    },
 }
 
 /// The user's answer to a paused swap. One byte in the preimage: Requote 0, Refund 1.
@@ -279,7 +287,8 @@ impl EventType {
             | EventType::RefundStarted { .. }
             | EventType::SwapDone { .. }
             | EventType::Frozen { .. }
-            | EventType::RolesChanged { .. } => None,
+            | EventType::RolesChanged { .. }
+            | EventType::WaitingRepaired { .. } => None,
         }
     }
 
@@ -444,6 +453,9 @@ impl EventType {
             }
             EventType::RolesChanged { quoter, watcher } => {
                 w.put_u16(18).put_text(quoter).put_text(watcher);
+            }
+            EventType::WaitingRepaired { quote_hash } => {
+                w.put_u16(19).put_hash(quote_hash.as_ref());
             }
         }
         w.finish()

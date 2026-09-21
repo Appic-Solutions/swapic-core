@@ -152,6 +152,16 @@ impl<S: Store> State<S> {
                 destination.fund(*amount)?;
                 Ok(())
             }
+            // the repair of a divergence, so it is admitted on what it repairs and not on
+            // the index: a swap that is not waiting for its user, or no swap at all. The
+            // entry it drops is in no log, so a replay never holds it, and a rule that read
+            // the index would refuse on replay the very line that explains the repair. An
+            // entry whose swap really is waiting is the index doing its job, and dropping it
+            // would strand the wait.
+            EventType::WaitingRepaired { quote_hash } => match self.store().swap(quote_hash) {
+                Some(swap) => swap.ensure_not_waiting(),
+                None => Ok(()),
+            },
             // always legal; named rather than matched by `_` so a new variant has to be
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
@@ -218,6 +228,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             amount,
             ..
         } => state.record_pocket_rebalanced(*from_chain, *to_chain, *amount),
+        EventType::WaitingRepaired { quote_hash } => state.record_waiting_repaired(quote_hash),
         // audit lines for deploy-time truth that lives in its own stable cell
         EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => {}
     }

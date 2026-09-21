@@ -108,6 +108,11 @@ pub enum EventType {
         quoter: String,
         watcher: String,
     },
+    /// A waiting index entry no event could have produced was dropped. Only a divergence
+    /// has one, so this line is the repair's explanation.
+    WaitingRepaired {
+        quote_hash: Hash32,
+    },
 }
 
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -299,6 +304,9 @@ impl From<types::EventType> for EventType {
                 amount: amount.into(),
             },
             Domain::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
+            Domain::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
+                quote_hash: quote_hash.into_bytes(),
+            },
         }
     }
 }
@@ -453,6 +461,9 @@ impl TryFrom<EventType> for types::EventType {
                 amount: amount(value)?,
             },
             EventType::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
+            EventType::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
+                quote_hash: QuoteHash::new(quote_hash),
+            },
         })
     }
 }

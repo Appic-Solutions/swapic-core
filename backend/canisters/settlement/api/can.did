@@ -124,6 +124,9 @@ type EventType = variant {
   DecisionRequired : record { quote_hash : blob; reason : text };
   // Principals as text, so the audit line reads without a decoder.
   RolesChanged : record { watcher : text; quoter : text };
+  // A waiting index entry no event could have produced was dropped. Only a divergence
+  // has one, so this line is the repair's explanation.
+  WaitingRepaired : record { quote_hash : blob };
   FeeAccrued : record { quote_hash : blob; amount : nat };
   TxConfirmed : record {
     attempt : nat32;

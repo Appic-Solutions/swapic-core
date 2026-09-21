@@ -432,24 +432,86 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
 
 /// The index is the queue, so an entry whose swap is not waiting any more is dropped by the
 /// pass that meets it: left in place it would hold a slot of every pass's cap for good. Only
-/// a fold no event could have produced has such an entry, so this is the sweep tidying up
-/// after a divergence, and the comparison the deep check makes is what judges the divergence.
+/// a fold no event could have produced has such an entry, and the drop is a logged event, so
+/// the repair is in the record the deep check reads rather than a silent edit of the fold.
 #[test]
-fn the_sweep_drops_an_index_entry_whose_swap_stopped_waiting() {
+fn the_sweep_repairs_an_index_entry_whose_swap_stopped_waiting_through_the_log() {
     on_fresh_memory(|| {
         append(funds(1));
+        let orphan = QuoteHash::new([9; 32]);
         // a swap that never waited, and an entry naming no swap at all
         StableStore(()).put_auto_refund_waiting(waiting_key(1, swap_id(1)));
-        StableStore(()).put_auto_refund_waiting(waiting_key(2, QuoteHash::new([9; 32])));
+        StableStore(()).put_auto_refund_waiting(waiting_key(2, orphan));
         assert!(!verify_replay(), "neither entry is a fold of the log");
+        let before = event_count();
 
         let swept = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
         assert_eq!((swept.stale, swept.refunds, swept.skipped), (2, 0, 0));
         assert!(read_state(|state| state.store().auto_refund_waiting()).is_empty());
+        assert_eq!(
+            events_page(before, 2)
+                .into_iter()
+                .map(|event| event.payload)
+                .collect::<Vec<_>>(),
+            vec![
+                EventType::WaitingRepaired {
+                    quote_hash: swap_id(1)
+                },
+                EventType::WaitingRepaired { quote_hash: orphan },
+            ],
+            "the pass wrote the repair down"
+        );
+        assert!(
+            verify_chain(),
+            "the repairs are links of the chain like every other event"
+        );
         assert!(
             verify_replay(),
-            "and with them gone the fold is the fold of the log again"
+            "and the fold is the fold of the log again, because the log explains the drop"
         );
+        assert!(
+            !deep_check_halts(),
+            "so the deep audit has nothing to halt on"
+        );
+
+        let again = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
+        assert_eq!(
+            (again.stale, again.skipped),
+            (0, 0),
+            "and there is nothing left to repair"
+        );
+    });
+}
+
+/// The repair is admitted on what it repairs, so it cannot be turned on a swap that really is
+/// waiting: the entry is the index doing its job, and dropping it would strand the wait.
+#[test]
+fn a_repair_is_refused_while_the_swap_really_waits() {
+    on_fresh_memory(|| {
+        let quote_hash = swap_id(2);
+        append(funds(2));
+        append(EventType::DecisionRequired {
+            quote_hash,
+            reason: "slippage".into(),
+        });
+        let indexed = read_state(|state| state.store().auto_refund_waiting());
+        assert_eq!(indexed.len(), 1, "the wait is indexed");
+        let before = event_count();
+
+        assert_eq!(
+            append_event_at(
+                EventType::WaitingRepaired { quote_hash },
+                Timestamp::from_nanos(2)
+            ),
+            Err(AppendError::Transition(TransitionError::WaitingForUser))
+        );
+        assert_eq!(event_count(), before, "and nothing was written");
+        assert_eq!(
+            read_state(|state| state.store().auto_refund_waiting()),
+            indexed,
+            "the entry is still there"
+        );
+        assert!(verify_replay());
     });
 }
 

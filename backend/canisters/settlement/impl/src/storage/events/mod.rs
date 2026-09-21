@@ -19,10 +19,9 @@ use types::{
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
-    // The log is the record and the four below are its fold. All five are private: every
-    // write to them but one goes through `append_event`, and the exception is
-    // `drop_stale_waiting` below, which only has something to do on a fold no event could
-    // have produced.
+    // The log is the record and the four below are its fold. All five are private, and
+    // every write to them goes through `append_event`: even the repair of a waiting entry
+    // no event could have produced is an event, so the fold has exactly one writer.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
     );
@@ -44,8 +43,8 @@ thread_local! {
         RefCell::new(StableBTreeSet::init(auto_refund_waiting_memory()));
 }
 
-/// The fold in stable memory. Only this module can build one, so the only writers of it are
-/// `append_event` and the one narrow exception `drop_stale_waiting` documents.
+/// The fold in stable memory. Only this module can build one, so `append_event` is its one
+/// and only writer.
 pub struct StableStore(());
 
 impl Store for StableStore {
@@ -88,6 +87,23 @@ impl Store for StableStore {
 
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
+    }
+
+    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash) {
+        // read the keys out before removing any: the set is borrowed for the walk
+        let doomed: Vec<WaitingKey> = AUTO_REFUND_WAITING.with(|waiting| {
+            waiting
+                .borrow()
+                .iter()
+                .filter(|key| key.quote_hash == *quote_hash)
+                .collect()
+        });
+        AUTO_REFUND_WAITING.with(|waiting| {
+            let mut waiting = waiting.borrow_mut();
+            for key in &doomed {
+                waiting.remove(key);
+            }
+        });
     }
 
     fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
@@ -273,15 +289,6 @@ pub fn append_event_at(
 /// Read-only view of the fold. There is deliberately no mutable twin.
 pub fn read_state<R>(f: impl FnOnce(&State<StableStore>) -> R) -> R {
     f(&State::new(StableStore(())))
-}
-
-/// Drops one entry from the auto-refund waiting index. The only write to the fold that does
-/// not go through `append_event`, and it is narrow on purpose: every transition that stops a
-/// wait removes the entry with it, so an entry whose swap is not waiting any more is a fold
-/// no event could have produced. Keeping the index to what it claims to hold is what keeps a
-/// bounded refund pass from spending its cap on entries no refund can ever reach.
-pub fn drop_stale_waiting(key: &WaitingKey) {
-    StableStore(()).remove_auto_refund_waiting(key);
 }
 
 /// Test-only: moves the fold's idea of the chain head off the log's, and touches the log

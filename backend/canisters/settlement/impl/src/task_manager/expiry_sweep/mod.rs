@@ -16,8 +16,10 @@ pub struct Sweep {
     /// timed-out swaps the pass stepped over: `quote_bytes` that did not parse, or an
     /// append the guard refused. Counted, never fatal, because the sweep must be total.
     pub skipped: usize,
-    /// index entries the pass dropped because their swap is not waiting any more. Only a
-    /// fold no event could have produced has any, and the pass tidies rather than trips.
+    /// index entries the pass repaired through a logged `WaitingRepaired`, because their
+    /// swap is not waiting any more. Only a fold no event could have produced has any, and
+    /// the pass tidies rather than trips. An entry whose repair the log refused stays in the
+    /// index for the next pass and is counted in `skipped`.
     pub stale: usize,
     /// whether either pass stopped at its cap with work still due, so the next tick has
     /// more to do. A pass is bounded; the timer is what makes it total.
@@ -51,14 +53,25 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
         config.max_refunds_per_sweep.as_usize(),
     );
     swept.more |= head.more;
-    swept.stale = head.stale.len();
     // the index is the queue, so an entry that is no longer work is dropped from it rather
-    // than stepped over: left in place it would hold a slot of every pass's cap for good
+    // than stepped over: left in place it would hold a slot of every pass's cap for good.
+    // The drop is a logged event like every other write to the fold, so the repair is in the
+    // record the deep audit compares against instead of quietly erasing what it would find
     for key in &head.stale {
-        events::drop_stale_waiting(key);
+        let repaired = events::append_event_at(
+            EventType::WaitingRepaired {
+                quote_hash: key.quote_hash,
+            },
+            now,
+        );
+        match repaired {
+            Ok(_) => swept.stale += 1,
+            // an entry the log refuses to repair stays for the next pass, like a refund
+            Err(_) => swept.skipped += 1,
+        }
     }
     let (due, unreadable) = due_refunds(head.waiting, now, config.decision_timeout);
-    swept.skipped = unreadable;
+    swept.skipped += unreadable;
     // decided first, then appended, so every refund of the pass is judged against the same
     // fold and one append cannot change which swaps the pass sees
     for quote_hash in due {

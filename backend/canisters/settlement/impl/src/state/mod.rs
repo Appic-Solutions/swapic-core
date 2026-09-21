@@ -25,6 +25,11 @@ pub trait Store {
     /// and nothing in it is work the timer can do.
     fn put_auto_refund_waiting(&mut self, key: WaitingKey);
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
+    /// Drops every indexed wait naming `quote_hash`, whatever instant its key carries. The
+    /// index is keyed by wait first, so a swap is found by a walk and not by a seek: only
+    /// the repair of a divergence needs this, and a diverged entry may carry an instant its
+    /// swap never had.
+    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash);
     /// Every indexed wait, longest wait first.
     fn auto_refund_waiting(&self) -> Vec<WaitingKey>;
     /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
@@ -87,6 +92,18 @@ impl Store for MemoryStore {
 
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
         self.auto_refund_waiting.remove(key);
+    }
+
+    fn remove_auto_refund_waiting_for(&mut self, quote_hash: &QuoteHash) {
+        let doomed: Vec<WaitingKey> = self
+            .auto_refund_waiting
+            .iter()
+            .filter(|key| key.quote_hash == *quote_hash)
+            .copied()
+            .collect();
+        for key in &doomed {
+            self.auto_refund_waiting.remove(key);
+        }
     }
 
     fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
@@ -264,6 +281,13 @@ impl<S: Store> State<S> {
                 quote_hash: *quote_hash,
             });
         }
+    }
+
+    /// Drops the waiting index entries of a swap that is not waiting for its user, which is
+    /// a fold no event could have produced. Found by swap id rather than by key, because a
+    /// diverged entry may carry an instant the swap never waited since.
+    fn record_waiting_repaired(&mut self, quote_hash: &QuoteHash) {
+        self.store.remove_auto_refund_waiting_for(quote_hash);
     }
 
     fn record_decision_made(&mut self, quote_hash: &QuoteHash, choice: Choice) {

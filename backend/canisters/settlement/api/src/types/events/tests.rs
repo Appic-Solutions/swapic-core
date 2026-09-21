@@ -97,6 +97,9 @@ fn samples() -> Vec<EventType> {
             quoter: "aaaaa-aa".into(),
             watcher: "2vxsx-fae".into(),
         },
+        EventType::WaitingRepaired {
+            quote_hash: [18; 32],
+        },
     ]
 }
 
