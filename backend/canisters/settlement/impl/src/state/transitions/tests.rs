@@ -1,8 +1,8 @@
 use super::*;
 use types::events::Choice;
 use types::{
-    Attempt, BlockNumber, ChainId, EventHash, EventIndex, LedgerMeta, Pocket, PocketError,
-    QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TxHash,
+    Attempt, BlockNumber, ChainId, EventHash, EventIndex, GasMode, LedgerMeta, Pocket, PocketError,
+    QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash, UnixSeconds,
 };
 
 type HeapState = State<MemoryStore>;
@@ -10,6 +10,7 @@ type HeapState = State<MemoryStore>;
 const BASE: ChainId = ChainId::BASE;
 const ARBITRUM: ChainId = ChainId::ARBITRUM;
 
+/// An id no quote hashes to: what an event about a swap the log never funded carries.
 fn qh(byte: u8) -> QuoteHash {
     QuoteHash::new([byte; 32])
 }
@@ -18,14 +19,44 @@ fn amount(value: u128) -> TokenAmount {
     TokenAmount::from(value)
 }
 
-fn funds(qh: QuoteHash) -> EventType {
+/// A quote the `FundsReceived` guard accepts, one per nonce. Shared with the other test
+/// modules of this crate: every swap starts with a `FundsReceived` whose bytes hash to its
+/// id, so every fixture needs a real quote behind its swap.
+pub(crate) fn quote(nonce: u64) -> Quote {
+    Quote {
+        version: 1,
+        src_chain: BASE,
+        src_token: "usdc".parse().unwrap(),
+        amount_in: amount(100),
+        dst_chain: ARBITRUM,
+        dst_token: "usdc".parse().unwrap(),
+        expected_out: amount(99),
+        min_out: amount(98),
+        dst_address: "0xuser".parse().unwrap(),
+        refund_address: None,
+        auto_refund: true,
+        gas_mode: GasMode::Gasless,
+        rail: Rail::CctpV2Fast,
+        expires_at: UnixSeconds::new(1_800_000_000),
+        nonce,
+    }
+}
+
+/// The swap id of the quote at `nonce`.
+pub(crate) fn swap_id(nonce: u64) -> QuoteHash {
+    quote(nonce).hash().expect("a fixture quote has an id")
+}
+
+/// The event that funds the swap of the quote at `nonce`.
+pub(crate) fn funds(nonce: u64) -> EventType {
+    let q = quote(nonce);
     EventType::FundsReceived {
-        quote_hash: qh,
-        quote_bytes: vec![1],
-        chain_id: BASE,
-        token: "usdc".parse().unwrap(),
-        amount: amount(100),
-        tx_ref: "0xabc".into(),
+        quote_hash: swap_id(nonce),
+        quote_bytes: q.canonical_bytes().expect("a fixture quote has a preimage"),
+        chain_id: q.src_chain,
+        token: q.src_token,
+        amount: q.amount_in,
+        tx_ref: format!("0xabc{nonce}"),
     }
 }
 
@@ -81,9 +112,9 @@ fn pocket(state: &HeapState, chain_id: ChainId) -> Pocket {
 
 #[test]
 fn happy_path_reaches_done() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::PaidInStable {
@@ -103,8 +134,8 @@ fn happy_path_reaches_done() {
 
 #[test]
 fn cannot_sign_next_attempt_while_one_is_open() {
-    let qh = qh(1);
-    let mut state = fold(vec![funds(qh), signed(qh, 1)]);
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1), signed(qh, 1)]);
     assert_eq!(
         state.check(&signed(qh, 2)),
         Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
@@ -117,10 +148,10 @@ fn cannot_sign_next_attempt_while_one_is_open() {
 
 #[test]
 fn attempt_numbers_are_strictly_sequential() {
-    let state = fold(vec![funds(qh(1))]);
+    let state = fold(vec![funds(1)]);
     // skips 1
     assert_eq!(
-        state.check(&signed(qh(1), 2)),
+        state.check(&signed(swap_id(1), 2)),
         Err(TransitionError::AttemptOutOfSequence {
             attempt: Attempt::new(2),
             expected: Some(Attempt::FIRST)
@@ -130,9 +161,9 @@ fn attempt_numbers_are_strictly_sequential() {
 
 #[test]
 fn closed_swap_rejects_new_signatures() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         EventType::Frozen {
             quote_hash: qh,
             reason: "sanctions".into(),
@@ -146,20 +177,75 @@ fn closed_swap_rejects_new_signatures() {
 
 #[test]
 fn duplicate_funds_received_rejected() {
-    let state = fold(vec![funds(qh(1))]);
+    let state = fold(vec![funds(1)]);
     assert_eq!(
-        state.check(&funds(qh(1))),
-        Err(TransitionError::SwapExists(qh(1)))
+        state.check(&funds(1)),
+        Err(TransitionError::SwapExists(swap_id(1)))
     );
+}
+
+/// The swap id and the preimage recorded with it must bind, because the expiry sweep reads
+/// `auto_refund` out of those bytes: a mismatched pair would refund a user who asked to be
+/// consulted, or leave a swap waiting for an answer nobody will give.
+#[test]
+fn funds_received_refuses_a_swap_id_its_quote_bytes_do_not_hash_to() {
+    let state = HeapState::default();
+    let EventType::FundsReceived {
+        quote_bytes,
+        chain_id,
+        token,
+        amount,
+        tx_ref,
+        ..
+    } = funds(1)
+    else {
+        panic!("the fixture is a FundsReceived");
+    };
+    // the bytes of quote 1 under the id of quote 2
+    let swapped = EventType::FundsReceived {
+        quote_hash: swap_id(2),
+        quote_bytes,
+        chain_id,
+        token,
+        amount,
+        tx_ref,
+    };
+    assert_eq!(
+        state.check(&swapped),
+        Err(TransitionError::QuoteHashMismatch {
+            declared: swap_id(2),
+            computed: swap_id(1)
+        })
+    );
+    state.check(&funds(1)).expect("the matching pair passes");
+}
+
+/// Bytes the canister cannot read are no quote at all: the refund policy would have nothing
+/// to read out of them, and the id could not be checked against them either.
+#[test]
+fn funds_received_refuses_quote_bytes_that_are_not_a_quote() {
+    let state = HeapState::default();
+    let garbled = EventType::FundsReceived {
+        quote_hash: swap_id(1),
+        quote_bytes: vec![0xff; 9],
+        chain_id: BASE,
+        token: "usdc".parse().unwrap(),
+        amount: amount(100),
+        tx_ref: "0xabc".into(),
+    };
+    assert!(matches!(
+        state.check(&garbled),
+        Err(TransitionError::UnparseableQuote(_))
+    ));
 }
 
 #[test]
 fn replay_is_deterministic() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let events: Vec<Event> = {
         let mut state = HeapState::default();
         let mut out = vec![];
-        for e in vec![funds(qh), signed(qh, 1), confirmed(qh, 1)] {
+        for e in vec![funds(1), signed(qh, 1), confirmed(qh, 1)] {
             let env = next_event(&state, 7, e);
             apply_state_transition(&mut state, &env);
             out.push(env);
@@ -179,9 +265,9 @@ fn pocket_reserve_moves_available_to_reserved() {
             chain_id: BASE,
             amount: amount(1000),
         },
-        funds(qh(1)),
+        funds(1),
         EventType::PocketReserved {
-            quote_hash: qh(1),
+            quote_hash: swap_id(1),
             chain_id: BASE,
             amount: amount(400),
         },
@@ -220,8 +306,8 @@ fn paid(qh: QuoteHash, value: u128) -> EventType {
 // without the amount_paid check the second event would overwrite the first amount.
 #[test]
 fn second_paid_in_stable_rejected() {
-    let qh = qh(1);
-    let mut events = vec![funds(qh), signed(qh, 1), confirmed(qh, 1), paid(qh, 99)];
+    let qh = swap_id(1);
+    let mut events = vec![funds(1), signed(qh, 1), confirmed(qh, 1), paid(qh, 99)];
     events.extend(decide(qh, Choice::Requote));
     let state = fold(events);
     assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
@@ -236,8 +322,8 @@ fn second_paid_in_stable_rejected() {
 /// door to a second payment that overwrites the first.
 #[test]
 fn a_zero_payment_still_refuses_a_second_after_a_requote() {
-    let qh = qh(1);
-    let mut events = vec![funds(qh), signed(qh, 1), confirmed(qh, 1), paid(qh, 0)];
+    let qh = swap_id(1);
+    let mut events = vec![funds(1), signed(qh, 1), confirmed(qh, 1), paid(qh, 0)];
     events.extend(decide(qh, Choice::Requote));
     let state = fold(events);
     assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
@@ -270,8 +356,8 @@ fn check_refuses_an_amount_no_canonical_field_holds() {
 
 #[test]
 fn waiting_for_user_blocks_signing() {
-    let qh = qh(1);
-    let mut state = fold(vec![funds(qh), signed(qh, 1), confirmed(qh, 1), ask(qh)]);
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1), signed(qh, 1), confirmed(qh, 1), ask(qh)]);
     assert_eq!(
         state.check(&signed(qh, 2)),
         Err(TransitionError::WaitingForUser)
@@ -288,9 +374,9 @@ fn waiting_for_user_blocks_signing() {
 
 #[test]
 fn done_swap_rejects_freeze() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::SwapDone { quote_hash: qh },
@@ -327,8 +413,8 @@ fn fee_needs_a_swap_but_config_and_funding_do_not() {
 
 #[test]
 fn tx_failed_closes_the_attempt() {
-    let qh = qh(1);
-    let state = fold(vec![funds(qh), signed(qh, 1), failed(qh, 1)]);
+    let qh = swap_id(1);
+    let state = fold(vec![funds(1), signed(qh, 1), failed(qh, 1)]);
     assert_eq!(swap(&state, qh).open_attempt, None);
     assert_eq!(swap(&state, qh).last_attempt, Some(Attempt::FIRST));
     // a failed attempt still counts, so the retry is number 2
@@ -341,9 +427,9 @@ fn tx_failed_closes_the_attempt() {
 
 #[test]
 fn refund_path_reaches_refunded() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         EventType::RefundStarted {
             quote_hash: qh,
             reason: "timeout".into(),
@@ -368,13 +454,13 @@ fn refund_path_reaches_refunded() {
 
 #[test]
 fn pocket_release_returns_reserved_to_available() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
         EventType::PocketFunded {
             chain_id: BASE,
             amount: amount(1000),
         },
-        funds(qh),
+        funds(1),
         EventType::PocketReserved {
             quote_hash: qh,
             chain_id: BASE,
@@ -414,9 +500,9 @@ fn ask(qh: QuoteHash) -> EventType {
 // keep seeing a stale deadline on a swap that is no longer waiting for anyone.
 #[test]
 fn refund_stops_the_waiting_clock() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         ask(qh),
         EventType::RefundStarted {
             quote_hash: qh,
@@ -429,9 +515,9 @@ fn refund_stops_the_waiting_clock() {
 
 #[test]
 fn freeze_stops_the_waiting_clock() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
-        funds(qh),
+        funds(1),
         ask(qh),
         EventType::Frozen {
             quote_hash: qh,
@@ -444,16 +530,16 @@ fn freeze_stops_the_waiting_clock() {
 
 #[test]
 fn second_decision_request_rejected() {
-    let qh = qh(1);
-    let state = fold(vec![funds(qh), ask(qh)]);
+    let qh = swap_id(1);
+    let state = fold(vec![funds(1), ask(qh)]);
     // re-asking would silently re-arm the deadline
     assert_eq!(state.check(&ask(qh)), Err(TransitionError::WaitingForUser));
 }
 
 #[test]
 fn decision_to_refund_reaches_refunding() {
-    let qh = qh(1);
-    let mut events = vec![funds(qh)];
+    let qh = swap_id(1);
+    let mut events = vec![funds(1)];
     events.extend(decide(qh, Choice::Refund));
     let state = fold(events);
     assert_eq!(swap(&state, qh).status, SwapStatus::Refunding);
@@ -463,13 +549,13 @@ fn decision_to_refund_reaches_refunding() {
 // Unlike a release, a spend does not return the value: the pocket total drops.
 #[test]
 fn pocket_spend_debits_reserved_without_returning_it() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let state = fold(vec![
         EventType::PocketFunded {
             chain_id: BASE,
             amount: amount(1000),
         },
-        funds(qh),
+        funds(1),
         EventType::PocketReserved {
             quote_hash: qh,
             chain_id: BASE,
@@ -559,8 +645,8 @@ fn pocket_rebalance_moves_available_between_chains() {
 // by hand with a distinctive time instead of fold's constant 1.
 #[test]
 fn decision_sets_then_clears_the_waiting_clock() {
-    let qh = qh(1);
-    let mut state = fold(vec![funds(qh)]);
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1)]);
     let pause = ask(qh);
     state.check(&pause).expect("guard admits pause");
     let env = next_event(&state, 777, pause);
@@ -606,9 +692,9 @@ fn a_rebalance_onto_the_same_chain_nets_to_nothing() {
 /// the balances are placed there directly.
 #[test]
 fn the_guard_refuses_what_would_overflow_the_fold() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let mut store = MemoryStore::default();
-    store.put_swap(qh, swap(&fold(vec![funds(qh)]), qh));
+    store.put_swap(qh, swap(&fold(vec![funds(1)]), qh));
     store.put_meta(LedgerMeta {
         fees_accrued: TokenAmount::MAX,
         ..LedgerMeta::default()
@@ -639,7 +725,7 @@ fn the_guard_refuses_what_would_overflow_the_fold() {
 /// The two stores a fold can land in agree event for event, so the audit can compare them.
 #[test]
 fn replay_rebuilds_exactly_the_incremental_state() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let mut state = HeapState::default();
     let mut log = vec![];
     for payload in [
@@ -647,7 +733,7 @@ fn replay_rebuilds_exactly_the_incremental_state() {
             chain_id: BASE,
             amount: amount(1000),
         },
-        funds(qh),
+        funds(1),
         signed(qh, 1),
         ask(qh),
     ] {
@@ -663,10 +749,10 @@ fn replay_rebuilds_exactly_the_incremental_state() {
 /// broke is an `Err` naming the event, never a panic in the fold.
 #[test]
 fn replay_refuses_a_log_append_event_could_not_have_written() {
-    let qh = qh(1);
+    let qh = swap_id(1);
     let mut state = HeapState::default();
     let mut log = vec![];
-    for payload in [funds(qh), signed(qh, 1)] {
+    for payload in [funds(1), signed(qh, 1)] {
         let event = next_event(&state, 1, payload);
         apply_state_transition(&mut state, &event);
         log.push(event);

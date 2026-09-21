@@ -257,6 +257,8 @@ type TransitionError = variant {
   AttemptStillOpen : nat32;
   UnknownSwap : blob;
   NotExecuting : SwapStatus;
+  QuoteHashMismatch : record { computed : blob; declared : blob };
+  UnparseableQuote : QuoteError;
   SwapClosed : SwapStatus;
   FeesOverflow;
   AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };

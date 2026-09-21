@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::transitions::tests::{funds, swap_id};
 use crate::state::transitions::ReplayError;
 use crate::state::MemoryStore;
 use crate::storage::halt::is_halted;
@@ -34,21 +35,14 @@ fn fold_both(payloads: Vec<EventType>) -> (State<StableStore>, State<MemoryStore
 /// fold of the same events are the same fold: what the replay audit relies on.
 #[test]
 fn the_stable_fold_matches_the_heap_fold() {
-    let quote = QuoteHash::new([7; 32]);
+    let quote = swap_id(7);
     let amount = |value: u32| TokenAmount::from(value);
     let (stable, heap) = fold_both(vec![
         EventType::PocketFunded {
             chain_id: ChainId::BASE,
             amount: amount(1_000),
         },
-        EventType::FundsReceived {
-            quote_hash: quote,
-            quote_bytes: vec![0xde, 0xad],
-            chain_id: ChainId::BASE,
-            token: "USDC".parse().unwrap(),
-            amount: amount(100),
-            tx_ref: "0xfeed".into(),
-        },
+        funds(7),
         EventType::PocketReserved {
             quote_hash: quote,
             chain_id: ChainId::BASE,
@@ -71,23 +65,54 @@ fn the_stable_fold_matches_the_heap_fold() {
     );
 }
 
-fn funds(quote_hash: QuoteHash) -> EventType {
-    EventType::FundsReceived {
-        quote_hash,
-        quote_bytes: vec![],
-        chain_id: ChainId::BASE,
-        token: "USDC".parse().unwrap(),
-        amount: TokenAmount::from(1_u32),
-        tx_ref: "0x".into(),
-    }
-}
-
 fn append(payload: EventType) {
     append_event_at(payload, Timestamp::from_nanos(1)).expect("the stable fold admits it");
 }
 
 fn log_replay() -> Result<State<MemoryStore>, ReplayError> {
     EVENTS.with(|e| replay(e.borrow().iter()))
+}
+
+/// A refused append writes nothing: no log entry, no swap, no moved fold. The pair the
+/// guard binds is the one the expiry sweep reads its refund policy out of.
+#[test]
+fn an_append_of_a_mismatched_quote_pair_writes_nothing() {
+    on_fresh_memory(|| {
+        let EventType::FundsReceived {
+            quote_bytes,
+            chain_id,
+            token,
+            amount,
+            tx_ref,
+            ..
+        } = funds(1)
+        else {
+            panic!("the fixture is a FundsReceived");
+        };
+        let swapped = EventType::FundsReceived {
+            quote_hash: swap_id(2),
+            quote_bytes,
+            chain_id,
+            token,
+            amount,
+            tx_ref,
+        };
+        assert_eq!(
+            append_event_at(swapped, Timestamp::from_nanos(1)),
+            Err(AppendError::Transition(
+                TransitionError::QuoteHashMismatch {
+                    declared: swap_id(2),
+                    computed: swap_id(1)
+                }
+            ))
+        );
+        assert_eq!(event_count(), 0);
+        assert_eq!(read_state(|state| state.store().swap(&swap_id(2))), None);
+        assert_eq!(ensure_fold_in_step(), Ok(()));
+
+        append(funds(1));
+        assert_eq!(event_count(), 1, "and the matching pair still lands");
+    });
 }
 
 /// A swap sits in the stable fold that no event created, and the log then builds on it.
@@ -135,7 +160,7 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
 #[test]
 fn replay_audit_halts_on_a_pocket_balance_no_event_produced() {
     on_fresh_memory(|| {
-        let quote = QuoteHash::new([8; 32]);
+        let quote = swap_id(8);
         StableStore(()).put_pocket(
             ChainId::BASE,
             Pocket {
@@ -143,7 +168,7 @@ fn replay_audit_halts_on_a_pocket_balance_no_event_produced() {
                 reserved: TokenAmount::from(10_u32),
             },
         );
-        append(funds(quote));
+        append(funds(8));
         append(EventType::PocketSpent {
             quote_hash: quote,
             chain_id: ChainId::BASE,
@@ -168,8 +193,8 @@ fn replay_audit_halts_on_a_pocket_balance_no_event_produced() {
 #[test]
 fn replay_audit_halts_on_a_fold_that_replays_cleanly_but_differs() {
     on_fresh_memory(|| {
-        let quote = QuoteHash::new([6; 32]);
-        append(funds(quote));
+        let quote = swap_id(6);
+        append(funds(6));
         let mut swap = StableStore(()).swap(&quote).unwrap();
         swap.status = SwapStatus::Frozen;
         StableStore(()).put_swap(quote, swap);
@@ -207,7 +232,7 @@ fn waiting_key(nanos: u64, quote_hash: QuoteHash) -> WaitingKey {
 #[test]
 fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
     on_fresh_memory(|| {
-        let [a, b, c, d] = [1, 2, 3, 4].map(|byte| QuoteHash::new([byte; 32]));
+        let [a, b, c, d] = [1, 2, 3, 4].map(swap_id);
         let ask = |quote_hash| EventType::DecisionRequired {
             quote_hash,
             reason: "slippage".into(),
@@ -222,10 +247,10 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
             reason: "sanctions".into(),
         };
         let steps = vec![
-            (1, funds(a)),
-            (2, funds(b)),
-            (3, funds(c)),
-            (4, funds(d)),
+            (1, funds(1)),
+            (2, funds(2)),
+            (3, funds(3)),
+            (4, funds(4)),
             (10, ask(a)),
             // two waits that begin at the same instant are two keys
             (11, ask(b)),
@@ -271,8 +296,8 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
 #[test]
 fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
     on_fresh_memory(|| {
-        let quote = QuoteHash::new([5; 32]);
-        append(funds(quote));
+        let quote = swap_id(5);
+        append(funds(5));
         assert!(verify_replay());
         StableStore(()).put_waiting(waiting_key(7, quote));
 
@@ -288,8 +313,8 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
 #[test]
 fn the_expiry_sweep_reads_the_index_and_not_the_swaps() {
     on_fresh_memory(|| {
-        let quote_hash = QuoteHash::new([4; 32]);
-        append(funds(quote_hash));
+        let quote_hash = swap_id(4);
+        append(funds(4));
         let auto_refund = Quote {
             version: 1,
             src_chain: ChainId::BASE,
@@ -349,8 +374,8 @@ fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
         );
         StableStore(()).put_meta(zero);
 
-        append(funds(QuoteHash::new([1; 32])));
-        append(funds(QuoteHash::new([2; 32])));
+        append(funds(1));
+        append(funds(2));
         assert_eq!(ensure_fold_in_step(), Ok(()));
         let meta = StableStore(()).meta();
 
@@ -366,7 +391,7 @@ fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
             })
         );
         assert_eq!(
-            append_event_at(funds(QuoteHash::new([3; 32])), Timestamp::from_nanos(1)),
+            append_event_at(funds(3), Timestamp::from_nanos(1)),
             Err(AppendError::IndexMismatch {
                 log_len: 2,
                 sealed: EventIndex::new(3)
@@ -385,7 +410,7 @@ fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
             })
         );
         assert!(matches!(
-            append_event_at(funds(QuoteHash::new([3; 32])), Timestamp::from_nanos(1)),
+            append_event_at(funds(3), Timestamp::from_nanos(1)),
             Err(AppendError::ChainDiverged { .. })
         ));
         assert_eq!(event_count(), 2, "a refused append writes nothing");

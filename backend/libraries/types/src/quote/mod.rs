@@ -137,6 +137,13 @@ impl QuoteError {
     }
 }
 
+/// The swap id of a canonical preimage: sha256 over exactly those bytes. Parsing a preimage
+/// and encoding it again gives the same bytes back, so a stored preimage is checked against
+/// the id it was recorded under without being re-encoded, and without a failure case.
+pub fn quote_hash_of(preimage: &[u8]) -> QuoteHash {
+    QuoteHash::new(sha2::Sha256::digest(preimage).into())
+}
+
 impl Quote {
     /// What a quote must satisfy before the canister holds on to it. A valid quote always
     /// has a canonical preimage.
@@ -222,9 +229,7 @@ impl Quote {
     /// The swap id: sha256 over the canonical preimage and nothing else. A quote with no
     /// preimage has no id.
     pub fn hash(&self) -> Result<QuoteHash, CanonicalError> {
-        Ok(QuoteHash::new(
-            sha2::Sha256::digest(self.canonical_bytes()?).into(),
-        ))
+        Ok(quote_hash_of(&self.canonical_bytes()?))
     }
 
     /// Reads a canonical preimage back. Strict: every byte must be one the writer could

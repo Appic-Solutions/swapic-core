@@ -5,6 +5,7 @@ use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{Attempt, Timestamp, TokenAmount};
+use crate::quote::QuoteError;
 use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
 use std::borrow::Cow;
@@ -112,6 +113,13 @@ pub enum TransitionError {
     FeesOverflow,
     #[error("amount {0} is above u128::MAX, which no event can carry")]
     AmountOutOfRange(TokenAmount),
+    #[error("quote_bytes are not a quote this canister reads: {0}")]
+    UnparseableQuote(#[from] QuoteError),
+    #[error("quote_bytes hash to {computed}, and the event carries {declared}")]
+    QuoteHashMismatch {
+        declared: QuoteHash,
+        computed: QuoteHash,
+    },
     #[error(transparent)]
     Pocket(#[from] PocketError),
 }

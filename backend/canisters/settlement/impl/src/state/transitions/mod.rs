@@ -1,7 +1,8 @@
 use crate::state::{MemoryStore, State, Store};
 use thiserror::Error;
 use types::events::{Event, EventType};
-use types::{EventHash, EventIndex, TransitionError};
+use types::quote::quote_hash_of;
+use types::{EventHash, EventIndex, Quote, TransitionError};
 
 impl<S: Store> State<S> {
     /// Every rule that can refuse an event. The match is exhaustive with no wildcard arm,
@@ -16,10 +17,28 @@ impl<S: Store> State<S> {
             return Err(TransitionError::AmountOutOfRange(amount));
         }
         match event {
-            EventType::FundsReceived { quote_hash, .. } => match self.store().swap(quote_hash) {
-                Some(_) => Err(TransitionError::SwapExists(*quote_hash)),
-                None => Ok(()),
-            },
+            // the swap id must be the hash of the preimage recorded with it: the sweep reads
+            // `auto_refund` out of those bytes to decide refund policy, so a pair that does
+            // not bind would refund a user who asked to be consulted, or leave a swap
+            // waiting forever
+            EventType::FundsReceived {
+                quote_hash,
+                quote_bytes,
+                ..
+            } => {
+                if self.store().swap(quote_hash).is_some() {
+                    return Err(TransitionError::SwapExists(*quote_hash));
+                }
+                Quote::parse(quote_bytes)?;
+                let computed = quote_hash_of(quote_bytes);
+                if computed != *quote_hash {
+                    return Err(TransitionError::QuoteHashMismatch {
+                        declared: *quote_hash,
+                        computed,
+                    });
+                }
+                Ok(())
+            }
             // the sign-before-send law: one open attempt at a time, numbered without gaps,
             // and a paused swap moves nothing until the user answers
             EventType::TxSigned {
@@ -256,4 +275,4 @@ pub fn replay(events: impl IntoIterator<Item = Event>) -> Result<State<MemorySto
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

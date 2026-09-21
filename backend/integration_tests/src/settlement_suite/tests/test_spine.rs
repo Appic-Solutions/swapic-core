@@ -5,12 +5,43 @@ use crate::wasms;
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, GuardError, TestAppendError};
-use settlement_api::types::events::{Event, EventType};
+use settlement_api::types::events::{Event, EventType, Hash32};
 use settlement_api::types::swap::TransitionError;
+use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
-const QUOTE: [u8; 32] = [7; 32];
+/// The quote the spine's swap is for. The `FundsReceived` guard binds the swap id to the
+/// preimage recorded with it, so the spine carries a real quote and not a placeholder.
+fn quote() -> types::Quote {
+    types::Quote {
+        version: 1,
+        src_chain: ChainId::BASE,
+        src_token: "USDC".parse().unwrap(),
+        amount_in: TokenAmount::from(1_000_u32),
+        dst_chain: ChainId::ARBITRUM,
+        dst_token: "USDC".parse().unwrap(),
+        expected_out: TokenAmount::from(999_u32),
+        min_out: TokenAmount::from(990_u32),
+        dst_address: "0xuser".parse().unwrap(),
+        refund_address: None,
+        auto_refund: true,
+        gas_mode: GasMode::Gasless,
+        rail: Rail::CctpV2Fast,
+        expires_at: UnixSeconds::new(1_800_000_000),
+        nonce: 7,
+    }
+}
+
+/// The swap id every event of the spine names: the hash of the quote's preimage.
+fn quote_hash() -> Hash32 {
+    quote()
+        .hash()
+        .expect("a valid quote has an id")
+        .into_bytes()
+}
 
 fn swap_sequence() -> Vec<EventType> {
+    let quote = quote();
+    let swap_id = quote_hash();
     vec![
         EventType::PocketFunded {
             chain_id: 8453,
@@ -18,33 +49,37 @@ fn swap_sequence() -> Vec<EventType> {
         },
         // the first event carrying blob fields through stable storage
         EventType::FundsReceived {
-            quote_hash: QUOTE,
-            quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
-            chain_id: 8453,
-            token: "USDC".into(),
-            amount: Nat::from(1000_u64),
+            quote_hash: swap_id,
+            quote_bytes: quote
+                .canonical_bytes()
+                .expect("a valid quote has a preimage"),
+            chain_id: quote.src_chain.get(),
+            token: quote.src_token.to_string(),
+            amount: quote.amount_in.into(),
             tx_ref: "0xfeed".into(),
         },
         EventType::TxSigned {
-            quote_hash: QUOTE,
+            quote_hash: swap_id,
             attempt: 1,
             chain_id: 8453,
             tx_hash: [1; 32],
             raw_tx: vec![0x02, 0xf8, 0x6b],
         },
         EventType::TxConfirmed {
-            quote_hash: QUOTE,
+            quote_hash: swap_id,
             attempt: 1,
             chain_id: 8453,
             tx_hash: [1; 32],
             block: 19_000_000,
         },
         EventType::PaidInStable {
-            quote_hash: QUOTE,
+            quote_hash: swap_id,
             chain_id: 42161,
             amount: Nat::from(999_u64),
         },
-        EventType::SwapDone { quote_hash: QUOTE },
+        EventType::SwapDone {
+            quote_hash: swap_id,
+        },
     ]
 }
 
@@ -85,7 +120,9 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     let err = append(&pic, canister, admin, dup).expect_err("guard rejects");
     assert_eq!(
         err,
-        TestAppendError::Append(AppendError::Transition(TransitionError::SwapExists(QUOTE))),
+        TestAppendError::Append(AppendError::Transition(TransitionError::SwapExists(
+            quote_hash()
+        ))),
         "the swap already has funds"
     );
     assert_eq!(
@@ -111,7 +148,7 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
 
-    let swap = get_swap(&pic, canister, admin, QUOTE).expect("the swap exists");
+    let swap = get_swap(&pic, canister, admin, quote_hash()).expect("the swap exists");
 
     pic.upgrade_canister(
         canister,
@@ -122,7 +159,7 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     .unwrap();
 
     assert_eq!(
-        get_swap(&pic, canister, admin, QUOTE),
+        get_swap(&pic, canister, admin, quote_hash()),
         Some(swap),
         "the fold is stable memory, so it comes through the upgrade without a replay"
     );

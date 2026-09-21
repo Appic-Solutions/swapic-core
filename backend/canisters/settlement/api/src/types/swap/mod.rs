@@ -1,4 +1,5 @@
 use crate::types::events::Hash32;
+use crate::types::quote::QuoteError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 
@@ -83,6 +84,8 @@ pub enum TransitionError {
     NotInFlight(SwapStatus),
     FeesOverflow,
     AmountOutOfRange(Nat),
+    UnparseableQuote(QuoteError),
+    QuoteHashMismatch { declared: Hash32, computed: Hash32 },
     Pocket(PocketError),
 }
 
@@ -117,6 +120,11 @@ impl From<types::TransitionError> for TransitionError {
             Domain::NotInFlight(status) => Self::NotInFlight(status.into()),
             Domain::FeesOverflow => Self::FeesOverflow,
             Domain::AmountOutOfRange(amount) => Self::AmountOutOfRange(amount.into()),
+            Domain::UnparseableQuote(error) => Self::UnparseableQuote(error.into()),
+            Domain::QuoteHashMismatch { declared, computed } => Self::QuoteHashMismatch {
+                declared: declared.into_bytes(),
+                computed: computed.into_bytes(),
+            },
             Domain::Pocket(error) => Self::Pocket(error.into()),
         }
     }
