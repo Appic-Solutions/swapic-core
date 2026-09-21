@@ -53,3 +53,25 @@ fn an_rpc_url_never_prints_its_secret() {
 fn the_redaction_placeholder_is_not_an_rpc_url() {
     assert_eq!(REDACTED.parse::<RpcUrl>(), Err(RedactedRpcUrl));
 }
+
+/// The bound is the type's, not the parser's: text read back from storage or a fixture is
+/// held to it too, so nothing over it can exist as an `Address` or a `TokenId` at all.
+#[test]
+fn storage_holds_text_to_the_same_bound_as_parsing() {
+    let at_cap = minicbor::to_vec("a".repeat(MAX_TEXT_BYTES)).unwrap();
+    assert_eq!(
+        minicbor::decode::<Address>(&at_cap).unwrap(),
+        "a".repeat(MAX_TEXT_BYTES).parse::<Address>().unwrap()
+    );
+    let over = minicbor::to_vec("a".repeat(MAX_TEXT_BYTES + 1)).unwrap();
+    let err = minicbor::decode::<TokenId>(&over).unwrap_err();
+    assert!(
+        err.to_string().contains("257 bytes, above the cap of 256"),
+        "{err}"
+    );
+    assert!(minicbor::decode::<Address>(&over).is_err());
+    // and what the type writes, it reads
+    let token: TokenId = "USDC".parse().unwrap();
+    let bytes = minicbor::to_vec(&token).unwrap();
+    assert_eq!(minicbor::decode::<TokenId>(&bytes).unwrap(), token);
+}

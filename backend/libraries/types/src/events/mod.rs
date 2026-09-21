@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub(crate) mod tests;
 
-use crate::address::{Address, TokenId, MAX_TEXT_BYTES};
+use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
 use crate::hash::{EventHash, QuoteHash, TxHash};
@@ -263,6 +263,13 @@ pub enum EventError {
     AmountTooLarge { field: &'static str },
     #[error("{field} is {len} bytes, above the cap of {MAX_TEXT_BYTES}")]
     TextTooLong { field: &'static str, len: usize },
+}
+
+impl EventError {
+    /// Names `field` in a text length failure.
+    pub fn text_too_long(field: &'static str) -> impl FnOnce(TextTooLong) -> Self {
+        move |TextTooLong { len }| Self::TextTooLong { field, len }
+    }
 }
 
 impl EventType {

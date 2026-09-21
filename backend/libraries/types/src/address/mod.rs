@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+use minicbor::decode::{self, Decoder};
 use minicbor::{Decode, Encode};
 use std::fmt;
 use std::str::FromStr;
@@ -19,13 +20,26 @@ pub struct TextTooLong {
 macro_rules! text_type {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
-        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode)]
         #[cbor(transparent)]
         pub struct $name(#[n(0)] String);
 
         impl $name {
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        /// Reads the text and holds it to the bound `FromStr` holds it to, so nothing
+        /// decoded from storage or a fixture can exceed it either.
+        impl<'b, C> Decode<'b, C> for $name {
+            fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, decode::Error> {
+                d.str()?.parse().map_err(|TextTooLong { len }| {
+                    decode::Error::message(format!(
+                        "{}: {len} bytes, above the cap of {MAX_TEXT_BYTES}",
+                        stringify!($name)
+                    ))
+                })
             }
         }
 

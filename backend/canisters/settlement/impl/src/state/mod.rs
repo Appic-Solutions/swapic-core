@@ -26,17 +26,43 @@ pub trait Store {
     /// and nothing in it is work the timer can do.
     fn put_auto_refund_waiting(&mut self, key: WaitingKey);
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
+    /// Runs `f` over every indexed wait, longest wait first, without materializing the
+    /// index: the one walk the three readers below are written over.
+    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R;
+
+    /// Every indexed wait, longest wait first.
+    fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
+        self.waiting_keys(|keys| keys.collect())
+    }
+
+    /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
+    /// Stops at the first key that is not older, or at `limit`, so the cost is the keys
+    /// returned and never the swaps ever recorded.
+    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
+        self.waiting_keys(|keys| {
+            keys.take_while(|key| key.since < cutoff)
+                .take(limit)
+                .collect()
+        })
+    }
+
     /// Makes the index hold, for `quote_hash`, exactly `implied`: drops every other entry
     /// naming it, and writes `implied` if it is missing. The index is keyed by wait first,
     /// so a swap's entries are found by a walk and not by a seek: only the repair of a
     /// divergence needs this, and a diverged entry may carry an instant its swap never had.
-    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>);
-    /// Every indexed wait, longest wait first.
-    fn auto_refund_waiting(&self) -> Vec<WaitingKey>;
-    /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them.
-    /// Walks the index from its first key and stops at the first one that is not older, or at
-    /// `limit`, so the cost is the keys returned and never the swaps ever recorded.
-    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey>;
+    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
+        // the keys come out before any is removed: the walk holds the index borrowed
+        let doomed: Vec<WaitingKey> = self.waiting_keys(|keys| {
+            keys.filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied)
+                .collect()
+        });
+        for key in &doomed {
+            self.remove_auto_refund_waiting(key);
+        }
+        if let Some(key) = implied {
+            self.put_auto_refund_waiting(key);
+        }
+    }
 }
 
 /// A [`Store`] on the heap: what unit tests and the replay audit fold into. The deep audit
@@ -101,32 +127,8 @@ impl Store for MemoryStore {
         self.auto_refund_waiting.remove(key);
     }
 
-    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
-        let doomed: Vec<WaitingKey> = self
-            .auto_refund_waiting
-            .iter()
-            .filter(|key| key.quote_hash == *quote_hash && Some(**key) != implied)
-            .copied()
-            .collect();
-        for key in &doomed {
-            self.auto_refund_waiting.remove(key);
-        }
-        if let Some(key) = implied {
-            self.auto_refund_waiting.insert(key);
-        }
-    }
-
-    fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
-        self.auto_refund_waiting.iter().copied().collect()
-    }
-
-    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
-        self.auto_refund_waiting
-            .iter()
-            .take_while(|key| key.since < cutoff)
-            .take(limit)
-            .copied()
-            .collect()
+    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R {
+        f(&mut self.auto_refund_waiting.iter().copied())
     }
 }
 

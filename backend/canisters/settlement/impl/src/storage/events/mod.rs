@@ -89,39 +89,8 @@ impl Store for StableStore {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
-    fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
-        // read the keys out before removing any: the set is borrowed for the walk
-        let doomed: Vec<WaitingKey> = AUTO_REFUND_WAITING.with(|waiting| {
-            waiting
-                .borrow()
-                .iter()
-                .filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied)
-                .collect()
-        });
-        AUTO_REFUND_WAITING.with(|waiting| {
-            let mut waiting = waiting.borrow_mut();
-            for key in &doomed {
-                waiting.remove(key);
-            }
-            if let Some(key) = implied {
-                waiting.insert(key);
-            }
-        });
-    }
-
-    fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
-        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow().iter().collect())
-    }
-
-    fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
-        AUTO_REFUND_WAITING.with(|waiting| {
-            waiting
-                .borrow()
-                .iter()
-                .take_while(|key| key.since < cutoff)
-                .take(limit)
-                .collect()
-        })
+    fn waiting_keys<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = WaitingKey>) -> R) -> R {
+        AUTO_REFUND_WAITING.with(|waiting| f(&mut waiting.borrow().iter()))
     }
 }
 

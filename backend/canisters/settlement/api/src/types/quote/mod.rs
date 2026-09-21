@@ -1,6 +1,7 @@
+use crate::types::{amount, text};
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::{ChainId, TokenAmount, UnixSeconds};
+use types::{ChainId, UnixSeconds};
 
 /// Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,19 +88,23 @@ impl TryFrom<Quote> for types::Quote {
     type Error = types::QuoteError;
 
     fn try_from(quote: Quote) -> Result<Self, Self::Error> {
+        use types::QuoteError::{self, AmountTooLarge};
         Ok(Self {
             version: quote.version,
             src_chain: ChainId::new(quote.src_chain),
-            src_token: text("src_token", &quote.src_token)?,
-            amount_in: amount("amount_in", quote.amount_in)?,
+            src_token: text(&quote.src_token).map_err(QuoteError::text_too_long("src_token"))?,
+            amount_in: amount(quote.amount_in).ok_or(AmountTooLarge { field: "amount_in" })?,
             dst_chain: ChainId::new(quote.dst_chain),
-            dst_token: text("dst_token", &quote.dst_token)?,
-            expected_out: amount("expected_out", quote.expected_out)?,
-            min_out: amount("min_out", quote.min_out)?,
-            dst_address: text("dst_address", &quote.dst_address)?,
+            dst_token: text(&quote.dst_token).map_err(QuoteError::text_too_long("dst_token"))?,
+            expected_out: amount(quote.expected_out).ok_or(AmountTooLarge {
+                field: "expected_out",
+            })?,
+            min_out: amount(quote.min_out).ok_or(AmountTooLarge { field: "min_out" })?,
+            dst_address: text(&quote.dst_address)
+                .map_err(QuoteError::text_too_long("dst_address"))?,
             refund_address: quote
                 .refund_address
-                .map(|address| text("refund_address", &address))
+                .map(|address| text(&address).map_err(QuoteError::text_too_long("refund_address")))
                 .transpose()?,
             auto_refund: quote.auto_refund,
             gas_mode: quote.gas_mode.into(),
@@ -108,19 +113,6 @@ impl TryFrom<Quote> for types::Quote {
             nonce: quote.nonce,
         })
     }
-}
-
-fn amount(field: &'static str, value: Nat) -> Result<TokenAmount, types::QuoteError> {
-    TokenAmount::from_canonical_nat(value).ok_or(types::QuoteError::AmountTooLarge { field })
-}
-
-fn text<T: std::str::FromStr<Err = types::address::TextTooLong>>(
-    field: &'static str,
-    value: &str,
-) -> Result<T, types::QuoteError> {
-    value
-        .parse()
-        .map_err(types::QuoteError::text_too_long(field))
 }
 
 /// Why a quote was refused, naming the field wherever one is at fault.

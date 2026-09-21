@@ -1,11 +1,14 @@
 use crate::types::swap::TransitionError;
+use crate::types::{amount, text};
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::address::TextTooLong;
 use types::events::EventError as DomainEventError;
-use types::{Attempt, BlockNumber, ChainId, QuoteHash, TokenAmount, TxHash};
+use types::{Attempt, BlockNumber, ChainId, QuoteHash, TxHash};
 
 pub type Hash32 = [u8; 32];
+
+/// Every wire amount is the `amount` field of its event.
+const AMOUNT_TOO_LARGE: DomainEventError = DomainEventError::AmountTooLarge { field: "amount" };
 
 /// What happened. The event hash is computed over a canonical encoding of the variant,
 /// never over this candid layout.
@@ -329,8 +332,8 @@ impl TryFrom<EventType> for types::EventType {
                 quote_hash: QuoteHash::new(quote_hash),
                 quote_bytes,
                 chain_id: ChainId::new(chain_id),
-                token: text("token", &token)?,
-                amount: amount(value)?,
+                token: text(&token).map_err(DomainEventError::text_too_long("token"))?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
                 tx_ref,
             },
             EventType::TxSigned {
@@ -375,7 +378,7 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::PaidInStable {
                 quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::DecisionRequired { quote_hash, reason } => Self::DecisionRequired {
                 quote_hash: QuoteHash::new(quote_hash),
@@ -398,9 +401,9 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::Refunded {
                 quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
-                token: text("token", &token)?,
-                amount: amount(value)?,
-                to: text("to", &to)?,
+                token: text(&token).map_err(DomainEventError::text_too_long("token"))?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
+                to: text(&to).map_err(DomainEventError::text_too_long("to"))?,
             },
             EventType::SwapDone { quote_hash } => Self::SwapDone {
                 quote_hash: QuoteHash::new(quote_hash),
@@ -414,14 +417,14 @@ impl TryFrom<EventType> for types::EventType {
                 amount: value,
             } => Self::FeeAccrued {
                 quote_hash: QuoteHash::new(quote_hash),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::PocketFunded {
                 chain_id,
                 amount: value,
             } => Self::PocketFunded {
                 chain_id: ChainId::new(chain_id),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::PocketReserved {
                 quote_hash,
@@ -430,7 +433,7 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::PocketReserved {
                 quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::PocketRebalanced {
                 from_chain,
@@ -440,7 +443,7 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::PocketRebalanced {
                 from_chain: ChainId::new(from_chain),
                 to_chain: ChainId::new(to_chain),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
                 route,
             },
             EventType::PocketReleased {
@@ -450,7 +453,7 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::PocketReleased {
                 quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::PocketSpent {
                 quote_hash,
@@ -459,7 +462,7 @@ impl TryFrom<EventType> for types::EventType {
             } => Self::PocketSpent {
                 quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
-                amount: amount(value)?,
+                amount: amount(value).ok_or(AMOUNT_TOO_LARGE)?,
             },
             EventType::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
             EventType::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
@@ -551,20 +554,6 @@ impl From<types::events::EventError> for EventError {
             },
         }
     }
-}
-
-fn amount(value: Nat) -> Result<TokenAmount, DomainEventError> {
-    TokenAmount::from_canonical_nat(value)
-        .ok_or(DomainEventError::AmountTooLarge { field: "amount" })
-}
-
-fn text<T: std::str::FromStr<Err = TextTooLong>>(
-    field: &'static str,
-    value: &str,
-) -> Result<T, DomainEventError> {
-    value
-        .parse()
-        .map_err(|TextTooLong { len }| DomainEventError::TextTooLong { field, len })
 }
 
 #[cfg(test)]
