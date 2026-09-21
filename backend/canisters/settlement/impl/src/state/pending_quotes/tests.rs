@@ -233,10 +233,48 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
     };
     register(q.clone(), UnixSeconds::new(u64::MAX - 20)).expect("a live quote registers");
     assert_eq!(
-        sweep_expired(UnixSeconds::new(u64::MAX), Duration::from_secs(120)),
-        0
+        sweep_expired(UnixSeconds::new(u64::MAX), Duration::from_secs(120), 200),
+        Evicted::default()
     );
     assert!(get_pending(&q.hash().unwrap()).is_some());
+}
+
+/// One pass evicts at most its cap, so a store full of stale quotes cannot put every
+/// removal in one message. The passes after it drain the rest.
+#[test]
+fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
+    clear();
+    let q = tiny(0);
+    let now = just_before_expiry(&q);
+    for nonce in 0..10 {
+        register(tiny(nonce), now).expect("a live quote registers");
+    }
+    let stale = seconds_after(&q, 121);
+    let window = Duration::from_secs(120);
+
+    assert_eq!(
+        sweep_expired(stale, window, 4),
+        Evicted {
+            dropped: 4,
+            more: true
+        }
+    );
+    assert_eq!(
+        sweep_expired(stale, window, 4),
+        Evicted {
+            dropped: 4,
+            more: true
+        }
+    );
+    assert_eq!(
+        sweep_expired(stale, window, 4),
+        Evicted {
+            dropped: 2,
+            more: false
+        },
+        "the last pass drains the store and reports nothing left"
+    );
+    assert_eq!(get_pending(&q.hash().unwrap()), None);
 }
 
 /// The recovery for a store a looping or compromised quoter filled, which an upgrade no

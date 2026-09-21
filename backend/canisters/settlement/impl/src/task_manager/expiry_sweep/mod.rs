@@ -16,14 +16,25 @@ pub struct Sweep {
     /// timed-out swaps the pass stepped over: `quote_bytes` that did not parse, or an
     /// append the guard refused. Counted, never fatal, because the sweep must be total.
     pub skipped: usize,
+    /// whether either pass stopped at its cap with work still due, so the next tick has
+    /// more to do. A pass is bounded; the timer is what makes it total.
+    pub more: bool,
 }
 
-/// One pass of the expiry timer. `now` is the caller's clock, so the whole pass is
-/// testable without a canister.
+/// One pass of the expiry timer, bounded at both ends by the configured caps: an unbounded
+/// pass would trap past the instruction budget, and a repeating timer retrying the same
+/// trapping batch would disable the sweep for good. `now` is the caller's clock, so the
+/// whole pass is testable without a canister.
 pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     let config = config::get();
+    let evicted = pending_quotes::sweep_expired(
+        now.as_secs(),
+        config.permit_deadline,
+        config.max_evictions_per_sweep.as_usize(),
+    );
     let mut swept = Sweep {
-        dropped: pending_quotes::sweep_expired(now.as_secs(), config.permit_deadline),
+        dropped: evicted.dropped,
+        more: evicted.more,
         ..Sweep::default()
     };
     // a halted canister's log and state disagree, so it appends nothing: dropping a stale
@@ -31,11 +42,13 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     if is_halted() {
         return swept;
     }
-    let (due, unreadable) = due_refunds(
-        timed_out_waiting(now, config.decision_timeout),
+    let (timed_out, more_waiting) = timed_out_waiting(
         now,
         config.decision_timeout,
+        config.max_refunds_per_sweep.as_usize(),
     );
+    swept.more |= more_waiting;
+    let (due, unreadable) = due_refunds(timed_out, now, config.decision_timeout);
     swept.skipped = unreadable;
     // decided first, then appended, so every refund of the pass is judged against the same
     // fold and one append cannot change which swaps the pass sees
@@ -56,21 +69,31 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     swept
 }
 
-/// The swaps whose wait began more than `timeout` before `now`, read off the waiting index
-/// rather than a scan of every swap, so a pass costs what is waiting, not what ever settled.
-fn timed_out_waiting(now: Timestamp, timeout: Duration) -> Vec<(QuoteHash, Swap)> {
+/// The `cap` longest-waiting swaps whose wait began more than `timeout` before `now`, and
+/// whether a further one was waiting behind them. Read off the waiting index rather than a
+/// scan of every swap, so a pass costs what it takes, not what ever settled.
+fn timed_out_waiting(
+    now: Timestamp,
+    timeout: Duration,
+    cap: usize,
+) -> (Vec<(QuoteHash, Swap)>, bool) {
     // a clock less than a whole timeout past the epoch has no wait that old
     let Some(cutoff) = now.checked_sub(timeout) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     events::read_state(|state| {
         let store = state.store();
+        // one key past the cap: the extra key is the evidence that work remains, and the
+        // index is ordered by wait, so the keys taken are the oldest waits there are
+        let mut keys = store.waiting_since_before(cutoff, cap.saturating_add(1));
+        let more = keys.len() > cap;
+        keys.truncate(cap);
         // an index entry always has its swap: the same record step writes both
-        store
-            .waiting_since_before(cutoff)
+        let swaps = keys
             .into_iter()
             .filter_map(|quote_hash| store.swap(&quote_hash).map(|swap| (quote_hash, swap)))
-            .collect()
+            .collect();
+        (swaps, more)
     })
 }
 

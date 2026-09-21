@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
+use types::config::{EvictionsPerSweep, RefundsPerSweep};
 use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -29,6 +30,8 @@ pub struct Config {
     pub rpc_urls: BTreeMap<u64, String>,
     pub vault_addresses: BTreeMap<u64, String>,
     pub ecdsa_key_name: String,
+    pub max_refunds_per_sweep: u32,
+    pub max_evictions_per_sweep: u32,
 }
 
 impl Default for Config {
@@ -60,6 +63,8 @@ impl fmt::Debug for Config {
             rpc_urls,
             vault_addresses,
             ecdsa_key_name,
+            max_refunds_per_sweep,
+            max_evictions_per_sweep,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -81,6 +86,8 @@ impl fmt::Debug for Config {
             .field("rpc_urls", &rpc_urls)
             .field("vault_addresses", vault_addresses)
             .field("ecdsa_key_name", ecdsa_key_name)
+            .field("max_refunds_per_sweep", max_refunds_per_sweep)
+            .field("max_evictions_per_sweep", max_evictions_per_sweep)
             .finish()
     }
 }
@@ -127,6 +134,8 @@ impl From<types::Config> for Config {
             rpc_urls,
             vault_addresses,
             ecdsa_key_name,
+            max_refunds_per_sweep,
+            max_evictions_per_sweep,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -156,6 +165,8 @@ impl From<types::Config> for Config {
                 .map(|(chain, address)| (chain.get(), address.to_string()))
                 .collect(),
             ecdsa_key_name,
+            max_refunds_per_sweep: max_refunds_per_sweep.get(),
+            max_evictions_per_sweep: max_evictions_per_sweep.get(),
         }
     }
 }
@@ -217,6 +228,8 @@ impl TryFrom<Config> for types::Config {
                 })
                 .collect::<Result<_, _>>()?,
             ecdsa_key_name: config.ecdsa_key_name,
+            max_refunds_per_sweep: RefundsPerSweep::new(config.max_refunds_per_sweep),
+            max_evictions_per_sweep: EvictionsPerSweep::new(config.max_evictions_per_sweep),
         })
     }
 }
@@ -233,6 +246,15 @@ pub enum ConfigError {
     TimerIntervalTooLong {
         field: String,
         interval_s: u64,
+    },
+    DurationAboveCap {
+        field: String,
+        duration_s: u64,
+    },
+    CapOutOfRange {
+        field: String,
+        cap: u32,
+        ceiling: u32,
     },
     AmountTooLarge {
         field: String,
@@ -273,6 +295,19 @@ impl From<types::ConfigError> for ConfigError {
             Domain::TimerIntervalTooLong { field, interval } => Self::TimerIntervalTooLong {
                 field: field.to_string(),
                 interval_s: interval.as_secs(),
+            },
+            Domain::DurationAboveCap { field, duration } => Self::DurationAboveCap {
+                field: field.to_string(),
+                duration_s: duration.as_secs(),
+            },
+            Domain::CapOutOfRange {
+                field,
+                cap,
+                ceiling,
+            } => Self::CapOutOfRange {
+                field: field.to_string(),
+                cap,
+                ceiling,
             },
             Domain::AmountTooLarge { field } => Self::AmountTooLarge {
                 field: field.to_string(),

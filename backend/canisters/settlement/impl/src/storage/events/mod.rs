@@ -91,12 +91,13 @@ impl Store for StableStore {
         WAITING.with(|waiting| waiting.borrow().iter().collect())
     }
 
-    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash> {
+    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash> {
         WAITING.with(|waiting| {
             waiting
                 .borrow()
                 .iter()
                 .take_while(|key| key.since < cutoff)
+                .take(limit)
                 .map(|key| key.quote_hash)
                 .collect()
         })

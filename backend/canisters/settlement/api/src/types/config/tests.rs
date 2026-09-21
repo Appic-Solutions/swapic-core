@@ -97,6 +97,52 @@ fn every_duration_keeps_its_unit() {
     assert_eq!(Config::unredacted(domain), wire);
 }
 
+/// The per-tick caps cross the wire as plain counts, and a cap outside its range comes back
+/// named, so an operator sees which knob was refused.
+#[test]
+fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
+    let wire = Config {
+        max_refunds_per_sweep: 7,
+        max_evictions_per_sweep: 9,
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(wire.clone()).unwrap();
+    assert_eq!(domain.max_refunds_per_sweep.get(), 7);
+    assert_eq!(domain.max_evictions_per_sweep.get(), 9);
+    assert_eq!(Config::unredacted(domain), wire);
+
+    let zero = types::Config::try_from(Config {
+        max_refunds_per_sweep: 0,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(zero.validate().unwrap_err()),
+        ConfigError::CapOutOfRange {
+            field: "max_refunds_per_sweep".to_string(),
+            cap: 0,
+            ceiling: 500
+        }
+    );
+}
+
+/// A duration knob above its cap is refused by name too, in the unit an operator set it in.
+#[test]
+fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
+    let domain = types::Config::try_from(Config {
+        permit_deadline_s: 86_401,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(domain.validate().unwrap_err()),
+        ConfigError::DurationAboveCap {
+            field: "permit_deadline_s".to_string(),
+            duration_s: 86_401
+        }
+    );
+}
+
 #[test]
 fn a_timeout_too_long_for_a_duration_is_refused() {
     let wire = Config {

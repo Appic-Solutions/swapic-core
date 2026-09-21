@@ -25,10 +25,11 @@ pub trait Store {
     fn remove_waiting(&mut self, key: &WaitingKey);
     /// Every waiting swap, longest wait first.
     fn waiting(&self) -> Vec<WaitingKey>;
-    /// The swaps that began waiting before `cutoff`, longest wait first. Walks the index
-    /// from its first key and stops at the first one that is not older, so the cost is the
-    /// swaps returned, not the swaps ever recorded.
-    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash>;
+    /// The swaps that began waiting before `cutoff`, longest wait first, at most `limit` of
+    /// them. Walks the index from its first key and stops at the first one that is not
+    /// older, or at `limit`, so the cost is the swaps returned and never the swaps ever
+    /// recorded.
+    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash>;
 }
 
 /// A [`Store`] on the heap: what unit tests and the replay audit fold into.
@@ -91,10 +92,11 @@ impl Store for MemoryStore {
         self.waiting.iter().copied().collect()
     }
 
-    fn waiting_since_before(&self, cutoff: Timestamp) -> Vec<QuoteHash> {
+    fn waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<QuoteHash> {
         self.waiting
             .iter()
             .take_while(|key| key.since < cutoff)
+            .take(limit)
             .map(|key| key.quote_hash)
             .collect()
     }

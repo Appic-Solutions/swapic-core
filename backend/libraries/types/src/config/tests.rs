@@ -1,5 +1,6 @@
 use super::*;
 use ic_stable_structures::Storable;
+use std::borrow::Cow;
 
 /// The defaults are spec numbers, not preferences: this test is the spec.
 #[test]
@@ -25,6 +26,8 @@ fn defaults_match_spec() {
                 .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
         )
     );
+    assert_eq!(c.max_refunds_per_sweep, RefundsPerSweep::new(50));
+    assert_eq!(c.max_evictions_per_sweep, EvictionsPerSweep::new(200));
     // deploy-time values, empty in code
     assert!(c.rpc_urls.is_empty());
     assert!(c.vault_addresses.is_empty());
@@ -214,6 +217,137 @@ fn validate_rejects_an_empty_rpc_url() {
     secret_bearing()
         .validate()
         .expect("real urls and addresses pass");
+}
+
+/// Every duration knob is bounded, and each rejection names its field. A knob near
+/// `u64::MAX` overflows the deadline it is added to, and the comparison that deadline feeds
+/// then never fires: no pending quote is ever evicted, no wait ever times out.
+#[test]
+fn validate_rejects_every_duration_knob_above_a_day() {
+    let over = MAX_SHORT_DURATION + Duration::from_secs(1);
+    /// One duration knob: its wire name, and a config with that knob set.
+    type Knob = (&'static str, fn(Duration) -> Config);
+    let knobs: [Knob; 5] = [
+        ("quote_ttl_s", |d| Config {
+            quote_ttl: d,
+            ..Config::default()
+        }),
+        ("permit_deadline_s", |d| Config {
+            permit_deadline: d,
+            ..Config::default()
+        }),
+        ("chain_data_max_age_s", |d| Config {
+            chain_data_max_age: d,
+            ..Config::default()
+        }),
+        ("decision_timeout_min", |d| Config {
+            decision_timeout: d,
+            ..Config::default()
+        }),
+        ("rail_status_max_age_s", |d| Config {
+            rail_status_max_age: d,
+            ..Config::default()
+        }),
+    ];
+    for (field, with) in knobs {
+        let err = with(over).validate().unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::DurationAboveCap {
+                field,
+                duration: over
+            }
+        );
+        assert!(err.to_string().contains(field), "{err}");
+        with(MAX_SHORT_DURATION)
+            .validate()
+            .expect("a day exactly is allowed");
+        // the near-overflow shape the bound exists for
+        assert!(with(Duration::from_secs(u64::MAX)).validate().is_err());
+    }
+}
+
+/// A zero cap makes no progress at all and an outsized one is the unbounded batch the cap
+/// exists to prevent, so both are refused by name.
+#[test]
+fn validate_rejects_a_cap_outside_its_range() {
+    let refunds = |cap| Config {
+        max_refunds_per_sweep: RefundsPerSweep::new(cap),
+        ..Config::default()
+    };
+    let evictions = |cap| Config {
+        max_evictions_per_sweep: EvictionsPerSweep::new(cap),
+        ..Config::default()
+    };
+    assert_eq!(
+        refunds(0).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "max_refunds_per_sweep",
+            cap: 0,
+            ceiling: RefundsPerSweep::CEILING
+        })
+    );
+    let over = RefundsPerSweep::CEILING + 1;
+    assert_eq!(
+        refunds(over).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "max_refunds_per_sweep",
+            cap: over,
+            ceiling: RefundsPerSweep::CEILING
+        })
+    );
+    refunds(RefundsPerSweep::CEILING)
+        .validate()
+        .expect("the ceiling itself is allowed");
+    refunds(1).validate().expect("one item a pass is allowed");
+
+    let err = evictions(0).validate().unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::CapOutOfRange {
+            field: "max_evictions_per_sweep",
+            cap: 0,
+            ceiling: EvictionsPerSweep::CEILING
+        }
+    );
+    assert!(err.to_string().contains("max_evictions_per_sweep"), "{err}");
+    assert!(evictions(EvictionsPerSweep::CEILING + 1)
+        .validate()
+        .is_err());
+    evictions(EvictionsPerSweep::CEILING)
+        .validate()
+        .expect("the ceiling itself is allowed");
+}
+
+/// A cap holding its default is absent from the stored bytes, which is what keeps the
+/// stored layout append-only: a config a wasm without these knobs wrote decodes here, and
+/// reads the defaults. The shortest encoding is the one the golden file pins.
+#[test]
+fn a_cap_at_its_default_is_absent_from_storage_and_reads_back_as_the_default() {
+    let defaults = Config::default().to_bytes().into_owned();
+    // 0x91: an array of the seventeen fields that existed before the caps did
+    assert_eq!(defaults[0], 0x91, "a default cap writes nothing of its own");
+    assert_eq!(
+        Config::from_bytes(Cow::Owned(defaults.clone())),
+        Config::default(),
+        "so bytes without the caps read as the defaults"
+    );
+
+    // the interior case: a later cap set, an earlier one at its default
+    let mixed = Config {
+        max_evictions_per_sweep: EvictionsPerSweep::new(7),
+        ..Config::default()
+    };
+    let bytes = mixed.to_bytes().into_owned();
+    assert!(bytes.len() > defaults.len());
+    assert_eq!(Config::from_bytes(Cow::Owned(bytes)), mixed);
+
+    let both = Config {
+        max_refunds_per_sweep: RefundsPerSweep::new(9),
+        max_evictions_per_sweep: EvictionsPerSweep::new(7),
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(both.to_bytes()), both);
 }
 
 /// The stored copy is the operative one, so it must keep the real urls.

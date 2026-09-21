@@ -4,7 +4,8 @@ mod tests;
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
-use minicbor::{Decode, Encode};
+use minicbor::data::Type;
+use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use thiserror::Error;
@@ -12,6 +13,99 @@ use thiserror::Error;
 /// The longest a timer interval may be: one year. Nothing legitimate waits longer, and a
 /// tight bound fails at set time rather than when the timer is wired.
 pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
+
+/// The longest a window inside one swap may be: one day. Every knob bounded by this one
+/// measures a wait a user or a chain is in the middle of, so anything longer is a typo, and
+/// a duration near `u64::MAX` overflows the deadline it is added to and never closes.
+pub const MAX_SHORT_DURATION: Duration = Duration::from_secs(86_400);
+
+/// A cap on the work one timer pass may do, carrying its default and its ceiling in the
+/// type, so no caller can invent a third pair.
+///
+/// A cap holding its default is absent from the stored config: the stored layout is
+/// append-only, so a config written before a cap existed reads back as that cap's default.
+/// Changing a `DEFAULT` therefore changes what every config that omitted the knob reads as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cap<const DEFAULT: u32, const CEILING: u32>(u32);
+
+/// The most refunds one expiry pass starts. A pass that has to append is the expensive one,
+/// so this is the tightest of the three caps.
+pub type RefundsPerSweep = Cap<50, 500>;
+
+/// The most pending quotes one expiry pass evicts. An eviction is a stable map removal and
+/// no append, so a pass affords more of them than of refunds.
+pub type EvictionsPerSweep = Cap<200, 5_000>;
+
+impl<const DEFAULT: u32, const CEILING: u32> Cap<DEFAULT, CEILING> {
+    /// What a config that never set the knob reads as.
+    pub const DEFAULT: Self = Self(DEFAULT);
+    /// The largest cap this knob accepts.
+    pub const CEILING: u32 = CEILING;
+
+    pub const fn new(items: u32) -> Self {
+        Self(items)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The cap as a `take` bound. A u32 fits every usize this canister runs on.
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    /// At least one item per pass, at most the type's ceiling: a zero cap makes no progress
+    /// at all, and an unbounded one is the trap the cap exists to prevent.
+    pub fn validate(self, field: &'static str) -> Result<(), ConfigError> {
+        if self.0 == 0 || self.0 > CEILING {
+            return Err(ConfigError::CapOutOfRange {
+                field,
+                cap: self.0,
+                ceiling: CEILING,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<const DEFAULT: u32, const CEILING: u32> Default for Cap<DEFAULT, CEILING> {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Stored as one unsigned integer, and as nothing at all when it holds the default.
+impl<C, const DEFAULT: u32, const CEILING: u32> Encode<C> for Cap<DEFAULT, CEILING> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.u32(self.0)?;
+        Ok(())
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0 == DEFAULT
+    }
+}
+
+impl<'b, C, const DEFAULT: u32, const CEILING: u32> Decode<'b, C> for Cap<DEFAULT, CEILING> {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the knob absent in the middle
+        // reads back, and it means the same as the knob missing off the end
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::DEFAULT);
+        }
+        Ok(Self(d.u32()?))
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::DEFAULT)
+    }
+}
 
 /// Every knob the canister reads at runtime. `Debug` is safe to log: [`RpcUrl`] prints
 /// as `***`.
@@ -61,6 +155,14 @@ pub struct Config {
     /// The name of the threshold ECDSA key the canister signs with.
     #[n(16)]
     pub ecdsa_key_name: String,
+    /// The most refunds one expiry pass starts, so a short `decision_timeout` cannot put
+    /// every timed-out swap in one message.
+    #[n(17)]
+    pub max_refunds_per_sweep: RefundsPerSweep,
+    /// The most pending quotes one expiry pass evicts, so a full store cannot put every
+    /// eviction in one message.
+    #[n(18)]
+    pub max_evictions_per_sweep: EvictionsPerSweep,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -79,6 +181,17 @@ pub enum ConfigError {
     TimerIntervalTooLong {
         field: &'static str,
         interval: Duration,
+    },
+    #[error("{field} is {}s, above the one-day cap of {}s", duration.as_secs(), MAX_SHORT_DURATION.as_secs())]
+    DurationAboveCap {
+        field: &'static str,
+        duration: Duration,
+    },
+    #[error("{field} is {cap}, outside the range 1 to {ceiling}")]
+    CapOutOfRange {
+        field: &'static str,
+        cap: u32,
+        ceiling: u32,
     },
     #[error("{field} does not fit in 256 bits")]
     AmountTooLarge { field: &'static str },
@@ -133,6 +246,8 @@ impl Default for Config {
             vault_addresses: BTreeMap::new(),
             // "key_1" in production
             ecdsa_key_name: "dfx_test_key".to_string(),
+            max_refunds_per_sweep: RefundsPerSweep::DEFAULT,
+            max_evictions_per_sweep: EvictionsPerSweep::DEFAULT,
         }
     }
 }
@@ -161,6 +276,23 @@ impl Config {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
             }
         }
+        // every window inside one swap: unbounded, each of these overflows the deadline it
+        // is added to, and the comparison that deadline feeds then never fires
+        for (field, duration) in [
+            ("quote_ttl_s", self.quote_ttl),
+            ("permit_deadline_s", self.permit_deadline),
+            ("chain_data_max_age_s", self.chain_data_max_age),
+            ("decision_timeout_min", self.decision_timeout),
+            ("rail_status_max_age_s", self.rail_status_max_age),
+        ] {
+            if duration > MAX_SHORT_DURATION {
+                return Err(ConfigError::DurationAboveCap { field, duration });
+            }
+        }
+        self.max_refunds_per_sweep
+            .validate("max_refunds_per_sweep")?;
+        self.max_evictions_per_sweep
+            .validate("max_evictions_per_sweep")?;
         // a chain listed with nothing behind it is a deploy mistake, not a way to unset it
         if let Some(chain) = self
             .vault_addresses

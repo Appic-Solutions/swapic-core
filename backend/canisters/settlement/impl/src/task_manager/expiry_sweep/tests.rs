@@ -1,8 +1,19 @@
 use super::*;
 use crate::storage::halt::set_halted;
 use crate::storage::on_fresh_memory;
+use types::config::{EvictionsPerSweep, RefundsPerSweep};
 use types::events::Choice;
 use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds, WaitingKey};
+
+/// Moves both per-tick caps, without the log line `config::set` would write: a unit test has
+/// no canister clock to seal one on.
+fn set_caps(refunds: u32, evictions: u32) {
+    config::test_set(types::Config {
+        max_refunds_per_sweep: RefundsPerSweep::new(refunds),
+        max_evictions_per_sweep: EvictionsPerSweep::new(evictions),
+        ..config::get()
+    });
+}
 
 fn quote(auto_refund: bool, nonce: u64) -> Quote {
     Quote {
@@ -284,7 +295,8 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
             Sweep {
                 dropped: 0,
                 refunds: 2,
-                skipped: 0
+                skipped: 0,
+                more: false
             }
         );
 
@@ -316,6 +328,74 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
         );
 
         assert_eq!(run_expiry_sweep(first_moment).refunds, 0, "and only once");
+        assert!(events::verify_replay());
+    });
+}
+
+/// A pass that refunded every due swap at once would trap past the instruction budget, and
+/// the repeating timer would retry the same batch forever, taking the eviction pass down
+/// with it. So one pass takes at most its cap, oldest first, and the passes after it drain
+/// the rest, while the eviction pass runs in the same tick whatever the refund pass does.
+#[test]
+fn the_sweep_refunds_at_most_the_cap_per_tick_and_drains_the_rest_on_the_next_ticks() {
+    on_fresh_memory(|| {
+        let cap = 3;
+        set_caps(cap as u32, 200);
+        let timeout = config::get().decision_timeout;
+        let start = at(1_700_000_000);
+
+        // three times the cap, each waiting since a distinct instant, so "oldest first" is
+        // an order and not a coincidence
+        let due: Vec<QuoteHash> = (0..3 * cap as u64)
+            .map(|nonce| {
+                let quote_hash = funded(&quote(true, nonce), start);
+                ask_at(quote_hash, Timestamp::from_nanos(start.as_nanos() + nonce));
+                quote_hash
+            })
+            .collect();
+        // a stale pending quote, to prove the eviction pass ran in the same tick
+        let stale = Quote {
+            expires_at: UnixSeconds::new(start.as_secs().get()),
+            ..quote(true, 9_000)
+        };
+        let pending = registered_at(&stale, expires_at_s(&stale) - 10);
+
+        let now = Timestamp::from_nanos(
+            start
+                .checked_add(timeout)
+                .expect("a timeout inside the clock")
+                .as_nanos()
+                + 3 * cap as u64,
+        );
+        let first = run_expiry_sweep(now);
+        assert_eq!((first.refunds, first.more), (cap, true));
+        assert_eq!(
+            due.iter()
+                .filter(|q| status(q) == SwapStatus::Refunding)
+                .count(),
+            cap,
+            "the cap, and no more"
+        );
+        for quote_hash in due.iter().take(cap) {
+            assert_eq!(
+                status(quote_hash),
+                SwapStatus::Refunding,
+                "the oldest waits go first"
+            );
+        }
+        assert_eq!(pending_quotes::get_pending(&pending), None);
+        assert_eq!(first.dropped, 1, "the eviction pass ran in the same tick");
+
+        let second = run_expiry_sweep(now);
+        assert_eq!((second.refunds, second.more), (cap, true));
+        let third = run_expiry_sweep(now);
+        assert_eq!(
+            (third.refunds, third.more),
+            (cap, false),
+            "the third tick drains the rest and reports nothing left"
+        );
+        assert!(due.iter().all(|q| status(q) == SwapStatus::Refunding));
+        assert_eq!(run_expiry_sweep(now).refunds, 0);
         assert!(events::verify_replay());
     });
 }

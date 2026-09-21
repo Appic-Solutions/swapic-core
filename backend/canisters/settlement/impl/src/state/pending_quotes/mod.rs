@@ -100,14 +100,24 @@ pub fn get_pending(quote_hash: &QuoteHash) -> Option<Quote> {
     PENDING.with(|p| p.borrow().get(quote_hash))
 }
 
+/// What one eviction pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Evicted {
+    /// quotes dropped by this pass
+    pub dropped: usize,
+    /// whether the pass stopped at its cap with another stale quote still in the store
+    pub more: bool,
+}
+
 /// Drops the quotes nobody can pay any more: past their expiry plus the window a permit
 /// signed against them stays valid for. Keyed on the expiry, never on when the quote was
-/// registered. Returns how many went.
-pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration) -> usize {
+/// registered. At most `cap` go per pass, and the scan stops one past the cap, so neither
+/// the removals nor the walk grows with the store.
+pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration, cap: usize) -> Evicted {
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
         // a deadline past u64::MAX seconds never closes
-        let stale: Vec<QuoteHash> = pending
+        let mut stale: Vec<QuoteHash> = pending
             .iter()
             .filter(|(_, quote)| {
                 quote
@@ -116,11 +126,19 @@ pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration) -> usize {
                     .is_some_and(|deadline| now > deadline)
             })
             .map(|(hash, _)| hash)
+            // one past the cap: the extra hash is the evidence that work remains, and it
+            // is the entry the next pass drops first
+            .take(cap.saturating_add(1))
             .collect();
+        let more = stale.len() > cap;
+        stale.truncate(cap);
         for hash in &stale {
             pending.remove(hash);
         }
-        stale.len()
+        Evicted {
+            dropped: stale.len(),
+            more,
+        }
     })
 }
 

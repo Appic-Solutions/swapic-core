@@ -59,5 +59,13 @@ pub fn set(new: Config) -> Result<IntervalChanges, SetConfigError> {
     Ok(changed)
 }
 
+/// Test-only: writes the cell and no log line, so a unit test can move a knob without a
+/// canister clock to seal an event on. The line a write leaves is an audit record and no
+/// part of the fold, so nothing the replay audit compares depends on it.
+#[cfg(test)]
+pub(crate) fn test_set(config: Config) {
+    CONFIG.with(|c| c.borrow_mut().set(config).expect("config cell write"));
+}
+
 #[cfg(test)]
 mod tests;

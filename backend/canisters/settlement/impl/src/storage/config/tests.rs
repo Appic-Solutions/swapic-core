@@ -27,7 +27,8 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""replay_audit_interval_s":21600,"#,
             r#""confirmations":{"1":1,"56":1,"137":6,"8453":1,"42161":1},"#,
             r#""rpc_urls":{"1":"***"},"vault_addresses":{"8453":"0xvault"},"#,
-            r#""ecdsa_key_name":"key_1"}"#
+            r#""ecdsa_key_name":"key_1","max_refunds_per_sweep":50,"#,
+            r#""max_evictions_per_sweep":200}"#
         )
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");

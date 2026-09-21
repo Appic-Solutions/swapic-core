@@ -20,6 +20,7 @@ type Config = record {
   rail_status_max_age_s : nat64;
   expiry_check_interval_s : nat64;
   batch_window_ms : nat64;
+  max_refunds_per_sweep : nat32;
   ecdsa_key_name : text;
   max_fee_bps : nat16;
   rpc_urls : vec record { nat64; text };
@@ -33,12 +34,14 @@ type Config = record {
   chain_data_max_age_s : nat64;
   max_swap_usd : nat;
   max_batch_items : nat32;
+  max_evictions_per_sweep : nat32;
 };
 // Why a config was refused, naming the knob at fault.
 type ConfigError = variant {
   EmptyEcdsaKeyName;
   MaxFeeAboveHundredPercent : nat16;
   VaultAddressTooLong : record { len : nat64; chain_id : nat64 };
+  CapOutOfRange : record { cap : nat32; field : text; ceiling : nat32 };
   PlatformFeeAboveMax : record {
     max_fee_bps : nat16;
     platform_fee_bps : nat16;
@@ -46,6 +49,7 @@ type ConfigError = variant {
   EmptyVaultAddress : record { chain_id : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
+  DurationAboveCap : record { field : text; duration_s : nat64 };
   AmountTooLarge : record { field : text };
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };
