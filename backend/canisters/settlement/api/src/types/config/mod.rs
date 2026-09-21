@@ -256,6 +256,7 @@ pub enum ConfigError {
     DurationAboveCap {
         field: String,
         duration_s: u64,
+        cap_s: u64,
     },
     CapOutOfRange {
         field: String,
@@ -302,9 +303,14 @@ impl From<types::ConfigError> for ConfigError {
                 field: field.to_string(),
                 interval_s: interval.as_secs(),
             },
-            Domain::DurationAboveCap { field, duration } => Self::DurationAboveCap {
+            Domain::DurationAboveCap {
+                field,
+                duration,
+                cap,
+            } => Self::DurationAboveCap {
                 field: field.to_string(),
                 duration_s: duration.as_secs(),
+                cap_s: cap.as_secs(),
             },
             Domain::CapOutOfRange {
                 field,

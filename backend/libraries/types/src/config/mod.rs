@@ -19,6 +19,10 @@ pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
 /// a duration near `u64::MAX` overflows the deadline it is added to and never closes.
 pub const MAX_SHORT_DURATION: Duration = Duration::from_secs(86_400);
 
+/// The longest a batching window may be: one minute. A window is how long the canister holds
+/// work back to send it together, which nobody gains by measuring in hours.
+pub const MAX_BATCH_WINDOW: Duration = Duration::from_secs(60);
+
 /// A cap on the work one timer pass may do, carrying its default and its ceiling in the
 /// type, so no caller can invent a third pair.
 ///
@@ -190,10 +194,11 @@ pub enum ConfigError {
         field: &'static str,
         interval: Duration,
     },
-    #[error("{field} is {}s, above the one-day cap of {}s", duration.as_secs(), MAX_SHORT_DURATION.as_secs())]
+    #[error("{field} is {}s, above the cap of {}s", duration.as_secs(), cap.as_secs())]
     DurationAboveCap {
         field: &'static str,
         duration: Duration,
+        cap: Duration,
     },
     #[error("{field} is {cap}, outside the range 1 to {ceiling}")]
     CapOutOfRange {
@@ -287,15 +292,36 @@ impl Config {
         }
         // every window inside one swap: unbounded, each of these overflows the deadline it
         // is added to, and the comparison that deadline feeds then never fires
-        for (field, duration) in [
-            ("quote_ttl_s", self.quote_ttl),
-            ("permit_deadline_s", self.permit_deadline),
-            ("chain_data_max_age_s", self.chain_data_max_age),
-            ("decision_timeout_min", self.decision_timeout),
-            ("rail_status_max_age_s", self.rail_status_max_age),
+        for (field, duration, cap) in [
+            ("quote_ttl_s", self.quote_ttl, MAX_SHORT_DURATION),
+            (
+                "permit_deadline_s",
+                self.permit_deadline,
+                MAX_SHORT_DURATION,
+            ),
+            (
+                "chain_data_max_age_s",
+                self.chain_data_max_age,
+                MAX_SHORT_DURATION,
+            ),
+            (
+                "decision_timeout_min",
+                self.decision_timeout,
+                MAX_SHORT_DURATION,
+            ),
+            (
+                "rail_status_max_age_s",
+                self.rail_status_max_age,
+                MAX_SHORT_DURATION,
+            ),
+            ("batch_window_ms", self.batch_window, MAX_BATCH_WINDOW),
         ] {
-            if duration > MAX_SHORT_DURATION {
-                return Err(ConfigError::DurationAboveCap { field, duration });
+            if duration > cap {
+                return Err(ConfigError::DurationAboveCap {
+                    field,
+                    duration,
+                    cap,
+                });
             }
         }
         self.max_refunds_per_sweep

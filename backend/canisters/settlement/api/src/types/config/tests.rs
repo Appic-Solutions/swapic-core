@@ -126,7 +126,7 @@ fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
     );
 }
 
-/// A duration knob above its cap is refused by name too, in the unit an operator set it in.
+/// A duration knob above its cap is refused by name too, with the cap it broke.
 #[test]
 fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
     let domain = types::Config::try_from(Config {
@@ -138,7 +138,8 @@ fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
         ConfigError::from(domain.validate().unwrap_err()),
         ConfigError::DurationAboveCap {
             field: "permit_deadline_s".to_string(),
-            duration_s: 86_401
+            duration_s: 86_401,
+            cap_s: 86_400
         }
     );
 }

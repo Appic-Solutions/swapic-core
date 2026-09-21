@@ -220,49 +220,54 @@ fn validate_rejects_an_empty_rpc_url() {
         .expect("real urls and addresses pass");
 }
 
-/// Every duration knob is bounded, and each rejection names its field. A knob near
-/// `u64::MAX` overflows the deadline it is added to, and the comparison that deadline feeds
-/// then never fires: no pending quote is ever evicted, no wait ever times out.
+/// Every duration knob is bounded, and each rejection names its field and its cap. A knob
+/// near `u64::MAX` overflows the deadline it is added to, and the comparison that deadline
+/// feeds then never fires: no pending quote is ever evicted, no wait ever times out.
 #[test]
-fn validate_rejects_every_duration_knob_above_a_day() {
-    let over = MAX_SHORT_DURATION + Duration::from_secs(1);
-    /// One duration knob: its wire name, and a config with that knob set.
-    type Knob = (&'static str, fn(Duration) -> Config);
-    let knobs: [Knob; 5] = [
-        ("quote_ttl_s", |d| Config {
+fn validate_rejects_every_duration_knob_above_its_cap() {
+    /// One duration knob: its wire name, its cap, and a config with that knob set.
+    type Knob = (&'static str, Duration, fn(Duration) -> Config);
+    let knobs: [Knob; 6] = [
+        ("quote_ttl_s", MAX_SHORT_DURATION, |d| Config {
             quote_ttl: d,
             ..Config::default()
         }),
-        ("permit_deadline_s", |d| Config {
+        ("permit_deadline_s", MAX_SHORT_DURATION, |d| Config {
             permit_deadline: d,
             ..Config::default()
         }),
-        ("chain_data_max_age_s", |d| Config {
+        ("chain_data_max_age_s", MAX_SHORT_DURATION, |d| Config {
             chain_data_max_age: d,
             ..Config::default()
         }),
-        ("decision_timeout_min", |d| Config {
+        ("decision_timeout_min", MAX_SHORT_DURATION, |d| Config {
             decision_timeout: d,
             ..Config::default()
         }),
-        ("rail_status_max_age_s", |d| Config {
+        ("rail_status_max_age_s", MAX_SHORT_DURATION, |d| Config {
             rail_status_max_age: d,
             ..Config::default()
         }),
+        // a batching window is the one knob measured in milliseconds, and a minute of it is
+        // already far more than a batch waits for
+        ("batch_window_ms", MAX_BATCH_WINDOW, |d| Config {
+            batch_window: d,
+            ..Config::default()
+        }),
     ];
-    for (field, with) in knobs {
+    for (field, cap, with) in knobs {
+        let over = cap + Duration::from_secs(1);
         let err = with(over).validate().unwrap_err();
         assert_eq!(
             err,
             ConfigError::DurationAboveCap {
                 field,
-                duration: over
+                duration: over,
+                cap
             }
         );
         assert!(err.to_string().contains(field), "{err}");
-        with(MAX_SHORT_DURATION)
-            .validate()
-            .expect("a day exactly is allowed");
+        with(cap).validate().expect("the cap itself is allowed");
         // the near-overflow shape the bound exists for
         assert!(with(Duration::from_secs(u64::MAX)).validate().is_err());
     }
