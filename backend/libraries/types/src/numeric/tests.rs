@@ -113,3 +113,40 @@ fn a_canonical_amount_stops_at_u128_max() {
         None
     );
 }
+
+/// The price of a transaction is the fee per gas multiplied by the gas it buys, computed on
+/// the types that hold the units, and it answers `None` rather than wrapping.
+#[test]
+fn a_fee_per_gas_prices_the_gas_it_is_paid_for() {
+    let fee = WeiPerGas::from(2_000_000_000_u64);
+    assert_eq!(
+        fee.transaction_cost(GasAmount::from(21_000_u32)),
+        Some(Wei::from(42_000_000_000_000_u64))
+    );
+    assert_eq!(
+        WeiPerGas::ZERO.transaction_cost(GasAmount::from(21_000_u32)),
+        Some(Wei::ZERO)
+    );
+    assert_eq!(
+        fee.transaction_cost(GasAmount::ZERO),
+        Some(Wei::ZERO),
+        "no gas costs nothing"
+    );
+    assert_eq!(WeiPerGas::MAX.transaction_cost(GasAmount::TWO), None);
+}
+
+/// How long ago an instant was, and nothing at all for an instant that is not past: a clock
+/// that moved back reports no age rather than an age that underflows.
+#[test]
+fn an_instant_measures_how_long_ago_an_earlier_one_was() {
+    let now = Timestamp::from_nanos(1_000_000_000);
+    assert_eq!(
+        now.saturating_duration_since(Timestamp::from_nanos(400_000_000)),
+        Duration::from_millis(600)
+    );
+    assert_eq!(now.saturating_duration_since(now), Duration::ZERO);
+    assert_eq!(
+        now.saturating_duration_since(Timestamp::from_nanos(2_000_000_000)),
+        Duration::ZERO
+    );
+}

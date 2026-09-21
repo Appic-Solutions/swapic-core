@@ -32,6 +32,20 @@ type CanonicalError = variant {
   TooLong : record { len : nat64 };
   AmountTooLarge : nat;
 };
+// One chain as the watcher last saw it. There is no instant on it: the canister stamps
+// what it receives, so nothing a caller sends can date its data forward.
+type ChainData = record {
+  // The base fee of that block.
+  base_fee_wei_per_gas : nat;
+  // The head block the watcher saw.
+  block : nat64;
+  // The tip to pay on top of the base fee.
+  priority_fee_wei_per_gas : nat;
+};
+// A cached reading with the canister time it arrived at.
+type ChainDataEntry = record { data : ChainData; pushed_at_ns : nat64 };
+// Why a pushed reading is not one this canister prices gas with.
+type ChainDataError = variant { FeeTooLarge : record { field : text } };
 type Choice = variant { Requote; Refund };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
@@ -179,6 +193,11 @@ type PocketError = variant {
   InsufficientReserved : record { requested : nat; "reserved" : nat };
   InsufficientAvailable : record { requested : nat; available : nat };
 };
+// Why `push_chain_data` stored nothing.
+type PushChainDataError = variant {
+  Guard : GuardError;
+  InvalidData : ChainDataError;
+};
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
 // order is frozen and is NOT the order a candid tool prints this record in:
@@ -248,10 +267,11 @@ type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : nat64; Err : GuardError };
 type Result_2 = variant { Ok : Config; Err : GuardError };
 type Result_3 = variant { Ok : opt Quote; Err : GuardError };
-type Result_4 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_5 = variant { Ok; Err : SetConfigError };
-type Result_6 = variant { Ok; Err : GuardError };
-type Result_7 = variant { Ok; Err : SetRolesError };
+type Result_4 = variant { Ok; Err : PushChainDataError };
+type Result_5 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_6 = variant { Ok; Err : SetConfigError };
+type Result_7 = variant { Ok; Err : GuardError };
+type Result_8 = variant { Ok; Err : SetRolesError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -337,6 +357,14 @@ service : (InitArg) -> {
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
+  // The cached reading for a chain, with the instant the canister stamped it, or nothing for
+  // a chain the watcher has never pushed. World-readable: a block height and a gas price are
+  // public facts about a public chain, and the stamp is how an operator sees the watcher
+  // stop pushing.
+  // 
+  // Answers the entry however old it is. Freshness is a decision, and the canister makes it
+  // against `chain_data_max_age` at the moment it decides.
+  get_chain_data : (nat64) -> (opt ChainDataEntry) query;
   // Public, so it answers with the redacted view; `get_config_full` is the ops door onto
   // the real thing.
   get_config : () -> (Config) query;
@@ -359,20 +387,29 @@ service : (InitArg) -> {
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
+  // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
+  // canister would otherwise spend an outcall on before every decision. It moves no money,
+  // so the halt switch does not gate it: a halted canister still wants a current view of the
+  // chains while an operator investigates.
+  // 
+  // The record carries no instant. The canister stamps what it stores with its own clock,
+  // because the age of a reading is what every decision on it depends on, and a caller that
+  // could date its data forward could keep stale gas prices alive indefinitely.
+  push_chain_data : (nat64, ChainData) -> (Result_4);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log.
-  register_quote : (Quote) -> (Result_4);
+  register_quote : (Quote) -> (Result_5);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_5);
+  set_config : (Config) -> (Result_6);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
-  set_halted : (bool) -> (Result_6);
+  set_halted : (bool) -> (Result_7);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_7);
+  set_roles : (principal, principal) -> (Result_8);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

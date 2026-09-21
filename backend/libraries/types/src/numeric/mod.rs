@@ -25,6 +25,29 @@ pub enum UsdTag {}
 /// Whole US dollars.
 pub type UsdAmount = CheckedAmountOf<UsdTag>;
 
+pub enum WeiTag {}
+/// The native currency of an EVM chain, in its smallest denomination.
+pub type Wei = CheckedAmountOf<WeiTag>;
+
+pub enum WeiPerGasTag {}
+/// A gas price: wei paid for each unit of gas.
+pub type WeiPerGas = CheckedAmountOf<WeiPerGasTag>;
+
+pub enum GasTag {}
+/// Units of gas: a limit, or what a transaction used.
+pub type GasAmount = CheckedAmountOf<GasTag>;
+
+impl WeiPerGas {
+    /// What `gas` units of gas cost at this price. `None` above 256 bits, so a price and a
+    /// limit that cannot both be paid are caught before a transaction is built.
+    pub fn transaction_cost(self, gas: GasAmount) -> Option<Wei> {
+        self.into_inner()
+            .checked_mul(gas.into_inner())
+            // the product is an amount of wei: the per-gas unit cancels against the gas
+            .map(|total| Wei::from_be_bytes(total.to_be_bytes()))
+    }
+}
+
 /// A block height on an EVM chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 #[cbor(transparent)]
@@ -166,6 +189,12 @@ impl Timestamp {
     pub fn checked_sub(self, duration: Duration) -> Option<Self> {
         let nanos = u64::try_from(duration.as_nanos()).ok()?;
         self.0.checked_sub(nanos).map(Self)
+    }
+
+    /// How long ago `earlier` was. An instant that is not earlier has no age rather than a
+    /// negative one, so a clock that moved back reports nothing instead of underflowing.
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
     }
 }
 

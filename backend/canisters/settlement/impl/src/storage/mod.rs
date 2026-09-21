@@ -1,4 +1,5 @@
 pub mod audit_cursor;
+pub mod chain_data;
 pub mod config;
 pub mod events;
 pub mod halt;
@@ -17,6 +18,7 @@ pub fn init() {
     halt::init();
     pending_quotes::init();
     audit_cursor::init();
+    chain_data::init();
     replay_cursor::init();
 }
 

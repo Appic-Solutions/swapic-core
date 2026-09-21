@@ -5,11 +5,13 @@
 //! reach the crate root, which is what lets queries and updates share group names
 //! like `config` without `lib.rs`'s glob imports becoming ambiguous.
 
+mod chain;
 mod config;
 mod ops;
 mod quotes;
 mod roles;
 
+pub use chain::push_chain_data;
 pub use config::set_config;
 pub use ops::{audit_replay_step, set_halted};
 pub use quotes::{clear_pending_quotes, register_quote};

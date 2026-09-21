@@ -4,12 +4,14 @@
 //! every endpoint's types at crate scope while the group names never reach the crate
 //! root (`lib.rs` glob-imports queries and updates together).
 
+mod chain;
 mod config;
 mod events;
 mod ops;
 mod quotes;
 mod swaps;
 
+pub use chain::*;
 pub use config::*;
 pub use events::*;
 pub use ops::*;

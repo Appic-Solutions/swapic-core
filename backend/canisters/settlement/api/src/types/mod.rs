@@ -1,3 +1,4 @@
+pub mod chain_data;
 pub mod config;
 pub mod errors;
 pub mod events;

@@ -1,6 +1,7 @@
 //! The canister-level errors: the guards, the append chokepoint, and each endpoint's
 //! composition of them with the domain errors.
 
+use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
 use crate::types::events::{CanonicalError, EventError, Hash32};
 use crate::types::quote::QuoteError;
@@ -64,6 +65,13 @@ pub enum RegisterQuoteError {
     StoreFull {
         capacity: u64,
     },
+}
+
+/// Why `push_chain_data` stored nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PushChainDataError {
+    Guard(GuardError),
+    InvalidData(ChainDataError),
 }
 
 /// Why `set_config` wrote nothing.

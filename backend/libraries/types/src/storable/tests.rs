@@ -1,9 +1,12 @@
 use crate::chain::ChainId;
+use crate::chain_data::ChainReading;
 use crate::config::{AuditChunk, Config, EvictionsPerSweep, RefundsPerSweep};
 use crate::events::{Event, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash};
 use crate::ledger::LedgerMeta;
-use crate::numeric::{Attempt, EventIndex, Timestamp, TokenAmount, UnixSeconds};
+use crate::numeric::{
+    Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds, WeiPerGas,
+};
 use crate::quote::ExpiryKey;
 use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
 use ic_stable_structures::Storable;
@@ -47,7 +50,7 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// Every type a stable structure holds, keys included, one sample per line of the golden
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
-/// default, and an interior cap set), and the four key types. Every field of a sample
+/// default, and an interior cap set), the four key types, and one cached chain reading. Every field of a sample
 /// differs from its neighbours, so a field that moves to another index decodes to a
 /// different value instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -154,6 +157,15 @@ fn samples() -> Vec<Sample> {
                 expires_at: UnixSeconds::new(1_800_000_000),
                 quote_hash: QuoteHash::new([0x5b; 32]),
             },
+        ),
+        sample(
+            "chain data",
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(100_000_000_u64),
+            }
+            .pushed_at(Timestamp::from_nanos(1_700_000_000_123_456_789)),
         ),
     ]);
     all

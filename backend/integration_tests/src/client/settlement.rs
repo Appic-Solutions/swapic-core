@@ -6,13 +6,14 @@ use crate::client::pocket::{query, update};
 use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
-    event_count, events_page, get_config, get_config_full, get_pending, get_swap, halted,
-    verify_chain, verify_replay,
+    event_count, events_page, get_chain_data, get_config, get_config_full, get_pending, get_swap,
+    halted, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, clear_pending_quotes, register_quote, set_config, set_halted, set_roles,
+    audit_replay_step, clear_pending_quotes, push_chain_data, register_quote, set_config,
+    set_halted, set_roles,
 };
 
 pub fn event_count(
@@ -175,6 +176,38 @@ pub fn get_swap(
     hash: get_swap::Args,
 ) -> get_swap::Response {
     query(pic, canister, sender, "get_swap", encode_one(hash).unwrap())
+}
+
+/// Positional, as the endpoint takes them.
+pub fn push_chain_data(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    chain_id: u64,
+    data: &settlement_api::types::chain_data::ChainData,
+) -> push_chain_data::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "push_chain_data",
+        encode_args((chain_id, data)).unwrap(),
+    )
+}
+
+pub fn get_chain_data(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    chain_id: get_chain_data::Args,
+) -> get_chain_data::Response {
+    query(
+        pic,
+        canister,
+        sender,
+        "get_chain_data",
+        encode_one(chain_id).unwrap(),
+    )
 }
 
 pub fn halted(pic: &PocketIc, canister: Principal, sender: Principal) -> halted::Response {
