@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
-use types::config::{EvictionsPerSweep, RefundsPerSweep};
+use types::config::{AuditChunk, EvictionsPerSweep, RefundsPerSweep};
 use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -32,6 +32,7 @@ pub struct Config {
     pub ecdsa_key_name: String,
     pub max_refunds_per_sweep: u32,
     pub max_evictions_per_sweep: u32,
+    pub audit_chunk_events: u32,
 }
 
 impl Default for Config {
@@ -65,6 +66,7 @@ impl fmt::Debug for Config {
             ecdsa_key_name,
             max_refunds_per_sweep,
             max_evictions_per_sweep,
+            audit_chunk_events,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -88,6 +90,7 @@ impl fmt::Debug for Config {
             .field("ecdsa_key_name", ecdsa_key_name)
             .field("max_refunds_per_sweep", max_refunds_per_sweep)
             .field("max_evictions_per_sweep", max_evictions_per_sweep)
+            .field("audit_chunk_events", audit_chunk_events)
             .finish()
     }
 }
@@ -136,6 +139,7 @@ impl From<types::Config> for Config {
             ecdsa_key_name,
             max_refunds_per_sweep,
             max_evictions_per_sweep,
+            audit_chunk_events,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -167,6 +171,7 @@ impl From<types::Config> for Config {
             ecdsa_key_name,
             max_refunds_per_sweep: max_refunds_per_sweep.get(),
             max_evictions_per_sweep: max_evictions_per_sweep.get(),
+            audit_chunk_events: audit_chunk_events.get(),
         }
     }
 }
@@ -230,6 +235,7 @@ impl TryFrom<Config> for types::Config {
             ecdsa_key_name: config.ecdsa_key_name,
             max_refunds_per_sweep: RefundsPerSweep::new(config.max_refunds_per_sweep),
             max_evictions_per_sweep: EvictionsPerSweep::new(config.max_evictions_per_sweep),
+            audit_chunk_events: AuditChunk::new(config.audit_chunk_events),
         })
     }
 }

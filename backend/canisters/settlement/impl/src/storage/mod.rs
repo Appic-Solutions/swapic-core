@@ -1,3 +1,4 @@
+pub mod audit_cursor;
 pub mod config;
 pub mod events;
 pub mod halt;
@@ -14,6 +15,7 @@ pub fn init() {
     roles::init();
     halt::init();
     pending_quotes::init();
+    audit_cursor::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

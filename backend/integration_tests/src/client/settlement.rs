@@ -12,7 +12,7 @@ use settlement_api::queries::{
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    clear_pending_quotes, register_quote, set_config, set_halted, set_roles,
+    audit_replay, clear_pending_quotes, register_quote, set_config, set_halted, set_roles,
 };
 
 pub fn event_count(
@@ -193,6 +193,23 @@ pub fn set_halted(
         sender,
         "set_halted",
         encode_one(halted).unwrap(),
+    )
+}
+
+/// Positional, as the endpoint takes them.
+pub fn audit_replay(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    start: u64,
+    len: u64,
+) -> audit_replay::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "audit_replay",
+        encode_args((start, len)).unwrap(),
     )
 }
 

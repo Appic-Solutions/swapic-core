@@ -1,3 +1,4 @@
+use crate::types::swap::TransitionError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 use types::address::TextTooLong;
@@ -454,6 +455,51 @@ impl TryFrom<EventType> for types::EventType {
             EventType::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
         })
     }
+}
+
+/// Why a window of the log does not fold. The replay stopped at `index` and applied nothing
+/// from there.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum ReplayError {
+    OutOfSequence {
+        expected: u64,
+        found: u64,
+    },
+    Unlinked {
+        index: u64,
+        parent: Hash32,
+        head: Hash32,
+    },
+    LogFull {
+        index: u64,
+    },
+    Refused {
+        index: u64,
+        error: TransitionError,
+    },
+}
+
+/// What one paged replay found.
+///
+/// `compared` is the field to read first: only a window that starts at index 0 and reaches
+/// the head can be measured against the live fold, because a fold has no state to start a
+/// later window from. A window that starts later reports what it did and condemns nothing.
+/// A compared window that does not match, or a window from index 0 the fold refuses, is a
+/// divergence and halts the canister.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub struct AuditPage {
+    pub start: u64,
+    /// entries folded by this call
+    pub folded: u64,
+    /// the log's length when the window was read
+    pub log_len: u64,
+    pub compared: bool,
+    /// whether the fold this call built is the live fold, which only a compared window says
+    pub matches: bool,
+    /// why the window did not fold, if it did not
+    pub refused: Option<ReplayError>,
+    /// whether this call halted the canister
+    pub halted: bool,
 }
 
 /// A value the canonical preimage has no bytes for.

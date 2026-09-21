@@ -36,6 +36,10 @@ pub type RefundsPerSweep = Cap<50, 500>;
 /// no append, so a pass affords more of them than of refunds.
 pub type EvictionsPerSweep = Cap<200, 5_000>;
 
+/// The most log entries one audit pass verifies. Each entry is read and rehashed, so the
+/// ceiling is what a timer message affords with room to spare.
+pub type AuditChunk = Cap<1_000, 10_000>;
+
 impl<const DEFAULT: u32, const CEILING: u32> Cap<DEFAULT, CEILING> {
     /// What a config that never set the knob reads as.
     pub const DEFAULT: Self = Self(DEFAULT);
@@ -163,6 +167,10 @@ pub struct Config {
     /// eviction in one message.
     #[n(18)]
     pub max_evictions_per_sweep: EvictionsPerSweep,
+    /// The most log entries one audit pass verifies, so the chain audit costs the same
+    /// however long the log grows.
+    #[n(19)]
+    pub audit_chunk_events: AuditChunk,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -248,6 +256,7 @@ impl Default for Config {
             ecdsa_key_name: "dfx_test_key".to_string(),
             max_refunds_per_sweep: RefundsPerSweep::DEFAULT,
             max_evictions_per_sweep: EvictionsPerSweep::DEFAULT,
+            audit_chunk_events: AuditChunk::DEFAULT,
         }
     }
 }
@@ -293,6 +302,7 @@ impl Config {
             .validate("max_refunds_per_sweep")?;
         self.max_evictions_per_sweep
             .validate("max_evictions_per_sweep")?;
+        self.audit_chunk_events.validate("audit_chunk_events")?;
         // a chain listed with nothing behind it is a deploy mistake, not a way to unset it
         if let Some(chain) = self
             .vault_addresses

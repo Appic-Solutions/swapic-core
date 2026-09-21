@@ -484,26 +484,71 @@ impl Event {
     }
 }
 
+/// Why an entry is not the link the chain expected where it sits.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum LinkError {
+    #[error("event {found} sits where event {expected} belongs")]
+    OutOfSequence {
+        expected: EventIndex,
+        found: EventIndex,
+    },
+    #[error("event {index} links to {parent} but the entry before it sealed {head}")]
+    Unlinked {
+        index: EventIndex,
+        parent: EventHash,
+        head: EventHash,
+    },
+    #[error("event {index} does not hash to the {hash} it carries")]
+    HashMismatch { index: EventIndex, hash: EventHash },
+}
+
+/// One link of the chain: `event` must sit at `index`, link to `parent`, and hash to the
+/// hash it carries. Answers the hash the next link is checked against, so a verification
+/// can stop anywhere and resume from what it answered. An event with no preimage has no
+/// hash to compare with, which is a mismatch like any other.
+pub fn check_link(
+    event: &Event,
+    index: EventIndex,
+    parent: EventHash,
+) -> Result<EventHash, LinkError> {
+    if event.index != index {
+        return Err(LinkError::OutOfSequence {
+            expected: index,
+            found: event.index,
+        });
+    }
+    if event.parent_hash != parent {
+        return Err(LinkError::Unlinked {
+            index,
+            parent: event.parent_hash,
+            head: parent,
+        });
+    }
+    if event_hash(
+        event.index,
+        event.timestamp,
+        &event.parent_hash,
+        &event.payload,
+    ) != Ok(event.hash)
+    {
+        return Err(LinkError::HashMismatch {
+            index,
+            hash: event.hash,
+        });
+    }
+    Ok(event.hash)
+}
+
 /// Genesis-anchored: index 0 links to [`EventHash::ZERO`] and every link after it holds.
 /// Takes anything iterable, by value or by reference, so a stable log streams through the
 /// same rule a slice does. An event with no preimage is not a valid link.
 pub fn chain_is_valid<E: Borrow<Event>>(events: impl IntoIterator<Item = E>) -> bool {
     let mut parent_hash = EventHash::ZERO;
     for (index, event) in (0..).map(EventIndex::new).zip(events) {
-        let event = event.borrow();
-        if event.index != index || event.parent_hash != parent_hash {
-            return false;
+        match check_link(event.borrow(), index, parent_hash) {
+            Ok(hash) => parent_hash = hash,
+            Err(_) => return false,
         }
-        let hash = event_hash(
-            event.index,
-            event.timestamp,
-            &event.parent_hash,
-            &event.payload,
-        );
-        if hash != Ok(event.hash) {
-            return false;
-        }
-        parent_hash = event.hash;
     }
     true
 }

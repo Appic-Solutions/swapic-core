@@ -11,6 +11,6 @@ mod quotes;
 mod roles;
 
 pub use config::set_config;
-pub use ops::set_halted;
+pub use ops::{audit_replay, set_halted};
 pub use quotes::{clear_pending_quotes, register_quote};
 pub use roles::set_roles;

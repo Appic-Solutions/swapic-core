@@ -277,6 +277,57 @@ fn chain_links_and_detects_tampering() {
     assert!(!chain_is_valid(&[e0, unlinked]));
 }
 
+/// One link at a time, which is what lets a verification stop at a chunk boundary and
+/// resume: each way a link can be wrong is named, and a sound link answers the hash the
+/// next one is checked against.
+#[test]
+fn check_link_names_what_is_wrong_and_carries_the_head_forward() {
+    let e0 = Event::seal(
+        EventIndex::ZERO,
+        Timestamp::from_nanos(100),
+        EventHash::ZERO,
+        swap_done(1),
+    )
+    .unwrap();
+    let e1 = Event::seal(
+        EventIndex::new(1),
+        Timestamp::from_nanos(200),
+        e0.hash,
+        swap_done(2),
+    )
+    .unwrap();
+    assert_eq!(
+        check_link(&e0, EventIndex::ZERO, EventHash::ZERO),
+        Ok(e0.hash)
+    );
+    assert_eq!(check_link(&e1, EventIndex::new(1), e0.hash), Ok(e1.hash));
+
+    assert_eq!(
+        check_link(&e1, EventIndex::new(7), e0.hash),
+        Err(LinkError::OutOfSequence {
+            expected: EventIndex::new(7),
+            found: EventIndex::new(1)
+        })
+    );
+    assert_eq!(
+        check_link(&e1, EventIndex::new(1), EventHash::new([7; 32])),
+        Err(LinkError::Unlinked {
+            index: EventIndex::new(1),
+            parent: e0.hash,
+            head: EventHash::new([7; 32])
+        })
+    );
+    let mut tampered = e1.clone();
+    tampered.payload = swap_done(3);
+    assert_eq!(
+        check_link(&tampered, EventIndex::new(1), e0.hash),
+        Err(LinkError::HashMismatch {
+            index: EventIndex::new(1),
+            hash: e1.hash
+        })
+    );
+}
+
 fn above_u128() -> TokenAmount {
     amount(u128::MAX).checked_add(TokenAmount::ONE).unwrap()
 }

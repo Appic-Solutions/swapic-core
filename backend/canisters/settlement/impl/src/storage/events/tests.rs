@@ -2,10 +2,12 @@ use super::*;
 use crate::state::transitions::tests::{funds, swap_id};
 use crate::state::transitions::ReplayError;
 use crate::state::MemoryStore;
+use crate::storage::audit_cursor;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use crate::task_manager::expiry_sweep::run_expiry_sweep;
-use crate::task_manager::replay_audit::run_replay_audit;
+use crate::task_manager::replay_audit::{run_audit_replay, run_replay_audit};
+use types::config::AuditChunk;
 use types::events::Choice;
 use types::LedgerMeta;
 use types::{
@@ -73,6 +75,14 @@ fn log_replay() -> Result<State<MemoryStore>, ReplayError> {
     EVENTS.with(|e| replay(e.borrow().iter()))
 }
 
+/// The deep check an operator runs by hand, over the whole log: the comparison a bounded
+/// timer pass cannot make. Answers whether it halted the canister.
+fn deep_check_halts() -> bool {
+    let halted = run_audit_replay(0, event_count()).halted;
+    assert_eq!(halted, is_halted(), "a halting pass sets the flag");
+    halted
+}
+
 /// A refused append writes nothing: no log entry, no swap, no moved fold. The pair the
 /// guard binds is the one the expiry sweep reads its refund policy out of.
 #[test]
@@ -115,6 +125,78 @@ fn an_append_of_a_mismatched_quote_pair_writes_nothing() {
     });
 }
 
+/// Moves the audit chunk, without the log line `config::set` would write: a unit test has no
+/// canister clock to seal one on.
+fn set_chunk(events: u32) {
+    crate::storage::config::test_set(types::Config {
+        audit_chunk_events: AuditChunk::new(events),
+        ..crate::storage::config::get()
+    });
+}
+
+/// A broken link inside the log, with the fold in step with it: the head check is O(1) and
+/// cannot see it, and the chain audit only reaches it once its rolling cursor gets there. So
+/// the pass that covers the entry is the pass that halts, and the cursor stops on it.
+#[test]
+fn the_chain_audit_halts_in_the_pass_that_covers_a_tampered_entry() {
+    on_fresh_memory(|| {
+        set_chunk(2);
+        for nonce in 1..=4 {
+            append(funds(nonce));
+        }
+        let meta = StableStore(()).meta();
+        // sealed on a parent the log does not end with: no guard would admit it, and no
+        // append could write it
+        let tampered = Event::seal(
+            meta.next_event_index,
+            Timestamp::from_nanos(5),
+            EventHash::new([7; 32]),
+            funds(5),
+        )
+        .expect("the payload has a preimage");
+        test_push_raw(tampered);
+        assert_eq!(
+            ensure_fold_in_step(),
+            Ok(()),
+            "the O(1) check is what cannot see this"
+        );
+
+        run_replay_audit();
+        assert!(!is_halted(), "the first chunk is sound");
+        assert_eq!(audit_cursor::get().next_index, EventIndex::new(2));
+        run_replay_audit();
+        assert!(!is_halted(), "and so is the second");
+        assert_eq!(audit_cursor::get().next_index, EventIndex::new(4));
+
+        run_replay_audit();
+        assert!(is_halted(), "the pass that reaches the entry halts");
+        assert_eq!(
+            audit_cursor::get().next_index,
+            EventIndex::new(4),
+            "and the cursor stays on the entry that failed"
+        );
+    });
+}
+
+/// The cheap invariant runs every tick: a fold whose head left the log's is exactly what
+/// `append_event` refuses to write on, so the audit halts on it without folding anything.
+#[test]
+fn a_fold_out_of_step_with_its_log_halts_the_next_pass() {
+    on_fresh_memory(|| {
+        append(funds(1));
+        run_replay_audit();
+        assert!(!is_halted());
+
+        let meta = StableStore(()).meta();
+        StableStore(()).put_meta(LedgerMeta {
+            last_event_hash: EventHash::new([7; 32]),
+            ..meta
+        });
+        run_replay_audit();
+        assert!(is_halted(), "the head check halts the tick");
+    });
+}
+
 /// A swap sits in the stable fold that no event created, and the log then builds on it.
 /// The heap replay refuses the first event on it, so the audit answers false and halts,
 /// where it used to trap on the fold's `expect` before it could halt.
@@ -152,7 +234,14 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
         );
         assert!(!verify_replay());
         run_replay_audit();
-        assert!(is_halted(), "the audit halts instead of trapping");
+        assert!(
+            !is_halted(),
+            "a bounded pass checks the chain and the head, not the whole fold"
+        );
+        assert!(
+            deep_check_halts(),
+            "the deep check halts instead of trapping"
+        );
     });
 }
 
@@ -184,7 +273,11 @@ fn replay_audit_halts_on_a_pocket_balance_no_event_produced() {
         );
         assert!(!verify_replay());
         run_replay_audit();
-        assert!(is_halted());
+        assert!(
+            !is_halted(),
+            "a bounded pass checks the chain and the head, not the whole fold"
+        );
+        assert!(deep_check_halts());
     });
 }
 
@@ -202,7 +295,11 @@ fn replay_audit_halts_on_a_fold_that_replays_cleanly_but_differs() {
         assert!(log_replay().is_ok(), "every event is admissible");
         assert!(!verify_replay());
         run_replay_audit();
-        assert!(is_halted());
+        assert!(
+            !is_halted(),
+            "a bounded pass checks the chain and the head, not the whole fold"
+        );
+        assert!(deep_check_halts());
     });
 }
 
@@ -305,7 +402,11 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
 
         assert!(!verify_replay());
         run_replay_audit();
-        assert!(is_halted());
+        assert!(
+            !is_halted(),
+            "a bounded pass checks the chain and the head, not the whole fold"
+        );
+        assert!(deep_check_halts());
     });
 }
 

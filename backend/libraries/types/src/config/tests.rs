@@ -28,6 +28,7 @@ fn defaults_match_spec() {
     );
     assert_eq!(c.max_refunds_per_sweep, RefundsPerSweep::new(50));
     assert_eq!(c.max_evictions_per_sweep, EvictionsPerSweep::new(200));
+    assert_eq!(c.audit_chunk_events, AuditChunk::new(1_000));
     // deploy-time values, empty in code
     assert!(c.rpc_urls.is_empty());
     assert!(c.vault_addresses.is_empty());
@@ -300,6 +301,16 @@ fn validate_rejects_a_cap_outside_its_range() {
         .validate()
         .expect("the ceiling itself is allowed");
     refunds(1).validate().expect("one item a pass is allowed");
+
+    let chunk = |cap| Config {
+        audit_chunk_events: AuditChunk::new(cap),
+        ..Config::default()
+    };
+    assert!(chunk(0).validate().is_err());
+    assert!(chunk(AuditChunk::CEILING + 1).validate().is_err());
+    chunk(AuditChunk::CEILING)
+        .validate()
+        .expect("the ceiling itself is allowed");
 
     let err = evictions(0).validate().unwrap_err();
     assert_eq!(

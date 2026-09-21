@@ -7,6 +7,27 @@ type AppendError = variant {
   Canonical : CanonicalError;
   OutOfStableMemory : record { current_pages : nat64; delta_pages : nat64 };
 };
+// What one paged replay found.
+// 
+// `compared` is the field to read first: only a window that starts at index 0 and reaches
+// the head can be measured against the live fold, because a fold has no state to start a
+// later window from. A window that starts later reports what it did and condemns nothing.
+// A compared window that does not match, or a window from index 0 the fold refuses, is a
+// divergence and halts the canister.
+type AuditPage = record {
+  compared : bool;
+  // the log's length when the window was read
+  log_len : nat64;
+  start : nat64;
+  // whether the fold this call built is the live fold, which only a compared window says
+  matches : bool;
+  // whether this call halted the canister
+  halted : bool;
+  // why the window did not fold, if it did not
+  refused : opt ReplayError;
+  // entries folded by this call
+  folded : nat64;
+};
 // A value the canonical preimage has no bytes for.
 type CanonicalError = variant {
   TooLong : record { len : nat64 };
@@ -17,6 +38,7 @@ type Choice = variant { Requote; Refund };
 // address maps and the key name are what a deploy fills in.
 type Config = record {
   confirmations : vec record { nat64; nat64 };
+  audit_chunk_events : nat32;
   rail_status_max_age_s : nat64;
   expiry_check_interval_s : nat64;
   batch_window_ms : nat64;
@@ -202,13 +224,22 @@ type RegisterQuoteError = variant {
   InvalidQuote : QuoteError;
   Expired : record { now_s : nat64; expires_at_s : nat64 };
 };
-type Result = variant { Ok : nat64; Err : GuardError };
-type Result_1 = variant { Ok : Config; Err : GuardError };
-type Result_2 = variant { Ok : opt Quote; Err : GuardError };
-type Result_3 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_4 = variant { Ok; Err : SetConfigError };
-type Result_5 = variant { Ok; Err : GuardError };
-type Result_6 = variant { Ok; Err : SetRolesError };
+// Why a window of the log does not fold. The replay stopped at `index` and applied nothing
+// from there.
+type ReplayError = variant {
+  OutOfSequence : record { found : nat64; expected : nat64 };
+  LogFull : record { index : nat64 };
+  Refused : record { error : TransitionError; index : nat64 };
+  Unlinked : record { head : blob; index : nat64; parent : blob };
+};
+type Result = variant { Ok : AuditPage; Err : GuardError };
+type Result_1 = variant { Ok : nat64; Err : GuardError };
+type Result_2 = variant { Ok : Config; Err : GuardError };
+type Result_3 = variant { Ok : opt Quote; Err : GuardError };
+type Result_4 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_5 = variant { Ok; Err : SetConfigError };
+type Result_6 = variant { Ok; Err : GuardError };
+type Result_7 = variant { Ok; Err : SetRolesError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -272,10 +303,18 @@ type TransitionError = variant {
   UnknownPocket : nat64;
 };
 service : (InitArg) -> {
+  // Controller-only. The deep check by hand: folds the log window `[start, start + len)` and,
+  // where the window is the whole log, compares it with the live state. An update, not a
+  // query, because a divergence it finds halts the canister.
+  // 
+  // Only a window from index 0 that reaches the head can be compared: a fold has no state to
+  // start a later window from. Ask for the count first and spend as many calls as the log
+  // needs.
+  audit_replay : (nat64, nat64) -> (Result);
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in
   // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.
-  clear_pending_quotes : () -> (Result);
+  clear_pending_quotes : () -> (Result_1);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
@@ -283,10 +322,10 @@ service : (InitArg) -> {
   // the real thing.
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
-  get_config_full : () -> (Result_1) query;
+  get_config_full : () -> (Result_2) query;
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
-  get_pending : (blob) -> (Result_2) query;
+  get_pending : (blob) -> (Result_3) query;
   // The folded state of one swap. Public: every field of it is already in the
   // world-readable event log, `quote_bytes` included.
   get_swap : (blob) -> (opt Swap) query;
@@ -296,17 +335,17 @@ service : (InitArg) -> {
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log.
-  register_quote : (Quote) -> (Result_3);
+  register_quote : (Quote) -> (Result_4);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_4);
+  set_config : (Config) -> (Result_5);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
-  set_halted : (bool) -> (Result_5);
+  set_halted : (bool) -> (Result_6);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_6);
+  set_roles : (principal, principal) -> (Result_7);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
