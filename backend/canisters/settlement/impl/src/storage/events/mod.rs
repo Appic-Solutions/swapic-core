@@ -89,12 +89,18 @@ impl Store for StableStore {
         AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
-    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey> {
+    fn waiting_keys(
+        &self,
+        before: Option<Timestamp>,
+        naming: Option<QuoteHash>,
+        limit: usize,
+    ) -> Vec<WaitingKey> {
         AUTO_REFUND_WAITING.with(|waiting| {
             waiting
                 .borrow()
                 .iter()
                 .take_while(|key| before.is_none_or(|cutoff| key.since < cutoff))
+                .filter(|key| naming.is_none_or(|quote_hash| key.quote_hash == quote_hash))
                 .take(limit)
                 .collect()
         })

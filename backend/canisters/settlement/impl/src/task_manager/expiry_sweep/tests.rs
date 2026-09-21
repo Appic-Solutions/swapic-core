@@ -1,9 +1,12 @@
 use super::*;
+use crate::state::MemoryStore;
 use crate::storage::halt::set_halted;
 use crate::storage::on_fresh_memory;
 use types::config::{EvictionsPerSweep, RefundsPerSweep};
 use types::events::Choice;
-use types::{ChainId, GasMode, Quote, Rail, SwapStatus, TokenAmount, UnixSeconds, WaitingKey};
+use types::{
+    ChainId, GasMode, Quote, Rail, Swap, SwapStatus, TokenAmount, UnixSeconds, WaitingKey,
+};
 
 /// Moves both per-tick caps, without the log line `config::set` would write: a unit test has
 /// no canister clock to seal one on.
@@ -76,58 +79,112 @@ const MINUTE_NS: u64 = 60 * 1_000_000_000;
 
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-fn due_at(swaps: &[(QuoteHash, Swap)], now_ns: u64) -> Vec<QuoteHash> {
-    due_refunds(swaps.to_vec(), Timestamp::from_nanos(now_ns), TIMEOUT)
+fn key(since_ns: u64, quote_hash: QuoteHash) -> WaitingKey {
+    WaitingKey {
+        since: Timestamp::from_nanos(since_ns),
+        quote_hash,
+    }
 }
 
-/// The dual refund policy, at the point the timer decides: only a swap whose quote says
-/// `auto_refund` is refunded on its own. The others keep waiting for a human.
+/// A heap store holding `swaps` and exactly the index `keys` given, planted as they are, so
+/// the head is read the way the sweep reads it and an entry can say what its swap does not.
+fn planted(swaps: Vec<(QuoteHash, Swap)>, keys: Vec<WaitingKey>) -> MemoryStore {
+    let mut store = MemoryStore::default();
+    for (quote_hash, swap) in swaps {
+        store.put_swap(quote_hash, swap);
+    }
+    for key in keys {
+        store.put_auto_refund_waiting(key);
+    }
+    store
+}
+
+fn head_at(store: &MemoryStore, now_ns: u64, cap: usize) -> Head {
+    timed_out_waiting(store, Timestamp::from_nanos(now_ns), TIMEOUT, cap)
+}
+
+/// The dual refund policy, at the point the timer decides: a timed-out entry is due only
+/// when it is the wait its swap is in, and that swap asks for an automatic refund. Every
+/// other entry at the head is stale, and an entry not yet timed out is not at the head.
 #[test]
-fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
+fn the_head_is_the_due_auto_refund_waits_and_everything_else_is_stale() {
     let auto = quote_bytes(&quote(true, 1));
     let manual = quote_bytes(&quote(false, 2));
-    let swaps = vec![
-        (qh(1), waiting(auto.clone(), 0)),
-        (qh(2), waiting(manual, 0)),
-        // asked for a refund, but not yet timed out
-        (qh(3), waiting(auto.clone(), 25 * MINUTE_NS)),
-        // not waiting for anyone
-        (
-            qh(4),
-            Swap {
-                status: SwapStatus::Executing,
-                waiting_since: None,
-                ..waiting(auto, 0)
-            },
-        ),
-    ];
-    assert_eq!(due_at(&swaps, 30 * MINUTE_NS + 1), vec![qh(1)]);
+    let store = planted(
+        vec![
+            (qh(1), waiting(auto.clone(), 0)),
+            (qh(2), waiting(manual, 0)),
+            // asked for a refund, but not yet timed out
+            (qh(3), waiting(auto.clone(), 25 * MINUTE_NS)),
+            // not waiting for anyone
+            (
+                qh(4),
+                Swap {
+                    status: SwapStatus::Executing,
+                    waiting_since: None,
+                    ..waiting(auto.clone(), 0)
+                },
+            ),
+            // waiting since an instant its entry does not say
+            (qh(6), waiting(auto, 1)),
+        ],
+        vec![
+            key(0, qh(1)),
+            key(0, qh(2)),
+            key(25 * MINUTE_NS, qh(3)),
+            key(0, qh(4)),
+            // no such swap
+            key(0, qh(5)),
+            key(0, qh(6)),
+        ],
+    );
+    let head = head_at(&store, 30 * MINUTE_NS + 1, 100);
+    assert_eq!(head.due, vec![qh(1)]);
+    assert_eq!(
+        head.stale,
+        vec![key(0, qh(2)), key(0, qh(4)), key(0, qh(5)), key(0, qh(6))]
+    );
+    assert!(!head.more);
 }
 
-/// "Older than the timeout" is strict: the deadline second itself is still the user's.
+/// "Older than the timeout" is strict: the deadline instant itself is still the user's. And
+/// the head is bounded by the cap, saying when more is due behind it.
 #[test]
-fn due_refunds_fires_the_moment_after_the_timeout_and_not_before() {
-    let swaps = vec![(qh(1), waiting(quote_bytes(&quote(true, 1)), 100))];
+fn the_head_fires_the_moment_after_the_timeout_and_stops_at_the_cap() {
+    let auto = quote_bytes(&quote(true, 1));
+    let store = planted(
+        vec![
+            (qh(1), waiting(auto.clone(), 100)),
+            (qh(2), waiting(auto.clone(), 101)),
+            (qh(3), waiting(auto, 102)),
+        ],
+        vec![key(100, qh(1)), key(101, qh(2)), key(102, qh(3))],
+    );
     let timeout = 30 * MINUTE_NS;
-    assert!(due_at(&swaps, 100 + timeout).is_empty());
-    assert_eq!(due_at(&swaps, 100 + timeout + 1), vec![qh(1)]);
+    assert!(head_at(&store, 100 + timeout, 100).due.is_empty());
+    assert_eq!(head_at(&store, 100 + timeout + 1, 100).due, vec![qh(1)]);
+    let all = head_at(&store, 102 + timeout + 1, 100);
+    assert_eq!((all.due, all.more), (vec![qh(1), qh(2), qh(3)], false));
+    let capped = head_at(&store, 102 + timeout + 1, 2);
+    assert_eq!((capped.due, capped.more), (vec![qh(1), qh(2)], true));
 }
 
 /// `quote_bytes` reaches the log from a caller, so the rule has to survive bytes it cannot
-/// read: a swap whose bytes are no quote has no wait the timer can act on, so it is not
-/// due, and the pass goes on to the ones that are. The sweep repairs its index entry.
+/// read: an entry whose swap has no quote behind it says a wait the timer cannot act on,
+/// so it is stale and repaired, and the pass goes on to the ones that are due.
 #[test]
-fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
-    let swaps = vec![
-        (qh(1), waiting(vec![], 0)),
-        (qh(2), waiting(vec![0xff; 9], 0)),
-        (qh(3), waiting(quote_bytes(&quote(true, 1)), 0)),
-    ];
-    assert_eq!(
-        due_at(&swaps, 30 * MINUTE_NS + 1),
-        vec![qh(3)],
-        "the readable one is still refunded"
+fn an_entry_whose_bytes_are_no_quote_is_stale() {
+    let store = planted(
+        vec![
+            (qh(1), waiting(vec![], 0)),
+            (qh(2), waiting(vec![0xff; 9], 0)),
+            (qh(3), waiting(quote_bytes(&quote(true, 1)), 0)),
+        ],
+        vec![key(0, qh(1)), key(0, qh(2)), key(0, qh(3))],
     );
+    let head = head_at(&store, 30 * MINUTE_NS + 1, 100);
+    assert_eq!(head.due, vec![qh(3)], "the readable one is still refunded");
+    assert_eq!(head.stale, vec![key(0, qh(1)), key(0, qh(2))]);
 }
 
 /// The permit window is measured from the quote's expiry, and the boundary second is

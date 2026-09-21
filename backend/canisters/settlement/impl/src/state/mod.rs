@@ -27,31 +27,37 @@ pub trait Store {
     fn put_auto_refund_waiting(&mut self, key: WaitingKey);
     fn remove_auto_refund_waiting(&mut self, key: &WaitingKey);
     /// The first `limit` indexed waits, longest wait first, stopping early at the first one
-    /// that began at `before` or later. The one walk of the index, and the readers below are
-    /// written over it. Answers owned keys, so no caller ever runs with the index borrowed.
-    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey>;
+    /// that began at `before` or later, and among them only the ones naming `naming` when
+    /// one is given. The one walk of the index, and the readers below are written over it.
+    /// Answers owned keys, and only the keys asked for, so no caller ever runs with the
+    /// index borrowed or copies more of it than it reads.
+    fn waiting_keys(
+        &self,
+        before: Option<Timestamp>,
+        naming: Option<QuoteHash>,
+        limit: usize,
+    ) -> Vec<WaitingKey>;
 
     /// Every indexed wait, longest wait first.
     fn auto_refund_waiting(&self) -> Vec<WaitingKey> {
-        self.waiting_keys(None, usize::MAX)
+        self.waiting_keys(None, None, usize::MAX)
     }
 
     /// The indexed waits that began before `cutoff`, longest first, at most `limit` of them:
     /// the cost is the keys returned and never the swaps ever recorded.
     fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey> {
-        self.waiting_keys(Some(cutoff), limit)
+        self.waiting_keys(Some(cutoff), None, limit)
     }
 
     /// Makes the index hold, for `quote_hash`, exactly `implied`: drops every other entry
     /// naming it, and writes `implied` if it is missing. The index is keyed by wait first,
-    /// so a swap's entries are found by a walk of the whole index and not by a seek: only
-    /// the repair of a divergence needs this, and a diverged entry may carry an instant its
-    /// swap never had.
+    /// so a swap's entries are found by a walk and not by a seek: only the repair of a
+    /// divergence needs this, and a diverged entry may carry an instant its swap never had.
     fn repair_auto_refund_waiting(&mut self, quote_hash: &QuoteHash, implied: Option<WaitingKey>) {
         let doomed = self
-            .auto_refund_waiting()
+            .waiting_keys(None, Some(*quote_hash), usize::MAX)
             .into_iter()
-            .filter(|key| key.quote_hash == *quote_hash && Some(*key) != implied);
+            .filter(|key| Some(*key) != implied);
         for key in doomed {
             self.remove_auto_refund_waiting(&key);
         }
@@ -123,10 +129,16 @@ impl Store for MemoryStore {
         self.auto_refund_waiting.remove(key);
     }
 
-    fn waiting_keys(&self, before: Option<Timestamp>, limit: usize) -> Vec<WaitingKey> {
+    fn waiting_keys(
+        &self,
+        before: Option<Timestamp>,
+        naming: Option<QuoteHash>,
+        limit: usize,
+    ) -> Vec<WaitingKey> {
         self.auto_refund_waiting
             .iter()
             .take_while(|key| before.is_none_or(|cutoff| key.since < cutoff))
+            .filter(|key| naming.is_none_or(|quote_hash| key.quote_hash == quote_hash))
             .take(limit)
             .copied()
             .collect()

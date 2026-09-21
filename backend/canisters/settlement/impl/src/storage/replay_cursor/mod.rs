@@ -33,7 +33,9 @@ impl ReplayCursor {
 /// Read back leniently, unlike every other stored type: a saved fold that no longer decodes
 /// reads as genesis. The fold is scratch the next step rebuilds from the log, so bytes a
 /// new wasm cannot read must not veto the upgrade that ships it; an audit in progress
-/// across such an upgrade starts over, which is all it could do.
+/// across such an upgrade starts over, which is all it could do. The cell decodes once,
+/// when it opens at start, and answers its cached value after, so this reset can happen
+/// only across an upgrade or a fresh start and never between two steps of one audit.
 impl Storable for ReplayCursor {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(minicbor::to_vec(self).expect("BUG: encoding into a Vec is infallible"))
