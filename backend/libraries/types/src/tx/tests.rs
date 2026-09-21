@@ -15,6 +15,7 @@ fn entry() -> OutboxEntry {
         status: OutboxStatus::Queued,
         created_at: Timestamp::from_nanos(1_700_000_000_000_000_000),
         last_sent_at: None,
+        first_sent_at: None,
         to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
             .parse()
             .unwrap(),
@@ -84,11 +85,49 @@ fn a_replacement_keeps_the_nonce_and_remembers_the_hash_it_replaced() {
 fn an_entry_knows_how_long_its_bytes_have_been_out() {
     let mut entry = entry();
     assert_eq!(entry.sent_for(Timestamp::from_nanos(9_000)), None);
+    assert_eq!(entry.out_for(Timestamp::from_nanos(9_000)), None);
     entry.sent(Timestamp::from_nanos(1_000_000_000));
     assert_eq!(
         entry.sent_for(Timestamp::from_nanos(4_000_000_000)),
         Some(Duration::from_secs(3))
     );
+    assert_eq!(
+        entry.out_for(Timestamp::from_nanos(4_000_000_000)),
+        Some(Duration::from_secs(3))
+    );
+}
+
+/// The replacement clock runs from the first broadcast and the rebroadcast clock from the
+/// last, so re-sending the same bytes can never postpone the fee bump: with one clock for
+/// both, a pass every rebroadcast window resets it forever and an underpriced transaction
+/// holds its swap for as long as the chain refuses to mine it.
+#[test]
+fn a_rebroadcast_moves_the_rebroadcast_clock_and_not_the_replacement_clock() {
+    let mut entry = entry();
+    entry.sent(Timestamp::from_nanos(1_000_000_000));
+    entry.sent(Timestamp::from_nanos(31_000_000_000));
+    entry.sent(Timestamp::from_nanos(61_000_000_000));
+    let now = Timestamp::from_nanos(121_000_000_000);
+    assert_eq!(
+        entry.sent_for(now),
+        Some(Duration::from_secs(60)),
+        "one minute since the last rebroadcast"
+    );
+    assert_eq!(
+        entry.out_for(now),
+        Some(Duration::from_secs(120)),
+        "and two minutes on the network, which is what a replacement is measured on"
+    );
+
+    // a replacement is new bytes at a new price, so its own clock starts when they go out
+    let replacement = entry.replaced(
+        TxHash::new([3; 32]),
+        vec![0x02, 0xff],
+        WeiPerGas::from(4_000_000_000_u64),
+        WeiPerGas::from(200_000_000_u64),
+    );
+    assert_eq!(replacement.first_sent_at, None);
+    assert_eq!(replacement.out_for(now), None);
 }
 
 /// The receipt's own block is the first confirmation, so a depth of one is satisfied by a

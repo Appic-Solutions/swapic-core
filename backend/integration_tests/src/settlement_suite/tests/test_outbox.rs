@@ -212,6 +212,9 @@ fn answer_pending(pic: &PocketIc, latest: u64, receipt: &Value) -> Vec<String> {
 fn receipt(block: u64, success: bool, tx_hash: Hash32) -> Value {
     json!({
         "transactionHash": format!("0x{}", hex::encode(tx_hash)),
+        // a receipt names the block it is in as well as the height of it, and a record
+        // without one was mined into no block at all
+        "blockHash": format!("0x{}", hex::encode([block as u8; 32])),
         "blockNumber": format!("0x{block:x}"),
         "status": if success { "0x1" } else { "0x0" },
     })
@@ -808,5 +811,132 @@ fn an_upgrade_between_the_allocation_and_the_cancel_loses_nothing() {
         of_kind(events(&pic, canister), is_cancelled).len(),
         1,
         "the allocation was in the fold, so the upgrade could not lose it"
+    );
+}
+
+/// Answers one pending outcall with a JSON-RPC error member per call, which is how a
+/// provider refuses a broadcast.
+fn reply_error(pic: &PocketIc, request: &CanisterHttpRequest, messages: Vec<&str>) {
+    let body: Vec<Value> = messages
+        .into_iter()
+        .enumerate()
+        .map(|(id, message)| json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": message}}))
+        .collect();
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: request.subnet_id,
+        request_id: request.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: Value::Array(body).to_string().into_bytes(),
+        }),
+        additional_responses: vec![],
+    });
+    for _ in 0..12 {
+        pic.tick();
+    }
+}
+
+/// Rule A5's replacement clock runs from the first broadcast and not from the last, so a
+/// rebroadcast can never postpone it. With the clock on the last broadcast, a pass every
+/// rebroadcast window resets it forever and the fee is never bumped: an underpriced
+/// transaction would hold its swap for as long as the chain refused to mine it.
+#[test]
+fn a_rebroadcast_never_postpones_the_replacement() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    // a pass every ten seconds for four minutes: the rebroadcast window is thirty seconds,
+    // so the bytes go out again and again, and the stuck window is two minutes
+    for block in 0..24 {
+        advance(&pic, canister, Duration::from_secs(10));
+        answer_pending(&pic, 19_000_000 + block, &json!(null));
+    }
+    assert!(
+        !of_kind(events(&pic, canister), is_replaced).is_empty(),
+        "the transaction was out for four minutes, so it was replaced at a higher fee"
+    );
+}
+
+/// A reverted receipt closes an attempt as a failure, and like a successful one it has to
+/// be deep enough first. A one-block reorg that drops a reverted transaction and includes
+/// the replacement that pays the user would otherwise leave the attempt closed, the outbox
+/// no longer watching, and the engine free to pay a second time.
+#[test]
+fn a_reverted_receipt_is_no_failure_until_it_is_deep_enough() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    // reverted, in a block the head has not reached: two moments of the chain
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_000, &receipt(19_000_005, false, tx_hash));
+    assert!(
+        of_kind(events(&pic, canister), is_failed).is_empty(),
+        "nothing fails on a receipt ahead of the head"
+    );
+
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_005, &receipt(19_000_005, false, tx_hash));
+    assert_eq!(
+        of_kind(events(&pic, canister), is_failed).len(),
+        1,
+        "at depth it fails the attempt"
+    );
+}
+
+/// A receipt decides nothing unless it is about a transaction this canister broadcast. One
+/// unreplicated provider answers both the head and the receipts, so without this it alone
+/// decides that an attempt confirmed, at a height it also supplies, for a transaction that
+/// may not exist.
+#[test]
+fn a_receipt_for_a_transaction_we_never_sent_closes_nothing() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
+
+    let foreign: Hash32 = [0xaa; 32];
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_005, &receipt(19_000_005, true, foreign));
+    assert!(
+        of_kind(events(&pic, canister), is_confirmed).is_empty(),
+        "a receipt for a foreign hash is not this attempt's receipt"
+    );
+
+    // and a forged reverted one is not a failure either
+    advance(&pic, canister, BATCH_WINDOW);
+    answer_pending(&pic, 19_000_006, &receipt(19_000_006, false, foreign));
+    assert!(
+        of_kind(events(&pic, canister), is_failed).is_empty(),
+        "nor is it this attempt's failure"
+    );
+}
+
+/// A provider answering "nonce too low" is saying one of this entry's own transactions is
+/// already mined, because this canister is the only account that spends its nonces. The
+/// entry goes to the receipt reader rather than back into the queue, where it would sit
+/// forever: `check_open` reads only what has been sent. A provider that lies about it
+/// self-corrects, because the entry then follows the normal receipt, rebroadcast and
+/// replacement path and an honest chain refuses the replacement.
+#[test]
+fn a_nonce_the_provider_calls_too_low_goes_to_the_receipt_reader() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(methods(&pending[0]), vec!["eth_sendRawTransaction"]);
+    reply_error(&pic, &pending[0], vec!["nonce too low"]);
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chain, one batch");
+    assert_eq!(
+        methods(&pending[0]),
+        vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+        "the entry is being watched, not broadcast again"
     );
 }

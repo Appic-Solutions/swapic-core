@@ -97,13 +97,13 @@ impl Storable for NonceKey {
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
         let (chain_id, nonce) = bytes
             .split_first_chunk::<8>()
-            .expect("BUG: a stored outbox key is written as exactly 16 bytes");
+            .expect("BUG: a stored nonce key is written as exactly 16 bytes");
         Self {
             chain_id: ChainId::new(u64::from_be_bytes(*chain_id)),
             nonce: Nonce::new(u64::from_be_bytes(
                 nonce
                     .try_into()
-                    .expect("BUG: a stored outbox key is written as exactly 16 bytes"),
+                    .expect("BUG: a stored nonce key is written as exactly 16 bytes"),
             )),
         }
     }
@@ -117,7 +117,10 @@ impl Storable for NonceKey {
 /// One signed transaction on its way to a chain.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
-/// new field is optional.
+/// new field is optional. Fields are declared beside the ones they describe rather than in
+/// index order, so the indices below run 0 to 5, then 11 to 14, then 6 to 10 and 15: the
+/// numbers are the order they were added in, and the declaration is the order they read
+/// in.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct OutboxEntry {
     #[n(0)]
@@ -158,6 +161,12 @@ pub struct OutboxEntry {
     /// When the current bytes were last handed to a provider.
     #[n(10)]
     pub last_sent_at: Option<Timestamp>,
+    /// When the current bytes were FIRST handed to a provider, which is what the
+    /// replacement clock runs from. A rebroadcast moves `last_sent_at` and not this, so
+    /// re-sending the same bytes can never postpone the fee bump; a replacement is new
+    /// bytes, so it starts the clock again.
+    #[n(15)]
+    pub first_sent_at: Option<Timestamp>,
 }
 
 impl OutboxEntry {
@@ -176,17 +185,27 @@ impl OutboxEntry {
             .expect("BUG: an outbox entry is created with the hash of its transaction")
     }
 
-    /// How long the current bytes have been out with a provider, or nothing while they
-    /// have never been sent.
+    /// How long it is since the current bytes were last handed to a provider, or nothing
+    /// while they have never been sent. What decides a rebroadcast.
     pub fn sent_for(&self, now: Timestamp) -> Option<Duration> {
         self.last_sent_at
             .map(|sent| now.saturating_duration_since(sent))
     }
 
-    /// Records that the current bytes went out at `at`.
+    /// How long the current bytes have been on the network, counted from the first time
+    /// they went out. What decides a replacement, so that a rebroadcast cannot postpone one
+    /// forever by resetting the other clock.
+    pub fn out_for(&self, now: Timestamp) -> Option<Duration> {
+        self.first_sent_at
+            .map(|sent| now.saturating_duration_since(sent))
+    }
+
+    /// Records that the current bytes went out at `at`. The first time is remembered as
+    /// well as the last, and only the first survives a rebroadcast.
     pub fn sent(&mut self, at: Timestamp) {
         self.status = OutboxStatus::Sent;
         self.last_sent_at = Some(at);
+        self.first_sent_at = self.first_sent_at.or(Some(at));
     }
 
     /// Takes the same nonce to a new transaction at a higher fee: the old hash stays, so a
@@ -207,6 +226,9 @@ impl OutboxEntry {
             max_priority_fee,
             status: OutboxStatus::Queued,
             last_sent_at: None,
+            // new bytes at a new price: the clock the next replacement is measured on
+            // starts when these first reach a provider, not when the ones they replace did
+            first_sent_at: None,
             ..self.clone()
         }
     }

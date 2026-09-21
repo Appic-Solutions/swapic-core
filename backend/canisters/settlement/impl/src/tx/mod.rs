@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use settlement_api::types::errors::GuardError;
 use std::time::Duration;
 use thiserror::Error;
+use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
@@ -40,10 +41,21 @@ use types::{
 /// the transaction from its mempool.
 const REBROADCAST_AFTER: Duration = Duration::from_secs(30);
 
-/// How long a transaction stays out before it is replaced at a higher fee. Long enough
-/// that a chain running normally lands it first, short enough that a swap is not held by
-/// an underpriced transaction. A config knob when the engine lands.
+/// How long a transaction stays on the network before it is replaced at a higher fee,
+/// counted from the FIRST time its bytes went out. Long enough that a chain running
+/// normally lands it first, short enough that a swap is not held by an underpriced
+/// transaction. A config knob when the engine lands.
 const STUCK_AFTER: Duration = Duration::from_secs(120);
+
+/// The most any one transaction this canister signs may spend on gas: one ether, which is
+/// two orders of magnitude above what a settlement transaction on the most congested chain
+/// this canister sends to costs, and far below what a broken fee reading would produce.
+///
+/// The per-gas ceiling and the multiple a replacement may bid are the other two bounds; this
+/// one is the product of a price and a limit, so it catches a gas limit nobody bounded as
+/// well as a price. Like the other two it is a constant rather than a config knob, so no
+/// config write can raise it; the knob belongs with the engine's gas policy in a later plan.
+const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 
 /// The most a provider's answer to one batch may be: a receipt is a few hundred bytes of
 /// logs at worst, and the cap is what the outcall reserves against.
@@ -52,6 +64,12 @@ const MAX_RECEIPT_BYTES: u64 = 32_768;
 /// The most a batch of broadcasts may answer: a transaction hash each, or an error.
 const MAX_SEND_BYTES: u64 = 8_192;
 
+/// How deep a receipt must be on a chain the config does not list a depth for. One is the
+/// safe floor rather than a free pass: `is_confirmed` counts the receipt's own block as the
+/// first confirmation, so a depth of one still refuses a receipt from a block the head has
+/// not reached, which is a provider answering from two different moments of the chain.
+const DEFAULT_CONFIRMATIONS: types::BlockDepth = types::BlockDepth::new(1);
+
 /// Why no transaction was created, or why a pass could not finish one.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TxError {
@@ -59,8 +77,16 @@ pub enum TxError {
     Guard(GuardError),
     #[error("chain {chain_id} has no chain data young enough to price a transaction with")]
     StaleChainData { chain_id: ChainId },
-    #[error("the fee for chain {chain_id} does not fit in 256 bits")]
-    FeeOutOfRange { chain_id: ChainId },
+    #[error(
+        "the fee for chain {chain_id} is outside what this canister will pay: at most \
+         {ceiling} per gas"
+    )]
+    FeeOutOfRange {
+        chain_id: ChainId,
+        ceiling: WeiPerGas,
+    },
+    #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the bound of {MAX_TRANSACTION_COST}")]
+    GasCostTooHigh { chain_id: ChainId, cost: Wei },
     #[error("{0} names no swap, and a transaction is signed against a swap's attempt")]
     PurposeNeedsASwap(&'static str),
     #[error("swap {quote_hash} has used every attempt number there is")]
@@ -71,19 +97,40 @@ pub enum TxError {
     Ecdsa(#[from] EcdsaError),
 }
 
+/// The freshest reading of a chain, or the refusal that prices nothing: a transaction is
+/// never sent on a reading the watcher stopped refreshing, because the fee it would carry
+/// is the fee some earlier moment of the chain was asking.
+fn fresh_reading(chain_id: ChainId, now: Timestamp) -> Result<ChainData, TxError> {
+    let max_age = config::get().chain_data_max_age;
+    chain_data::fresh(chain_id, now, max_age).ok_or(TxError::StaleChainData { chain_id })
+}
+
 /// The fees to send at, from the chain data the watcher pushed: the tip it suggests, and a
 /// ceiling of twice the base fee on top of it, which carries a transaction through several
-/// blocks of a rising base fee.
-fn fees(chain_id: ChainId, now: Timestamp) -> Result<(WeiPerGas, WeiPerGas), TxError> {
-    let max_age = config::get().chain_data_max_age;
-    let data =
-        chain_data::fresh(chain_id, now, max_age).ok_or(TxError::StaleChainData { chain_id })?;
-    let max_fee = data
-        .base_fee
-        .checked_mul(2_u8)
-        .and_then(|headroom| headroom.checked_add(data.priority_fee))
-        .ok_or(TxError::FeeOutOfRange { chain_id })?;
-    Ok((max_fee, data.priority_fee))
+/// blocks of a rising base fee. A reading that prices a transaction above
+/// [`MAX_FEE_PER_GAS`] prices nothing: the bound is what a fee this canister did not compute
+/// is held to.
+fn fees(chain_id: ChainId, now: Timestamp) -> Result<Fees, TxError> {
+    fresh_reading(chain_id, now)?
+        .fees()
+        .ok_or(TxError::FeeOutOfRange {
+            chain_id,
+            ceiling: MAX_FEE_PER_GAS,
+        })
+}
+
+/// Refuses a transaction whose gas could cost more than this canister will ever spend on
+/// one. The per-gas ceiling bounds the price and this bounds the price times the limit, so
+/// a gas limit nobody checked cannot turn a sane price into an insane bill.
+fn affordable(chain_id: ChainId, fees: Fees, gas_limit: GasAmount) -> Result<(), TxError> {
+    let cost = fees.worst_cost(gas_limit).ok_or(TxError::GasCostTooHigh {
+        chain_id,
+        cost: Wei::MAX,
+    })?;
+    if cost > MAX_TRANSACTION_COST {
+        return Err(TxError::GasCostTooHigh { chain_id, cost });
+    }
+    Ok(())
 }
 
 /// Creates, signs and queues one transaction, and answers the hash it will be looked up
@@ -107,7 +154,8 @@ pub async fn create_and_send(
         .quote_hash()
         .ok_or(TxError::PurposeNeedsASwap("a cancel"))?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let (max_fee, max_priority_fee) = fees(chain_id, now)?;
+    let fees = fees(chain_id, now)?;
+    affordable(chain_id, fees, gas_limit)?;
 
     // read before the allocation, not after it: a swap that has used every attempt number
     // there is cannot sign anything, and refusing it here costs nothing, while refusing it
@@ -126,8 +174,8 @@ pub async fn create_and_send(
     let tx = Eip1559Tx {
         chain_id,
         nonce,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         gas_limit,
         to,
         value,
@@ -141,8 +189,8 @@ pub async fn create_and_send(
         value,
         data: tx.data.clone(),
         gas_limit,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
     })?;
 
     // armed here rather than after the queue, and before the first await, so every way
@@ -173,11 +221,12 @@ pub async fn create_and_send(
         attempt: Some(attempt),
         hashes: vec![tx_hash],
         raw_tx,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         status: OutboxStatus::Queued,
         created_at: now,
         last_sent_at: None,
+        first_sent_at: None,
         to,
         value,
         data,
@@ -229,9 +278,15 @@ pub async fn cancel_stranded() {
 /// further line in the log.
 async fn cancel(key: NonceKey, now: Timestamp) {
     let NonceKey { chain_id, nonce } = key;
-    let Ok((max_fee, max_priority_fee)) = fees(chain_id, now) else {
+    let gas_limit = GasAmount::from(CANCEL_GAS_LIMIT);
+    // the same door every other send is priced through, so a cancel carries the same
+    // ceilings: a bad reading refuses it rather than putting a huge fee on the chain
+    let Ok(fees) = fees(chain_id, now) else {
         return;
     };
+    if affordable(chain_id, fees, gas_limit).is_err() {
+        return;
+    }
     let Ok(mine) = ecdsa::canister_address().await else {
         return;
     };
@@ -240,12 +295,11 @@ async fn cancel(key: NonceKey, now: Timestamp) {
     if read_state(|state| state.unsigned_nonces().into_iter().all(|(at, _)| at != key)) {
         return;
     }
-    let gas_limit = GasAmount::from(CANCEL_GAS_LIMIT);
     let tx = Eip1559Tx {
         chain_id,
         nonce,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         gas_limit,
         to: mine,
         value: Wei::ZERO,
@@ -274,11 +328,12 @@ async fn cancel(key: NonceKey, now: Timestamp) {
         attempt: None,
         hashes: vec![tx_hash],
         raw_tx,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         status: OutboxStatus::Queued,
         created_at: now,
         last_sent_at: None,
+        first_sent_at: None,
         to: mine,
         value: Wei::ZERO,
         data: Vec::new(),
@@ -305,6 +360,12 @@ fn already_on_the_network(message: &str) -> bool {
 /// chain, and this canister is the only account that spends it: one of the transactions
 /// this entry has broadcast at that nonce is mined. The entry goes to the receipt reader,
 /// which looks up every one of them, rather than sitting in the queue forever.
+///
+/// A provider that says this and is lying self-corrects. The entry then follows the normal
+/// path: no receipt comes back, so the bytes go out again after the rebroadcast window and
+/// are replaced at a higher fee after the stuck window, and an honest chain refuses that
+/// replacement if the nonce really was spent. Nothing here decides money on the string; it
+/// decides only which of this entry's own transactions to look up.
 fn nonce_already_spent(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     ["nonce too low", "nonce is too low", "oldnonce"]
@@ -315,6 +376,12 @@ fn nonce_already_spent(message: &str) -> bool {
 /// Hands every queued transaction to its chain's provider, one batch per chain. An entry a
 /// provider refuses stays queued and goes out again on the next pass: the nonce is
 /// allocated either way, so the only way out is forward.
+///
+/// An entry leaves the queue on three answers, and only one of them is the provider
+/// accepting these bytes: a result, a provider that already holds the transaction, and a
+/// nonce the chain calls too low, which means one of this entry's EARLIER transactions is
+/// already mined. All three mean the same thing for the queue, that there is nothing left
+/// to broadcast and the receipt reader takes it from here.
 pub async fn flush() {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let limit = config::get().max_batch_items as usize;
@@ -332,14 +399,14 @@ pub async fn flush() {
             continue;
         };
         for (entry, answer) in batch.into_iter().zip(answers) {
-            let accepted = match answer {
+            let off_the_queue = match answer {
                 Ok(_) => true,
                 Err(RpcError::Rpc { message, .. }) => {
                     already_on_the_network(&message) || nonce_already_spent(&message)
                 }
                 Err(_) => false,
             };
-            if accepted {
+            if off_the_queue {
                 // A3: the entry is the one this pass read, and the only field it moves is
                 // how far the broadcast got
                 if let Some(mut current) = outbox::get(entry.key()) {
@@ -355,8 +422,15 @@ pub async fn flush() {
 
 /// Reads what happened to every transaction still out, one batch per chain: the head
 /// block, then a receipt for every hash ever broadcast at each open nonce. A receipt deep
-/// enough closes the attempt, a reverted one fails it, and a transaction that is not
-/// landing is re-sent and then replaced.
+/// enough closes the attempt, a reverted one at the same depth fails it, and a transaction
+/// that is not landing is re-sent and then replaced.
+///
+/// This is the read that decides money: the lines that close an attempt are appended from
+/// what it answers.
+// todo_harden_reads: single unreplicated read; upgrade to k-of-n later. Until then the
+// answers are bound to what this canister signed (`parse_receipt` refuses a receipt for a
+// hash this entry never broadcast) and held to the configured depth, so one provider can
+// delay a decision but cannot invent one.
 pub async fn check_open() {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
@@ -384,35 +458,43 @@ pub async fn check_open() {
         }) else {
             continue;
         };
-        let depth = config
-            .confirmations
-            .get(&chain_id)
-            .copied()
-            .unwrap_or(types::BlockDepth::new(1));
-        let mut next = 1;
+        let depth = confirmations(&config, chain_id);
+        // `rpc_batch_each` answers exactly one result per call, in call order, so the head
+        // is at 0 and each entry's receipts follow in the order the calls were built
+        let mut receipts_from = 1;
         for entry in open {
-            let receipts = &answers[next..next + entry.hashes.len()];
-            next += entry.hashes.len();
+            let receipts = &answers[receipts_from..receipts_from + entry.hashes.len()];
+            receipts_from += entry.hashes.len();
             let landed = receipts
                 .iter()
                 .filter_map(|answer| answer.as_ref().ok())
-                .find_map(parse_receipt);
+                .find_map(|value| parse_receipt(value, &entry.hashes).ok());
             match landed {
-                Some(Receipt { success: false, .. }) => {
-                    close(&entry, |quote_hash, attempt| EventType::TxFailed {
-                        quote_hash,
-                        attempt,
-                        reason: "the transaction reverted on the chain".to_string(),
-                    });
-                }
-                Some(Receipt { block, tx_hash, .. }) if is_confirmed(block, latest, depth) => {
-                    close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
-                        quote_hash,
-                        attempt,
-                        chain_id,
+                // rule A10: only a receipt at the configured depth closes an attempt, and
+                // that holds however the transaction ended. A reverted receipt closed at
+                // once would free the swap to be re-signed at a fresh nonce, and a one-block
+                // reorg that drops the revert and includes the replacement then pays twice.
+                Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
+                    let Receipt {
                         tx_hash,
                         block,
-                    });
+                        success,
+                    } = receipt;
+                    if success {
+                        close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
+                            quote_hash,
+                            attempt,
+                            chain_id,
+                            tx_hash,
+                            block,
+                        });
+                    } else {
+                        close(&entry, |quote_hash, attempt| EventType::TxFailed {
+                            quote_hash,
+                            attempt,
+                            reason: "the transaction reverted on the chain".to_string(),
+                        });
+                    }
                 }
                 // mined but not deep enough: nothing to do but wait
                 Some(_) => {}
@@ -420,6 +502,18 @@ pub async fn check_open() {
             }
         }
     }
+}
+
+/// How deep a receipt on `chain_id` must be before it closes an attempt.
+///
+/// A chain the config forgot confirms at [`DEFAULT_CONFIRMATIONS`], which is the safe floor
+/// and not a free pass: a receipt still has to be in a block the head has reached.
+fn confirmations(config: &types::Config, chain_id: ChainId) -> types::BlockDepth {
+    config
+        .confirmations
+        .get(&chain_id)
+        .copied()
+        .unwrap_or(DEFAULT_CONFIRMATIONS)
 }
 
 /// Drops the entry, appending the line that closes its attempt when it has one. A refused
@@ -450,21 +544,33 @@ fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventT
 
 /// A transaction that has not landed: the same bytes again while it is young, and a
 /// replacement at the same nonce once it is not (A5). Neither abandons the nonce.
+///
+/// The two clocks are deliberately different. The rebroadcast runs from the last time the
+/// bytes went out, because that is what it repairs: a provider that dropped them. The
+/// replacement runs from the FIRST time they went out, because a rebroadcast that reset it
+/// would postpone the fee bump every thirty seconds and the transaction would sit
+/// underpriced forever.
 async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
-    let Some(out_for) = entry.sent_for(now) else {
+    let (Some(since_last), Some(since_first)) = (entry.sent_for(now), entry.out_for(now)) else {
         return;
     };
-    if out_for >= STUCK_AFTER {
+    if since_first >= STUCK_AFTER {
         // a replacement is a new transaction, signed and broadcast, so the halt switch
-        // gates it like every other path that creates one. Reading receipts and closing
-        // attempts carries on while halted: an operator investigating a divergence wants
-        // to see what the chains did with what is already out there, and a rebroadcast
-        // sends bytes this canister signed before it stopped.
+        // gates it like every other path that creates one, and a halted canister leaves
+        // the entry exactly where it is. Reading receipts and closing attempts carries on
+        // while halted: an operator investigating a divergence wants to see what the
+        // chains did with what is already out there.
         if require_not_halted().is_err() {
             return;
         }
-        replace(entry, chain_id, now).await;
-    } else if out_for >= REBROADCAST_AFTER {
+        if replace(entry, chain_id, now).await {
+            return;
+        }
+        // no replacement: already bidding the ceiling, or the reading is too old to price
+        // a bid against. The bytes are still the right bytes and the nonce is still this
+        // entry's, so they keep going out on the rebroadcast cadence below.
+    }
+    if since_last >= REBROADCAST_AFTER {
         // the same bytes, so no new signature and no new line in the log
         let mut queued = entry.clone();
         queued.status = OutboxStatus::Queued;
@@ -473,40 +579,46 @@ async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
     }
 }
 
-/// Re-signs the same transaction at a higher fee and records it, keeping the nonce.
-async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
+/// Re-signs the same transaction at a higher fee and records it, keeping the nonce, and
+/// answers whether it did.
+///
+/// A replacement signs new bytes and broadcasts them, so callers gate it on
+/// `require_not_halted`. It answers `false` when the fee cannot be raised: the entry is
+/// already bidding the ceiling [`ChainData::fee_ceiling`] allows, or the chain reading is
+/// too old to price against, or a call failed. None of those abandon the nonce; the current
+/// bytes stay on the network.
+async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool {
     // a replacement a node accepts pays at least an eighth more, so the fee doubles: the
     // fresh chain data is a floor, not the answer, because the old fee may already be
-    // above it
-    let (max_fee, max_priority_fee) = match bumped(entry, chain_id, now) {
-        Some(fees) => fees,
-        None => return,
+    // above it, and the ceiling is what stops the doubling from running away
+    let Some(fees) = bumped(entry, chain_id, now) else {
+        return false;
     };
     let tx = Eip1559Tx {
         chain_id,
         nonce: entry.nonce,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         gas_limit: entry.gas_limit,
         to: entry.to,
         value: entry.value,
         data: entry.data.clone(),
     };
     let Ok(signature) = ecdsa::sign(tx.signing_hash()).await else {
-        return;
+        return false;
     };
     let signed = tx.into_signed(signature);
     let appended = append_event(EventType::TxReplaced {
         purpose: entry.purpose,
         chain_id,
         nonce: entry.nonce,
-        max_fee,
-        max_priority_fee,
+        max_fee: fees.max_fee(),
+        max_priority_fee: fees.max_priority_fee(),
         tx_hash: signed.hash(),
         raw_tx: signed.raw().to_vec(),
     });
     if appended.is_err() {
-        return;
+        return false;
     }
     // A3: the entry this pass read is the one replaced, and only if it is still the one
     // the outbox holds
@@ -514,30 +626,45 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
         outbox::put(entry.replaced(
             signed.hash(),
             signed.raw().to_vec(),
-            max_fee,
-            max_priority_fee,
+            fees.max_fee(),
+            fees.max_priority_fee(),
         ));
     }
+    true
 }
 
-/// The fees a replacement pays: double what the transaction being replaced paid, and never
-/// below what the chain is asking now.
-fn bumped(
-    entry: &OutboxEntry,
-    chain_id: ChainId,
-    now: Timestamp,
-) -> Option<(WeiPerGas, WeiPerGas)> {
-    let (fresh_max, fresh_tip) = fees(chain_id, now).ok()?;
-    let max_fee = entry.max_fee.checked_mul(2_u8)?.max(fresh_max);
-    let max_priority_fee = entry.max_priority_fee.checked_mul(2_u8)?.max(fresh_tip);
-    Some((max_fee, max_priority_fee))
+/// The fees a replacement pays: double what the transaction being replaced paid, never
+/// below what the chain is asking now, and never above what the freshest reading allows.
+/// Nothing at all once the entry is already at that ceiling, or when the chain reading is
+/// too old to price a bid against.
+fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
+    let reading = fresh_reading(chain_id, now).ok()?;
+    let floor = reading.fees()?;
+    let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
+    let bumped = current.bumped(floor, reading.fee_ceiling())?;
+    affordable(chain_id, bumped, entry.gas_limit).ok()?;
+    Some(bumped)
 }
 
 /// What a receipt says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Receipt {
     tx_hash: TxHash,
     block: BlockNumber,
     success: bool,
+}
+
+/// Why a provider's answer is not a receipt this entry may be decided on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotOurReceipt {
+    /// The provider has not mined the transaction: it answered `null`, or a half-written
+    /// record. Not a failure, just nothing to decide on yet.
+    Unmined,
+    /// A receipt for a transaction this entry never broadcast. A receipt decides whether an
+    /// attempt confirmed or failed, and one unreplicated provider supplies both the receipt
+    /// and the height it is measured against, so an answer about some other transaction
+    /// must decide nothing at all.
+    AnotherTransaction,
 }
 
 /// `0x`-prefixed hex as a block number.
@@ -547,17 +674,36 @@ fn parse_block_number(text: &str) -> Option<BlockNumber> {
         .map(BlockNumber::new)
 }
 
-/// A receipt, or nothing at all for the `null` a provider answers for a transaction it has
-/// not mined.
-fn parse_receipt(value: &Value) -> Option<Receipt> {
-    let block = parse_block_number(value.get("blockNumber")?.as_str()?)?;
-    let tx_hash = hex::decode(value.get("transactionHash")?.as_str()?.strip_prefix("0x")?).ok()?;
-    let status = value.get("status")?.as_str()?;
-    Some(Receipt {
-        tx_hash: TxHash::new(<[u8; 32]>::try_from(tx_hash).ok()?),
-        block,
-        success: status == "0x1",
-    })
+/// `0x`-prefixed hex as a thirty-two byte hash.
+fn parse_hash32(value: Option<&Value>) -> Option<[u8; 32]> {
+    let text = value?.as_str()?.strip_prefix("0x")?;
+    <[u8; 32]>::try_from(hex::decode(text).ok()?).ok()
+}
+
+/// The receipt `value` carries, if it is a receipt about one of `ours`.
+///
+/// `ours` is every hash this entry has broadcast at its nonce, which is what binds the
+/// answer to a transaction this canister actually signed. Without it the provider decides
+/// on its own that an attempt is confirmed, for a transaction that need not exist, at a
+/// height it also supplies. A receipt is also refused unless it names the block it is in:
+/// a record with no block hash was mined into no block.
+fn parse_receipt(value: &Value, ours: &[TxHash]) -> Result<Receipt, NotOurReceipt> {
+    let read = || -> Option<Receipt> {
+        let block = parse_block_number(value.get("blockNumber")?.as_str()?)?;
+        parse_hash32(value.get("blockHash"))?;
+        let tx_hash = TxHash::new(parse_hash32(value.get("transactionHash"))?);
+        let status = value.get("status")?.as_str()?;
+        Some(Receipt {
+            tx_hash,
+            block,
+            success: status == "0x1",
+        })
+    };
+    let receipt = read().ok_or(NotOurReceipt::Unmined)?;
+    if !ours.contains(&receipt.tx_hash) {
+        return Err(NotOurReceipt::AnotherTransaction);
+    }
+    Ok(receipt)
 }
 
 /// The entry a swap's open attempt is in, for the engine and for the tests.
@@ -577,8 +723,14 @@ impl From<TxError> for settlement_api::types::tx::TxError {
             TxError::StaleChainData { chain_id } => Self::StaleChainData {
                 chain_id: chain_id.get(),
             },
-            TxError::FeeOutOfRange { chain_id } => Self::FeeOutOfRange {
+            TxError::FeeOutOfRange { chain_id, ceiling } => Self::FeeOutOfRange {
                 chain_id: chain_id.get(),
+                ceiling_wei_per_gas: ceiling.into(),
+            },
+            TxError::GasCostTooHigh { chain_id, cost } => Self::GasCostTooHigh {
+                chain_id: chain_id.get(),
+                cost_wei: cost.into(),
+                bound_wei: MAX_TRANSACTION_COST.into(),
             },
             TxError::PurposeNeedsASwap(purpose) => Self::PurposeNeedsASwap {
                 purpose: purpose.to_string(),

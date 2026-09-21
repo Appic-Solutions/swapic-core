@@ -30,13 +30,9 @@ fn the_fee_ceiling_leaves_room_for_a_rising_base_fee() {
             },
             at(100),
         );
-        assert_eq!(
-            fees(ChainId::BASE, at(105)),
-            Ok((
-                WeiPerGas::from(2_100_000_000_u64),
-                WeiPerGas::from(100_000_000_u64)
-            ))
-        );
+        let priced = fees(ChainId::BASE, at(105)).expect("a fresh reading prices a send");
+        assert_eq!(priced.max_fee(), WeiPerGas::from(2_100_000_000_u64));
+        assert_eq!(priced.max_priority_fee(), WeiPerGas::from(100_000_000_u64));
         // `chain_data_max_age` is ten seconds by default, and a stale reading prices
         // nothing rather than pricing a transaction wrong
         assert_eq!(
@@ -66,10 +62,150 @@ fn a_fee_that_cannot_be_doubled_is_refused() {
         assert_eq!(
             fees(ChainId::BASE, at(100)),
             Err(TxError::FeeOutOfRange {
-                chain_id: ChainId::BASE
+                chain_id: ChainId::BASE,
+                ceiling: MAX_FEE_PER_GAS,
             })
         );
     });
+}
+
+/// A fee no chain ever asks is a reading this canister did not compute, and it prices
+/// nothing: the watcher is a separate principal from the controller on purpose, and the
+/// tip a transaction offers is paid to the block producer in full.
+#[test]
+fn a_fee_above_the_absolute_ceiling_prices_nothing() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        // a thousand times the real tip, which is the shape a compromised watcher pushes
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(1_000_000_000_000_u64),
+            },
+            at(100),
+        );
+        assert_eq!(
+            fees(ChainId::BASE, at(100)),
+            Err(TxError::FeeOutOfRange {
+                chain_id: ChainId::BASE,
+                ceiling: MAX_FEE_PER_GAS,
+            }),
+            "the ceiling bounds the tip as well as the ceiling it is paid out of"
+        );
+    });
+}
+
+/// The price is bounded per unit of gas and the bill is bounded as a whole, so a gas limit
+/// nobody checked cannot turn a sane price into one this canister would never pay.
+#[test]
+fn a_transaction_whose_gas_would_cost_more_than_the_bound_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                // a hundred gwei, inside the per-gas ceiling
+                base_fee: WeiPerGas::from(50_000_000_000_u64),
+                priority_fee: WeiPerGas::from(1_000_000_000_u64),
+            },
+            at(100),
+        );
+        let priced = fees(ChainId::BASE, at(100)).expect("a hundred gwei is a real price");
+        assert_eq!(
+            affordable(ChainId::BASE, priced, GasAmount::from(120_000_u32)),
+            Ok(()),
+            "a payout at a hundred gwei is twelve thousandths of an ether"
+        );
+        let absurd = GasAmount::from(100_000_000_u64);
+        assert!(
+            matches!(
+                affordable(ChainId::BASE, priced, absurd),
+                Err(TxError::GasCostTooHigh { .. })
+            ),
+            "a hundred million gas at a hundred gwei is ten ether"
+        );
+    });
+}
+
+/// A replacement doubles what it replaces, never bids below what the chain is asking, and
+/// never bids above eight times the going rate. Without the ceiling the doubling is
+/// unbounded: fifteen stuck windows is thirty thousand times the original fee, paid to
+/// whoever mines it.
+#[test]
+fn a_replacement_doubles_its_fee_up_to_a_ceiling_and_then_stops() {
+    let reading = ChainReading {
+        block: BlockNumber::new(19_000_000),
+        base_fee: WeiPerGas::from(1_000_000_000_u64),
+        priority_fee: WeiPerGas::from(100_000_000_u64),
+    }
+    .pushed_at(at(100));
+    let floor = reading.fees().expect("the reading prices a send");
+    let ceiling = reading.fee_ceiling();
+    assert_eq!(
+        ceiling.max_fee(),
+        WeiPerGas::from(8_800_000_000_u64),
+        "eight times the base fee plus the tip"
+    );
+
+    let mut fees = floor;
+    let mut bids = Vec::new();
+    while let Some(next) = fees.bumped(floor, ceiling) {
+        assert!(
+            next.max_fee() > fees.max_fee(),
+            "a bid that is not higher is no replacement"
+        );
+        fees = next;
+        bids.push(fees.max_fee());
+        assert!(bids.len() < 10, "the ceiling has to stop this");
+    }
+    assert_eq!(
+        bids,
+        vec![
+            WeiPerGas::from(4_200_000_000_u64),
+            WeiPerGas::from(8_400_000_000_u64),
+            WeiPerGas::from(8_800_000_000_u64),
+        ],
+        "double, double, then the ceiling"
+    );
+    assert_eq!(fees.max_fee(), ceiling.max_fee());
+    assert_eq!(
+        fees.bumped(floor, ceiling),
+        None,
+        "at the ceiling there is nothing left to bid"
+    );
+}
+
+/// The tip a transaction offers is never above the ceiling it is paid out of: under
+/// EIP-1559 the producer keeps min(tip, ceiling - base fee), so a tip above the ceiling is
+/// not an error the chain reports, it is a number that quietly means something else.
+#[test]
+fn a_tip_is_never_above_the_ceiling_it_is_paid_out_of() {
+    let fees = Fees::new(
+        WeiPerGas::from(1_000_000_000_u64),
+        WeiPerGas::from(9_000_000_000_u64),
+    )
+    .expect("both are inside the absolute ceiling");
+    assert_eq!(fees.max_priority_fee(), fees.max_fee());
+    assert_eq!(
+        Fees::new(MAX_FEE_PER_GAS, WeiPerGas::ONE),
+        Fees::new(MAX_FEE_PER_GAS, WeiPerGas::ONE),
+        "the absolute ceiling itself is allowed"
+    );
+    for above in [
+        Fees::new(
+            MAX_FEE_PER_GAS.checked_add(WeiPerGas::ONE).unwrap(),
+            WeiPerGas::ONE,
+        ),
+        Fees::new(
+            WeiPerGas::ONE,
+            MAX_FEE_PER_GAS.checked_add(WeiPerGas::ONE).unwrap(),
+        ),
+    ] {
+        assert_eq!(above, None, "one wei per gas above the ceiling is above it");
+    }
 }
 
 /// A provider that already holds the transaction has accepted it: the bytes are on the
@@ -116,44 +252,78 @@ fn a_nonce_the_chain_calls_too_low_is_a_nonce_already_spent() {
     }
 }
 
+/// One of this entry's own hashes, as the receipt reader is given them.
+fn ours() -> Vec<TxHash> {
+    vec![TxHash::new([0x22; 32])]
+}
+
+/// A receipt shaped the way a provider answers one, for `hash`.
+fn a_receipt(hash: [u8; 32], status: &str) -> serde_json::Value {
+    json!({
+        "transactionHash": format!("0x{}", hex::encode(hash)),
+        "blockHash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "blockNumber": "0x121eac0",
+        "status": status,
+    })
+}
+
 /// A receipt is read for the three things a decision needs: which transaction it is, where
 /// it landed, and whether it did what it was sent to do.
 #[test]
 fn a_receipt_reads_its_block_its_hash_and_whether_it_reverted() {
-    let receipt = json!({
-        "transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "blockNumber": "0x121eac0",
-        "status": "0x1",
-    });
-    let read = parse_receipt(&receipt).expect("a receipt reads");
+    let read = parse_receipt(&a_receipt([0x22; 32], "0x1"), &ours()).expect("a receipt reads");
     assert_eq!(read.tx_hash, TxHash::new([0x22; 32]));
     assert_eq!(read.block, BlockNumber::new(19_000_000));
     assert!(read.success);
 
-    let reverted = json!({
-        "transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "blockNumber": "0x121eac0",
-        "status": "0x0",
-    });
     assert!(
-        !parse_receipt(&reverted)
+        !parse_receipt(&a_receipt([0x22; 32], "0x0"), &ours())
             .expect("a reverted receipt reads")
             .success
     );
 }
 
+/// A receipt decides nothing unless it is about a transaction this entry broadcast. One
+/// unreplicated provider supplies both the receipt and the height it is measured against,
+/// so an answer about any other transaction must not be able to close an attempt, whatever
+/// it says.
+#[test]
+fn a_receipt_for_a_transaction_we_never_broadcast_is_not_ours() {
+    for foreign in [[0x23_u8; 32], [0x00; 32], [0xff; 32]] {
+        for status in ["0x1", "0x0"] {
+            assert_eq!(
+                parse_receipt(&a_receipt(foreign, status), &ours()),
+                Err(NotOurReceipt::AnotherTransaction),
+                "{}",
+                hex::encode(foreign)
+            );
+        }
+    }
+    // and every hash this nonce has ever carried is ours, because any of them may land
+    let every = vec![TxHash::new([0x22; 32]), TxHash::new([0x23; 32])];
+    assert!(parse_receipt(&a_receipt([0x23; 32], "0x1"), &every).is_ok());
+}
+
 /// A transaction a provider has not mined answers `null`, which is not a receipt, and
-/// neither is a half-written one.
+/// neither is a half-written one, nor one that names no block it is in.
 #[test]
 fn an_unmined_transaction_has_no_receipt_to_read() {
+    let full = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let block_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
     for not_a_receipt in [
         json!(null),
-        json!({"transactionHash": "0x22", "blockNumber": "0x1", "status": "0x1"}),
-        json!({"blockNumber": "0x1", "status": "0x1"}),
-        json!({"transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222", "status": "0x1"}),
-        json!({"transactionHash": "0x2222222222222222222222222222222222222222222222222222222222222222", "blockNumber": "not hex", "status": "0x1"}),
+        json!({"transactionHash": "0x22", "blockHash": block_hash, "blockNumber": "0x1", "status": "0x1"}),
+        json!({"blockHash": block_hash, "blockNumber": "0x1", "status": "0x1"}),
+        json!({"transactionHash": full, "blockHash": block_hash, "status": "0x1"}),
+        json!({"transactionHash": full, "blockHash": block_hash, "blockNumber": "not hex", "status": "0x1"}),
+        json!({"transactionHash": full, "blockNumber": "0x1", "status": "0x1"}),
+        json!({"transactionHash": full, "blockHash": "0x33", "blockNumber": "0x1", "status": "0x1"}),
     ] {
-        assert!(parse_receipt(&not_a_receipt).is_none(), "{not_a_receipt}");
+        assert_eq!(
+            parse_receipt(&not_a_receipt, &ours()),
+            Err(NotOurReceipt::Unmined),
+            "{not_a_receipt}"
+        );
     }
 }
 

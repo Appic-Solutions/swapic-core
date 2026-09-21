@@ -53,7 +53,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
-/// key types, and one nonce waiting for its signature. Every field of a sample differs from
+/// key types, one nonce waiting for its signature, and a cancel that has been out on the
+/// network. Every field of a sample differs from
 /// its neighbours, so a field that moves to another index decodes to a different value
 /// instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -184,6 +185,10 @@ fn samples() -> Vec<Sample> {
                 status: OutboxStatus::Sent,
                 created_at: Timestamp::from_nanos(1_700_000_000_123_456_789),
                 last_sent_at: Some(Timestamp::from_nanos(1_700_000_001_000_000_000)),
+                // absent, so this sample's bytes stay exactly the ones the golden already
+                // pins: a record stops at its last field that carries a value. The entry
+                // appended at the end of `samples()` is the one that pins this field.
+                first_sent_at: None,
                 to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
                     .parse()
                     .unwrap(),
@@ -204,6 +209,29 @@ fn samples() -> Vec<Sample> {
             UnsignedTx {
                 purpose: TxPurpose::Refund(QuoteHash::new([0x5f; 32])),
                 created_at: Timestamp::from_nanos(1_700_000_002_000_000_000),
+            },
+        ),
+        sample(
+            "outbox entry on the network",
+            OutboxEntry {
+                purpose: TxPurpose::Cancel(ChainId::POLYGON),
+                chain_id: ChainId::POLYGON,
+                nonce: Nonce::new(11),
+                attempt: None,
+                hashes: vec![TxHash::new([0x60; 32])],
+                raw_tx: vec![0x02, 0xf8, 0x6c],
+                max_fee: WeiPerGas::from(3_000_000_000_u64),
+                max_priority_fee: WeiPerGas::from(200_000_000_u64),
+                status: OutboxStatus::Sent,
+                created_at: Timestamp::from_nanos(1_700_000_003_000_000_000),
+                last_sent_at: Some(Timestamp::from_nanos(1_700_000_005_000_000_000)),
+                first_sent_at: Some(Timestamp::from_nanos(1_700_000_004_000_000_000)),
+                to: "0x4200000000000000000000000000000000000006"
+                    .parse()
+                    .unwrap(),
+                value: Wei::ZERO,
+                data: vec![],
+                gas_limit: GasAmount::from(21_000_u32),
             },
         ),
     ]);

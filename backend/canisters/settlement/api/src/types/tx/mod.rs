@@ -1,7 +1,7 @@
 use crate::types::errors::{AppendError, GuardError};
 use crate::types::events::Hash32;
 use crate::types::evm::EcdsaError;
-use candid::CandidType;
+use candid::{CandidType, Nat};
 use serde::Deserialize;
 
 /// Why no transaction was created.
@@ -12,8 +12,18 @@ pub enum TxError {
     StaleChainData {
         chain_id: u64,
     },
+    /// The chain reading prices this transaction above the ceiling this canister will pay
+    /// per unit of gas, so nothing was signed.
     FeeOutOfRange {
         chain_id: u64,
+        ceiling_wei_per_gas: Nat,
+    },
+    /// The price and the gas limit together are above the most this canister will spend on
+    /// one transaction.
+    GasCostTooHigh {
+        chain_id: u64,
+        cost_wei: Nat,
+        bound_wei: Nat,
     },
     /// A transaction is signed against a swap's attempt, and this purpose names no swap.
     PurposeNeedsASwap {

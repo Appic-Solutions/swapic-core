@@ -16,6 +16,7 @@ fn entry(chain_id: ChainId, nonce: u64, status: OutboxStatus) -> OutboxEntry {
         status,
         created_at: Timestamp::from_nanos(1_000),
         last_sent_at: None,
+        first_sent_at: None,
         to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
             .parse()
             .unwrap(),
