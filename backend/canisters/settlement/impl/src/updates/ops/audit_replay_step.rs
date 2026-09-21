@@ -34,9 +34,11 @@ impl From<Progress> for AuditProgress {
 ///
 /// Each step answers how much is folded and how much is left; keep calling until
 /// `finished`. A refusal, a broken link, or a finished fold that differs from the live
-/// state halts the canister, and every verdict starts the next audit over from genesis. A
-/// step too large for one message fails that call alone and leaves the saved fold where it
-/// was.
+/// state halts the canister, and every verdict starts the next audit over from genesis.
+///
+/// A step costs the entries it folds plus the fold so far, which is read and written whole,
+/// so on a large fold the fold's own size is the floor and `max_events` is the rest. A step
+/// too large for one message fails that call alone and leaves the saved fold where it was.
 #[update]
 pub fn audit_replay_step(max_events: u64) -> Result<AuditProgress, GuardError> {
     require_controller()?;

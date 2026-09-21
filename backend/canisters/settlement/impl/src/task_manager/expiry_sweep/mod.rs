@@ -1,9 +1,10 @@
 use crate::state::{pending_quotes, Store};
 use crate::storage::halt::is_halted;
 use crate::storage::{config, events};
+use std::collections::BTreeSet;
 use std::time::Duration;
 use types::events::EventType;
-use types::{Quote, QuoteHash, Swap, SwapStatus, Timestamp, WaitingKey};
+use types::{QuoteHash, Swap, Timestamp, WaitingKey};
 
 /// What one expiry pass did. Returned rather than logged, so the sweep is testable
 /// without a canister and without reading the event log back.
@@ -59,7 +60,13 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     // good, and a cap's worth of them would starve every refund behind them.
     // The drop is a logged event like every other write to the fold, so the repair is in the
     // record the deep audit compares against instead of quietly erasing what it would find
+    // one repair per swap: it makes every entry of the swap right, so a second line for the
+    // same swap would change nothing and still sit on the log and in the cap
+    let mut repaired_swaps = BTreeSet::new();
     for key in &head.stale {
+        if !repaired_swaps.insert(key.quote_hash) {
+            continue;
+        }
         let repaired = events::append_event_at(
             EventType::WaitingRepaired {
                 quote_hash: key.quote_hash,
@@ -72,11 +79,9 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
             Err(_) => swept.skipped += 1,
         }
     }
-    let (due, unreadable) = due_refunds(head.waiting, now, config.decision_timeout);
-    swept.skipped += unreadable;
     // decided first, then appended, so every refund of the pass is judged against the same
     // fold and one append cannot change which swaps the pass sees
-    for quote_hash in due {
+    for quote_hash in due_refunds(head.waiting, now, config.decision_timeout) {
         let appended = events::append_event_at(
             EventType::RefundStarted {
                 quote_hash,
@@ -140,41 +145,26 @@ fn timed_out_waiting(now: Timestamp, timeout: Duration, cap: usize) -> Head {
     })
 }
 
-/// Which waiting swaps have run out of time and whose quote asked for an automatic refund,
-/// plus a count of the ones whose `quote_bytes` did not parse. Pure and total: an
-/// unreadable quote is counted and stepped over, never a panic. The sweep hands it the
-/// index's timed-out entries only; the policy holds for whatever it is handed.
+/// Which of the swaps have run out of time: those whose own wait, the one the index holds
+/// for them, began more than `timeout` before `now`. Pure and total: "older than the
+/// timeout" is strict, so the deadline itself is still the user's, a deadline past what a
+/// timestamp can hold never comes, and a swap with no wait the timer can act on is not due.
+/// The sweep hands it the head of the index only; the rule holds for whatever it is handed.
 fn due_refunds(
     swaps: impl IntoIterator<Item = (QuoteHash, Swap)>,
     now: Timestamp,
     timeout: Duration,
-) -> (Vec<QuoteHash>, usize) {
-    let mut due = Vec::new();
-    let mut unreadable = 0;
-    for (quote_hash, swap) in swaps {
-        if swap.status != SwapStatus::WaitingForUser {
-            continue;
-        }
-        let Some(since) = swap.waiting_since else {
-            continue;
-        };
-        // older than the timeout, so the deadline itself is still the user's; a deadline
-        // past what a timestamp can hold never comes
-        if since
-            .checked_add(timeout)
-            .is_none_or(|deadline| now <= deadline)
-        {
-            continue;
-        }
-        match Quote::parse(&swap.quote_bytes) {
-            Ok(quote) if quote.auto_refund => due.push(quote_hash),
-            // the other half of the dual refund policy: this user asked to be consulted,
-            // so the swap keeps waiting however long that takes
-            Ok(_) => {}
-            Err(_) => unreadable += 1,
-        }
-    }
-    (due, unreadable)
+) -> Vec<QuoteHash> {
+    swaps
+        .into_iter()
+        .filter_map(|(quote_hash, swap)| {
+            let since = swap.auto_refund_wait()?;
+            since
+                .checked_add(timeout)
+                .is_some_and(|deadline| now > deadline)
+                .then_some(quote_hash)
+        })
+        .collect()
 }
 
 #[cfg(test)]

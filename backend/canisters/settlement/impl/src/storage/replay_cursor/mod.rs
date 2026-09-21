@@ -6,16 +6,17 @@
 
 use crate::state::MemoryStore;
 use crate::storage::memory::{replay_cursor_memory, Memory};
+use ic_stable_structures::storable::{Bound, Storable};
 use ic_stable_structures::StableCell;
 use minicbor::{Decode, Encode};
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 /// The fold of the log as far as the deep audit got. The index it resumes at and the hash
 /// it links to are the fold's own ledger meta, so nothing here can disagree with it.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
-/// new field is optional. A saved fold that no longer decodes traps `storage::init`, which
-/// refuses the upgrade and leaves the wasm that wrote it running.
+/// new field is optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct ReplayCursor {
     #[n(0)]
@@ -29,7 +30,21 @@ impl ReplayCursor {
     }
 }
 
-types::storable_as_cbor!(ReplayCursor);
+/// Read back leniently, unlike every other stored type: a saved fold that no longer decodes
+/// reads as genesis. The fold is scratch the next step rebuilds from the log, so bytes a
+/// new wasm cannot read must not veto the upgrade that ships it; an audit in progress
+/// across such an upgrade starts over, which is all it could do.
+impl Storable for ReplayCursor {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(minicbor::to_vec(self).expect("BUG: encoding into a Vec is infallible"))
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        minicbor::decode(&bytes).unwrap_or_else(|_| Self::genesis())
+    }
+
+    const BOUND: Bound = Bound::Unbounded;
+}
 
 thread_local! {
     static CURSOR: RefCell<StableCell<ReplayCursor, Memory>> = RefCell::new(

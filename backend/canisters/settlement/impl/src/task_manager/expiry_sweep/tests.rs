@@ -3,7 +3,7 @@ use crate::storage::halt::set_halted;
 use crate::storage::on_fresh_memory;
 use types::config::{EvictionsPerSweep, RefundsPerSweep};
 use types::events::Choice;
-use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds, WaitingKey};
+use types::{ChainId, GasMode, Quote, Rail, SwapStatus, TokenAmount, UnixSeconds, WaitingKey};
 
 /// Moves both per-tick caps, without the log line `config::set` would write: a unit test has
 /// no canister clock to seal one on.
@@ -76,7 +76,7 @@ const MINUTE_NS: u64 = 60 * 1_000_000_000;
 
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-fn due_at(swaps: &[(QuoteHash, Swap)], now_ns: u64) -> (Vec<QuoteHash>, usize) {
+fn due_at(swaps: &[(QuoteHash, Swap)], now_ns: u64) -> Vec<QuoteHash> {
     due_refunds(swaps.to_vec(), Timestamp::from_nanos(now_ns), TIMEOUT)
 }
 
@@ -101,9 +101,7 @@ fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
             },
         ),
     ];
-    let (due, skipped) = due_at(&swaps, 30 * MINUTE_NS + 1);
-    assert_eq!(due, vec![qh(1)]);
-    assert_eq!(skipped, 0);
+    assert_eq!(due_at(&swaps, 30 * MINUTE_NS + 1), vec![qh(1)]);
 }
 
 /// "Older than the timeout" is strict: the deadline second itself is still the user's.
@@ -111,12 +109,13 @@ fn due_refunds_picks_the_timed_out_auto_refund_swaps_only() {
 fn due_refunds_fires_the_moment_after_the_timeout_and_not_before() {
     let swaps = vec![(qh(1), waiting(quote_bytes(&quote(true, 1)), 100))];
     let timeout = 30 * MINUTE_NS;
-    assert!(due_at(&swaps, 100 + timeout).0.is_empty());
-    assert_eq!(due_at(&swaps, 100 + timeout + 1).0, vec![qh(1)]);
+    assert!(due_at(&swaps, 100 + timeout).is_empty());
+    assert_eq!(due_at(&swaps, 100 + timeout + 1), vec![qh(1)]);
 }
 
-/// `quote_bytes` reaches the log from a caller, so the sweep has to survive bytes it
-/// cannot read. It counts them and moves on rather than trapping the whole pass.
+/// `quote_bytes` reaches the log from a caller, so the rule has to survive bytes it cannot
+/// read: a swap whose bytes are no quote has no wait the timer can act on, so it is not
+/// due, and the pass goes on to the ones that are. The sweep repairs its index entry.
 #[test]
 fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
     let swaps = vec![
@@ -124,9 +123,11 @@ fn due_refunds_is_total_when_quote_bytes_do_not_parse() {
         (qh(2), waiting(vec![0xff; 9], 0)),
         (qh(3), waiting(quote_bytes(&quote(true, 1)), 0)),
     ];
-    let (due, skipped) = due_at(&swaps, 30 * MINUTE_NS + 1);
-    assert_eq!(due, vec![qh(3)], "the readable one is still refunded");
-    assert_eq!(skipped, 2);
+    assert_eq!(
+        due_at(&swaps, 30 * MINUTE_NS + 1),
+        vec![qh(3)],
+        "the readable one is still refunded"
+    );
 }
 
 /// The permit window is measured from the quote's expiry, and the boundary second is

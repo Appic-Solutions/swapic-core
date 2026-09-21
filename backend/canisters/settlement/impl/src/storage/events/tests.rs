@@ -788,3 +788,24 @@ fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
         assert_eq!(event_count(), 2, "a refused append writes nothing");
     });
 }
+
+/// One repair makes every entry of a swap right, so a swap with several stale entries at
+/// the head of the index is repaired by one line and not one per entry: the others would be
+/// no-op lines on a permanent log, each holding a slot of the pass's cap.
+#[test]
+fn several_stale_entries_for_one_swap_are_repaired_by_one_line() {
+    on_fresh_memory(|| {
+        append(funds(1));
+        let quote_hash = swap_id(1);
+        for nanos in [1, 2, 3] {
+            StableStore(()).put_auto_refund_waiting(waiting_key(nanos, quote_hash));
+        }
+        let before = event_count();
+
+        let swept = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
+        assert_eq!((swept.stale, swept.skipped, swept.more), (1, 0, false));
+        assert_eq!(event_count(), before + 1, "one line for the swap");
+        assert!(read_state(|state| state.store().auto_refund_waiting()).is_empty());
+        assert!(verify_replay());
+    });
+}

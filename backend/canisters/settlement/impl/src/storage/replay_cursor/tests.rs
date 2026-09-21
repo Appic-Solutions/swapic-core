@@ -1,46 +1,47 @@
 use super::*;
-use crate::state::transitions::apply_state_transition;
-use crate::state::transitions::tests::{funds, swap_id};
-use crate::state::State;
+use crate::state::Store;
 use crate::storage::on_fresh_memory;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
-use types::events::EventType;
-use types::{ChainId, Event, Timestamp, TokenAmount};
+use types::{
+    Attempt, ChainId, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap, SwapStatus,
+    Timestamp, TokenAmount, WaitingKey,
+};
 
-/// A fold with something in every collection: a pocket, a swap, and its wait in the index.
+/// A fold with something in every collection, built from literal values so the pinned
+/// bytes below move only when the layout does. Every field differs from its neighbours.
 fn sample_fold() -> MemoryStore {
-    let mut state = State::<MemoryStore>::default();
-    let steps = [
-        (
-            1,
-            EventType::PocketFunded {
-                chain_id: ChainId::BASE,
-                amount: TokenAmount::from(1_000_u32),
-            },
-        ),
-        (2, funds(1)),
-        (
-            3,
-            EventType::DecisionRequired {
-                quote_hash: swap_id(1),
-                reason: "slippage".into(),
-            },
-        ),
-    ];
-    for (nanos, payload) in steps {
-        state.check(&payload).expect("the fold admits it");
-        let meta = state.meta();
-        let event = Event::seal(
-            meta.next_event_index,
-            Timestamp::from_nanos(nanos),
-            meta.last_event_hash,
-            payload,
-        )
-        .expect("the payload has a preimage");
-        apply_state_transition(&mut state, &event);
-    }
-    state.into_store()
+    let quote_hash = QuoteHash::new([0x5a; 32]);
+    let since = Timestamp::from_nanos(1_700_000_000_123_456_789);
+    let mut store = MemoryStore::default();
+    store.put_swap(
+        quote_hash,
+        Swap {
+            quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
+            status: SwapStatus::WaitingForUser,
+            last_attempt: Some(Attempt::new(3)),
+            open_attempt: None,
+            src_chain: ChainId::BASE,
+            src_token: "USDC".parse().unwrap(),
+            amount_in: TokenAmount::from(25_000_000_u32),
+            amount_paid: Some(TokenAmount::from(24_990_000_u32)),
+            waiting_since: Some(since),
+        },
+    );
+    store.put_pocket(
+        ChainId::ARBITRUM,
+        Pocket {
+            available: TokenAmount::from(1u128 << 70),
+            reserved: TokenAmount::from(250_u32),
+        },
+    );
+    store.put_meta(LedgerMeta {
+        fees_accrued: TokenAmount::from(7_u32),
+        next_event_index: EventIndex::new(19),
+        last_event_hash: EventHash::new([0xab; 32]),
+    });
+    store.put_auto_refund_waiting(WaitingKey { since, quote_hash });
+    store
 }
 
 /// A canister that has never run the deep audit starts it at genesis: the empty fold, which
@@ -65,13 +66,11 @@ fn a_fresh_canister_starts_the_deep_audit_at_genesis() {
 /// `storage_v1.txt` pins the other stored layouts: the wasm that upgrades over a saved fold
 /// reads it with the types it has, so a field that moves must fail here, before anything is
 /// deployed, and never on the read after an upgrade.
-const PINNED: &str = "8184a15820eef2a093530cd1a7b5ddf1c212ddd2243c5329150cbb10a4a91d961a44a09a7889\
-    5881010000000000002105000000047573646300000000000000000000000000000064000000000000a4b1\
-    00000004757364630000000000000000000000000000006300000000000000000000000000000062000000\
-    063078757365720000000001000000000c636374705f76325f66617374000000006b49d200000000000000\
-    000104f6f619210564757364631864f603a1192105821903e80083000358205c8d761508201400bbd75a99\
-    20b03c5419344867dc65edaeea0fe00ba825500c8182035820eef2a093530cd1a7b5ddf1c212ddd2243c53\
-    29150cbb10a4a91d961a44a09a78";
+const PINNED: &str =
+    "8184a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef04\
+    03f619210564555344431a017d78401a017d51301b17979cfe3d85cd15a119a4b182c2494000000000000000\
+    0018fa8307135820abababababababababababababababababababababababababababababababab81821b17\
+    979cfe3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
 
 #[test]
 fn a_saved_fold_decodes_from_its_pinned_bytes() {
@@ -85,4 +84,17 @@ fn a_saved_fold_decodes_from_its_pinned_bytes() {
         "the stored layout moved: append a field, never renumber one"
     );
     assert_eq!(ReplayCursor::from_bytes(Cow::Owned(bytes)), cursor);
+}
+
+/// The saved fold is scratch the next step rebuilds from the log, so bytes this wasm cannot
+/// read are not a reason to refuse the upgrade that shipped it: they read as genesis, and
+/// the audit in progress starts over.
+#[test]
+fn a_saved_fold_that_no_longer_decodes_reads_as_genesis() {
+    for garbage in [vec![], vec![0xff, 0x00, 0x01], vec![0x82, 0x00, 0x00]] {
+        assert_eq!(
+            ReplayCursor::from_bytes(Cow::Owned(garbage)),
+            ReplayCursor::genesis()
+        );
+    }
 }

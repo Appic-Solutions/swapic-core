@@ -75,9 +75,10 @@ pub struct AuditProgress {
 /// so is a fold that reaches the head and differs: either halts the canister. A verdict
 /// either way puts the next audit back at genesis.
 ///
-/// Off the timer on purpose: this is the check whose cost grows with the log, and an ops
-/// call that runs out of instructions fails that call alone and leaves the saved fold
-/// where it was.
+/// Off the timer on purpose: this is the check whose cost grows with the log. A step reads
+/// and writes the fold so far whole, so its cost is that fold plus the entries it folds,
+/// and an ops call that runs out of instructions fails that call alone and leaves the
+/// saved fold where it was.
 pub fn run_audit_replay_step(max_events: u64) -> AuditProgress {
     let mut fold = State::new(replay_cursor::get().fold);
     let outcome = events::replay_next(&mut fold, max_events);
