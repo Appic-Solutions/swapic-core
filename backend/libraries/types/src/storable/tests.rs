@@ -3,7 +3,8 @@ use crate::config::Config;
 use crate::events::{Event, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash};
 use crate::ledger::LedgerMeta;
-use crate::numeric::{Attempt, EventIndex, Timestamp, TokenAmount};
+use crate::numeric::{Attempt, EventIndex, Timestamp, TokenAmount, UnixSeconds};
+use crate::quote::ExpiryKey;
 use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -45,7 +46,7 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 
 /// Every type a stable structure holds, keys included, one sample per line of the golden
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
-/// unpaid), a pocket, the ledger meta, a pending quote, the config, and the three key
+/// unpaid), a pocket, the ledger meta, a pending quote, the config, and the four key
 /// types. Every field of a sample differs from its neighbours, so a field that moves to
 /// another index decodes to a different value instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -130,6 +131,13 @@ fn samples() -> Vec<Sample> {
             WaitingKey {
                 since: Timestamp::from_nanos(1_700_000_000_123_456_789),
                 quote_hash: QuoteHash::new([0x5a; 32]),
+            },
+        ),
+        sample(
+            "expiry key",
+            ExpiryKey {
+                expires_at: UnixSeconds::new(1_800_000_000),
+                quote_hash: QuoteHash::new([0x5b; 32]),
             },
         ),
     ]);

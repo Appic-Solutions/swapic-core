@@ -253,6 +253,11 @@ pub enum ConfigError {
         field: String,
         interval_s: u64,
     },
+    TimerIntervalTooShort {
+        field: String,
+        interval_s: u64,
+        floor_s: u64,
+    },
     DurationAboveCap {
         field: String,
         duration_s: u64,
@@ -302,6 +307,15 @@ impl From<types::ConfigError> for ConfigError {
             Domain::TimerIntervalTooLong { field, interval } => Self::TimerIntervalTooLong {
                 field: field.to_string(),
                 interval_s: interval.as_secs(),
+            },
+            Domain::TimerIntervalTooShort {
+                field,
+                interval,
+                floor,
+            } => Self::TimerIntervalTooShort {
+                field: field.to_string(),
+                interval_s: interval.as_secs(),
+                floor_s: floor.as_secs(),
             },
             Domain::DurationAboveCap {
                 field,

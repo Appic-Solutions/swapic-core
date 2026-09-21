@@ -204,6 +204,143 @@ fn fill_to_the_cap() -> UnixSeconds {
     now
 }
 
+/// A small quote expiring at `expires_at`, so a fixture can lay quotes out along the index.
+fn expiring(nonce: u64, expires_at: u64) -> Quote {
+    Quote {
+        expires_at: UnixSeconds::new(expires_at),
+        ..tiny(nonce)
+    }
+}
+
+/// The expiry index as a full scan of the store would build it.
+fn scanned_index() -> Vec<ExpiryKey> {
+    let mut keys: Vec<ExpiryKey> = all_pending()
+        .into_iter()
+        .map(|(quote_hash, quote)| ExpiryKey {
+            expires_at: quote.expires_at,
+            quote_hash,
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// What the cap has to bound: a full store of quotes nobody can evict yet. The pass walks
+/// the index in expiry order, so it reads the soonest expiry, sees the window is open and
+/// stops, instead of decoding ten thousand quotes to evict none of them.
+#[test]
+fn a_pass_over_a_full_store_of_live_quotes_reads_one_entry_and_evicts_nothing() {
+    clear();
+    let cap = 200;
+    let now = fill_to_the_cap();
+
+    let swept = sweep_expired(now, Duration::from_secs(120), cap);
+    assert!(
+        swept.visited <= cap,
+        "the cap bounds the work: {} entries read",
+        swept.visited
+    );
+    assert_eq!(
+        swept,
+        Evicted {
+            dropped: 0,
+            visited: 1,
+            more: false
+        }
+    );
+    assert_eq!(all_pending().len(), MAX_PENDING as usize);
+    assert_eq!(expiry_index().len(), MAX_PENDING as usize);
+}
+
+/// And with stale quotes at the head of the index the same pass evicts its cap, reads one
+/// entry past it to learn that work remains, and never reaches the live quotes behind them.
+#[test]
+fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
+    clear();
+    let cap: usize = 20;
+    let stale: usize = 50;
+    let base = 1_800_000_000;
+    let now = UnixSeconds::new(base);
+    let window = Duration::from_secs(120);
+    for nonce in 0..stale as u64 {
+        register(expiring(nonce, base + 10), now).expect("a live quote registers");
+    }
+    for nonce in 0..1_000 {
+        register(expiring(1_000 + nonce, base + 80_000), now).expect("a live quote registers");
+    }
+
+    let after = UnixSeconds::new(base + 10 + window.as_secs() + 1);
+    assert_eq!(
+        sweep_expired(after, window, cap),
+        Evicted {
+            dropped: cap,
+            visited: cap + 1,
+            more: true
+        }
+    );
+    assert_eq!(all_pending().len(), 1_050 - cap);
+
+    // the rest of the stale head drains over the next passes, and then the pass stops at
+    // the first quote whose window is still open, whatever sits behind it
+    for expected in [cap, stale - 2 * cap] {
+        assert_eq!(sweep_expired(after, window, cap).dropped, expected);
+    }
+    assert_eq!(
+        sweep_expired(after, window, cap),
+        Evicted {
+            dropped: 0,
+            visited: 1,
+            more: false
+        },
+        "the live quotes behind the head cost one entry, not a thousand"
+    );
+    assert_eq!(all_pending().len(), 1_000);
+}
+
+/// The index is the store keyed by expiry and nothing else, at every point the store moves:
+/// a registration, a repeat of one already held, an eviction, a clear.
+#[test]
+fn the_expiry_index_matches_a_full_scan_of_the_store() {
+    clear();
+    assert_eq!(expiry_index(), scanned_index());
+    let base = 1_800_000_000;
+    let now = UnixSeconds::new(base);
+    for (nonce, expires_at) in [
+        (1, base + 5),
+        (2, base + 5),
+        (3, base + 50),
+        (4, base + 900),
+    ] {
+        register(expiring(nonce, expires_at), now).expect("a live quote registers");
+        assert_eq!(expiry_index(), scanned_index(), "after registering {nonce}");
+    }
+    assert_eq!(expiry_index().len(), 4);
+
+    // a registration the store refuses indexes nothing: the insert is after every rule
+    assert!(register(expiring(5, base - 1), now).is_err());
+    assert_eq!(
+        expiry_index(),
+        scanned_index(),
+        "after a refused registration"
+    );
+    assert_eq!(expiry_index().len(), 4);
+
+    // the hash covers `expires_at`, so a repeat is the same key written again
+    register(expiring(3, base + 50), now).expect("a repeat registers");
+    assert_eq!(expiry_index(), scanned_index(), "after a repeat");
+    assert_eq!(expiry_index().len(), 4);
+
+    let window = Duration::from_secs(120);
+    let swept = sweep_expired(UnixSeconds::new(base + 5 + window.as_secs() + 1), window, 2);
+    assert_eq!((swept.dropped, swept.more), (2, false));
+    assert_eq!(expiry_index(), scanned_index(), "after an eviction");
+    assert_eq!(expiry_index().len(), 2);
+
+    assert_eq!(clear(), 2);
+    assert_eq!(expiry_index(), scanned_index(), "after a clear");
+    assert!(expiry_index().is_empty());
+}
+
 /// The backstop against a looping quoter: a full store refuses a new quote but must
 /// still take a re-registration of one it holds.
 #[test]
@@ -234,7 +371,12 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
     register(q.clone(), UnixSeconds::new(u64::MAX - 20)).expect("a live quote registers");
     assert_eq!(
         sweep_expired(UnixSeconds::new(u64::MAX), Duration::from_secs(120), 200),
-        Evicted::default()
+        Evicted {
+            dropped: 0,
+            visited: 1,
+            more: false
+        },
+        "the pass reads the soonest expiry and stops there"
     );
     assert!(get_pending(&q.hash().unwrap()).is_some());
 }
@@ -252,10 +394,12 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
     let stale = seconds_after(&q, 121);
     let window = Duration::from_secs(120);
 
+    // one entry past the cap is read, and it is the evidence that work remains
     assert_eq!(
         sweep_expired(stale, window, 4),
         Evicted {
             dropped: 4,
+            visited: 5,
             more: true
         }
     );
@@ -263,6 +407,7 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
         sweep_expired(stale, window, 4),
         Evicted {
             dropped: 4,
+            visited: 5,
             more: true
         }
     );
@@ -270,6 +415,7 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
         sweep_expired(stale, window, 4),
         Evicted {
             dropped: 2,
+            visited: 2,
             more: false
         },
         "the last pass drains the store and reports nothing left"

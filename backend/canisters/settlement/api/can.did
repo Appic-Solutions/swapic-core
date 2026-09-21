@@ -64,6 +64,11 @@ type ConfigError = variant {
   MaxFeeAboveHundredPercent : nat16;
   VaultAddressTooLong : record { len : nat64; chain_id : nat64 };
   CapOutOfRange : record { cap : nat32; field : text; ceiling : nat32 };
+  TimerIntervalTooShort : record {
+    field : text;
+    interval_s : nat64;
+    floor_s : nat64;
+  };
   PlatformFeeAboveMax : record {
     max_fee_bps : nat16;
     platform_fee_bps : nat16;

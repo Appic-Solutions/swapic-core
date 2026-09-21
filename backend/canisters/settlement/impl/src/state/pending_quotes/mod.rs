@@ -1,11 +1,11 @@
-use crate::storage::memory::{pending_quotes_memory, Memory};
-use ic_stable_structures::StableBTreeMap;
+use crate::storage::memory::{pending_expiry_memory, pending_quotes_memory, Memory};
+use ic_stable_structures::{StableBTreeMap, StableBTreeSet};
 use settlement_api::types::errors::RegisterQuoteError;
 use std::cell::RefCell;
 use std::time::Duration;
 use thiserror::Error;
 use types::quote::{QuoteError, MAX_QUOTE_LIFETIME};
-use types::{Quote, QuoteHash, UnixSeconds};
+use types::{ExpiryKey, Quote, QuoteHash, UnixSeconds};
 
 /// How many quotes may sit in the pending store at once. The quoter is the only writer, so
 /// this is a backstop against a compromised or looping quoter filling stable memory, not a
@@ -18,6 +18,22 @@ thread_local! {
     // everything else, so an upgrade keeps it.
     static PENDING: RefCell<StableBTreeMap<QuoteHash, Quote, Memory>> =
         RefCell::new(StableBTreeMap::init(pending_quotes_memory()));
+
+    // The pending store keyed by expiry, so an eviction pass walks the quotes that can be
+    // stale and stops at the first one that cannot: without it a pass decodes every stored
+    // quote to find the few it may drop, however distant their expiries are.
+    //
+    // Derived from PENDING and nothing else, and PENDING is not in the event log, so this
+    // index is no part of the fold: it stays out of `State::matches` and out of the replay
+    // audit's comparison, which measure the log against what the log produced.
+    //
+    // Nothing rebuilds it, so an upgrade from a wasm without it opens on an empty index
+    // against whatever PENDING holds, and those quotes are never evicted: they keep their
+    // slots against MAX_PENDING until a controller calls `clear_pending_quotes`. The wasm
+    // this index arrives in wants a fresh install anyway, which is what `post_upgrade`
+    // says, so there is nothing to migrate from.
+    static PENDING_EXPIRY: RefCell<StableBTreeSet<ExpiryKey, Memory>> =
+        RefCell::new(StableBTreeSet::init(pending_expiry_memory()));
 }
 
 /// Why a quote was not registered.
@@ -59,10 +75,11 @@ impl From<RegisterError> for RegisterQuoteError {
     }
 }
 
-/// Writes the store's header in an update context, so no query is ever the first to grow
-/// its memory.
+/// Writes the headers of the store and its index in an update context, so no query is ever
+/// the first to grow their memory.
 pub fn init() {
     PENDING.with(|_| ());
+    PENDING_EXPIRY.with(|_| ());
 }
 
 /// Records a quote against its hash. `now` is the caller's clock, so every rule here is
@@ -93,7 +110,16 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
         }
         pending.insert(hash, quote);
         Ok(hash)
-    })
+    })?;
+    // the hash covers `expires_at`, so a re-registration carries the same key: the index
+    // entry is written again rather than moved, and no stale key can be left behind
+    PENDING_EXPIRY.with(|index| {
+        index.borrow_mut().insert(ExpiryKey {
+            expires_at,
+            quote_hash: hash,
+        })
+    });
+    Ok(hash)
 }
 
 pub fn get_pending(quote_hash: &QuoteHash) -> Option<Quote> {
@@ -105,52 +131,91 @@ pub fn get_pending(quote_hash: &QuoteHash) -> Option<Quote> {
 pub struct Evicted {
     /// quotes dropped by this pass
     pub dropped: usize,
+    /// index entries the pass read, which is the work its cap bounds: at most one past the
+    /// cap, and one entry for a store whose soonest expiry is still in its window, however
+    /// many quotes sit behind it
+    pub visited: usize,
     /// whether the pass stopped at its cap with another stale quote still in the store
     pub more: bool,
 }
 
 /// Drops the quotes nobody can pay any more: past their expiry plus the window a permit
 /// signed against them stays valid for. Keyed on the expiry, never on when the quote was
-/// registered. At most `cap` go per pass, and the scan stops one past the cap, so neither
-/// the removals nor the walk grows with the store.
+/// registered.
+///
+/// Walks the expiry index rather than the store, in expiry order, so the pass stops at the
+/// first quote still inside its window: everything behind it expires later. At most `cap`
+/// entries are visited and at most `cap` quotes go, so a pass costs what it evicts and not
+/// what the store holds, and no quote is decoded to decide its fate.
 pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration, cap: usize) -> Evicted {
+    let mut stale: Vec<ExpiryKey> = Vec::new();
+    let mut visited = 0;
+    let mut more = false;
+    // the walk holds the index borrowed, so the keys come out before anything is removed
+    PENDING_EXPIRY.with(|index| {
+        for key in index.borrow().iter() {
+            visited += 1;
+            // a deadline past u64::MAX seconds never closes, and nothing behind this key
+            // closes earlier
+            let closed = key
+                .expires_at
+                .checked_add(permit_deadline)
+                .is_some_and(|deadline| now > deadline);
+            if !closed {
+                break;
+            }
+            // one key past the cap is the evidence that work remains, and it is the entry
+            // the next pass drops first
+            if stale.len() == cap {
+                more = true;
+                break;
+            }
+            stale.push(key);
+        }
+    });
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
-        // a deadline past u64::MAX seconds never closes
-        let mut stale: Vec<QuoteHash> = pending
-            .iter()
-            .filter(|(_, quote)| {
-                quote
-                    .expires_at
-                    .checked_add(permit_deadline)
-                    .is_some_and(|deadline| now > deadline)
-            })
-            .map(|(hash, _)| hash)
-            // one past the cap: the extra hash is the evidence that work remains, and it
-            // is the entry the next pass drops first
-            .take(cap.saturating_add(1))
-            .collect();
-        let more = stale.len() > cap;
-        stale.truncate(cap);
-        for hash in &stale {
-            pending.remove(hash);
+        for key in &stale {
+            pending.remove(&key.quote_hash);
         }
-        Evicted {
-            dropped: stale.len(),
-            more,
+    });
+    PENDING_EXPIRY.with(|index| {
+        let mut index = index.borrow_mut();
+        for key in &stale {
+            index.remove(key);
         }
-    })
+    });
+    Evicted {
+        dropped: stale.len(),
+        visited,
+        more,
+    }
 }
 
-/// Empties the store and answers how many quotes it held. The store survives upgrades, so
-/// this is how a store a looping or compromised quoter filled is recovered in place.
+/// Empties the store and its index, and answers how many quotes it held. The store survives
+/// upgrades, so this is how a store a looping or compromised quoter filled is recovered in
+/// place.
 pub fn clear() -> u64 {
-    PENDING.with(|p| {
+    let held = PENDING.with(|p| {
         let mut pending = p.borrow_mut();
         let held = pending.len();
         pending.clear_new();
         held
-    })
+    });
+    PENDING_EXPIRY.with(|index| index.borrow_mut().clear());
+    held
+}
+
+/// Test-only: the expiry index as it stands, in key order.
+#[cfg(test)]
+pub(crate) fn expiry_index() -> Vec<ExpiryKey> {
+    PENDING_EXPIRY.with(|index| index.borrow().iter().collect())
+}
+
+/// Test-only: every pending quote, in swap id order.
+#[cfg(test)]
+pub(crate) fn all_pending() -> Vec<(QuoteHash, Quote)> {
+    PENDING.with(|p| p.borrow().iter().collect())
 }
 
 #[cfg(test)]

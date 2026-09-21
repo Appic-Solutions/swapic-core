@@ -22,6 +22,7 @@ const LEDGER_META_MEMORY_ID: MemoryId = MemoryId::new(8);
 const PENDING_QUOTES_MEMORY_ID: MemoryId = MemoryId::new(9);
 const AUTO_REFUND_WAITING_MEMORY_ID: MemoryId = MemoryId::new(10);
 const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
+const PENDING_EXPIRY_MEMORY_ID: MemoryId = MemoryId::new(12);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -69,4 +70,8 @@ pub fn auto_refund_waiting_memory() -> Memory {
 
 pub fn audit_cursor_memory() -> Memory {
     memory(AUDIT_CURSOR_MEMORY_ID)
+}
+
+pub fn pending_expiry_memory() -> Memory {
+    memory(PENDING_EXPIRY_MEMORY_ID)
 }

@@ -179,6 +179,44 @@ fn validate_rejects_a_timer_interval_above_a_year() {
     .expect("a year exactly is allowed");
 }
 
+/// The sweep interval has a floor as well as a ceiling: a zero interval is clamped to a
+/// second rather than refused, so a config could otherwise put a pass that reads stable
+/// memory and appends on every second.
+#[test]
+fn validate_rejects_a_sweep_interval_below_the_floor() {
+    let under = MIN_EXPIRY_CHECK_INTERVAL - Duration::from_secs(1);
+    for interval in [Duration::ZERO, Duration::from_secs(1), under] {
+        let err = Config {
+            expiry_check_interval: interval,
+            ..Config::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::TimerIntervalTooShort {
+                field: "expiry_check_interval_s",
+                interval,
+                floor: MIN_EXPIRY_CHECK_INTERVAL
+            }
+        );
+        assert!(err.to_string().contains("expiry_check_interval_s"), "{err}");
+    }
+    Config {
+        expiry_check_interval: MIN_EXPIRY_CHECK_INTERVAL,
+        ..Config::default()
+    }
+    .validate()
+    .expect("the floor itself is allowed");
+    // the floor is the sweep's alone: the audit timer keeps only its ceiling
+    Config {
+        replay_audit_interval: Duration::from_secs(1),
+        ..Config::default()
+    }
+    .validate()
+    .expect("the audit interval has no floor");
+}
+
 #[test]
 fn validate_rejects_an_empty_vault_address() {
     let config = Config {

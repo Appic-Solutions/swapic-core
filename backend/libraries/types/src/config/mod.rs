@@ -14,6 +14,11 @@ use thiserror::Error;
 /// tight bound fails at set time rather than when the timer is wired.
 pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
 
+/// The shortest the expiry sweep may run: ten seconds. A pass reads stable memory and
+/// appends, and the work it has to do does not arrive faster than this, so anything shorter
+/// burns cycles on passes with nothing to do.
+pub const MIN_EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
 /// The longest a window inside one swap may be: one day. Every knob bounded by this one
 /// measures a wait a user or a chain is in the middle of, so anything longer is a typo, and
 /// a duration near `u64::MAX` overflows the deadline it is added to and never closes.
@@ -194,6 +199,12 @@ pub enum ConfigError {
         field: &'static str,
         interval: Duration,
     },
+    #[error("{field} is {}s, below the floor of {}s", interval.as_secs(), floor.as_secs())]
+    TimerIntervalTooShort {
+        field: &'static str,
+        interval: Duration,
+        floor: Duration,
+    },
     #[error("{field} is {}s, above the cap of {}s", duration.as_secs(), cap.as_secs())]
     DurationAboveCap {
         field: &'static str,
@@ -289,6 +300,16 @@ impl Config {
             if interval > MAX_TIMER_INTERVAL {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
             }
+        }
+        // the sweep is the one timer with a floor as well as a ceiling: it reads stable
+        // memory and appends, and a zero interval is clamped to a second rather than
+        // refused, so without this a config could put that pass on every second
+        if self.expiry_check_interval < MIN_EXPIRY_CHECK_INTERVAL {
+            return Err(ConfigError::TimerIntervalTooShort {
+                field: "expiry_check_interval_s",
+                interval: self.expiry_check_interval,
+                floor: MIN_EXPIRY_CHECK_INTERVAL,
+            });
         }
         // every window inside one swap: unbounded, each of these overflows the deadline it
         // is added to, and the comparison that deadline feeds then never fires

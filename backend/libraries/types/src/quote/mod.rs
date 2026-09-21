@@ -7,8 +7,10 @@ use crate::chain::ChainId;
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
 use crate::rail::{Rail, UnknownRail};
+use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::{Decode, Encode};
 use sha2::Digest;
+use std::borrow::Cow;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -342,3 +344,42 @@ impl<'a> Reader<'a> {
 }
 
 crate::storable_as_cbor!(Quote);
+
+/// A pending quote as the expiry index keys it: by the second it expires, then by swap id,
+/// so a walk from the first key meets the soonest expiry first and stops at the first quote
+/// still inside its window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExpiryKey {
+    pub expires_at: UnixSeconds,
+    pub quote_hash: QuoteHash,
+}
+
+/// Forty bytes: the eight big-endian bytes of `expires_at`, then the hash, so byte order and
+/// key order agree.
+impl Storable for ExpiryKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut bytes = Vec::with_capacity(40);
+        bytes.extend_from_slice(&self.expires_at.get().to_be_bytes());
+        bytes.extend_from_slice(self.quote_hash.as_ref());
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let (expires_at, quote_hash) = bytes
+            .split_first_chunk::<8>()
+            .expect("BUG: a stored expiry key is written as exactly 40 bytes");
+        Self {
+            expires_at: UnixSeconds::new(u64::from_be_bytes(*expires_at)),
+            quote_hash: QuoteHash::new(
+                quote_hash
+                    .try_into()
+                    .expect("BUG: a stored expiry key is written as exactly 40 bytes"),
+            ),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 40,
+        is_fixed_size: true,
+    };
+}

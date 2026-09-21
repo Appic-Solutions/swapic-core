@@ -26,6 +26,6 @@ pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds,
     UsdAmount,
 };
-pub use quote::{GasMode, Quote, QuoteError};
+pub use quote::{ExpiryKey, GasMode, Quote, QuoteError};
 pub use rail::Rail;
 pub use swap::{Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
