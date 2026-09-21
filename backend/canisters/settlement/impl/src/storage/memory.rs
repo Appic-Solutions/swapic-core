@@ -23,6 +23,7 @@ const PENDING_QUOTES_MEMORY_ID: MemoryId = MemoryId::new(9);
 const AUTO_REFUND_WAITING_MEMORY_ID: MemoryId = MemoryId::new(10);
 const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
 const PENDING_EXPIRY_MEMORY_ID: MemoryId = MemoryId::new(12);
+const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -74,4 +75,8 @@ pub fn audit_cursor_memory() -> Memory {
 
 pub fn pending_expiry_memory() -> Memory {
     memory(PENDING_EXPIRY_MEMORY_ID)
+}
+
+pub fn replay_cursor_memory() -> Memory {
+    memory(REPLAY_CURSOR_MEMORY_ID)
 }

@@ -3,6 +3,7 @@ pub mod config;
 pub mod events;
 pub mod halt;
 pub mod memory;
+pub mod replay_cursor;
 pub mod roles;
 
 use crate::state::pending_quotes;
@@ -16,6 +17,7 @@ pub fn init() {
     halt::init();
     pending_quotes::init();
     audit_cursor::init();
+    replay_cursor::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

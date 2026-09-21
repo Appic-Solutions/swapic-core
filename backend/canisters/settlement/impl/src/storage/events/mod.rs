@@ -1,5 +1,5 @@
-use crate::state::transitions::{apply_state_transition, replay, ReplayError};
-use crate::state::{State, Store};
+use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
+use crate::state::{MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
     pockets_memory, swaps_memory, Memory,
@@ -323,8 +323,9 @@ pub fn verify_chain() -> bool {
 /// than trapping before the audit can halt.
 ///
 /// Its cost grows with the log, so no timer runs it: a query that runs out of instructions
-/// fails that query alone, and the ops door onto the same comparison is
-/// [`replay_window`], which bounds the work it does in one message.
+/// fails that query alone, and the ops door onto the same comparison is the controller's
+/// `audit_replay_step`, which folds the log through [`replay_next`] a bounded step at a
+/// time.
 pub fn verify_replay() -> bool {
     match EVENTS.with(|e| replay(e.borrow().iter())) {
         Ok(rebuilt) => read_state(|live| rebuilt.matches(live)),
@@ -378,59 +379,21 @@ pub fn verify_chain_chunk(
     })
 }
 
-/// What one paged replay found.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ReplayWindow {
-    pub start: u64,
-    /// entries folded by this call
-    pub folded: u64,
-    /// the log's length when the window was read
-    pub log_len: u64,
-    /// whether the window could be measured against the live fold at all
-    pub compared: bool,
-    /// whether the fold this call built is the live fold, which only a compared window says
-    pub matches: bool,
-    /// why the window did not fold, if it did not
-    pub refused: Option<ReplayError>,
-}
-
-/// Folds the log window `[start, start + len)` into a fresh heap state and, where it can,
-/// compares the result with the live fold.
-///
-/// Only a window that starts at index 0 and reaches the head can be compared: a fold has no
-/// state to start a later window from, so [`State::check`] refuses the first event naming a
-/// swap an earlier window funded. A window anchored at genesis is the deep check
-/// [`verify_replay`] does in one go, in as many calls as the caller wants to spend.
-pub fn replay_window(start: u64, len: u64) -> ReplayWindow {
+/// Folds at most `max` more entries of the log onto `fold`, from the index it seals next,
+/// admitting each the way `append_event` did, and answers how many entries still lie
+/// between the fold and the head. Reads the log one entry at a time, so a step costs the
+/// entries it folds and never the whole log; the fold is the caller's to keep between
+/// steps. A fold sealing past the head folds nothing and has nothing left, and the
+/// comparison it then goes to is what refuses it.
+pub fn replay_next(fold: &mut State<MemoryStore>, max: u64) -> Result<u64, ReplayError> {
     let log_len = event_count();
-    let end = start.saturating_add(len).min(log_len);
-    let folded = end.saturating_sub(start);
-    let anchored = start == 0;
-    let outcome = EVENTS.with(|e| {
+    let start = fold.meta().next_event_index.get();
+    let end = start.saturating_add(max).min(log_len);
+    EVENTS.with(|e| {
         let log = e.borrow();
-        replay((start..end).map_while(|i| log.get(i)))
-    });
-    match outcome {
-        Err(error) => ReplayWindow {
-            start,
-            folded,
-            log_len,
-            compared: false,
-            matches: false,
-            refused: Some(error),
-        },
-        Ok(rebuilt) => {
-            let compared = anchored && end == log_len;
-            ReplayWindow {
-                start,
-                folded,
-                log_len,
-                compared,
-                matches: compared && read_state(|live| rebuilt.matches(live)),
-                refused: None,
-            }
-        }
-    }
+        replay_into(fold, (start..end).map_while(|i| log.get(i)))
+    })?;
+    Ok(log_len.saturating_sub(fold.meta().next_event_index.get()))
 }
 
 impl From<ReplayError> for settlement_api::types::events::ReplayError {

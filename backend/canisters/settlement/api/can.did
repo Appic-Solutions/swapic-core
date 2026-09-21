@@ -7,26 +7,25 @@ type AppendError = variant {
   Canonical : CanonicalError;
   OutOfStableMemory : record { current_pages : nat64; delta_pages : nat64 };
 };
-// What one paged replay found.
+// What one step of the deep check found.
 // 
-// `compared` is the field to read first: only a window that starts at index 0 and reaches
-// the head can be measured against the live fold, because a fold has no state to start a
-// later window from. A window that starts later reports what it did and condemns nothing.
-// A compared window that does not match, or a window from index 0 the fold refuses, is a
-// divergence and halts the canister.
-type AuditPage = record {
-  compared : bool;
-  // the log's length when the window was read
-  log_len : nat64;
-  start : nat64;
-  // whether the fold this call built is the live fold, which only a compared window says
+// `finished` is the field to read first: only a step that reached the head compared the
+// fold with the live one, and `matches` is its verdict. A step short of the head reports
+// how far the fold got and how much is left, and condemns nothing. An entry the fold
+// refuses, or a finished fold that differs, is a divergence and halts the canister; every
+// verdict starts the next audit over from genesis.
+type AuditProgress = record {
+  // whether the fold is the live fold, which only a finished step says
   matches : bool;
-  // whether this call halted the canister
+  finished : bool;
+  // whether this step halted the canister
   halted : bool;
-  // why the window did not fold, if it did not
+  // entries between the fold and the head, as the log stood when this step read it
+  remaining : nat64;
+  // entries folded from genesis, this step's included
+  folded_so_far : nat64;
+  // why the fold stopped, if it did
   refused : opt ReplayError;
-  // entries folded by this call
-  folded : nat64;
 };
 // A value the canonical preimage has no bytes for.
 type CanonicalError = variant {
@@ -232,15 +231,14 @@ type RegisterQuoteError = variant {
   InvalidQuote : QuoteError;
   Expired : record { now_s : nat64; expires_at_s : nat64 };
 };
-// Why a window of the log does not fold. The replay stopped at `index` and applied nothing
-// from there.
+// Why the log does not fold. The replay stopped at `index` and applied nothing from there.
 type ReplayError = variant {
   OutOfSequence : record { found : nat64; expected : nat64 };
   LogFull : record { index : nat64 };
   Refused : record { error : TransitionError; index : nat64 };
   Unlinked : record { head : blob; index : nat64; parent : blob };
 };
-type Result = variant { Ok : AuditPage; Err : GuardError };
+type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : nat64; Err : GuardError };
 type Result_2 = variant { Ok : Config; Err : GuardError };
 type Result_3 = variant { Ok : opt Quote; Err : GuardError };
@@ -311,14 +309,19 @@ type TransitionError = variant {
   UnknownPocket : nat64;
 };
 service : (InitArg) -> {
-  // Controller-only. The deep check by hand: folds the log window `[start, start + len)` and,
-  // where the window is the whole log, compares it with the live state. An update, not a
-  // query, because a divergence it finds halts the canister.
+  // Controller-only. One step of the deep check: folds up to `max_events` more of the log
+  // onto the fold the step before saved, from genesis when there is none, and once the fold
+  // reaches the head compares it with the live state. An update, not a query, because a
+  // divergence it finds halts the canister, and because the fold so far is saved in stable
+  // memory between steps, so an audit spans as many calls as the log needs and survives an
+  // upgrade in the middle.
   // 
-  // Only a window from index 0 that reaches the head can be compared: a fold has no state to
-  // start a later window from. Ask for the count first and spend as many calls as the log
-  // needs.
-  audit_replay : (nat64, nat64) -> (Result);
+  // Each step answers how much is folded and how much is left; keep calling until
+  // `finished`. A refusal, a broken link, or a finished fold that differs from the live
+  // state halts the canister, and every verdict starts the next audit over from genesis. A
+  // step too large for one message fails that call alone and leaves the saved fold where it
+  // was.
+  audit_replay_step : (nat64) -> (Result);
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in
   // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.
@@ -342,9 +345,9 @@ service : (InitArg) -> {
   // the chunk of the chain it verified, and a controller calling `set_halted`.
   // 
   // The deep comparison of the fold against a replay of the log is not on that timer: it is
-  // the controller-only `audit_replay`, whose cost grows with the log, and it halts the
-  // canister on what it finds. The flag also gates the expiry sweep, which appends nothing
-  // while it is set; the money endpoints that honour it arrive with the chain layer.
+  // the controller-only `audit_replay_step`, run as many times as the log needs, and it
+  // halts the canister on what it finds. The flag also gates the expiry sweep, which appends
+  // nothing while it is set; the money endpoints that honour it arrive with the chain layer.
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;

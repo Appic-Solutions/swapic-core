@@ -468,8 +468,7 @@ impl TryFrom<EventType> for types::EventType {
     }
 }
 
-/// Why a window of the log does not fold. The replay stopped at `index` and applied nothing
-/// from there.
+/// Why the log does not fold. The replay stopped at `index` and applied nothing from there.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum ReplayError {
     OutOfSequence {
@@ -490,26 +489,25 @@ pub enum ReplayError {
     },
 }
 
-/// What one paged replay found.
+/// What one step of the deep check found.
 ///
-/// `compared` is the field to read first: only a window that starts at index 0 and reaches
-/// the head can be measured against the live fold, because a fold has no state to start a
-/// later window from. A window that starts later reports what it did and condemns nothing.
-/// A compared window that does not match, or a window from index 0 the fold refuses, is a
-/// divergence and halts the canister.
+/// `finished` is the field to read first: only a step that reached the head compared the
+/// fold with the live one, and `matches` is its verdict. A step short of the head reports
+/// how far the fold got and how much is left, and condemns nothing. An entry the fold
+/// refuses, or a finished fold that differs, is a divergence and halts the canister; every
+/// verdict starts the next audit over from genesis.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
-pub struct AuditPage {
-    pub start: u64,
-    /// entries folded by this call
-    pub folded: u64,
-    /// the log's length when the window was read
-    pub log_len: u64,
-    pub compared: bool,
-    /// whether the fold this call built is the live fold, which only a compared window says
+pub struct AuditProgress {
+    /// entries folded from genesis, this step's included
+    pub folded_so_far: u64,
+    /// entries between the fold and the head, as the log stood when this step read it
+    pub remaining: u64,
+    pub finished: bool,
+    /// whether the fold is the live fold, which only a finished step says
     pub matches: bool,
-    /// why the window did not fold, if it did not
+    /// why the fold stopped, if it did
     pub refused: Option<ReplayError>,
-    /// whether this call halted the canister
+    /// whether this step halted the canister
     pub halted: bool,
 }
 

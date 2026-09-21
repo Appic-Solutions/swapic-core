@@ -264,6 +264,18 @@ pub enum ReplayError {
 /// wasm made inconsistent is an `Err`, never a panic, so the audit can halt on it.
 pub fn replay(events: impl IntoIterator<Item = Event>) -> Result<State<MemoryStore>, ReplayError> {
     let mut state = State::default();
+    replay_into(&mut state, events)?;
+    Ok(state)
+}
+
+/// [`replay`] continued: folds `events` onto a heap state that already holds the fold of
+/// the events before them, so a log too long to fold in one message is folded across many.
+/// The first event must be the one the state seals next. On an `Err` the state holds the
+/// events before the one refused, and nothing of it.
+pub fn replay_into(
+    state: &mut State<MemoryStore>,
+    events: impl IntoIterator<Item = Event>,
+) -> Result<(), ReplayError> {
     for event in events {
         let meta = state.meta();
         let index = event.index;
@@ -286,9 +298,9 @@ pub fn replay(events: impl IntoIterator<Item = Event>) -> Result<State<MemorySto
         state
             .check(&event.payload)
             .map_err(|error| ReplayError::Refused { index, error })?;
-        apply_state_transition(&mut state, &event);
+        apply_state_transition(state, &event);
     }
-    Ok(state)
+    Ok(())
 }
 
 #[cfg(test)]

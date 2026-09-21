@@ -6,7 +6,7 @@ use crate::storage::audit_cursor;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use crate::task_manager::expiry_sweep::run_expiry_sweep;
-use crate::task_manager::replay_audit::{run_audit_replay, run_replay_audit};
+use crate::task_manager::replay_audit::{run_audit_replay_step, run_replay_audit};
 use types::config::AuditChunk;
 use types::events::Choice;
 use types::quote::QuoteError;
@@ -76,12 +76,16 @@ fn log_replay() -> Result<State<MemoryStore>, ReplayError> {
     EVENTS.with(|e| replay(e.borrow().iter()))
 }
 
-/// The deep check an operator runs by hand, over the whole log: the comparison a bounded
-/// timer pass cannot make. Answers whether it halted the canister.
+/// The deep check an operator runs by hand, in one step the size of the log: the comparison
+/// a bounded timer pass cannot make. Answers whether it halted the canister.
 fn deep_check_halts() -> bool {
-    let halted = run_audit_replay(0, event_count()).halted;
-    assert_eq!(halted, is_halted(), "a halting pass sets the flag");
-    halted
+    let step = run_audit_replay_step(event_count());
+    assert!(
+        step.finished || step.halted,
+        "one step the size of the log ends the audit: {step:?}"
+    );
+    assert_eq!(step.halted, is_halted(), "a halting step sets the flag");
+    step.halted
 }
 
 /// A refused append writes nothing: no log entry, no swap, no moved fold. The pair the

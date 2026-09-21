@@ -1828,9 +1828,11 @@ name = "settlement"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "hex",
  "ic-cdk",
  "ic-cdk-timers",
  "ic-stable-structures",
+ "minicbor",
  "serde",
  "serde_json",
  "settlement_api",

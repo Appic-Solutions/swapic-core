@@ -371,35 +371,43 @@ fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
     assert!(halted(&pic, canister), "the new audit interval is live");
 }
 
-/// The deep check is an ops action, not a timer's: a controller runs it over the whole log
-/// and it answers what it compared. A divergence it finds halts the canister, and a
-/// stranger cannot run it at all.
+/// The deep check is an ops action, not a timer's: a controller runs it over the whole log,
+/// a step at a time, and it answers what it compared. A divergence it finds halts the
+/// canister, and a stranger cannot run it at all.
 #[test]
-fn audit_replay_is_the_controllers_deep_check_and_halts_on_a_divergence() {
+fn audit_replay_step_is_the_controllers_deep_check_and_halts_on_a_divergence() {
     let (pic, canister, admin) = setup();
     waiting_swap(&pic, canister, admin, true, 1);
     let len = settlement::event_count(&pic, canister, stranger());
 
     assert_eq!(
-        settlement::audit_replay(&pic, canister, stranger(), 0, len),
+        settlement::audit_replay_step(&pic, canister, stranger(), len),
         Err(GuardError::NotController),
         "the deep check is controller-only"
     );
     assert_eq!(
-        settlement::audit_replay(&pic, canister, quoter(), 0, len),
+        settlement::audit_replay_step(&pic, canister, quoter(), len),
         Err(GuardError::NotController)
     );
 
-    let page = settlement::audit_replay(&pic, canister, admin, 0, len).expect("a controller may");
-    assert_eq!((page.folded, page.log_len), (len, len));
-    assert!(page.compared && page.matches && !page.halted);
+    // a step short of the head reports how far it got and condemns nothing
+    let first = settlement::audit_replay_step(&pic, canister, admin, 1).expect("a controller may");
+    assert_eq!(
+        (first.folded_so_far, first.remaining, first.finished),
+        (1, len - 1, false)
+    );
+    assert!(!first.halted && !halted(&pic, canister));
+    // the next step carries on from there and finishes
+    let last = settlement::audit_replay_step(&pic, canister, admin, len).expect("a controller may");
+    assert_eq!((last.folded_so_far, last.remaining), (len, 0));
+    assert!(last.finished && last.matches && !last.halted, "{last:?}");
     assert!(!halted(&pic, canister));
 
     // the fold's head moved off the log's, which is the divergence the comparison sees
     skew_state(&pic, canister, admin).unwrap();
-    let page = settlement::audit_replay(&pic, canister, admin, 0, len).expect("a controller may");
-    assert!(page.compared && !page.matches, "{page:?}");
-    assert!(page.halted && halted(&pic, canister));
+    let step = settlement::audit_replay_step(&pic, canister, admin, len).expect("a controller may");
+    assert!(step.finished && !step.matches, "{step:?}");
+    assert!(step.halted && halted(&pic, canister));
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Pocket, Quote, QuoteHash, Swap,
@@ -38,12 +39,18 @@ pub trait Store {
     fn auto_refund_waiting_since_before(&self, cutoff: Timestamp, limit: usize) -> Vec<WaitingKey>;
 }
 
-/// A [`Store`] on the heap: what unit tests and the replay audit fold into.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A [`Store`] on the heap: what unit tests and the replay audit fold into. The deep audit
+/// saves one between its steps, so it is stored as minicbor: `#[n]` indices are
+/// append-only, never renumbered or reused, and a new field is optional.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct MemoryStore {
+    #[n(0)]
     swaps: BTreeMap<QuoteHash, Swap>,
+    #[n(1)]
     pockets: BTreeMap<ChainId, Pocket>,
+    #[n(2)]
     meta: LedgerMeta,
+    #[n(3)]
     auto_refund_waiting: BTreeSet<WaitingKey>,
 }
 
@@ -159,6 +166,11 @@ impl<S: Store> State<S> {
 
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// The fold as the bare store, for saving it.
+    pub fn into_store(self) -> S {
+        self.store
     }
 
     pub fn meta(&self) -> LedgerMeta {

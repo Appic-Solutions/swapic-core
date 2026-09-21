@@ -1,4 +1,4 @@
-use crate::client::settlement::test_skew_state;
+use crate::client::settlement::{append, audit_replay_step, event_count, test_skew_state};
 use crate::settlement_suite::init::setup;
 use crate::wasms;
 use candid::{decode_one, encode_one, Nat, Principal};
@@ -140,4 +140,41 @@ fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
         .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
         .unwrap();
     assert!(decode_one::<bool>(&raw).unwrap());
+}
+
+/// The deep audit saves its fold between steps in stable memory, so an upgrade in the
+/// middle of an audit loses nothing: the step after it carries on where the one before it
+/// stopped.
+#[test]
+fn the_replay_cursor_survives_an_upgrade() {
+    let (pic, canister, admin) = setup();
+    let installed = event_count(&pic, canister, admin);
+    for i in 1..=4_u64 {
+        let event = EventType::PocketFunded {
+            chain_id: 8453,
+            amount: Nat::from(i),
+        };
+        append(&pic, canister, admin, &event).expect("the guard admits it");
+    }
+    let total = installed + 4;
+
+    let before = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
+    assert_eq!((before.folded_so_far, before.finished), (2, false));
+
+    pic.upgrade_canister(
+        canister,
+        wasms::settlement(),
+        encode_one(()).unwrap(),
+        Some(admin),
+    )
+    .unwrap();
+
+    let after = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
+    assert_eq!(
+        (after.folded_so_far, after.remaining, after.finished),
+        (4, total - 4, false),
+        "the fold carried on where it stopped"
+    );
+    let last = audit_replay_step(&pic, canister, admin, total).expect("a controller may");
+    assert!(last.finished && last.matches && !last.halted, "{last:?}");
 }

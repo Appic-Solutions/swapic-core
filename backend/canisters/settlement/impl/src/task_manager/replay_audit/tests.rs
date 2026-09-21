@@ -1,10 +1,13 @@
 use super::*;
 use crate::guards::require_not_halted;
-use crate::state::transitions::tests::funds;
+use crate::state::transitions::tests::{funds, swap_id};
+use crate::state::transitions::ReplayError;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
+use crate::storage::replay_cursor::{self, ReplayCursor};
 use types::config::AuditChunk;
-use types::Timestamp;
+use types::events::EventType;
+use types::{Attempt, ChainId, Event, EventIndex, Timestamp, TransitionError, TxHash};
 
 /// The halt is one-way by design: a later clean audit must not clear it, because the
 /// canister may have been halted for a reason the audit no longer sees.
@@ -41,9 +44,9 @@ fn set_chunk(events: u32) {
     });
 }
 
-/// Funds `count` swaps, one event each.
-fn log_of(count: u64) {
-    for nonce in 1..=count {
+/// Funds one swap per nonce in `nonces`, one event each.
+fn fund(nonces: impl IntoIterator<Item = u64>) {
+    for nonce in nonces {
         events::append_event_at(funds(nonce), Timestamp::from_nanos(nonce))
             .expect("the fold admits it");
     }
@@ -60,7 +63,7 @@ fn next_index() -> u64 {
 fn the_cursor_advances_across_ticks_and_wraps_at_the_head() {
     on_fresh_memory(|| {
         set_chunk(2);
-        log_of(5);
+        fund(1..=5);
         assert_eq!(audit_cursor::get(), AuditCursor::GENESIS);
 
         run_replay_audit();
@@ -81,62 +84,162 @@ fn the_cursor_advances_across_ticks_and_wraps_at_the_head() {
     });
 }
 
-/// The deep check over the whole log: a healthy canister compares equal, and the page says
-/// what it did.
+/// What one step reports before it is finished: how far the fold got and what is left.
+fn unfinished(step: AuditProgress) -> (u64, u64) {
+    assert!(
+        !step.finished && !step.matches && step.refused.is_none() && !step.halted,
+        "{step:?}"
+    );
+    (step.folded_so_far, step.remaining)
+}
+
+/// The deep check over a log too long to fold in one message: three steps of a thousand
+/// fold three thousand events, the third reaches the head and compares, and the verdict is
+/// the one an unbounded fold gives. A finished audit starts the next one at genesis.
 #[test]
-fn the_paged_replay_compares_a_whole_log_and_finds_it_sound() {
+fn the_deep_audit_folds_a_long_log_in_bounded_steps_and_finds_it_sound() {
     on_fresh_memory(|| {
-        log_of(3);
-        let replay = run_audit_replay(0, events::event_count());
+        fund(1..=3_000);
+
+        assert_eq!(unfinished(run_audit_replay_step(1_000)), (1_000, 2_000));
+        assert_eq!(unfinished(run_audit_replay_step(1_000)), (2_000, 1_000));
         assert_eq!(
-            replay,
-            AuditReplay {
-                window: ReplayWindow {
-                    start: 0,
-                    folded: 3,
-                    log_len: 3,
-                    compared: true,
-                    matches: true,
-                    refused: None,
-                },
-                halted: false
+            run_audit_replay_step(1_000),
+            AuditProgress {
+                folded_so_far: 3_000,
+                remaining: 0,
+                finished: true,
+                matches: true,
+                refused: None,
+                halted: false,
             }
+        );
+        assert!(!is_halted());
+        assert!(
+            events::verify_replay(),
+            "the same verdict as one unbounded fold"
+        );
+        assert_eq!(
+            replay_cursor::get(),
+            ReplayCursor::genesis(),
+            "a finished audit starts the next at genesis"
+        );
+
+        // the next audit starts over, and one step the size of the log finishes it
+        let whole = run_audit_replay_step(3_000);
+        assert_eq!(
+            (whole.folded_so_far, whole.finished, whole.matches),
+            (3_000, true, true)
+        );
+    });
+}
+
+/// A divergence deep in the log is met by the step that reaches it and by no step before:
+/// planted at index 2,500, it halts the third step of a thousand, not the first. A halted
+/// audit starts the next one at genesis, and the verdict is the one an unbounded fold gives.
+#[test]
+fn a_divergence_deep_in_the_log_halts_the_step_that_reaches_it() {
+    on_fresh_memory(|| {
+        fund(1..=2_500);
+        // an entry no guard admitted, on a swap the log never funded, written raw with the
+        // fold moved onto it so the log builds on from there
+        let meta = events::read_state(|state| state.meta());
+        assert_eq!(meta.next_event_index, EventIndex::new(2_500));
+        let orphan = swap_id(9_999);
+        let planted = Event::seal(
+            meta.next_event_index,
+            Timestamp::from_nanos(2_501),
+            meta.last_event_hash,
+            EventType::TxSigned {
+                quote_hash: orphan,
+                attempt: Attempt::FIRST,
+                chain_id: ChainId::BASE,
+                tx_hash: TxHash::new([1; 32]),
+                raw_tx: vec![],
+            },
+        )
+        .expect("the payload has a preimage");
+        events::test_push_raw(planted);
+        fund(2_502..=3_000);
+        assert_eq!(events::event_count(), 3_000);
+
+        assert_eq!(unfinished(run_audit_replay_step(1_000)), (1_000, 2_000));
+        assert!(!is_halted(), "the first two thousand entries are sound");
+        assert_eq!(unfinished(run_audit_replay_step(1_000)), (2_000, 1_000));
+        assert!(!is_halted());
+
+        assert_eq!(
+            run_audit_replay_step(1_000),
+            AuditProgress {
+                folded_so_far: 2_500,
+                remaining: 500,
+                finished: false,
+                matches: false,
+                refused: Some(ReplayError::Refused {
+                    index: EventIndex::new(2_500),
+                    error: TransitionError::UnknownSwap(orphan),
+                }),
+                halted: true,
+            },
+            "the step that reaches the entry halts"
+        );
+        assert!(is_halted());
+        assert_eq!(
+            replay_cursor::get(),
+            ReplayCursor::genesis(),
+            "a halted audit starts the next one over"
+        );
+        assert!(
+            !events::verify_replay(),
+            "the same verdict as one unbounded fold"
+        );
+    });
+}
+
+/// The log keeps growing while an audit runs, so a step folds towards the head as it stands
+/// when the step reads it, not as it stood when the audit began.
+#[test]
+fn a_log_that_grows_between_steps_is_audited_to_its_new_head() {
+    on_fresh_memory(|| {
+        fund(1..=5);
+        assert_eq!(unfinished(run_audit_replay_step(3)), (3, 2));
+        fund(6..=9);
+        let last = run_audit_replay_step(100);
+        assert_eq!(
+            (
+                last.folded_so_far,
+                last.remaining,
+                last.finished,
+                last.matches
+            ),
+            (9, 0, true, true),
+            "{last:?}"
         );
         assert!(!is_halted());
     });
 }
 
-/// A window that does not reach the head folds what it was given and compares nothing, and
-/// a window that does not start at genesis cannot even fold: the state it would need was
-/// built by the entries before it. Neither condemns the canister.
+/// A step of nothing folds nothing and moves nothing, and on an empty log it is the whole
+/// audit: nothing to fold, nothing to differ.
 #[test]
-fn a_partial_window_reports_what_it_did_and_halts_nothing() {
+fn a_step_of_nothing_is_a_report_and_an_empty_log_audits_at_once() {
     on_fresh_memory(|| {
-        log_of(4);
-        let head_of_log = run_audit_replay(0, 2).window;
-        assert_eq!((head_of_log.folded, head_of_log.log_len), (2, 4));
-        assert!(
-            !head_of_log.compared && !head_of_log.matches,
-            "a window short of the head is measured against nothing"
-        );
-        assert_eq!(head_of_log.refused, None);
-        assert!(!is_halted());
-
-        let mid_log = run_audit_replay(2, 2).window;
-        assert_eq!(mid_log.start, 2);
-        assert!(!mid_log.compared);
-        assert!(
-            mid_log.refused.is_some(),
-            "a fold has no state to start a later window from"
-        );
-        assert!(
-            !is_halted(),
-            "and a window that cannot compare cannot condemn"
+        let empty = run_audit_replay_step(0);
+        assert_eq!(
+            (
+                empty.folded_so_far,
+                empty.finished,
+                empty.matches,
+                empty.halted
+            ),
+            (0, true, true, false),
+            "{empty:?}"
         );
 
-        // a window past the end is empty, and empty is not a divergence
-        let past_the_end = run_audit_replay(99, 10).window;
-        assert_eq!((past_the_end.folded, past_the_end.compared), (0, false));
-        assert!(!is_halted());
+        fund(1..=2);
+        assert_eq!(unfinished(run_audit_replay_step(0)), (0, 2));
+        assert_eq!(unfinished(run_audit_replay_step(1)), (1, 1));
+        assert_eq!(unfinished(run_audit_replay_step(0)), (1, 1));
+        assert!(run_audit_replay_step(1).finished);
     });
 }

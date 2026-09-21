@@ -227,9 +227,14 @@ impl Swap {
 
 /// A swap waiting for its user, as the waiting index keys it: by when the wait began, then
 /// by swap id, so a walk from the first key meets the longest wait first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The index is stored as these keys' forty bytes below; the deep audit's saved fold holds
+/// them as minicbor, where `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 pub struct WaitingKey {
+    #[n(0)]
     pub since: Timestamp,
+    #[n(1)]
     pub quote_hash: QuoteHash,
 }
 

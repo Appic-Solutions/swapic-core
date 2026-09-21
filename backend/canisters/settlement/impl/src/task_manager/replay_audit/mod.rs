@@ -1,7 +1,9 @@
+use crate::state::transitions::ReplayError;
+use crate::state::State;
 use crate::storage::audit_cursor::{self, AuditCursor};
-use crate::storage::events::{self, ReplayWindow};
 use crate::storage::halt::set_halted;
-use crate::storage::{config, events::ChainChunk};
+use crate::storage::replay_cursor::{self, ReplayCursor};
+use crate::storage::{config, events, events::ChainChunk};
 
 /// One pass of the audit timer, bounded whatever the log holds: the O(1) invariant that the
 /// fold is in step with the log, then one chunk of the chain, resumed from the stable
@@ -47,29 +49,81 @@ fn audit_pass() -> bool {
     }
 }
 
-/// What one paged deep check found, and whether it halted the canister.
+/// What one step of the deep check found: how far the fold got, and the verdict once it
+/// reached the head.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AuditReplay {
-    pub window: ReplayWindow,
+pub struct AuditProgress {
+    /// entries folded from genesis, this step's included
+    pub folded_so_far: u64,
+    /// entries between the fold and the head, as the log stood when this step read it
+    pub remaining: u64,
+    /// whether this step reached the head and compared the fold with the live one
+    pub finished: bool,
+    /// whether the fold is the live fold, which only a finished step says
+    pub matches: bool,
+    /// why the fold stopped, if it did
+    pub refused: Option<ReplayError>,
+    /// whether this step halted the canister
     pub halted: bool,
 }
 
-/// The deep check, by hand: folds a window of the log and, where the window is the whole
-/// log, compares it with the live fold. A genesis-anchored window that the fold refuses, or
-/// that reproduces another state, is a divergence and halts the canister. A window that
-/// starts later is a report and nothing more: it cannot be compared, so it cannot condemn.
+/// One step of the deep check, by hand: folds up to `max_events` more of the log onto the
+/// fold the step before saved, from genesis when there is none, and once the fold reaches
+/// the head compares it with the live one. The fold so far is saved in stable memory
+/// between steps, so an audit spans as many messages as the log needs and survives an
+/// upgrade in the middle. A refusal or a broken link is a divergence wherever it sits, and
+/// so is a fold that reaches the head and differs: either halts the canister. A verdict
+/// either way puts the next audit back at genesis.
 ///
 /// Off the timer on purpose: this is the check whose cost grows with the log, and an ops
-/// call that runs out of instructions fails that call alone.
-pub fn run_audit_replay(start: u64, len: u64) -> AuditReplay {
-    let window = events::replay_window(start, len);
-    let anchored = window.start == 0;
-    let diverged = anchored && (window.refused.is_some() || (window.compared && !window.matches));
-    record_audit(!diverged);
-    AuditReplay {
-        window,
-        halted: diverged,
+/// call that runs out of instructions fails that call alone and leaves the saved fold
+/// where it was.
+pub fn run_audit_replay_step(max_events: u64) -> AuditProgress {
+    let mut fold = State::new(replay_cursor::get().fold);
+    let outcome = events::replay_next(&mut fold, max_events);
+    let folded_so_far = fold.meta().next_event_index.get();
+    let remaining = events::event_count().saturating_sub(folded_so_far);
+    let unfinished = |refused, halted| AuditProgress {
+        folded_so_far,
+        remaining,
+        finished: false,
+        matches: false,
+        refused,
+        halted,
+    };
+    match outcome {
+        // the log does not fold: a divergence, wherever in the log it sits
+        Err(error) => {
+            finish(false);
+            unfinished(Some(error), true)
+        }
+        // the fold reached the head, so the two folds are compared: the deep check itself
+        Ok(0) => {
+            let matches = events::read_state(|live| fold.matches(live));
+            finish(matches);
+            AuditProgress {
+                folded_so_far,
+                remaining: 0,
+                finished: true,
+                matches,
+                refused: None,
+                halted: !matches,
+            }
+        }
+        // more to fold: the fold so far waits for the next step
+        Ok(_) => {
+            replay_cursor::set(ReplayCursor {
+                fold: fold.into_store(),
+            });
+            unfinished(None, false)
+        }
     }
+}
+
+/// Ends an audit on its verdict: the next one starts at genesis, and a divergence halts.
+fn finish(ok: bool) {
+    replay_cursor::set(ReplayCursor::genesis());
+    record_audit(ok);
 }
 
 /// One audit's verdict. A pass never clears the flag: only a human does, through

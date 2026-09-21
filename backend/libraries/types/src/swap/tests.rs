@@ -169,3 +169,15 @@ fn swaps_and_pockets_round_trip_through_storage() {
     };
     assert_eq!(Pocket::from_bytes(pocket.to_bytes()), pocket);
 }
+
+/// The deep audit saves its fold between steps, index included, so a key must also
+/// survive the minicbor encoding that snapshot is written in.
+#[test]
+fn a_waiting_key_round_trips_through_minicbor() {
+    let key = WaitingKey {
+        since: Timestamp::from_nanos(1_700_000_000_123_456_789),
+        quote_hash: QuoteHash::new([0x5a; 32]),
+    };
+    let bytes = minicbor::to_vec(key).unwrap();
+    assert_eq!(minicbor::decode::<WaitingKey>(&bytes).unwrap(), key);
+}
