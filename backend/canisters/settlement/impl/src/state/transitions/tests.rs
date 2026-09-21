@@ -2,8 +2,8 @@ use super::*;
 use types::events::{Choice, TxPurpose};
 use types::{
     Attempt, BlockNumber, ChainId, EventHash, EventIndex, GasAmount, GasMode, LedgerMeta, Nonce,
-    Pocket, PocketError, QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount, TxHash,
-    UnixSeconds, WaitingKey, Wei, WeiPerGas,
+    NonceKey, Pocket, PocketError, QuoteHash, Rail, Swap, SwapStatus, Timestamp, TokenAmount,
+    TxHash, UnixSeconds, UnsignedTx, WaitingKey, Wei, WeiPerGas,
 };
 
 type HeapState = State<MemoryStore>;
@@ -999,14 +999,19 @@ fn replaced(purpose: TxPurpose, chain: ChainId, nonce: u64) -> EventType {
 /// Rule A4, the one that makes a double spend of a nonce impossible: the allocator counts
 /// from zero on each chain, hands out one number at a time, and counts each chain
 /// separately.
+///
+/// One swap per allocation, because a swap that already holds a number it has not signed
+/// for is refused a second one: the two `TxCreated` that drive the allocator here belong to
+/// two swaps, which is the only way two numbers are ever out at once.
 #[test]
 fn the_nonce_allocator_hands_out_one_number_at_a_time_per_chain() {
-    let qh = swap_id(1);
-    let burn = TxPurpose::Burn(qh);
+    let burn = |n: u64| TxPurpose::Burn(swap_id(n));
     let state = fold(vec![
         funds(1),
-        created(burn, BASE, 0),
-        created(burn, BASE, 1),
+        funds(2),
+        funds(3),
+        created(burn(1), BASE, 0),
+        created(burn(2), BASE, 1),
     ]);
     assert_eq!(state.next_nonce(&BASE), Nonce::new(2));
     assert_eq!(
@@ -1018,7 +1023,7 @@ fn the_nonce_allocator_hands_out_one_number_at_a_time_per_chain() {
     // the next one on Base must be 2, and nothing else
     for wrong in [0, 1, 3, u64::MAX] {
         assert_eq!(
-            state.check(&created(burn, BASE, wrong)),
+            state.check(&created(burn(3), BASE, wrong)),
             Err(TransitionError::NonceOutOfSequence {
                 chain_id: BASE,
                 nonce: Nonce::new(wrong),
@@ -1026,16 +1031,202 @@ fn the_nonce_allocator_hands_out_one_number_at_a_time_per_chain() {
             })
         );
     }
-    assert_eq!(state.check(&created(burn, BASE, 2)), Ok(()));
+    assert_eq!(state.check(&created(burn(3), BASE, 2)), Ok(()));
     // and each chain counts on its own
-    assert_eq!(state.check(&created(burn, ARBITRUM, 0)), Ok(()));
+    assert_eq!(state.check(&created(burn(3), ARBITRUM, 0)), Ok(()));
     assert_eq!(
-        state.check(&created(burn, ARBITRUM, 1)),
+        state.check(&created(burn(3), ARBITRUM, 1)),
         Err(TransitionError::NonceOutOfSequence {
             chain_id: ARBITRUM,
             nonce: Nonce::new(1),
             expected: Nonce::ZERO,
         })
+    );
+}
+
+/// Rule A4 read from the swap's side, which is what makes two sends for ONE swap safe:
+/// while a swap holds a number nothing has signed for, it is refused another. Without it
+/// two calls that interleave at the signature both allocate, the second's `TxSigned` is
+/// refused because the first attempt is open, and its number is left with no transaction.
+#[test]
+fn one_swap_never_holds_two_nonces_at_once() {
+    let qh = swap_id(1);
+    let burn = TxPurpose::Burn(qh);
+    let mut state = fold(vec![funds(1), created(burn, BASE, 0)]);
+    assert_eq!(
+        state.check(&created(burn, BASE, 1)),
+        Err(TransitionError::NonceStillUnsigned(qh)),
+        "the swap is still holding nonce 0"
+    );
+    assert_eq!(
+        state.check(&created(TxPurpose::Payout(qh), ARBITRUM, 0)),
+        Err(TransitionError::NonceStillUnsigned(qh)),
+        "and on any chain, because the swap is what holds the number"
+    );
+
+    // the signed record spends it, and then the swap may hold another
+    let event = next_event(&state, 1, signed(qh, 1));
+    apply_state_transition(&mut state, &event);
+    assert!(state.unsigned_nonces().is_empty());
+    let event = next_event(&state, 1, confirmed(qh, 1));
+    apply_state_transition(&mut state, &event);
+    assert_eq!(state.check(&created(burn, BASE, 1)), Ok(()));
+}
+
+/// The rest of `TxSigned`'s rules, checked where the number is handed out: a swap with an
+/// attempt still open can never sign the transaction a creation would buy, so creating one
+/// would strand the number it allocated.
+#[test]
+fn a_transaction_is_not_created_for_a_swap_whose_attempt_is_still_open() {
+    let qh = swap_id(1);
+    let state = fold(vec![
+        funds(1),
+        created(TxPurpose::Burn(qh), BASE, 0),
+        signed(qh, 1),
+    ]);
+    assert_eq!(
+        state.check(&created(TxPurpose::Payout(qh), BASE, 1)),
+        Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
+    );
+}
+
+/// Rule A5, the half the fold carries: a number leaves the allocator held as unsigned, and
+/// exactly two lines end that, the signed record of the transaction it was handed out for
+/// and the cancel that spends it instead. A number no line ends is a gap the account can
+/// never mine past, so the fold holds it where a pass can find it.
+#[test]
+fn a_created_nonce_is_unsigned_until_a_signed_record_or_a_cancel_ends_it() {
+    let qh = swap_id(1);
+    let key = NonceKey {
+        chain_id: BASE,
+        nonce: Nonce::ZERO,
+    };
+    let mut state = HeapState::default();
+    for (at, payload) in [(1, funds(1)), (7, created(TxPurpose::Burn(qh), BASE, 0))] {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(&state, at, payload);
+        apply_state_transition(&mut state, &event);
+    }
+    assert_eq!(
+        state.unsigned_nonces(),
+        vec![(
+            key,
+            UnsignedTx {
+                purpose: TxPurpose::Burn(qh),
+                created_at: Timestamp::from_nanos(7),
+            }
+        )],
+        "the allocation is stamped with the instant the log sealed it, so a replay of the \
+         log rebuilds the same wait"
+    );
+
+    let mut cancelled = state.clone();
+    let event = next_event(&state, 9, signed(qh, 1));
+    apply_state_transition(&mut state, &event);
+    assert!(
+        state.unsigned_nonces().is_empty(),
+        "the signed record spends the number the swap was holding"
+    );
+
+    // the other way it ends, on a state where the signature never came
+    let cancel = EventType::TxCancelled {
+        chain_id: BASE,
+        nonce: Nonce::ZERO,
+        tx_hash: TxHash::new([9; 32]),
+        raw_tx: vec![0x02, 0xf8, 0x6c],
+    };
+    assert_eq!(cancelled.check(&cancel), Ok(()));
+    let event = next_event(&cancelled, 11, cancel);
+    apply_state_transition(&mut cancelled, &event);
+    assert!(cancelled.unsigned_nonces().is_empty());
+    assert_eq!(
+        cancelled.next_nonce(&BASE),
+        Nonce::new(1),
+        "a cancel spends the number, it does not give it back"
+    );
+}
+
+/// A cancel spends a number that was handed out and never signed for, and nothing else:
+/// a number nobody allocated is not one to put on a chain, and neither is one whose
+/// transaction is already signed and in flight.
+#[test]
+fn a_cancel_is_refused_on_a_nonce_that_is_not_waiting_for_a_signature() {
+    let qh = swap_id(1);
+    let cancel = |nonce: u64| EventType::TxCancelled {
+        chain_id: BASE,
+        nonce: Nonce::new(nonce),
+        tx_hash: TxHash::new([9; 32]),
+        raw_tx: vec![0x02, 0xf8, 0x6c],
+    };
+    let never_allocated = fold(vec![funds(1)]);
+    assert_eq!(
+        never_allocated.check(&cancel(0)),
+        Err(TransitionError::NonceNotUnsigned {
+            chain_id: BASE,
+            nonce: Nonce::ZERO,
+        })
+    );
+
+    let signed_for = fold(vec![
+        funds(1),
+        created(TxPurpose::Burn(qh), BASE, 0),
+        signed(qh, 1),
+    ]);
+    assert_eq!(
+        signed_for.check(&cancel(0)),
+        Err(TransitionError::NonceNotUnsigned {
+            chain_id: BASE,
+            nonce: Nonce::ZERO,
+        }),
+        "a signed transaction is out there carrying this number"
+    );
+    assert_eq!(
+        signed_for.check(&cancel(1)),
+        Err(TransitionError::NonceNotUnsigned {
+            chain_id: BASE,
+            nonce: Nonce::new(1),
+        })
+    );
+}
+
+/// Folding the log rebuilds the numbers still waiting for a signature exactly, which is
+/// what lets the deep audit compare them: an allocation the log holds and the fold does not
+/// would be a nonce nothing ever ends.
+#[test]
+fn a_replay_rebuilds_the_nonces_that_are_still_unsigned() {
+    let mut state = HeapState::default();
+    let mut log = Vec::new();
+    for (at, payload) in [
+        (1, funds(1)),
+        (2, funds(2)),
+        (3, created(TxPurpose::Burn(swap_id(1)), BASE, 0)),
+        (4, created(TxPurpose::Payout(swap_id(2)), BASE, 1)),
+        (5, signed(swap_id(2), 1)),
+    ] {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(&state, at, payload);
+        apply_state_transition(&mut state, &event);
+        log.push(event);
+    }
+    assert_eq!(
+        state.unsigned_nonces().len(),
+        1,
+        "swap 1 is still holding its number and swap 2 signed for its own"
+    );
+    assert_eq!(replay(log), Ok(state));
+}
+
+/// An allocator with no successor to move to is a different refusal from a number that is
+/// not the one expected: reporting it as the second would say the number is not the number
+/// it is.
+#[test]
+fn an_allocator_out_of_numbers_says_so() {
+    let mut store = fold(vec![funds(1)]).into_store();
+    store.put_next_nonce(BASE, Nonce::new(u64::MAX));
+    let state = State::new(store);
+    assert_eq!(
+        state.check(&created(TxPurpose::Burn(swap_id(1)), BASE, u64::MAX)),
+        Err(TransitionError::NonceExhausted { chain_id: BASE })
     );
 }
 

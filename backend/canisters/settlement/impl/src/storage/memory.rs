@@ -30,6 +30,7 @@ const OUTBOX_MEMORY_ID: MemoryId = MemoryId::new(16);
 // 17 to 19 are reserved for the rest of Plan 3: attestation inbox, in-flight markers,
 // sanctions
 const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
+const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -101,4 +102,8 @@ pub fn outbox_memory() -> Memory {
 
 pub fn ecdsa_address_memory() -> Memory {
     memory(ECDSA_ADDRESS_MEMORY_ID)
+}
+
+pub fn unsigned_nonces_memory() -> Memory {
+    memory(UNSIGNED_NONCES_MEMORY_ID)
 }

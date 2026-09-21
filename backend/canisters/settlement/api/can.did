@@ -146,6 +146,14 @@ type EventType = variant {
     raw_tx : blob;
     tx_hash : blob;
   };
+  // A nonce that was allocated and never signed for was spent by a zero-value
+  // self-transfer, so the chain is never left with a gap it cannot mine past.
+  TxCancelled : record {
+    chain_id : nat64;
+    nonce : nat64;
+    raw_tx : blob;
+    tx_hash : blob;
+  };
   SwapDone : record { quote_hash : blob };
   TxFailed : record { attempt : nat32; quote_hash : blob; reason : text };
   PocketRebalanced : record {
@@ -363,6 +371,7 @@ type TransitionError = variant {
   SwapExists : blob;
   AttemptStillOpen : nat32;
   UnknownSwap : blob;
+  NonceStillUnsigned : blob;
   NotExecuting : SwapStatus;
   NoOpenAttempt : blob;
   QuoteHashMismatch : record { computed : blob; declared : blob };
@@ -372,9 +381,11 @@ type TransitionError = variant {
     chain_id : nat64;
     nonce : nat64;
   };
+  NonceExhausted : record { chain_id : nat64 };
   SwapClosed : SwapStatus;
   FeesOverflow;
   AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };
+  NonceNotUnsigned : record { chain_id : nat64; nonce : nat64 };
   AmountOutOfRange : nat;
   AttemptNotOpen : nat32;
   CannotStartRefund : SwapStatus;

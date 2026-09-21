@@ -9,7 +9,11 @@
 //!   bytes before anything is broadcast (A6), so a rebroadcast re-sends what the log
 //!   holds and never something else.
 //! - An allocated nonce is never abandoned (A5): a transaction that does not land is
-//!   re-sent as it is, and then replaced at the same nonce with a higher fee.
+//!   re-sent as it is, and then replaced at the same nonce with a higher fee. A nonce whose
+//!   transaction never came back at all, because the signature was refused or the signed
+//!   record was, is held by the fold as created-but-unsigned and spent by [`cancel_stranded`]
+//!   with a zero-value self-transfer, so an EVM account this canister owns never has a gap
+//!   in its nonces and never stops being able to send.
 
 #[cfg(test)]
 mod tests;
@@ -27,8 +31,8 @@ use thiserror::Error;
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, Nonce, OutboxEntry,
-    OutboxKey, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
+    Attempt, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, Nonce, NonceKey,
+    OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
 };
 
 /// How long the current bytes stay out before they are handed to a provider again. A
@@ -105,22 +109,20 @@ pub async fn create_and_send(
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let (max_fee, max_priority_fee) = fees(chain_id, now)?;
 
+    // read before the allocation, not after it: a swap that has used every attempt number
+    // there is cannot sign anything, and refusing it here costs nothing, while refusing it
+    // after the append would leave a number handed out for a transaction that never existed
+    let attempt = read_state(|state| {
+        state
+            .swap(&quote_hash)
+            .ok()
+            .and_then(|swap| swap.next_attempt())
+    })
+    .ok_or(TxError::NoAttemptLeft { quote_hash })?;
+
     // A1 and A4: from here to the append there is no await, so the number read is the
     // number written
     let nonce = read_state(|state| state.next_nonce(&chain_id));
-    append_event(EventType::TxCreated {
-        purpose,
-        chain_id,
-        nonce,
-        to,
-        value,
-        data: data.clone(),
-        gas_limit,
-        max_fee,
-        max_priority_fee,
-    })?;
-
-    let tx_data = data.clone();
     let tx = Eip1559Tx {
         chain_id,
         nonce,
@@ -131,25 +133,38 @@ pub async fn create_and_send(
         value,
         data,
     };
-    // the `TxCreated` guard just proved the swap exists and can still sign, so it has a
-    // next attempt; `TxSigned` refuses anything else below
-    let attempt = read_state(|state| {
-        state
-            .swap(&quote_hash)
-            .ok()
-            .and_then(|swap| swap.next_attempt())
-    })
-    .ok_or(TxError::NoAttemptLeft { quote_hash })?;
-    // the signature is the await this whole order exists for
+    append_event(EventType::TxCreated {
+        purpose,
+        chain_id,
+        nonce,
+        to,
+        value,
+        data: tx.data.clone(),
+        gas_limit,
+        max_fee,
+        max_priority_fee,
+    })?;
+
+    // armed here rather than after the queue, and before the first await, so every way
+    // this call can fail from now on still leaves a pass scheduled to end the allocation.
+    // A trap before the await rolls the append back with it, so an unsigned nonce and an
+    // unarmed pass cannot both happen.
+    task_manager::outbox::arm();
+
+    // the signature is the await this whole order exists for. From here on a failure
+    // leaves the nonce in the fold as created-but-unsigned, and the outbox pass spends it
+    // with a cancel rather than leaving the account with a gap (A5).
     let signature = ecdsa::sign(tx.signing_hash()).await?;
+    let data = tx.data.clone();
     let signed = tx.into_signed(signature);
     let tx_hash = signed.hash();
+    let raw_tx = signed.raw().to_vec();
     append_event(EventType::TxSigned {
         quote_hash,
         attempt,
         chain_id,
         tx_hash,
-        raw_tx: signed.raw().to_vec(),
+        raw_tx: raw_tx.clone(),
     })?;
     outbox::put(OutboxEntry {
         purpose,
@@ -157,7 +172,7 @@ pub async fn create_and_send(
         nonce,
         attempt: Some(attempt),
         hashes: vec![tx_hash],
-        raw_tx: signed.raw().to_vec(),
+        raw_tx,
         max_fee,
         max_priority_fee,
         status: OutboxStatus::Queued,
@@ -165,11 +180,111 @@ pub async fn create_and_send(
         last_sent_at: None,
         to,
         value,
-        data: tx_data,
+        data,
         gas_limit,
     });
     task_manager::outbox::arm();
     Ok(tx_hash)
+}
+
+/// The gas a bare transfer of the chain's own currency costs, which is what a cancel is.
+/// Fixed by the EVM itself, so no config knob can move it.
+const CANCEL_GAS_LIMIT: u64 = 21_000;
+
+/// Spends every nonce that was handed out and never signed for, with a zero-value transfer
+/// from this canister's address to itself at that exact number (rule A5).
+///
+/// A nonce leaves the allocator with `TxCreated` and is spent by `TxSigned`. Anything that
+/// refuses in between, a rejected signing call, a signed record the swap no longer admits,
+/// a trap or an upgrade mid-await, leaves the number handed out with nothing carrying it,
+/// and an EVM account with a gap at N can never mine N+1: every payout, refund and burn on
+/// that chain stops. So the allocation is in the fold, and this pass ends it.
+///
+/// The wait before a cancel is one batch window: the whole path from the append to the
+/// signed record runs inside one message chain, so an allocation older than a window has
+/// lost its transaction. Signing and broadcasting a cancel is creating a transaction, so
+/// the halt switch gates it like every other such path.
+pub async fn cancel_stranded() {
+    if require_not_halted().is_err() {
+        return;
+    }
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
+    let window = config::get().batch_window;
+    let stranded: Vec<NonceKey> = read_state(|state| {
+        state
+            .unsigned_nonces()
+            .into_iter()
+            .filter(|(_, unsigned)| unsigned.is_stranded(now, window))
+            .map(|(key, _)| key)
+            .collect()
+    });
+    for key in stranded {
+        cancel(key, now).await;
+    }
+}
+
+/// Signs, records and queues the cancel of one allocated nonce. Recorded before it is
+/// broadcast like every other transaction (A6), and the record is what seals the nonce's
+/// fate: the entry then rides the outbox as any transaction does, and its receipt needs no
+/// further line in the log.
+async fn cancel(key: NonceKey, now: Timestamp) {
+    let NonceKey { chain_id, nonce } = key;
+    let Ok((max_fee, max_priority_fee)) = fees(chain_id, now) else {
+        return;
+    };
+    let Ok(mine) = ecdsa::canister_address().await else {
+        return;
+    };
+    // the fold may have moved while the address was being read: a `TxSigned` that arrived
+    // late spends this number, and cancelling it would put a second transaction on it
+    if read_state(|state| state.unsigned_nonces().into_iter().all(|(at, _)| at != key)) {
+        return;
+    }
+    let gas_limit = GasAmount::from(CANCEL_GAS_LIMIT);
+    let tx = Eip1559Tx {
+        chain_id,
+        nonce,
+        max_fee,
+        max_priority_fee,
+        gas_limit,
+        to: mine,
+        value: Wei::ZERO,
+        data: Vec::new(),
+    };
+    let Ok(signature) = ecdsa::sign(tx.signing_hash()).await else {
+        return;
+    };
+    let signed = tx.into_signed(signature);
+    let tx_hash = signed.hash();
+    let raw_tx = signed.raw().to_vec();
+    if append_event(EventType::TxCancelled {
+        chain_id,
+        nonce,
+        tx_hash,
+        raw_tx: raw_tx.clone(),
+    })
+    .is_err()
+    {
+        return;
+    }
+    outbox::put(OutboxEntry {
+        purpose: TxPurpose::Cancel(chain_id),
+        chain_id,
+        nonce,
+        attempt: None,
+        hashes: vec![tx_hash],
+        raw_tx,
+        max_fee,
+        max_priority_fee,
+        status: OutboxStatus::Queued,
+        created_at: now,
+        last_sent_at: None,
+        to: mine,
+        value: Wei::ZERO,
+        data: Vec::new(),
+        gas_limit,
+    });
+    task_manager::outbox::arm();
 }
 
 /// `0x` and the hex of `bytes`, which is how a chain takes raw bytes.
@@ -284,32 +399,20 @@ pub async fn check_open() {
                 .find_map(parse_receipt);
             match landed {
                 Some(Receipt { success: false, .. }) => {
-                    close(
-                        &entry,
-                        EventType::TxFailed {
-                            quote_hash: entry
-                                .purpose
-                                .quote_hash()
-                                .expect("BUG: only a swap's transaction reaches the outbox"),
-                            attempt: entry.attempt.unwrap_or(Attempt::FIRST),
-                            reason: "the transaction reverted on the chain".to_string(),
-                        },
-                    );
+                    close(&entry, |quote_hash, attempt| EventType::TxFailed {
+                        quote_hash,
+                        attempt,
+                        reason: "the transaction reverted on the chain".to_string(),
+                    });
                 }
                 Some(Receipt { block, tx_hash, .. }) if is_confirmed(block, latest, depth) => {
-                    close(
-                        &entry,
-                        EventType::TxConfirmed {
-                            quote_hash: entry
-                                .purpose
-                                .quote_hash()
-                                .expect("BUG: only a swap's transaction reaches the outbox"),
-                            attempt: entry.attempt.unwrap_or(Attempt::FIRST),
-                            chain_id,
-                            tx_hash,
-                            block,
-                        },
-                    );
+                    close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
+                        quote_hash,
+                        attempt,
+                        chain_id,
+                        tx_hash,
+                        block,
+                    });
                 }
                 // mined but not deep enough: nothing to do but wait
                 Some(_) => {}
@@ -319,11 +422,29 @@ pub async fn check_open() {
     }
 }
 
-/// Appends the line that closes an attempt and drops the entry. A refused append leaves
-/// the entry where it is, so the next pass sees the same receipt and tries again.
-fn close(entry: &OutboxEntry, payload: EventType) {
-    if append_event(payload).is_ok() {
-        outbox::remove(entry.key());
+/// Drops the entry, appending the line that closes its attempt when it has one. A refused
+/// append leaves the entry where it is, so the next pass sees the same receipt and tries
+/// again.
+///
+/// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
+/// fate before the bytes went out, so what the chain did with them changes nothing in the
+/// fold. An entry that names a swap and carries no attempt number is neither shape, so it
+/// is left alone rather than closed against a number nobody recorded: the consensus log
+/// would otherwise carry an attempt this canister invented.
+///
+/// A3, the re-read the two other post-await writes in this module do, is not needed here:
+/// the entry is being removed, not edited, and the only writer that could have put another
+/// entry at this key is `create_and_send`, which only ever writes at a number the allocator
+/// has just handed out and this one is not.
+fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) {
+    match (entry.purpose.quote_hash(), entry.attempt) {
+        (None, _) => outbox::remove(entry.key()),
+        (Some(quote_hash), Some(attempt)) => {
+            if append_event(payload(quote_hash, attempt)).is_ok() {
+                outbox::remove(entry.key());
+            }
+        }
+        (Some(_), None) => {}
     }
 }
 
@@ -441,7 +562,7 @@ fn parse_receipt(value: &Value) -> Option<Receipt> {
 
 /// The entry a swap's open attempt is in, for the engine and for the tests.
 pub fn open_entry(chain_id: ChainId, nonce: Nonce) -> Option<OutboxEntry> {
-    outbox::get(OutboxKey { chain_id, nonce })
+    outbox::get(NonceKey { chain_id, nonce })
 }
 
 /// The swap an outbox entry belongs to, for a caller that has one.

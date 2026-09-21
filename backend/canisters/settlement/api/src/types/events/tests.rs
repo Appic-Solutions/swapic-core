@@ -121,6 +121,12 @@ fn samples() -> Vec<EventType> {
             tx_hash: [20; 32],
             raw_tx: vec![0x02, 0xf8, 0x6b],
         },
+        EventType::TxCancelled {
+            chain_id: 137,
+            nonce: 9,
+            tx_hash: [21; 32],
+            raw_tx: vec![0x02, 0xf8, 0x6c],
+        },
     ]
 }
 

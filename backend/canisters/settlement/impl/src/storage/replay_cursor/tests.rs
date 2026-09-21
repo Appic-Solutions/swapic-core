@@ -3,9 +3,10 @@ use crate::state::Store;
 use crate::storage::on_fresh_memory;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
+use types::events::TxPurpose;
 use types::{
-    Attempt, ChainId, EventHash, EventIndex, LedgerMeta, Pocket, QuoteHash, Swap, SwapStatus,
-    Timestamp, TokenAmount, WaitingKey,
+    Attempt, ChainId, EventHash, EventIndex, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
+    SwapStatus, Timestamp, TokenAmount, UnsignedTx, WaitingKey,
 };
 
 /// A fold with something in every collection, built from literal values so the pinned
@@ -41,6 +42,16 @@ fn sample_fold() -> MemoryStore {
         last_event_hash: EventHash::new([0xab; 32]),
     });
     store.put_auto_refund_waiting(WaitingKey { since, quote_hash });
+    store.put_unsigned_nonce(
+        NonceKey {
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(4),
+        },
+        UnsignedTx {
+            purpose: TxPurpose::Payout(quote_hash),
+            created_at: Timestamp::from_nanos(1_700_000_000_987_654_321),
+        },
+    );
     store
 }
 
@@ -67,14 +78,17 @@ fn a_fresh_canister_starts_the_deep_audit_at_genesis() {
 /// reads it with the types it has, so a field that moves must fail here, before anything is
 /// deployed, and never on the read after an upgrade.
 ///
-/// The array grew from four elements to five when the fold gained the nonce allocator:
-/// `8184` became `8185` and an empty map was appended, which is what appending a field to
-/// the fold looks like. Nothing before it moved.
+/// The array grows by one element every time the fold gains a collection, and by nothing
+/// else: `8184` became `8185` with the nonce allocator, and `8185` became `8186` with the
+/// nonces the fold holds as created but unsigned. Nothing before the appended element ever
+/// moves, which is what makes an upgrade over a saved fold safe.
 const PINNED: &str =
-    "8185a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef04\
-    03f619210564555344431a017d78401a017d51301b17979cfe3d85cd15a119a4b182c2494000000000000000\
-    0018fa8307135820abababababababababababababababababababababababababababababababab81821b17\
-    979cfe3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aa0";
+    "8186a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef0403\
+    f619210564555344431a017d78401a017d51301b17979cfe3d85cd15a119a4b182c24940000000000000000018\
+    fa8307135820abababababababababababababababababababababababababababababababab81821b17979cfe\
+    3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aa0a18219210504\
+    8282028158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a1b17979cfe7108\
+    68b1";
 
 #[test]
 fn a_saved_fold_decodes_from_its_pinned_bytes() {

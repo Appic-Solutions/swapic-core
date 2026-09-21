@@ -113,6 +113,12 @@ pub enum TransitionError {
         nonce: Nonce,
         next: Nonce,
     },
+    #[error("the allocator on chain {chain_id} has no number left to hand out")]
+    NonceExhausted { chain_id: ChainId },
+    #[error("swap {0} already holds a nonce it has not signed for")]
+    NonceStillUnsigned(QuoteHash),
+    #[error("nonce {nonce} on chain {chain_id} is not one that is waiting for a signature")]
+    NonceNotUnsigned { chain_id: ChainId, nonce: Nonce },
     #[error("swap is not executing ({0:?})")]
     NotExecuting(SwapStatus),
     #[error("swap is already paid in stable")]

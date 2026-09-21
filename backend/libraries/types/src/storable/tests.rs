@@ -1,16 +1,16 @@
 use crate::chain::ChainId;
 use crate::chain_data::ChainReading;
 use crate::config::{AuditChunk, Config, EvictionsPerSweep, RefundsPerSweep};
-use crate::events::TxPurpose;
-use crate::events::{Event, EVENT_VARIANT_COUNT};
-use crate::hash::TxHash;
-use crate::hash::{EventHash, QuoteHash};
+use crate::events::{Event, TxPurpose, EVENT_VARIANT_COUNT};
+use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
-use crate::numeric::{Attempt, BlockNumber, EventIndex, Timestamp, TokenAmount, UnixSeconds};
-use crate::numeric::{Nonce, WeiPerGas};
+use crate::numeric::{
+    Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, UnixSeconds, Wei,
+    WeiPerGas,
+};
 use crate::quote::ExpiryKey;
 use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
-use crate::tx::{OutboxEntry, OutboxKey, OutboxStatus};
+use crate::tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -52,9 +52,10 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// Every type a stable structure holds, keys included, one sample per line of the golden
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
-/// default, and an interior cap set), the four key types, and one cached chain reading. Every field of a sample
-/// differs from its neighbours, so a field that moves to another index decodes to a
-/// different value instead of passing unnoticed.
+/// default, and an interior cap set), one cached chain reading, one outbox entry, the five
+/// key types, and one nonce waiting for its signature. Every field of a sample differs from
+/// its neighbours, so a field that moves to another index decodes to a different value
+/// instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
     assert_eq!(
@@ -186,16 +187,23 @@ fn samples() -> Vec<Sample> {
                 to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
                     .parse()
                     .unwrap(),
-                value: crate::numeric::Wei::ZERO,
+                value: Wei::ZERO,
                 data: vec![0xde, 0xad, 0xbe, 0xef],
-                gas_limit: crate::numeric::GasAmount::from(120_000_u32),
+                gas_limit: GasAmount::from(120_000_u32),
             },
         ),
         sample(
-            "outbox key",
-            OutboxKey {
+            "nonce key",
+            NonceKey {
                 chain_id: ChainId::ARBITRUM,
                 nonce: Nonce::new(9),
+            },
+        ),
+        sample(
+            "unsigned nonce",
+            UnsignedTx {
+                purpose: TxPurpose::Refund(QuoteHash::new([0x5f; 32])),
+                created_at: Timestamp::from_nanos(1_700_000_002_000_000_000),
             },
         ),
     ]);

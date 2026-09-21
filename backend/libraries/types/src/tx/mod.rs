@@ -1,10 +1,16 @@
-//! The outbox: what the canister has signed and still has to get onto a chain.
+//! The outbox: what the canister has signed and still has to get onto a chain, and the
+//! nonces it has handed out but not yet signed for.
 //!
 //! An entry is keyed by the nonce it holds, so a replacement at the same nonce overwrites
 //! the entry it replaces and two transactions can never be in flight for one nonce. It is
 //! NOT part of the fold of the event log: the log records that a transaction was created,
 //! signed and replaced, while how far its broadcast got is work in progress that no event
 //! describes, so the replay audit does not compare it.
+//!
+//! [`UnsignedTx`] is the opposite: it IS part of the fold. A nonce leaves the allocator
+//! with `TxCreated` and is only spent once a transaction carrying it is signed, so between
+//! those two lines the fold holds it here. Rule A5 says an allocated nonce is never
+//! abandoned, and this is what a pass reads to keep that promise.
 
 #[cfg(test)]
 mod tests;
@@ -35,16 +41,52 @@ pub enum OutboxStatus {
     Sent,
 }
 
-/// One chain's nonce: what an outbox entry is keyed by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OutboxKey {
+/// One chain's nonce: what an outbox entry is keyed by, and what the fold keys an
+/// [`UnsignedTx`] by.
+///
+/// Stored as minicbor as well as by the twenty-byte layout below, because the fold's heap
+/// twin holds it in a map minicbor writes: `#[n]` indices are append-only, never
+/// renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct NonceKey {
+    #[n(0)]
     pub chain_id: ChainId,
+    #[n(1)]
     pub nonce: Nonce,
 }
 
-/// Sixteen bytes: the chain id then the nonce, both big-endian, so a walk of the map meets
-/// each chain's transactions in the order they were allocated.
-impl Storable for OutboxKey {
+/// A nonce `TxCreated` handed out that no `TxSigned` has spent yet.
+///
+/// It holds what the cancel that ends the nonce needs: the purpose it was allocated for,
+/// which says which swap (if any) is still waiting on it, and the instant the allocation
+/// was sealed, so a pass can tell a send still in flight from one that will never come
+/// back. Everything else a cancel carries is fixed: a zero-value self-transfer to this
+/// canister's own address, with no calldata, at the gas a bare transfer costs.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
+/// new field is optional.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct UnsignedTx {
+    #[n(0)]
+    pub purpose: TxPurpose,
+    #[n(1)]
+    pub created_at: Timestamp,
+}
+
+impl UnsignedTx {
+    /// Whether the allocation has been waiting long enough that the transaction it was made
+    /// for is never coming: one send's whole path, from the append to the signature, fits
+    /// inside `window`, so anything older than it lost its transaction to a failure.
+    pub fn is_stranded(&self, now: Timestamp, window: Duration) -> bool {
+        now.saturating_duration_since(self.created_at) >= window
+    }
+}
+
+crate::storable_as_cbor!(UnsignedTx);
+
+/// Sixteen bytes: the chain id then the nonce, both big-endian, so a walk of a map keyed
+/// by one meets each chain's transactions in the order they were allocated.
+impl Storable for NonceKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         let mut bytes = Vec::with_capacity(16);
         bytes.extend_from_slice(&self.chain_id.get().to_be_bytes());
@@ -119,8 +161,8 @@ pub struct OutboxEntry {
 }
 
 impl OutboxEntry {
-    pub fn key(&self) -> OutboxKey {
-        OutboxKey {
+    pub fn key(&self) -> NonceKey {
+        NonceKey {
             chain_id: self.chain_id,
             nonce: self.nonce,
         }

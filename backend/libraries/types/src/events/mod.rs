@@ -17,7 +17,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 22;
+pub const EVENT_VARIANT_COUNT: usize = 23;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -273,6 +273,22 @@ pub enum EventType {
         #[cbor(n(6), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    /// A nonce that was allocated and never signed for was spent by a cancel: a zero-value
+    /// self-transfer at that number, recorded before it is broadcast the way every other
+    /// transaction is (rule A6). It is the other way an allocation ends, so the pair of
+    /// `TxSigned` and this line is what makes rule A5 hold: every nonce `TxCreated` hands
+    /// out reaches one of them, and the chain is never left with a gap it cannot mine past.
+    #[n(22)]
+    TxCancelled {
+        #[n(0)]
+        chain_id: ChainId,
+        #[n(1)]
+        nonce: Nonce,
+        #[n(2)]
+        tx_hash: TxHash,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -403,7 +419,8 @@ impl EventType {
             // a transaction's value, gas and fees are not token amounts: `State::check`
             // holds them to the same 16-byte range the preimage writes them in
             | EventType::TxCreated { .. }
-            | EventType::TxReplaced { .. } => None,
+            | EventType::TxReplaced { .. }
+            | EventType::TxCancelled { .. } => None,
         }
     }
 
@@ -609,6 +626,18 @@ impl EventType {
                     .put_u64(nonce.get())
                     .put_amount(*max_fee)
                     .put_amount(*max_priority_fee)
+                    .put_hash(tx_hash.as_ref())
+                    .put_bytes(raw_tx);
+            }
+            EventType::TxCancelled {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => {
+                w.put_u16(22)
+                    .put_u64(chain_id.get())
+                    .put_u64(nonce.get())
                     .put_hash(tx_hash.as_ref())
                     .put_bytes(raw_tx);
             }

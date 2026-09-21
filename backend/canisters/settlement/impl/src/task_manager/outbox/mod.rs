@@ -9,6 +9,7 @@
 //! was in flight would read the same entries and send them twice; the guard is released on
 //! drop, including on a trap.
 
+use crate::storage::events::read_state;
 use crate::storage::{config, outbox};
 use crate::tx;
 use ic_cdk_timers::TimerId;
@@ -61,24 +62,37 @@ pub fn arm() {
     FLUSH_TIMER.with(|slot| slot.set(Some(timer)));
 }
 
+/// Whether a pass still has work: bytes on their way to a chain, or a nonce that was
+/// handed out and never signed for. An upgrade in the middle of a send leaves only the
+/// second, and rule A5 is what makes it work the pass cannot skip.
+fn work_is_pending() -> bool {
+    !outbox::is_empty() || read_state(|state| !state.unsigned_nonces().is_empty())
+}
+
 /// Arms the pass if anything is still in flight. Called from `post_upgrade`, because an
-/// upgrade clears every timer and a queued transaction would otherwise sit forever (A9).
+/// upgrade clears every timer and a queued transaction, or an allocation waiting for its
+/// cancel, would otherwise sit forever (A9).
 pub fn arm_if_work_is_pending() {
-    if !outbox::is_empty() {
+    if work_is_pending() {
         arm();
     }
 }
 
-/// One pass: broadcast what is queued, then read what the chains did with what was already
-/// out. Re-arms itself while the outbox holds anything.
+/// One pass: end every allocation that lost its transaction, broadcast what is queued, then
+/// read what the chains did with what was already out. Re-arms itself while anything is
+/// still in flight.
+///
+/// The cancel comes first so the nonce it spends goes out in this pass's own batch rather
+/// than waiting a window for the next one.
 async fn run() {
     let Some(_guard) = PassGuard::take() else {
         // a pass is already running and will re-arm when it is done
         return;
     };
+    tx::cancel_stranded().await;
     tx::flush().await;
     tx::check_open().await;
-    if !outbox::is_empty() {
+    if work_is_pending() {
         arm();
     }
 }

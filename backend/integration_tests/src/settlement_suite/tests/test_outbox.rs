@@ -5,7 +5,8 @@
 //! transaction that is not signed is not a transaction.
 
 use crate::client::settlement::{
-    append, derive_evm_address, events_page, push_chain_data, set_halted, test_send,
+    append, derive_evm_address, events_page, evm_address, push_chain_data, set_halted, test_send,
+    verify_replay,
 };
 use crate::settlement_suite::init::{install, quoter, upgrade, watcher};
 use candid::{encode_args, Nat, Principal};
@@ -598,5 +599,214 @@ fn a_halted_canister_replaces_nothing_and_still_reads_its_receipts() {
         of_kind(events(&pic, canister), is_confirmed).len(),
         1,
         "the original transaction landed after all"
+    );
+}
+
+fn is_cancelled(payload: &EventType) -> bool {
+    matches!(payload, EventType::TxCancelled { .. })
+}
+
+fn tx_cancelled(events: &[Event]) -> Vec<(u64, u64, Vec<u8>)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventType::TxCancelled {
+                chain_id,
+                nonce,
+                raw_tx,
+                ..
+            } => Some((*chain_id, *nonce, raw_tx.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A canister with a provider and a fresh reading on a network that holds NO threshold key,
+/// so the signature a send asks for is refused: the one failure that strands a nonce
+/// without any test door planting it.
+fn setup_without_a_signing_key(count: u64) -> (PocketIc, Principal, Principal) {
+    let (pic, canister, admin) = crate::settlement_suite::init::empty_canister();
+    let arg = InitArg {
+        config: Config {
+            rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
+            ..Config::default()
+        },
+        quoter: quoter(),
+        watcher: watcher(),
+    };
+    install(&pic, canister, admin, &arg).expect("the arg installs");
+    push_reading(&pic, canister);
+    for nonce in 0..count {
+        append(&pic, canister, admin, &funds(nonce)).expect("the swap is funded");
+    }
+    (pic, canister, admin)
+}
+
+/// Rule A5, the failure it is really about: the signature is asked for AFTER the nonce is
+/// allocated, so a management canister that refuses it leaves the number handed out with no
+/// transaction carrying it. The fold holds that number, and the chain does not stop: the
+/// next send takes the next one.
+#[test]
+fn a_refused_signature_leaves_the_nonce_unsigned_and_blocks_no_later_send() {
+    let (pic, canister, admin) = setup_without_a_signing_key(2);
+    let refused = send(&pic, canister, admin, 0);
+    assert!(
+        matches!(refused, Err(TxError::Ecdsa(_))),
+        "a network with no key refuses the signature: {refused:?}"
+    );
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0)],
+        "the number was handed out before the signature was asked for"
+    );
+    assert!(
+        tx_signed(&events(&pic, canister)).is_empty(),
+        "and nothing was signed"
+    );
+
+    // the same swap is refused another number while it is still holding this one
+    let twice = send(&pic, canister, admin, 0);
+    assert!(
+        matches!(twice, Err(TxError::Append(_))),
+        "one swap holds one number: {twice:?}"
+    );
+
+    // a different swap is not blocked by it: the allocator moves on
+    let other = send(&pic, canister, admin, 1);
+    assert!(matches!(other, Err(TxError::Ecdsa(_))), "{other:?}");
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0), (BASE, 1)],
+        "the next send took the next number"
+    );
+    assert!(
+        verify_replay(&pic, canister, Principal::anonymous()),
+        "the log still folds to the live fold"
+    );
+}
+
+/// The repair rule A5 asks for: a number that was handed out and lost its transaction is
+/// spent by a zero-value transfer from this canister's address to itself at that exact
+/// number, recorded before it is broadcast like every other transaction. Without it the
+/// account has a gap and can never mine anything above it again.
+#[test]
+fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let mine = evm_address(&pic, canister, Principal::anonymous()).expect("the address is derived");
+
+    // a `TxCreated` with no `TxSigned` after it: exactly the state a refused signature, a
+    // refused signed record or a trap mid-await leaves behind
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "nothing is broadcast before the cancel is recorded"
+    );
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(cancelled.len(), 1, "one cancel for one stranded number");
+    let (chain_id, nonce, raw_tx) = cancelled[0].clone();
+    assert_eq!((chain_id, nonce), (BASE, 0), "at the number it spends");
+    let mine_hex = mine
+        .strip_prefix("0x")
+        .expect("an evm address is written with its prefix")
+        .to_ascii_lowercase();
+    let raw_hex = hex::encode(&raw_tx).to_ascii_lowercase();
+    assert!(
+        raw_hex.contains(&mine_hex),
+        "a cancel sends to this canister's own address"
+    );
+    assert!(
+        !raw_hex.contains(&VAULT[2..].to_ascii_lowercase()),
+        "and not to the vault the stranded transaction was for"
+    );
+
+    // recorded first, then broadcast, like every other transaction (A6)
+    let pending = pic.get_canister_http();
+    let sends: Vec<&CanisterHttpRequest> = pending
+        .iter()
+        .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
+        .collect();
+    assert_eq!(sends.len(), 1, "the cancel went out");
+    assert_eq!(
+        params(sends[0], 0),
+        json!([format!("0x{}", hex::encode(&raw_tx))]),
+        "the bytes broadcast are the bytes the log recorded"
+    );
+    assert!(
+        verify_replay(&pic, canister, Principal::anonymous()),
+        "the log still folds to the live fold"
+    );
+
+    // and the number is spent, not given back: the next send takes the one after it
+    reply(&pic, sends[0], vec![json!("0xabc")]);
+    send(&pic, canister, admin, 0).expect("the swap may send again");
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0), (BASE, 1)],
+        "the allocator moved on"
+    );
+}
+
+/// The cancel rides the outbox the way any transaction does, and its receipt closes the
+/// outbox entry and writes nothing: `TxCancelled` already sealed that number's fate before
+/// the bytes went out, so what the chain did with them changes nothing in the fold.
+#[test]
+fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+    advance(&pic, canister, BATCH_WINDOW);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(cancelled.len(), 1);
+    let cancel_hash: Hash32 = {
+        let EventType::TxCancelled { tx_hash, .. } = events(&pic, canister)
+            .into_iter()
+            .map(|event| event.payload)
+            .find(is_cancelled)
+            .expect("the cancel is in the log")
+        else {
+            unreachable!()
+        };
+        tx_hash
+    };
+    let pending = pic.get_canister_http();
+    reply(&pic, &pending[0], vec![json!("0xabc")]);
+
+    let before = events(&pic, canister).len();
+    advance(&pic, canister, BATCH_WINDOW);
+    let asked = answer_pending(&pic, 19_000_005, &receipt(19_000_005, true, cancel_hash));
+    assert!(asked.contains(&"eth_getTransactionReceipt".to_string()));
+    assert_eq!(
+        events(&pic, canister).len(),
+        before,
+        "a cancel closes no attempt, so it writes no line"
+    );
+
+    // the entry left the outbox, so nothing is read for it again
+    advance(&pic, canister, Duration::from_secs(300));
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "the cancel is done and the outbox is empty"
+    );
+}
+
+/// An upgrade in the middle of a send loses nothing: the number handed out is in the fold,
+/// not in a timer or a heap cell, so the pass the upgrade cleared is armed again and the
+/// cancel still happens (A9 over rule A5).
+#[test]
+fn an_upgrade_between_the_allocation_and_the_cancel_loses_nothing() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+    upgrade(&pic, canister, admin).expect("the upgrade goes through");
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "nothing has gone out yet"
+    );
+
+    advance(&pic, canister, BATCH_WINDOW);
+    assert_eq!(
+        of_kind(events(&pic, canister), is_cancelled).len(),
+        1,
+        "the allocation was in the fold, so the upgrade could not lose it"
     );
 }

@@ -2,7 +2,7 @@ use crate::state::transitions::{apply_state_transition, replay, replay_into, Rep
 use crate::state::{MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
-    nonces_memory, pockets_memory, swaps_memory, Memory,
+    nonces_memory, pockets_memory, swaps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -11,15 +11,15 @@ use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::{
-    ChainId, EventHash, EventIndex, LedgerMeta, Nonce, Pocket, QuoteHash, Swap, Timestamp,
-    TransitionError, WaitingKey,
+    ChainId, EventHash, EventIndex, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
+    Timestamp, TransitionError, UnsignedTx, WaitingKey,
 };
 
 /// Longest page a query will return, so one call can never walk the whole log.
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
-    // The log is the record and the four below are its fold. All five are private, and
+    // The log is the record and the six below are its fold. All seven are private, and
     // every write to them goes through `append_event`: even the repair of a waiting entry
     // no event could have produced is an event, so the fold has exactly one writer.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
@@ -47,6 +47,13 @@ thread_local! {
     // and the deep audit compares it.
     static NONCES: RefCell<StableBTreeMap<ChainId, Nonce, Memory>> =
         RefCell::new(StableBTreeMap::init(nonces_memory()));
+
+    // The nonces handed out and not yet signed for. Part of the fold as well: `TxCreated`
+    // writes one, `TxSigned` and `TxCancelled` take it away, so a replay reproduces it and
+    // the deep audit compares it. It is what rule A5 is read off, and the pass that ends an
+    // abandoned allocation is the only reader.
+    static UNSIGNED_NONCES: RefCell<StableBTreeMap<NonceKey, UnsignedTx, Memory>> =
+        RefCell::new(StableBTreeMap::init(unsigned_nonces_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -107,6 +114,22 @@ impl Store for StableStore {
 
     fn nonces(&self) -> Vec<(ChainId, Nonce)> {
         NONCES.with(|nonces| nonces.borrow().iter().collect())
+    }
+
+    fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
+        UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().get(key))
+    }
+
+    fn put_unsigned_nonce(&mut self, key: NonceKey, tx: UnsignedTx) {
+        UNSIGNED_NONCES.with(|unsigned| unsigned.borrow_mut().insert(key, tx));
+    }
+
+    fn remove_unsigned_nonce(&mut self, key: &NonceKey) {
+        UNSIGNED_NONCES.with(|unsigned| unsigned.borrow_mut().remove(key));
+    }
+
+    fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)> {
+        UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().iter().collect())
     }
 
     fn waiting_keys(
@@ -210,6 +233,7 @@ pub fn init() {
     LEDGER_META.with(|_| ());
     AUTO_REFUND_WAITING.with(|_| ());
     NONCES.with(|_| ());
+    UNSIGNED_NONCES.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

@@ -28,7 +28,7 @@ fn entry() -> OutboxEntry {
 /// outbox meets each chain's transactions in allocation order.
 #[test]
 fn an_outbox_key_orders_by_chain_then_nonce() {
-    let key = |chain: ChainId, nonce: u64| OutboxKey {
+    let key = |chain: ChainId, nonce: u64| NonceKey {
         chain_id: chain,
         nonce: Nonce::new(nonce),
     };
@@ -48,7 +48,7 @@ fn an_outbox_key_orders_by_chain_then_nonce() {
     );
     for key in keys {
         assert_eq!(key.to_bytes().len(), 16);
-        assert_eq!(OutboxKey::from_bytes(key.to_bytes()), key);
+        assert_eq!(NonceKey::from_bytes(key.to_bytes()), key);
     }
 }
 
@@ -118,4 +118,26 @@ fn a_receipt_is_confirmed_once_its_block_is_deep_enough() {
 fn an_outbox_entry_round_trips_through_storage() {
     let entry = entry();
     assert_eq!(OutboxEntry::from_bytes(entry.to_bytes()), entry);
+}
+
+/// An allocation waiting for its signature survives the stable map it lives in, and knows
+/// when it has waited long enough that its transaction is never coming.
+#[test]
+fn an_unsigned_nonce_round_trips_and_knows_when_it_was_abandoned() {
+    let unsigned = UnsignedTx {
+        purpose: TxPurpose::Payout(QuoteHash::new([4; 32])),
+        created_at: Timestamp::from_nanos(1_000_000_000),
+    };
+    assert_eq!(UnsignedTx::from_bytes(unsigned.to_bytes()), unsigned);
+
+    let window = Duration::from_secs(2);
+    assert!(!unsigned.is_stranded(Timestamp::from_nanos(2_999_999_999), window));
+    assert!(
+        unsigned.is_stranded(Timestamp::from_nanos(3_000_000_000), window),
+        "a whole window is long enough: the append and the signed record are one message chain"
+    );
+    assert!(
+        !unsigned.is_stranded(Timestamp::from_nanos(0), window),
+        "a clock behind the stamp has waited no time at all"
+    );
 }

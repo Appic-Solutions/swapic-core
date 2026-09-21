@@ -141,6 +141,12 @@ pub(crate) fn samples() -> Vec<EventType> {
             tx_hash: TxHash::new([20; 32]),
             raw_tx: vec![0x02, 0xf8, 0x6b],
         },
+        EventType::TxCancelled {
+            chain_id: ChainId::POLYGON,
+            nonce: Nonce::new(9),
+            tx_hash: TxHash::new([21; 32]),
+            raw_tx: vec![0x02, 0xf8, 0x6c],
+        },
     ]
 }
 

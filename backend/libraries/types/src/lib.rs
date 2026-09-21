@@ -35,4 +35,4 @@ pub use numeric::{
 pub use quote::{ExpiryKey, GasMode, Quote, QuoteError};
 pub use rail::Rail;
 pub use swap::{Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
-pub use tx::{OutboxEntry, OutboxKey, OutboxStatus};
+pub use tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};

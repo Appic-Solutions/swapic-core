@@ -142,6 +142,14 @@ pub enum EventType {
         tx_hash: Hash32,
         raw_tx: Vec<u8>,
     },
+    /// A nonce that was allocated and never signed for was spent by a zero-value
+    /// self-transfer, so the chain is never left with a gap it cannot mine past.
+    TxCancelled {
+        chain_id: u64,
+        nonce: u64,
+        tx_hash: Hash32,
+        raw_tx: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. All but the last name the swap they belong to.
@@ -412,6 +420,17 @@ impl From<types::EventType> for EventType {
                 tx_hash: tx_hash.into_bytes(),
                 raw_tx,
             },
+            Domain::TxCancelled {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => Self::TxCancelled {
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                tx_hash: tx_hash.into_bytes(),
+                raw_tx,
+            },
         }
     }
 }
@@ -613,6 +632,17 @@ impl TryFrom<EventType> for types::EventType {
                 max_fee: WeiPerGas::try_from(max_fee_wei_per_gas).map_err(|_| AMOUNT_TOO_LARGE)?,
                 max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
                     .map_err(|_| AMOUNT_TOO_LARGE)?,
+                tx_hash: TxHash::new(tx_hash),
+                raw_tx,
+            },
+            EventType::TxCancelled {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => Self::TxCancelled {
+                chain_id: ChainId::new(chain_id),
+                nonce: Nonce::new(nonce),
                 tx_hash: TxHash::new(tx_hash),
                 raw_tx,
             },

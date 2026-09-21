@@ -1,8 +1,9 @@
 use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
+use types::events::TxPurpose;
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Nonce, Pocket, QuoteHash, Swap,
-    SwapStatus, Timestamp, TokenAmount, TransitionError, WaitingKey,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Nonce, NonceKey, Pocket,
+    QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, UnsignedTx, WaitingKey,
 };
 
 pub mod pending_quotes;
@@ -28,6 +29,34 @@ pub trait Store {
     fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce);
     /// Every chain the allocator has handed out a nonce on, in chain id order.
     fn nonces(&self) -> Vec<(ChainId, Nonce)>;
+    /// The nonce `TxCreated` handed out at `key` and no `TxSigned` or `TxCancelled` has
+    /// ended, if there is one.
+    fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx>;
+    fn put_unsigned_nonce(&mut self, key: NonceKey, unsigned: UnsignedTx);
+    fn remove_unsigned_nonce(&mut self, key: &NonceKey);
+    /// Every nonce still waiting for its signed record, in chain then nonce order. The
+    /// collection holds one entry per send between its `TxCreated` and its `TxSigned`, plus
+    /// the allocations whose transaction never came back, and the outbox pass ends those
+    /// within a batch window: it is small by construction, so a walk of it is the read.
+    fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)>;
+
+    /// Whether `quote_hash` already holds a nonce it has not signed for. Rule A4 read from
+    /// the swap's side: one swap never has two numbers out at once, so two sends that
+    /// interleave at the signature cannot both allocate.
+    fn has_unsigned_nonce_for(&self, quote_hash: &QuoteHash) -> bool {
+        self.unsigned_nonces()
+            .iter()
+            .any(|(_, unsigned)| unsigned.purpose.quote_hash().as_ref() == Some(quote_hash))
+    }
+
+    /// The nonce `quote_hash` holds unsigned, if it holds one. `TxSigned` names a swap and
+    /// not a nonce, so this is how the signed record finds the allocation it spends.
+    fn unsigned_nonce_of(&self, quote_hash: &QuoteHash) -> Option<NonceKey> {
+        self.unsigned_nonces()
+            .into_iter()
+            .find(|(_, unsigned)| unsigned.purpose.quote_hash().as_ref() == Some(quote_hash))
+            .map(|(key, _)| key)
+    }
     /// Indexes a waiting swap whose quote asks for an automatic refund. A swap that waits
     /// for a human is not indexed: the index is the queue the expiry timer works through,
     /// and nothing in it is work the timer can do.
@@ -89,6 +118,8 @@ pub struct MemoryStore {
     auto_refund_waiting: BTreeSet<WaitingKey>,
     #[n(4)]
     nonces: BTreeMap<ChainId, Nonce>,
+    #[n(5)]
+    unsigned: BTreeMap<NonceKey, UnsignedTx>,
 }
 
 impl Store for MemoryStore {
@@ -139,7 +170,29 @@ impl Store for MemoryStore {
     }
 
     fn nonces(&self) -> Vec<(ChainId, Nonce)> {
-        self.nonces.iter().map(|(chain, n)| (*chain, *n)).collect()
+        self.nonces
+            .iter()
+            .map(|(chain, nonce)| (*chain, *nonce))
+            .collect()
+    }
+
+    fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
+        self.unsigned.get(key).copied()
+    }
+
+    fn put_unsigned_nonce(&mut self, key: NonceKey, unsigned: UnsignedTx) {
+        self.unsigned.insert(key, unsigned);
+    }
+
+    fn remove_unsigned_nonce(&mut self, key: &NonceKey) {
+        self.unsigned.remove(key);
+    }
+
+    fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)> {
+        self.unsigned
+            .iter()
+            .map(|(key, unsigned)| (*key, *unsigned))
+            .collect()
     }
 
     fn put_auto_refund_waiting(&mut self, key: WaitingKey) {
@@ -183,14 +236,19 @@ impl State<MemoryStore> {
             meta,
             auto_refund_waiting,
             nonces,
+            unsigned,
         } = &self.store;
         let other_pockets = other.store.pockets();
         let other_swaps = other.store.swaps();
         let other_nonces = other.store.nonces();
+        let other_unsigned = other.store.unsigned_nonces();
         *meta == other.meta()
             && nonces
                 .iter()
                 .eq(other_nonces.iter().map(|(chain, nonce)| (chain, nonce)))
+            && unsigned
+                .iter()
+                .eq(other_unsigned.iter().map(|(key, tx)| (key, tx)))
             && auto_refund_waiting
                 .iter()
                 .eq(other.store.auto_refund_waiting().iter())
@@ -224,6 +282,12 @@ impl<S: Store> State<S> {
     /// The number the next transaction on `chain_id` must carry.
     pub fn next_nonce(&self, chain_id: &ChainId) -> Nonce {
         self.store.next_nonce(chain_id)
+    }
+
+    /// Every nonce that has been allocated and not yet signed for, in chain then nonce
+    /// order. What the pass that keeps rule A5 reads.
+    pub fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)> {
+        self.store.unsigned_nonces()
     }
 
     pub fn swap(&self, quote_hash: &QuoteHash) -> Result<Swap, TransitionError> {
@@ -300,7 +364,14 @@ impl<S: Store> State<S> {
         );
     }
 
+    /// The signed record spends the nonce the swap was holding. `TxSigned` names a swap and
+    /// not a number, and it cannot start naming one without moving its canonical preimage,
+    /// so the allocation is found by the swap: the `TxCreated` guard admits one unsigned
+    /// nonce per swap, which is what makes that lookup single-valued.
     fn record_attempt_signed(&mut self, quote_hash: &QuoteHash, attempt: Attempt) {
+        if let Some(key) = self.store.unsigned_nonce_of(quote_hash) {
+            self.store.remove_unsigned_nonce(&key);
+        }
         self.update_swap(quote_hash, |swap| {
             swap.last_attempt = Some(attempt);
             swap.open_attempt = Some(attempt);
@@ -398,14 +469,36 @@ impl<S: Store> State<S> {
     }
 
     /// The allocation rule: the nonce the event carries was the next one, so the next one
-    /// is now the one after it. A nonce past `u64::MAX` is refused by the guard.
-    fn record_nonce_allocated(&mut self, chain_id: ChainId, nonce: Nonce) {
+    /// is now the one after it. A nonce past `u64::MAX` is refused by the guard. The number
+    /// handed out is held as unsigned until a signed record or a cancel spends it, so rule
+    /// A5 can be read off the fold rather than inferred from what is missing.
+    fn record_nonce_allocated(
+        &mut self,
+        chain_id: ChainId,
+        nonce: Nonce,
+        purpose: TxPurpose,
+        at: Timestamp,
+    ) {
         self.store.put_next_nonce(
             chain_id,
             nonce
                 .next()
                 .expect("BUG: State::check refuses a nonce without a successor"),
         );
+        self.store.put_unsigned_nonce(
+            NonceKey { chain_id, nonce },
+            UnsignedTx {
+                purpose,
+                created_at: at,
+            },
+        );
+    }
+
+    /// The other way an allocation ends: the nonce was spent by a cancel rather than by the
+    /// transaction it was made for, so it stops being unsigned and nothing else moves.
+    fn record_nonce_cancelled(&mut self, chain_id: ChainId, nonce: Nonce) {
+        self.store
+            .remove_unsigned_nonce(&NonceKey { chain_id, nonce });
     }
 
     fn record_fee_accrued(&mut self, amount: TokenAmount) {

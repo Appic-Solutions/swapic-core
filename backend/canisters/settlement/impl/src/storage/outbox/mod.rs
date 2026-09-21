@@ -9,10 +9,10 @@
 use crate::storage::memory::{outbox_memory, Memory};
 use ic_stable_structures::StableBTreeMap;
 use std::cell::RefCell;
-use types::{ChainId, Nonce, OutboxEntry, OutboxKey, OutboxStatus};
+use types::{ChainId, Nonce, NonceKey, OutboxEntry, OutboxStatus};
 
 thread_local! {
-    static OUTBOX: RefCell<StableBTreeMap<OutboxKey, OutboxEntry, Memory>> =
+    static OUTBOX: RefCell<StableBTreeMap<NonceKey, OutboxEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(outbox_memory()));
 }
 
@@ -29,12 +29,12 @@ pub fn put(entry: OutboxEntry) {
     OUTBOX.with(|outbox| outbox.borrow_mut().insert(entry.key(), entry));
 }
 
-pub fn get(key: OutboxKey) -> Option<OutboxEntry> {
+pub fn get(key: NonceKey) -> Option<OutboxEntry> {
     OUTBOX.with(|outbox| outbox.borrow().get(&key))
 }
 
 /// Drops the entry, which is what closing an attempt does.
-pub fn remove(key: OutboxKey) {
+pub fn remove(key: NonceKey) {
     OUTBOX.with(|outbox| outbox.borrow_mut().remove(&key));
 }
 
@@ -59,10 +59,10 @@ pub fn chains() -> Vec<ChainId> {
 /// At most `limit` of the chain's entries in `status`, oldest nonce first, so a pass costs
 /// the batch it works on and never the whole outbox.
 pub fn by_status(chain_id: ChainId, status: OutboxStatus, limit: usize) -> Vec<OutboxEntry> {
-    let range = OutboxKey {
+    let range = NonceKey {
         chain_id,
         nonce: Nonce::ZERO,
-    }..=OutboxKey {
+    }..=NonceKey {
         chain_id,
         nonce: Nonce::new(u64::MAX),
     };
