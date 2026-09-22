@@ -4,6 +4,7 @@ mod test_config;
 mod test_engine;
 mod test_install;
 mod test_outbox;
+mod test_phase0;
 mod test_quotes;
 mod test_rpc;
 mod test_sanctions;

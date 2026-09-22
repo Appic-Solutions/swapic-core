@@ -1888,6 +1888,7 @@ name = "integration_tests"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
  "candid",
  "hex",
  "libsecp256k1",

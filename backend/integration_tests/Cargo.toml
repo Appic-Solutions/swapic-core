@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 candid = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
 hex = { workspace = true }
 libsecp256k1 = { workspace = true }
 pocket-ic = { workspace = true }
