@@ -2,8 +2,9 @@ use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use types::events::TxPurpose;
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Nonce, NonceKey, Pocket,
-    QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, UnsignedTx, WaitingKey,
+    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Leg, Nonce, NonceKey, Outcome,
+    Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, UnsignedTx,
+    WaitingKey,
 };
 
 pub mod pending_quotes;
@@ -360,6 +361,8 @@ impl<S: Store> State<S> {
                 amount_in,
                 amount_paid: None,
                 waiting_since: None,
+                last_leg: None,
+                last_outcome: None,
             },
         );
     }
@@ -374,10 +377,18 @@ impl<S: Store> State<S> {
             .store
             .unsigned_nonce_of(quote_hash)
             .expect("BUG: State::check refuses a signed record for a swap holding no nonce");
+        // the leg the attempt is, read off the allocation's purpose: `TxSigned` names no
+        // leg, and the engine needs one to know where the swap is between its lines
+        let leg = self
+            .store
+            .unsigned_nonce(&key)
+            .and_then(|unsigned| Leg::of(unsigned.purpose));
         self.store.remove_unsigned_nonce(&key);
         self.update_swap(quote_hash, |swap| {
             swap.last_attempt = Some(attempt);
             swap.open_attempt = Some(attempt);
+            swap.last_leg = leg;
+            swap.last_outcome = None;
             match swap.status {
                 SwapStatus::FundsReceived => swap.status = SwapStatus::Executing,
                 SwapStatus::PaidInStable => swap.status = SwapStatus::Delivering,
@@ -386,9 +397,13 @@ impl<S: Store> State<S> {
         });
     }
 
-    /// The open attempt was confirmed or failed; either way it counts.
-    fn record_attempt_closed(&mut self, quote_hash: &QuoteHash) {
-        self.update_swap(quote_hash, |swap| swap.open_attempt = None);
+    /// The open attempt was confirmed or failed; either way it counts, and how it ended is
+    /// kept for the engine.
+    fn record_attempt_closed(&mut self, quote_hash: &QuoteHash, outcome: Outcome) {
+        self.update_swap(quote_hash, |swap| {
+            swap.open_attempt = None;
+            swap.last_outcome = Some(outcome);
+        });
     }
 
     fn record_paid_in_stable(&mut self, quote_hash: &QuoteHash, amount: TokenAmount) {

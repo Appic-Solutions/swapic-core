@@ -289,6 +289,8 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
             amount_in: TokenAmount::from(1_u32),
             amount_paid: None,
             waiting_since: None,
+            last_leg: None,
+            last_outcome: None,
         };
         StableStore(()).put_swap(quote, ghost);
         // the stable fold holds the ghost, so it admits the allocation and the signed

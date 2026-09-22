@@ -3,7 +3,9 @@ mod tests;
 
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
+use crate::evm::EvmAddress;
 use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
+use crate::rail::CctpDomain;
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::collections::BTreeMap;
@@ -131,6 +133,57 @@ impl<'b, C, const DEFAULT: u32, const CEILING: u32> Decode<'b, C> for Cap<DEFAUL
     }
 }
 
+/// A per-chain table of deploy-time facts. Absent from storage while empty, so a config
+/// written before the table existed reads back with it empty, and one that never fills it
+/// keeps the bytes the golden file pins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainTable<V>(pub BTreeMap<ChainId, V>);
+
+impl<V: Copy> ChainTable<V> {
+    pub fn get(&self, chain_id: ChainId) -> Option<V> {
+        self.0.get(&chain_id).copied()
+    }
+}
+
+// by hand: the derive would ask `V: Default`, and a table of values that have no default
+// is still empty by default
+impl<V> Default for ChainTable<V> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+/// Stored as the map, and as nothing at all when it is empty.
+impl<C, V: Encode<C>> Encode<C> for ChainTable<V> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'b, C, V: Decode<'b, C>> Decode<'b, C> for ChainTable<V> {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the table absent in the middle
+        // reads back, and it means the same as the table missing off the end
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::default());
+        }
+        BTreeMap::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::default())
+    }
+}
+
 /// Every knob the canister reads at runtime. `Debug` is safe to log: [`RpcUrl`] prints
 /// as `***`.
 ///
@@ -195,6 +248,21 @@ pub struct Config {
     /// How many blocks back from the head the deposit read looks for a user's deposit.
     #[n(20)]
     pub deposit_lookback_blocks: DepositLookback,
+    /// CCTP's domain id for each chain a burn may leave from or arrive on.
+    #[n(21)]
+    pub cctp_domains: ChainTable<CctpDomain>,
+    /// The USDC contract on each chain: the token the rails carry.
+    #[n(22)]
+    pub usdc_addresses: ChainTable<EvmAddress>,
+    /// CCTP v2's `TokenMessengerV2`, one address on every chain Circle deploys to.
+    #[n(23)]
+    pub token_messenger: Option<EvmAddress>,
+    /// CCTP v2's `MessageTransmitterV2`, one address on every chain Circle deploys to.
+    #[n(24)]
+    pub message_transmitter: Option<EvmAddress>,
+    /// Eco's `Portal`, one address on every chain Eco deploys to.
+    #[n(25)]
+    pub eco_portal: Option<EvmAddress>,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -253,6 +321,12 @@ pub enum ConfigError {
     EmptyVaultAddress { chain: ChainId },
     #[error("rpc_urls[{chain}] is empty")]
     EmptyRpcUrl { chain: ChainId },
+    #[error("{field}{} is not an EVM address: {reason}", chain.map(|chain| format!("[{chain}]")).unwrap_or_default())]
+    NotAnAddress {
+        field: &'static str,
+        chain: Option<ChainId>,
+        reason: crate::evm::EvmAddressError,
+    },
 }
 
 /// Which timer intervals a config write moved, so only those timers restart.
@@ -295,6 +369,11 @@ impl Default for Config {
             max_evictions_per_sweep: EvictionsPerSweep::DEFAULT,
             audit_chunk_events: AuditChunk::DEFAULT,
             deposit_lookback_blocks: DepositLookback::DEFAULT,
+            cctp_domains: ChainTable::default(),
+            usdc_addresses: ChainTable::default(),
+            token_messenger: None,
+            message_transmitter: None,
+            eco_portal: None,
         }
     }
 }

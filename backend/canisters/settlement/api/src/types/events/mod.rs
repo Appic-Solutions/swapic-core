@@ -178,6 +178,7 @@ pub enum TxPurpose {
     Refund(Hash32),
     GaslessPull(Hash32),
     Cancel(u64),
+    Reclaim(Hash32),
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -190,6 +191,7 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::Refund(hash) => Self::Refund(hash.into_bytes()),
             Domain::GaslessPull(hash) => Self::GaslessPull(hash.into_bytes()),
             Domain::Cancel(chain_id) => Self::Cancel(chain_id.get()),
+            Domain::Reclaim(hash) => Self::Reclaim(hash.into_bytes()),
         }
     }
 }
@@ -203,6 +205,7 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::Refund(hash) => Self::Refund(QuoteHash::new(hash)),
             TxPurpose::GaslessPull(hash) => Self::GaslessPull(QuoteHash::new(hash)),
             TxPurpose::Cancel(chain_id) => Self::Cancel(ChainId::new(chain_id)),
+            TxPurpose::Reclaim(hash) => Self::Reclaim(QuoteHash::new(hash)),
         }
     }
 }

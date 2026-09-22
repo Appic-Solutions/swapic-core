@@ -51,6 +51,8 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
         amount_in: TokenAmount::from(u128::MAX),
         amount_paid: Some(TokenAmount::ZERO),
         waiting_since: Some(types::Timestamp::from_nanos(777)),
+        last_leg: Some(types::Leg::Payout),
+        last_outcome: Some(types::Outcome::Failed),
     };
     assert_eq!(
         Swap::from(swap),
@@ -64,6 +66,8 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
             amount_in: Nat::from(u128::MAX),
             amount_paid: Some(Nat::from(0_u8)),
             waiting_since_ns: Some(777),
+            last_leg: Some(Leg::Payout),
+            last_outcome: Some(Outcome::Failed),
         }
     );
 }

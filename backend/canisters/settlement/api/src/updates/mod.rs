@@ -20,6 +20,6 @@ pub use ops::{
     test_sign,
 };
 pub use quotes::{clear_pending_quotes, register_quote};
-pub use rails::push_attestation;
+pub use rails::{push_attestation, push_eco_intent};
 pub use roles::set_roles;
 pub use swaps::{claim_swap, start_gasless_pull};

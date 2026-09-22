@@ -1,4 +1,5 @@
 use super::*;
+use crate::evm::EvmAddress;
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
 
@@ -546,4 +547,62 @@ fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
         "a set lookback is written after the three sweep caps"
     );
     assert_eq!(Config::from_bytes(Cow::Owned(bytes)), set);
+}
+
+/// The rail knobs are deploy-time facts like the vault addresses: per-chain tables and
+/// three contract addresses. Unset, they are absent from the stored config, so a config
+/// written before they existed reads back with them empty and the golden lines do not
+/// move; set, they round-trip, tables by chain.
+#[test]
+fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
+    let defaults = Config::default();
+    assert!(defaults.cctp_domains.0.is_empty());
+    assert!(defaults.usdc_addresses.0.is_empty());
+    assert_eq!(defaults.token_messenger, None);
+    assert_eq!(defaults.message_transmitter, None);
+    assert_eq!(defaults.eco_portal, None);
+    assert_eq!(
+        defaults.to_bytes()[0],
+        0x91,
+        "unset rail knobs write nothing of their own"
+    );
+
+    let usdc: EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let messenger: EvmAddress = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+        .parse()
+        .unwrap();
+    let wired = Config {
+        cctp_domains: ChainTable(BTreeMap::from([
+            (ChainId::ETHEREUM, CctpDomain::new(0)),
+            (ChainId::BASE, CctpDomain::new(6)),
+            (ChainId::ARBITRUM, CctpDomain::new(3)),
+        ])),
+        usdc_addresses: ChainTable(BTreeMap::from([(ChainId::BASE, usdc)])),
+        token_messenger: Some(messenger),
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(wired.to_bytes()), wired);
+    assert_eq!(
+        wired.cctp_domains.get(ChainId::BASE),
+        Some(CctpDomain::new(6))
+    );
+    assert_eq!(wired.cctp_domains.get(ChainId::POLYGON), None);
+    assert_eq!(wired.usdc_addresses.get(ChainId::BASE), Some(usdc));
+
+    // the last knob set: everything before it is written, the ones after it are not
+    let portal_only = Config {
+        eco_portal: Some(messenger),
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(portal_only.to_bytes()), portal_only);
+    assert_eq!(
+        portal_only.to_bytes()[..2],
+        [0x98, 26],
+        "twenty-six fields up to the portal, a length CBOR writes in its own byte"
+    );
+    // a table written as null, by an encoder that keeps every index, reads as empty
+    let empty: ChainTable<CctpDomain> = minicbor::decode(&[0xf6]).unwrap();
+    assert!(empty.0.is_empty());
 }

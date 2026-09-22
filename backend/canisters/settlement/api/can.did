@@ -83,18 +83,28 @@ type Config = record {
   max_refunds_per_sweep : nat32;
   ecdsa_key_name : text;
   max_fee_bps : nat16;
+  // CCTP v2's `TokenMessengerV2`, the same address on every chain.
+  token_messenger : opt text;
   rpc_urls : vec record { nat64; text };
   simulate_before_sign : bool;
   vault_addresses : vec record { nat64; text };
   platform_fee_bps : nat16;
   permit_deadline_s : nat64;
+  // CCTP's domain id per chain: Circle's own numbering, never a chain id.
+  cctp_domains : vec record { nat64; nat32 };
   replay_audit_interval_s : nat64;
   quote_ttl_s : nat64;
+  // Eco's `Portal`, the same address on every chain.
+  eco_portal : opt text;
   decision_timeout_min : nat64;
+  // The USDC contract per chain, as an EVM address.
+  usdc_addresses : vec record { nat64; text };
   chain_data_max_age_s : nat64;
   max_swap_usd : nat;
   max_batch_items : nat32;
   max_evictions_per_sweep : nat32;
+  // CCTP v2's `MessageTransmitterV2`, the same address on every chain.
+  message_transmitter : opt text;
   // How many blocks back from a chain's head the deposit read looks for a user's
   // deposit, 1 to 1,000,000.
   deposit_lookback_blocks : nat32;
@@ -118,6 +128,12 @@ type ConfigError = variant {
     platform_fee_bps : nat16;
   };
   EmptyVaultAddress : record { chain_id : nat64 };
+  // The text in `field` (for a table, at `chain_id`) is not an EVM address.
+  NotAnAddress : record {
+    field : text;
+    chain_id : opt nat64;
+    reason : EvmAddressError;
+  };
   RedactedRpcUrl : record { chain_id : nat64 };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
   // In milliseconds, so the one knob set in milliseconds is reported as it was set.
@@ -153,6 +169,17 @@ type EcdsaError = variant {
   UnreadablePublicKey;
   Signature : record { message : text };
   PublicKey : record { message : text };
+};
+// What Eco's quote response gave a swap on the Eco rail, as the watcher hands it in:
+// `destination_chain` is Eco's `destinationChainID` and never the chain the user is paid
+// on, `route` its `encodedRoute`, `deadline_s` the reward's deadline and `prover` the
+// prover it names. The reward itself is the swap's own amount of the source USDC, with
+// the vault as its creator, which the canister fills in.
+type EcoIntent = record {
+  destination_chain : nat64;
+  deadline_s : nat64;
+  prover : text;
+  route : blob;
 };
 // One entry of the log. `time_ns` is IC time in nanoseconds.
 type Event = record {
@@ -294,6 +321,10 @@ type InitArg = record {
   config : Config;
   quoter : principal;
 };
+// The leg of a swap a transaction attempt was signed for.
+type Leg = variant { Payout; Burn; Mint; Refund; Reclaim };
+// How a swap's latest attempt ended.
+type Outcome = variant { Failed; Confirmed };
 // Why a permit is not one the vault can use, naming the field.
 type PermitError = variant {
   NotAnAddress : record { field : text; reason : EvmAddressError };
@@ -351,6 +382,15 @@ type PushAttestationError = variant {
 type PushChainDataError = variant {
   Guard : GuardError;
   InvalidData : ChainDataError;
+};
+// Why `push_eco_intent` stored nothing.
+type PushEcoIntentError = variant {
+  // The swap is not on the Eco rail.
+  NotAnEcoSwap : blob;
+  RouteTooLong : record { cap : nat64; len : nat64 };
+  Guard : GuardError;
+  UnknownSwap : blob;
+  ProverNotAnAddress : record { reason : EvmAddressError };
 };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
@@ -419,18 +459,19 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : blob; Err : ClaimError };
-type Result_10 = variant { Ok; Err : GuardError };
-type Result_11 = variant { Ok; Err : SetRolesError };
-type Result_12 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_13 = variant { Ok : blob; Err : PullError };
+type Result_10 = variant { Ok; Err : SetConfigError };
+type Result_11 = variant { Ok; Err : GuardError };
+type Result_12 = variant { Ok; Err : SetRolesError };
+type Result_13 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_14 = variant { Ok : blob; Err : PullError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : Config; Err : GuardError };
 type Result_5 = variant { Ok : opt Quote; Err : GuardError };
 type Result_6 = variant { Ok; Err : PushAttestationError };
 type Result_7 = variant { Ok; Err : PushChainDataError };
-type Result_8 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_9 = variant { Ok; Err : SetConfigError };
+type Result_8 = variant { Ok; Err : PushEcoIntentError };
+type Result_9 = variant { Ok : blob; Err : RegisterQuoteError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why a read of a chain answered nothing usable. `NoUrl` is a deploy mistake, `Rpc` is the
@@ -484,8 +525,12 @@ type Swap = record {
   // Absent until the swap is paid in stable.
   amount_paid : opt nat;
   src_chain : nat64;
+  // How the latest attempt ended: absent while it is open, or before any was signed.
+  last_outcome : opt Outcome;
   amount_in : nat;
   open_attempt : opt nat32;
+  // The leg the latest attempt was signed for, once one has been.
+  last_leg : opt Leg;
   last_attempt : opt nat32;
 };
 // Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
@@ -578,6 +623,7 @@ type TxPurpose = variant {
   Refund : blob;
   GaslessPull : blob;
   Cancel : nat64;
+  Reclaim : blob;
 };
 // Why a chain has no vault to read or send to: a deploy mistake, named by chain.
 type VaultError = variant {
@@ -674,24 +720,31 @@ service : (InitArg) -> {
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
   push_chain_data : (nat64, ChainData) -> (Result_7);
+  // Watcher-only. Hands in what Eco's quote response gave a swap on the Eco rail: the
+  // destination Eco named, the route, the reward's deadline and the prover. The inbox holds
+  // one intent per swap, and a push replaces the one before it, so a corrected intent is the
+  // one the publish carries. Rail data and not money: the vault locks only the swap's own
+  // amount whatever the intent says, so the halt switch does not gate it. Only a known swap
+  // on the Eco rail has an inbox slot.
+  push_eco_intent : (blob, EcoIntent) -> (Result_8);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log.
-  register_quote : (Quote) -> (Result_8);
+  register_quote : (Quote) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_9);
+  set_config : (Config) -> (Result_10);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_10);
+  set_halted : (bool) -> (Result_11);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_11);
+  set_roles : (principal, principal) -> (Result_12);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -701,13 +754,13 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_12);
+  set_sanctioned : (vec text, vec text) -> (Result_13);
   // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the permit
   // they signed, for a quote that is pending, gasless, still payable, and whose token and
   // amount the permit names, and answers the hash of the transaction that does it. The pull
   // creates no swap: the deposit it makes is what `claim_swap` then verifies. Halted, the
   // canister pulls nothing.
-  start_gasless_pull : (blob, PermitSig) -> (Result_13);
+  start_gasless_pull : (blob, PermitSig) -> (Result_14);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

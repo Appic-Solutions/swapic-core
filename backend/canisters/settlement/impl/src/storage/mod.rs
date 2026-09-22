@@ -3,6 +3,7 @@ pub mod audit_cursor;
 pub mod chain_data;
 pub mod config;
 pub mod ecdsa_address;
+pub mod eco_intents;
 pub mod events;
 pub mod halt;
 pub mod inflight;
@@ -30,6 +31,7 @@ pub fn init() {
     sanctions::init();
     attestations::init();
     inflight::init();
+    eco_intents::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

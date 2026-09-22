@@ -7,7 +7,8 @@
 
 use crate::client::settlement::{
     claim_swap, derive_evm_address, event_count, events_page, get_swap, push_attestation,
-    push_chain_data, register_quote, set_halted, set_sanctioned, start_gasless_pull, verify_replay,
+    push_chain_data, push_eco_intent, register_quote, set_halted, set_sanctioned,
+    start_gasless_pull, verify_replay,
 };
 use crate::settlement_suite::init::{empty_canister, install, quoter, watcher};
 use candid::{encode_one, Nat, Principal};
@@ -775,4 +776,90 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
         json!([format!("0x{}", hex::encode(&signed[0]))])
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The Eco intent inbox is the watcher's, holds one intent per known swap on the Eco rail,
+/// and refuses an intent for a swap on another rail, so no CCTP swap can be steered onto
+/// a publish.
+#[test]
+fn push_eco_intent_is_the_watchers_and_needs_a_known_eco_swap() {
+    use settlement_api::types::entry::{EcoIntent, PushEcoIntentError};
+    use settlement_api::types::events::EvmAddressError;
+    let (pic, canister, _admin) = setup();
+    let intent = EcoIntent {
+        destination_chain: BASE,
+        route: vec![0xde, 0xad, 0xbe, 0xef],
+        deadline_s: 1_800_000_500,
+        prover: "0xeC00008537c1F26E739486BCFCC818d81234d5aD".to_string(),
+    };
+
+    // a swap on CCTP, and one on Eco, both claimed
+    let cctp = quote(12);
+    let eco = types::Quote {
+        rail: Rail::Eco,
+        ..quote(13)
+    };
+    for quote in [&cctp, &eco] {
+        let quote_hash = swap_id(quote);
+        assert_eq!(
+            push_eco_intent(&pic, canister, watcher(), quote_hash, &intent),
+            Err(PushEcoIntentError::UnknownSwap(quote_hash)),
+            "no swap, no inbox slot"
+        );
+        let call = submit_claim(&pic, canister, watcher(), &wire(quote));
+        answer(
+            &pic,
+            &the_read(&pic, quote_hash),
+            HEAD,
+            vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+        );
+        assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    }
+
+    assert_eq!(
+        push_eco_intent(
+            &pic,
+            canister,
+            Principal::from_slice(&[9; 29]),
+            swap_id(&eco),
+            &intent
+        ),
+        Err(PushEcoIntentError::Guard(GuardError::CallerNotRole(
+            settlement_api::types::errors::Role::Watcher
+        )))
+    );
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), swap_id(&cctp), &intent),
+        Err(PushEcoIntentError::NotAnEcoSwap(swap_id(&cctp)))
+    );
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &intent),
+        Ok(())
+    );
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &intent),
+        Ok(()),
+        "idempotent"
+    );
+    let bad_prover = EcoIntent {
+        prover: "prover".to_string(),
+        ..intent.clone()
+    };
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &bad_prover),
+        Err(PushEcoIntentError::ProverNotAnAddress {
+            reason: EvmAddressError::NoPrefix
+        })
+    );
+    let long_route = EcoIntent {
+        route: vec![0; 8_193],
+        ..intent
+    };
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &long_route),
+        Err(PushEcoIntentError::RouteTooLong {
+            len: 8_193,
+            cap: 8_192
+        })
+    );
 }

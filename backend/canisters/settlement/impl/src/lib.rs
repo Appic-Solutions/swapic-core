@@ -4,6 +4,7 @@ pub mod entry;
 pub mod guards;
 pub mod lifecycle;
 pub mod queries;
+pub mod rails;
 pub mod rpc;
 pub mod state;
 pub mod storage;

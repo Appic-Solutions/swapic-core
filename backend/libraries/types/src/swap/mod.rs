@@ -3,6 +3,7 @@ mod tests;
 
 use crate::address::TokenId;
 use crate::chain::ChainId;
+use crate::events::TxPurpose;
 use crate::hash::QuoteHash;
 use crate::numeric::{Attempt, Nonce, Timestamp, TokenAmount};
 use crate::quote::{Quote, QuoteError};
@@ -44,6 +45,57 @@ impl SwapStatus {
     }
 }
 
+/// The leg of a swap a transaction attempt was signed for: what the engine reads to know
+/// where a swap is between its lines, since the status alone does not say whether the
+/// attempt that just closed was the burn or the mint.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum Leg {
+    /// The user's funds leave the source vault for the rail.
+    #[n(0)]
+    Burn,
+    /// The rail's funds arrive in the destination vault.
+    #[n(1)]
+    Mint,
+    /// The user is paid from the destination vault.
+    #[n(2)]
+    Payout,
+    /// The user is paid back from the source vault.
+    #[n(3)]
+    Refund,
+    /// The rail gives the funds back to the source vault, for a refund to follow.
+    #[n(4)]
+    Reclaim,
+}
+
+impl Leg {
+    /// The leg a transaction of `purpose` is, for the purposes that are a swap's attempt.
+    pub fn of(purpose: TxPurpose) -> Option<Self> {
+        match purpose {
+            TxPurpose::Burn(_) => Some(Self::Burn),
+            TxPurpose::Mint(_) => Some(Self::Mint),
+            TxPurpose::Payout(_) => Some(Self::Payout),
+            TxPurpose::Refund(_) => Some(Self::Refund),
+            TxPurpose::Reclaim(_) => Some(Self::Reclaim),
+            TxPurpose::GaslessPull(_) | TxPurpose::Cancel(_) => None,
+        }
+    }
+}
+
+/// How a swap's latest attempt ended, once it has.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum Outcome {
+    #[n(0)]
+    Confirmed,
+    #[n(1)]
+    Failed,
+}
+
 /// The folded state of one swap.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
@@ -73,6 +125,12 @@ pub struct Swap {
     /// When the swap paused on the user, while it waits.
     #[n(8)]
     pub waiting_since: Option<Timestamp>,
+    /// The leg the latest attempt was signed for, once one has been.
+    #[n(9)]
+    pub last_leg: Option<Leg>,
+    /// How the latest attempt ended: absent while it is open, or before any was signed.
+    #[n(10)]
+    pub last_outcome: Option<Outcome>,
 }
 
 /// Why an event cannot move the state it was offered to.

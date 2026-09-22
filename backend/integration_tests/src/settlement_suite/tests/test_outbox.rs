@@ -358,13 +358,21 @@ fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
         candid::decode_one(&pic.await_call(first).expect("the first send returns")).unwrap();
     let second: Result<Hash32, TxError> =
         candid::decode_one(&pic.await_call(second).expect("the second send returns")).unwrap();
-    assert!(first.is_ok(), "{first:?}");
+    // which of the two messages the subnet runs first is the induction order, which is
+    // not the order they were submitted in; the rule is that one allocates and the other
+    // is refused at the append, whichever comes first
+    let (allocated, refused) = if first.is_ok() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert!(allocated.is_ok(), "{allocated:?}");
     assert_eq!(
-        second,
+        refused,
         Err(TxError::Append(AppendError::Transition(
             TransitionError::NonceStillUnsigned(swap_id(0))
         ))),
-        "the swap was holding its number unsigned when the second send reached the append"
+        "the swap was holding its number unsigned when the later send reached the append"
     );
 
     let log = events(&pic, canister);

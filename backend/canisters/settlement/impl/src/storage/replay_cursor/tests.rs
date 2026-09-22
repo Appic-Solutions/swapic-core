@@ -27,6 +27,10 @@ fn sample_fold() -> MemoryStore {
             amount_in: TokenAmount::from(25_000_000_u32),
             amount_paid: Some(TokenAmount::from(24_990_000_u32)),
             waiting_since: Some(since),
+            // absent, so the pinned bytes below do not move: a field appended to the swap
+            // is absent from every swap stored before it existed
+            last_leg: None,
+            last_outcome: None,
         },
     );
     store.put_pocket(

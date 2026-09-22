@@ -1,4 +1,7 @@
 use super::*;
+use crate::events::TxPurpose;
+use ic_stable_structures::Storable;
+use std::borrow::Cow;
 
 fn amount(value: u128) -> TokenAmount {
     TokenAmount::from(value)
@@ -22,6 +25,8 @@ fn swap(status: SwapStatus) -> Swap {
         amount_in: amount(100),
         amount_paid: None,
         waiting_since: None,
+        last_leg: None,
+        last_outcome: None,
     }
 }
 
@@ -236,4 +241,42 @@ fn auto_refund_wait_is_the_wait_the_timer_can_act_on() {
         None,
         "not waiting"
     );
+}
+
+/// The engine drives a swap by which leg its latest attempt was and how it ended, and the
+/// fold learns both from the lines it already has: a leg from the purpose of the number
+/// the signed record spends, and an outcome from the line that closes the attempt. A
+/// swap that has signed nothing knows neither, and both are absent from its stored bytes,
+/// so a swap stored before the fields existed reads back the same.
+#[test]
+fn a_leg_is_read_off_the_purpose_and_neither_is_stored_while_unknown() {
+    let qh = QuoteHash::new([1; 32]);
+    assert_eq!(Leg::of(TxPurpose::Burn(qh)), Some(Leg::Burn));
+    assert_eq!(Leg::of(TxPurpose::Mint(qh)), Some(Leg::Mint));
+    assert_eq!(Leg::of(TxPurpose::Payout(qh)), Some(Leg::Payout));
+    assert_eq!(Leg::of(TxPurpose::Refund(qh)), Some(Leg::Refund));
+    assert_eq!(Leg::of(TxPurpose::Reclaim(qh)), Some(Leg::Reclaim));
+    assert_eq!(
+        Leg::of(TxPurpose::GaslessPull(qh)),
+        None,
+        "a pull is no swap's leg"
+    );
+    assert_eq!(Leg::of(TxPurpose::Cancel(ChainId::BASE)), None);
+
+    let fresh = swap(SwapStatus::FundsReceived);
+    assert_eq!((fresh.last_leg, fresh.last_outcome), (None, None));
+    let bytes = fresh.to_bytes().into_owned();
+    assert_eq!(
+        bytes[0], 0x87,
+        "seven fields: every trailing field that is not known is absent, the two new ones \
+         included"
+    );
+    let failed = Swap {
+        last_leg: Some(Leg::Mint),
+        last_outcome: Some(Outcome::Failed),
+        ..swap(SwapStatus::Executing)
+    };
+    let bytes = failed.to_bytes().into_owned();
+    assert_eq!(bytes[0], 0x8b, "eleven fields once both are known");
+    assert_eq!(Swap::from_bytes(Cow::Owned(bytes)), failed);
 }

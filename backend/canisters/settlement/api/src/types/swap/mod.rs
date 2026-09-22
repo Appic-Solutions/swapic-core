@@ -17,6 +17,44 @@ pub enum SwapStatus {
     Frozen,
 }
 
+/// The leg of a swap a transaction attempt was signed for.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leg {
+    Burn,
+    Mint,
+    Payout,
+    Refund,
+    Reclaim,
+}
+
+/// How a swap's latest attempt ended.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Confirmed,
+    Failed,
+}
+
+impl From<types::Leg> for Leg {
+    fn from(leg: types::Leg) -> Self {
+        match leg {
+            types::Leg::Burn => Self::Burn,
+            types::Leg::Mint => Self::Mint,
+            types::Leg::Payout => Self::Payout,
+            types::Leg::Refund => Self::Refund,
+            types::Leg::Reclaim => Self::Reclaim,
+        }
+    }
+}
+
+impl From<types::Outcome> for Outcome {
+    fn from(outcome: types::Outcome) -> Self {
+        match outcome {
+            types::Outcome::Confirmed => Self::Confirmed,
+            types::Outcome::Failed => Self::Failed,
+        }
+    }
+}
+
 /// The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct Swap {
@@ -30,6 +68,10 @@ pub struct Swap {
     /// Absent until the swap is paid in stable.
     pub amount_paid: Option<Nat>,
     pub waiting_since_ns: Option<u64>,
+    /// The leg the latest attempt was signed for, once one has been.
+    pub last_leg: Option<Leg>,
+    /// How the latest attempt ended: absent while it is open, or before any was signed.
+    pub last_outcome: Option<Outcome>,
 }
 
 impl From<types::SwapStatus> for SwapStatus {
@@ -61,6 +103,8 @@ impl From<types::Swap> for Swap {
             amount_in: swap.amount_in.into(),
             amount_paid: swap.amount_paid.map(Nat::from),
             waiting_since_ns: swap.waiting_since.map(|since| since.as_nanos()),
+            last_leg: swap.last_leg.map(Leg::from),
+            last_outcome: swap.last_outcome.map(Outcome::from),
         }
     }
 }

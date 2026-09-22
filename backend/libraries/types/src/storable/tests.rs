@@ -54,8 +54,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
 /// key types, one nonce waiting for its signature, a cancel that has been out on the
-/// network, a sanctioned address as the sanctions set keys it, an in-flight marker, and an
-/// attestation. Every field of a sample differs from
+/// network, a sanctioned address as the sanctions set keys it, an in-flight marker, an
+/// attestation, a swap whose latest leg is known, and an Eco intent. Every field of a sample differs from
 /// its neighbours, so a field that moves to another index decodes to a different value
 /// instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -90,6 +90,10 @@ fn samples() -> Vec<Sample> {
         amount_in: TokenAmount::from(25_000_000_u32),
         amount_paid: Some(TokenAmount::from(24_990_000_u32)),
         waiting_since: Some(Timestamp::from_nanos(1_700_000_000_123_456_789)),
+        // absent, so this sample's bytes stay exactly the ones the golden already pins; the
+        // swap appended at the end of `samples()` is the one that pins the two fields
+        last_leg: None,
+        last_outcome: None,
     };
     let unpaid = Swap {
         quote_bytes: vec![],
@@ -101,6 +105,8 @@ fn samples() -> Vec<Sample> {
         amount_in: TokenAmount::from(1u128 << 70),
         amount_paid: None,
         waiting_since: None,
+        last_leg: None,
+        last_outcome: None,
     };
     let config = Config {
         platform_fee: crate::BasisPoints::new(10),
@@ -254,6 +260,34 @@ fn samples() -> Vec<Sample> {
                 vec![0x61; 40],
                 vec![0x62; 65],
                 Timestamp::from_nanos(1_700_000_007_000_000_000),
+            )
+            .unwrap(),
+        ),
+        sample(
+            "swap with its latest leg known",
+            Swap {
+                quote_bytes: vec![0xca, 0xfe],
+                status: SwapStatus::Executing,
+                last_attempt: Some(Attempt::new(2)),
+                open_attempt: None,
+                src_chain: ChainId::ETHEREUM,
+                src_token: "0x1".parse().unwrap(),
+                amount_in: TokenAmount::from(5_000_000_u32),
+                amount_paid: None,
+                waiting_since: None,
+                last_leg: Some(crate::Leg::Mint),
+                last_outcome: Some(crate::Outcome::Failed),
+            },
+        ),
+        sample(
+            "eco intent",
+            crate::EcoIntent::new(
+                ChainId::BASE,
+                vec![0x63, 0x64, 0x65],
+                UnixSeconds::new(1_788_357_691),
+                "0xeC00008537c1F26E739486BCFCC818d81234d5aD"
+                    .parse()
+                    .unwrap(),
             )
             .unwrap(),
         ),

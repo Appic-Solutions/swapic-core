@@ -286,3 +286,167 @@ fn the_deposited_topic_is_the_one_the_vault_logs_under() {
         "cfccc5211684bc31ce945214025a7453ba30a1ffcc38fcb691ce742437f3f256"
     );
 }
+
+fn reward() -> EcoReward {
+    EcoReward {
+        deadline: UnixSeconds::new(1_788_357_691),
+        creator: address(USDC_BASE),
+        prover: address("0xeC00008537c1F26E739486BCFCC818d81234d5aD"),
+        native_amount: Wei::ZERO,
+        tokens: vec![(address(USDC_ARBITRUM), TokenAmount::from(20_000_000_u32))],
+    }
+}
+
+/// ```text
+/// cast calldata "publishAndFund(uint64,bytes,(uint64,address,address,uint256,(address,uint256)[]),bool)" \
+///   8453 0xdeadbeef \
+///   "(1788357691,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,0xeC00008537c1F26E739486BCFCC818d81234d5aD,0,[(0xaf88d065e77c8cC2239327C5EDb3A432268e5831,20000000)])" \
+///   false
+/// ```
+#[test]
+fn an_eco_publish_encodes_as_cast_encodes_it() {
+    assert_eq!(
+        hex::encode(eco_publish_and_fund(
+            ChainId::BASE,
+            &[0xde, 0xad, 0xbe, 0xef],
+            &reward()
+        )),
+        concat!(
+            "df00f8fa",
+            "0000000000000000000000000000000000000000000000000000000000002105",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            "00000000000000000000000000000000000000000000000000000000000000c0",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000004",
+            "deadbeef00000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000006a982c3b",
+            "000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "000000000000000000000000ec00008537c1f26e739486bcfcc818d81234d5ad",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "00000000000000000000000000000000000000000000000000000000000000a0",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+            "0000000000000000000000000000000000000000000000000000000001312d00",
+        )
+    );
+}
+
+/// The refund names the route by its hash, which is the keccak of the route bytes: the
+/// hash the research refund script used for the quoted route of intent 1.
+///
+/// ```text
+/// cast calldata "refund(uint64,bytes32,(uint64,address,address,uint256,(address,uint256)[]))" \
+///   8453 0x3ba712a847684bf22e809750624c41fe747904cf11409c3c11d4e6e23ce0f888 \
+///   "(1788357691,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,0xeC00008537c1F26E739486BCFCC818d81234d5aD,0,[(0xaf88d065e77c8cC2239327C5EDb3A432268e5831,20000000)])"
+/// cast keccak 0xdeadbeef
+/// ```
+#[test]
+fn an_eco_refund_encodes_as_cast_encodes_it_and_hashes_the_route() {
+    let route_hash: [u8; 32] =
+        hex::decode("3ba712a847684bf22e809750624c41fe747904cf11409c3c11d4e6e23ce0f888")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    assert_eq!(
+        hex::encode(eco_refund(ChainId::BASE, route_hash, &reward())),
+        concat!(
+            "308adade",
+            "0000000000000000000000000000000000000000000000000000000000002105",
+            "3ba712a847684bf22e809750624c41fe747904cf11409c3c11d4e6e23ce0f888",
+            "0000000000000000000000000000000000000000000000000000000000000060",
+            "000000000000000000000000000000000000000000000000000000006a982c3b",
+            "000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "000000000000000000000000ec00008537c1f26e739486bcfcc818d81234d5ad",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "00000000000000000000000000000000000000000000000000000000000000a0",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+            "0000000000000000000000000000000000000000000000000000000001312d00",
+        )
+    );
+    assert_eq!(
+        hex::encode(eco_route_hash(&[0xde, 0xad, 0xbe, 0xef])),
+        "d4fd4e189132273036449fc9e11198c739161b4c0116a9a2dccdfa1c492006f1"
+    );
+}
+
+/// What this canister sends reads back: the end-to-end test decodes the broadcast bytes to
+/// prove which call each transaction makes, so every builder has a decoder that is its
+/// inverse and refuses other calldata.
+#[test]
+fn every_sent_call_decodes_back_to_what_built_it() {
+    let calls = vec![VaultCall {
+        target: address(ROUTER),
+        value: Wei::from(7_u8),
+        data: vec![0xde, 0xad, 0xbe, 0xef],
+        approve_token: address(USDC_BASE),
+        approve_amount: TokenAmount::from(25_000_000_u32),
+    }];
+    let deltas = vec![VaultDelta {
+        token: address(USDC_ARBITRUM),
+        min_change: -24_900_000,
+    }];
+    let execute = vault_execute(swap_ref(), &calls, &deltas);
+    assert_eq!(
+        decode_vault_execute(&execute),
+        Some((swap_ref(), calls.clone(), deltas.clone()))
+    );
+    let burn = Burn {
+        amount: TokenAmount::from(25_000_000_u32),
+        destination_domain: 3,
+        mint_recipient: address(USER).to_word(),
+        burn_token: address(USDC_BASE),
+        destination_caller: address(ROUTER).to_word(),
+        max_fee: TokenAmount::from(5_000_u32),
+        min_finality_threshold: 1_000,
+    };
+    assert_eq!(
+        decode_cctp_deposit_for_burn(&cctp_deposit_for_burn(&burn)),
+        Some(burn)
+    );
+    assert_eq!(
+        decode_cctp_receive_message(&cctp_receive_message(&[1, 2], &[3])),
+        Some((vec![1, 2], vec![3]))
+    );
+    let payout = vault_payout(
+        swap_ref(),
+        address(USDC_BASE),
+        address(USER),
+        TokenAmount::from(9_u8),
+    );
+    assert_eq!(
+        decode_vault_payout(&payout),
+        Some((
+            swap_ref(),
+            address(USDC_BASE),
+            address(USER),
+            TokenAmount::from(9_u8)
+        ))
+    );
+    let refund = vault_refund(
+        swap_ref(),
+        address(USDC_BASE),
+        address(USER),
+        TokenAmount::from(8_u8),
+    );
+    assert_eq!(
+        decode_vault_refund(&refund),
+        Some((
+            swap_ref(),
+            address(USDC_BASE),
+            address(USER),
+            TokenAmount::from(8_u8)
+        ))
+    );
+    let publish = eco_publish_and_fund(ChainId::BASE, &[0xaa], &reward());
+    assert_eq!(
+        decode_eco_publish_and_fund(&publish),
+        Some((ChainId::BASE, vec![0xaa], reward()))
+    );
+
+    // a decoder answers only its own call
+    assert_eq!(decode_vault_payout(&refund), None);
+    assert_eq!(decode_vault_execute(&payout), None);
+    assert_eq!(decode_cctp_deposit_for_burn(&execute), None);
+    assert_eq!(decode_vault_execute(&[]), None);
+}

@@ -1619,3 +1619,75 @@ fn a_pull_record_spends_only_the_nonce_held_for_that_pull() {
         "and a number never handed out is not one to spend"
     );
 }
+
+/// The engine reads where a swap is from its latest leg and how it ended, and the fold
+/// learns both from lines it already writes: the leg from the purpose of the number the
+/// signed record spends, the outcome from the line that closes the attempt. A replay
+/// rebuilds the same pair.
+#[test]
+fn the_fold_knows_the_latest_leg_and_how_it_ended() {
+    use types::{Leg, Outcome};
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1)]);
+    let progress = |state: &HeapState| {
+        let swap = swap(state, qh);
+        (swap.last_leg, swap.last_outcome)
+    };
+    assert_eq!(progress(&state), (None, None), "nothing signed yet");
+
+    let step = |state: &mut HeapState, payload: EventType| {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(state, 1, payload);
+        apply_state_transition(state, &event);
+    };
+    step(&mut state, created(TxPurpose::Burn(qh), BASE, 0));
+    assert_eq!(
+        progress(&state),
+        (None, None),
+        "an allocation is not a leg yet"
+    );
+    step(&mut state, signed(qh, 1));
+    assert_eq!(
+        progress(&state),
+        (Some(Leg::Burn), None),
+        "signed: the leg is known and it is open"
+    );
+    step(&mut state, confirmed(qh, 1));
+    assert_eq!(
+        progress(&state),
+        (Some(Leg::Burn), Some(Outcome::Confirmed))
+    );
+
+    step(&mut state, created(TxPurpose::Mint(qh), BASE, 1));
+    step(&mut state, signed(qh, 2));
+    assert_eq!(
+        progress(&state),
+        (Some(Leg::Mint), None),
+        "a new leg supersedes the old outcome"
+    );
+    step(&mut state, failed(qh, 2));
+    assert_eq!(progress(&state), (Some(Leg::Mint), Some(Outcome::Failed)));
+
+    let replayed = fold(vec![
+        funds(1),
+        created(TxPurpose::Burn(qh), BASE, 0),
+        signed(qh, 1),
+        confirmed(qh, 1),
+        created(TxPurpose::Mint(qh), BASE, 1),
+        signed(qh, 2),
+        failed(qh, 2),
+    ]);
+    assert_eq!(
+        progress(&replayed),
+        (Some(Leg::Mint), Some(Outcome::Failed))
+    );
+
+    // a reclaim is a swap's leg like the others
+    let mut reclaimed = fold(vec![funds(2)]);
+    step(
+        &mut reclaimed,
+        created(TxPurpose::Reclaim(swap_id(2)), BASE, 0),
+    );
+    step(&mut reclaimed, signed(swap_id(2), 1));
+    assert_eq!(swap(&reclaimed, swap_id(2)).last_leg, Some(Leg::Reclaim));
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::events::EvmAddressError;
 
 const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 
@@ -262,6 +263,66 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
             field: "deposit_lookback_blocks".to_string(),
             cap: 0,
             ceiling: 1_000_000
+        }
+    );
+}
+
+/// The rail knobs cross the wire as chain-keyed tables and optional addresses, print as
+/// EIP-55 text, and a value that is not an address is refused by knob and chain.
+#[test]
+fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
+    let wire = Config {
+        cctp_domains: BTreeMap::from([(8453, 6), (42161, 3)]),
+        usdc_addresses: BTreeMap::from([(
+            8453,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+        )]),
+        token_messenger: Some("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string()),
+        message_transmitter: Some("0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string()),
+        eco_portal: Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string()),
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(wire.clone()).unwrap();
+    assert_eq!(
+        domain.cctp_domains.get(types::ChainId::BASE),
+        Some(types::rail::CctpDomain::new(6))
+    );
+    assert_eq!(Config::unredacted(domain), wire);
+
+    // a lower-case spelling comes back checksummed: the address is the bytes
+    let lower = Config {
+        eco_portal: Some("0xec000064576f9c95a8623bc0eff3db6d296ea6df".to_string()),
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(lower).unwrap();
+    assert_eq!(
+        Config::unredacted(domain).eco_portal,
+        Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string())
+    );
+
+    let bad_usdc = Config {
+        usdc_addresses: BTreeMap::from([(8453, "usdc".to_string())]),
+        ..Config::default()
+    };
+    assert_eq!(
+        types::Config::try_from(bad_usdc).map(drop),
+        Err(types::ConfigError::NotAnAddress {
+            field: "usdc_addresses",
+            chain: Some(types::ChainId::BASE),
+            reason: types::evm::EvmAddressError::NoPrefix,
+        })
+    );
+    let bad_portal = Config {
+        eco_portal: Some("0x12".to_string()),
+        ..Config::default()
+    };
+    let refused = types::Config::try_from(bad_portal).unwrap_err();
+    assert_eq!(
+        ConfigError::from(refused),
+        ConfigError::NotAnAddress {
+            field: "eco_portal".to_string(),
+            chain_id: None,
+            reason: EvmAddressError::WrongLength { len: 2 },
         }
     );
 }

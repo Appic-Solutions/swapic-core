@@ -427,6 +427,7 @@ fn every_purpose_has_its_own_preimage() {
         TxPurpose::Refund(hash),
         TxPurpose::GaslessPull(hash),
         TxPurpose::Cancel(ChainId::BASE),
+        TxPurpose::Reclaim(hash),
     ];
     let mut seen = Vec::new();
     for purpose in purposes {

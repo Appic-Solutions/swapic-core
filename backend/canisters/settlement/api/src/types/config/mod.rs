@@ -1,11 +1,13 @@
+use crate::types::events::EvmAddressError;
 use candid::{CandidType, Nat};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
-use types::config::{AuditChunk, DepositLookback, EvictionsPerSweep, RefundsPerSweep};
-use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
+use types::config::{AuditChunk, ChainTable, DepositLookback, EvictionsPerSweep, RefundsPerSweep};
+use types::rail::CctpDomain;
+use types::{BasisPoints, BlockDepth, ChainId, EvmAddress, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 /// address maps and the key name are what a deploy fills in.
@@ -36,6 +38,16 @@ pub struct Config {
     /// How many blocks back from a chain's head the deposit read looks for a user's
     /// deposit, 1 to 1,000,000.
     pub deposit_lookback_blocks: u32,
+    /// CCTP's domain id per chain: Circle's own numbering, never a chain id.
+    pub cctp_domains: BTreeMap<u64, u32>,
+    /// The USDC contract per chain, as an EVM address.
+    pub usdc_addresses: BTreeMap<u64, String>,
+    /// CCTP v2's `TokenMessengerV2`, the same address on every chain.
+    pub token_messenger: Option<String>,
+    /// CCTP v2's `MessageTransmitterV2`, the same address on every chain.
+    pub message_transmitter: Option<String>,
+    /// Eco's `Portal`, the same address on every chain.
+    pub eco_portal: Option<String>,
 }
 
 impl Default for Config {
@@ -71,6 +83,11 @@ impl fmt::Debug for Config {
             max_evictions_per_sweep,
             audit_chunk_events,
             deposit_lookback_blocks,
+            cctp_domains,
+            usdc_addresses,
+            token_messenger,
+            message_transmitter,
+            eco_portal,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -96,6 +113,11 @@ impl fmt::Debug for Config {
             .field("max_evictions_per_sweep", max_evictions_per_sweep)
             .field("audit_chunk_events", audit_chunk_events)
             .field("deposit_lookback_blocks", deposit_lookback_blocks)
+            .field("cctp_domains", cctp_domains)
+            .field("usdc_addresses", usdc_addresses)
+            .field("token_messenger", token_messenger)
+            .field("message_transmitter", message_transmitter)
+            .field("eco_portal", eco_portal)
             .finish()
     }
 }
@@ -146,6 +168,11 @@ impl From<types::Config> for Config {
             max_evictions_per_sweep,
             audit_chunk_events,
             deposit_lookback_blocks,
+            cctp_domains,
+            usdc_addresses,
+            token_messenger,
+            message_transmitter,
+            eco_portal,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -179,8 +206,35 @@ impl From<types::Config> for Config {
             max_evictions_per_sweep: max_evictions_per_sweep.get(),
             audit_chunk_events: audit_chunk_events.get(),
             deposit_lookback_blocks: deposit_lookback_blocks.get(),
+            cctp_domains: cctp_domains
+                .0
+                .into_iter()
+                .map(|(chain, domain)| (chain.get(), domain.get()))
+                .collect(),
+            usdc_addresses: usdc_addresses
+                .0
+                .into_iter()
+                .map(|(chain, address)| (chain.get(), address.to_string()))
+                .collect(),
+            token_messenger: token_messenger.map(|address| address.to_string()),
+            message_transmitter: message_transmitter.map(|address| address.to_string()),
+            eco_portal: eco_portal.map(|address| address.to_string()),
         }
     }
+}
+
+/// `text` as an EVM address, or the refusal naming the knob (and the chain, for a table).
+fn evm_address(
+    field: &'static str,
+    chain: Option<ChainId>,
+    text: &str,
+) -> Result<EvmAddress, types::ConfigError> {
+    text.parse()
+        .map_err(|reason| types::ConfigError::NotAnAddress {
+            field,
+            chain,
+            reason,
+        })
 }
 
 impl TryFrom<Config> for types::Config {
@@ -244,6 +298,39 @@ impl TryFrom<Config> for types::Config {
             max_evictions_per_sweep: EvictionsPerSweep::new(config.max_evictions_per_sweep),
             audit_chunk_events: AuditChunk::new(config.audit_chunk_events),
             deposit_lookback_blocks: DepositLookback::new(config.deposit_lookback_blocks),
+            cctp_domains: ChainTable(
+                config
+                    .cctp_domains
+                    .into_iter()
+                    .map(|(chain, domain)| (ChainId::new(chain), CctpDomain::new(domain)))
+                    .collect(),
+            ),
+            usdc_addresses: ChainTable(
+                config
+                    .usdc_addresses
+                    .iter()
+                    .map(|(chain, address)| {
+                        let chain = ChainId::new(*chain);
+                        evm_address("usdc_addresses", Some(chain), address)
+                            .map(|address| (chain, address))
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+            token_messenger: config
+                .token_messenger
+                .as_deref()
+                .map(|address| evm_address("token_messenger", None, address))
+                .transpose()?,
+            message_transmitter: config
+                .message_transmitter
+                .as_deref()
+                .map(|address| evm_address("message_transmitter", None, address))
+                .transpose()?,
+            eco_portal: config
+                .eco_portal
+                .as_deref()
+                .map(|address| evm_address("eco_portal", None, address))
+                .transpose()?,
         })
     }
 }
@@ -301,6 +388,12 @@ pub enum ConfigError {
     },
     EmptyRpcUrl {
         chain_id: u64,
+    },
+    /// The text in `field` (for a table, at `chain_id`) is not an EVM address.
+    NotAnAddress {
+        field: String,
+        chain_id: Option<u64>,
+        reason: EvmAddressError,
     },
 }
 
@@ -377,6 +470,15 @@ impl From<types::ConfigError> for ConfigError {
             },
             Domain::EmptyRpcUrl { chain } => Self::EmptyRpcUrl {
                 chain_id: chain.get(),
+            },
+            Domain::NotAnAddress {
+                field,
+                chain,
+                reason,
+            } => Self::NotAnAddress {
+                field: field.to_string(),
+                chain_id: chain.map(ChainId::get),
+                reason: reason.into(),
             },
         }
     }

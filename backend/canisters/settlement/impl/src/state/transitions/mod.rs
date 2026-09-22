@@ -3,7 +3,9 @@ use thiserror::Error;
 use types::checked_amount::CheckedAmountOf;
 use types::events::{Event, EventType, TxPurpose};
 use types::quote::quote_hash_of;
-use types::{ChainId, EventHash, EventIndex, Nonce, NonceKey, Quote, QuoteHash, TransitionError};
+use types::{
+    ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, TransitionError,
+};
 
 /// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
 /// unit it counts. Checked here so an event with no preimage is refused by the guard
@@ -397,8 +399,11 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             attempt,
             ..
         } => state.record_attempt_signed(quote_hash, *attempt),
-        EventType::TxConfirmed { quote_hash, .. } | EventType::TxFailed { quote_hash, .. } => {
-            state.record_attempt_closed(quote_hash)
+        EventType::TxConfirmed { quote_hash, .. } => {
+            state.record_attempt_closed(quote_hash, Outcome::Confirmed)
+        }
+        EventType::TxFailed { quote_hash, .. } => {
+            state.record_attempt_closed(quote_hash, Outcome::Failed)
         }
         EventType::PaidInStable {
             quote_hash, amount, ..

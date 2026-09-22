@@ -190,3 +190,32 @@ pub enum PushAttestationError {
 
 #[cfg(test)]
 mod tests;
+
+/// What Eco's quote response gave a swap on the Eco rail, as the watcher hands it in:
+/// `destination_chain` is Eco's `destinationChainID` and never the chain the user is paid
+/// on, `route` its `encodedRoute`, `deadline_s` the reward's deadline and `prover` the
+/// prover it names. The reward itself is the swap's own amount of the source USDC, with
+/// the vault as its creator, which the canister fills in.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EcoIntent {
+    pub destination_chain: u64,
+    pub route: Vec<u8>,
+    pub deadline_s: u64,
+    pub prover: String,
+}
+
+/// Why `push_eco_intent` stored nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PushEcoIntentError {
+    Guard(GuardError),
+    UnknownSwap(Hash32),
+    /// The swap is not on the Eco rail.
+    NotAnEcoSwap(Hash32),
+    ProverNotAnAddress {
+        reason: EvmAddressError,
+    },
+    RouteTooLong {
+        len: u64,
+        cap: u64,
+    },
+}

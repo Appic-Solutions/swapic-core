@@ -335,6 +335,10 @@ pub enum TxPurpose {
     /// whose transaction is no longer wanted (rule A5).
     #[n(5)]
     Cancel(#[n(0)] ChainId),
+    /// The rail gives the funds back to the source vault: an intent nobody filled is
+    /// refunded to the vault, so the user can be refunded from it.
+    #[n(6)]
+    Reclaim(#[n(0)] QuoteHash),
 }
 
 impl TxPurpose {
@@ -346,7 +350,8 @@ impl TxPurpose {
             | Self::Mint(hash)
             | Self::Payout(hash)
             | Self::Refund(hash)
-            | Self::GaslessPull(hash) => Some(*hash),
+            | Self::GaslessPull(hash)
+            | Self::Reclaim(hash) => Some(*hash),
             Self::Cancel(_) => None,
         }
     }
@@ -355,15 +360,18 @@ impl TxPurpose {
     /// swap exists and a cancel belongs to none, so neither is signed against an attempt.
     pub fn attempt_of(&self) -> Option<QuoteHash> {
         match self {
-            Self::Burn(hash) | Self::Mint(hash) | Self::Payout(hash) | Self::Refund(hash) => {
-                Some(*hash)
-            }
+            Self::Burn(hash)
+            | Self::Mint(hash)
+            | Self::Payout(hash)
+            | Self::Refund(hash)
+            | Self::Reclaim(hash) => Some(*hash),
             Self::GaslessPull(_) | Self::Cancel(_) => None,
         }
     }
 
-    /// One byte and then its argument: a swap id for the five that name one, the chain id
-    /// for the cancel. The tag makes the two shapes unambiguous.
+    /// One byte and then its argument: a swap id for the six that name one, the chain id
+    /// for the cancel. The tag makes the two shapes unambiguous, and a tag is never
+    /// renumbered or reused.
     fn write_canonical(&self, w: &mut CanonicalWriter) {
         match self {
             Self::Burn(hash) => w.put_u8(0).put_hash(hash.as_ref()),
@@ -372,6 +380,7 @@ impl TxPurpose {
             Self::Refund(hash) => w.put_u8(3).put_hash(hash.as_ref()),
             Self::GaslessPull(hash) => w.put_u8(4).put_hash(hash.as_ref()),
             Self::Cancel(chain_id) => w.put_u8(5).put_u64(chain_id.get()),
+            Self::Reclaim(hash) => w.put_u8(6).put_hash(hash.as_ref()),
         };
     }
 }
