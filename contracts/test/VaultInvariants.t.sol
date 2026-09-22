@@ -123,6 +123,10 @@ contract VaultInvariantsTest is StdInvariant, Test {
         vm.expectRevert(Vault.QuoteHashUsed.selector);
         vault.pullWithPermit(quoteHash, token, payer, 0, 0, 0, bytes32(0), bytes32(0));
 
+        vm.prank(canister);
+        vm.expectRevert(Vault.QuoteHashUsed.selector);
+        vault.pullWithAuthorization(quoteHash, token, payer, 0, 0, 0, Vault.Signature(0, bytes32(0), bytes32(0)));
+
         ISignatureTransfer.PermitTransferFrom memory permit = ISignatureTransfer.PermitTransferFrom({
             permitted: ISignatureTransfer.TokenPermissions({token: token, amount: 0}),
             nonce: 0,

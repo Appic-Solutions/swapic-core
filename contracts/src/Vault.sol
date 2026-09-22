@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import "./interfaces/IERC3009.sol";
 import "./interfaces/ISignatureTransfer.sol";
 
 contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
@@ -37,6 +38,14 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         Call[] calls;
         Delta[] deltas;
         uint256 gasLimit; // 0 = all
+    }
+
+    /// one calldata word group for (v, r, s): without it pullWithAuthorization is
+    /// stack-too-deep at solc 0.8.24. The canister's encoder has to match it.
+    struct Signature {
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
     }
 
     error OnlyCanister();
@@ -168,6 +177,44 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     function depositNative(bytes32 quoteHash) external payable nonReentrant whenNotPaused(PauseClass.Deposits) {
         _markQuote(quoteHash, msg.sender);
         emit Deposited(quoteHash, address(0), msg.sender, msg.value);
+    }
+
+    /// The first of the four gasless doors, and the one to reach for whenever the
+    /// token has it: EIP-3009 `receiveWithAuthorization` with the quote hash as
+    /// the authorization's nonce. Order of preference is 3009, then the 2612 door
+    /// below (only where 3009 is absent), then Permit2, then legacy approve and
+    /// deposit. Which door a token can take is a property of the token, settled by
+    /// the quoter and the canister's config, never probed here.
+    ///
+    /// Nothing in this function checks a signature, and that is the point: the
+    /// token does all of it, and does it better than a relayer can.
+    ///   - no prior approval is needed, so it is gasless for a first-time user;
+    ///   - no allowance is ever created, so the standing-allowance precondition
+    ///     that makes a swallowed permit dangerous never exists;
+    ///   - the token requires `to == msg.sender`, so only this vault can submit
+    ///     this authorization and there is no front-run to defend against;
+    ///   - the nonce is an arbitrary 32 byte value in a used-or-not map, so
+    ///     putting the quote hash there binds the authorization to one swap, and
+    ///     the token keeps that replay guard independently of `usedQuoteKey`.
+    ///
+    /// Both of the token's time bounds are strict (`now > validAfter` and
+    /// `now < validBefore` in Circle's implementation), so equality on either
+    /// side reverts on chain: the window the canister signs has to allow for it.
+    function pullWithAuthorization(
+        bytes32 quoteHash,
+        address token,
+        address owner,
+        uint256 amount,
+        uint256 validAfter,
+        uint256 validBefore,
+        Signature calldata sig
+    ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
+        _markQuote(quoteHash, owner);
+        uint256 before = IERC20(token).balanceOf(address(this));
+        IERC3009(token).receiveWithAuthorization(
+            owner, address(this), amount, validAfter, validBefore, quoteHash, sig.v, sig.r, sig.s
+        );
+        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
     function pullWithPermit(
