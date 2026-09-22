@@ -18,7 +18,7 @@ use crate::rails::{self, Leg as RailLeg, RailError, RailStep, RailTx};
 use crate::state::Store;
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::sanctions::is_sanctioned;
-use crate::storage::{attestations, config, ecdsa_address, eco_intents};
+use crate::storage::{attestations, config, ecdsa_address, eco_intents, engine_cursor};
 use crate::tx::{self, TxError};
 use std::cell::Cell;
 use thiserror::Error;
@@ -38,7 +38,8 @@ pub const REFUND_GAS_LIMIT: GasAmount = GasAmount::new(120_000);
 
 /// The most swaps one tick acts on. A tick awaits a signature per transaction it sends,
 /// so an unbounded tick under a backlog would run for minutes; the rest wait for the next
-/// tick, oldest swap id first. A config knob when the engine's other windows become one.
+/// tick, which starts where this one stopped. A config knob when the engine's other
+/// windows become one.
 pub const MAX_SWAPS_PER_TICK: usize = 50;
 
 /// What the engine does for one swap on one tick.
@@ -251,9 +252,36 @@ impl Drop for TickGuard {
     }
 }
 
-/// One tick over every open swap: decides and acts on each in turn, at most
-/// [`MAX_SWAPS_PER_TICK`] of them. Nothing while halted, and nothing while another tick is
-/// still running.
+/// The swaps this tick acts on: at most `cap` of them, in swap id order, starting after
+/// `after` and wrapping at the end of the map.
+///
+/// The cursor is a place in the order and not a swap, so one naming a swap that has since
+/// closed starts the window at the next id after it. Without the rotation a backlog of
+/// more than `cap` open swaps would hand every tick the same low ids, and a swap whose
+/// action is refused every tick (its chain's data stale, a knob its rail needs unset)
+/// would hold its slot forever: this way a refused swap is passed over until the window
+/// comes round again.
+fn window(
+    open: &[(QuoteHash, Swap)],
+    after: Option<QuoteHash>,
+    cap: usize,
+) -> Vec<(QuoteHash, Swap)> {
+    let start = match after {
+        None => 0,
+        Some(after) => open.partition_point(|(quote_hash, _)| *quote_hash <= after),
+    };
+    open.iter()
+        .skip(start)
+        .chain(open.iter().take(start))
+        .take(cap)
+        .cloned()
+        .collect()
+}
+
+/// One tick over the open swaps: decides and acts on each in turn, at most
+/// [`MAX_SWAPS_PER_TICK`] of them, starting after the swap the last tick ended on and
+/// wrapping, so no swap waits behind another for good. Nothing while halted, and nothing
+/// while another tick is still running.
 pub async fn drive_all() -> Drive {
     let mut drive = Drive::default();
     let Some(_guard) = TickGuard::take() else {
@@ -268,14 +296,18 @@ pub async fn drive_all() -> Drive {
             .swaps()
             .into_iter()
             .filter(|(_, swap)| next_action(swap) != Action::Wait)
-            .take(MAX_SWAPS_PER_TICK)
             .collect()
     });
-    for (quote_hash, swap) in open {
-        // the halt can land during an await
+    for (quote_hash, swap) in window(&open, engine_cursor::get(), MAX_SWAPS_PER_TICK) {
+        // the halt can land during an await; the cursor already names the last swap this
+        // tick drove, so the tick after the halt lifts begins with the one it never
+        // reached instead of driving the earlier ones again
         if require_not_halted().is_err() {
             return drive;
         }
+        // every swap the tick considers moves the cursor past it, whatever its action
+        // came to: a swap whose action is refused must not pin the window to itself
+        engine_cursor::set(quote_hash);
         match drive_one(quote_hash, &swap).await {
             Ok(Did::Sent) => drive.sent += 1,
             Ok(Did::Recorded) => drive.recorded += 1,

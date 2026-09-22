@@ -323,3 +323,61 @@ fn one_tick_runs_at_a_time_and_the_guard_comes_back_on_a_trap() {
         "a trap releases the guard on the way out"
     );
 }
+
+/// The tick's window rotates: it starts after the swap the last tick ended on, takes at
+/// most its cap, and wraps, so sixty open swaps under a cap of fifty are all driven in two
+/// ticks and no swap behind a refusing one is starved.
+#[test]
+fn the_window_starts_after_the_last_swap_driven_and_wraps() {
+    let swaps: Vec<(QuoteHash, Swap)> = (0..60)
+        .map(|i| {
+            (
+                QuoteHash::new([i; 32]),
+                at(SwapStatus::PaidInStable, None, None),
+            )
+        })
+        .collect();
+    let ids = |window: &[(QuoteHash, Swap)]| -> Vec<u8> {
+        window.iter().map(|(hash, _)| hash.as_ref()[0]).collect()
+    };
+    // the swap a window ends on is the one the tick's cursor is left naming
+    let last_of = |window: &[(QuoteHash, Swap)]| window.last().map(|(hash, _)| *hash);
+
+    let first = window(&swaps, None, 50);
+    assert_eq!(ids(&first), (0..50).collect::<Vec<u8>>());
+    let after = last_of(&first).expect("a window that drove something ends on a swap");
+    assert_eq!(after, QuoteHash::new([49; 32]));
+
+    // the next tick starts after it and wraps at the end of the map
+    let second = window(&swaps, Some(after), 50);
+    assert_eq!(
+        ids(&second),
+        (50..60).chain(0..40).collect::<Vec<u8>>(),
+        "the ten that waited first, then round again"
+    );
+    assert_eq!(
+        last_of(&second),
+        Some(QuoteHash::new([39; 32])),
+        "and the tick after that carries on from there"
+    );
+
+    // a cursor naming a swap that has since closed is a place in the order, not a swap:
+    // the window starts at the next one that is still open
+    let closed = QuoteHash::new([44; 32]);
+    let gone: Vec<(QuoteHash, Swap)> = swaps
+        .iter()
+        .filter(|(hash, _)| *hash != closed)
+        .cloned()
+        .collect();
+    assert_eq!(
+        window(&gone, Some(closed), 3).first().unwrap().0.as_ref()[0],
+        45
+    );
+
+    // fewer swaps than the cap is one pass over all of them and no repeats
+    assert_eq!(
+        ids(&window(&swaps[..7], Some(QuoteHash::new([3; 32])), 50)).len(),
+        7
+    );
+    assert!(window(&[], None, 50).is_empty());
+}

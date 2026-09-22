@@ -33,6 +33,7 @@ const SANCTIONS_MEMORY_ID: MemoryId = MemoryId::new(19);
 const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
 const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
 const ECO_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(22);
+const ENGINE_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(23);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -124,4 +125,8 @@ pub fn inflight_memory() -> Memory {
 
 pub fn eco_intents_memory() -> Memory {
     memory(ECO_INTENTS_MEMORY_ID)
+}
+
+pub fn engine_cursor_memory() -> Memory {
+    memory(ENGINE_CURSOR_MEMORY_ID)
 }
