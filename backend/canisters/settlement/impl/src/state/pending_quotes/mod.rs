@@ -94,9 +94,11 @@ pub fn init() {
 }
 
 /// Records a quote against its hash, with the height the canister last heard of on the
-/// quote's source chain: the deposit that pays this quote cannot be in an earlier block,
-/// so a claim's log read starts there. `now` and `registered_at` are the caller's, so every
-/// rule here is testable without a canister.
+/// quote's source chain: the deposit that pays this quote cannot be in an earlier block, so
+/// a claim's log read starts there. A quote already in the store keeps the earliest height
+/// it was ever registered at, because a retry must never narrow the window past a deposit
+/// made in the meantime. `now` and `registered_at` are the caller's, so every rule here is
+/// testable without a canister.
 pub fn register(
     quote: Quote,
     now: UnixSeconds,
@@ -132,9 +134,19 @@ pub fn register(
         let mut pending = p.borrow_mut();
         // a re-registration is always allowed, cap or no cap: the hash covers every field,
         // so an overwrite replaces a quote with itself
-        if pending.len() >= MAX_PENDING && !pending.contains_key(&hash) {
+        let held = pending.get(&hash);
+        if pending.len() >= MAX_PENDING && held.is_none() {
             return Err(RegisterError::StoreFull);
         }
+        // the height may only ever move earlier. The user may have deposited between this
+        // call and the one before it, so a retry that moved the height forward would start
+        // the claim's read past their deposit and leave it unclaimable; no height at all
+        // is the widest read of all, and `None` sorts below every height, so the smaller of
+        // the two is always the safe one.
+        let registered_at = match held {
+            Some(entry) => entry.registered_at.min(registered_at),
+            None => registered_at,
+        };
         pending.insert(
             hash,
             PendingQuote {

@@ -1403,12 +1403,16 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
         },
     )
     .expect("the watcher may push");
+    // the quoter retries the same quote from the head it sees now: the height the claim
+    // reads from stays the earliest one, because the user may have deposited in between
+    registered(&pic, canister, &quote);
     let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
     let read = the_read(&pic, quote_hash);
     assert_eq!(
         from_block(&read),
         HEAD,
-        "the height the quote was registered at, not a day of blocks back"
+        "the height the quote was first registered at, not a day of blocks back and not \
+         the head a retry saw"
     );
     answer(
         &pic,

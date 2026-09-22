@@ -226,14 +226,29 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
             registered_at: Some(at),
         })
     );
-    // the quoter re-registering after a reorg-free wait moves the height forward, and the
-    // quote is the same quote: the hash covers every field of it
+    // the quoter retrying is the same quote (the hash covers every field of it), and the
+    // height it keeps is the earliest one: the user may have deposited between the two
+    // calls, and a later height would start the claim's read past that deposit
     let later = types::BlockNumber::new(19_000_500);
     assert_eq!(
         super::register(q.clone(), just_before_expiry(&q), Some(later)),
         Ok(h)
     );
-    assert_eq!(get_pending(&h).unwrap().registered_at, Some(later));
+    assert_eq!(get_pending(&h).unwrap().registered_at, Some(at));
+    // and a first registration that had no reading to go by keeps none, so its claim reads
+    // the whole lookback however many times the quoter retries
+    let blind_first = pending_quote(9_022);
+    let h = register(blind_first.clone(), just_before_expiry(&blind_first))
+        .expect("a live quote registers");
+    assert_eq!(
+        super::register(
+            blind_first.clone(),
+            just_before_expiry(&blind_first),
+            Some(later)
+        ),
+        Ok(h)
+    );
+    assert_eq!(get_pending(&h).unwrap().registered_at, None);
 
     let blind = pending_quote(9_021);
     let h = register(blind.clone(), just_before_expiry(&blind)).expect("a live quote registers");
