@@ -24,5 +24,8 @@ pub fn set_config(new: Config) -> Result<(), SetConfigError> {
     if changed.audit {
         task_manager::restart_audit_timer();
     }
+    if changed.rail_status {
+        task_manager::restart_rail_status_timer();
+    }
     Ok(())
 }

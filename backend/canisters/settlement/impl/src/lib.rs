@@ -1,5 +1,6 @@
 pub mod deposits;
 pub mod ecdsa;
+pub mod engine;
 pub mod entry;
 pub mod guards;
 pub mod lifecycle;

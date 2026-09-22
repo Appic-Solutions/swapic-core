@@ -127,23 +127,28 @@ fn interval_changes_flags_each_timer_for_its_own_interval_only() {
     let base = Config::default();
     let changes = |new: Config| {
         let c = base.interval_changes(&new);
-        (c.expiry, c.audit)
+        (c.expiry, c.audit, c.rail_status)
     };
     let fee_only = Config {
         platform_fee: BasisPoints::new(10),
         ..Config::default()
     };
-    assert_eq!(changes(fee_only), (false, false));
+    assert_eq!(changes(fee_only), (false, false, false));
     let expiry = Config {
         expiry_check_interval: Duration::from_secs(61),
         ..Config::default()
     };
-    assert_eq!(changes(expiry), (true, false));
+    assert_eq!(changes(expiry), (true, false, false));
     let audit = Config {
         replay_audit_interval: Duration::from_secs(21_601),
         ..Config::default()
     };
-    assert_eq!(changes(audit), (false, true));
+    assert_eq!(changes(audit), (false, true, false));
+    let rail_status = Config {
+        rail_status_max_age: Duration::from_secs(31),
+        ..Config::default()
+    };
+    assert_eq!(changes(rail_status), (false, false, true));
 }
 
 #[test]

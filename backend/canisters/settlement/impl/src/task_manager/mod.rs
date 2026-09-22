@@ -9,7 +9,10 @@ use types::Timestamp;
 
 pub mod expiry_sweep;
 pub mod outbox;
+pub mod rail_status;
 pub mod replay_audit;
+
+pub use rail_status::restart_rail_status_timer;
 
 thread_local! {
     // Heap by necessity: a timer id is a runtime handle that an upgrade invalidates anyway.
@@ -24,11 +27,12 @@ fn interval(every: Duration) -> Duration {
     every.max(Duration::from_secs(1))
 }
 
-/// Wires both timers. Called from `init` and `post_upgrade`, because timers live in the
-/// heap and an upgrade clears them.
+/// Wires the three repeating timers. Called from `init` and `post_upgrade`, because timers
+/// live in the heap and an upgrade clears them.
 pub fn start_timers() {
     restart_expiry_timer();
     restart_audit_timer();
+    restart_rail_status_timer();
 }
 
 /// Puts the expiry timer on the configured interval. `set_config` calls it only when that

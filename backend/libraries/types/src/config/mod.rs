@@ -334,6 +334,8 @@ pub enum ConfigError {
 pub struct IntervalChanges {
     pub expiry: bool,
     pub audit: bool,
+    /// The engine's tick, which runs on `rail_status_max_age`.
+    pub rail_status: bool,
 }
 
 impl Default for Config {
@@ -484,6 +486,7 @@ impl Config {
         IntervalChanges {
             expiry: self.expiry_check_interval != new.expiry_check_interval,
             audit: self.replay_audit_interval != new.replay_audit_interval,
+            rail_status: self.rail_status_max_age != new.rail_status_max_age,
         }
     }
 }

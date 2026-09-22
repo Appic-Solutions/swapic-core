@@ -77,7 +77,9 @@ fn quote_expiring_in(pic: &PocketIc, ttl_s: u64, auto_refund: bool, nonce: u64) 
         expected_out: Nat::from(24_990_000_u32),
         min_out: Nat::from(24_900_000_u32),
         dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
-        refund_address: None,
+        // a quote that asks to be refunded on its own says where: without an address the
+        // engine can only stop the refund for a human
+        refund_address: Some("0x7551A66653f9a20979ed81835a0b7008EC83401b".into()),
         auto_refund,
         gas_mode: GasMode::Gasless,
         rail: "cctp_v2_fast".into(),
