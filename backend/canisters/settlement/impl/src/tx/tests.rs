@@ -130,6 +130,47 @@ fn a_transaction_whose_gas_would_cost_more_than_the_bound_is_refused() {
     });
 }
 
+/// Each cancel of a pass is priced at its own instant and not the pass's. The cancels
+/// before it each awaited a signature, a round trip of consensus rounds on another subnet,
+/// so a `now` read once for the pass is stale by a round trip per cancel: a reading that
+/// aged out meanwhile would still look fresh against it, and a reading the watcher pushed
+/// meanwhile would be ignored for the older one. Read per cancel, the clock refuses the
+/// first and takes the second.
+#[test]
+fn each_cancel_is_priced_at_its_own_instant() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let reading = |base_fee: u64| ChainReading {
+            block: BlockNumber::new(19_000_000),
+            base_fee: WeiPerGas::from(base_fee),
+            priority_fee: WeiPerGas::from(100_000_000_u64),
+        };
+        chain_data::put(ChainId::BASE, reading(1_000_000_000), at(100));
+        let first = cancel_fees(ChainId::BASE, at(105)).expect("the first cancel is priced");
+        assert_eq!(first.max_fee(), WeiPerGas::from(2_100_000_000_u64));
+
+        // the first cancel's signature took fifteen seconds: at the second cancel's own
+        // instant the reading is past `chain_data_max_age`, and pricing on the pass's
+        // instant would have hidden that
+        assert_eq!(
+            cancel_fees(ChainId::BASE, at(120)),
+            Err(TxError::StaleChainData {
+                chain_id: ChainId::BASE
+            }),
+            "the reading the first cancel was priced on has aged out"
+        );
+
+        // and a reading pushed while the first was signing is the one the second sees
+        chain_data::put(ChainId::BASE, reading(3_000_000_000), at(118));
+        let second = cancel_fees(ChainId::BASE, at(120)).expect("the second cancel is priced");
+        assert_eq!(
+            second.max_fee(),
+            WeiPerGas::from(6_100_000_000_u64),
+            "priced on the reading that is fresh at its own instant"
+        );
+    });
+}
+
 /// A replacement doubles what it replaces, never bids below what the chain is asking, and
 /// never bids above eight times the going rate. Without the ceiling the doubling is
 /// unbounded: fifteen stuck windows is thirty thousand times the original fee, paid to

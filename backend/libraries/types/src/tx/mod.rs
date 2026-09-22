@@ -74,9 +74,10 @@ pub struct UnsignedTx {
 }
 
 impl UnsignedTx {
-    /// Whether the allocation has been waiting long enough that the transaction it was made
-    /// for is never coming: one send's whole path, from the append to the signature, fits
-    /// inside `window`, so anything older than it lost its transaction to a failure.
+    /// Whether the allocation has waited `window` or longer for its signed record. The
+    /// wait it measures is a threshold signature: an await that leaves this subnet and
+    /// spans consensus rounds on the signing one, so `window` is the caller's bound on a
+    /// signing round trip and never a batch window.
     pub fn is_stranded(&self, now: Timestamp, window: Duration) -> bool {
         now.saturating_duration_since(self.created_at) >= window
     }

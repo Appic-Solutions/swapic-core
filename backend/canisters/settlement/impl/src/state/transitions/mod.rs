@@ -3,7 +3,7 @@ use thiserror::Error;
 use types::checked_amount::CheckedAmountOf;
 use types::events::{Event, EventType, TxPurpose};
 use types::quote::quote_hash_of;
-use types::{ChainId, EventHash, EventIndex, Nonce, NonceKey, Quote, TransitionError};
+use types::{ChainId, EventHash, EventIndex, Nonce, NonceKey, Quote, QuoteHash, TransitionError};
 
 /// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
 /// unit it counts. Checked here so an event with no preimage is refused by the guard
@@ -53,17 +53,20 @@ impl<S: Store> State<S> {
                 Ok(())
             }
             // the sign-before-send law: one open attempt at a time, numbered without gaps,
-            // and a paused swap moves nothing until the user answers
+            // a paused swap moves nothing until the user answers, and the record spends a
+            // number the swap is still holding
             EventType::TxSigned {
                 quote_hash,
                 attempt,
+                chain_id,
                 ..
             } => {
                 let swap = self.swap(quote_hash)?;
                 swap.ensure_not_closed()?;
                 swap.ensure_not_waiting()?;
                 swap.ensure_no_open_attempt()?;
-                swap.ensure_next_attempt(*attempt)
+                swap.ensure_next_attempt(*attempt)?;
+                self.ensure_holds_unsigned_nonce(quote_hash, *chain_id)
             }
             EventType::TxConfirmed {
                 quote_hash,
@@ -285,6 +288,26 @@ impl<S: Store> State<S> {
             });
         }
         Ok(())
+    }
+
+    /// The mirror of [`Self::ensure_unsigned_nonce`] from the swap's side: a signed record
+    /// spends the number the swap is holding, so the swap has to be holding one, on the
+    /// chain the record names. The signature is awaited across consensus rounds on the
+    /// signing subnet, and a cancel that spent the number meanwhile has sealed it (rule
+    /// A5); the record that comes back late is refused here, which is what keeps two signed
+    /// transactions off one nonce.
+    fn ensure_holds_unsigned_nonce(
+        &self,
+        quote_hash: &QuoteHash,
+        chain_id: ChainId,
+    ) -> Result<(), TransitionError> {
+        match self.store().unsigned_nonce_of(quote_hash) {
+            Some(key) if key.chain_id == chain_id => Ok(()),
+            _ => Err(TransitionError::NoUnsignedNonce {
+                quote_hash: *quote_hash,
+                chain_id,
+            }),
+        }
     }
 
     /// A nonce that was handed out and is still waiting for a signed record.

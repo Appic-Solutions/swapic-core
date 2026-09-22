@@ -4,7 +4,7 @@ use crate::settlement_suite::init::{setup, upgrade};
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, GuardError, TestAppendError};
-use settlement_api::types::events::{Event, EventType, Hash32};
+use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::swap::TransitionError;
 use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
@@ -56,6 +56,19 @@ fn swap_sequence() -> Vec<EventType> {
             token: quote.src_token.to_string(),
             amount: quote.amount_in.into(),
             tx_ref: "0xfeed".into(),
+        },
+        // the allocation the signed record spends: a signed record for a swap holding no
+        // number is refused
+        EventType::TxCreated {
+            purpose: TxPurpose::Payout(swap_id),
+            chain_id: 8453,
+            nonce: 0,
+            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+            value_wei: Nat::from(0_u8),
+            data: vec![],
+            gas_limit: Nat::from(120_000_u64),
+            max_fee_wei_per_gas: Nat::from(1_u8),
+            max_priority_fee_wei_per_gas: Nat::from(1_u8),
         },
         EventType::TxSigned {
             quote_hash: swap_id,

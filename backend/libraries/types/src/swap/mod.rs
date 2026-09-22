@@ -119,6 +119,14 @@ pub enum TransitionError {
     NonceStillUnsigned(QuoteHash),
     #[error("nonce {nonce} on chain {chain_id} is not one that is waiting for a signature")]
     NonceNotUnsigned { chain_id: ChainId, nonce: Nonce },
+    #[error(
+        "swap {quote_hash} holds no nonce on chain {chain_id} waiting for its signature: the \
+         allocation was cancelled, or never made"
+    )]
+    NoUnsignedNonce {
+        quote_hash: QuoteHash,
+        chain_id: ChainId,
+    },
     #[error("swap is not executing ({0:?})")]
     NotExecuting(SwapStatus),
     #[error("swap is already paid in stable")]

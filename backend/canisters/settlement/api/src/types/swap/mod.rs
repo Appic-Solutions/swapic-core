@@ -99,6 +99,10 @@ pub enum TransitionError {
         chain_id: u64,
         nonce: u64,
     },
+    NoUnsignedNonce {
+        quote_hash: Hash32,
+        chain_id: u64,
+    },
     NotExecuting(SwapStatus),
     AlreadyPaid,
     CannotStartRefund(SwapStatus),
@@ -167,6 +171,13 @@ impl From<types::TransitionError> for TransitionError {
             Domain::NonceNotUnsigned { chain_id, nonce } => Self::NonceNotUnsigned {
                 chain_id: chain_id.get(),
                 nonce: nonce.get(),
+            },
+            Domain::NoUnsignedNonce {
+                quote_hash,
+                chain_id,
+            } => Self::NoUnsignedNonce {
+                quote_hash: quote_hash.into_bytes(),
+                chain_id: chain_id.get(),
             },
             Domain::NotExecuting(status) => Self::NotExecuting(status.into()),
             Domain::AlreadyPaid => Self::AlreadyPaid,

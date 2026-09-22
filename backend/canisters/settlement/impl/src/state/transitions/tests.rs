@@ -141,6 +141,7 @@ fn happy_path_reaches_done() {
     let qh = swap_id(1);
     let state = fold(vec![
         funds(1),
+        allocated(qh, 0),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::PaidInStable {
@@ -148,6 +149,7 @@ fn happy_path_reaches_done() {
             chain_id: ARBITRUM,
             amount: amount(99),
         },
+        allocated(qh, 1),
         signed(qh, 2),
         confirmed(qh, 2),
         EventType::SwapDone { quote_hash: qh },
@@ -161,14 +163,16 @@ fn happy_path_reaches_done() {
 #[test]
 fn cannot_sign_next_attempt_while_one_is_open() {
     let qh = swap_id(1);
-    let mut state = fold(vec![funds(1), signed(qh, 1)]);
+    let mut state = fold(vec![funds(1), allocated(qh, 0), signed(qh, 1)]);
     assert_eq!(
         state.check(&signed(qh, 2)),
         Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
     );
-    // closing attempt 1 unblocks attempt 2
-    let env = next_event(&state, 1, confirmed(qh, 1));
-    apply_state_transition(&mut state, &env);
+    // closing attempt 1 unblocks attempt 2, once it holds a number to sign against
+    for payload in [confirmed(qh, 1), allocated(qh, 1)] {
+        let env = next_event(&state, 1, payload);
+        apply_state_transition(&mut state, &env);
+    }
     assert!(state.check(&signed(qh, 2)).is_ok());
 }
 
@@ -271,7 +275,7 @@ fn replay_is_deterministic() {
     let events: Vec<Event> = {
         let mut state = HeapState::default();
         let mut out = vec![];
-        for e in [funds(1), signed(qh, 1), confirmed(qh, 1)] {
+        for e in [funds(1), allocated(qh, 0), signed(qh, 1), confirmed(qh, 1)] {
             let env = next_event(&state, 7, e);
             apply_state_transition(&mut state, &env);
             out.push(env);
@@ -333,7 +337,13 @@ fn paid(qh: QuoteHash, value: u128) -> EventType {
 #[test]
 fn second_paid_in_stable_rejected() {
     let qh = swap_id(1);
-    let mut events = vec![funds(1), signed(qh, 1), confirmed(qh, 1), paid(qh, 99)];
+    let mut events = vec![
+        funds(1),
+        allocated(qh, 0),
+        signed(qh, 1),
+        confirmed(qh, 1),
+        paid(qh, 99),
+    ];
     events.extend(decide(qh, Choice::Requote));
     let state = fold(events);
     assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
@@ -349,7 +359,13 @@ fn second_paid_in_stable_rejected() {
 #[test]
 fn a_zero_payment_still_refuses_a_second_after_a_requote() {
     let qh = swap_id(1);
-    let mut events = vec![funds(1), signed(qh, 1), confirmed(qh, 1), paid(qh, 0)];
+    let mut events = vec![
+        funds(1),
+        allocated(qh, 0),
+        signed(qh, 1),
+        confirmed(qh, 1),
+        paid(qh, 0),
+    ];
     events.extend(decide(qh, Choice::Requote));
     let state = fold(events);
     assert_eq!(swap(&state, qh).status, SwapStatus::Executing);
@@ -383,18 +399,26 @@ fn check_refuses_an_amount_no_canonical_field_holds() {
 #[test]
 fn waiting_for_user_blocks_signing() {
     let qh = swap_id(1);
-    let mut state = fold(vec![funds(1), signed(qh, 1), confirmed(qh, 1), ask(qh)]);
+    let mut state = fold(vec![
+        funds(1),
+        allocated(qh, 0),
+        signed(qh, 1),
+        confirmed(qh, 1),
+        ask(qh),
+    ]);
     assert_eq!(
         state.check(&signed(qh, 2)),
         Err(TransitionError::WaitingForUser)
     );
-    // answering the question unblocks the next attempt
+    // answering the question unblocks the next attempt, which allocates and then signs
     let resume = EventType::DecisionMade {
         quote_hash: qh,
         choice: Choice::Requote,
     };
-    let env = next_event(&state, 1, resume);
-    apply_state_transition(&mut state, &env);
+    for payload in [resume, allocated(qh, 1)] {
+        let env = next_event(&state, 1, payload);
+        apply_state_transition(&mut state, &env);
+    }
     assert!(state.check(&signed(qh, 2)).is_ok());
 }
 
@@ -403,6 +427,7 @@ fn done_swap_rejects_freeze() {
     let qh = swap_id(1);
     let state = fold(vec![
         funds(1),
+        allocated(qh, 0),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::SwapDone { quote_hash: qh },
@@ -440,10 +465,17 @@ fn fee_needs_a_swap_but_config_and_funding_do_not() {
 #[test]
 fn tx_failed_closes_the_attempt() {
     let qh = swap_id(1);
-    let state = fold(vec![funds(1), signed(qh, 1), failed(qh, 1)]);
+    let mut state = fold(vec![
+        funds(1),
+        allocated(qh, 0),
+        signed(qh, 1),
+        failed(qh, 1),
+    ]);
     assert_eq!(swap(&state, qh).open_attempt, None);
     assert_eq!(swap(&state, qh).last_attempt, Some(Attempt::FIRST));
-    // a failed attempt still counts, so the retry is number 2
+    // a failed attempt still counts, so the retry is number 2, at the next number
+    let env = next_event(&state, 1, allocated(qh, 1));
+    apply_state_transition(&mut state, &env);
     assert!(matches!(
         state.check(&signed(qh, 1)),
         Err(TransitionError::AttemptOutOfSequence { .. })
@@ -460,6 +492,7 @@ fn refund_path_reaches_refunded() {
             quote_hash: qh,
             reason: "timeout".into(),
         },
+        allocated(qh, 0),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::Refunded {
@@ -574,6 +607,7 @@ fn a_refund_in_flight_cannot_be_turned_back_into_a_delivery() {
             quote_hash: qh,
             reason: "decision timeout".into(),
         },
+        allocated(qh, 0),
         signed(qh, 1),
     ]);
     assert_eq!(swap(&state, qh).status, SwapStatus::Refunding);
@@ -598,7 +632,7 @@ fn a_refund_in_flight_cannot_be_turned_back_into_a_delivery() {
 #[test]
 fn a_swap_with_an_attempt_in_flight_is_not_asked() {
     let qh = swap_id(1);
-    let mut state = fold(vec![funds(1), signed(qh, 1)]);
+    let mut state = fold(vec![funds(1), allocated(qh, 0), signed(qh, 1)]);
     assert_eq!(
         state.check(&ask(qh)),
         Err(TransitionError::AttemptStillOpen(Attempt::FIRST))
@@ -620,8 +654,10 @@ fn a_failed_refund_attempt_is_retried_as_the_next_attempt() {
             quote_hash: qh,
             reason: "decision timeout".into(),
         },
+        allocated(qh, 0),
         signed(qh, 1),
         failed(qh, 1),
+        allocated(qh, 1),
         signed(qh, 2),
         confirmed(qh, 2),
         EventType::Refunded {
@@ -834,6 +870,7 @@ fn replay_rebuilds_exactly_the_incremental_state() {
             amount: amount(1000),
         },
         funds(1),
+        allocated(qh, 0),
         signed(qh, 1),
         // the attempt closes before the question: a swap with one in flight is not asked
         confirmed(qh, 1),
@@ -854,7 +891,7 @@ fn replay_refuses_a_log_append_event_could_not_have_written() {
     let qh = swap_id(1);
     let mut state = HeapState::default();
     let mut log = vec![];
-    for payload in [funds(1), signed(qh, 1)] {
+    for payload in [funds(1), allocated(qh, 0), signed(qh, 1)] {
         let event = next_event(&state, 1, payload);
         apply_state_transition(&mut state, &event);
         log.push(event);
@@ -866,7 +903,7 @@ fn replay_refuses_a_log_append_event_could_not_have_written() {
     assert_eq!(
         replay(refused),
         Err(ReplayError::Refused {
-            index: EventIndex::new(2),
+            index: EventIndex::new(3),
             error: TransitionError::AttemptStillOpen(Attempt::FIRST)
         })
     );
@@ -1245,12 +1282,13 @@ fn a_transaction_is_created_only_for_a_swap_that_can_send_one() {
 
     let done = fold(vec![
         funds(1),
+        created(burn, BASE, 0),
         signed(qh, 1),
         confirmed(qh, 1),
         EventType::SwapDone { quote_hash: qh },
     ]);
     assert_eq!(
-        done.check(&created(burn, BASE, 0)),
+        done.check(&created(burn, BASE, 1)),
         Err(TransitionError::SwapClosed(SwapStatus::Done))
     );
 
@@ -1358,4 +1396,79 @@ fn a_transaction_field_above_the_preimage_range_is_refused() {
             "a field above the range was admitted"
         );
     }
+}
+
+/// The allocation a signed record spends: the number the next `TxSigned` for this swap
+/// carries, handed out on Base at `nonce`. Every attempt in these fixtures is created
+/// before it is signed, the way `create_and_send` does it, because a signed record for a
+/// swap holding no number is refused.
+fn allocated(qh: QuoteHash, nonce: u64) -> EventType {
+    created(TxPurpose::Payout(qh), BASE, nonce)
+}
+
+/// The race rule A5's cancel opens: the signature is awaited across consensus rounds on
+/// another subnet, and a cancel that spent the number meanwhile has sealed it. The signed
+/// record that comes back late finds the swap holding nothing, and is refused: without
+/// this it would be admitted and its outbox entry would overwrite the cancel's, so two
+/// signed transactions would carry one nonce. The same refusal meets a signed record for a
+/// swap that never allocated, and one naming a chain the swap holds no number on.
+#[test]
+fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
+    let qh = swap_id(1);
+    let refused = |chain: ChainId| TransitionError::NoUnsignedNonce {
+        quote_hash: qh,
+        chain_id: chain,
+    };
+    let mut state = HeapState::default();
+    let mut log = Vec::new();
+    for (at, payload) in [
+        (1, funds(1)),
+        (2, allocated(qh, 0)),
+        (
+            3,
+            EventType::TxCancelled {
+                chain_id: BASE,
+                nonce: Nonce::ZERO,
+                tx_hash: TxHash::new([9; 32]),
+                raw_tx: vec![0x02, 0xf8, 0x6c],
+            },
+        ),
+    ] {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(&state, at, payload);
+        apply_state_transition(&mut state, &event);
+        log.push(event);
+    }
+    assert!(state.unsigned_nonces().is_empty(), "the cancel spent it");
+    assert_eq!(
+        state.check(&signed(qh, 1)),
+        Err(refused(BASE)),
+        "the number this signature was made for is gone"
+    );
+    assert_eq!(replay(log), Ok(state.clone()), "the log folds clean");
+
+    // the swap may send again: it allocates the next number, and signs against that one
+    for payload in [allocated(qh, 1), signed(qh, 1)] {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(&state, 4, payload);
+        apply_state_transition(&mut state, &event);
+    }
+    assert_eq!(swap(&state, qh).open_attempt, Some(Attempt::FIRST));
+    assert_eq!(state.next_nonce(&BASE), Nonce::new(2));
+
+    // a swap that never allocated holds nothing to sign against either
+    let never = fold(vec![funds(1)]);
+    assert_eq!(never.check(&signed(qh, 1)), Err(refused(BASE)));
+
+    // and the number it holds is on one chain: a record naming another finds nothing
+    let elsewhere = fold(vec![funds(1), allocated(qh, 0)]);
+    assert_eq!(elsewhere.check(&signed(qh, 1)), Ok(()));
+    let on_arbitrum = EventType::TxSigned {
+        quote_hash: qh,
+        attempt: Attempt::FIRST,
+        chain_id: ARBITRUM,
+        tx_hash: TxHash::new([1; 32]),
+        raw_tx: vec![],
+    };
+    assert_eq!(elsewhere.check(&on_arbitrum), Err(refused(ARBITRUM)));
 }

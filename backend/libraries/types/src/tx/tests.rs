@@ -204,7 +204,7 @@ fn an_unsigned_nonce_round_trips_and_knows_when_it_was_abandoned() {
     assert!(!unsigned.is_stranded(Timestamp::from_nanos(2_999_999_999), window));
     assert!(
         unsigned.is_stranded(Timestamp::from_nanos(3_000_000_000), window),
-        "a whole window is long enough: the append and the signed record are one message chain"
+        "the whole window has passed, and the bound is inclusive"
     );
     assert!(
         !unsigned.is_stranded(Timestamp::from_nanos(0), window),

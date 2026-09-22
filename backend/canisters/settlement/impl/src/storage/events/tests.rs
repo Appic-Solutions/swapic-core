@@ -8,11 +8,12 @@ use crate::storage::on_fresh_memory;
 use crate::task_manager::expiry_sweep::run_expiry_sweep;
 use crate::task_manager::replay_audit::{run_audit_replay_step, run_replay_audit};
 use types::config::{AuditChunk, RefundsPerSweep};
-use types::events::Choice;
+use types::events::{Choice, TxPurpose};
 use types::quote::QuoteError;
 use types::LedgerMeta;
 use types::{
-    Attempt, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds, WaitingKey,
+    Attempt, GasAmount, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds,
+    WaitingKey, Wei, WeiPerGas,
 };
 
 fn fold_both(payloads: Vec<EventType>) -> (State<StableStore>, State<MemoryStore>) {
@@ -51,6 +52,7 @@ fn the_stable_fold_matches_the_heap_fold() {
             chain_id: ChainId::BASE,
             amount: amount(400),
         },
+        created(quote),
         EventType::TxSigned {
             quote_hash: quote,
             attempt: Attempt::FIRST,
@@ -60,7 +62,7 @@ fn the_stable_fold_matches_the_heap_fold() {
         },
     ]);
     assert!(heap.matches(&stable));
-    assert_eq!(stable.meta().next_event_index, EventIndex::new(4));
+    assert_eq!(stable.meta().next_event_index, EventIndex::new(5));
     assert_eq!(stable.pocket(&ChainId::BASE).unwrap().reserved, amount(400));
     assert_eq!(
         stable.swap(&quote).unwrap().open_attempt,
@@ -70,6 +72,24 @@ fn the_stable_fold_matches_the_heap_fold() {
 
 fn append(payload: EventType) {
     append_event_at(payload, Timestamp::from_nanos(1)).expect("the stable fold admits it");
+}
+
+/// The allocation the first signed record of `quote` spends: nonce zero on Base, which is
+/// where every chain's allocator starts.
+fn created(quote: QuoteHash) -> EventType {
+    EventType::TxCreated {
+        purpose: TxPurpose::Payout(quote),
+        chain_id: ChainId::BASE,
+        nonce: Nonce::ZERO,
+        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap(),
+        value: Wei::ZERO,
+        data: vec![],
+        gas_limit: GasAmount::from(120_000_u32),
+        max_fee: WeiPerGas::from(2_000_000_000_u64),
+        max_priority_fee: WeiPerGas::from(100_000_000_u64),
+    }
 }
 
 fn log_replay() -> Result<State<MemoryStore>, ReplayError> {
@@ -271,6 +291,9 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
             waiting_since: None,
         };
         StableStore(()).put_swap(quote, ghost);
+        // the stable fold holds the ghost, so it admits the allocation and the signed
+        // record; the replay of the log, which never funded the swap, admits neither
+        append(created(quote));
         append(EventType::TxSigned {
             quote_hash: quote,
             attempt: Attempt::FIRST,

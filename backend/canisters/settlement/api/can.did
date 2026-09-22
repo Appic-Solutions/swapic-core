@@ -362,6 +362,7 @@ type SwapStatus = variant {
 };
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
+  NoUnsignedNonce : record { quote_hash : blob; chain_id : nat64 };
   CannotAskWhileRefunding;
   NonceNeverAllocated : record {
     next : nat64;

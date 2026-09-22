@@ -17,7 +17,7 @@ use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde_json::{json, Value};
 use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::config::Config;
-use settlement_api::types::errors::AppendError;
+use settlement_api::types::errors::{AppendError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::init::InitArg;
 use settlement_api::types::swap::TransitionError;
@@ -33,6 +33,11 @@ const GAS_LIMIT: u64 = 120_000;
 /// The batch window the default config is on, which is how long a queued transaction waits
 /// before the outbox pass takes it.
 const BATCH_WINDOW: Duration = Duration::from_secs(2);
+
+/// How long an allocated nonce waits for its signed record before the pass cancels it: the
+/// canister's `STRANDED_AFTER`, five minutes, which is a signing round trip and then some
+/// and never the batch window.
+const STRANDED_AFTER: Duration = Duration::from_secs(300);
 
 /// A quote whose swap the tests send transactions for, one per nonce.
 fn quote(nonce: u64) -> types::Quote {
@@ -225,8 +230,13 @@ fn receipt(block: u64, success: bool, tx_hash: Hash32) -> Value {
 /// A `TxCreated` for the first swap at `nonce`, which the allocator admits only at the
 /// number it is at.
 fn created_at(nonce: u64) -> EventType {
+    created_for(0, nonce)
+}
+
+/// A `TxCreated` for the swap of the quote at `swap`, at `nonce`.
+fn created_for(swap: u64, nonce: u64) -> EventType {
     EventType::TxCreated {
-        purpose: TxPurpose::Payout(swap_id(0)),
+        purpose: TxPurpose::Payout(swap_id(swap)),
         chain_id: BASE,
         nonce,
         to: VAULT.to_string(),
@@ -768,7 +778,7 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
         "nothing is broadcast before the cancel is recorded"
     );
 
-    advance(&pic, canister, BATCH_WINDOW);
+    advance(&pic, canister, STRANDED_AFTER);
     let cancelled = tx_cancelled(&events(&pic, canister));
     assert_eq!(cancelled.len(), 1, "one cancel for one stranded number");
     let (chain_id, nonce, raw_tx) = cancelled[0].clone();
@@ -821,7 +831,7 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
 fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
     let (pic, canister, admin) = setup_with_swaps(1);
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
-    advance(&pic, canister, BATCH_WINDOW);
+    advance(&pic, canister, STRANDED_AFTER);
     let cancelled = tx_cancelled(&events(&pic, canister));
     assert_eq!(cancelled.len(), 1);
     let cancel_hash: Hash32 = {
@@ -869,7 +879,7 @@ fn an_upgrade_between_the_allocation_and_the_cancel_loses_nothing() {
         "nothing has gone out yet"
     );
 
-    advance(&pic, canister, BATCH_WINDOW);
+    advance(&pic, canister, STRANDED_AFTER);
     assert_eq!(
         of_kind(events(&pic, canister), is_cancelled).len(),
         1,
@@ -1099,4 +1109,196 @@ fn a_halted_canister_broadcasts_nothing_new() {
         json!([format!("0x{}", hex::encode(&signed[0]))]),
         "and it is the transaction the log recorded"
     );
+}
+
+/// The cancel's tx hash, as the log recorded it.
+fn cancel_hash(pic: &PocketIc, canister: Principal) -> Hash32 {
+    let EventType::TxCancelled { tx_hash, .. } = events(pic, canister)
+        .into_iter()
+        .map(|event| event.payload)
+        .find(is_cancelled)
+        .expect("the cancel is in the log")
+    else {
+        unreachable!()
+    };
+    tx_hash
+}
+
+/// The rounds a threshold signature takes, with nothing else moving.
+fn settle(pic: &PocketIc) {
+    for _ in 0..12 {
+        pic.tick();
+    }
+}
+
+/// An allocation is stranded on a clock of its own and never on the batch window. The
+/// signature is awaited across consensus rounds on the signing subnet, a round trip that
+/// is several windows long, so a cancel fired after one window races the very signature it
+/// stands in for. Here the allocation is left alone through window after window and a
+/// whole minute, and is cancelled by one pass once it is older than a signing round trip
+/// could possibly be.
+#[test]
+fn an_allocation_is_stranded_only_once_a_signing_round_trip_could_not_still_be_out() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+
+    for window in 1..=5 {
+        advance(&pic, canister, BATCH_WINDOW);
+        assert!(
+            of_kind(events(&pic, canister), is_cancelled).is_empty(),
+            "window {window}: an allocation younger than a signing round trip is not stranded"
+        );
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "window {window}: and nothing is broadcast for it"
+        );
+    }
+    advance(&pic, canister, Duration::from_secs(60));
+    assert!(
+        of_kind(events(&pic, canister), is_cancelled).is_empty(),
+        "a minute is still inside the bound"
+    );
+
+    advance(&pic, canister, STRANDED_AFTER);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(cancelled.len(), 1, "past the bound, one pass cancels it");
+    assert_eq!((cancelled[0].0, cancelled[0].1), (BASE, 0));
+}
+
+/// The race the stranding clock cannot fully close, closed at the fold: a cancel spent the
+/// number while the signature was on its way, and the signed record that comes back late
+/// is refused. Nothing of it reaches the outbox, so the cancel's entry at that nonce stays
+/// whole: its bytes are what goes out, its hash is what the receipt reader asks for, the
+/// log still folds, and the swap sends again at the next number. The real interleaving
+/// cannot be forced here, because both signatures ride the same signing subnet in the order
+/// they were asked for, so the late record arrives through the test door.
+#[test]
+fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+    advance(&pic, canister, STRANDED_AFTER);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(cancelled.len(), 1, "the number was spent by a cancel");
+    let cancel_raw = cancelled[0].2.clone();
+    let cancel_hash = cancel_hash(&pic, canister);
+
+    let late = EventType::TxSigned {
+        quote_hash: swap_id(0),
+        attempt: 1,
+        chain_id: BASE,
+        tx_hash: [0x77; 32],
+        raw_tx: vec![0x02, 0xf8, 0x6b],
+    };
+    assert_eq!(
+        append(&pic, canister, admin, &late),
+        Err(TestAppendError::Append(AppendError::Transition(
+            TransitionError::NoUnsignedNonce {
+                quote_hash: swap_id(0),
+                chain_id: BASE,
+            }
+        ))),
+        "the number this signature was made for is gone"
+    );
+    assert!(
+        verify_replay(&pic, canister, Principal::anonymous()),
+        "the log still folds to the live fold"
+    );
+
+    // the outbox holds exactly the cancel: its bytes are what is broadcast
+    let pending = pic.get_canister_http();
+    let sends: Vec<&CanisterHttpRequest> = pending
+        .iter()
+        .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
+        .collect();
+    assert_eq!(sends.len(), 1, "one entry at the nonce, the cancel's");
+    assert_eq!(
+        params(sends[0], 0),
+        json!([format!("0x{}", hex::encode(&cancel_raw))]),
+        "and the bytes are the cancel's"
+    );
+    reply(&pic, sends[0], vec![json!("0xabc")]);
+
+    // and its hash is the only one the receipt reader looks up
+    let pending = pic.get_canister_http();
+    let receipts: Vec<&CanisterHttpRequest> = pending
+        .iter()
+        .filter(|request| methods(request).contains(&"eth_getTransactionReceipt".to_string()))
+        .collect();
+    assert_eq!(receipts.len(), 1, "one receipt batch for the one entry");
+    assert_eq!(
+        methods(receipts[0]),
+        vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+        "the head and one receipt: nothing of the refused record is in the outbox"
+    );
+    assert_eq!(
+        params(receipts[0], 1),
+        json!([format!("0x{}", hex::encode(cancel_hash))]),
+        "and it is the cancel's"
+    );
+    answer_pending(&pic, 19_000_000, &json!(null));
+
+    // the swap is free to send at the next number
+    send(&pic, canister, admin, 0).expect("the swap may send again");
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0), (BASE, 1)],
+        "the allocator moved on past the cancelled number"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// Each cancel of a pass reads the clock for itself. The cancels before it each awaited a
+/// signature, so the instant the pass started is stale by a round trip per cancel: priced
+/// on it, the second cancel would take a reading that aged out while the first was
+/// signing. Here the reading ages out during the first cancel's signature, the second
+/// cancel refuses to price on it, and the watcher's next push lets the next pass cancel it.
+#[test]
+fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
+    let (pic, canister, admin) = setup_with_swaps(2);
+    append(&pic, canister, admin, &created_for(0, 0)).expect("the first allocation");
+    append(&pic, canister, admin, &created_for(1, 1)).expect("the second allocation");
+
+    // both are stranded: the round the pass starts in prices the first cancel and asks
+    // for its signature, which comes back in a later round
+    pic.advance_time(STRANDED_AFTER);
+    push_reading(&pic, canister);
+    pic.tick();
+    assert!(
+        of_kind(events(&pic, canister), is_cancelled).is_empty(),
+        "the first cancel is still waiting for its signature"
+    );
+
+    // the reading ages past `chain_data_max_age` while that signature is on its way, and
+    // no watcher pushes another
+    pic.advance_time(Duration::from_secs(20));
+    settle(&pic);
+    settle(&pic);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(
+        cancelled
+            .iter()
+            .map(|(_, nonce, _)| *nonce)
+            .collect::<Vec<_>>(),
+        vec![0],
+        "the first cancel was priced before the reading aged out; the second read the clock \
+         for itself and refused the reading, rather than pricing on the pass's instant"
+    );
+
+    // the pass broadcasts the one cancel it signed and reads its receipt, then re-arms for
+    // the number it could not price; the next push is fresh at that pass's instant, so
+    // the second number is cancelled by it
+    answer_pending(&pic, 19_000_000, &json!(null));
+    answer_pending(&pic, 19_000_000, &json!(null));
+    advance(&pic, canister, BATCH_WINDOW);
+    settle(&pic);
+    let cancelled = tx_cancelled(&events(&pic, canister));
+    assert_eq!(
+        cancelled
+            .iter()
+            .map(|(_, nonce, _)| *nonce)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "nothing was abandoned"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }

@@ -47,6 +47,21 @@ const REBROADCAST_AFTER: Duration = Duration::from_secs(30);
 /// transaction. A config knob when the engine lands.
 const STUCK_AFTER: Duration = Duration::from_secs(120);
 
+/// How long an allocated nonce may wait for its signed record before the pass spends it
+/// with a cancel: five minutes.
+///
+/// This clock is its own and is never the batch window. The signature is asked for after
+/// `TxCreated`, and that await does not run to its end inside one message on this subnet:
+/// it crosses to the signing subnet and spans the consensus rounds a threshold signature
+/// takes there, measured at 10.5 seconds for `key_1`, against a default window of two
+/// seconds. A cancel fired inside that round trip races the signature it was meant to
+/// stand in for, and the fold refuses whichever comes second (`NoUnsignedNonce` or
+/// `NonceNotUnsigned`), so nothing breaks, but a cancel that was never needed is signed
+/// and broadcast. Five minutes is far above any round trip the signing subnet takes under
+/// load, and short enough that a number nothing carries holds up the chain's queue for
+/// minutes rather than hours. A config knob is a later plan.
+const STRANDED_AFTER: Duration = Duration::from_secs(300);
+
 /// The most any one transaction this canister signs may spend on gas: one ether, which is
 /// two orders of magnitude above what a settlement transaction on the most congested chain
 /// this canister sends to costs, and far below what a broken fee reading would produce.
@@ -212,10 +227,13 @@ pub async fn create_and_send(
         max_priority_fee: fees.max_priority_fee(),
     })?;
 
-    // armed here rather than after the queue, and before the first await, so every way
-    // this call can fail from now on still leaves a pass scheduled to end the allocation.
-    // A trap before the await rolls the append back with it, so an unsigned nonce and an
-    // unarmed pass cannot both happen.
+    // the one place this call arms the pass: here, after the allocation and before the
+    // first await, so every way it can fail from now on still leaves a pass scheduled to
+    // end the allocation, and a trap before the await rolls the append back with it, so
+    // an unsigned nonce and an unarmed pass cannot both happen. Nothing arms again after
+    // the queue below, because the pass re-arms itself for as long as this nonce is
+    // unsigned or the outbox holds anything, and the entry is queued before either of
+    // those stops being true.
     task_manager::outbox::arm();
 
     // the signature is the await this whole order exists for. From here on a failure
@@ -225,6 +243,9 @@ pub async fn create_and_send(
     let signed = tx.signed(signature);
     let tx_hash = signed.hash();
     let raw_tx = signed.into_raw();
+    // refused when a cancel spent the number while the signature was on its way: the
+    // error goes back to the caller and the outbox is not touched, so the cancel's entry
+    // at this nonce stays exactly as the pass queued it
     append_event(EventType::TxSigned {
         quote_hash,
         attempt,
@@ -251,7 +272,6 @@ pub async fn create_and_send(
         data: tx.data,
         gas_limit,
     });
-    task_manager::outbox::arm();
     Ok(tx_hash)
 }
 
@@ -268,44 +288,57 @@ const CANCEL_GAS_LIMIT: u64 = 21_000;
 /// and an EVM account with a gap at N can never mine N+1: every payout, refund and burn on
 /// that chain stops. So the allocation is in the fold, and this pass ends it.
 ///
-/// The wait before a cancel is one batch window: the whole path from the append to the
-/// signed record runs inside one message chain, so an allocation older than a window has
-/// lost its transaction. Signing and broadcasting a cancel is creating a transaction, so
-/// the halt switch gates it like every other such path.
+/// An allocation is stranded once it is older than [`STRANDED_AFTER`], which is a signing
+/// round trip and then some, never the batch window: the path from the append to the
+/// signed record is not one message chain, its signing await spans consensus rounds on
+/// the signing subnet, and a cancel fired inside that wait races the very signature it
+/// stands in for. Which allocations are stranded is judged at one instant, the pass's
+/// start; each cancel then reads the clock for itself, because the awaits between two
+/// cancels are signing round trips of their own. Signing and broadcasting a cancel is
+/// creating a transaction, so the halt switch gates it like every other such path.
 pub async fn cancel_stranded() {
     if require_not_halted().is_err() {
         return;
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let window = config::get().batch_window;
     let stranded: Vec<NonceKey> = read_state(|state| {
         state
             .unsigned_nonces()
             .into_iter()
-            .filter(|(_, unsigned)| unsigned.is_stranded(now, window))
+            .filter(|(_, unsigned)| unsigned.is_stranded(now, STRANDED_AFTER))
             .map(|(key, _)| key)
             .collect()
     });
     for key in stranded {
-        cancel(key, now).await;
+        cancel(key).await;
     }
+}
+
+/// What a cancel on `chain_id` pays at `now`: the same door every other send is priced
+/// through, so it carries the same ceilings, and a bad or aged reading refuses it rather
+/// than putting a stale or a huge fee on the chain.
+fn cancel_fees(chain_id: ChainId, now: Timestamp) -> Result<Fees, TxError> {
+    let fees = fees(chain_id, now)?;
+    affordable(chain_id, fees, GasAmount::from(CANCEL_GAS_LIMIT))?;
+    Ok(fees)
 }
 
 /// Signs, records and queues the cancel of one allocated nonce. Recorded before it is
 /// broadcast like every other transaction (A6), and the record is what seals the nonce's
 /// fate: the entry then rides the outbox as any transaction does, and its receipt needs no
 /// further line in the log.
-async fn cancel(key: NonceKey, now: Timestamp) {
+///
+/// The clock is read here and not once for the whole pass: the cancels before this one
+/// each awaited a signature, so the pass's instant is stale by a round trip per cancel,
+/// which would price this one on a reading that has aged out and stamp its entry with an
+/// instant before it existed.
+async fn cancel(key: NonceKey) {
     let NonceKey { chain_id, nonce } = key;
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
     let gas_limit = GasAmount::from(CANCEL_GAS_LIMIT);
-    // the same door every other send is priced through, so a cancel carries the same
-    // ceilings: a bad reading refuses it rather than putting a huge fee on the chain
-    let Ok(fees) = fees(chain_id, now) else {
+    let Ok(fees) = cancel_fees(chain_id, now) else {
         return;
     };
-    if affordable(chain_id, fees, gas_limit).is_err() {
-        return;
-    }
     let Ok(mine) = ecdsa::canister_address().await else {
         return;
     };

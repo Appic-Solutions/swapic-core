@@ -367,11 +367,14 @@ impl<S: Store> State<S> {
     /// The signed record spends the nonce the swap was holding. `TxSigned` names a swap and
     /// not a number, and it cannot start naming one without moving its canonical preimage,
     /// so the allocation is found by the swap: the `TxCreated` guard admits one unsigned
-    /// nonce per swap, which is what makes that lookup single-valued.
+    /// nonce per swap, which is what makes that lookup single-valued, and the `TxSigned`
+    /// guard admits no record for a swap holding none, which is what makes it total.
     fn record_attempt_signed(&mut self, quote_hash: &QuoteHash, attempt: Attempt) {
-        if let Some(key) = self.store.unsigned_nonce_of(quote_hash) {
-            self.store.remove_unsigned_nonce(&key);
-        }
+        let key = self
+            .store
+            .unsigned_nonce_of(quote_hash)
+            .expect("BUG: State::check refuses a signed record for a swap holding no nonce");
+        self.store.remove_unsigned_nonce(&key);
         self.update_swap(quote_hash, |swap| {
             swap.last_attempt = Some(attempt);
             swap.open_attempt = Some(attempt);
