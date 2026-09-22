@@ -13,7 +13,8 @@ use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
     audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
-    set_config, set_halted, set_roles, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
+    set_config, set_halted, set_roles, set_sanctioned, test_rpc_batch as test_rpc_batch_api,
+    test_send, test_sign,
 };
 
 pub fn event_count(
@@ -372,5 +373,25 @@ pub fn test_skew_state(
         sender,
         "test_skew_state",
         encode_one(()).unwrap(),
+    )
+}
+
+/// Positional, as the endpoint takes them: adds `add` to the sanctions set, then removes
+/// `remove`, and answers the count held after.
+pub fn set_sanctioned(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    add: &[&str],
+    remove: &[&str],
+) -> set_sanctioned::Response {
+    let add: Vec<String> = add.iter().map(|text| text.to_string()).collect();
+    let remove: Vec<String> = remove.iter().map(|text| text.to_string()).collect();
+    update(
+        pic,
+        canister,
+        sender,
+        "set_sanctioned",
+        encode_args((add, remove)).unwrap(),
     )
 }

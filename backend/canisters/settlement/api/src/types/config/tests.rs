@@ -237,3 +237,31 @@ fn a_config_error_names_its_knob_on_the_wire() {
         ConfigError::EmptyVaultAddress { chain_id: 8453 }
     );
 }
+
+/// The deposit lookback crosses the wire as a plain block count like the per-pass caps,
+/// and one outside its range comes back named.
+#[test]
+fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
+    let wire = Config {
+        deposit_lookback_blocks: 4_321,
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(wire.clone()).unwrap();
+    assert_eq!(domain.deposit_lookback_blocks.get(), 4_321);
+    assert_eq!(Config::unredacted(domain), wire);
+    assert_eq!(Config::default().deposit_lookback_blocks, 10_000);
+
+    let zero = types::Config::try_from(Config {
+        deposit_lookback_blocks: 0,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(zero.validate().unwrap_err()),
+        ConfigError::CapOutOfRange {
+            field: "deposit_lookback_blocks".to_string(),
+            cap: 0,
+            ceiling: 1_000_000
+        }
+    );
+}

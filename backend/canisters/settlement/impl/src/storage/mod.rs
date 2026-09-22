@@ -8,6 +8,7 @@ pub mod memory;
 pub mod outbox;
 pub mod replay_cursor;
 pub mod roles;
+pub mod sanctions;
 
 use crate::state::pending_quotes;
 
@@ -24,6 +25,7 @@ pub fn init() {
     ecdsa_address::init();
     outbox::init();
     replay_cursor::init();
+    sanctions::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

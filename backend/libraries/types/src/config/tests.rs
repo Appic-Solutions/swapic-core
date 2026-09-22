@@ -495,3 +495,55 @@ fn validate_rejects_a_batch_size_outside_its_range() {
         .expect("the ceiling itself is allowed");
     batch(1).validate().expect("one item a batch is allowed");
 }
+
+/// The deposit read looks back a bounded number of blocks from the chain's head for the
+/// user's deposit. A lookback of nothing finds nothing, and an unbounded one is a range no
+/// provider serves, so the knob is a cap like the per-pass ones: one to its ceiling, at its
+/// default absent from storage so the stored config's bytes do not move.
+#[test]
+fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
+    assert_eq!(
+        Config::default().deposit_lookback_blocks,
+        DepositLookback::new(10_000)
+    );
+    let lookback = |blocks| Config {
+        deposit_lookback_blocks: DepositLookback::new(blocks),
+        ..Config::default()
+    };
+    assert_eq!(
+        lookback(0).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "deposit_lookback_blocks",
+            cap: 0,
+            ceiling: DepositLookback::CEILING
+        })
+    );
+    let over = DepositLookback::CEILING + 1;
+    assert_eq!(
+        lookback(over).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "deposit_lookback_blocks",
+            cap: over,
+            ceiling: DepositLookback::CEILING
+        })
+    );
+    lookback(DepositLookback::CEILING)
+        .validate()
+        .expect("the ceiling itself is allowed");
+    lookback(1).validate().expect("one block back is allowed");
+
+    // at its default the knob writes nothing, so the stored bytes are the ones the golden
+    // file already pins; set, it is the twenty-first element
+    let defaults = Config::default().to_bytes().into_owned();
+    assert_eq!(
+        defaults[0], 0x91,
+        "a default lookback writes nothing of its own"
+    );
+    let set = lookback(7);
+    let bytes = set.to_bytes().into_owned();
+    assert_eq!(
+        bytes[0], 0x95,
+        "a set lookback is written after the three sweep caps"
+    );
+    assert_eq!(Config::from_bytes(Cow::Owned(bytes)), set);
+}

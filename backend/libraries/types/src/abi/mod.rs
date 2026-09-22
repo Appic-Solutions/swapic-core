@@ -13,7 +13,7 @@ use crate::evm::EvmAddress;
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds, Wei};
 use alloy_primitives::{Address, FixedBytes, I256, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{sol, SolCall, SolEvent};
 
 sol! {
     /// One router call inside a vault execution.
@@ -30,6 +30,10 @@ sol! {
         address token;
         int256 minChange;
     }
+
+    /// What every vault entry door logs: the quote the funds are for, the token, the
+    /// payer, and the amount the vault measured as received.
+    event Deposited(bytes32 indexed quoteHash, address indexed token, address indexed from, uint256 amount);
 
     function execute(bytes32 swapRef, Call[] calls, Delta[] deltas);
     function payout(bytes32 swapRef, address token, address to, uint256 amount);
@@ -112,6 +116,13 @@ fn amount<Unit>(amount: crate::checked_amount::CheckedAmountOf<Unit>) -> U256 {
 
 fn word(bytes: [u8; 32]) -> FixedBytes<32> {
     FixedBytes(bytes)
+}
+
+/// The topic a `Deposited` log carries first: the keccak of
+/// `Deposited(bytes32,address,address,uint256)`, which is what the deposit read filters
+/// the vault's logs by.
+pub fn deposited_topic() -> [u8; 32] {
+    Deposited::SIGNATURE_HASH.0
 }
 
 /// `execute(bytes32,(address,uint256,bytes,address,uint256)[],(address,int256)[])`.

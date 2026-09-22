@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::decode::{self, Decoder};
 use minicbor::{Decode, Encode};
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
@@ -75,6 +77,26 @@ text_type! {
     /// An account address on some chain, kept as the exact text it arrived as: parsing
     /// never changes case or checksum. At most [`MAX_TEXT_BYTES`].
     Address
+}
+
+/// Its utf8 bytes, so a stable map keyed by addresses orders them as text. Read back to the
+/// bound parsing holds it to, which every stored value was held to when it was written.
+impl Storable for Address {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Borrowed(self.0.as_bytes())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        std::str::from_utf8(&bytes)
+            .expect("BUG: a stored address is written as utf8")
+            .parse()
+            .expect("BUG: a stored address is written inside the bound")
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: MAX_TEXT_BYTES as u32,
+        is_fixed_size: false,
+    };
 }
 
 text_type! {

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
-use types::config::{AuditChunk, EvictionsPerSweep, RefundsPerSweep};
+use types::config::{AuditChunk, DepositLookback, EvictionsPerSweep, RefundsPerSweep};
 use types::{BasisPoints, BlockDepth, ChainId, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -33,6 +33,9 @@ pub struct Config {
     pub max_refunds_per_sweep: u32,
     pub max_evictions_per_sweep: u32,
     pub audit_chunk_events: u32,
+    /// How many blocks back from a chain's head the deposit read looks for a user's
+    /// deposit, 1 to 1,000,000.
+    pub deposit_lookback_blocks: u32,
 }
 
 impl Default for Config {
@@ -67,6 +70,7 @@ impl fmt::Debug for Config {
             max_refunds_per_sweep,
             max_evictions_per_sweep,
             audit_chunk_events,
+            deposit_lookback_blocks,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -91,6 +95,7 @@ impl fmt::Debug for Config {
             .field("max_refunds_per_sweep", max_refunds_per_sweep)
             .field("max_evictions_per_sweep", max_evictions_per_sweep)
             .field("audit_chunk_events", audit_chunk_events)
+            .field("deposit_lookback_blocks", deposit_lookback_blocks)
             .finish()
     }
 }
@@ -140,6 +145,7 @@ impl From<types::Config> for Config {
             max_refunds_per_sweep,
             max_evictions_per_sweep,
             audit_chunk_events,
+            deposit_lookback_blocks,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -172,6 +178,7 @@ impl From<types::Config> for Config {
             max_refunds_per_sweep: max_refunds_per_sweep.get(),
             max_evictions_per_sweep: max_evictions_per_sweep.get(),
             audit_chunk_events: audit_chunk_events.get(),
+            deposit_lookback_blocks: deposit_lookback_blocks.get(),
         }
     }
 }
@@ -236,6 +243,7 @@ impl TryFrom<Config> for types::Config {
             max_refunds_per_sweep: RefundsPerSweep::new(config.max_refunds_per_sweep),
             max_evictions_per_sweep: EvictionsPerSweep::new(config.max_evictions_per_sweep),
             audit_chunk_events: AuditChunk::new(config.audit_chunk_events),
+            deposit_lookback_blocks: DepositLookback::new(config.deposit_lookback_blocks),
         })
     }
 }

@@ -53,8 +53,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
-/// key types, one nonce waiting for its signature, and a cancel that has been out on the
-/// network. Every field of a sample differs from
+/// key types, one nonce waiting for its signature, a cancel that has been out on the
+/// network, and a sanctioned address as the sanctions set keys it. Every field of a sample differs from
 /// its neighbours, so a field that moves to another index decodes to a different value
 /// instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -233,6 +233,12 @@ fn samples() -> Vec<Sample> {
                 data: vec![],
                 gas_limit: GasAmount::from(21_000_u32),
             },
+        ),
+        sample(
+            "sanctioned address key",
+            "0x1111111111111111111111111111111111111111"
+                .parse::<crate::Address>()
+                .unwrap(),
         ),
     ]);
     all

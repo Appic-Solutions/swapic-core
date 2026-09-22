@@ -75,3 +75,18 @@ fn storage_holds_text_to_the_same_bound_as_parsing() {
     let bytes = minicbor::to_vec(&token).unwrap();
     assert_eq!(minicbor::decode::<TokenId>(&bytes).unwrap(), token);
 }
+
+/// The sanctions set keys a stable map by an address: its utf8 bytes, so byte order and key
+/// order agree, and read back to the same bound parsing holds it to.
+#[test]
+fn an_address_is_a_stable_key_of_its_utf8_bytes() {
+    use ic_stable_structures::Storable;
+    let address: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let bytes = address.to_bytes();
+    assert_eq!(bytes.as_ref(), address.as_str().as_bytes());
+    assert_eq!(Address::from_bytes(bytes), address);
+    let at_cap: Address = "a".repeat(MAX_TEXT_BYTES).parse().unwrap();
+    assert_eq!(Address::from_bytes(at_cap.to_bytes()), at_cap);
+}

@@ -275,3 +275,14 @@ fn the_widest_amount_still_encodes() {
         "the amount word is all ones"
     );
 }
+
+/// The deposit read filters the vault's logs by this topic, so it is pinned against what the
+/// vault emits: `cast sig-event "Deposited(bytes32 indexed quoteHash, address indexed
+/// token, address indexed from, uint256 amount)"`.
+#[test]
+fn the_deposited_topic_is_the_one_the_vault_logs_under() {
+    assert_eq!(
+        hex::encode(deposited_topic()),
+        "cfccc5211684bc31ce945214025a7453ba30a1ffcc38fcb691ce742437f3f256"
+    );
+}

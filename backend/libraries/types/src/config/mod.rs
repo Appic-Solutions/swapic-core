@@ -53,6 +53,13 @@ pub type EvictionsPerSweep = Cap<200, 5_000>;
 /// ceiling is what a timer message affords with room to spare.
 pub type AuditChunk = Cap<1_000, 10_000>;
 
+/// How many blocks back from a chain's head the deposit read looks for a user's deposit.
+/// Ten thousand is what most providers serve in one `eth_getLogs` range, and it is forty
+/// minutes on the fastest chain this canister reads (Arbitrum, four blocks a second) and
+/// more than a day on Ethereum: a claim that lags its deposit by longer is an operator's
+/// call, made by raising the knob. The ceiling is a range no provider serves in one call.
+pub type DepositLookback = Cap<10_000, 1_000_000>;
+
 impl<const DEFAULT: u32, const CEILING: u32> Cap<DEFAULT, CEILING> {
     /// What a config that never set the knob reads as.
     pub const DEFAULT: Self = Self(DEFAULT);
@@ -185,6 +192,9 @@ pub struct Config {
     /// however long the log grows.
     #[n(19)]
     pub audit_chunk_events: AuditChunk,
+    /// How many blocks back from the head the deposit read looks for a user's deposit.
+    #[n(20)]
+    pub deposit_lookback_blocks: DepositLookback,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -284,6 +294,7 @@ impl Default for Config {
             max_refunds_per_sweep: RefundsPerSweep::DEFAULT,
             max_evictions_per_sweep: EvictionsPerSweep::DEFAULT,
             audit_chunk_events: AuditChunk::DEFAULT,
+            deposit_lookback_blocks: DepositLookback::DEFAULT,
         }
     }
 }
@@ -361,6 +372,8 @@ impl Config {
         self.max_evictions_per_sweep
             .validate("max_evictions_per_sweep")?;
         self.audit_chunk_events.validate("audit_chunk_events")?;
+        self.deposit_lookback_blocks
+            .validate("deposit_lookback_blocks")?;
         // the batch size is a cap like the three above, held to the same rule
         if self.max_batch_items == 0 || self.max_batch_items > MAX_BATCH_ITEMS {
             return Err(ConfigError::CapOutOfRange {

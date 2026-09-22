@@ -20,7 +20,7 @@ mod tests;
 
 use crate::ecdsa::{self, EcdsaError};
 use crate::guards::require_not_halted;
-use crate::rpc::{self, RpcError};
+use crate::rpc::{self, parse_block_number, parse_hash32, RpcError};
 use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::{chain_data, config, outbox};
@@ -738,11 +738,12 @@ fn send_cap(sends: usize) -> u64 {
     MAX_SEND_BYTES_PER_ITEM * sends as u64
 }
 
-/// How deep a receipt on `chain_id` must be before it closes an attempt.
+/// How deep a receipt on `chain_id` must be before it closes an attempt, and how deep a
+/// deposit must be before a swap is claimed on it: the one definition of a chain's depth.
 ///
 /// A chain the config forgot confirms at [`DEFAULT_CONFIRMATIONS`], which is the safe floor
 /// and not a free pass: a receipt still has to be in a block the head has reached.
-fn confirmations(config: &types::Config, chain_id: ChainId) -> BlockDepth {
+pub(crate) fn confirmations(config: &types::Config, chain_id: ChainId) -> BlockDepth {
     config
         .confirmations
         .get(&chain_id)
@@ -915,19 +916,6 @@ enum NotOurReceipt {
     /// and the height it is measured against, so an answer about some other transaction
     /// must decide nothing at all.
     AnotherTransaction,
-}
-
-/// `0x`-prefixed hex as a block number.
-fn parse_block_number(text: &str) -> Option<BlockNumber> {
-    u64::from_str_radix(text.strip_prefix("0x")?, 16)
-        .ok()
-        .map(BlockNumber::new)
-}
-
-/// `0x`-prefixed hex as a thirty-two byte hash.
-fn parse_hash32(value: Option<&Value>) -> Option<[u8; 32]> {
-    let text = value?.as_str()?.strip_prefix("0x")?;
-    <[u8; 32]>::try_from(hex::decode(text).ok()?).ok()
 }
 
 /// The receipt `value` carries, if it is a receipt about one of `ours`.

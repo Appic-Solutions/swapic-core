@@ -19,7 +19,7 @@ use ic_cdk::api::management_canister::http_request::{
 };
 use serde_json::{json, Value};
 use thiserror::Error;
-use types::{ChainId, RpcUrl};
+use types::{BlockNumber, ChainId, RpcUrl};
 
 /// Pay-as-you-go pricing: charges what the call consumed rather than what it reserved, and
 /// it is the only version that prices an unreplicated call as one.
@@ -180,6 +180,19 @@ fn request_size(request: &HttpRequest) -> u64 {
         .sum();
     let bytes = request.url.len() + headers + request.body.as_ref().map_or(0, Vec::len);
     u64::try_from(bytes).expect("BUG: usize is at most 64 bits on every target")
+}
+
+/// `0x`-prefixed hex as a block number.
+pub(crate) fn parse_block_number(text: &str) -> Option<BlockNumber> {
+    u64::from_str_radix(text.strip_prefix("0x")?, 16)
+        .ok()
+        .map(BlockNumber::new)
+}
+
+/// `0x`-prefixed hex as a thirty-two byte word.
+pub(crate) fn parse_hash32(value: Option<&Value>) -> Option<[u8; 32]> {
+    let text = value?.as_str()?.strip_prefix("0x")?;
+    <[u8; 32]>::try_from(hex::decode(text).ok()?).ok()
 }
 
 /// The chain's provider url, or the refusal that spends no outcall.

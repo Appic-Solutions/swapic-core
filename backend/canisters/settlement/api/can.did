@@ -70,6 +70,9 @@ type Config = record {
   max_swap_usd : nat;
   max_batch_items : nat32;
   max_evictions_per_sweep : nat32;
+  // How many blocks back from a chain's head the deposit read looks for a user's
+  // deposit, 1 to 1,000,000.
+  deposit_lookback_blocks : nat32;
 };
 // Why a config was refused, naming the knob at fault.
 type ConfigError = variant {
@@ -221,6 +224,7 @@ type GuardError = variant {
   NotController;
   RolesNotSet;
   CallerNotRole : Role;
+  CallerNotWatcherOrController;
   CallerNotQuoterOrWatcher;
   Halted;
   RoleNotSet : Role;
@@ -311,6 +315,7 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : nat64; Err : GuardError };
+type Result_10 = variant { Ok : nat64; Err : SetSanctionedError };
 type Result_2 = variant { Ok : text; Err : SignError };
 type Result_3 = variant { Ok : Config; Err : GuardError };
 type Result_4 = variant { Ok : opt Quote; Err : GuardError };
@@ -332,6 +337,14 @@ type SetRolesError = variant {
   Guard : GuardError;
   AnonymousRole : Role;
   Append : AppendError;
+};
+// Why `set_sanctioned` changed nothing.
+type SetSanctionedError = variant {
+  // The text at `index` of `list` (`"add"` or `"remove"`) is above the 256-byte cap.
+  TextTooLong : record { len : nat64; list : text; index : nat64 };
+  Guard : GuardError;
+  // The set would grow past its cap; nothing of the call landed.
+  SetFull : record { capacity : nat64 };
 };
 // Why a call that needs the canister's threshold key answered nothing.
 type SignError = variant { Guard : GuardError; Ecdsa : EcdsaError };
@@ -499,6 +512,16 @@ service : (InitArg) -> {
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
   set_roles : (principal, principal) -> (Result_9);
+  // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
+  // `remove` from it, and answers how many addresses the set holds after. An EVM address is
+  // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
+  // Compliance data, not money, so the halt switch does not gate it: an operator halting on
+  // a divergence still wants the list current.
+  // 
+  // The set is bounded, and a call that would take it past the bound is refused whole, with
+  // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
+  // by its position, also with nothing written.
+  set_sanctioned : (vec text, vec text) -> (Result_10);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

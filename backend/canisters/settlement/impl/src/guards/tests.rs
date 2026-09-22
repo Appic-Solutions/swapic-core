@@ -60,3 +60,21 @@ fn a_refusal_names_the_role_and_never_a_principal() {
     );
     assert!(shown.contains("Quoter"), "names the role: {shown}");
 }
+
+/// The watcher-or-controller rule: a controller passes whether or not the watcher is set, the
+/// watcher passes, and anyone else is refused without being told which it failed to be.
+#[test]
+fn check_watcher_or_controller_admits_either_and_nobody_else() {
+    assert_eq!(check_watcher_or_controller(None, p(1), true), Ok(()));
+    assert_eq!(check_watcher_or_controller(Some(p(3)), p(3), false), Ok(()));
+    assert_eq!(
+        check_watcher_or_controller(None, p(3), false),
+        Err(GuardError::CallerNotWatcherOrController),
+        "an unset watcher refuses everyone but a controller"
+    );
+    assert_eq!(
+        check_watcher_or_controller(Some(p(3)), p(2), false),
+        Err(GuardError::CallerNotWatcherOrController),
+        "the quoter is neither"
+    );
+}

@@ -28,6 +28,7 @@ pub enum GuardError {
     RolesNotSet,
     CallerNotQuoterOrWatcher,
     Halted,
+    CallerNotWatcherOrController,
 }
 
 /// Why an event was not appended. Nothing was written.
@@ -97,6 +98,22 @@ pub enum SetRolesError {
 pub enum SignError {
     Guard(GuardError),
     Ecdsa(EcdsaError),
+}
+
+/// Why `set_sanctioned` changed nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum SetSanctionedError {
+    Guard(GuardError),
+    /// The text at `index` of `list` (`"add"` or `"remove"`) is above the 256-byte cap.
+    TextTooLong {
+        list: String,
+        index: u64,
+        len: u64,
+    },
+    /// The set would grow past its cap; nothing of the call landed.
+    SetFull {
+        capacity: u64,
+    },
 }
 
 /// Why the test-only `test_rpc_batch` read nothing.

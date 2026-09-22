@@ -47,6 +47,30 @@ pub fn require_quoter_or_watcher() -> Result<(), GuardError> {
     check_either(&roles::get(), ic_cdk::api::caller())
 }
 
+/// The watcher, or a controller standing in for it: the compliance data the watcher pushes
+/// is also what an operator corrects by hand. One error for both, so a refusal says nothing
+/// about which of the two the caller failed to be.
+fn check_watcher_or_controller(
+    watcher: Option<Principal>,
+    caller: Principal,
+    is_controller: bool,
+) -> Result<(), GuardError> {
+    if is_controller || watcher == Some(caller) {
+        Ok(())
+    } else {
+        Err(GuardError::CallerNotWatcherOrController)
+    }
+}
+
+pub fn require_watcher_or_controller() -> Result<(), GuardError> {
+    let caller = ic_cdk::api::caller();
+    check_watcher_or_controller(
+        roles::get().watcher,
+        caller,
+        ic_cdk::api::is_controller(&caller),
+    )
+}
+
 /// The gate Plan 3's money endpoints call before they move anything.
 pub fn require_not_halted() -> Result<(), GuardError> {
     if is_halted() {
