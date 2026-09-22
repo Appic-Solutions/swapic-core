@@ -410,6 +410,27 @@ impl<'a> Reader<'a> {
 
 crate::storable_as_cbor!(Quote);
 
+/// A quote the store holds, with what the canister knew when it was registered: the height
+/// the watcher had last reported on the quote's source chain.
+///
+/// The deposit a claim looks for cannot be older than the quote it pays, so that height is
+/// where the claim's log read starts. Without it the read walks the whole lookback, which
+/// is a day of blocks on the fastest chain; with it the usual claim reads one window. It is
+/// the canister's own reading and never the caller's, and it lags the true head, so it can
+/// only ever be at or below the block the deposit lands in.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, and the height is absent while
+/// unknown, so an entry written before it existed reads back without one.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PendingQuote {
+    #[n(0)]
+    pub quote: Quote,
+    #[n(1)]
+    pub registered_at: Option<crate::numeric::BlockNumber>,
+}
+
+crate::storable_as_cbor!(PendingQuote);
+
 /// A pending quote as the expiry index keys it: by the second it expires, then by swap id,
 /// so a walk from the first key meets the soonest expiry first and stops at the first quote
 /// still inside its window.

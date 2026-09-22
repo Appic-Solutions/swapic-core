@@ -3,7 +3,7 @@ use crate::deposits::{Wanted, WantedAmount};
 use crate::state::transitions::tests::quote;
 use crate::storage::{on_fresh_memory, sanctions};
 use std::collections::BTreeMap;
-use types::abi::Permit;
+use types::abi::Permit2Permit;
 use types::config::ChainTable;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
@@ -13,6 +13,7 @@ use types::{BlockNumber, ChainId, Config, GasMode, Rail, TokenAmount};
 const USDC: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC_ARBITRUM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
+const VAULT: &str = "0x1111111111111111111111111111111111111111";
 
 /// The fixture quote with the rail's tokens on both sides, which is what a claim on an
 /// EVM chain needs.
@@ -278,34 +279,106 @@ fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
     );
 }
 
-/// The pull needs the quote's own permit: the vault pulls the quote's token and amount, so
-/// a permit for anything else would either fail on the chain or take the wrong funds.
+/// The pull binds the permit to the quote in every field the user signed: the witness is
+/// the quote, the token and the amount are the quote's, the spender is the vault the pull
+/// calls, and the deadline has not passed. A permit that misses any of them frees funds
+/// this swap has no claim on, so it is refused before anything is signed, by name.
 #[test]
-fn a_permit_must_be_for_the_quotes_token_and_amount() {
+fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
     let quote = evm_quote(1);
+    let quote_hash = quote.hash().unwrap();
     let token: EvmAddress = USDC.parse().unwrap();
-    let permit = |token: &str, amount: u128| PullPermit {
-        token: token.parse().unwrap(),
+    let vault: EvmAddress = VAULT.parse().unwrap();
+    let now = UnixSeconds::new(1_799_999_000);
+    let signed = PullPermit {
+        witness: quote_hash,
         owner: USER.parse().unwrap(),
-        amount: TokenAmount::from(amount),
-        deadline: UnixSeconds::new(1_800_000_000),
-        signature: Permit {
-            v: 27,
-            r: [1; 32],
-            s: [2; 32],
+        spender: vault,
+        permit: Permit2Permit {
+            token,
+            amount: quote.amount_in,
+            nonce: types::Permit2Nonce::from(7_u8),
+            deadline: UnixSeconds::new(1_800_000_000),
         },
+        signature: vec![0x22; 65],
     };
+    let binds =
+        |permit: &PullPermit| ensure_permit_binds(quote_hash, &quote, token, vault, now, permit);
+    assert_eq!(binds(&signed), Ok(()));
+
+    let other_quote = evm_quote(2).hash().unwrap();
     assert_eq!(
-        ensure_permit_matches(&quote, token, &permit(USDC, 100)),
-        Ok(())
+        binds(&PullPermit {
+            witness: other_quote,
+            ..signed.clone()
+        }),
+        Err(PullError::PermitMismatch(PermitMismatch::Witness {
+            signed_for: other_quote
+        })),
+        "a permit witnessed for another quote frees nothing here"
     );
+    let another_token: EvmAddress = USER.parse().unwrap();
     assert_eq!(
-        ensure_permit_matches(&quote, token, &permit(USER, 100)),
-        Err(PullError::PermitMismatch { field: "token" })
+        binds(&PullPermit {
+            permit: Permit2Permit {
+                token: another_token,
+                ..signed.permit
+            },
+            ..signed.clone()
+        }),
+        Err(PullError::PermitMismatch(PermitMismatch::Token {
+            permitted: another_token,
+            wanted: token
+        }))
     );
+    let more = quote
+        .amount_in
+        .checked_add(TokenAmount::from(1_u8))
+        .unwrap();
     assert_eq!(
-        ensure_permit_matches(&quote, token, &permit(USDC, 101)),
-        Err(PullError::PermitMismatch { field: "amount" })
+        binds(&PullPermit {
+            permit: Permit2Permit {
+                amount: more,
+                ..signed.permit
+            },
+            ..signed.clone()
+        }),
+        Err(PullError::PermitMismatch(PermitMismatch::Amount {
+            permitted: more,
+            wanted: quote.amount_in
+        }))
+    );
+    let elsewhere: EvmAddress = USDC_ARBITRUM.parse().unwrap();
+    assert_eq!(
+        binds(&PullPermit {
+            spender: elsewhere,
+            ..signed.clone()
+        }),
+        Err(PullError::PermitMismatch(PermitMismatch::Spender {
+            signed_for: elsewhere,
+            vault
+        }))
+    );
+    let past = UnixSeconds::new(1_799_998_999);
+    assert_eq!(
+        ensure_permit_binds(
+            quote_hash,
+            &quote,
+            token,
+            vault,
+            now,
+            &PullPermit {
+                permit: Permit2Permit {
+                    deadline: past,
+                    ..signed.permit
+                },
+                ..signed.clone()
+            }
+        ),
+        Err(PullError::PermitMismatch(PermitMismatch::Expired {
+            deadline: past,
+            now
+        }))
     );
     let legacy = Quote {
         gas_mode: GasMode::Legacy,

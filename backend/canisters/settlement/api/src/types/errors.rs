@@ -27,6 +27,9 @@ pub enum GuardError {
     CallerNotRole(Role),
     RolesNotSet,
     CallerNotQuoterOrWatcher,
+    /// Neither service principal, and not a controller either: the claim's door, which an
+    /// operator may open by hand.
+    CallerNotQuoterWatcherOrController,
     Halted,
     CallerNotWatcherOrController,
 }

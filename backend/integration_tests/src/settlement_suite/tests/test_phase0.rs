@@ -7,7 +7,7 @@
 //! was broadcast. Nothing else is stubbed: the claim, the engine, both rails' legs, the
 //! outbox, the signatures and the fold all run as deployed.
 
-use crate::client::settlement::{append, derive_evm_address};
+use crate::client::settlement::{append, derive_evm_address, register_quote};
 use crate::client::settlement::{
     audit_replay_step, events_page, evm_address, get_swap, push_attestation, verify_chain,
     verify_replay,
@@ -22,7 +22,7 @@ use alloy_primitives::keccak256;
 use alloy_rlp::Header;
 use candid::{encode_one, Principal};
 use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
-use pocket_ic::{PocketIc, PocketIcBuilder};
+use pocket_ic::{PocketIc, PocketIcBuilder, Time};
 use serde_json::{json, Value};
 use settlement_api::types::config::Config;
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
@@ -351,6 +351,12 @@ fn setup_at_fee(platform_fee_bps: u16) -> (PocketIc, Principal, Principal) {
     };
     install(&pic, canister, admin, &arg).expect("the arg installs");
     derive_evm_address(&pic, canister, admin).expect("the test key derives an address");
+    // the fixture quotes' expiry is fixed, and the store takes no quote expiring more than
+    // a day out, so the clock moves to the quotes: ten minutes before they expire, which
+    // is longer than any walk below takes
+    pic.set_time(Time::from_nanos_since_unix_epoch(
+        (quote(0).expires_at.get() - 600) * 1_000_000_000,
+    ));
     push_readings(&pic, canister, 19_000_000);
     (pic, canister, admin)
 }
@@ -402,6 +408,9 @@ fn trail(pic: &PocketIc, canister: Principal, installed: usize) -> Vec<String> {
 /// and returns the swap id.
 fn claim(pic: &PocketIc, canister: Principal, chains: &mut Chains, quote: &types::Quote) -> Hash32 {
     let quote_hash = swap_id(quote);
+    // a swap's economics are the quoter's, so the quote is registered before it is claimed
+    register_quote(pic, canister, quoter(), &Quote::from(quote.clone()))
+        .expect("the quoter registers the quote");
     chains.deposits.push(deposit_log(
         quote_hash,
         chains.head,

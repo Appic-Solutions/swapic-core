@@ -52,7 +52,8 @@ fn expires_at_s(q: &Quote) -> u64 {
 }
 
 fn registered_at(q: &Quote, now_s: u64) -> QuoteHash {
-    pending_quotes::register(q.clone(), UnixSeconds::new(now_s)).expect("a live quote registers")
+    pending_quotes::register(q.clone(), UnixSeconds::new(now_s), None)
+        .expect("a live quote registers")
 }
 
 /// The canister clock at a whole second.

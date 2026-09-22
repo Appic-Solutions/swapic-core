@@ -7,12 +7,24 @@ use crate::types::rpc::RpcError;
 use crate::types::tx::TxError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::abi::Permit;
-use types::{EvmAddress, TokenAmount, UnixSeconds};
+use types::abi::Permit2Permit;
+use types::{EvmAddress, Permit2Nonce, QuoteHash, TokenAmount, UnixSeconds};
 
-/// An EIP-2612 permit a user signed for the vault, with what it permits: the token and the
-/// amount of the quote, from the user's own account, until `deadline_s`. `r` and `s` are
-/// the signature words and `v` its recovery byte, 27 or 28.
+/// The most bytes a Permit2 signature may be. A wallet signs sixty-five (or sixty-four
+/// compact); a contract wallet answering EIP-1271 may sign more, and this is room for one
+/// without letting a caller put a megabyte in a transaction this canister pays gas for.
+pub const MAX_PERMIT2_SIGNATURE_BYTES: usize = 1_024;
+
+/// An EIP-2612 permit a user signed for a token contract, with what it permits: the token
+/// and the amount of the quote, from the user's own account, until `deadline_s`. `r` and
+/// `s` are the signature words and `v` its recovery byte, 27 or 28.
+///
+/// NOT A SHAPE THIS CANISTER PULLS WITH, and a pull carrying one is refused: the vault's
+/// 2612 door runs `safeTransferFrom` whether or not the permit verified, so the signature
+/// decides nothing and any standing allowance is enough to move a user's funds, and a 2612
+/// permit names `(owner, spender, value, deadline)` and never a quote, so one signed for a
+/// quote can be spent under another. It stays on the wire so a caller that sends one is
+/// told why, by name.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PermitSig {
     pub token: String,
@@ -24,14 +36,78 @@ pub struct PermitSig {
     pub s: Hash32,
 }
 
-/// A permit as the vault's `pullWithPermit` takes it, in the domain's own types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A Permit2 `PermitTransferFrom` a gasless user signed for the vault, witnessed by the
+/// quote it pays for.
+///
+/// `quote_hash` is that witness and `spender` is the address the signature names as the
+/// one who may spend: neither travels in the calldata (the vault derives the witness from
+/// the quote it is called with, and Permit2 takes the spender from its caller), so both
+/// are here to be checked against the quote and the vault before anything is signed.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Permit2Sig {
+    /// the quote hash the signature's witness names
+    pub quote_hash: Hash32,
+    pub token: String,
+    pub owner: String,
+    /// the spender the signature names, which has to be the vault
+    pub spender: String,
+    pub amount: Nat,
+    /// Permit2's own nonce, a number the signer picks and Permit2 spends once
+    pub nonce: Nat,
+    pub deadline_s: u64,
+    /// the signature itself, at most [`MAX_PERMIT2_SIGNATURE_BYTES`] bytes
+    pub signature: Vec<u8>,
+}
+
+/// What a gasless pull may be asked with. Only the Permit2 permit is a door this canister
+/// uses; see [`PermitSig`] for why the other one is refused.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PullRequest {
+    Eip2612(PermitSig),
+    Permit2(Permit2Sig),
+}
+
+/// A permit as the vault's `pullWithPermit2` takes it, in the domain's own types, with
+/// the two fields the calldata does not carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullPermit {
-    pub token: EvmAddress,
+    /// the quote the signature's witness names
+    pub witness: QuoteHash,
     pub owner: EvmAddress,
-    pub amount: TokenAmount,
-    pub deadline: UnixSeconds,
-    pub signature: Permit,
+    /// the spender the signature names
+    pub spender: EvmAddress,
+    pub permit: Permit2Permit,
+    pub signature: Vec<u8>,
+}
+
+/// Why a permit the caller sent is not the one this quote's pull may use, with what it
+/// says and what the quote says beside it.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PermitMismatch {
+    /// The signature's witness names another quote, so the funds it frees are not this
+    /// swap's.
+    Witness {
+        signed_for: Hash32,
+    },
+    Token {
+        permitted: String,
+        wanted: String,
+    },
+    Amount {
+        permitted: Nat,
+        wanted: Nat,
+    },
+    /// The signature names another spender than the vault the pull would call, so Permit2
+    /// would refuse it on the chain.
+    Spender {
+        signed_for: String,
+        vault: String,
+    },
+    /// The permit's own deadline has passed.
+    Expired {
+        deadline_s: u64,
+        now_s: u64,
+    },
 }
 
 /// Why a permit is not one the vault can use, naming the field.
@@ -42,12 +118,31 @@ pub enum PermitError {
         reason: EvmAddressError,
     },
     AmountTooLarge,
+    NonceTooLarge,
+    /// The pull carried an EIP-2612 permit, which this canister never sends: the vault's
+    /// 2612 door transfers whether or not the permit verified, and a 2612 signature names
+    /// no quote.
+    NotAPermit2Permit,
+    SignatureTooLong {
+        len: u64,
+        cap: u64,
+    },
 }
 
-impl TryFrom<PermitSig> for PullPermit {
+impl TryFrom<PullRequest> for PullPermit {
     type Error = PermitError;
 
-    fn try_from(permit: PermitSig) -> Result<Self, Self::Error> {
+    fn try_from(request: PullRequest) -> Result<Self, Self::Error> {
+        let permit = match request {
+            PullRequest::Eip2612(_) => return Err(PermitError::NotAPermit2Permit),
+            PullRequest::Permit2(permit) => permit,
+        };
+        if permit.signature.len() > MAX_PERMIT2_SIGNATURE_BYTES {
+            return Err(PermitError::SignatureTooLong {
+                len: crate::types::wire_len(permit.signature.len()),
+                cap: crate::types::wire_len(MAX_PERMIT2_SIGNATURE_BYTES),
+            });
+        }
         let address = |field: &str, text: &str| {
             text.parse().map_err(
                 |reason: types::evm::EvmAddressError| PermitError::NotAnAddress {
@@ -57,16 +152,18 @@ impl TryFrom<PermitSig> for PullPermit {
             )
         };
         Ok(Self {
-            token: address("token", &permit.token)?,
+            witness: QuoteHash::new(permit.quote_hash),
             owner: address("owner", &permit.owner)?,
-            amount: TokenAmount::from_canonical_nat(permit.amount)
-                .ok_or(PermitError::AmountTooLarge)?,
-            deadline: UnixSeconds::new(permit.deadline_s),
-            signature: Permit {
-                v: permit.v,
-                r: permit.r,
-                s: permit.s,
+            spender: address("spender", &permit.spender)?,
+            permit: Permit2Permit {
+                token: address("token", &permit.token)?,
+                amount: TokenAmount::from_canonical_nat(permit.amount)
+                    .ok_or(PermitError::AmountTooLarge)?,
+                nonce: Permit2Nonce::try_from(permit.nonce)
+                    .map_err(|_| PermitError::NonceTooLarge)?,
+                deadline: UnixSeconds::new(permit.deadline_s),
             },
+            signature: permit.signature,
         })
     }
 }
@@ -98,6 +195,11 @@ pub enum DepositError {
         anchor: u64,
         windows: u64,
         cap: u64,
+    },
+    /// The config lists no confirmation depth for the chain, so nothing on it is deep
+    /// enough to decide money on.
+    NoDepth {
+        chain_id: u64,
     },
     Rpc(RpcError),
     UnreadableHead,
@@ -145,6 +247,9 @@ pub enum ClaimError {
     RailUnavailable {
         rail: String,
     },
+    /// No quote with this id is in the pending store: the quoter never registered it, or
+    /// it was evicted. A controller may still claim such a quote by hand.
+    NotRegistered(Hash32),
     /// The quote's tokens are not its rail's: refused before any outcall.
     RailToken(RailTokenError),
     /// A field of the quote that the claim reads as an EVM address is not one.
@@ -167,10 +272,8 @@ pub enum PullError {
         now_s: u64,
     },
     Permit(PermitError),
-    /// The permit's `field` (`"token"` or `"amount"`) is not the quote's.
-    PermitMismatch {
-        field: String,
-    },
+    /// The permit is not one this quote's pull may use.
+    PermitMismatch(PermitMismatch),
     /// A field of the quote that the pull reads as an EVM address is not one.
     QuoteAddress(QuoteAddressError),
     /// `party` is `"owner"`, `"dst_address"` or `"refund_address"`.

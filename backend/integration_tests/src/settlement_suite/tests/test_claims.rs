@@ -16,12 +16,13 @@ use pocket_ic::common::rest::{
     CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse, MockCanisterHttpResponse,
     RawMessageId,
 };
-use pocket_ic::{PocketIc, PocketIcBuilder};
+use pocket_ic::{PocketIc, PocketIcBuilder, Time};
 use serde_json::{json, Value};
 use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::config::Config;
 use settlement_api::types::entry::{
-    ClaimError, DepositError, PermitSig, PullError, PushAttestationError,
+    ClaimError, DepositError, Permit2Sig, PermitError, PermitMismatch, PermitSig, PullError,
+    PullRequest, PushAttestationError,
 };
 use settlement_api::types::errors::GuardError;
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
@@ -40,6 +41,10 @@ const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
 const REFUND: &str = "0x1111111111111111111111111111111111111111";
 const HEAD: u64 = 19_000_000;
 const AMOUNT: u32 = 25_000_000;
+/// The second the fixture quote expires at. The clock moves to the quote rather than the
+/// quote to the clock, because a quote is claimed only after the quoter registered it and
+/// a registration is refused for a quote expiring more than a day out.
+const EXPIRES_AT: u64 = 1_800_000_000;
 
 /// A quote for a deposit on Base: the source token is the token contract, as a quote on
 /// an EVM chain names it.
@@ -59,7 +64,7 @@ fn quote(nonce: u64) -> types::Quote {
         auto_refund: true,
         gas_mode: GasMode::Legacy,
         rail: Rail::CctpV2Fast,
-        expires_at: UnixSeconds::new(1_800_000_000),
+        expires_at: UnixSeconds::new(EXPIRES_AT),
         nonce,
     }
 }
@@ -95,8 +100,17 @@ fn setup() -> (PocketIc, Principal, Principal) {
         watcher: watcher(),
     };
     install(&pic, canister, admin, &arg).expect("the arg installs");
+    set_the_clock_inside_the_fixtures_window(&pic);
     push_reading(&pic, canister);
     (pic, canister, admin)
+}
+
+/// Ten minutes before the fixture quote expires: inside the window the store registers a
+/// quote in, and inside the window a claim is admitted in.
+fn set_the_clock_inside_the_fixtures_window(pic: &PocketIc) {
+    pic.set_time(Time::from_nanos_since_unix_epoch(
+        (EXPIRES_AT - 600) * 1_000_000_000,
+    ));
 }
 
 /// The same on a network holding the test threshold keys, for the pull, which signs.
@@ -116,6 +130,7 @@ fn setup_with_keys() -> (PocketIc, Principal, Principal) {
     };
     install(&pic, canister, admin, &arg).expect("the arg installs");
     derive_evm_address(&pic, canister, admin).expect("the test key derives an address");
+    set_the_clock_inside_the_fixtures_window(&pic);
     push_reading(&pic, canister);
     (pic, canister, admin)
 }
@@ -143,8 +158,27 @@ fn count(pic: &PocketIc, canister: Principal) -> u64 {
     event_count(pic, canister, Principal::anonymous())
 }
 
-/// Submits a claim and gives the canister the rounds it needs to reach its outcall.
+/// The quoter registers the quote, which is what a claim needs: a swap's economics are
+/// the quoter's, so only a quote the store holds becomes one. Answers the swap id.
+fn registered(pic: &PocketIc, canister: Principal, quote: &types::Quote) -> Hash32 {
+    register_quote(pic, canister, quoter(), &wire(quote)).expect("the quoter registers the quote")
+}
+
+/// Registers the quote the way the quoter would, submits a claim for it, and gives the
+/// canister the rounds it needs to reach its outcall. A test about an unregistered quote
+/// calls the door itself.
 fn submit_claim(
+    pic: &PocketIc,
+    canister: Principal,
+    who: Principal,
+    quote: &types::Quote,
+) -> RawMessageId {
+    registered(pic, canister, quote);
+    submit_claim_unregistered(pic, canister, who, &wire(quote))
+}
+
+/// Submits a claim without registering anything first.
+fn submit_claim_unregistered(
     pic: &PocketIc,
     canister: Principal,
     who: Principal,
@@ -267,7 +301,7 @@ fn a_valid_mocked_deposit_appends_funds_received_and_returns_the_hash() {
     let quote_hash = swap_id(&quote);
     let before = count(&pic, canister);
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     let read = the_read(&pic, quote_hash);
     answer(
         &pic,
@@ -313,7 +347,7 @@ fn no_deposit_means_nothing_stored() {
     let quote_hash = swap_id(&quote);
     let before = count(&pic, canister);
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(&pic, &the_read(&pic, quote_hash), HEAD, vec![]);
     assert_eq!(
         await_claim(&pic, call),
@@ -326,7 +360,7 @@ fn no_deposit_means_nothing_stored() {
     );
 
     // the deposit is there, in a block the head has not reached: not yet
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -344,7 +378,7 @@ fn no_deposit_means_nothing_stored() {
     assert_eq!(count(&pic, canister), before, "still nothing");
 
     // and once the head reaches it, the same claim goes through
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -366,7 +400,7 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     let quote_hash = swap_id(&quote);
     let before = count(&pic, canister);
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -381,7 +415,7 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
         }))
     );
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -414,7 +448,7 @@ fn a_dust_deposit_ahead_of_the_real_one_still_claims() {
     let quote = quote(14);
     let quote_hash = swap_id(&quote);
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -443,7 +477,7 @@ fn a_dust_deposit_ahead_of_the_real_one_still_claims() {
         .map(|i| dust_log(quote_hash, HEAD - 50 + i, 1 + i))
         .collect();
     logs.push(deposit_log(quote_hash, HEAD - 1, USDC, USER, AMOUNT.into()));
-    let call = submit_claim(&pic, canister, watcher(), &wire(&behind_forty));
+    let call = submit_claim(&pic, canister, watcher(), &behind_forty);
     answer(&pic, &the_read(&pic, quote_hash), HEAD, logs);
     assert_eq!(
         await_claim(&pic, call),
@@ -576,7 +610,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
         &[REFUND],
     )
     .unwrap();
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -600,6 +634,7 @@ fn concurrent_claims_buy_one_outcall() {
     let (pic, canister, _admin) = setup();
     let quote = quote(5);
     let quote_hash = swap_id(&quote);
+    registered(&pic, canister, &quote);
 
     let first = pic
         .submit_call(
@@ -646,21 +681,27 @@ fn concurrent_claims_buy_one_outcall() {
 #[test]
 fn an_expired_quote_is_refused_before_any_outcall() {
     let (pic, canister, _admin) = setup();
+    // the quote expires a minute out, and the quoter registers it now: the store takes no
+    // quote that has already expired, so the registration is what fixes the clock here
     let quote = types::Quote {
-        expires_at: UnixSeconds::new(pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000),
+        expires_at: UnixSeconds::new(
+            pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000 + 60,
+        ),
         ..quote(6)
     };
-    // the default permit window is two minutes: a minute in, the quote is still claimable
+    registered(&pic, canister, &quote);
+    // the default permit window is two minutes: at the expiry itself, and a minute past
+    // it, the quote is still claimable
     pic.advance_time(Duration::from_secs(60));
     push_reading(&pic, canister);
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
     answer(&pic, &the_read(&pic, swap_id(&quote)), HEAD, vec![]);
     assert!(matches!(
         await_claim(&pic, call),
         Err(ClaimError::Deposit(DepositError::NotFound { .. }))
     ));
 
-    pic.advance_time(Duration::from_secs(61));
+    pic.advance_time(Duration::from_secs(121));
     push_reading(&pic, canister);
     let refused = claim_swap(&pic, canister, watcher(), &wire(&quote));
     assert!(
@@ -681,7 +722,10 @@ fn a_stranger_and_a_halted_canister_claim_nothing() {
     let quote = wire(&quote(7));
     assert_eq!(
         claim_swap(&pic, canister, Principal::from_slice(&[9; 29]), &quote),
-        Err(ClaimError::Guard(GuardError::CallerNotQuoterOrWatcher))
+        // the door admits a controller too, so the refusal names all three
+        Err(ClaimError::Guard(
+            GuardError::CallerNotQuoterWatcherOrController
+        ))
     );
     set_halted(&pic, canister, admin, true).unwrap();
     assert_eq!(
@@ -731,7 +775,7 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
         "no swap, no inbox slot"
     );
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -786,7 +830,7 @@ fn a_moved_token_table_refuses_new_claims_and_leaves_the_log_replayable() {
     let (pic, canister, admin) = setup();
     let quote = quote(19);
     let quote_hash = swap_id(&quote);
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
         &the_read(&pic, quote_hash),
@@ -825,15 +869,28 @@ fn live_quote(pic: &PocketIc, nonce: u64) -> types::Quote {
     }
 }
 
-fn permit(quote: &types::Quote) -> PermitSig {
-    PermitSig {
+/// The Permit2 permit a gasless user signs for the vault: witnessed by the quote it pays,
+/// for the quote's token and amount, with the vault as the spender.
+fn permit(quote: &types::Quote) -> PullRequest {
+    PullRequest::Permit2(Permit2Sig {
+        quote_hash: swap_id(quote),
         token: USDC.to_string(),
         owner: USER.to_string(),
+        spender: VAULT.to_string(),
         amount: quote.amount_in.into(),
-        deadline_s: 1_800_000_100,
-        v: 28,
-        r: [0x22; 32],
-        s: [0x33; 32],
+        nonce: Nat::from(7_u8),
+        deadline_s: EXPIRES_AT + 100,
+        signature: vec![0x22; 65],
+    })
+}
+
+/// What the permit above says, as the pull encodes it.
+fn permitted(quote: &types::Quote) -> types::abi::Permit2Permit {
+    types::abi::Permit2Permit {
+        token: USDC.parse().unwrap(),
+        amount: quote.amount_in,
+        nonce: types::Permit2Nonce::from(7_u8),
+        deadline: UnixSeconds::new(EXPIRES_AT + 100),
     }
 }
 
@@ -882,7 +939,7 @@ fn a_pull_for_an_unknown_or_legacy_quote_is_refused() {
 
 /// A pull goes through the one send path: the nonce is allocated, the bytes are recorded
 /// as `PullSigned` before they are broadcast, and what goes out is the vault's
-/// `pullWithPermit`. A second pull while the first is on its way is refused, and no swap
+/// `pullWithPermit2`, witnessed by the quote. A second pull while the first is on its way is refused, and no swap
 /// exists until a claim verifies the deposit the pull made.
 #[test]
 fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
@@ -894,15 +951,60 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
     let quote_hash = swap_id(&quote);
     register_quote(&pic, canister, quoter(), &wire(&quote)).expect("the quoter registers");
 
-    let wrong_amount = PermitSig {
-        amount: Nat::from(1_u8),
-        ..permit(&quote)
+    let PullRequest::Permit2(signed) = permit(&quote) else {
+        panic!("the fixture is a Permit2 permit");
     };
     assert_eq!(
-        start_gasless_pull(&pic, canister, quoter(), quote_hash, &wrong_amount),
-        Err(PullError::PermitMismatch {
-            field: "amount".to_string()
-        })
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            quote_hash,
+            &PullRequest::Permit2(Permit2Sig {
+                amount: Nat::from(1_u8),
+                ..signed.clone()
+            })
+        ),
+        Err(PullError::PermitMismatch(PermitMismatch::Amount {
+            permitted: Nat::from(1_u8),
+            wanted: quote.amount_in.into(),
+        }))
+    );
+    // a permit witnessed for another quote frees nothing here, whatever else it says
+    let elsewhere = swap_id(&self::quote(12));
+    assert_eq!(
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            quote_hash,
+            &PullRequest::Permit2(Permit2Sig {
+                quote_hash: elsewhere,
+                ..signed.clone()
+            })
+        ),
+        Err(PullError::PermitMismatch(PermitMismatch::Witness {
+            signed_for: elsewhere
+        }))
+    );
+    // and the 2612 door is not one this canister pulls through
+    assert_eq!(
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            quote_hash,
+            &PullRequest::Eip2612(PermitSig {
+                token: USDC.to_string(),
+                owner: USER.to_string(),
+                amount: quote.amount_in.into(),
+                deadline_s: EXPIRES_AT + 100,
+                v: 28,
+                r: [0x22; 32],
+                s: [0x33; 32],
+            })
+        ),
+        Err(PullError::Permit(PermitError::NotAPermit2Permit))
     );
 
     let tx_hash = start_gasless_pull(&pic, canister, quoter(), quote_hash, &permit(&quote))
@@ -936,8 +1038,13 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
         .collect();
     assert_eq!(signed.len(), 1, "one signed record, the pull's own");
     assert!(
-        hex::encode(&signed[0]).contains("0263549d"),
-        "the bytes carry pullWithPermit"
+        hex::encode(&signed[0]).contains(&hex::encode(types::abi::vault_pull_with_permit2(
+            types::QuoteHash::new(quote_hash),
+            USER.parse().unwrap(),
+            &permitted(&quote),
+            &[0x22; 65],
+        ))),
+        "the bytes carry the Permit2 pull this permit makes, field for field"
     );
     assert!(
         log.iter()
@@ -1008,7 +1115,7 @@ fn eco_is_off_until_its_route_is_designed_and_an_intent_is_the_publishs_own() {
     // a CCTP swap, which no intent may steer onto a publish
     let cctp = quote(12);
     let cctp_hash = swap_id(&cctp);
-    let call = submit_claim(&pic, canister, watcher(), &wire(&cctp));
+    let call = submit_claim(&pic, canister, watcher(), &cctp);
     answer(
         &pic,
         &the_read(&pic, cctp_hash),
@@ -1038,7 +1145,7 @@ fn eco_is_off_until_its_route_is_designed_and_an_intent_is_the_publishs_own() {
         Err(PushEcoIntentError::UnknownSwap(eco_hash)),
         "no swap, no inbox slot"
     );
-    let call = submit_claim(&pic, canister, watcher(), &wire(&eco));
+    let call = submit_claim(&pic, canister, watcher(), &eco);
     answer(
         &pic,
         &the_read(&pic, eco_hash),
@@ -1186,7 +1293,7 @@ fn a_claim_whose_read_returns_after_a_halt_records_nothing() {
     let quote_hash = swap_id(&quote);
     let before = count(&pic, canister);
 
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
     let read = the_read(&pic, quote_hash);
     set_halted(&pic, canister, admin, true).expect("the operator halts");
     answer(
@@ -1206,7 +1313,190 @@ fn a_claim_whose_read_returns_after_a_halt_records_nothing() {
     );
 
     set_halted(&pic, canister, admin, false).expect("the operator lifts the halt");
-    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let call = submit_claim(&pic, canister, watcher(), &quote);
+    answer(
+        &pic,
+        &the_read(&pic, quote_hash),
+        HEAD,
+        vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+}
+
+/// The block a read asks the provider to start at.
+fn from_block(request: &CanisterHttpRequest) -> u64 {
+    let filter = params(request, 1);
+    let text = filter[0]["fromBlock"].as_str().expect("a fromBlock");
+    u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex block number")
+}
+
+/// A swap's economics are the quoter's: the rail, the destination, the expiry and the
+/// amounts all come from the quote, so a claim is admitted only for a quote the quoter
+/// registered. The watcher alone cannot author one and claim its own deposit. A controller
+/// stands in where a deposit has to be claimed by hand, which is the ops path for a quote
+/// the store no longer holds.
+#[test]
+fn a_claim_needs_a_quote_the_quoter_registered() {
+    let (pic, canister, admin) = setup();
+    let unregistered = quote(30);
+    let quote_hash = swap_id(&unregistered);
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&unregistered)),
+        Err(ClaimError::NotRegistered(quote_hash))
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), quote_hash),
+        None
+    );
+
+    // the quoter registers it, and the same claim goes through
+    registered(&pic, canister, &unregistered);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&unregistered));
+    answer(
+        &pic,
+        &the_read(&pic, quote_hash),
+        HEAD,
+        vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+
+    // and the operator's door: a quote the store never held, claimed by a controller
+    let by_hand = quote(31);
+    let by_hand_hash = swap_id(&by_hand);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    answer(
+        &pic,
+        &the_read(&pic, by_hand_hash),
+        HEAD,
+        vec![deposit_log(by_hand_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(by_hand_hash));
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The deposit that pays a quote is in no block before the quote was registered, so the
+/// claim's log read starts at the height the store kept and reads one window. A quote the
+/// store holds no height for is read from the lookback, which is a day of blocks on the
+/// chain whose blocks come fastest: a deposit made while the canister was halted is still
+/// in the range.
+#[test]
+fn the_read_starts_at_the_block_the_quote_was_registered_at() {
+    let (pic, canister, admin) = setup();
+    let quote = quote(32);
+    let quote_hash = swap_id(&quote);
+    registered(&pic, canister, &quote);
+    // the watcher's head moves on before the claim, and the read still starts where the
+    // quote was registered
+    push_chain_data(
+        &pic,
+        canister,
+        watcher(),
+        BASE,
+        &ChainData {
+            block: HEAD + 5_000,
+            base_fee_wei_per_gas: Nat::from(1_000_000_000_u64),
+            priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+    )
+    .expect("the watcher may push");
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let read = the_read(&pic, quote_hash);
+    assert_eq!(
+        from_block(&read),
+        HEAD,
+        "the height the quote was registered at, not a day of blocks back"
+    );
+    answer(
+        &pic,
+        &read,
+        HEAD + 5_000,
+        vec![deposit_log(quote_hash, HEAD + 1, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+
+    // a quote the store holds nothing for: the controller's door, read from the lookback
+    let by_hand = self::quote(33);
+    let by_hand_hash = swap_id(&by_hand);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let read = the_read(&pic, by_hand_hash);
+    assert_eq!(
+        from_block(&read),
+        HEAD + 5_000 + 1 - 10_000,
+        "the newest window of the day-wide lookback"
+    );
+    // the deposit is in that window, so the walk ends there; a walk that found nothing
+    // would read the older windows of the lookback, up to the cap the read refuses above
+    answer(
+        &pic,
+        &read,
+        HEAD + 5_000,
+        vec![deposit_log(
+            by_hand_hash,
+            HEAD + 4_000,
+            USDC,
+            USER,
+            AMOUNT.into(),
+        )],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(by_hand_hash));
+}
+
+/// A depth decides money on both sides, so a chain the deploy gave no depth decides
+/// nothing: the claim is refused by name before any outcall. And mainnet's depth is held
+/// to the floor a reorg there makes necessary, at the config's own door.
+#[test]
+fn a_chain_the_config_gives_no_depth_decides_nothing() {
+    use crate::client::settlement::{get_config_full, set_config};
+    use settlement_api::types::config::ConfigError;
+    use settlement_api::types::errors::SetConfigError;
+    let (pic, canister, admin) = setup();
+    let quote = quote(34);
+    let quote_hash = swap_id(&quote);
+    registered(&pic, canister, &quote);
+
+    let mut depthless = get_config_full(&pic, canister, admin).expect("the controller reads it");
+    depthless.confirmations = BTreeMap::new();
+    set_config(&pic, canister, admin, &depthless).expect("a config may list no depths");
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&quote)),
+        Err(ClaimError::Deposit(DepositError::NoDepth {
+            chain_id: BASE
+        }))
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), quote_hash),
+        None
+    );
+
+    let shallow = Config {
+        confirmations: BTreeMap::from([(1, 11)]),
+        ..depthless.clone()
+    };
+    assert_eq!(
+        set_config(&pic, canister, admin, &shallow),
+        Err(SetConfigError::InvalidConfig(
+            ConfigError::DepthTooShallow {
+                chain_id: 1,
+                depth: 11,
+                floor: 12,
+            }
+        )),
+        "mainnet is held to the floor at the door"
+    );
+    let deep_enough = Config {
+        confirmations: BTreeMap::from([(1, 12), (BASE, 1)]),
+        ..depthless
+    };
+    set_config(&pic, canister, admin, &deep_enough).expect("the floor itself is allowed");
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
     answer(
         &pic,
         &the_read(&pic, quote_hash),

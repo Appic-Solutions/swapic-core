@@ -14,7 +14,7 @@ mod tests;
 use crate::deposits::{
     self, DepositError, DepositRead, VaultError, VerifiedDeposit, Wanted, WantedAmount,
 };
-use crate::guards::{require_not_halted, require_quoter, require_quoter_or_watcher};
+use crate::guards::{require_not_halted, require_quoter, require_quoter_watcher_or_controller};
 use crate::state::{pending_quotes, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::sanctions::is_sanctioned;
@@ -24,19 +24,20 @@ use settlement_api::types::entry::PullPermit;
 use settlement_api::types::errors::GuardError;
 use std::time::Duration;
 use thiserror::Error;
-use types::abi::vault_pull_with_permit;
+use types::abi::vault_pull_with_permit2;
 use types::events::TxPurpose;
 use types::quote::QuoteError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::{ensure_rail_tokens, RailTokenError};
 use types::{
     Address, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight, InFlightKind, Quote,
-    QuoteHash, Rail, Timestamp, TxHash, UnixSeconds, Wei,
+    QuoteHash, Rail, Timestamp, TokenAmount, TxHash, UnixSeconds, Wei,
 };
 
-/// The gas a `pullWithPermit` needs: the permit's signature check and storage write, the
-/// transfer, and the vault's own bookkeeping, with room over the measured cost.
-const PULL_GAS_LIMIT: GasAmount = GasAmount::new(150_000);
+/// The gas a `pullWithPermit2` needs: Permit2's signature and witness check and the
+/// storage write that spends its nonce, the transfer, and the vault's own balance
+/// measurement and event, with room over the measured cost.
+const PULL_GAS_LIMIT: GasAmount = GasAmount::new(200_000);
 
 /// Why `claim_swap` created no swap. Nothing was written.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -61,6 +62,8 @@ pub enum ClaimError {
     InFlight(InFlight),
     #[error("the {rail} rail is not available on this deploy")]
     RailUnavailable { rail: Rail },
+    #[error("quote {0} is not one the quoter registered")]
+    NotRegistered(QuoteHash),
     #[error(transparent)]
     RailToken(#[from] RailTokenError),
     #[error(transparent)]
@@ -69,6 +72,60 @@ pub enum ClaimError {
     Deposit(#[from] DepositError),
     #[error(transparent)]
     Append(#[from] AppendError),
+}
+
+/// Why a permit the caller sent is not the one this quote's pull may use, with what it
+/// says and what the quote says beside it.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum PermitMismatch {
+    #[error("the signature's witness names quote {signed_for}, and not this one")]
+    Witness { signed_for: QuoteHash },
+    #[error("the permit is for token {permitted}, and the quote's is {wanted}")]
+    Token {
+        permitted: EvmAddress,
+        wanted: EvmAddress,
+    },
+    #[error("the permit is for {permitted}, and the quote's amount is {wanted}")]
+    Amount {
+        permitted: TokenAmount,
+        wanted: TokenAmount,
+    },
+    #[error("the signature names spender {signed_for}, and the vault is {vault}")]
+    Spender {
+        signed_for: EvmAddress,
+        vault: EvmAddress,
+    },
+    #[error("the permit's own deadline passed at {deadline}; it is {now}")]
+    Expired {
+        deadline: UnixSeconds,
+        now: UnixSeconds,
+    },
+}
+
+impl From<PermitMismatch> for settlement_api::types::entry::PermitMismatch {
+    fn from(mismatch: PermitMismatch) -> Self {
+        match mismatch {
+            PermitMismatch::Witness { signed_for } => Self::Witness {
+                signed_for: signed_for.into_bytes(),
+            },
+            PermitMismatch::Token { permitted, wanted } => Self::Token {
+                permitted: permitted.to_string(),
+                wanted: wanted.to_string(),
+            },
+            PermitMismatch::Amount { permitted, wanted } => Self::Amount {
+                permitted: permitted.into(),
+                wanted: wanted.into(),
+            },
+            PermitMismatch::Spender { signed_for, vault } => Self::Spender {
+                signed_for: signed_for.to_string(),
+                vault: vault.to_string(),
+            },
+            PermitMismatch::Expired { deadline, now } => Self::Expired {
+                deadline_s: deadline.get(),
+                now_s: now.get(),
+            },
+        }
+    }
 }
 
 /// Why `start_gasless_pull` sent nothing.
@@ -88,8 +145,8 @@ pub enum PullError {
         claim_until: UnixSeconds,
         now: UnixSeconds,
     },
-    #[error("the permit's {field} is not the quote's")]
-    PermitMismatch { field: &'static str },
+    #[error("the permit is not this quote's: {0}")]
+    PermitMismatch(#[from] PermitMismatch),
     #[error(transparent)]
     QuoteAddress(#[from] QuoteAddressError),
     #[error("the {party} is sanctioned")]
@@ -226,7 +283,7 @@ fn party(address: EvmAddress) -> Address {
 /// refusal anywhere stores nothing.
 pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     require_not_halted().map_err(ClaimError::Guard)?;
-    require_quoter_or_watcher().map_err(ClaimError::Guard)?;
+    require_quoter_watcher_or_controller().map_err(ClaimError::Guard)?;
     quote.validate()?;
     let quote_hash = quote.hash().expect("BUG: a validated quote has a preimage");
     if read_state(|state| state.store().swap(&quote_hash).is_some()) {
@@ -241,12 +298,19 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         return Err(ClaimError::Sanctioned { party });
     }
     let token = rail_source_token(&config, &quote)?;
+    // a swap's economics are the quoter's: only a quote the store holds is claimed, and a
+    // controller stands in where a deposit has to be claimed by hand
+    let pending = pending_quotes::get_pending(&quote_hash);
+    if pending.is_none() && !ic_cdk::api::is_controller(&ic_cdk::api::caller()) {
+        return Err(ClaimError::NotRegistered(quote_hash));
+    }
     inflight::take(quote_hash, InFlightKind::Claim, now).map_err(ClaimError::InFlight)?;
     let verified = deposits::verify_evm_deposit(&DepositRead {
         chain_id: quote.src_chain,
         quote_hash,
         wanted: wanted(&quote, token),
-        not_before: None,
+        // the deposit that pays a quote is not in a block before the quote was registered
+        not_before: pending.and_then(|entry| entry.registered_at),
     })
     .await;
     // the message chain ends here whatever the read said: the marker was for the outcall
@@ -270,18 +334,54 @@ pub fn ensure_gasless(quote: &Quote) -> Result<(), PullError> {
     Ok(())
 }
 
-/// The permit has to be the quote's own: the vault pulls the quote's token and amount, so
-/// a permit for anything else either fails on the chain or takes the wrong funds.
-pub fn ensure_permit_matches(
+/// The permit has to be this quote's own, in every field the user signed.
+///
+/// The witness is the quote hash, so a signature made for one quote frees nothing under
+/// another; the token and the amount are the quote's, so the vault pulls what the swap is
+/// for and no more; the spender is the vault the pull would call, which is the address
+/// Permit2 takes from its caller; and the deadline has not passed, so the pull is not gas
+/// spent on a signature Permit2 will refuse.
+pub fn ensure_permit_binds(
+    quote_hash: QuoteHash,
     quote: &Quote,
     token: EvmAddress,
+    vault: EvmAddress,
+    now: UnixSeconds,
     permit: &PullPermit,
 ) -> Result<(), PullError> {
-    if permit.token != token {
-        return Err(PullError::PermitMismatch { field: "token" });
+    if permit.witness != quote_hash {
+        return Err(PermitMismatch::Witness {
+            signed_for: permit.witness,
+        }
+        .into());
     }
-    if permit.amount != quote.amount_in {
-        return Err(PullError::PermitMismatch { field: "amount" });
+    if permit.permit.token != token {
+        return Err(PermitMismatch::Token {
+            permitted: permit.permit.token,
+            wanted: token,
+        }
+        .into());
+    }
+    if permit.permit.amount != quote.amount_in {
+        return Err(PermitMismatch::Amount {
+            permitted: permit.permit.amount,
+            wanted: quote.amount_in,
+        }
+        .into());
+    }
+    if permit.spender != vault {
+        return Err(PermitMismatch::Spender {
+            signed_for: permit.spender,
+            vault,
+        }
+        .into());
+    }
+    if now > permit.permit.deadline {
+        return Err(PermitMismatch::Expired {
+            deadline: permit.permit.deadline,
+            now,
+        }
+        .into());
     }
     Ok(())
 }
@@ -299,8 +399,7 @@ pub async fn start_gasless_pull(
 ) -> Result<TxHash, PullError> {
     require_not_halted().map_err(PullError::Guard)?;
     require_quoter().map_err(PullError::Guard)?;
-    let quote =
-        pending_quotes::get_pending(&quote_hash).ok_or(PullError::UnknownQuote(quote_hash))?;
+    let quote = pending_quotes::quote_of(&quote_hash).ok_or(PullError::UnknownQuote(quote_hash))?;
     ensure_gasless(&quote)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
@@ -312,14 +411,14 @@ pub async fn start_gasless_pull(
         });
     }
     let token = quote.evm_address(QuoteAddressField::SrcToken)?;
-    ensure_permit_matches(&quote, token, &permit)?;
+    let vault = deposits::vault_of(&config, quote.src_chain)?;
+    ensure_permit_binds(quote_hash, &quote, token, vault, now.as_secs(), &permit)?;
     if is_sanctioned(&party(permit.owner)) {
         return Err(PullError::Sanctioned { party: "owner" });
     }
     if let Some(party) = sanctioned_party(&quote) {
         return Err(PullError::Sanctioned { party });
     }
-    let vault = deposits::vault_of(&config, quote.src_chain)?;
     // a second pull while the first is still on its way would only revert on the vault,
     // which marks a quote per payer, and pay gas for it
     if let Some(out) = outbox::find(TxPurpose::GaslessPull(quote_hash)) {
@@ -328,19 +427,12 @@ pub async fn start_gasless_pull(
         });
     }
     inflight::take(quote_hash, InFlightKind::Pull, now).map_err(PullError::InFlight)?;
-    let PullPermit {
-        token,
-        owner,
-        amount,
-        deadline,
-        signature,
-    } = permit;
     let sent = tx::create_and_send(
         TxPurpose::GaslessPull(quote_hash),
         quote.src_chain,
         vault,
         Wei::ZERO,
-        vault_pull_with_permit(quote_hash, token, owner, amount, deadline, &signature),
+        vault_pull_with_permit2(quote_hash, permit.owner, &permit.permit, &permit.signature),
         PULL_GAS_LIMIT,
     )
     .await;
@@ -372,6 +464,7 @@ impl From<ClaimError> for settlement_api::types::entry::ClaimError {
             ClaimError::RailUnavailable { rail } => Self::RailUnavailable {
                 rail: rail.to_string(),
             },
+            ClaimError::NotRegistered(quote_hash) => Self::NotRegistered(quote_hash.into_bytes()),
             ClaimError::RailToken(error) => Self::RailToken(error.into()),
             ClaimError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
             ClaimError::Deposit(error) => Self::Deposit(error.into()),
@@ -395,9 +488,7 @@ impl From<PullError> for settlement_api::types::entry::PullError {
                 claim_until_s: claim_until.get(),
                 now_s: now.get(),
             },
-            PullError::PermitMismatch { field } => Self::PermitMismatch {
-                field: field.to_string(),
-            },
+            PullError::PermitMismatch(mismatch) => Self::PermitMismatch(mismatch.into()),
             PullError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
             PullError::Sanctioned { party } => Self::Sanctioned {
                 party: party.to_string(),
@@ -445,6 +536,9 @@ impl From<DepositError> for settlement_api::types::entry::DepositError {
                 anchor: anchor.get(),
                 windows,
                 cap,
+            },
+            DepositError::NoDepth(crate::tx::NoDepth { chain_id }) => Self::NoDepth {
+                chain_id: chain_id.get(),
             },
             DepositError::Rpc(error) => Self::Rpc(error.into()),
             DepositError::UnreadableHead => Self::UnreadableHead,

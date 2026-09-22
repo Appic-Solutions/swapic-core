@@ -6,7 +6,7 @@ use std::time::Duration;
 use thiserror::Error;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError, MAX_QUOTE_LIFETIME};
-use types::{ExpiryKey, Quote, QuoteHash, UnixSeconds};
+use types::{BlockNumber, ExpiryKey, PendingQuote, Quote, QuoteHash, UnixSeconds};
 
 /// How many quotes may sit in the pending store at once. The quoter is the only writer, so
 /// this is a backstop against a compromised or looping quoter filling stable memory, not a
@@ -17,7 +17,7 @@ thread_local! {
     // Pre-money: a registered quote is a promise the quoter made, not something that
     // happened to money, so it is not in the event log. It is in stable memory like
     // everything else, so an upgrade keeps it.
-    static PENDING: RefCell<StableBTreeMap<QuoteHash, Quote, Memory>> =
+    static PENDING: RefCell<StableBTreeMap<QuoteHash, PendingQuote, Memory>> =
         RefCell::new(StableBTreeMap::init(pending_quotes_memory()));
 
     // The pending store keyed by expiry, so an eviction pass walks the quotes that can be
@@ -93,9 +93,15 @@ pub fn init() {
     PENDING_EXPIRY.with(|_| ());
 }
 
-/// Records a quote against its hash. `now` is the caller's clock, so every rule here is
-/// testable without a canister.
-pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
+/// Records a quote against its hash, with the height the canister last heard of on the
+/// quote's source chain: the deposit that pays this quote cannot be in an earlier block,
+/// so a claim's log read starts there. `now` and `registered_at` are the caller's, so every
+/// rule here is testable without a canister.
+pub fn register(
+    quote: Quote,
+    now: UnixSeconds,
+    registered_at: Option<BlockNumber>,
+) -> Result<QuoteHash, RegisterError> {
     quote.validate()?;
     // a quote a refund could never be paid on is a swap that can only freeze with the
     // user's funds in the vault: the fold does not hold the payer, so the refund address
@@ -129,7 +135,13 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
         if pending.len() >= MAX_PENDING && !pending.contains_key(&hash) {
             return Err(RegisterError::StoreFull);
         }
-        pending.insert(hash, quote);
+        pending.insert(
+            hash,
+            PendingQuote {
+                quote,
+                registered_at,
+            },
+        );
         Ok(hash)
     })?;
     // the hash covers `expires_at`, so a re-registration carries the same key: the index
@@ -143,8 +155,15 @@ pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterErr
     Ok(hash)
 }
 
-pub fn get_pending(quote_hash: &QuoteHash) -> Option<Quote> {
+/// The entry the store holds for a quote: the quote the quoter registered and the height
+/// it was registered at.
+pub fn get_pending(quote_hash: &QuoteHash) -> Option<PendingQuote> {
     PENDING.with(|p| p.borrow().get(quote_hash))
+}
+
+/// The quote alone, for a caller with no use for the height.
+pub fn quote_of(quote_hash: &QuoteHash) -> Option<Quote> {
+    get_pending(quote_hash).map(|entry| entry.quote)
 }
 
 /// What one eviction pass did.
@@ -235,7 +254,7 @@ pub(crate) fn expiry_index() -> Vec<ExpiryKey> {
 
 /// Test-only: every pending quote, in swap id order.
 #[cfg(test)]
-pub(crate) fn all_pending() -> Vec<(QuoteHash, Quote)> {
+pub(crate) fn all_pending() -> Vec<(QuoteHash, PendingQuote)> {
     PENDING.with(|p| p.borrow().iter().collect())
 }
 

@@ -25,11 +25,11 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""max_batch_items":10,"decision_timeout_min":30,"rail_status_max_age_s":30,"#,
             r#""simulate_before_sign":false,"expiry_check_interval_s":60,"#,
             r#""replay_audit_interval_s":21600,"#,
-            r#""confirmations":{"1":1,"56":1,"137":6,"8453":1,"42161":1},"#,
+            r#""confirmations":{"1":12,"56":1,"137":6,"8453":1,"42161":1},"#,
             r#""rpc_urls":{"1":"***"},"vault_addresses":{"8453":"0xvault"},"#,
             r#""ecdsa_key_name":"key_1","max_refunds_per_sweep":50,"#,
             r#""max_evictions_per_sweep":200,"audit_chunk_events":1000,"#,
-            r#""deposit_lookback_blocks":10000,"cctp_domains":{},"usdc_addresses":{},"#,
+            r#""deposit_lookback_blocks":345600,"cctp_domains":{},"usdc_addresses":{},"#,
             r#""token_messenger":null,"message_transmitter":null,"eco_portal":null,"#,
             r#""eco_enabled":false}"#
         )

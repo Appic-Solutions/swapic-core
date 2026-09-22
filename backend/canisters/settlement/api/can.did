@@ -51,6 +51,9 @@ type Choice = variant { Requote; Refund };
 type ClaimError = variant {
   // `party` is `"dst_address"`, `"refund_address"` or `"from"` (the payer).
   Sanctioned : record { party : text };
+  // No quote with this id is in the pending store: the quoter never registered it, or
+  // it was evicted. A controller may still claim such a quote by hand.
+  NotRegistered : blob;
   // The quote's tokens are not its rail's: refused before any outcall.
   RailToken : RailTokenError;
   // Past the quote's expiry plus the permit window, nobody can pay the quote and no
@@ -137,6 +140,10 @@ type ConfigError = variant {
     chain_id : opt nat64;
     reason : EvmAddressError;
   };
+  // The depth configured for `chain_id` is below the floor a reorg on that chain makes
+  // necessary, so a deposit or a receipt there could be taken as final and then leave
+  // the chain.
+  DepthTooShallow : record { floor : nat64; chain_id : nat64; depth : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
   // In milliseconds, so the one knob set in milliseconds is reported as it was set.
@@ -169,6 +176,9 @@ type DepositError = variant {
   NotFound : record { quote_hash : blob };
   // The deposit is in a block the head has not reached by the configured depth.
   NotConfirmed : record { latest : nat64; block : nat64; depth : nat64 };
+  // The config lists no confirmation depth for the chain, so nothing on it is deep
+  // enough to decide money on.
+  NoDepth : record { chain_id : nat64 };
   // The watcher has pushed nothing young enough to anchor the read on.
   StaleChainData : record { chain_id : nat64 };
   Vault : VaultError;
@@ -323,6 +333,9 @@ type GuardError = variant {
   RolesNotSet;
   CallerNotRole : Role;
   CallerNotWatcherOrController;
+  // Neither service principal, and not a controller either: the claim's door, which an
+  // operator may open by hand.
+  CallerNotQuoterWatcherOrController;
   CallerNotQuoterOrWatcher;
   Halted;
   RoleNotSet : Role;
@@ -371,14 +384,62 @@ type MessageMismatch = variant {
 };
 // How a swap's latest attempt ended.
 type Outcome = variant { Failed; Confirmed };
+// A Permit2 `PermitTransferFrom` a gasless user signed for the vault, witnessed by the
+// quote it pays for.
+// 
+// `quote_hash` is that witness and `spender` is the address the signature names as the
+// one who may spend: neither travels in the calldata (the vault derives the witness from
+// the quote it is called with, and Permit2 takes the spender from its caller), so both
+// are here to be checked against the quote and the vault before anything is signed.
+type Permit2Sig = record {
+  token : text;
+  // the signature itself, at most [`MAX_PERMIT2_SIGNATURE_BYTES`] bytes
+  signature : blob;
+  deadline_s : nat64;
+  owner : text;
+  // the quote hash the signature's witness names
+  quote_hash : blob;
+  // Permit2's own nonce, a number the signer picks and Permit2 spends once
+  nonce : nat;
+  amount : nat;
+  // the spender the signature names, which has to be the vault
+  spender : text;
+};
 // Why a permit is not one the vault can use, naming the field.
 type PermitError = variant {
+  // The pull carried an EIP-2612 permit, which this canister never sends: the vault's
+  // 2612 door transfers whether or not the permit verified, and a 2612 signature names
+  // no quote.
+  NotAPermit2Permit;
   NotAnAddress : record { field : text; reason : EvmAddressError };
+  SignatureTooLong : record { cap : nat64; len : nat64 };
+  NonceTooLarge;
   AmountTooLarge;
 };
-// An EIP-2612 permit a user signed for the vault, with what it permits: the token and the
-// amount of the quote, from the user's own account, until `deadline_s`. `r` and `s` are
-// the signature words and `v` its recovery byte, 27 or 28.
+// Why a permit the caller sent is not the one this quote's pull may use, with what it
+// says and what the quote says beside it.
+type PermitMismatch = variant {
+  Amount : record { permitted : nat; wanted : nat };
+  // The signature's witness names another quote, so the funds it frees are not this
+  // swap's.
+  Witness : record { signed_for : blob };
+  Token : record { permitted : text; wanted : text };
+  // The signature names another spender than the vault the pull would call, so Permit2
+  // would refuse it on the chain.
+  Spender : record { vault : text; signed_for : text };
+  // The permit's own deadline has passed.
+  Expired : record { deadline_s : nat64; now_s : nat64 };
+};
+// An EIP-2612 permit a user signed for a token contract, with what it permits: the token
+// and the amount of the quote, from the user's own account, until `deadline_s`. `r` and
+// `s` are the signature words and `v` its recovery byte, 27 or 28.
+// 
+// NOT A SHAPE THIS CANISTER PULLS WITH, and a pull carrying one is refused: the vault's
+// 2612 door runs `safeTransferFrom` whether or not the permit verified, so the signature
+// decides nothing and any standing allowance is enough to move a user's funds, and a 2612
+// permit names `(owner, spender, value, deadline)` and never a quote, so one signed for a
+// quote can be spent under another. It stays on the wire so a caller that sends one is
+// told why, by name.
 type PermitSig = record {
   r : blob;
   s : blob;
@@ -405,8 +466,8 @@ type PullError = variant {
     expires_at_s : nat64;
   };
   Guard : GuardError;
-  // The permit's `field` (`"token"` or `"amount"`) is not the quote's.
-  PermitMismatch : record { field : text };
+  // The permit is not one this quote's pull may use.
+  PermitMismatch : PermitMismatch;
   // The quote is not in the pending store: never registered, or evicted.
   UnknownQuote : blob;
   Permit : PermitError;
@@ -419,6 +480,9 @@ type PullError = variant {
   // The quote's user pays their own gas.
   NotGasless;
 };
+// What a gasless pull may be asked with. Only the Permit2 permit is a door this canister
+// uses; see [`PermitSig`] for why the other one is refused.
+type PullRequest = variant { Permit2 : Permit2Sig; Eip2612 : PermitSig };
 // Why `push_attestation` stored nothing.
 type PushAttestationError = variant {
   // The burn the push names is not the transaction the swap's burn confirmed as.
@@ -886,12 +950,15 @@ service : (InitArg) -> {
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
   set_sanctioned : (vec text, vec text) -> (Result_13);
-  // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the permit
-  // they signed, for a quote that is pending, gasless, still payable, and whose token and
-  // amount the permit names, and answers the hash of the transaction that does it. The pull
+  // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the
+  // Permit2 permit they signed, for a quote that is pending, gasless and still payable, and
+  // answers the hash of the transaction that does it. The permit has to be witnessed by
+  // this quote and name its token, its amount and the vault as the spender; an EIP-2612
+  // permit is refused, because the vault's 2612 door transfers on a standing allowance
+  // whether or not the permit verified and a 2612 signature names no quote. The pull
   // creates no swap: the deposit it makes is what `claim_swap` then verifies. Halted, the
   // canister pulls nothing.
-  start_gasless_pull : (blob, PermitSig) -> (Result_14);
+  start_gasless_pull : (blob, PullRequest) -> (Result_14);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

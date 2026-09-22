@@ -250,7 +250,8 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let domain = types::Config::try_from(wire.clone()).unwrap();
     assert_eq!(domain.deposit_lookback_blocks.get(), 4_321);
     assert_eq!(Config::unredacted(domain), wire);
-    assert_eq!(Config::default().deposit_lookback_blocks, 10_000);
+    // a day of the chain whose blocks come fastest
+    assert_eq!(Config::default().deposit_lookback_blocks, 345_600);
 
     let zero = types::Config::try_from(Config {
         deposit_lookback_blocks: 0,

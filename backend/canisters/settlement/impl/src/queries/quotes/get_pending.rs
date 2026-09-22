@@ -11,5 +11,5 @@ use types::QuoteHash;
 #[query]
 pub fn get_pending(quote_hash: Hash32) -> Result<Option<Quote>, GuardError> {
     guards::require_quoter_or_watcher()?;
-    Ok(pending_quotes::get_pending(&QuoteHash::new(quote_hash)).map(Quote::from))
+    Ok(pending_quotes::quote_of(&QuoteHash::new(quote_hash)).map(Quote::from))
 }

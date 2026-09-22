@@ -722,3 +722,20 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
         "the fresh number's own signature is still welcome"
     );
 }
+
+/// A depth decides money on both sides, so a chain the deploy listed no depth for decides
+/// nothing: the read that would close an attempt or claim a deposit is refused by name
+/// rather than run at a depth nobody chose.
+#[test]
+fn a_chain_with_no_depth_configured_decides_no_money() {
+    let config = types::Config::default();
+    assert_eq!(
+        confirmations(&config, ChainId::ETHEREUM),
+        Ok(types::config::MIN_ETHEREUM_CONFIRMATIONS)
+    );
+    let unlisted = ChainId::new(59_144);
+    assert_eq!(
+        confirmations(&config, unlisted),
+        Err(NoDepth { chain_id: unlisted })
+    );
+}

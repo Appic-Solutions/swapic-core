@@ -20,13 +20,17 @@ fn defaults_match_spec() {
     assert!(!c.simulate_before_sign);
     assert_eq!(c.expiry_check_interval, Duration::from_secs(60));
     assert_eq!(c.replay_audit_interval, Duration::from_secs(21_600));
+    // Ethereum's depth is the floor a reorg on it makes necessary, not the spec's one
     assert_eq!(
         c.confirmations,
         BTreeMap::from(
-            [(1, 1), (8453, 1), (56, 1), (137, 6), (42161, 1)]
+            [(1, 12), (8453, 1), (56, 1), (137, 6), (42161, 1)]
                 .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
         )
     );
+    // a day of the chain whose blocks come fastest, so a deposit made while the canister
+    // was halted is still in the range a claim reads
+    assert_eq!(c.deposit_lookback_blocks, DepositLookback::new(345_600));
     assert_eq!(c.max_refunds_per_sweep, RefundsPerSweep::new(50));
     assert_eq!(c.max_evictions_per_sweep, EvictionsPerSweep::new(200));
     assert_eq!(c.audit_chunk_events, AuditChunk::new(1_000));
@@ -120,6 +124,40 @@ fn validate_rejects_an_empty_ecdsa_key_name() {
         ..Config::default()
     };
     assert_eq!(config.validate(), Err(ConfigError::EmptyEcdsaKeyName));
+}
+
+/// A depth decides money on both sides, and Ethereum mainnet reorgs routinely: a config
+/// that would claim a deposit or close a burn there at less than the floor is refused,
+/// whatever else it holds. Every other chain is the deploy's own call.
+#[test]
+fn validate_rejects_a_mainnet_depth_below_the_floor() {
+    for depth in [1, MIN_ETHEREUM_CONFIRMATIONS.get() - 1] {
+        let shallow = Config {
+            confirmations: BTreeMap::from([(ChainId::ETHEREUM, BlockDepth::new(depth))]),
+            ..Config::default()
+        };
+        assert_eq!(
+            shallow.validate(),
+            Err(ConfigError::DepthTooShallow {
+                chain: ChainId::ETHEREUM,
+                depth: BlockDepth::new(depth),
+                floor: MIN_ETHEREUM_CONFIRMATIONS,
+            })
+        );
+    }
+    let at_the_floor = Config {
+        confirmations: BTreeMap::from([(ChainId::ETHEREUM, MIN_ETHEREUM_CONFIRMATIONS)]),
+        ..Config::default()
+    };
+    assert_eq!(at_the_floor.validate(), Ok(()));
+    // another chain's depth is the deploy's to size, and a chain with no depth at all is
+    // refused where money is decided, not here
+    let shallow_elsewhere = Config {
+        confirmations: BTreeMap::from([(ChainId::ARBITRUM, BlockDepth::new(1))]),
+        ..Config::default()
+    };
+    assert_eq!(shallow_elsewhere.validate(), Ok(()));
+    assert_eq!(Config::default().validate(), Ok(()));
 }
 
 #[test]
@@ -508,9 +546,11 @@ fn validate_rejects_a_batch_size_outside_its_range() {
 /// default absent from storage so the stored config's bytes do not move.
 #[test]
 fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
+    // a day of the chain whose blocks come fastest, which is a day on every slower chain
+    // many times over
     assert_eq!(
         Config::default().deposit_lookback_blocks,
-        DepositLookback::new(10_000)
+        DepositLookback::new(345_600)
     );
     let lookback = |blocks| Config {
         deposit_lookback_blocks: DepositLookback::new(blocks),

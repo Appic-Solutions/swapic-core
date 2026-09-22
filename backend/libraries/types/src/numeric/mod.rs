@@ -39,6 +39,12 @@ pub enum GasTag {}
 /// Units of gas: a limit, or what a transaction used.
 pub type GasAmount = CheckedAmountOf<GasTag>;
 
+pub enum Permit2NonceTag {}
+/// A Permit2 nonce: a 256-bit number the signer picks, which Permit2 spends once. It
+/// orders nothing, so it is never incremented here, only carried from the signature to the
+/// calldata.
+pub type Permit2Nonce = CheckedAmountOf<Permit2NonceTag>;
+
 impl WeiPerGas {
     /// What `gas` units of gas cost at this price. `None` above 256 bits, so a price and a
     /// limit that cannot both be paid are caught before a transaction is built.

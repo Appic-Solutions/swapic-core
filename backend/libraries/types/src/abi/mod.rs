@@ -13,7 +13,7 @@ mod tests;
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::hash::QuoteHash;
-use crate::numeric::{TokenAmount, UnixSeconds, Wei};
+use crate::numeric::{Permit2Nonce, TokenAmount, UnixSeconds, Wei};
 use alloy_primitives::{keccak256, Address, FixedBytes, I256, U256};
 use alloy_sol_types::{sol, SolCall, SolEvent};
 
@@ -53,6 +53,24 @@ sol! {
         uint8 v,
         bytes32 r,
         bytes32 s
+    );
+    /// What a Permit2 signature permits: one token, up to one amount.
+    struct TokenPermissions {
+        address token;
+        uint256 amount;
+    }
+    /// The Permit2 permit the vault hands to Permit2, exactly as the user signed it. The
+    /// spender is not in it: Permit2 takes the caller, which is the vault.
+    struct PermitTransferFrom {
+        TokenPermissions permitted;
+        uint256 nonce;
+        uint256 deadline;
+    }
+    function pullWithPermit2(
+        bytes32 quoteHash,
+        address owner,
+        PermitTransferFrom permit,
+        bytes signature
     );
     function depositForBurn(
         uint256 amount,
@@ -113,6 +131,19 @@ pub struct VaultCall {
 pub struct VaultDelta {
     pub token: EvmAddress,
     pub min_change: i128,
+}
+
+/// A Permit2 `PermitTransferFrom` as the user signed it: one token, one amount, the nonce
+/// Permit2 spends and the deadline it holds the signature to. The witness the signature
+/// also commits to is the quote hash, which the vault computes from the hash it is called
+/// with, and the spender is the vault, which Permit2 takes from its caller: neither is in
+/// this struct, because neither is in the calldata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Permit2Permit {
+    pub token: EvmAddress,
+    pub amount: TokenAmount,
+    pub nonce: Permit2Nonce,
+    pub deadline: UnixSeconds,
 }
 
 /// An EIP-2612 permit signature, as the token contract takes it.
@@ -275,6 +306,13 @@ pub fn vault_refund(
 }
 
 /// `pullWithPermit(bytes32,address,address,uint256,uint256,uint8,bytes32,bytes32)`.
+///
+/// NOT A DOOR THIS CANISTER USES. The vault's 2612 path wraps the permit in `try/catch`
+/// and transfers on whatever allowance the owner already gave the vault, so the signature
+/// decides nothing, and a 2612 permit names `(owner, spender, value, deadline)` and never
+/// a quote, so one signed for a quote can be spent under another. The canister pulls
+/// through [`vault_pull_with_permit2`] only. The encoder stays because the test below pins
+/// the vault's ABI, and for a caller outside this canister.
 pub fn vault_pull_with_permit(
     quote_hash: QuoteHash,
     token: EvmAddress,
@@ -292,6 +330,32 @@ pub fn vault_pull_with_permit(
         v: permit.v,
         r: word(permit.r),
         s: word(permit.s),
+    }
+    .abi_encode()
+}
+
+/// `pullWithPermit2(bytes32,address,((address,uint256),uint256,uint256),bytes)`: the pull
+/// this canister sends. The vault passes `quote_hash` to Permit2 as the witness the user's
+/// signature commits to, and Permit2 verifies the signature itself, with no `try/catch`,
+/// so a permit signed for one quote moves nothing under another.
+pub fn vault_pull_with_permit2(
+    quote_hash: QuoteHash,
+    owner: EvmAddress,
+    permit: &Permit2Permit,
+    signature: &[u8],
+) -> Vec<u8> {
+    pullWithPermit2Call {
+        quoteHash: word(quote_hash.into_bytes()),
+        owner: address(owner),
+        permit: PermitTransferFrom {
+            permitted: TokenPermissions {
+                token: address(permit.token),
+                amount: amount(permit.amount),
+            },
+            nonce: amount(permit.nonce),
+            deadline: U256::from(permit.deadline.get()),
+        },
+        signature: signature.to_vec().into(),
     }
     .abi_encode()
 }
@@ -401,6 +465,25 @@ pub fn decode_vault_refund(
         evm_address(call.token),
         evm_address(call.to),
         checked(call.amount),
+    ))
+}
+
+/// The Permit2 pull `data` encodes, if it is one: the quote, the owner, the permit they
+/// signed and the signature.
+pub fn decode_vault_pull_with_permit2(
+    data: &[u8],
+) -> Option<(QuoteHash, EvmAddress, Permit2Permit, Vec<u8>)> {
+    let call = pullWithPermit2Call::abi_decode(data).ok()?;
+    Some((
+        QuoteHash::new(call.quoteHash.0),
+        evm_address(call.owner),
+        Permit2Permit {
+            token: evm_address(call.permit.permitted.token),
+            amount: checked(call.permit.permitted.amount),
+            nonce: checked(call.permit.nonce),
+            deadline: UnixSeconds::new(u64::try_from(call.permit.deadline).ok()?),
+        },
+        call.signature.to_vec(),
     ))
 }
 

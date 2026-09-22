@@ -414,13 +414,13 @@ pub fn claim_swap(
     )
 }
 
-/// Positional, as the endpoint takes them: `(quote_hash, permit)`.
+/// Positional, as the endpoint takes them: `(quote_hash, request)`.
 pub fn start_gasless_pull(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
     quote_hash: settlement_api::types::events::Hash32,
-    permit: &settlement_api::types::entry::PermitSig,
+    permit: &settlement_api::types::entry::PullRequest,
 ) -> start_gasless_pull::Response {
     update(
         pic,

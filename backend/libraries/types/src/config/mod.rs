@@ -56,11 +56,23 @@ pub type EvictionsPerSweep = Cap<200, 5_000>;
 pub type AuditChunk = Cap<1_000, 10_000>;
 
 /// How many blocks back from a chain's head the deposit read looks for a user's deposit.
-/// Ten thousand is what most providers serve in one `eth_getLogs` range, and it is forty
-/// minutes on the fastest chain this canister reads (Arbitrum, four blocks a second) and
-/// more than a day on Ethereum: a claim that lags its deposit by longer is an operator's
-/// call, made by raising the knob. The ceiling is a range no provider serves in one call.
-pub type DepositLookback = Cap<10_000, 1_000_000>;
+///
+/// A quote is claimable for its lifetime (a day) plus the permit window, so the deposit a
+/// claim looks for can be a day old: a canister halted for an hour, a quoter outage, or a
+/// user who deposits late must not put the funds out of reach. The default is therefore a
+/// day of the chain whose blocks come fastest among the configured ones (Arbitrum, four
+/// blocks a second), which is the widest a day is in blocks and covers a day on every
+/// slower chain many times over. It is read in windows of [`LOGS_WINDOW_BLOCKS`] and a
+/// claim for a quote the store still holds starts at that quote's registration block
+/// instead, so the width costs an outcall only where the entry is gone. The ceiling is a
+/// range no walk of the windows the read caps itself at can cover.
+pub type DepositLookback = Cap<345_600, 1_000_000>;
+
+/// The least deep a receipt or a deposit on Ethereum mainnet may be taken as final. A
+/// one-block reorg there is routine, and a depth below this would claim a deposit that
+/// then leaves the chain, or refund a burn that then mines. The other chains' depths are
+/// the deploy's to size; this one is refused at the door.
+pub const MIN_ETHEREUM_CONFIRMATIONS: BlockDepth = BlockDepth::new(12);
 
 impl<const DEFAULT: u32, const CEILING: u32> Cap<DEFAULT, CEILING> {
     /// What a config that never set the knob reads as.
@@ -364,6 +376,15 @@ pub enum ConfigError {
         cap: u32,
         ceiling: u32,
     },
+    #[error(
+        "confirmations[{chain}] is {depth}, below the floor of {floor} a reorg on that \
+         chain makes necessary"
+    )]
+    DepthTooShallow {
+        chain: ChainId,
+        depth: BlockDepth,
+        floor: BlockDepth,
+    },
     #[error("{field} does not fit in 256 bits")]
     AmountTooLarge { field: &'static str },
     #[error("{field} does not fit in a duration")]
@@ -415,7 +436,9 @@ impl Default for Config {
             expiry_check_interval: Duration::from_secs(60),
             replay_audit_interval: Duration::from_secs(21_600),
             confirmations: BTreeMap::from([
-                (ChainId::ETHEREUM, BlockDepth::new(1)),
+                // the one depth the canister holds a deploy to, because a shallow one on
+                // mainnet is a reorg away from a burn with no deposit behind it
+                (ChainId::ETHEREUM, MIN_ETHEREUM_CONFIRMATIONS),
                 (ChainId::BASE, BlockDepth::new(1)),
                 (ChainId::BSC, BlockDepth::new(1)),
                 (ChainId::POLYGON, BlockDepth::new(6)),
@@ -455,6 +478,20 @@ impl Config {
         }
         if self.ecdsa_key_name.is_empty() {
             return Err(ConfigError::EmptyEcdsaKeyName);
+        }
+        // a chain listed with no depth at all is refused where money is decided, so the
+        // one depth checked here is the one whose shallow value is a mistake on any deploy
+        if let Some(depth) = self
+            .confirmations
+            .get(&ChainId::ETHEREUM)
+            .copied()
+            .filter(|depth| *depth < MIN_ETHEREUM_CONFIRMATIONS)
+        {
+            return Err(ConfigError::DepthTooShallow {
+                chain: ChainId::ETHEREUM,
+                depth,
+                floor: MIN_ETHEREUM_CONFIRMATIONS,
+            });
         }
         for (field, interval) in [
             ("expiry_check_interval_s", self.expiry_check_interval),

@@ -95,11 +95,14 @@ const RECEIPTS_PER_CALL: usize = 32;
 /// JSON-RPC error object carrying a provider's message.
 const MAX_SEND_BYTES_PER_ITEM: u64 = 1_024;
 
-/// How deep a receipt must be on a chain the config does not list a depth for. One is the
-/// safe floor rather than a free pass: `is_confirmed` counts the receipt's own block as the
-/// first confirmation, so a depth of one still refuses a receipt from a block the head has
-/// not reached, which is a provider answering from two different moments of the chain.
-const DEFAULT_CONFIRMATIONS: BlockDepth = BlockDepth::new(1);
+/// Why a decision on a chain cannot be made: the deploy listed no depth for it. A depth
+/// nobody chose is not one to claim a deposit or close an attempt at, so the chain decides
+/// nothing until the config names its depth.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("chain {chain_id} has no confirmation depth configured")]
+pub struct NoDepth {
+    pub chain_id: ChainId,
+}
 
 /// Why no transaction was created, or why a pass could not finish one.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -541,6 +544,9 @@ pub struct ReceiptPass {
     pub reread: usize,
     /// entries whose own answer did not come back either, left to the rebroadcast rule
     pub unread: usize,
+    /// entries on a chain the config lists no depth for: nothing about them is decided
+    /// until a deploy names that chain's depth, and they stay in the outbox meanwhile
+    pub no_depth: usize,
 }
 
 /// Reads what happened to every transaction still out, one batch per chain: the head
@@ -568,7 +574,12 @@ pub async fn check_open() -> ReceiptPass {
     let mut pass = ReceiptPass::default();
     for chain_id in outbox::chains() {
         let open = outbox::by_status(chain_id, OutboxStatus::Sent, limit);
-        let depth = confirmations(&config, chain_id);
+        // a chain with no depth configured closes nothing: the entries wait in the outbox,
+        // rebroadcast by their own clock, until a deploy names the depth to judge them at
+        let Ok(depth) = confirmations(&config, chain_id) else {
+            pass.no_depth += open.len();
+            continue;
+        };
         // split so the answer fits one outcall: the head comes with every chunk, so each
         // chunk's receipts are read against a height from the same answer
         for chunk in receipt_chunks(open) {
@@ -758,14 +769,19 @@ fn send_cap(sends: usize) -> u64 {
 /// How deep a receipt on `chain_id` must be before it closes an attempt, and how deep a
 /// deposit must be before a swap is claimed on it: the one definition of a chain's depth.
 ///
-/// A chain the config forgot confirms at [`DEFAULT_CONFIRMATIONS`], which is the safe floor
-/// and not a free pass: a receipt still has to be in a block the head has reached.
-pub(crate) fn confirmations(config: &types::Config, chain_id: ChainId) -> BlockDepth {
+/// A chain the config lists no depth for decides nothing. The alternative, a default of
+/// one, is a depth nobody chose deciding money on a chain whose reorgs nobody sized, which
+/// is how a deposit is claimed and then leaves the chain; a deploy that adds a chain adds
+/// its depth with it.
+pub(crate) fn confirmations(
+    config: &types::Config,
+    chain_id: ChainId,
+) -> Result<BlockDepth, NoDepth> {
     config
         .confirmations
         .get(&chain_id)
         .copied()
-        .unwrap_or(DEFAULT_CONFIRMATIONS)
+        .ok_or(NoDepth { chain_id })
 }
 
 /// Drops the entry, appending the line that closes its attempt when it has one, and

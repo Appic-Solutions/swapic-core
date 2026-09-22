@@ -13,7 +13,7 @@ mod tests;
 
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BLOCK_NUMBER_BYTES};
 use crate::storage::{chain_data, config};
-use crate::tx::confirmations;
+use crate::tx::{confirmations, NoDepth};
 use serde_json::{json, Value};
 use thiserror::Error;
 pub use types::abi::deposited_topic;
@@ -82,6 +82,8 @@ pub enum DepositError {
         windows: u64,
         cap: u64,
     },
+    #[error(transparent)]
+    NoDepth(#[from] NoDepth),
     #[error(transparent)]
     Rpc(#[from] RpcError),
     #[error("the head block did not come back as a number")]
@@ -359,7 +361,7 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
         .chain([range_from(anchor, config.deposit_lookback_blocks)])
         .max()
         .expect("BUG: the lookback is always a start");
-    let depth = confirmations(&config, chain_id);
+    let depth = confirmations(&config, chain_id)?;
     let mut seen = 0;
     for window in windows(from, anchor)? {
         let calls = read_calls(vault, quote_hash, &window);

@@ -61,6 +61,21 @@ fn every_selector_is_the_one_cast_computes() {
                 },
             ),
         ),
+        // cast sig "pullWithPermit2(bytes32,address,((address,uint256),uint256,uint256),bytes)"
+        (
+            "917c46e3",
+            vault_pull_with_permit2(
+                swap_ref(),
+                address(USER),
+                &Permit2Permit {
+                    token: address(USDC_BASE),
+                    amount: TokenAmount::from(1_u8),
+                    nonce: Permit2Nonce::from(2_u8),
+                    deadline: UnixSeconds::new(1),
+                },
+                &[0x04],
+            ),
+        ),
         // cast sig "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)"
         (
             "8e0250ee",
@@ -460,4 +475,71 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     assert_eq!(decode_vault_execute(&payout), None);
     assert_eq!(decode_cctp_deposit_for_burn(&execute), None);
     assert_eq!(decode_vault_execute(&[]), None);
+}
+
+/// ```text
+/// cast calldata "pullWithPermit2(bytes32,address,((address,uint256),uint256,uint256),bytes)" \
+///   0x1111..11 0x7551A66653f9a20979ed81835a0b7008EC83401b \
+///   "((0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,25000000),7,1800000000)" \
+///   0x2222..22 3333..33 1c
+/// ```
+#[test]
+fn a_permit2_pull_encodes_as_cast_encodes_it() {
+    let mut signature = Vec::new();
+    signature.extend_from_slice(&word(0x22));
+    signature.extend_from_slice(&word(0x33));
+    signature.push(0x1c);
+    let encoded = vault_pull_with_permit2(
+        swap_ref(),
+        address(USER),
+        &Permit2Permit {
+            token: address(USDC_BASE),
+            amount: TokenAmount::from(25_000_000_u32),
+            nonce: Permit2Nonce::from(7_u8),
+            deadline: UnixSeconds::new(1_800_000_000),
+        },
+        &signature,
+    );
+    assert_eq!(
+        hex::encode(&encoded),
+        concat!(
+            "917c46e3",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "0000000000000000000000007551a66653f9a20979ed81835a0b7008ec83401b",
+            "000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "00000000000000000000000000000000000000000000000000000000017d7840",
+            "0000000000000000000000000000000000000000000000000000000000000007",
+            "000000000000000000000000000000000000000000000000000000006b49d200",
+            "00000000000000000000000000000000000000000000000000000000000000e0",
+            "0000000000000000000000000000000000000000000000000000000000000041",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            "1c00000000000000000000000000000000000000000000000000000000000000",
+        )
+    );
+    // and the decoder reads the call back into the pull it makes
+    assert_eq!(
+        decode_vault_pull_with_permit2(&encoded),
+        Some((
+            swap_ref(),
+            address(USER),
+            Permit2Permit {
+                token: address(USDC_BASE),
+                amount: TokenAmount::from(25_000_000_u32),
+                nonce: Permit2Nonce::from(7_u8),
+                deadline: UnixSeconds::new(1_800_000_000),
+            },
+            signature,
+        ))
+    );
+    assert_eq!(
+        decode_vault_pull_with_permit2(&vault_payout(
+            swap_ref(),
+            address(USDC_BASE),
+            address(USER),
+            TokenAmount::from(1_u8),
+        )),
+        None,
+        "another call is not a pull"
+    );
 }

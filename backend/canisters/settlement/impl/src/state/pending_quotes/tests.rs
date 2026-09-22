@@ -49,6 +49,13 @@ fn pending_quote(nonce: u64) -> Quote {
     }
 }
 
+/// The store's `register` for a test with no interest in the height the quote was
+/// registered at: the height is the claim's business, and the test below that cares about
+/// it calls the store's own function.
+fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
+    super::register(quote, now, None)
+}
+
 fn seconds_after(q: &Quote, secs: u64) -> UnixSeconds {
     UnixSeconds::new(q.expires_at.get() + secs)
 }
@@ -193,12 +200,51 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
     let q = pending_quote(9_003);
     let h = register(q.clone(), just_before_expiry(&q)).expect("a live quote registers");
     assert_eq!(h, q.hash().unwrap());
-    assert_eq!(get_pending(&h), Some(q.clone()));
-    // the store is stable and keeps a bare `Quote`, so an upgrade loses nothing and a repeat
-    // is the quoter retrying: the same quote twice overwrites itself, and is not an error
+    assert_eq!(quote_of(&h), Some(q.clone()));
+    // the store is stable, so an upgrade loses nothing and a repeat is the quoter retrying:
+    // the same quote twice overwrites itself, and is not an error
     assert_eq!(register(q.clone(), just_before_expiry(&q)), Ok(h));
-    assert_eq!(get_pending(&h), Some(q));
-    assert_eq!(get_pending(&QuoteHash::new([0; 32])), None);
+    assert_eq!(quote_of(&h), Some(q));
+    assert_eq!(quote_of(&QuoteHash::new([0; 32])), None);
+}
+
+/// The deposit that pays a quote cannot be in a block before the quote was registered, so
+/// the store keeps the height the canister knew then and a claim starts its log read
+/// there. An entry registered with no reading to go by keeps none, and the claim falls
+/// back to the lookback.
+#[test]
+fn register_keeps_the_height_the_quote_was_registered_at() {
+    clear();
+    let q = pending_quote(9_020);
+    let at = types::BlockNumber::new(19_000_123);
+    let h = super::register(q.clone(), just_before_expiry(&q), Some(at))
+        .expect("a live quote registers");
+    assert_eq!(
+        get_pending(&h),
+        Some(types::PendingQuote {
+            quote: q.clone(),
+            registered_at: Some(at),
+        })
+    );
+    // the quoter re-registering after a reorg-free wait moves the height forward, and the
+    // quote is the same quote: the hash covers every field of it
+    let later = types::BlockNumber::new(19_000_500);
+    assert_eq!(
+        super::register(q.clone(), just_before_expiry(&q), Some(later)),
+        Ok(h)
+    );
+    assert_eq!(get_pending(&h).unwrap().registered_at, Some(later));
+
+    let blind = pending_quote(9_021);
+    let h = register(blind.clone(), just_before_expiry(&blind)).expect("a live quote registers");
+    assert_eq!(
+        get_pending(&h),
+        Some(types::PendingQuote {
+            quote: blind,
+            registered_at: None,
+        }),
+        "no reading, no height, and the claim reads the whole lookback"
+    );
 }
 
 /// The boundary the expiry check draws: `expires_at` is the last second the quote is
@@ -262,8 +308,8 @@ fn expiring(nonce: u64, expires_at: u64) -> Quote {
 fn scanned_index() -> Vec<ExpiryKey> {
     let mut keys: Vec<ExpiryKey> = all_pending()
         .into_iter()
-        .map(|(quote_hash, quote)| ExpiryKey {
-            expires_at: quote.expires_at,
+        .map(|(quote_hash, entry)| ExpiryKey {
+            expires_at: entry.quote.expires_at,
             quote_hash,
         })
         .collect();

@@ -380,6 +380,14 @@ pub enum ConfigError {
         cap: u32,
         ceiling: u32,
     },
+    /// The depth configured for `chain_id` is below the floor a reorg on that chain makes
+    /// necessary, so a deposit or a receipt there could be taken as final and then leave
+    /// the chain.
+    DepthTooShallow {
+        chain_id: u64,
+        depth: u64,
+        floor: u64,
+    },
     AmountTooLarge {
         field: String,
     },
@@ -461,6 +469,15 @@ impl From<types::ConfigError> for ConfigError {
                 field: field.to_string(),
                 cap,
                 ceiling,
+            },
+            Domain::DepthTooShallow {
+                chain,
+                depth,
+                floor,
+            } => Self::DepthTooShallow {
+                chain_id: chain.get(),
+                depth: depth.get(),
+                floor: floor.get(),
             },
             Domain::AmountTooLarge { field } => Self::AmountTooLarge {
                 field: field.to_string(),

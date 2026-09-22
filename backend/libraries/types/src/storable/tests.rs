@@ -5,8 +5,8 @@ use crate::events::{Event, TxPurpose, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
 use crate::numeric::{
-    Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, UnixSeconds, Wei,
-    WeiPerGas,
+    Attempt, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount,
+    UnixSeconds, Wei, WeiPerGas,
 };
 use crate::quote::ExpiryKey;
 use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
@@ -114,6 +114,17 @@ fn samples() -> Vec<Sample> {
         last_tx_hash: None,
         paid_out: None,
     };
+    // the depths the default held when this line was written. A default that moves changes
+    // what every config encodes, and a golden line never changes, so the two lines below
+    // spell the old table out and the new default is pinned by a line of its own at the
+    // end of `samples()`.
+    let depths_before_the_mainnet_floor = BTreeMap::from([
+        (ChainId::ETHEREUM, BlockDepth::new(1)),
+        (ChainId::BASE, BlockDepth::new(1)),
+        (ChainId::BSC, BlockDepth::new(1)),
+        (ChainId::POLYGON, BlockDepth::new(6)),
+        (ChainId::ARBITRUM, BlockDepth::new(1)),
+    ]);
     let config = Config {
         platform_fee: crate::BasisPoints::new(10),
         rpc_urls: BTreeMap::from([(
@@ -122,6 +133,7 @@ fn samples() -> Vec<Sample> {
         )]),
         vault_addresses: BTreeMap::from([(ChainId::BASE, "0xvault".parse().unwrap())]),
         ecdsa_key_name: "key_1".to_string(),
+        confirmations: depths_before_the_mainnet_floor.clone(),
         ..Config::default()
     };
     // every cap of the sample above holds its default, so its bytes stop where the caps
@@ -135,6 +147,7 @@ fn samples() -> Vec<Sample> {
         max_evictions_per_sweep: EvictionsPerSweep::new(1_234),
         audit_chunk_events: AuditChunk::DEFAULT,
         ecdsa_key_name: "key_1".to_string(),
+        confirmations: depths_before_the_mainnet_floor,
         ..Config::default()
     };
     all.extend([
@@ -365,6 +378,25 @@ fn samples() -> Vec<Sample> {
                 last_outcome: Some(crate::Outcome::Confirmed),
                 last_tx_hash: Some(TxHash::new([0x69; 32])),
                 paid_out: Some(TokenAmount::from(6_978_003_u32)),
+            },
+        ),
+        // the entry the pending store holds now: the quote with the height the watcher had
+        // reported when it was registered. The `pending quote` line above is the quote
+        // alone, which is what the entry holds inside it and what the store held before.
+        sample(
+            "pending quote entry",
+            crate::PendingQuote {
+                quote: crate::quote::tests::fixed_quote(),
+                registered_at: Some(BlockNumber::new(19_000_123)),
+            },
+        ),
+        // the depths a deploy now gets, mainnet's floor among them: the two config lines
+        // above keep the table this one replaced, so neither of them moves
+        sample(
+            "config at the depths a deploy gets",
+            Config {
+                ecdsa_key_name: "key_1".to_string(),
+                ..Config::default()
             },
         ),
     ]);

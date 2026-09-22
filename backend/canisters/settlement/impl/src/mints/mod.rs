@@ -50,6 +50,8 @@ pub enum MintError {
     #[error(transparent)]
     Vault(#[from] VaultError),
     #[error(transparent)]
+    NoDepth(#[from] crate::tx::NoDepth),
+    #[error(transparent)]
     Rpc(#[from] RpcError),
     #[error("the head block did not come back as a number")]
     UnreadableHead,
@@ -181,7 +183,7 @@ pub async fn read_mint(chain_id: ChainId, tx_hash: TxHash) -> Result<Minted, Min
             .get(chain_id)
             .ok_or(MintError::NoUsdc { chain_id })?,
     };
-    let depth = confirmations(&config, chain_id);
+    let depth = confirmations(&config, chain_id)?;
     let calls = read_calls(tx_hash);
     // the whole batch or nothing: a decision needs both reads
     let answers = rpc::rpc_batch(

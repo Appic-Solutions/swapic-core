@@ -32,10 +32,10 @@ pub use evm::{EcdsaSignature, Eip1559Tx, EvmAddress, SignedTx};
 pub use hash::{EventHash, QuoteHash, TxHash};
 pub use ledger::LedgerMeta;
 pub use numeric::{
-    Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp,
-    TokenAmount, UnixSeconds, UsdAmount, Wei, WeiPerGas,
+    Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Permit2Nonce,
+    Timestamp, TokenAmount, UnixSeconds, UsdAmount, Wei, WeiPerGas,
 };
-pub use quote::{ExpiryKey, GasMode, Quote, QuoteError};
+pub use quote::{ExpiryKey, GasMode, PendingQuote, Quote, QuoteError};
 pub use rail::{CctpDomain, EcoIntent, Rail};
 pub use swap::{Leg, Outcome, Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
 pub use tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};

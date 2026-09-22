@@ -1,5 +1,6 @@
 use crate::guards;
 use crate::state::pending_quotes;
+use crate::storage::chain_data;
 use ic_cdk::update;
 pub use settlement_api::types::errors::RegisterQuoteError;
 pub use settlement_api::types::events::Hash32;
@@ -16,6 +17,11 @@ pub fn register_quote(quote: Quote) -> Result<Hash32, RegisterQuoteError> {
         types::Quote::try_from(quote).map_err(|e| RegisterQuoteError::InvalidQuote(e.into()))?;
     // deliberately no `gas_mode` gate: the mode only matters once funds arrive
     let now = Timestamp::from_nanos(ic_cdk::api::time()).as_secs();
-    let hash = pending_quotes::register(quote, now)?;
+    // the height the watcher last reported on the quote's source chain: the deposit that
+    // pays this quote lands at or above it, so a claim's log read starts there rather than
+    // a day of blocks back. However old the reading is, it only widens that read, never
+    // narrows it past the deposit, so its age is not checked here.
+    let registered_at = chain_data::get(quote.src_chain).map(|data| data.block);
+    let hash = pending_quotes::register(quote, now, registered_at)?;
     Ok(hash.into_bytes())
 }
