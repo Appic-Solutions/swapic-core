@@ -61,8 +61,9 @@ pub fn chains() -> Vec<ChainId> {
     chains
 }
 
-/// At most `limit` of the chain's entries in `status`, oldest nonce first, so the work a
-/// pass does is bounded by the batch and not by the outbox.
+/// At most `limit` of the chain's entries in `status`, oldest nonce first. What a pass hands
+/// to a provider is bounded by the batch; the walk that finds them runs over the chain's
+/// entries, which the outbox keeps few (see [`chains`]).
 pub fn by_status(chain_id: ChainId, status: OutboxStatus, limit: usize) -> Vec<OutboxEntry> {
     let range = NonceKey {
         chain_id,

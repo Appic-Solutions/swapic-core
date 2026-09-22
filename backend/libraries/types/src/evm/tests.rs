@@ -172,7 +172,7 @@ fn the_unsigned_envelope_matches_the_golden_file() {
 /// transaction and the same signature, and the hash is the hash of those bytes.
 #[test]
 fn a_signed_transaction_is_the_raw_cast_produced() {
-    let signed = fixture_tx().into_signed(fixture_signature());
+    let signed = fixture_tx().signed(fixture_signature());
     assert_eq!(hex::encode(signed.raw()), FIXTURE_RAW);
     assert_eq!(signed.hash().to_string(), FIXTURE_TX_HASH);
 }
@@ -239,8 +239,8 @@ fn a_transaction_carries_full_width_amounts() {
 #[test]
 fn the_parity_is_part_of_the_raw_bytes() {
     let tx = fixture_tx();
-    let even = tx.clone().into_signed(fixture_signature());
-    let odd = tx.into_signed(EcdsaSignature::new(
+    let even = tx.signed(fixture_signature());
+    let odd = tx.signed(EcdsaSignature::new(
         *fixture_signature().r(),
         *fixture_signature().s(),
         true,

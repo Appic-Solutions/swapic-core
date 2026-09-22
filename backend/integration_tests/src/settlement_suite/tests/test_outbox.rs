@@ -17,8 +17,10 @@ use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde_json::{json, Value};
 use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::config::Config;
+use settlement_api::types::errors::AppendError;
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::init::InitArg;
+use settlement_api::types::swap::TransitionError;
 use settlement_api::types::tx::TxError;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -319,6 +321,67 @@ fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
         created,
         vec![(BASE, 0), (BASE, 1)],
         "the allocator handed out one number each"
+    );
+}
+
+/// Rule A4 from the swap's side, which is what the guard on `TxCreated` exists for: two
+/// sends for ONE swap that are both in flight at the signature allocate once. The second
+/// reaches the append while the first is still holding its number unsigned, and is refused
+/// there, before it can take a number that no `TxSigned` could ever spend. Without the
+/// guard both allocate, the second's signed record is refused because the first attempt is
+/// open, and its number is stranded.
+#[test]
+fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let same_swap = || encode_args((swap_id(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap();
+    let first = pic
+        .submit_call(canister, admin, "test_send", same_swap())
+        .unwrap();
+    let second = pic
+        .submit_call(canister, admin, "test_send", same_swap())
+        .unwrap();
+    for _ in 0..11 {
+        pic.tick();
+    }
+    let first: Result<Hash32, TxError> =
+        candid::decode_one(&pic.await_call(first).expect("the first send returns")).unwrap();
+    let second: Result<Hash32, TxError> =
+        candid::decode_one(&pic.await_call(second).expect("the second send returns")).unwrap();
+    assert!(first.is_ok(), "{first:?}");
+    assert_eq!(
+        second,
+        Err(TxError::Append(AppendError::Transition(
+            TransitionError::NonceStillUnsigned(swap_id(0))
+        ))),
+        "the swap was holding its number unsigned when the second send reached the append"
+    );
+
+    let log = events(&pic, canister);
+    assert_eq!(
+        tx_created(&log),
+        vec![(BASE, 0)],
+        "one number was handed out"
+    );
+    assert_eq!(
+        tx_signed(&log).len(),
+        1,
+        "and the one transaction that carries it was signed"
+    );
+
+    // nothing is stranded: the first send spent its number, so the pass that ends
+    // abandoned allocations has nothing to cancel, and the outbox holds one transaction
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chain, one batch");
+    assert_eq!(methods(&pending[0]), vec!["eth_sendRawTransaction"]);
+    reply(&pic, &pending[0], vec![json!("0xabc")]);
+    assert!(
+        of_kind(events(&pic, canister), is_cancelled).is_empty(),
+        "nothing was stranded, so nothing was cancelled"
+    );
+    assert!(
+        verify_replay(&pic, canister, Principal::anonymous()),
+        "the log still folds to the live fold"
     );
 }
 

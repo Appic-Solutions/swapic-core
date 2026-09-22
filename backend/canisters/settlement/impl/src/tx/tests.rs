@@ -433,4 +433,44 @@ fn the_outcall_caps_are_derived_from_the_batch() {
         receipt_cap(RECEIPTS_PER_CALL) < 2 * 1024 * 1024,
         "a full call stays inside what one outcall may answer"
     );
+    assert!(
+        send_cap(types::config::MAX_BATCH_ITEMS as usize) < 2 * 1024 * 1024,
+        "and so does the largest batch of broadcasts a config may ask for"
+    );
+}
+
+/// The lines that close an attempt carry the attempt the entry recorded and never a
+/// default. A cancel closes no attempt and writes no line, and an entry that names a swap
+/// but carries no attempt number is left where it is rather than closed against a number
+/// this canister invented: the consensus log would otherwise hold an attempt nobody signed
+/// for.
+#[test]
+fn closing_an_entry_never_invents_an_attempt() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let never = |_: QuoteHash, _: Attempt| -> EventType {
+            panic!("no line is written for an entry that carries no attempt")
+        };
+
+        let mut cancel = entry_with(0, 1);
+        cancel.purpose = TxPurpose::Cancel(ChainId::BASE);
+        cancel.attempt = None;
+        outbox::put(cancel.clone());
+        close(&cancel, never);
+        assert_eq!(
+            outbox::get(cancel.key()),
+            None,
+            "a cancel's receipt closes its entry and writes nothing"
+        );
+
+        let mut unnumbered = entry_with(1, 1);
+        unnumbered.attempt = None;
+        outbox::put(unnumbered.clone());
+        close(&unnumbered, never);
+        assert_eq!(
+            outbox::get(unnumbered.key()),
+            Some(unnumbered),
+            "a swap's entry with no attempt is left alone, not closed as attempt one"
+        );
+    });
 }

@@ -222,10 +222,9 @@ pub async fn create_and_send(
     // leaves the nonce in the fold as created-but-unsigned, and the outbox pass spends it
     // with a cancel rather than leaving the account with a gap (A5).
     let signature = ecdsa::sign(tx.signing_hash()).await?;
-    let data = tx.data.clone();
-    let signed = tx.into_signed(signature);
+    let signed = tx.signed(signature);
     let tx_hash = signed.hash();
-    let raw_tx = signed.raw().to_vec();
+    let raw_tx = signed.into_raw();
     append_event(EventType::TxSigned {
         quote_hash,
         attempt,
@@ -248,7 +247,8 @@ pub async fn create_and_send(
         first_sent_at: None,
         to,
         value,
-        data,
+        // the calldata was copied once, into the log; the transaction's own moves on here
+        data: tx.data,
         gas_limit,
     });
     task_manager::outbox::arm();
@@ -327,9 +327,9 @@ async fn cancel(key: NonceKey, now: Timestamp) {
     let Ok(signature) = ecdsa::sign(tx.signing_hash()).await else {
         return;
     };
-    let signed = tx.into_signed(signature);
+    let signed = tx.signed(signature);
     let tx_hash = signed.hash();
-    let raw_tx = signed.raw().to_vec();
+    let raw_tx = signed.into_raw();
     if append_event(EventType::TxCancelled {
         chain_id,
         nonce,
@@ -674,15 +674,17 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
     let Ok(signature) = ecdsa::sign(tx.signing_hash()).await else {
         return false;
     };
-    let signed = tx.into_signed(signature);
+    let signed = tx.signed(signature);
+    let tx_hash = signed.hash();
+    let raw_tx = signed.into_raw();
     let appended = append_event(EventType::TxReplaced {
         purpose: entry.purpose,
         chain_id,
         nonce: entry.nonce,
         max_fee: fees.max_fee(),
         max_priority_fee: fees.max_priority_fee(),
-        tx_hash: signed.hash(),
-        raw_tx: signed.raw().to_vec(),
+        tx_hash,
+        raw_tx: raw_tx.clone(),
     });
     if appended.is_err() {
         return false;
@@ -690,12 +692,7 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
     // A3: the entry this pass read is the one replaced, and only if it is still the one
     // the outbox holds
     if outbox::get(entry.key()).is_some_and(|current| current.tx_hash() == entry.tx_hash()) {
-        outbox::put(entry.replaced(
-            signed.hash(),
-            signed.raw().to_vec(),
-            fees.max_fee(),
-            fees.max_priority_fee(),
-        ));
+        outbox::put(entry.replaced(tx_hash, raw_tx, fees.max_fee(), fees.max_priority_fee()));
     }
     true
 }

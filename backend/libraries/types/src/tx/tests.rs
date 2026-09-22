@@ -73,10 +73,41 @@ fn a_replacement_keeps_the_nonce_and_remembers_the_hash_it_replaced() {
         vec![TxHash::new([2; 32]), TxHash::new([3; 32])]
     );
     assert_eq!(replacement.tx_hash(), TxHash::new([3; 32]));
+    assert_eq!(
+        replacement.raw_tx,
+        vec![0x02, 0xff],
+        "the new bytes are the current ones"
+    );
     assert_eq!(replacement.status, OutboxStatus::Queued);
     assert_eq!(replacement.last_sent_at, None, "the new bytes are unsent");
-    assert_eq!(replacement.attempt, sent.attempt);
     assert!(replacement.max_fee > sent.max_fee);
+    assert!(replacement.max_priority_fee > sent.max_priority_fee);
+    // everything that says what the transaction is comes over unchanged, so the next
+    // replacement can re-sign the same call again
+    assert_eq!(
+        (
+            replacement.purpose,
+            replacement.chain_id,
+            replacement.nonce,
+            replacement.attempt,
+            replacement.to,
+            replacement.value,
+            &replacement.data,
+            replacement.gas_limit,
+            replacement.created_at,
+        ),
+        (
+            sent.purpose,
+            sent.chain_id,
+            sent.nonce,
+            sent.attempt,
+            sent.to,
+            sent.value,
+            &sent.data,
+            sent.gas_limit,
+            sent.created_at,
+        )
+    );
 }
 
 /// How long the current bytes have been out, which is what decides a rebroadcast from a

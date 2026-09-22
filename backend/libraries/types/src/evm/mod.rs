@@ -248,7 +248,9 @@ impl Eip1559Tx {
     }
 
     /// The broadcastable transaction: the same nine fields, then the parity, r and s.
-    pub fn into_signed(self, signature: EcdsaSignature) -> SignedTx {
+    /// Borrows rather than consumes, so a caller that has recorded the calldata can move it
+    /// on to the outbox afterwards instead of keeping a copy for it.
+    pub fn signed(&self, signature: EcdsaSignature) -> SignedTx {
         let mut fields = Vec::new();
         let mut payload_length = self.rlp_fields(&mut fields);
         let mut tail = Vec::new();
@@ -287,6 +289,12 @@ pub struct SignedTx {
 impl SignedTx {
     pub fn raw(&self) -> &[u8] {
         &self.raw
+    }
+
+    /// The bytes to broadcast, by value: the caller becomes their owner, so keeping them
+    /// costs no copy.
+    pub fn into_raw(self) -> Vec<u8> {
+        self.raw
     }
 
     pub fn hash(&self) -> TxHash {

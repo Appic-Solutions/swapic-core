@@ -210,6 +210,10 @@ impl OutboxEntry {
 
     /// Takes the same nonce to a new transaction at a higher fee: the old hash stays, so a
     /// receipt for it is still recognised, and the new bytes go out on the next pass.
+    ///
+    /// Every field is named, so a field added to the entry has to be classified here as
+    /// carried over or started afresh, and the bytes being replaced are not copied only
+    /// to be dropped.
     pub fn replaced(
         &self,
         hash: TxHash,
@@ -217,19 +221,43 @@ impl OutboxEntry {
         max_fee: WeiPerGas,
         max_priority_fee: WeiPerGas,
     ) -> Self {
-        let mut hashes = self.hashes.clone();
-        hashes.push(hash);
-        Self {
+        let Self {
+            purpose,
+            chain_id,
+            nonce,
+            attempt,
             hashes,
+            raw_tx: _,
+            to,
+            value,
+            data,
+            gas_limit,
+            max_fee: _,
+            max_priority_fee: _,
+            status: _,
+            created_at,
+            last_sent_at: _,
+            first_sent_at: _,
+        } = self;
+        Self {
+            purpose: *purpose,
+            chain_id: *chain_id,
+            nonce: *nonce,
+            attempt: *attempt,
+            hashes: hashes.iter().copied().chain([hash]).collect(),
             raw_tx,
+            to: *to,
+            value: *value,
+            data: data.clone(),
+            gas_limit: *gas_limit,
             max_fee,
             max_priority_fee,
             status: OutboxStatus::Queued,
+            created_at: *created_at,
             last_sent_at: None,
             // new bytes at a new price: the clock the next replacement is measured on
             // starts when these first reach a provider, not when the ones they replace did
             first_sent_at: None,
-            ..self.clone()
         }
     }
 }
