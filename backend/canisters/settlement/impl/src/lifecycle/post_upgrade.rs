@@ -1,4 +1,4 @@
-use crate::storage::{self, events};
+use crate::storage::{self, events, inflight};
 use crate::task_manager;
 use ic_cdk::post_upgrade;
 
@@ -27,4 +27,8 @@ fn post_upgrade() {
     // rule A9: a transaction signed before the upgrade is still in flight, and the one-shot
     // pass that would have sent it went with the old heap
     task_manager::outbox::arm_if_work_is_pending();
+    // and the opposite for the entry doors' markers: the message chains they stood for went
+    // with the old heap too, so nothing they marked is still out, and a claim retried
+    // after the upgrade must not wait out the bound
+    inflight::clear();
 }

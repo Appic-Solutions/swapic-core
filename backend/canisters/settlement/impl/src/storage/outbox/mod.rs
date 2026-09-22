@@ -9,6 +9,7 @@
 use crate::storage::memory::{outbox_memory, Memory};
 use ic_stable_structures::StableBTreeMap;
 use std::cell::RefCell;
+use types::events::TxPurpose;
 use types::{ChainId, Nonce, NonceKey, OutboxEntry, OutboxStatus};
 
 thread_local! {
@@ -51,6 +52,19 @@ pub fn any_sent() -> bool {
             .borrow()
             .iter()
             .any(|(_, entry)| entry.status == OutboxStatus::Sent)
+    })
+}
+
+/// The entry sent for `purpose`, if one is still out. A walk of the outbox, which is small
+/// by construction (see [`chains`]): what the pull door asks before it sends a second pull
+/// for a quote whose first has not landed.
+pub fn find(purpose: TxPurpose) -> Option<OutboxEntry> {
+    OUTBOX.with(|outbox| {
+        outbox
+            .borrow()
+            .iter()
+            .map(|(_, entry)| entry)
+            .find(|entry| entry.purpose == purpose)
     })
 }
 

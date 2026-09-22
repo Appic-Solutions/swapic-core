@@ -127,6 +127,13 @@ fn samples() -> Vec<EventType> {
             tx_hash: [21; 32],
             raw_tx: vec![0x02, 0xf8, 0x6c],
         },
+        EventType::PullSigned {
+            quote_hash: [22; 32],
+            chain_id: 8453,
+            nonce: 10,
+            tx_hash: [23; 32],
+            raw_tx: vec![0x02, 0xf8, 0x6d],
+        },
     ]
 }
 

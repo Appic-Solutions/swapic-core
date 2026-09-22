@@ -9,7 +9,9 @@ mod chain;
 mod config;
 mod ops;
 mod quotes;
+mod rails;
 mod roles;
+mod swaps;
 
 pub use chain::push_chain_data;
 pub use config::set_config;
@@ -18,4 +20,6 @@ pub use ops::{
     test_sign,
 };
 pub use quotes::{clear_pending_quotes, register_quote};
+pub use rails::push_attestation;
 pub use roles::set_roles;
+pub use swaps::{claim_swap, start_gasless_pull};

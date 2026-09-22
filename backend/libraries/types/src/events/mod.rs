@@ -17,7 +17,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 23;
+pub const EVENT_VARIANT_COUNT: usize = 24;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -289,6 +289,25 @@ pub enum EventType {
         #[cbor(n(3), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    /// A gasless pull was signed: the transaction that takes a user's funds into the vault
+    /// with the permit they signed, recorded with its exact bytes before it is broadcast
+    /// (rule A6). It names the quote and the nonce rather than a swap's attempt, because no
+    /// swap exists yet: the deposit the pull makes is what `claim_swap` then verifies on
+    /// the chain, and that is what creates the swap. It spends the nonce `TxCreated` handed
+    /// out for the pull, the way `TxSigned` spends a swap's.
+    #[n(23)]
+    PullSigned {
+        #[n(0)]
+        quote_hash: QuoteHash,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        tx_hash: TxHash,
+        #[cbor(n(4), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -319,7 +338,8 @@ pub enum TxPurpose {
 }
 
 impl TxPurpose {
-    /// The swap this transaction belongs to, if it belongs to one.
+    /// The quote this transaction is for, if it is for one: the swap's id for the legs of a
+    /// swap, and the quote a pull is paying for before its swap exists.
     pub fn quote_hash(&self) -> Option<QuoteHash> {
         match self {
             Self::Burn(hash)
@@ -328,6 +348,17 @@ impl TxPurpose {
             | Self::Refund(hash)
             | Self::GaslessPull(hash) => Some(*hash),
             Self::Cancel(_) => None,
+        }
+    }
+
+    /// The swap whose attempt this transaction is, if it is one: a pull runs before any
+    /// swap exists and a cancel belongs to none, so neither is signed against an attempt.
+    pub fn attempt_of(&self) -> Option<QuoteHash> {
+        match self {
+            Self::Burn(hash) | Self::Mint(hash) | Self::Payout(hash) | Self::Refund(hash) => {
+                Some(*hash)
+            }
+            Self::GaslessPull(_) | Self::Cancel(_) => None,
         }
     }
 
@@ -435,7 +466,8 @@ impl EventType {
             // holds them to the same 16-byte range the preimage writes them in
             | EventType::TxCreated { .. }
             | EventType::TxReplaced { .. }
-            | EventType::TxCancelled { .. } => None,
+            | EventType::TxCancelled { .. }
+            | EventType::PullSigned { .. } => None,
         }
     }
 
@@ -651,6 +683,20 @@ impl EventType {
                 raw_tx,
             } => {
                 w.put_u16(22)
+                    .put_u64(chain_id.get())
+                    .put_u64(nonce.get())
+                    .put_hash(tx_hash.as_ref())
+                    .put_bytes(raw_tx);
+            }
+            EventType::PullSigned {
+                quote_hash,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => {
+                w.put_u16(23)
+                    .put_hash(quote_hash.as_ref())
                     .put_u64(chain_id.get())
                     .put_u64(nonce.get())
                     .put_hash(tx_hash.as_ref())

@@ -497,9 +497,10 @@ impl<S: Store> State<S> {
         );
     }
 
-    /// The other way an allocation ends: the nonce was spent by a cancel rather than by the
-    /// transaction it was made for, so it stops being unsigned and nothing else moves.
-    fn record_nonce_cancelled(&mut self, chain_id: ChainId, nonce: Nonce) {
+    /// The other ways an allocation ends: the nonce was spent by a cancel rather than by the
+    /// transaction it was made for, or by a pull's own record, which names its number
+    /// because no swap holds it. Either way it stops being unsigned and nothing else moves.
+    fn record_nonce_spent(&mut self, chain_id: ChainId, nonce: Nonce) {
         self.store
             .remove_unsigned_nonce(&NonceKey { chain_id, nonce });
     }

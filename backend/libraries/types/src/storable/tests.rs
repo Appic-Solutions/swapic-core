@@ -54,7 +54,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
 /// key types, one nonce waiting for its signature, a cancel that has been out on the
-/// network, and a sanctioned address as the sanctions set keys it. Every field of a sample differs from
+/// network, a sanctioned address as the sanctions set keys it, an in-flight marker, and an
+/// attestation. Every field of a sample differs from
 /// its neighbours, so a field that moves to another index decodes to a different value
 /// instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
@@ -239,6 +240,22 @@ fn samples() -> Vec<Sample> {
             "0x1111111111111111111111111111111111111111"
                 .parse::<crate::Address>()
                 .unwrap(),
+        ),
+        sample(
+            "in-flight marker",
+            crate::InFlight {
+                kind: crate::InFlightKind::Pull,
+                since: Timestamp::from_nanos(1_700_000_006_000_000_000),
+            },
+        ),
+        sample(
+            "attestation",
+            crate::Attestation::new(
+                vec![0x61; 40],
+                vec![0x62; 65],
+                Timestamp::from_nanos(1_700_000_007_000_000_000),
+            )
+            .unwrap(),
         ),
     ]);
     all

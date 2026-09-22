@@ -1,9 +1,11 @@
+pub mod attestations;
 pub mod audit_cursor;
 pub mod chain_data;
 pub mod config;
 pub mod ecdsa_address;
 pub mod events;
 pub mod halt;
+pub mod inflight;
 pub mod memory;
 pub mod outbox;
 pub mod replay_cursor;
@@ -26,6 +28,8 @@ pub fn init() {
     outbox::init();
     replay_cursor::init();
     sanctions::init();
+    attestations::init();
+    inflight::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

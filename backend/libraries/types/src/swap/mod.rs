@@ -127,6 +127,15 @@ pub enum TransitionError {
         quote_hash: QuoteHash,
         chain_id: ChainId,
     },
+    #[error(
+        "nonce {nonce} on chain {chain_id} is not one waiting for the pull of quote \
+         {quote_hash} to be signed"
+    )]
+    NonceNotHeldForPull {
+        chain_id: ChainId,
+        nonce: Nonce,
+        quote_hash: QuoteHash,
+    },
     #[error("swap is not executing ({0:?})")]
     NotExecuting(SwapStatus),
     #[error("swap is already paid in stable")]

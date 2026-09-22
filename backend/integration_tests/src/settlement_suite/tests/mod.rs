@@ -1,4 +1,5 @@
 mod test_chain_data;
+mod test_claims;
 mod test_config;
 mod test_install;
 mod test_outbox;

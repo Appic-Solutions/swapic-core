@@ -567,6 +567,20 @@ fn closing_an_entry_never_invents_an_attempt() {
             Some(unnumbered),
             "a swap's entry with no attempt is left alone, not closed as attempt one"
         );
+
+        // a pull is signed against its quote and not a swap's attempt: its record sealed
+        // the number, and the deposit its bytes made is read by the claim, so its receipt
+        // closes its entry and writes nothing, like a cancel's
+        let mut pull = entry_with(2, 1);
+        pull.purpose = TxPurpose::GaslessPull(QuoteHash::new([2; 32]));
+        pull.attempt = None;
+        outbox::put(pull.clone());
+        close(&pull, never);
+        assert_eq!(
+            outbox::get(pull.key()),
+            None,
+            "a pull's receipt closes its entry and writes nothing"
+        );
     });
 }
 

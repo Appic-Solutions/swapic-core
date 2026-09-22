@@ -1,5 +1,6 @@
 pub mod chain_data;
 pub mod config;
+pub mod entry;
 pub mod errors;
 pub mod events;
 pub mod evm;

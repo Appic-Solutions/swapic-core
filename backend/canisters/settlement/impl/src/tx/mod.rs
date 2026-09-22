@@ -142,8 +142,9 @@ pub enum TxError {
 }
 
 /// Whether `quote_hash` still holds exactly `key` as its unsigned nonce: the signed bytes
-/// carry that number, and a record that spent any other number the swap holds would put
-/// two signed transactions on one nonce (the cancelled one) and strand the other. Pure, so
+/// carry that number, and a record that spent any other number the quote holds would put
+/// two signed transactions on one nonce (the cancelled one) and strand the other. The same
+/// rule for a swap's leg and for a pull, which holds its number by its quote too. Pure, so
 /// the race a signing await opens is proven without a signing subnet.
 fn still_holds<S: Store>(
     state: &State<S>,
@@ -211,8 +212,8 @@ pub async fn create_and_send(
     gas_limit: GasAmount,
 ) -> Result<TxHash, TxError> {
     require_not_halted().map_err(TxError::Guard)?;
-    // a cancel spends a nonce without a swap behind it, and `TxSigned` is a swap's line:
-    // the swap-less signed record arrives with the engine
+    // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
+    // pass that ends a stranded allocation, never through here
     let quote_hash = purpose
         .quote_hash()
         .ok_or(TxError::PurposeNeedsASwap("a cancel"))?;
@@ -220,16 +221,18 @@ pub async fn create_and_send(
     let fees = fees(chain_id, now)?;
     affordable(chain_id, fees, gas_limit)?;
 
-    // read before the allocation, not after it: a swap that has used every attempt number
-    // there is cannot sign anything, and refusing it here costs nothing, while refusing it
-    // after the append would leave a number handed out for a transaction that never existed
-    let attempt = read_state(|state| {
-        state
-            .swap(&quote_hash)
-            .ok()
-            .and_then(|swap| swap.next_attempt())
-    })
-    .ok_or(TxError::NoAttemptLeft { quote_hash })?;
+    // the attempt the signed record will carry: the swap's next one, and none for a pull,
+    // which is signed against its quote because no swap exists yet. Read before the
+    // allocation, not after it: a swap that has used every attempt number there is cannot
+    // sign anything, and refusing it here costs nothing, while refusing it after the append
+    // would leave a number handed out for a transaction that never existed
+    let attempt = match purpose.attempt_of() {
+        Some(swap) => Some(
+            read_state(|state| state.swap(&swap).ok().and_then(|swap| swap.next_attempt()))
+                .ok_or(TxError::NoAttemptLeft { quote_hash })?,
+        ),
+        None => None,
+    };
 
     // A1 and A4: from here to the append there is no await, so the number read is the
     // number written
@@ -279,18 +282,29 @@ pub async fn create_and_send(
     // one; either way the late signature is refused, the outbox is not touched, and the
     // cancel's entry at this nonce stays exactly as the pass queued it
     read_state(|state| still_holds(state, &quote_hash, NonceKey { chain_id, nonce }))?;
-    append_event(EventType::TxSigned {
-        quote_hash,
-        attempt,
-        chain_id,
-        tx_hash,
-        raw_tx: raw_tx.clone(),
-    })?;
+    let record = match attempt {
+        Some(attempt) => EventType::TxSigned {
+            quote_hash,
+            attempt,
+            chain_id,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        },
+        // a pull names its number: no swap holds it for the record to find
+        None => EventType::PullSigned {
+            quote_hash,
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        },
+    };
+    append_event(record)?;
     outbox::put(OutboxEntry {
         purpose,
         chain_id,
         nonce,
-        attempt: Some(attempt),
+        attempt,
         hashes: vec![tx_hash],
         raw_tx,
         max_fee: fees.max_fee(),
@@ -757,16 +771,19 @@ pub(crate) fn confirmations(config: &types::Config, chain_id: ChainId) -> BlockD
 ///
 /// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
 /// fate before the bytes went out, so what the chain did with them changes nothing in the
-/// fold. An entry that names a swap and carries no attempt number is neither shape, so it
-/// is left alone rather than closed against a number nobody recorded: the consensus log
-/// would otherwise carry an attempt this canister invented.
+/// fold. Neither does a pull: `PullSigned` sealed its number, and the deposit its bytes
+/// make is read from the vault's log by `claim_swap`, which is where a pull that reverted
+/// shows, as a quote with no deposit. An entry that names a swap's attempt and carries no
+/// attempt number is neither shape, so it is left alone rather than closed against a number
+/// nobody recorded: the consensus log would otherwise carry an attempt this canister
+/// invented.
 ///
 /// A3, the re-read the two other post-await writes in this module do, is not needed here:
 /// the entry is being removed, not edited, and the only writer that could have put another
 /// entry at this key is `create_and_send`, which only ever writes at a number the allocator
 /// has just handed out and this one is not.
 fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) -> bool {
-    match (entry.purpose.quote_hash(), entry.attempt) {
+    match (entry.purpose.attempt_of(), entry.attempt) {
         (None, _) => {
             outbox::remove(entry.key());
             true

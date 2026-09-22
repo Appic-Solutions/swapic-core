@@ -1472,3 +1472,150 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
     };
     assert_eq!(elsewhere.check(&on_arbitrum), Err(refused(ARBITRUM)));
 }
+
+fn pull_signed(qh: QuoteHash, nonce: u64) -> EventType {
+    EventType::PullSigned {
+        quote_hash: qh,
+        chain_id: BASE,
+        nonce: Nonce::new(nonce),
+        tx_hash: TxHash::new([0x33; 32]),
+        raw_tx: vec![0x02, 0xf8, 0x6d],
+    }
+}
+
+/// A gasless pull is a transaction with no swap behind it: it makes the deposit the claim
+/// then verifies. So its allocation needs no swap, its signed record is its own line, and
+/// that line spends the number the way `TxSigned` spends a swap's, so a replay rebuilds
+/// the same allocator with nothing left waiting.
+#[test]
+fn a_pull_is_created_with_no_swap_and_its_record_spends_its_nonce() {
+    let qh = swap_id(1);
+    let pull = TxPurpose::GaslessPull(qh);
+    let mut state = HeapState::default();
+    let allocation = created(pull, BASE, 0);
+    assert_eq!(
+        state.check(&allocation),
+        Ok(()),
+        "no swap exists, and none is needed"
+    );
+    let event = next_event(&state, 1, allocation.clone());
+    apply_state_transition(&mut state, &event);
+    assert_eq!(
+        state.unsigned_nonces(),
+        vec![(
+            NonceKey {
+                chain_id: BASE,
+                nonce: Nonce::ZERO
+            },
+            UnsignedTx {
+                purpose: pull,
+                created_at: Timestamp::from_nanos(1)
+            }
+        )]
+    );
+    assert_eq!(
+        state.check(&signed(qh, 1)),
+        Err(TransitionError::UnknownSwap(qh)),
+        "a swap's signed record is not a pull's: there is no swap"
+    );
+    assert_eq!(state.check(&pull_signed(qh, 0)), Ok(()));
+    let event = next_event(&state, 2, pull_signed(qh, 0));
+    apply_state_transition(&mut state, &event);
+    assert!(
+        state.unsigned_nonces().is_empty(),
+        "the record spent the number"
+    );
+    assert_eq!(state.next_nonce(&BASE), Nonce::new(1));
+    assert!(
+        state.swap(&qh).is_err(),
+        "a pull creates no swap: the deposit it makes is what the claim verifies"
+    );
+
+    // a stuck pull is replaced at its nonce like any transaction, with no swap to ask
+    assert_eq!(state.check(&replaced(pull, BASE, 0)), Ok(()));
+
+    // and a replay of the two lines rebuilds the same allocator with nothing waiting
+    let replayed = fold(vec![allocation, pull_signed(qh, 0)]);
+    assert_eq!(replayed.next_nonce(&BASE), Nonce::new(1));
+    assert!(replayed.unsigned_nonces().is_empty());
+    assert!(replayed.swap(&qh).is_err());
+}
+
+/// A pull is for a quote nobody has paid yet: once the swap exists the funds are in, and
+/// while the quote holds a number unsigned a second pull would strand one (rule A4 from
+/// the quote's side, exactly as for a swap).
+#[test]
+fn a_pull_is_refused_once_the_swap_exists_or_while_the_quote_holds_a_nonce() {
+    let qh = swap_id(1);
+    let pull = TxPurpose::GaslessPull(qh);
+    let paid = fold(vec![funds(1)]);
+    assert_eq!(
+        paid.check(&created(pull, BASE, 0)),
+        Err(TransitionError::SwapExists(qh)),
+        "the deposit is already in"
+    );
+    let holding = fold(vec![created(pull, BASE, 0)]);
+    assert_eq!(
+        holding.check(&created(pull, BASE, 1)),
+        Err(TransitionError::NonceStillUnsigned(qh)),
+        "one number at a time per quote"
+    );
+    // and a closed or waiting swap is still refused a pull, through the same door
+    let done = fold(vec![
+        funds(1),
+        EventType::Frozen {
+            quote_hash: qh,
+            reason: "sanctions".into(),
+        },
+    ]);
+    assert!(matches!(
+        done.check(&created(pull, BASE, 0)),
+        Err(TransitionError::SwapExists(_))
+    ));
+}
+
+/// The pull's record spends the number that was handed out for that pull and nothing else:
+/// not a number nobody allocated, not a swap's number, not one a cancel already spent, and
+/// not another quote's pull.
+#[test]
+fn a_pull_record_spends_only_the_nonce_held_for_that_pull() {
+    let qh = swap_id(1);
+    let other = swap_id(2);
+    let refused = |nonce: u64| TransitionError::NonceNotHeldForPull {
+        chain_id: BASE,
+        nonce: Nonce::new(nonce),
+        quote_hash: qh,
+    };
+    let nothing = HeapState::default();
+    assert_eq!(nothing.check(&pull_signed(qh, 0)), Err(refused(0)));
+
+    let swaps_number = fold(vec![funds(1), allocated(qh, 0)]);
+    assert_eq!(
+        swaps_number.check(&pull_signed(qh, 0)),
+        Err(refused(0)),
+        "a swap's allocation is spent by TxSigned, not by a pull's record"
+    );
+
+    let another_pull = fold(vec![created(TxPurpose::GaslessPull(other), BASE, 0)]);
+    assert_eq!(another_pull.check(&pull_signed(qh, 0)), Err(refused(0)));
+
+    let cancelled = fold(vec![
+        created(TxPurpose::GaslessPull(qh), BASE, 0),
+        EventType::TxCancelled {
+            chain_id: BASE,
+            nonce: Nonce::ZERO,
+            tx_hash: TxHash::new([9; 32]),
+            raw_tx: vec![0x02, 0xf8, 0x6c],
+        },
+    ]);
+    assert_eq!(
+        cancelled.check(&pull_signed(qh, 0)),
+        Err(refused(0)),
+        "the late record of a cancelled pull is refused, as a swap's is"
+    );
+    assert_eq!(
+        cancelled.check(&pull_signed(qh, 1)),
+        Err(refused(1)),
+        "and a number never handed out is not one to spend"
+    );
+}

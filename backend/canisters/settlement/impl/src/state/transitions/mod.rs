@@ -192,7 +192,9 @@ impl<S: Store> State<S> {
                 self.ensure_next_nonce(*chain_id, *nonce)
             }
             // a replacement keeps the nonce of what it replaces, so it allocates nothing
-            // and must name a nonce the allocator already handed out (rule A5)
+            // and must name a nonce the allocator already handed out (rule A5). One that
+            // is a swap's attempt must be that swap's open attempt; a pull and a cancel
+            // have no swap to ask.
             EventType::TxReplaced {
                 purpose,
                 chain_id,
@@ -203,7 +205,7 @@ impl<S: Store> State<S> {
             } => {
                 in_preimage_range(*max_fee)?;
                 in_preimage_range(*max_priority_fee)?;
-                if let Some(quote_hash) = purpose.quote_hash() {
+                if let Some(quote_hash) = purpose.attempt_of() {
                     let swap = self.swap(&quote_hash)?;
                     if swap.open_attempt.is_none() {
                         return Err(TransitionError::NoOpenAttempt(quote_hash));
@@ -218,6 +220,16 @@ impl<S: Store> State<S> {
             EventType::TxCancelled {
                 chain_id, nonce, ..
             } => self.ensure_unsigned_nonce(*chain_id, *nonce),
+            // the pull's signed record: `TxSigned` for a transaction with no swap behind it.
+            // It spends the number handed out for this pull and nothing else, so a late
+            // record of a cancelled pull, a swap's number, and another quote's pull are all
+            // refused, as they are for a swap.
+            EventType::PullSigned {
+                quote_hash,
+                chain_id,
+                nonce,
+                ..
+            } => self.ensure_pull_nonce(*quote_hash, *chain_id, *nonce),
             // the repair of a divergence: it makes a swap's index entries agree with the
             // swap, dropping what the swap does not imply and keeping what it does. Admitted
             // on nothing, because nothing here could tell: the entry it drops is in no log,
@@ -236,15 +248,26 @@ impl<S: Store> State<S> {
     /// be one an attempt can still be signed for, and it must not already be holding a
     /// number it has not signed for. These are `TxSigned`'s rules, minus the attempt number
     /// a `TxCreated` does not carry, so a creation this guard admits is one the signed
-    /// record will admit too. A cancel names no swap.
+    /// record will admit too. A pull is for a quote nobody has paid yet, so it needs the
+    /// swap NOT to exist and is held to one number at a time like a swap. A cancel names no
+    /// swap.
     fn ensure_can_send(&self, purpose: &TxPurpose) -> Result<(), TransitionError> {
         let Some(quote_hash) = purpose.quote_hash() else {
             return Ok(());
         };
-        let swap = self.swap(&quote_hash)?;
-        swap.ensure_not_closed()?;
-        swap.ensure_not_waiting()?;
-        swap.ensure_no_open_attempt()?;
+        match purpose {
+            TxPurpose::GaslessPull(_) => {
+                if self.store().swap(&quote_hash).is_some() {
+                    return Err(TransitionError::SwapExists(quote_hash));
+                }
+            }
+            _ => {
+                let swap = self.swap(&quote_hash)?;
+                swap.ensure_not_closed()?;
+                swap.ensure_not_waiting()?;
+                swap.ensure_no_open_attempt()?;
+            }
+        }
         // rule A4 from the swap's side: two sends for ONE swap that interleave at the
         // signature would otherwise both allocate, and the second's `TxSigned` would be
         // refused with its number already spent
@@ -308,6 +331,29 @@ impl<S: Store> State<S> {
                 chain_id,
             }),
         }
+    }
+
+    /// The mirror of [`Self::ensure_holds_unsigned_nonce`] for a pull, which has no swap to
+    /// find its number by: the record names the number, and that number must be waiting for
+    /// exactly this quote's pull.
+    fn ensure_pull_nonce(
+        &self,
+        quote_hash: QuoteHash,
+        chain_id: ChainId,
+        nonce: Nonce,
+    ) -> Result<(), TransitionError> {
+        let held = self
+            .store()
+            .unsigned_nonce(&NonceKey { chain_id, nonce })
+            .map(|unsigned| unsigned.purpose);
+        if held != Some(TxPurpose::GaslessPull(quote_hash)) {
+            return Err(TransitionError::NonceNotHeldForPull {
+                chain_id,
+                nonce,
+                quote_hash,
+            });
+        }
+        Ok(())
     }
 
     /// A nonce that was handed out and is still waiting for a signed record.
@@ -395,7 +441,10 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         } => state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp),
         EventType::TxCancelled {
             chain_id, nonce, ..
-        } => state.record_nonce_cancelled(*chain_id, *nonce),
+        }
+        | EventType::PullSigned {
+            chain_id, nonce, ..
+        } => state.record_nonce_spent(*chain_id, *nonce),
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

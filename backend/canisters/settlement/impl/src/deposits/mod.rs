@@ -40,16 +40,23 @@ pub struct VerifiedDeposit {
     pub block: BlockNumber,
 }
 
-/// Why the read verified no deposit.
+/// Why a chain has no vault to read or send to.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum DepositError {
+pub enum VaultError {
     #[error("chain {chain_id} has no vault configured")]
     NoVault { chain_id: ChainId },
     #[error("the vault configured for chain {chain_id} is not an address: {reason}")]
-    VaultNotAnAddress {
+    NotAnAddress {
         chain_id: ChainId,
         reason: EvmAddressError,
     },
+}
+
+/// Why the read verified no deposit.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum DepositError {
+    #[error(transparent)]
+    Vault(#[from] VaultError),
     #[error("chain {chain_id} has no chain data young enough to anchor the read on")]
     StaleChainData { chain_id: ChainId },
     #[error(transparent)]
@@ -183,15 +190,15 @@ pub fn decide(
 }
 
 /// The vault the config names for `chain_id`, as an address.
-fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress, DepositError> {
+pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress, VaultError> {
     let vault = config
         .vault_addresses
         .get(&chain_id)
-        .ok_or(DepositError::NoVault { chain_id })?;
+        .ok_or(VaultError::NoVault { chain_id })?;
     vault
         .as_str()
         .parse()
-        .map_err(|reason| DepositError::VaultNotAnAddress { chain_id, reason })
+        .map_err(|reason| VaultError::NotAnAddress { chain_id, reason })
 }
 
 /// Reads whether the vault on `chain_id` holds a deposit for `quote_hash`, deep enough to

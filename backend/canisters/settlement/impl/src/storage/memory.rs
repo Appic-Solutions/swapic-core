@@ -27,7 +27,8 @@ const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
 const NONCES_MEMORY_ID: MemoryId = MemoryId::new(15);
 const OUTBOX_MEMORY_ID: MemoryId = MemoryId::new(16);
-// 17 and 18 are reserved for the rest of Plan 3: attestation inbox, in-flight markers
+const ATTESTATIONS_MEMORY_ID: MemoryId = MemoryId::new(17);
+const IN_FLIGHT_MEMORY_ID: MemoryId = MemoryId::new(18);
 const SANCTIONS_MEMORY_ID: MemoryId = MemoryId::new(19);
 const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
 const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
@@ -110,4 +111,12 @@ pub fn unsigned_nonces_memory() -> Memory {
 
 pub fn sanctions_memory() -> Memory {
     memory(SANCTIONS_MEMORY_ID)
+}
+
+pub fn attestations_memory() -> Memory {
+    memory(ATTESTATIONS_MEMORY_ID)
+}
+
+pub fn inflight_memory() -> Memory {
+    memory(IN_FLIGHT_MEMORY_ID)
 }

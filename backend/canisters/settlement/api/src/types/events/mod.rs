@@ -157,6 +157,16 @@ pub enum EventType {
         tx_hash: Hash32,
         raw_tx: Vec<u8>,
     },
+    /// A gasless pull was signed: the transaction that takes a user's funds into the vault
+    /// with their permit, recorded before it is broadcast. It names the quote and the nonce
+    /// and no swap, because the deposit it makes is what `claim_swap` then verifies.
+    PullSigned {
+        quote_hash: Hash32,
+        chain_id: u64,
+        nonce: u64,
+        tx_hash: Hash32,
+        raw_tx: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. All but the last name the swap they belong to.
@@ -438,6 +448,19 @@ impl From<types::EventType> for EventType {
                 tx_hash: tx_hash.into_bytes(),
                 raw_tx,
             },
+            Domain::PullSigned {
+                quote_hash,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => Self::PullSigned {
+                quote_hash: quote_hash.into_bytes(),
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
+                tx_hash: tx_hash.into_bytes(),
+                raw_tx,
+            },
         }
     }
 }
@@ -647,6 +670,19 @@ impl TryFrom<EventType> for types::EventType {
                 tx_hash,
                 raw_tx,
             } => Self::TxCancelled {
+                chain_id: ChainId::new(chain_id),
+                nonce: Nonce::new(nonce),
+                tx_hash: TxHash::new(tx_hash),
+                raw_tx,
+            },
+            EventType::PullSigned {
+                quote_hash,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            } => Self::PullSigned {
+                quote_hash: QuoteHash::new(quote_hash),
                 chain_id: ChainId::new(chain_id),
                 nonce: Nonce::new(nonce),
                 tx_hash: TxHash::new(tx_hash),
