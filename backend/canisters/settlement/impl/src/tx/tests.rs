@@ -627,3 +627,83 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         "fewer answers than calls is not an answer to this chunk"
     );
 }
+
+/// The signature is awaited across consensus rounds on the signing subnet, so by the time
+/// it comes back the number it was asked for may have been cancelled and the swap handed
+/// a fresh one. The record the signed bytes belong to is the number they carry, not
+/// whatever number the swap holds now: a late signature is refused unless the swap still
+/// holds exactly the nonce that was allocated for it, so it can never be written at the
+/// cancel's nonce or spend the fresh allocation.
+#[test]
+fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
+    use crate::state::transitions::apply_state_transition;
+    use crate::state::transitions::tests::{funds, swap_id};
+    use crate::state::{MemoryStore, State};
+    use types::events::EventType;
+    use types::{Event, Nonce, NonceKey, TxHash};
+
+    let qh = swap_id(1);
+    let mut state = State::<MemoryStore>::default();
+    let apply = |state: &mut State<MemoryStore>, payload: EventType| {
+        state.check(&payload).expect("the fold admits it");
+        let meta = state.meta();
+        let event = Event::seal(
+            meta.next_event_index,
+            Timestamp::from_nanos(1),
+            meta.last_event_hash,
+            payload,
+        )
+        .expect("the payload has a preimage");
+        apply_state_transition(state, &event);
+    };
+    let allocation = |nonce: u64| EventType::TxCreated {
+        purpose: TxPurpose::Payout(qh),
+        chain_id: ChainId::BASE,
+        nonce: Nonce::new(nonce),
+        to: EvmAddress::ZERO,
+        value: Wei::ZERO,
+        data: vec![],
+        gas_limit: GasAmount::from(21_000_u32),
+        max_fee: WeiPerGas::from(2_u32),
+        max_priority_fee: WeiPerGas::from(1_u32),
+    };
+    let key = |nonce: u64| NonceKey {
+        chain_id: ChainId::BASE,
+        nonce: Nonce::new(nonce),
+    };
+
+    apply(&mut state, funds(1));
+    apply(&mut state, allocation(0));
+    assert_eq!(
+        still_holds(&state, &qh, key(0)),
+        Ok(()),
+        "the number just allocated is the number the signature is for"
+    );
+
+    // the pass cancels number 0 while the signature is on its way, and the swap is handed
+    // number 1 by a retry: the late signature carries 0, and 0 is sealed
+    apply(
+        &mut state,
+        EventType::TxCancelled {
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(0),
+            tx_hash: TxHash::new([1; 32]),
+            raw_tx: vec![0x02],
+        },
+    );
+    apply(&mut state, allocation(1));
+    assert_eq!(
+        still_holds(&state, &qh, key(0)),
+        Err(TxError::NonceCancelled {
+            quote_hash: qh,
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(0),
+        }),
+        "the swap holds 1 now, and a record carrying 0 must not spend it"
+    );
+    assert_eq!(
+        still_holds(&state, &qh, key(1)),
+        Ok(()),
+        "the fresh number's own signature is still welcome"
+    );
+}

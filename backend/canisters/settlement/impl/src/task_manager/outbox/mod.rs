@@ -112,11 +112,14 @@ async fn run() {
     tx::cancel_stranded().await;
     tx::flush().await;
     tx::check_open().await;
-    // a halted canister rests: the two passes that create transactions return at once,
-    // and an empty pass every window until an operator lifts the halt is spinning. The
-    // halt is read after the passes, because it can be set during their awaits, and
-    // `set_halted` arms the pass again when the halt lifts, so nothing waits for nothing.
-    if !is_halted() && work_is_pending() {
+    // a halted canister creates nothing (the two passes that would return at once) but
+    // keeps reading what the chains do with the bytes already out, so an operator
+    // investigating a divergence sees attempts close as they mine: while anything is
+    // sent, the pass re-arms whatever the halt says. What it does not do is spin on work
+    // it may not touch: a halt with only queued or unsigned work rests until `set_halted`
+    // arms it again. The halt is read after the passes, because it can land during their
+    // awaits.
+    if outbox::any_sent() || (!is_halted() && work_is_pending()) {
         arm();
     }
 }

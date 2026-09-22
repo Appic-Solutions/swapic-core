@@ -21,6 +21,7 @@ mod tests;
 use crate::ecdsa::{self, EcdsaError};
 use crate::guards::require_not_halted;
 use crate::rpc::{self, RpcError};
+use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::{chain_data, config, outbox};
 use crate::task_manager;
@@ -32,7 +33,7 @@ use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount,
+    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, Nonce,
     NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
 };
 
@@ -125,10 +126,38 @@ pub enum TxError {
     PurposeNeedsASwap(&'static str),
     #[error("swap {quote_hash} has used every attempt number there is")]
     NoAttemptLeft { quote_hash: QuoteHash },
+    #[error(
+        "nonce {nonce} on chain {chain_id} was cancelled while swap {quote_hash}'s signature \
+         was on its way, so the signed bytes carrying it are not recorded"
+    )]
+    NonceCancelled {
+        quote_hash: QuoteHash,
+        chain_id: ChainId,
+        nonce: Nonce,
+    },
     #[error(transparent)]
     Append(#[from] AppendError),
     #[error(transparent)]
     Ecdsa(#[from] EcdsaError),
+}
+
+/// Whether `quote_hash` still holds exactly `key` as its unsigned nonce: the signed bytes
+/// carry that number, and a record that spent any other number the swap holds would put
+/// two signed transactions on one nonce (the cancelled one) and strand the other. Pure, so
+/// the race a signing await opens is proven without a signing subnet.
+fn still_holds<S: Store>(
+    state: &State<S>,
+    quote_hash: &QuoteHash,
+    key: NonceKey,
+) -> Result<(), TxError> {
+    if state.store().unsigned_nonce_of(quote_hash) == Some(key) {
+        return Ok(());
+    }
+    Err(TxError::NonceCancelled {
+        quote_hash: *quote_hash,
+        chain_id: key.chain_id,
+        nonce: key.nonce,
+    })
 }
 
 /// The freshest reading of a chain, or the refusal that prices nothing: a transaction is
@@ -243,9 +272,13 @@ pub async fn create_and_send(
     let signed = tx.signed(signature);
     let tx_hash = signed.hash();
     let raw_tx = signed.into_raw();
-    // refused when a cancel spent the number while the signature was on its way: the
-    // error goes back to the caller and the outbox is not touched, so the cancel's entry
-    // at this nonce stays exactly as the pass queued it
+    // the bytes carry the number that was allocated before the await, and `TxSigned`
+    // names the swap, not the number: so the swap must still hold exactly that number,
+    // checked here with no await between the check and the append. A cancel that spent
+    // the number meanwhile has sealed it, and a retry may have handed the swap a fresh
+    // one; either way the late signature is refused, the outbox is not touched, and the
+    // cancel's entry at this nonce stays exactly as the pass queued it
+    read_state(|state| still_holds(state, &quote_hash, NonceKey { chain_id, nonce }))?;
     append_event(EventType::TxSigned {
         quote_hash,
         attempt,
@@ -528,7 +561,9 @@ pub async fn check_open() -> ReceiptPass {
                         pass.closed += decide(entry, chain_id, landed, latest, depth, now).await;
                     }
                 }
-                Err(_) if chunk.len() > 1 => {
+                // only a failed call is worth splitting: a head that did not come back as
+                // a number fails every chunk of any size the same way
+                Err(Unread::Rpc) if chunk.len() > 1 => {
                     pass.reread += 1;
                     for entry in &chunk {
                         match read_receipts(chain_id, std::slice::from_ref(entry)).await {
@@ -557,9 +592,10 @@ pub async fn check_open() -> ReceiptPass {
     pass
 }
 
-/// Why a chunk's answer decided nothing about any entry in it. The pass does the same
-/// either way, re-read the chunk one entry at a time or leave the entry to the rebroadcast
-/// rule, so neither carries more than its name.
+/// Why a chunk's answer decided nothing about any entry in it. A failed call is re-read one
+/// entry at a time, because the chunk's size may be what failed it; a head that is not a
+/// number leaves every entry to the rebroadcast rule, because no smaller chunk would read
+/// it better.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unread {
     /// the call itself failed: unreachable, refused by the system, a provider error, or an
@@ -941,6 +977,15 @@ impl From<TxError> for settlement_api::types::tx::TxError {
             },
             TxError::NoAttemptLeft { quote_hash } => Self::NoAttemptLeft {
                 quote_hash: quote_hash.into_bytes(),
+            },
+            TxError::NonceCancelled {
+                quote_hash,
+                chain_id,
+                nonce,
+            } => Self::NonceCancelled {
+                quote_hash: quote_hash.into_bytes(),
+                chain_id: chain_id.get(),
+                nonce: nonce.get(),
             },
             TxError::Append(error) => Self::Append(error.into()),
             TxError::Ecdsa(error) => Self::Ecdsa(error.into()),

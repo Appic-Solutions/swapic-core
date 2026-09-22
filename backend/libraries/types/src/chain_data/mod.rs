@@ -192,12 +192,17 @@ impl Fees {
     /// The fees a replacement pays: double what the transaction being replaced offered, but
     /// never below what the chain is asking now and never above `ceiling`.
     ///
-    /// `None` once neither field can be raised any further, which is not a failure: a node
-    /// accepts a replacement only when both fields are higher than the ones it replaces, so
-    /// a bid at the ceiling is the last bid there is. The transaction is not abandoned, it
-    /// keeps going out at the price it already offers, because a chain that will not mine
-    /// eight times the going rate will not mine sixteen either.
+    /// `None` when no bid can be raised, which is not a failure: a node accepts a
+    /// replacement only when it pays more than the one it replaces, so a bid at the ceiling
+    /// is the last bid there is, and a ceiling that sits below the floor leaves no bid the
+    /// chain would mine. The transaction is not abandoned, it keeps going out at the price
+    /// it already offers, because a chain that will not mine eight times the going rate
+    /// will not mine sixteen either.
     pub fn bumped(self, floor: Fees, ceiling: Fees) -> Option<Self> {
+        // a ceiling under the floor is a bound the chain's own price already breaks
+        if ceiling.max_fee < floor.max_fee {
+            return None;
+        }
         let bump = |old: WeiPerGas, floor: WeiPerGas, cap: WeiPerGas| {
             old.checked_mul(2_u8).unwrap_or(cap).max(floor).min(cap)
         };
@@ -210,8 +215,9 @@ impl Fees {
             ),
         }
         .clamped();
+        // the fee cap is what a node compares; the tip only has to not fall
         let raised =
-            bumped.max_fee > self.max_fee && bumped.max_priority_fee > self.max_priority_fee;
+            bumped.max_fee > self.max_fee && bumped.max_priority_fee >= self.max_priority_fee;
         raised.then_some(bumped)
     }
 }

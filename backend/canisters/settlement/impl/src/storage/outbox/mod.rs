@@ -42,6 +42,18 @@ pub fn is_empty() -> bool {
     OUTBOX.with(|outbox| outbox.borrow().is_empty())
 }
 
+/// Whether any entry has bytes out on a chain: the work a pass reads receipts for, which
+/// a halt does not stop. A walk of the outbox, which is small by construction (see
+/// [`chains`]).
+pub fn any_sent() -> bool {
+    OUTBOX.with(|outbox| {
+        outbox
+            .borrow()
+            .iter()
+            .any(|(_, entry)| entry.status == OutboxStatus::Sent)
+    })
+}
+
 /// Every chain that has an entry, in chain id order. The key orders by chain first, so this
 /// is a walk of the map and never of the chains the config lists.
 ///

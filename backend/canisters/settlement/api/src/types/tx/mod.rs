@@ -38,6 +38,13 @@ pub enum TxError {
     NoAttemptLeft {
         quote_hash: Hash32,
     },
+    /// The nonce the signed bytes carry was cancelled while the signature was on its way,
+    /// so the record was refused and nothing was queued.
+    NonceCancelled {
+        quote_hash: Hash32,
+        chain_id: u64,
+        nonce: u64,
+    },
     Append(AppendError),
     Ecdsa(EcdsaError),
 }

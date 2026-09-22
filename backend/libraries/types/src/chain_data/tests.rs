@@ -102,3 +102,23 @@ fn a_ceiling_capped_below_itself_lowers_both_fields() {
         "and the tip never ends up above the ceiling"
     );
 }
+
+/// A replacement is never priced under what the chain is asking now. When the ceiling a
+/// cost bound turned into sits below the floor, no bid can be both affordable and
+/// acceptable, and the answer is no bid rather than a signature on bytes the chain will
+/// not mine.
+#[test]
+fn no_replacement_is_bid_below_the_floor() {
+    let gwei = |n: u64| WeiPerGas::from(n * 1_000_000_000);
+    let old = Fees::new(gwei(1), gwei(1)).unwrap();
+    let floor = Fees::new(gwei(3), gwei(1)).unwrap();
+    let ceiling_under_floor = Fees::new(gwei(2), gwei(1)).unwrap();
+    assert_eq!(old.bumped(floor, ceiling_under_floor), None);
+
+    let ceiling_at_floor = floor;
+    assert_eq!(
+        old.bumped(floor, ceiling_at_floor),
+        Some(floor),
+        "a ceiling at the floor still allows the one bid the chain asks for"
+    );
+}
