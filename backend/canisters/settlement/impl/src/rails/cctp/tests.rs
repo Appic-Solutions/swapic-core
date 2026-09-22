@@ -1,9 +1,12 @@
 use super::*;
 use crate::rails::tests::{
-    config, fixture_swap, leg, quote, MINE, USDC_ARBITRUM, USDC_BASE, VAULT_ARBITRUM, VAULT_BASE,
+    at, config, fixture_swap, quote, MINE, USDC_ARBITRUM, USDC_BASE, VAULT_ARBITRUM, VAULT_BASE,
 };
-use crate::rails::{RailStep, WaitingFor};
-use types::abi::{decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute};
+use crate::rails::{RailStep, ReclaimStep, WaitingFor};
+use types::abi::{
+    decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute, CctpMint,
+    VaultDelta, VaultExecution,
+};
 use types::cctp::{BurnBody, BurnMessage, BURN_BODY_VERSION, MESSAGE_VERSION};
 use types::config::ChainTable;
 use types::evm::EvmAddressError;
@@ -49,11 +52,11 @@ fn attestation_of(message: &BurnMessage) -> Attestation {
 }
 
 fn fast() -> Cctp {
-    Cctp { fast: true }
+    Cctp::Fast
 }
 
 fn standard() -> Cctp {
-    Cctp { fast: false }
+    Cctp::Standard
 }
 
 /// The fast path is attested at threshold 1000 and pays at most two basis points, rounded
@@ -101,15 +104,19 @@ fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
     let quote = quote();
     let swap = fixture_swap(None, None);
     let config = config();
-    let leg = leg(&quote, &swap, &config, None, None);
-    let burn = fast().burn(&leg).expect("everything is configured");
-    assert_eq!(burn.purpose, TxPurpose::Burn(leg.quote_hash));
+    let at = at(&quote, &swap, &config, None, None);
+    let burn = fast().burn(&at).expect("everything is configured");
+    assert_eq!(burn.purpose, TxPurpose::Burn(at.quote_hash));
     assert_eq!(burn.chain_id, ChainId::BASE);
     assert_eq!(burn.to, VAULT_BASE.parse::<EvmAddress>().unwrap());
     assert_eq!(burn.value, Wei::ZERO);
     assert_eq!(burn.gas_limit, BURN_GAS_LIMIT);
-    let (swap_ref, calls, deltas) = decode_vault_execute(&burn.data).expect("an execute");
-    assert_eq!(swap_ref, leg.quote_hash);
+    let VaultExecution {
+        swap_ref,
+        calls,
+        deltas,
+    } = decode_vault_execute(&burn.data).expect("an execute");
+    assert_eq!(swap_ref, at.quote_hash);
     assert_eq!(calls.len(), 1);
     let usdc_base: EvmAddress = USDC_BASE.parse().unwrap();
     assert_eq!(calls[0].target, config.token_messenger.unwrap());
@@ -143,8 +150,8 @@ fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
         }]
     );
 
-    let standard = standard().burn(&leg).unwrap();
-    let (_, calls, _) = decode_vault_execute(&standard.data).unwrap();
+    let standard = standard().burn(&at).unwrap();
+    let calls = decode_vault_execute(&standard.data).unwrap().calls;
     let inner = decode_cctp_deposit_for_burn(&calls[0].data).unwrap();
     assert_eq!(
         (inner.max_fee, inner.min_finality_threshold),
@@ -163,7 +170,7 @@ fn a_missing_knob_refuses_the_burn_by_name() {
     };
     assert_eq!(
         fast()
-            .burn(&leg(&quote, &swap, &no_domain, None, None))
+            .burn(&at(&quote, &swap, &no_domain, None, None))
             .map(drop),
         Err(RailError::NoDomain {
             chain_id: ChainId::ARBITRUM
@@ -175,7 +182,7 @@ fn a_missing_knob_refuses_the_burn_by_name() {
     };
     assert_eq!(
         fast()
-            .burn(&leg(&quote, &swap, &no_usdc, None, None))
+            .burn(&at(&quote, &swap, &no_usdc, None, None))
             .map(drop),
         Err(RailError::NoUsdc {
             chain_id: ChainId::BASE
@@ -187,7 +194,7 @@ fn a_missing_knob_refuses_the_burn_by_name() {
     };
     assert_eq!(
         fast()
-            .burn(&leg(&quote, &swap, &no_messenger, None, None))
+            .burn(&at(&quote, &swap, &no_messenger, None, None))
             .map(drop),
         Err(RailError::NoTokenMessenger)
     );
@@ -199,7 +206,7 @@ fn a_missing_knob_refuses_the_burn_by_name() {
     let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     assert_eq!(
         fast()
-            .step(&leg(
+            .step(&at(
                 &quote,
                 &burned,
                 &no_transmitter,
@@ -212,15 +219,14 @@ fn a_missing_knob_refuses_the_burn_by_name() {
 }
 
 /// The rail's whole table: the burn first, then a wait for the attestation, then the mint
-/// carrying exactly what the watcher handed in, then the arrival with the least the
-/// destination vault holds; and a burn is never reclaimed.
+/// carrying exactly what the watcher handed in, then the read of what that mint delivered.
 #[test]
-fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
+fn the_steps_run_burn_attestation_mint_and_the_read_of_what_it_delivered() {
     let quote = quote();
     let config = config();
     let fresh = fixture_swap(None, None);
     assert!(matches!(
-        fast().step(&leg(&quote, &fresh, &config, None, None)),
+        fast().step(&at(&quote, &fresh, &config, None, None)),
         Ok(RailStep::Send(RailTx {
             purpose: TxPurpose::Burn(_),
             ..
@@ -229,39 +235,42 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
 
     let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     assert_eq!(
-        fast().step(&leg(&quote, &burned, &config, None, None)),
+        fast().step(&at(&quote, &burned, &config, None, None)),
         Ok(RailStep::Wait(WaitingFor::Attestation))
     );
     let message = attested_message();
     let attestation = attestation_of(&message);
-    let mint = match fast().step(&leg(&quote, &burned, &config, Some(&attestation), None)) {
+    let mint = match fast().step(&at(&quote, &burned, &config, Some(&attestation), None)) {
         Ok(RailStep::Send(tx)) => tx,
         other => panic!("the mint is sent once the attestation is in: {other:?}"),
     };
     assert_eq!(
         mint.purpose,
-        TxPurpose::Mint(leg(&quote, &burned, &config, None, None).quote_hash)
+        TxPurpose::Mint(at(&quote, &burned, &config, None, None).quote_hash)
     );
     assert_eq!(mint.chain_id, ChainId::ARBITRUM);
     assert_eq!(mint.to, config.message_transmitter.unwrap());
     assert_eq!(mint.gas_limit, MINT_GAS_LIMIT);
     assert_eq!(
         decode_cctp_receive_message(&mint.data),
-        Some((message.encode(), vec![0xbb; 65]))
+        Some(CctpMint {
+            message: message.encode(),
+            attestation: vec![0xbb; 65],
+        })
     );
 
     // the mint confirmed: what it delivered is read off its own receipt, never computed
     let mut minted = fixture_swap(Some(SwapLeg::Mint), Some(Outcome::Confirmed));
     minted.last_tx_hash = Some(TxHash::new([0x42; 32]));
     assert_eq!(
-        fast().step(&leg(&quote, &minted, &config, None, None)),
+        fast().step(&at(&quote, &minted, &config, None, None)),
         Ok(RailStep::ReadMint {
             chain_id: ChainId::ARBITRUM,
             tx_hash: TxHash::new([0x42; 32]),
         })
     );
     assert_eq!(
-        standard().step(&leg(&quote, &minted, &config, None, None)),
+        standard().step(&at(&quote, &minted, &config, None, None)),
         Ok(RailStep::ReadMint {
             chain_id: ChainId::ARBITRUM,
             tx_hash: TxHash::new([0x42; 32]),
@@ -270,28 +279,45 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
     let mut no_hash = fixture_swap(Some(SwapLeg::Mint), Some(Outcome::Confirmed));
     no_hash.last_tx_hash = None;
     assert_eq!(
-        fast().step(&leg(&quote, &no_hash, &config, None, None)),
+        fast().step(&at(&quote, &no_hash, &config, None, None)),
         Err(RailError::NoMintHash),
         "a confirmed mint with no hash recorded is a fold no line produces"
     );
 
+    let _ = USDC_ARBITRUM;
+}
+
+/// A burn is final on the source side, and a swap already paid out has no leg left: both
+/// stop the rail rather than sending anything.
+#[test]
+fn a_burn_is_never_reclaimed_and_a_paid_out_swap_has_no_step() {
+    let quote = quote();
+    let config = config();
+    let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     assert!(matches!(
-        fast().reclaim(&leg(&quote, &burned, &config, None, None)),
-        Ok(RailStep::Stuck(_))
+        fast().reclaim(&at(&quote, &burned, &config, None, None)),
+        Ok(ReclaimStep::Stuck(_))
     ));
     let paid_out = fixture_swap(Some(SwapLeg::Payout), Some(Outcome::Confirmed));
     assert!(matches!(
-        fast().step(&leg(&quote, &paid_out, &config, None, None)),
+        fast().step(&at(&quote, &paid_out, &config, None, None)),
         Ok(RailStep::Stuck(_))
     ));
+}
 
-    // a quote paying out a token that is no address is refused before the burn
+/// A quote whose destination token is no address at all is refused before the burn, by the
+/// field: the rail pins both tokens, and text that is no address is not the rail's token
+/// however it is spelled.
+#[test]
+fn a_quote_whose_token_is_no_address_is_refused_by_the_field() {
+    let config = config();
+    let fresh = fixture_swap(None, None);
     let odd_token = types::Quote {
         dst_token: "USDC".parse().unwrap(),
-        ..quote.clone()
+        ..quote()
     };
     assert_eq!(
-        fast().step(&leg(&odd_token, &fresh, &config, None, None)),
+        fast().step(&at(&odd_token, &fresh, &config, None, None)),
         Err(RailError::RailToken(RailTokenError::QuoteAddress(
             QuoteAddressError::NotAnAddress {
                 field: QuoteAddressField::DstToken,
@@ -299,7 +325,6 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
             }
         )))
     );
-    let _ = USDC_ARBITRUM;
 }
 
 /// The rail carries the configured USDC and nothing else: a swap naming any other token on
@@ -316,7 +341,7 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
     };
     assert_eq!(
         fast()
-            .step(&leg(&wrong_source, &swap, &config, None, None))
+            .step(&at(&wrong_source, &swap, &config, None, None))
             .map(drop),
         Err(RailError::RailToken(RailTokenError::NotTheRailToken {
             field: QuoteAddressField::SrcToken,
@@ -331,7 +356,7 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
     };
     assert_eq!(
         standard()
-            .step(&leg(&wrong_destination, &swap, &config, None, None))
+            .step(&at(&wrong_destination, &swap, &config, None, None))
             .map(drop),
         Err(RailError::RailToken(RailTokenError::NotTheRailToken {
             field: QuoteAddressField::DstToken,
@@ -344,7 +369,7 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
     // and a swap already burned is held to the same pin at every later step
     let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     assert!(matches!(
-        fast().step(&leg(&wrong_source, &burned, &config, None, None)),
+        fast().step(&at(&wrong_source, &burned, &config, None, None)),
         Err(RailError::RailToken(_))
     ));
 }
@@ -360,7 +385,7 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
     let quote = quote();
     let config = config();
     let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
-    let view = leg(&quote, &burned, &config, None, None);
+    let view = at(&quote, &burned, &config, None, None);
     let good = attested_message();
     assert_eq!(fast().ensure_message_binds(&view, &good), Ok(()));
 
@@ -582,7 +607,7 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
         ..good.clone()
     };
     assert!(matches!(
-        fast().step(&leg(
+        fast().step(&at(
             &quote,
             &burned,
             &config,
@@ -594,7 +619,7 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
     let garbage =
         Attestation::new(vec![0xaa; 376], vec![0xbb; 65], Timestamp::from_nanos(1)).unwrap();
     assert!(matches!(
-        fast().step(&leg(&quote, &burned, &config, Some(&garbage), None)),
+        fast().step(&at(&quote, &burned, &config, Some(&garbage), None)),
         Err(RailError::UnreadableMessage(_))
     ));
 }

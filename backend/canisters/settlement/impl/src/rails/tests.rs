@@ -1,6 +1,6 @@
 //! The fixtures the two rails' tests share: a Base to Arbitrum USDC quote, a swap at any
 //! point of its life, and a config with every rail knob set.
-use super::Leg;
+use super::Position;
 use std::collections::BTreeMap;
 use types::config::ChainTable;
 use types::{
@@ -90,14 +90,14 @@ pub fn config() -> Config {
     }
 }
 
-pub fn leg<'a>(
+pub fn at<'a>(
     quote: &'a Quote,
     swap: &'a Swap,
     config: &'a Config,
     attestation: Option<&'a Attestation>,
     intent: Option<&'a EcoIntent>,
-) -> Leg<'a> {
-    Leg {
+) -> Position<'a> {
+    Position {
         quote_hash: quote.hash().unwrap(),
         quote,
         swap,

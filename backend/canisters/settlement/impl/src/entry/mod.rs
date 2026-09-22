@@ -20,11 +20,12 @@ use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::sanctions::is_sanctioned;
 use crate::storage::{config, inflight, outbox};
 use crate::tx::{self, TxError};
-use settlement_api::types::entry::PullPermit;
+use settlement_api::types::entry::{PermitError, PullRequest, MAX_PERMIT2_SIGNATURE_BYTES};
 use settlement_api::types::errors::GuardError;
+use settlement_api::types::wire_len;
 use std::time::Duration;
 use thiserror::Error;
-use types::abi::vault_pull_with_permit2;
+use types::abi::{vault_pull_with_permit2, Permit2Permit};
 use types::events::TxPurpose;
 use types::quote::QuoteError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
@@ -72,6 +73,58 @@ pub enum ClaimError {
     Deposit(#[from] DepositError),
     #[error(transparent)]
     Append(#[from] AppendError),
+}
+
+/// A permit as the vault's `pullWithPermit2` takes it, in the domain's own types, with
+/// the two fields the calldata does not carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullPermit {
+    /// the quote the signature's witness names
+    pub witness: QuoteHash,
+    pub owner: EvmAddress,
+    /// the spender the signature names
+    pub spender: EvmAddress,
+    pub permit: Permit2Permit,
+    pub signature: Vec<u8>,
+}
+
+impl TryFrom<PullRequest> for PullPermit {
+    type Error = PermitError;
+
+    fn try_from(request: PullRequest) -> Result<Self, Self::Error> {
+        let permit = match request {
+            PullRequest::Eip2612(_) => return Err(PermitError::NotAPermit2Permit),
+            PullRequest::Permit2(permit) => permit,
+        };
+        if permit.signature.len() > MAX_PERMIT2_SIGNATURE_BYTES {
+            return Err(PermitError::SignatureTooLong {
+                len: wire_len(permit.signature.len()),
+                cap: wire_len(MAX_PERMIT2_SIGNATURE_BYTES),
+            });
+        }
+        let address = |field: &str, text: &str| {
+            text.parse().map_err(
+                |reason: types::evm::EvmAddressError| PermitError::NotAnAddress {
+                    field: field.to_string(),
+                    reason: reason.into(),
+                },
+            )
+        };
+        Ok(Self {
+            witness: QuoteHash::new(permit.quote_hash),
+            owner: address("owner", &permit.owner)?,
+            spender: address("spender", &permit.spender)?,
+            permit: Permit2Permit {
+                token: address("token", &permit.token)?,
+                amount: TokenAmount::from_canonical_nat(permit.amount)
+                    .ok_or(PermitError::AmountTooLarge)?,
+                nonce: types::Permit2Nonce::try_from(permit.nonce)
+                    .map_err(|_| PermitError::NonceTooLarge)?,
+                deadline: UnixSeconds::new(permit.deadline_s),
+            },
+            signature: permit.signature,
+        })
+    }
 }
 
 /// Why a permit the caller sent is not the one this quote's pull may use, with what it
@@ -255,11 +308,7 @@ pub fn funds_received(quote: &Quote, deposit: &VerifiedDeposit) -> EventType {
             .canonical_bytes()
             .expect("BUG: a validated quote has a preimage"),
         chain_id: quote.src_chain,
-        token: deposit
-            .token
-            .to_string()
-            .parse()
-            .expect("BUG: an EIP-55 address is 42 bytes"),
+        token: deposit.token.into(),
         amount: deposit.amount,
         tx_ref: format!("0x{}", hex::encode(deposit.tx_ref.as_ref())),
     }
@@ -267,10 +316,7 @@ pub fn funds_received(quote: &Quote, deposit: &VerifiedDeposit) -> EventType {
 
 /// An address as the sanctions set reads it.
 fn party(address: EvmAddress) -> Address {
-    address
-        .to_string()
-        .parse()
-        .expect("BUG: an EIP-55 address is 42 bytes")
+    address.into()
 }
 
 /// Claims the deposit a user made for `quote` and creates its swap.
@@ -459,6 +505,7 @@ impl From<ClaimError> for settlement_api::types::entry::ClaimError {
                 party: party.to_string(),
             },
             ClaimError::InFlight(marker) => Self::InFlight {
+                kind: marker.kind.into(),
                 since_ns: marker.since.as_nanos(),
             },
             ClaimError::RailUnavailable { rail } => Self::RailUnavailable {
@@ -494,6 +541,7 @@ impl From<PullError> for settlement_api::types::entry::PullError {
                 party: party.to_string(),
             },
             PullError::InFlight(marker) => Self::InFlight {
+                kind: marker.kind.into(),
                 since_ns: marker.since.as_nanos(),
             },
             PullError::AlreadyPulling { tx_hash } => Self::AlreadyPulling {

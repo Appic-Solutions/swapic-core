@@ -54,7 +54,10 @@ pub fn is_sanctioned(address: &Address) -> bool {
     SANCTIONED.with(|set| set.borrow().contains_key(&key(address)))
 }
 
-pub fn len() -> u64 {
+/// How many addresses the set holds. `apply` answers the same number, so this is what the
+/// tests read and nothing else.
+#[cfg(test)]
+pub(crate) fn len() -> u64 {
     SANCTIONED.with(|set| set.borrow().len())
 }
 
@@ -71,7 +74,9 @@ pub fn apply(add: &[Address], remove: &[Address]) -> Result<u64, SanctionsError>
             .map(key)
             .filter(|address| !set.contains_key(address))
             .collect();
-        // what leaves is what is held now and asked to go, not also re-added
+        // what leaves is what the set holds now, is asked to go, and is not added back in
+        // the same call: `new` holds only addresses the set does not have yet, so an
+        // address that is in both lists and already held is counted here and not there
         let leaving = removed
             .iter()
             .filter(|address| set.contains_key(address) && !new.contains(*address))

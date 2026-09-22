@@ -7,8 +7,6 @@ use crate::types::rpc::RpcError;
 use crate::types::tx::TxError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::abi::Permit2Permit;
-use types::{EvmAddress, Permit2Nonce, QuoteHash, TokenAmount, UnixSeconds};
 
 /// The most bytes a Permit2 signature may be. A wallet signs sixty-five (or sixty-four
 /// compact); a contract wallet answering EIP-1271 may sign more, and this is room for one
@@ -67,19 +65,6 @@ pub enum PullRequest {
     Permit2(Permit2Sig),
 }
 
-/// A permit as the vault's `pullWithPermit2` takes it, in the domain's own types, with
-/// the two fields the calldata does not carry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullPermit {
-    /// the quote the signature's witness names
-    pub witness: QuoteHash,
-    pub owner: EvmAddress,
-    /// the spender the signature names
-    pub spender: EvmAddress,
-    pub permit: Permit2Permit,
-    pub signature: Vec<u8>,
-}
-
 /// Why a permit the caller sent is not the one this quote's pull may use, with what it
 /// says and what the quote says beside it.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -110,6 +95,22 @@ pub enum PermitMismatch {
     },
 }
 
+/// Which door holds the marker: a claim reading the chain, or a pull being signed.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InFlightKind {
+    Claim,
+    Pull,
+}
+
+impl From<types::InFlightKind> for InFlightKind {
+    fn from(kind: types::InFlightKind) -> Self {
+        match kind {
+            types::InFlightKind::Claim => Self::Claim,
+            types::InFlightKind::Pull => Self::Pull,
+        }
+    }
+}
+
 /// Why a permit is not one the vault can use, naming the field.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum PermitError {
@@ -127,45 +128,6 @@ pub enum PermitError {
         len: u64,
         cap: u64,
     },
-}
-
-impl TryFrom<PullRequest> for PullPermit {
-    type Error = PermitError;
-
-    fn try_from(request: PullRequest) -> Result<Self, Self::Error> {
-        let permit = match request {
-            PullRequest::Eip2612(_) => return Err(PermitError::NotAPermit2Permit),
-            PullRequest::Permit2(permit) => permit,
-        };
-        if permit.signature.len() > MAX_PERMIT2_SIGNATURE_BYTES {
-            return Err(PermitError::SignatureTooLong {
-                len: crate::types::wire_len(permit.signature.len()),
-                cap: crate::types::wire_len(MAX_PERMIT2_SIGNATURE_BYTES),
-            });
-        }
-        let address = |field: &str, text: &str| {
-            text.parse().map_err(
-                |reason: types::evm::EvmAddressError| PermitError::NotAnAddress {
-                    field: field.to_string(),
-                    reason: reason.into(),
-                },
-            )
-        };
-        Ok(Self {
-            witness: QuoteHash::new(permit.quote_hash),
-            owner: address("owner", &permit.owner)?,
-            spender: address("spender", &permit.spender)?,
-            permit: Permit2Permit {
-                token: address("token", &permit.token)?,
-                amount: TokenAmount::from_canonical_nat(permit.amount)
-                    .ok_or(PermitError::AmountTooLarge)?,
-                nonce: Permit2Nonce::try_from(permit.nonce)
-                    .map_err(|_| PermitError::NonceTooLarge)?,
-                deadline: UnixSeconds::new(permit.deadline_s),
-            },
-            signature: permit.signature,
-        })
-    }
 }
 
 /// Why a chain has no vault to read or send to: a deploy mistake, named by chain.
@@ -239,8 +201,10 @@ pub enum ClaimError {
     Sanctioned {
         party: String,
     },
-    /// A claim or a pull for this quote is already out, since `since_ns`.
+    /// A claim or a pull for this quote is already out, since `since_ns`: `kind` says
+    /// which of the two, so a caller told to wait knows what it is waiting on.
     InFlight {
+        kind: InFlightKind,
         since_ns: u64,
     },
     /// The quote names a rail this deploy does not run, by its id.
@@ -281,6 +245,7 @@ pub enum PullError {
         party: String,
     },
     InFlight {
+        kind: InFlightKind,
         since_ns: u64,
     },
     /// A pull for this quote is signed and not yet landed; it is that transaction.
@@ -387,6 +352,11 @@ pub enum RailError {
     FeeOverflow {
         amount: Nat,
     },
+    /// An amount above the largest floor a vault execution can carry, which is no amount
+    /// this canister swaps.
+    AmountTooLarge {
+        amount: Nat,
+    },
     RailToken(RailTokenError),
     QuoteAddress(QuoteAddressError),
     UnreadableMessage(MessageError),
@@ -423,9 +393,6 @@ pub enum PushAttestationError {
     Rail(RailError),
 }
 
-#[cfg(test)]
-mod tests;
-
 /// What Eco's quote response gave a swap on the Eco rail, as the watcher hands it in:
 /// `destination_chain` is Eco's `destinationChainID` and never the chain the user is paid
 /// on, `route` its `encodedRoute`, `deadline_s` the reward's deadline and `prover` the
@@ -437,6 +404,49 @@ pub struct EcoIntent {
     pub route: Vec<u8>,
     pub deadline_s: u64,
     pub prover: String,
+}
+
+/// Why a pushed intent is not one the inbox can hold, whichever door it came through.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum EcoIntentError {
+    ProverNotAnAddress { reason: EvmAddressError },
+    RouteTooLong { len: u64, cap: u64 },
+}
+
+impl TryFrom<EcoIntent> for types::EcoIntent {
+    type Error = EcoIntentError;
+
+    fn try_from(intent: EcoIntent) -> Result<Self, Self::Error> {
+        let prover = intent
+            .prover
+            .parse()
+            .map_err(
+                |reason: types::evm::EvmAddressError| EcoIntentError::ProverNotAnAddress {
+                    reason: reason.into(),
+                },
+            )?;
+        types::EcoIntent::new(
+            types::ChainId::new(intent.destination_chain),
+            intent.route,
+            types::UnixSeconds::new(intent.deadline_s),
+            prover,
+        )
+        .map_err(|types::rail::EcoIntentError::RouteTooLong { len, cap }| {
+            EcoIntentError::RouteTooLong {
+                len: crate::types::wire_len(len),
+                cap: crate::types::wire_len(cap),
+            }
+        })
+    }
+}
+
+impl From<EcoIntentError> for PushEcoIntentError {
+    fn from(error: EcoIntentError) -> Self {
+        match error {
+            EcoIntentError::ProverNotAnAddress { reason } => Self::ProverNotAnAddress { reason },
+            EcoIntentError::RouteTooLong { len, cap } => Self::RouteTooLong { len, cap },
+        }
+    }
 }
 
 /// Why `push_eco_intent` stored nothing.

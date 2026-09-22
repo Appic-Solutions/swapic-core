@@ -413,8 +413,75 @@ pub fn eco_refund(destination: ChainId, route_hash: [u8; 32], reward: &EcoReward
     .abi_encode()
 }
 
+/// What a vault execution says: the swap it is for, the calls it runs and the floors the
+/// vault holds them to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultExecution {
+    pub swap_ref: QuoteHash,
+    pub calls: Vec<VaultCall>,
+    pub deltas: Vec<VaultDelta>,
+}
+
+/// What a vault transfer says: the swap it closes, the token, who is paid and how much.
+/// `payout` and `refund` are the same shape and differ only in which side of a swap they
+/// end, so one type reads both back and no caller has to remember which address is which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaultTransfer {
+    pub swap_ref: QuoteHash,
+    pub token: EvmAddress,
+    pub to: EvmAddress,
+    pub amount: TokenAmount,
+}
+
+/// What a Permit2 pull says: the quote it is witnessed by, whose funds it moves, the
+/// permit they signed and their signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Permit2Pull {
+    pub quote_hash: QuoteHash,
+    pub owner: EvmAddress,
+    pub permit: Permit2Permit,
+    pub signature: Vec<u8>,
+}
+
+/// What an EIP-2612 pull says. This canister sends none (see
+/// [`vault_pull_with_permit`]); the decoder is here so a test can read one back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Eip2612Pull {
+    pub quote_hash: QuoteHash,
+    pub token: EvmAddress,
+    pub owner: EvmAddress,
+    pub amount: TokenAmount,
+    pub deadline: UnixSeconds,
+    pub signature: Permit,
+}
+
+/// What a CCTP mint carries: Circle's message and its attestation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CctpMint {
+    pub message: Vec<u8>,
+    pub attestation: Vec<u8>,
+}
+
+/// What an Eco publish says: the destination Eco named, the route a filler runs and the
+/// reward the vault locks for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcoPublish {
+    pub destination: ChainId,
+    pub route: Vec<u8>,
+    pub reward: EcoReward,
+}
+
+/// What an Eco reclaim says: the intent it names, by destination and route hash, and the
+/// reward that goes back to its creator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcoReclaim {
+    pub destination: ChainId,
+    pub route_hash: [u8; 32],
+    pub reward: EcoReward,
+}
+
 /// The execute `data` encodes, if it is one.
-pub fn decode_vault_execute(data: &[u8]) -> Option<(QuoteHash, Vec<VaultCall>, Vec<VaultDelta>)> {
+pub fn decode_vault_execute(data: &[u8]) -> Option<VaultExecution> {
     let call = executeCall::abi_decode(data).ok()?;
     let calls = call
         .calls
@@ -437,54 +504,67 @@ pub fn decode_vault_execute(data: &[u8]) -> Option<(QuoteHash, Vec<VaultCall>, V
             })
         })
         .collect::<Option<_>>()?;
-    Some((QuoteHash::new(call.swapRef.0), calls, deltas))
+    Some(VaultExecution {
+        swap_ref: QuoteHash::new(call.swapRef.0),
+        calls,
+        deltas,
+    })
 }
 
-/// The payout `data` encodes, if it is one: the swap, the token, the recipient and the
-/// amount.
-pub fn decode_vault_payout(
-    data: &[u8],
-) -> Option<(QuoteHash, EvmAddress, EvmAddress, TokenAmount)> {
+/// The payout `data` encodes, if it is one.
+pub fn decode_vault_payout(data: &[u8]) -> Option<VaultTransfer> {
     let call = payoutCall::abi_decode(data).ok()?;
-    Some((
-        QuoteHash::new(call.swapRef.0),
-        evm_address(call.token),
-        evm_address(call.to),
-        checked(call.amount),
-    ))
+    Some(VaultTransfer {
+        swap_ref: QuoteHash::new(call.swapRef.0),
+        token: evm_address(call.token),
+        to: evm_address(call.to),
+        amount: checked(call.amount),
+    })
 }
 
-/// The refund `data` encodes, if it is one: the swap, the token, the recipient and the
-/// amount.
-pub fn decode_vault_refund(
-    data: &[u8],
-) -> Option<(QuoteHash, EvmAddress, EvmAddress, TokenAmount)> {
+/// The refund `data` encodes, if it is one.
+pub fn decode_vault_refund(data: &[u8]) -> Option<VaultTransfer> {
     let call = refundCall::abi_decode(data).ok()?;
-    Some((
-        QuoteHash::new(call.r#ref.0),
-        evm_address(call.token),
-        evm_address(call.to),
-        checked(call.amount),
-    ))
+    Some(VaultTransfer {
+        swap_ref: QuoteHash::new(call.r#ref.0),
+        token: evm_address(call.token),
+        to: evm_address(call.to),
+        amount: checked(call.amount),
+    })
 }
 
-/// The Permit2 pull `data` encodes, if it is one: the quote, the owner, the permit they
-/// signed and the signature.
-pub fn decode_vault_pull_with_permit2(
-    data: &[u8],
-) -> Option<(QuoteHash, EvmAddress, Permit2Permit, Vec<u8>)> {
+/// The Permit2 pull `data` encodes, if it is one.
+pub fn decode_vault_pull_with_permit2(data: &[u8]) -> Option<Permit2Pull> {
     let call = pullWithPermit2Call::abi_decode(data).ok()?;
-    Some((
-        QuoteHash::new(call.quoteHash.0),
-        evm_address(call.owner),
-        Permit2Permit {
+    Some(Permit2Pull {
+        quote_hash: QuoteHash::new(call.quoteHash.0),
+        owner: evm_address(call.owner),
+        permit: Permit2Permit {
             token: evm_address(call.permit.permitted.token),
             amount: checked(call.permit.permitted.amount),
             nonce: checked(call.permit.nonce),
             deadline: UnixSeconds::new(u64::try_from(call.permit.deadline).ok()?),
         },
-        call.signature.to_vec(),
-    ))
+        signature: call.signature.to_vec(),
+    })
+}
+
+/// The EIP-2612 pull `data` encodes, if it is one. No path in this canister builds one;
+/// the decoder answers the call's own shape so the ABI stays readable from both ends.
+pub fn decode_vault_pull_with_permit(data: &[u8]) -> Option<Eip2612Pull> {
+    let call = pullWithPermitCall::abi_decode(data).ok()?;
+    Some(Eip2612Pull {
+        quote_hash: QuoteHash::new(call.quoteHash.0),
+        token: evm_address(call.token),
+        owner: evm_address(call.owner),
+        amount: checked(call.amount),
+        deadline: UnixSeconds::new(u64::try_from(call.deadline).ok()?),
+        signature: Permit {
+            v: call.v,
+            r: call.r.0,
+            s: call.s.0,
+        },
+    })
 }
 
 /// The burn `data` encodes, if it is one.
@@ -502,18 +582,30 @@ pub fn decode_cctp_deposit_for_burn(data: &[u8]) -> Option<Burn> {
 }
 
 /// The message and attestation `data` carries, if it is a `receiveMessage`.
-pub fn decode_cctp_receive_message(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+pub fn decode_cctp_receive_message(data: &[u8]) -> Option<CctpMint> {
     let call = receiveMessageCall::abi_decode(data).ok()?;
-    Some((call.message.to_vec(), call.attestation.to_vec()))
+    Some(CctpMint {
+        message: call.message.to_vec(),
+        attestation: call.attestation.to_vec(),
+    })
 }
 
-/// The intent `data` publishes, if it is a `publishAndFund`: the destination, the route
-/// and the reward.
-pub fn decode_eco_publish_and_fund(data: &[u8]) -> Option<(ChainId, Vec<u8>, EcoReward)> {
+/// The intent `data` publishes, if it is a `publishAndFund`.
+pub fn decode_eco_publish_and_fund(data: &[u8]) -> Option<EcoPublish> {
     let call = publishAndFundCall::abi_decode(data).ok()?;
-    Some((
-        ChainId::new(call.destination),
-        call.route.to_vec(),
-        eco_reward(call.reward),
-    ))
+    Some(EcoPublish {
+        destination: ChainId::new(call.destination),
+        route: call.route.to_vec(),
+        reward: eco_reward(call.reward),
+    })
+}
+
+/// The reclaim `data` asks for, if it is the Portal's `refund`.
+pub fn decode_eco_refund(data: &[u8]) -> Option<EcoReclaim> {
+    let call = ecoRefundCall::abi_decode(data).ok()?;
+    Some(EcoReclaim {
+        destination: ChainId::new(call.destination),
+        route_hash: call.routeHash.0,
+        reward: eco_reward(call.reward),
+    })
 }

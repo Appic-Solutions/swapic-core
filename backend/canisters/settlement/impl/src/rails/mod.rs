@@ -14,8 +14,9 @@ pub(crate) mod tests;
 
 pub use cctp::{MessageField, MessageMismatch};
 
-use crate::deposits::VaultError;
+use crate::deposits::{vault_of, VaultError};
 use thiserror::Error;
+use types::abi::{vault_execute, VaultCall, VaultDelta};
 use types::cctp::MessageError;
 use types::events::TxPurpose;
 use types::quote::QuoteAddressError;
@@ -68,10 +69,22 @@ pub enum RailStep {
     /// to the destination vault: the engine appends `PaidInStable` for that amount, which
     /// is what the chain says arrived and never what the burn promised.
     ReadMint { chain_id: ChainId, tx_hash: TxHash },
+    /// No leg leads from here: the engine freezes the swap with this reason.
+    Stuck(&'static str),
+}
+
+/// The rail's move for a swap whose funds are on the rail and have to come back. Its own
+/// type, because the three moves here are all a reclaim ever has: the rest of [`RailStep`]
+/// is what a swap going forward does, and an engine handler that had to match those arms
+/// would be answering for cases no rail can reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReclaimStep {
     /// Send this transaction to take the funds back into the source vault, for a refund to
     /// follow.
-    Reclaim(RailTx),
-    /// No leg leads from here: the engine freezes the swap with this reason.
+    Send(RailTx),
+    /// Nothing to send yet.
+    Wait(WaitingFor),
+    /// The funds cannot come back: the engine freezes the swap with this reason.
     Stuck(&'static str),
 }
 
@@ -94,6 +107,8 @@ pub enum RailError {
     Vault(#[from] VaultError),
     #[error("the fee of {amount} does not fit an amount")]
     FeeOverflow { amount: TokenAmount },
+    #[error("an amount of {amount} is above the largest a vault execution can floor")]
+    AmountTooLarge { amount: TokenAmount },
     #[error(transparent)]
     RailToken(#[from] RailTokenError),
     #[error(transparent)]
@@ -108,7 +123,7 @@ pub enum RailError {
 
 /// What a rail decides on: the swap as the fold holds it, its quote, the deploy's config,
 /// this canister's own address, what the inboxes hold for the swap, and the clock.
-pub struct Leg<'a> {
+pub struct Position<'a> {
     pub quote_hash: QuoteHash,
     pub quote: &'a Quote,
     pub swap: &'a Swap,
@@ -126,20 +141,11 @@ pub trait CallRail {
 
     /// The next move for a swap executing on this rail. Asked with no attempt open, when
     /// the funds have arrived and after each of the rail's own legs confirmed.
-    fn step(&self, leg: &Leg) -> Result<RailStep, RailError>;
+    fn step(&self, at: &Position) -> Result<RailStep, RailError>;
 
     /// The move for a swap being refunded whose first leg confirmed: whether and how the
     /// funds come back to the source vault, from where the user is refunded.
-    fn reclaim(&self, leg: &Leg) -> Result<RailStep, RailError>;
-}
-
-/// A rail entered by sending the funds to an address the rail owns, which a later plan's
-/// NEAR-style rails are. Declared now so the engine's shape admits them without a change.
-pub trait DepositRail {
-    fn rail(&self) -> Rail;
-
-    /// Where the funds for `quote` are sent to enter the rail.
-    fn deposit_address(&self, quote: &Quote) -> Result<types::Address, RailError>;
+    fn reclaim(&self, at: &Position) -> Result<ReclaimStep, RailError>;
 }
 
 /// The rail a quote names, and never any other.
@@ -148,6 +154,51 @@ pub fn for_rail(rail: Rail) -> Box<dyn CallRail> {
         Some(cctp) => Box::new(cctp),
         None => Box::new(eco::Eco),
     }
+}
+
+/// The envelope both rails enter their rail through, as one call: the source vault
+/// approves `router` for `amount` of `token`, calls it with `data`, and refuses the whole
+/// execution unless its own balance of that token fell by at most `amount`. The floor is
+/// what keeps a router from taking more than the swap, so it is computed in one place and
+/// from the swap's own amount.
+fn through_the_vault(
+    at: &Position,
+    purpose: TxPurpose,
+    router: EvmAddress,
+    data: Vec<u8>,
+    token: EvmAddress,
+    amount: TokenAmount,
+    gas_limit: GasAmount,
+) -> Result<RailTx, RailError> {
+    let calls = [VaultCall {
+        target: router,
+        value: Wei::ZERO,
+        data,
+        approve_token: token,
+        approve_amount: amount,
+    }];
+    let deltas = [VaultDelta {
+        token,
+        min_change: -floor_of(amount)?,
+    }];
+    Ok(RailTx {
+        purpose,
+        chain_id: at.quote.src_chain,
+        to: vault_of(at.config, at.quote.src_chain)?,
+        value: Wei::ZERO,
+        data: vault_execute(at.quote_hash, &calls, &deltas),
+        gas_limit,
+    })
+}
+
+/// `amount` as the signed floor a vault execution takes. Every amount this canister swaps
+/// is far inside an `i128`; one that is not is refused by name rather than wrapped into a
+/// floor that lets a router take everything.
+fn floor_of(amount: TokenAmount) -> Result<i128, RailError> {
+    amount
+        .try_into_u128()
+        .and_then(|amount| i128::try_from(amount).ok())
+        .ok_or(RailError::AmountTooLarge { amount })
 }
 
 /// The USDC contract on `chain_id`, or the knob that is unset.
@@ -164,10 +215,10 @@ fn usdc_on(config: &Config, chain_id: ChainId) -> Result<EvmAddress, RailError> 
 /// USDC spent for nothing, or a token paid out that the mint never delivered. Refused by
 /// the field, and retried on the next tick rather than frozen, because a knob an operator
 /// moves is what puts a claimed swap here.
-fn ensure_rail_tokens(leg: &Leg) -> Result<(), RailError> {
+fn ensure_rail_tokens(at: &Position) -> Result<(), RailError> {
     Ok(types::rail::ensure_rail_tokens(
-        &leg.config.usdc_addresses,
-        leg.quote,
+        &at.config.usdc_addresses,
+        at.quote,
     )?)
 }
 
@@ -188,6 +239,9 @@ impl From<RailError> for settlement_api::types::entry::RailError {
             },
             RailError::Vault(error) => Self::Vault(error.into()),
             RailError::FeeOverflow { amount } => Self::FeeOverflow {
+                amount: amount.into(),
+            },
+            RailError::AmountTooLarge { amount } => Self::AmountTooLarge {
                 amount: amount.into(),
             },
             RailError::RailToken(error) => Self::RailToken(error.into()),

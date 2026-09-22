@@ -50,16 +50,20 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 }
 
 /// Every type a stable structure holds, keys included, one sample per line of the golden
-/// file: an `Event` per `EventType` variant in tag order, then two swaps (paid and
-/// unpaid), a pocket, the ledger meta, a pending quote, two configs (every cap at its
-/// default, and an interior cap set), one cached chain reading, one outbox entry, the five
-/// key types, one nonce waiting for its signature, a cancel that has been out on the
-/// network, a sanctioned address as the sanctions set keys it, an in-flight marker, an
-/// attestation, a swap whose latest leg is known, an Eco intent, a swap with the hash its
-/// latest attempt confirmed as, an outbox entry the provider refused, and a swap with the
-/// amount its payout was signed for. Every field of a
-/// sample differs from its neighbours, so a field that moves to another index decodes to
-/// a different value instead of passing unnoticed.
+/// file, in the order the lines were added: an `Event` per `EventType` variant in tag
+/// order, two swaps (paid and unpaid), a pocket, the ledger meta, a pending quote, two
+/// configs (every cap at its default, and an interior cap set), one cached chain reading,
+/// one outbox entry, the five key types, one nonce waiting for its signature, a cancel
+/// that has been out on the network, a sanctioned address as the sanctions set keys it, an
+/// in-flight marker, an attestation, a swap whose latest leg is known, an Eco intent, a
+/// swap with the hash its latest attempt confirmed as, an outbox entry the provider
+/// refused, a swap with the amount its payout was signed for, a pending quote entry with
+/// the height it was registered at, and a config at the depths a deploy gets.
+///
+/// Every field of a sample differs from its neighbours, so a field that moves to another
+/// index decodes to a different value instead of passing unnoticed. The file is append
+/// only: a new stored type adds a line at the end, and a default that moves adds a line of
+/// its own rather than changing the line above it.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
     assert_eq!(

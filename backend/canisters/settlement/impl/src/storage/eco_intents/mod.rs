@@ -5,7 +5,8 @@
 //! prover, the destination, the route itself) is why the rail stays off until its route is
 //! designed, which `rails::eco` sets out. Not a fold of
 //! the event log, so it has a map of its own and the replay audit does not compare it.
-//! Stable, so a pushed intent survives an upgrade (rule A9).
+//! Stable, so a pushed intent survives an upgrade (rule A9). The attestation inbox is this
+//! module's twin; the note there says why the two are kept apart.
 
 use crate::storage::memory::{eco_intents_memory, Memory};
 use ic_stable_structures::StableBTreeMap;

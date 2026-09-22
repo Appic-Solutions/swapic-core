@@ -4,8 +4,7 @@ use crate::storage::{eco_intents, events};
 use ic_cdk::update;
 pub use settlement_api::types::entry::{EcoIntent, PushEcoIntentError};
 pub use settlement_api::types::events::Hash32;
-use types::rail::EcoIntentError;
-use types::{ChainId, Quote, QuoteHash, Rail, UnixSeconds};
+use types::{Quote, QuoteHash, Rail};
 
 /// Watcher-only. Hands in what Eco's quote response gave a swap on the Eco rail: the
 /// destination Eco named, the route, the reward's deadline and the prover. The inbox holds
@@ -32,26 +31,8 @@ pub fn push_eco_intent(quote_hash: Hash32, intent: EcoIntent) -> Result<(), Push
             quote_hash.into_bytes(),
         ));
     }
-    let prover = intent
-        .prover
-        .parse()
-        .map_err(
-            |reason: types::evm::EvmAddressError| PushEcoIntentError::ProverNotAnAddress {
-                reason: reason.into(),
-            },
-        )?;
-    let intent = types::EcoIntent::new(
-        ChainId::new(intent.destination_chain),
-        intent.route,
-        UnixSeconds::new(intent.deadline_s),
-        prover,
-    )
-    .map_err(
-        |EcoIntentError::RouteTooLong { len, cap }| PushEcoIntentError::RouteTooLong {
-            len: len as u64,
-            cap: cap as u64,
-        },
-    )?;
+    // the wire crosses to the domain in one place, beside the type it crosses from
+    let intent = types::EcoIntent::try_from(intent)?;
     eco_intents::put(quote_hash, intent);
     Ok(())
 }

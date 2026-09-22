@@ -33,7 +33,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use types::abi::{
     decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute,
-    decode_vault_payout, decode_vault_refund, deposited_topic, mint_and_withdraw_topic,
+    decode_vault_payout, decode_vault_refund, deposited_topic, mint_and_withdraw_topic, CctpMint,
+    VaultTransfer,
 };
 use types::cctp::{BurnBody, BurnMessage, BURN_BODY_VERSION, MESSAGE_VERSION};
 use types::{BlockNumber, EvmAddress, TokenAmount};
@@ -189,8 +190,8 @@ impl Chains {
         if tx.to != MESSAGE_TRANSMITTER.parse::<EvmAddress>().unwrap() {
             return vec![];
         }
-        let (message, _) = decode_cctp_receive_message(&tx.data).expect("a receiveMessage");
-        let message = BurnMessage::parse(&message).expect("a burn message");
+        let mint = decode_cctp_receive_message(&tx.data).expect("a receiveMessage");
+        let message = BurnMessage::parse(&mint.message).expect("a burn message");
         let delivered = message
             .body
             .amount
@@ -609,8 +610,9 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     let burn = &chains.sent[0];
     assert_eq!((burn.chain_id, burn.nonce), (8453, 0));
     assert_eq!(burn.to, VAULT_BASE.parse().unwrap());
-    let (swap_ref, calls, _) = decode_vault_execute(&burn.data).expect("an execute");
-    assert_eq!(swap_ref.into_bytes(), quote_hash);
+    let execute = decode_vault_execute(&burn.data).expect("an execute");
+    let calls = execute.calls;
+    assert_eq!(execute.swap_ref.into_bytes(), quote_hash);
     assert_eq!(calls[0].target, TOKEN_MESSENGER.parse().unwrap());
     let inner = decode_cctp_deposit_for_burn(&calls[0].data).expect("a depositForBurn");
     assert_eq!(inner.amount, quote.amount_in);
@@ -627,7 +629,10 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     assert_eq!(mint.to, MESSAGE_TRANSMITTER.parse().unwrap());
     assert_eq!(
         decode_cctp_receive_message(&mint.data),
-        Some((message.encode(), ATTESTATION.to_vec())),
+        Some(CctpMint {
+            message: message.encode(),
+            attestation: ATTESTATION.to_vec(),
+        }),
         "the mint carries what the watcher handed in"
     );
 
@@ -636,12 +641,12 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     assert_eq!(payout.to, VAULT_ARBITRUM.parse().unwrap());
     assert_eq!(
         decode_vault_payout(&payout.data),
-        Some((
-            types::QuoteHash::new(quote_hash),
-            USDC_ARBITRUM.parse().unwrap(),
-            USER.parse().unwrap(),
-            types::TokenAmount::from(AMOUNT - FEE_EXECUTED),
-        ))
+        Some(VaultTransfer {
+            swap_ref: types::QuoteHash::new(quote_hash),
+            token: USDC_ARBITRUM.parse().unwrap(),
+            to: USER.parse().unwrap(),
+            amount: types::TokenAmount::from(AMOUNT - FEE_EXECUTED),
+        })
     );
     assert!(chains.sent.iter().all(|tx| tx.value == 0));
 
@@ -770,12 +775,12 @@ fn a_platform_fee_is_paid_out_accrued_and_recorded_as_it_was_sent() {
         .expect("the payout went out");
     assert_eq!(
         payout,
-        (
-            types::QuoteHash::new(quote_hash),
-            USDC_ARBITRUM.parse().unwrap(),
-            USER.parse().unwrap(),
-            TokenAmount::from(delivered - fee),
-        )
+        VaultTransfer {
+            swap_ref: types::QuoteHash::new(quote_hash),
+            token: USDC_ARBITRUM.parse().unwrap(),
+            to: USER.parse().unwrap(),
+            amount: TokenAmount::from(delivered - fee),
+        }
     );
     let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
     assert_eq!(swap.paid_out, Some(candid::Nat::from(delivered - fee)));
@@ -952,12 +957,12 @@ fn a_refund_walks_to_refunded() {
     assert_eq!(refund.to, VAULT_BASE.parse().unwrap());
     assert_eq!(
         decode_vault_refund(&refund.data),
-        Some((
-            types::QuoteHash::new(quote_hash),
-            USDC_BASE.parse().unwrap(),
-            USER.parse().unwrap(),
-            quote.amount_in,
-        ))
+        Some(VaultTransfer {
+            swap_ref: types::QuoteHash::new(quote_hash),
+            token: USDC_BASE.parse().unwrap(),
+            to: USER.parse().unwrap(),
+            amount: quote.amount_in,
+        })
     );
     let refunded = events(&pic, canister).last().unwrap().payload.clone();
     assert_eq!(

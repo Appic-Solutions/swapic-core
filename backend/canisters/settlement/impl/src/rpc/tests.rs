@@ -234,3 +234,25 @@ fn the_attached_cycles_grow_with_the_request_and_the_cap() {
         "the reservation is not below what the call can cost"
     );
 }
+
+/// Nothing a provider or the system wrote reaches a caller of this canister whole: a
+/// summary is cut to its cap at a character boundary and carries no control character, so
+/// a refusal a quoter reads back is a line in a log and never a page of somebody else's
+/// html.
+#[test]
+fn a_summary_is_bounded_and_carries_no_control_characters() {
+    assert_eq!(Summary::of("no route to host").as_str(), "no route to host");
+    assert_eq!(
+        Summary::of("rate\nlimited\r\n\tby\u{0}the provider").as_str(),
+        "rate limited   by the provider",
+        "control characters travel as spaces"
+    );
+    let page = "a".repeat(MAX_SUMMARY_BYTES * 10);
+    assert_eq!(Summary::of(&page).as_str().len(), MAX_SUMMARY_BYTES);
+    // a cut inside a character takes the character with it rather than trapping
+    let wide = "é".repeat(MAX_SUMMARY_BYTES);
+    let summary = Summary::of(&wide);
+    assert!(summary.as_str().len() <= MAX_SUMMARY_BYTES);
+    assert!(wide.starts_with(summary.as_str()));
+    assert_eq!(summary.as_str().chars().count(), MAX_SUMMARY_BYTES / 2);
+}

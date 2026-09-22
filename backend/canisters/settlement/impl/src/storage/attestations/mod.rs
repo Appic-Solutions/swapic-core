@@ -6,6 +6,11 @@
 //! the chain, not whose burn they are. Not a fold of the event log, so it has a map of
 //! its own and the replay audit does not compare it. Stable, so a pushed attestation
 //! survives an upgrade (rule A9).
+//!
+//! The Eco intent inbox is this module's twin: both are swap-keyed stable maps outside the
+//! fold, and they are kept apart rather than made one generic map because what a push
+//! replaces differs (see each `put`), and because a map's memory id reads better beside
+//! the type it holds than behind a macro.
 
 use crate::storage::memory::{attestations_memory, Memory};
 use ic_stable_structures::StableBTreeMap;

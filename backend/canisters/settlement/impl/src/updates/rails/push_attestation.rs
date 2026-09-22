@@ -1,6 +1,6 @@
 use crate::guards::require_watcher;
 use crate::rails::cctp::Cctp;
-use crate::rails::Leg;
+use crate::rails::Position;
 use crate::state::Store;
 use crate::storage::{attestations, config, ecdsa_address, events};
 use ic_cdk::update;
@@ -73,7 +73,7 @@ pub fn push_attestation(
     }
     let config = config::get();
     let mine = ecdsa_address::get().ok_or(PushAttestationError::AddressNotDerived)?;
-    let view = Leg {
+    let at = Position {
         quote_hash,
         quote: &quote,
         swap: &swap,
@@ -83,9 +83,9 @@ pub fn push_attestation(
         intent: None,
         now: received_at.as_secs(),
     };
-    let parsed = BurnMessage::parse(&attestation.message)
+    let parsed = BurnMessage::parse(attestation.message())
         .map_err(|error| PushAttestationError::Rail(crate::rails::RailError::from(error).into()))?;
-    rail.ensure_message_binds(&view, &parsed)
+    rail.ensure_message_binds(&at, &parsed)
         .map_err(|error| PushAttestationError::Rail(error.into()))?;
     attestations::put(quote_hash, attestation);
     Ok(())

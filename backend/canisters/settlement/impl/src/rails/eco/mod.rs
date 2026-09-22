@@ -26,12 +26,12 @@
 #[cfg(test)]
 mod tests;
 
-use super::{ensure_rail_tokens, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
-use crate::deposits::vault_of;
-use types::abi::{
-    eco_publish_and_fund, eco_refund, eco_route_hash, vault_execute, EcoReward, VaultCall,
-    VaultDelta,
+use super::{
+    ensure_rail_tokens, through_the_vault, usdc_on, CallRail, Position, RailError, RailStep,
+    RailTx, ReclaimStep, WaitingFor,
 };
+use crate::deposits::vault_of;
+use types::abi::{eco_publish_and_fund, eco_refund, eco_route_hash, EcoReward};
 use types::events::TxPurpose;
 use types::{EcoIntent, GasAmount, Leg as SwapLeg, Rail, Wei};
 
@@ -46,8 +46,8 @@ pub const RECLAIM_GAS_LIMIT: GasAmount = GasAmount::new(250_000);
 pub struct Eco;
 
 /// The rail moves nothing while the deploy has it off.
-fn ensure_enabled(leg: &Leg) -> Result<(), RailError> {
-    if !leg.config.eco_enabled.is_on() {
+fn ensure_enabled(at: &Position) -> Result<(), RailError> {
+    if !at.config.eco_enabled.is_on() {
         return Err(RailError::RailDisabled { rail: Rail::Eco });
     }
     Ok(())
@@ -57,64 +57,54 @@ impl Eco {
     /// The reward the vault locks for the filler: the swap's whole amount of the source
     /// USDC, refundable to the vault itself after the deadline. The creator is the vault
     /// and never anything the watcher pushed, because the creator is who a refund pays.
-    pub fn reward(&self, leg: &Leg, intent: &EcoIntent) -> Result<EcoReward, RailError> {
-        let source_usdc = usdc_on(leg.config, leg.quote.src_chain)?;
+    pub fn reward(&self, at: &Position, intent: &EcoIntent) -> Result<EcoReward, RailError> {
+        let source_usdc = usdc_on(at.config, at.quote.src_chain)?;
         Ok(EcoReward {
-            deadline: intent.deadline,
-            creator: vault_of(leg.config, leg.quote.src_chain)?,
-            prover: intent.prover,
+            deadline: intent.deadline(),
+            creator: vault_of(at.config, at.quote.src_chain)?,
+            prover: intent.prover(),
             native_amount: Wei::ZERO,
-            tokens: vec![(source_usdc, leg.swap.amount_in)],
+            tokens: vec![(source_usdc, at.swap.amount_in)],
         })
     }
 
     /// The publish: the vault approves the Portal for the amount and calls
     /// `publishAndFund` for the destination ECO named, and its USDC balance may fall by
     /// exactly the amount.
-    pub fn publish(&self, leg: &Leg, intent: &EcoIntent) -> Result<RailTx, RailError> {
-        let config = leg.config;
-        let amount = leg.swap.amount_in;
+    pub fn publish(&self, at: &Position, intent: &EcoIntent) -> Result<RailTx, RailError> {
+        let config = at.config;
+        let amount = at.swap.amount_in;
         let portal = config.eco_portal.ok_or(RailError::NoEcoPortal)?;
-        let source_usdc = usdc_on(config, leg.quote.src_chain)?;
-        let reward = self.reward(leg, intent)?;
-        let calls = [VaultCall {
-            target: portal,
-            value: Wei::ZERO,
-            data: eco_publish_and_fund(intent.destination, &intent.route, &reward),
-            approve_token: source_usdc,
-            approve_amount: amount,
-        }];
-        let min_change = i128::try_from(
-            amount
-                .try_into_u128()
-                .ok_or(RailError::FeeOverflow { amount })?,
+        let source_usdc = usdc_on(config, at.quote.src_chain)?;
+        let reward = self.reward(at, intent)?;
+        through_the_vault(
+            at,
+            TxPurpose::Burn(at.quote_hash),
+            portal,
+            eco_publish_and_fund(intent.destination(), intent.route(), &reward),
+            source_usdc,
+            amount,
+            PUBLISH_GAS_LIMIT,
         )
-        .map_err(|_| RailError::FeeOverflow { amount })?;
-        let deltas = [VaultDelta {
-            token: source_usdc,
-            min_change: -min_change,
-        }];
-        Ok(RailTx {
-            purpose: TxPurpose::Burn(leg.quote_hash),
-            chain_id: leg.quote.src_chain,
-            to: vault_of(config, leg.quote.src_chain)?,
-            value: Wei::ZERO,
-            data: vault_execute(leg.quote_hash, &calls, &deltas),
-            gas_limit: PUBLISH_GAS_LIMIT,
-        })
     }
 
     /// The reclaim: the Portal's permissionless `refund`, from this canister's own address,
-    /// paying the reward back to the vault that created it.
-    pub fn refund(&self, leg: &Leg, intent: &EcoIntent) -> Result<RailTx, RailError> {
-        let portal = leg.config.eco_portal.ok_or(RailError::NoEcoPortal)?;
-        let reward = self.reward(leg, intent)?;
+    /// paying the reward back to the vault that created it. Named for the leg it is and not
+    /// for the Portal's function, because the vault has a `refund` of its own and that one
+    /// is what pays the user back.
+    pub fn reclaim_tx(&self, at: &Position, intent: &EcoIntent) -> Result<RailTx, RailError> {
+        let portal = at.config.eco_portal.ok_or(RailError::NoEcoPortal)?;
+        let reward = self.reward(at, intent)?;
         Ok(RailTx {
-            purpose: TxPurpose::Reclaim(leg.quote_hash),
-            chain_id: leg.quote.src_chain,
+            purpose: TxPurpose::Reclaim(at.quote_hash),
+            chain_id: at.quote.src_chain,
             to: portal,
             value: Wei::ZERO,
-            data: eco_refund(intent.destination, eco_route_hash(&intent.route), &reward),
+            data: eco_refund(
+                intent.destination(),
+                eco_route_hash(intent.route()),
+                &reward,
+            ),
             gas_limit: RECLAIM_GAS_LIMIT,
         })
     }
@@ -125,43 +115,43 @@ impl CallRail for Eco {
         Rail::Eco
     }
 
-    fn step(&self, leg: &Leg) -> Result<RailStep, RailError> {
+    fn step(&self, at: &Position) -> Result<RailStep, RailError> {
         // the rail is off until its route is designed: a swap claimed while it was on,
         // or through a door that did not check, moves nothing
-        ensure_enabled(leg)?;
+        ensure_enabled(at)?;
         // the publish locks the source USDC as the reward and the fill is read in the
         // destination USDC, so both of the quote's tokens have to be those
-        ensure_rail_tokens(leg)?;
-        let Some(intent) = leg.intent else {
+        ensure_rail_tokens(at)?;
+        let Some(intent) = at.intent else {
             return Ok(RailStep::Wait(WaitingFor::Intent));
         };
-        Ok(match leg.swap.last_leg {
-            None => RailStep::Send(self.publish(leg, intent)?),
+        Ok(match at.swap.last_leg {
+            None => RailStep::Send(self.publish(at, intent)?),
             // the filler delivers into the destination vault on its own; the read that
             // finds it is the engine's, and past the deadline a read that finds nothing
             // ends the swap in a refund
             Some(SwapLeg::Burn) => RailStep::CheckArrival {
-                chain_id: leg.quote.dst_chain,
-                expired: intent.is_past_deadline(leg.now),
+                chain_id: at.quote.dst_chain,
+                expired: intent.is_past_deadline(at.now),
             },
             Some(SwapLeg::Mint | SwapLeg::Payout | SwapLeg::Refund | SwapLeg::Reclaim) => {
                 RailStep::Stuck(
-                    "a mint, payout, refund or reclaim leg is not one this rail steps from",
+                    "a mint, payout, refund or reclaim at is not one this rail steps from",
                 )
             }
         })
     }
 
-    fn reclaim(&self, leg: &Leg) -> Result<RailStep, RailError> {
-        ensure_enabled(leg)?;
-        let Some(intent) = leg.intent else {
-            return Ok(RailStep::Stuck(
+    fn reclaim(&self, at: &Position) -> Result<ReclaimStep, RailError> {
+        ensure_enabled(at)?;
+        let Some(intent) = at.intent else {
+            return Ok(ReclaimStep::Stuck(
                 "the intent this swap published is no longer in the inbox",
             ));
         };
-        if !intent.is_past_deadline(leg.now) {
-            return Ok(RailStep::Wait(WaitingFor::Deadline));
+        if !intent.is_past_deadline(at.now) {
+            return Ok(ReclaimStep::Wait(WaitingFor::Deadline));
         }
-        Ok(RailStep::Reclaim(self.refund(leg, intent)?))
+        Ok(ReclaimStep::Send(self.reclaim_tx(at, intent)?))
     }
 }

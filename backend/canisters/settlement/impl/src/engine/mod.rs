@@ -14,7 +14,7 @@ mod tests;
 use crate::deposits::{self, DepositError, DepositRead, VaultError, Wanted, WantedAmount};
 use crate::guards::require_not_halted;
 use crate::mints::{self, MintError};
-use crate::rails::{self, Leg as RailLeg, RailError, RailStep, RailTx};
+use crate::rails::{self, Position, RailError, RailStep, RailTx, ReclaimStep};
 use crate::state::Store;
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::sanctions::is_sanctioned;
@@ -76,15 +76,15 @@ pub fn next_action(swap: &Swap) -> Action {
     if swap.open_attempt.is_some() {
         return Action::Wait;
     }
-    if matches!(swap.status, WaitingForUser | Done | Refunded | Frozen) {
-        return Action::Wait;
-    }
-    // a leg that closed with no outcome is a fold no line produces
-    if swap.last_leg.is_some() && swap.last_outcome.is_none() {
-        return Action::Freeze("a leg closed with no outcome recorded");
-    }
     let leg = swap.last_leg.zip(swap.last_outcome);
+    // one arm per status, and the closed ones first: a swap that is already stopped is
+    // waited on whatever its latest leg says, including the half-recorded leg below
     match (swap.status, leg) {
+        (WaitingForUser | Done | Refunded | Frozen, _) => Action::Wait,
+        // a leg that closed with no outcome is a fold no line produces
+        _ if swap.last_leg.is_some() && swap.last_outcome.is_none() => {
+            Action::Freeze("a leg closed with no outcome recorded")
+        }
         (FundsReceived, _) | (Executing, None) => Action::Rail,
         (Executing, Some((Leg::Burn | Leg::Mint, Outcome::Confirmed))) => Action::Rail,
         (Executing, Some((Leg::Burn, Outcome::Failed))) => {
@@ -135,7 +135,6 @@ pub fn next_action(swap: &Swap) -> Action {
             Action::Freeze("the funds left for the rail and never arrived")
         }
         (Refunding, Some((Leg::Payout, _))) => Action::Freeze("the user was paid out"),
-        (WaitingForUser | Done | Refunded | Frozen, _) => Action::Wait,
     }
 }
 
@@ -367,11 +366,7 @@ fn forget(quote_hash: QuoteHash) {
 /// on CCTP) would otherwise be paid by a canister that screened it only at intake. A hit
 /// freezes the swap with the party named, so the funds stay in the vault for an operator.
 fn ensure_unsanctioned(to: EvmAddress, party: &'static str) -> Result<(), &'static str> {
-    if is_sanctioned(
-        &to.to_string()
-            .parse::<types::Address>()
-            .expect("BUG: an EIP-55 address is 42 bytes"),
-    ) {
+    if is_sanctioned(&types::Address::from(to)) {
         return Err(party);
     }
     Ok(())
@@ -522,18 +517,18 @@ fn record_refunded(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
 
 /// Runs `f` with the rail's view of the swap: its quote, the config, this canister's
 /// address, what the inboxes hold, and the clock.
-fn with_rail_leg(
+fn at_the_rail<Step>(
     quote_hash: QuoteHash,
     swap: &Swap,
-    f: impl FnOnce(&dyn rails::CallRail, &RailLeg) -> Result<RailStep, RailError>,
-) -> Result<(Quote, RailStep), EngineError> {
+    f: impl FnOnce(&dyn rails::CallRail, &Position) -> Result<Step, RailError>,
+) -> Result<(Quote, Step), EngineError> {
     let quote = quote_of(swap)?;
     let config = config::get();
     let mine = ecdsa_address::get().ok_or(EngineError::AddressNotDerived)?;
     let attestation = attestations::get(quote_hash);
     let intent = eco_intents::get(quote_hash);
     let now = Timestamp::from_nanos(ic_cdk::api::time()).as_secs();
-    let leg = RailLeg {
+    let at = Position {
         quote_hash,
         quote: &quote,
         swap,
@@ -544,13 +539,13 @@ fn with_rail_leg(
         now,
     };
     let rail = rails::for_rail(quote.rail);
-    let step = f(rail.as_ref(), &leg)?;
+    let step = f(rail.as_ref(), &at)?;
     Ok((quote, step))
 }
 
 /// The rail's move for a swap that is executing.
 async fn rail_step(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
-    let (quote, step) = with_rail_leg(quote_hash, swap, |rail, leg| rail.step(leg))?;
+    let (quote, step) = at_the_rail(quote_hash, swap, |rail, at| rail.step(at))?;
     match step {
         RailStep::Send(tx) => send(tx).await,
         RailStep::Wait(_) => Ok(Did::Nothing),
@@ -568,7 +563,6 @@ async fn rail_step(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
             check_arrival(quote_hash, &quote, chain_id, expired).await
         }
         RailStep::ReadMint { chain_id, tx_hash } => read_mint(quote_hash, chain_id, tx_hash).await,
-        RailStep::Reclaim(tx) => send(tx).await,
         RailStep::Stuck(reason) => freeze(quote_hash, reason),
     }
 }
@@ -646,13 +640,10 @@ async fn check_arrival(
 
 /// The rail's move for a swap being refunded whose funds are on the rail.
 async fn reclaim(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
-    let (_, step) = with_rail_leg(quote_hash, swap, |rail, leg| rail.reclaim(leg))?;
+    let (_, step) = at_the_rail(quote_hash, swap, |rail, at| rail.reclaim(at))?;
     match step {
-        RailStep::Reclaim(tx) | RailStep::Send(tx) => send(tx).await,
-        RailStep::Wait(_) | RailStep::CheckArrival { .. } | RailStep::ReadMint { .. } => {
-            Ok(Did::Nothing)
-        }
-        RailStep::Arrived { .. } => Ok(Did::Nothing),
-        RailStep::Stuck(reason) => freeze(quote_hash, reason),
+        ReclaimStep::Send(tx) => send(tx).await,
+        ReclaimStep::Wait(_) => Ok(Did::Nothing),
+        ReclaimStep::Stuck(reason) => freeze(quote_hash, reason),
     }
 }

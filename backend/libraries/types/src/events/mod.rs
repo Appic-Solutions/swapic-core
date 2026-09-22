@@ -311,7 +311,8 @@ pub enum EventType {
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
-/// these, and all but the last name the swap they belong to.
+/// these, and all of them but [`TxPurpose::Cancel`] name the swap they belong to;
+/// [`Leg::of`] is the other side of that split, and the two are tested against each other.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]

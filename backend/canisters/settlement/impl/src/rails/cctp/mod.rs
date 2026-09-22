@@ -11,12 +11,13 @@
 #[cfg(test)]
 mod tests;
 
-use super::{ensure_rail_tokens, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
+use super::{
+    ensure_rail_tokens, through_the_vault, usdc_on, CallRail, Position, RailError, RailStep,
+    RailTx, ReclaimStep, WaitingFor,
+};
 use crate::deposits::vault_of;
 use thiserror::Error;
-use types::abi::{
-    cctp_deposit_for_burn, cctp_receive_message, vault_execute, Burn, VaultCall, VaultDelta,
-};
+use types::abi::{cctp_deposit_for_burn, cctp_receive_message, Burn};
 use types::cctp::{BurnMessage, MESSAGE_VERSION};
 use types::events::TxPurpose;
 use types::{BasisPoints, GasAmount, Leg as SwapLeg, Rail, TokenAmount, Wei};
@@ -112,9 +113,15 @@ pub const BURN_GAS_LIMIT: GasAmount = GasAmount::new(350_000);
 /// The gas a `receiveMessage` needs: the attestation's signature checks and the mint.
 pub const MINT_GAS_LIMIT: GasAmount = GasAmount::new(300_000);
 
-/// The CCTP v2 rail, fast or standard.
-pub struct Cctp {
-    pub fast: bool,
+/// The CCTP v2 rail: the same lane at one of Circle's two finalities. The path is the
+/// rail the quote named and nothing else, so the rail carries it as that rail rather than
+/// as a flag a caller has to read back into one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cctp {
+    /// Attested at confirmation, minutes on every chain, for a fee.
+    Fast,
+    /// Attested at finality, which on an L2 is the L1's, and free.
+    Standard,
 }
 
 impl Cctp {
@@ -122,15 +129,20 @@ impl Cctp {
     /// it binds a message, since only a CCTP swap has a burn to attest.
     pub fn of(rail: Rail) -> Option<Self> {
         match rail {
-            Rail::CctpV2Fast => Some(Self { fast: true }),
-            Rail::CctpV2Standard => Some(Self { fast: false }),
+            Rail::CctpV2Fast => Some(Self::Fast),
+            Rail::CctpV2Standard => Some(Self::Standard),
             Rail::Eco => None,
         }
     }
 
+    /// Whether this is the path Circle charges for.
+    fn is_fast(self) -> bool {
+        matches!(self, Self::Fast)
+    }
+
     /// The finality Circle attests the burn at.
     pub fn finality_threshold(&self) -> u32 {
-        if self.fast {
+        if self.is_fast() {
             FAST_FINALITY_THRESHOLD
         } else {
             STANDARD_FINALITY_THRESHOLD
@@ -140,7 +152,7 @@ impl Cctp {
     /// The most Circle may take from `amount`: the fast ceiling rounded up, so no burn is
     /// refused for a fee that rounds to nothing, and nothing at all on the standard path.
     pub fn max_fee(&self, amount: TokenAmount) -> Result<TokenAmount, RailError> {
-        if !self.fast {
+        if !self.is_fast() {
             return Ok(TokenAmount::ZERO);
         }
         amount
@@ -162,10 +174,10 @@ impl Cctp {
     /// The burn: the vault approves the token messenger for the amount and calls
     /// `depositForBurn`, minting to the destination vault, deliverable only by this
     /// canister's own address, and its USDC balance may fall by exactly the amount.
-    pub fn burn(&self, leg: &Leg) -> Result<RailTx, RailError> {
-        let quote = leg.quote;
-        let config = leg.config;
-        let amount = leg.swap.amount_in;
+    pub fn burn(&self, at: &Position) -> Result<RailTx, RailError> {
+        let quote = at.quote;
+        let config = at.config;
+        let amount = at.swap.amount_in;
         let source_usdc = usdc_on(config, quote.src_chain)?;
         let destination_domain =
             config
@@ -183,35 +195,19 @@ impl Cctp {
             burn_token: source_usdc,
             // only this canister delivers the mint, so nobody can spend the message first
             // and leave the mint transaction to revert
-            destination_caller: leg.mine.to_word(),
+            destination_caller: at.mine.to_word(),
             max_fee: self.max_fee(amount)?,
             min_finality_threshold: self.finality_threshold(),
         };
-        let calls = [VaultCall {
-            target: messenger,
-            value: Wei::ZERO,
-            data: cctp_deposit_for_burn(&burn),
-            approve_token: source_usdc,
-            approve_amount: amount,
-        }];
-        let min_change = i128::try_from(
-            amount
-                .try_into_u128()
-                .ok_or(RailError::FeeOverflow { amount })?,
+        through_the_vault(
+            at,
+            TxPurpose::Burn(at.quote_hash),
+            messenger,
+            cctp_deposit_for_burn(&burn),
+            source_usdc,
+            amount,
+            BURN_GAS_LIMIT,
         )
-        .map_err(|_| RailError::FeeOverflow { amount })?;
-        let deltas = [VaultDelta {
-            token: source_usdc,
-            min_change: -min_change,
-        }];
-        Ok(RailTx {
-            purpose: TxPurpose::Burn(leg.quote_hash),
-            chain_id: quote.src_chain,
-            to: vault_of(config, quote.src_chain)?,
-            value: Wei::ZERO,
-            data: vault_execute(leg.quote_hash, &calls, &deltas),
-            gas_limit: BURN_GAS_LIMIT,
-        })
     }
 
     /// Whether `message` is the attested message of this swap's own burn: every field the
@@ -222,9 +218,13 @@ impl Cctp {
     /// executed must be inside that ceiling. The nonce, the finality executed and the
     /// expiration are the service's to fill in. Refused by the field, so a message of
     /// another burn, ours or anyone's, is never minted under this swap's name.
-    pub fn ensure_message_binds(&self, leg: &Leg, message: &BurnMessage) -> Result<(), RailError> {
-        let quote = leg.quote;
-        let config = leg.config;
+    pub fn ensure_message_binds(
+        &self,
+        at: &Position,
+        message: &BurnMessage,
+    ) -> Result<(), RailError> {
+        let quote = at.quote;
+        let config = at.config;
         let domain = |chain_id| {
             config
                 .cctp_domains
@@ -236,7 +236,7 @@ impl Cctp {
             .token_messenger
             .ok_or(RailError::NoTokenMessenger)?
             .to_word();
-        let amount = leg.swap.amount_in;
+        let amount = at.swap.amount_in;
         let max_fee = self.max_fee(amount)?;
         if message.version != MESSAGE_VERSION {
             return Err(MessageMismatch::Version {
@@ -270,7 +270,7 @@ impl Cctp {
             (MessageField::Recipient, messenger, message.recipient),
             (
                 MessageField::DestinationCaller,
-                leg.mine.to_word(),
+                at.mine.to_word(),
                 message.destination_caller,
             ),
             (
@@ -339,19 +339,23 @@ impl Cctp {
     /// bound to this swap's own burn. The inbox door binds it at the push; binding it here
     /// again is rule A2's counterpart for a line no fold can check, so nothing that
     /// reaches the inbox another way is minted either.
-    pub fn mint(&self, leg: &Leg, attestation: &types::Attestation) -> Result<RailTx, RailError> {
-        let message = BurnMessage::parse(&attestation.message)?;
-        self.ensure_message_binds(leg, &message)?;
-        let transmitter = leg
+    pub fn mint(
+        &self,
+        at: &Position,
+        attestation: &types::Attestation,
+    ) -> Result<RailTx, RailError> {
+        let message = BurnMessage::parse(attestation.message())?;
+        self.ensure_message_binds(at, &message)?;
+        let transmitter = at
             .config
             .message_transmitter
             .ok_or(RailError::NoMessageTransmitter)?;
         Ok(RailTx {
-            purpose: TxPurpose::Mint(leg.quote_hash),
-            chain_id: leg.quote.dst_chain,
+            purpose: TxPurpose::Mint(at.quote_hash),
+            chain_id: at.quote.dst_chain,
             to: transmitter,
             value: Wei::ZERO,
-            data: cctp_receive_message(&attestation.message, &attestation.attestation),
+            data: cctp_receive_message(attestation.message(), attestation.attestation()),
             gas_limit: MINT_GAS_LIMIT,
         })
     }
@@ -359,40 +363,39 @@ impl Cctp {
 
 impl CallRail for Cctp {
     fn rail(&self) -> Rail {
-        if self.fast {
-            Rail::CctpV2Fast
-        } else {
-            Rail::CctpV2Standard
+        match self {
+            Self::Fast => Rail::CctpV2Fast,
+            Self::Standard => Rail::CctpV2Standard,
         }
     }
 
-    fn step(&self, leg: &Leg) -> Result<RailStep, RailError> {
+    fn step(&self, at: &Position) -> Result<RailStep, RailError> {
         // the burn spends the source USDC and the payout pays the destination USDC, so
         // both of the quote's tokens have to be those; refused before the burn rather
         // than after the funds have crossed
-        ensure_rail_tokens(leg)?;
-        Ok(match leg.swap.last_leg {
-            None => RailStep::Send(self.burn(leg)?),
-            Some(SwapLeg::Burn) => match leg.attestation {
-                Some(attestation) => RailStep::Send(self.mint(leg, attestation)?),
+        ensure_rail_tokens(at)?;
+        Ok(match at.swap.last_leg {
+            None => RailStep::Send(self.burn(at)?),
+            Some(SwapLeg::Burn) => match at.attestation {
+                Some(attestation) => RailStep::Send(self.mint(at, attestation)?),
                 None => RailStep::Wait(WaitingFor::Attestation),
             },
             // the mint confirmed: what it delivered is on the chain, in the mint's own
             // receipt, and that is what `PaidInStable` records
             Some(SwapLeg::Mint) => RailStep::ReadMint {
-                chain_id: leg.quote.dst_chain,
-                tx_hash: leg.swap.last_tx_hash.ok_or(RailError::NoMintHash)?,
+                chain_id: at.quote.dst_chain,
+                tx_hash: at.swap.last_tx_hash.ok_or(RailError::NoMintHash)?,
             },
             Some(SwapLeg::Payout | SwapLeg::Refund | SwapLeg::Reclaim) => {
-                RailStep::Stuck("a payout, refund or reclaim leg is not one this rail steps from")
+                RailStep::Stuck("a payout, refund or reclaim at is not one this rail steps from")
             }
         })
     }
 
-    fn reclaim(&self, _leg: &Leg) -> Result<RailStep, RailError> {
+    fn reclaim(&self, _at: &Position) -> Result<ReclaimStep, RailError> {
         // a burn is final: the USDC is gone from the source chain, and only the mint on
         // the destination brings it back into a vault
-        Ok(RailStep::Stuck(
+        Ok(ReclaimStep::Stuck(
             "the burn confirmed, so the funds cannot come back to the source vault",
         ))
     }

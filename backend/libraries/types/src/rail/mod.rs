@@ -155,16 +155,18 @@ pub enum EcoIntentError {
 /// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct EcoIntent {
+    // private, so [`EcoIntent::new`] is the only way to make one and its bound is the
+    // bound of every intent this canister holds
     #[n(0)]
-    pub destination: ChainId,
+    destination: ChainId,
     #[cbor(n(1), with = "minicbor::bytes")]
-    pub route: Vec<u8>,
+    route: Vec<u8>,
     /// The reward's deadline: the last second a filler may claim it, after which the
     /// refund is permissionless.
     #[n(2)]
-    pub deadline: UnixSeconds,
+    deadline: UnixSeconds,
     #[n(3)]
-    pub prover: EvmAddress,
+    prover: EvmAddress,
 }
 
 impl EcoIntent {
@@ -193,6 +195,27 @@ impl EcoIntent {
     /// still the filler's.
     pub fn is_past_deadline(&self, now: UnixSeconds) -> bool {
         now > self.deadline
+    }
+
+    /// The chain Eco named as the intent's destination, which is not always the chain the
+    /// user is paid on.
+    pub fn destination(&self) -> ChainId {
+        self.destination
+    }
+
+    /// The route a filler runs to earn the reward.
+    pub fn route(&self) -> &[u8] {
+        &self.route
+    }
+
+    /// The last second a filler may claim the reward.
+    pub fn deadline(&self) -> UnixSeconds {
+        self.deadline
+    }
+
+    /// The prover the intent names: who may say the intent was filled.
+    pub fn prover(&self) -> EvmAddress {
+        self.prover
     }
 }
 

@@ -1,6 +1,6 @@
-use crate::entry;
+use crate::entry::{self, PullPermit};
 use ic_cdk::update;
-pub use settlement_api::types::entry::{PullError, PullPermit, PullRequest};
+pub use settlement_api::types::entry::{PullError, PullRequest};
 pub use settlement_api::types::events::Hash32;
 use types::QuoteHash;
 

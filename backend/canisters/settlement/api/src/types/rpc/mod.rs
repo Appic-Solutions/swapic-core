@@ -8,9 +8,13 @@ pub enum RpcError {
     NoUrl {
         chain_id: u64,
     },
+    /// The system refused the outcall, summarised: a bounded, control-character-free cut
+    /// of the reject message, never the whole of it.
     Unreachable {
-        message: String,
+        reason: String,
     },
+    /// The provider answered outside 2xx. The body is summarised the same way, so a
+    /// provider cannot answer a caller of this canister with a page of its own.
     Http {
         status: u16,
         body: String,

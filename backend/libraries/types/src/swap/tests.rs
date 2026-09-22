@@ -265,6 +265,31 @@ fn a_leg_is_read_off_the_purpose_and_neither_is_stored_while_unknown() {
     );
     assert_eq!(Leg::of(TxPurpose::Cancel(ChainId::BASE)), None);
 
+    // the two ways `TxPurpose` is partitioned agree: every purpose that is a swap's leg
+    // names the swap, and the only purpose that names no swap at all is the cancel
+    for purpose in [
+        TxPurpose::Burn(qh),
+        TxPurpose::Mint(qh),
+        TxPurpose::Payout(qh),
+        TxPurpose::Refund(qh),
+        TxPurpose::Reclaim(qh),
+        TxPurpose::GaslessPull(qh),
+        TxPurpose::Cancel(ChainId::BASE),
+    ] {
+        if Leg::of(purpose).is_some() {
+            assert_eq!(
+                purpose.quote_hash(),
+                Some(qh),
+                "{purpose:?} is a leg of a swap it does not name"
+            );
+        }
+        assert_eq!(
+            purpose.quote_hash().is_none(),
+            matches!(purpose, TxPurpose::Cancel(_)),
+            "{purpose:?} is the only kind of purpose that names no swap"
+        );
+    }
+
     let fresh = swap(SwapStatus::FundsReceived);
     assert_eq!((fresh.last_leg, fresh.last_outcome), (None, None));
     let bytes = fresh.to_bytes().into_owned();

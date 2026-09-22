@@ -80,6 +80,21 @@ text_type! {
     Address
 }
 
+/// An EVM address as the text types hold one: its EIP-55 spelling, which is forty-two
+/// characters and always inside the bound, so the two types cross without a parse that
+/// could fail and without a `BUG:` at every call site.
+impl From<EvmAddress> for Address {
+    fn from(address: EvmAddress) -> Self {
+        Self(address.to_string())
+    }
+}
+
+impl From<EvmAddress> for TokenId {
+    fn from(address: EvmAddress) -> Self {
+        Self(address.to_string())
+    }
+}
+
 /// Its utf8 bytes, so a stable map keyed by addresses orders them as text. Read back to the
 /// bound parsing holds it to, which every stored value was held to when it was written.
 impl Storable for Address {

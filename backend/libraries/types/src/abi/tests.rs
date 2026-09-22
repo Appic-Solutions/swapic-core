@@ -415,7 +415,11 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     let execute = vault_execute(swap_ref(), &calls, &deltas);
     assert_eq!(
         decode_vault_execute(&execute),
-        Some((swap_ref(), calls.clone(), deltas.clone()))
+        Some(VaultExecution {
+            swap_ref: swap_ref(),
+            calls: calls.clone(),
+            deltas: deltas.clone(),
+        })
     );
     let burn = Burn {
         amount: TokenAmount::from(25_000_000_u32),
@@ -432,7 +436,10 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     );
     assert_eq!(
         decode_cctp_receive_message(&cctp_receive_message(&[1, 2], &[3])),
-        Some((vec![1, 2], vec![3]))
+        Some(CctpMint {
+            message: vec![1, 2],
+            attestation: vec![3],
+        })
     );
     let payout = vault_payout(
         swap_ref(),
@@ -442,12 +449,12 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     );
     assert_eq!(
         decode_vault_payout(&payout),
-        Some((
-            swap_ref(),
-            address(USDC_BASE),
-            address(USER),
-            TokenAmount::from(9_u8)
-        ))
+        Some(VaultTransfer {
+            swap_ref: swap_ref(),
+            token: address(USDC_BASE),
+            to: address(USER),
+            amount: TokenAmount::from(9_u8),
+        })
     );
     let refund = vault_refund(
         swap_ref(),
@@ -457,23 +464,64 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     );
     assert_eq!(
         decode_vault_refund(&refund),
-        Some((
-            swap_ref(),
-            address(USDC_BASE),
-            address(USER),
-            TokenAmount::from(8_u8)
-        ))
+        Some(VaultTransfer {
+            swap_ref: swap_ref(),
+            token: address(USDC_BASE),
+            to: address(USER),
+            amount: TokenAmount::from(8_u8),
+        })
     );
     let publish = eco_publish_and_fund(ChainId::BASE, &[0xaa], &reward());
     assert_eq!(
         decode_eco_publish_and_fund(&publish),
-        Some((ChainId::BASE, vec![0xaa], reward()))
+        Some(EcoPublish {
+            destination: ChainId::BASE,
+            route: vec![0xaa],
+            reward: reward(),
+        })
+    );
+    let reclaim = eco_refund(ChainId::BASE, eco_route_hash(&[0xaa]), &reward());
+    assert_eq!(
+        decode_eco_refund(&reclaim),
+        Some(EcoReclaim {
+            destination: ChainId::BASE,
+            route_hash: eco_route_hash(&[0xaa]),
+            reward: reward(),
+        })
+    );
+    // the 2612 pull is nothing this canister sends, and its decoder is its builder's
+    // inverse like every other
+    let permit = Permit {
+        v: 27,
+        r: word(2),
+        s: word(3),
+    };
+    let pull = vault_pull_with_permit(
+        swap_ref(),
+        address(USDC_BASE),
+        address(USER),
+        TokenAmount::from(6_u8),
+        UnixSeconds::new(5),
+        &permit,
+    );
+    assert_eq!(
+        decode_vault_pull_with_permit(&pull),
+        Some(Eip2612Pull {
+            quote_hash: swap_ref(),
+            token: address(USDC_BASE),
+            owner: address(USER),
+            amount: TokenAmount::from(6_u8),
+            deadline: UnixSeconds::new(5),
+            signature: permit,
+        })
     );
 
     // a decoder answers only its own call
     assert_eq!(decode_vault_payout(&refund), None);
     assert_eq!(decode_vault_execute(&payout), None);
     assert_eq!(decode_cctp_deposit_for_burn(&execute), None);
+    assert_eq!(decode_eco_refund(&publish), None);
+    assert_eq!(decode_vault_pull_with_permit(&pull[4..]), None);
     assert_eq!(decode_vault_execute(&[]), None);
 }
 
@@ -520,17 +568,17 @@ fn a_permit2_pull_encodes_as_cast_encodes_it() {
     // and the decoder reads the call back into the pull it makes
     assert_eq!(
         decode_vault_pull_with_permit2(&encoded),
-        Some((
-            swap_ref(),
-            address(USER),
-            Permit2Permit {
+        Some(Permit2Pull {
+            quote_hash: swap_ref(),
+            owner: address(USER),
+            permit: Permit2Permit {
                 token: address(USDC_BASE),
                 amount: TokenAmount::from(25_000_000_u32),
                 nonce: Permit2Nonce::from(7_u8),
                 deadline: UnixSeconds::new(1_800_000_000),
             },
             signature,
-        ))
+        })
     );
     assert_eq!(
         decode_vault_pull_with_permit2(&vault_payout(

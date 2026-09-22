@@ -76,15 +76,53 @@ impl std::fmt::Debug for HttpRequest {
     }
 }
 
+/// The most of a text this canister did not write that an error carries out of this
+/// module: enough for an operator to tell one failure from another in a log, and never a
+/// provider's whole answer.
+pub const MAX_SUMMARY_BYTES: usize = 200;
+
+/// A bounded summary of text that came from outside: the system's reject message, or a
+/// provider's body. It can only be made by [`Summary::of`], so no caller can put a
+/// provider's megabyte into an error that a quoter or a watcher reads back, and no control
+/// character can travel with it into whatever reads the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Summary(String);
+
+impl Summary {
+    /// `text` with its control characters turned into spaces, cut to
+    /// [`MAX_SUMMARY_BYTES`] at a character boundary.
+    pub fn of(text: &str) -> Self {
+        let cleaned: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let mut end = cleaned.len().min(MAX_SUMMARY_BYTES);
+        while !cleaned.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self(cleaned[..end].to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Summary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Why a read of a chain answered nothing usable.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RpcError {
     #[error("no rpc url is configured for chain {0}")]
     NoUrl(ChainId),
-    #[error("the outcall was rejected: {message}")]
-    Unreachable { message: String },
-    #[error("the provider answered http {status}")]
-    Http { status: u16, body: String },
+    #[error("the outcall was rejected: {reason}")]
+    Unreachable { reason: Summary },
+    #[error("the provider answered http {status}: {body}")]
+    Http { status: u16, body: Summary },
     #[error("a batch of {calls} is answered by an array, and this is not one: {reason}")]
     NotAnArray { calls: usize, reason: String },
     #[error("{asked} calls were answered by {answered} replies")]
@@ -158,14 +196,14 @@ async fn http_post(
     )
     .await
     .map_err(|(code, message)| RpcError::Unreachable {
-        message: format!("{code:?}: {message}"),
+        reason: Summary::of(&format!("{code:?}: {message}")),
     })?;
     // a status outside a u16 is no http status at all, and is not a 2xx either
     let status: u16 = response.status.0.try_into().unwrap_or(u16::MAX);
     if !(200..300).contains(&status) {
         return Err(RpcError::Http {
             status,
-            body: String::from_utf8_lossy(&response.body).into_owned(),
+            body: Summary::of(&String::from_utf8_lossy(&response.body)),
         });
     }
     Ok(response.body)
@@ -342,8 +380,13 @@ impl From<RpcError> for settlement_api::types::rpc::RpcError {
             RpcError::NoUrl(chain_id) => Self::NoUrl {
                 chain_id: chain_id.get(),
             },
-            RpcError::Unreachable { message } => Self::Unreachable { message },
-            RpcError::Http { status, body } => Self::Http { status, body },
+            RpcError::Unreachable { reason } => Self::Unreachable {
+                reason: reason.as_str().to_string(),
+            },
+            RpcError::Http { status, body } => Self::Http {
+                status,
+                body: body.as_str().to_string(),
+            },
             RpcError::NotAnArray { calls, reason } => Self::NotAnArray {
                 calls: calls as u64,
                 reason,

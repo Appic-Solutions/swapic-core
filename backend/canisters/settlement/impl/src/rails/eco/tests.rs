@@ -1,7 +1,10 @@
 use super::*;
-use crate::rails::tests::{config, fixture_swap, leg, quote, USDC_BASE, VAULT_BASE};
-use crate::rails::{RailStep, WaitingFor};
-use types::abi::{decode_eco_publish_and_fund, decode_vault_execute};
+use crate::rails::tests::{at, config, fixture_swap, quote, USDC_BASE, VAULT_BASE};
+use crate::rails::{RailStep, ReclaimStep, WaitingFor};
+use types::abi::{
+    decode_eco_publish_and_fund, decode_eco_refund, decode_vault_execute, EcoPublish, EcoReclaim,
+    VaultExecution,
+};
 use types::config::EcoEnabled;
 use types::{ChainId, Config, EvmAddress, Outcome, Rail, TokenAmount, UnixSeconds};
 
@@ -34,22 +37,27 @@ fn the_publish_names_ecos_destination_and_the_vault_as_the_rewards_creator() {
     let swap = fixture_swap(None, None);
     let config = config();
     let intent = intent(1_788_357_691);
-    let leg = leg(&quote, &swap, &config, None, Some(&intent));
-    let publish = Eco
-        .publish(&leg, &intent)
-        .expect("everything is configured");
-    assert_eq!(publish.purpose, TxPurpose::Burn(leg.quote_hash));
+    let at = at(&quote, &swap, &config, None, Some(&intent));
+    let publish = Eco.publish(&at, &intent).expect("everything is configured");
+    assert_eq!(publish.purpose, TxPurpose::Burn(at.quote_hash));
     assert_eq!(publish.chain_id, ChainId::BASE);
     assert_eq!(publish.to, VAULT_BASE.parse::<EvmAddress>().unwrap());
     assert_eq!(publish.gas_limit, PUBLISH_GAS_LIMIT);
-    let (swap_ref, calls, deltas) = decode_vault_execute(&publish.data).expect("an execute");
-    assert_eq!(swap_ref, leg.quote_hash);
+    let VaultExecution {
+        swap_ref,
+        calls,
+        deltas,
+    } = decode_vault_execute(&publish.data).expect("an execute");
+    assert_eq!(swap_ref, at.quote_hash);
     let usdc_base: EvmAddress = USDC_BASE.parse().unwrap();
     assert_eq!(calls[0].target, config.eco_portal.unwrap());
     assert_eq!(calls[0].approve_token, usdc_base);
     assert_eq!(calls[0].approve_amount, swap.amount_in);
-    let (destination, route, reward) =
-        decode_eco_publish_and_fund(&calls[0].data).expect("a publishAndFund");
+    let EcoPublish {
+        destination,
+        route,
+        reward,
+    } = decode_eco_publish_and_fund(&calls[0].data).expect("a publishAndFund");
     assert_eq!(
         destination,
         ChainId::BASE,
@@ -80,12 +88,12 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
     let config = config();
     let fresh = fixture_swap(None, None);
     assert_eq!(
-        Eco.step(&leg(&quote, &fresh, &config, None, None)),
+        Eco.step(&at(&quote, &fresh, &config, None, None)),
         Ok(RailStep::Wait(WaitingFor::Intent))
     );
     let intent = intent(2_000);
     assert!(matches!(
-        Eco.step(&leg(&quote, &fresh, &config, None, Some(&intent))),
+        Eco.step(&at(&quote, &fresh, &config, None, Some(&intent))),
         Ok(RailStep::Send(RailTx {
             purpose: TxPurpose::Burn(_),
             ..
@@ -93,7 +101,7 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
     ));
 
     let published = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
-    let mut before = leg(&quote, &published, &config, None, Some(&intent));
+    let mut before = at(&quote, &published, &config, None, Some(&intent));
     before.now = UnixSeconds::new(2_000);
     assert_eq!(
         Eco.step(&before),
@@ -102,7 +110,7 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
             expired: false
         })
     );
-    let mut after = leg(&quote, &published, &config, None, Some(&intent));
+    let mut after = at(&quote, &published, &config, None, Some(&intent));
     after.now = UnixSeconds::new(2_001);
     assert_eq!(
         Eco.step(&after),
@@ -114,31 +122,30 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
 
     assert_eq!(
         Eco.reclaim(&before),
-        Ok(RailStep::Wait(WaitingFor::Deadline)),
+        Ok(ReclaimStep::Wait(WaitingFor::Deadline)),
         "the reward is the filler's until the deadline"
     );
     let reclaim = match Eco.reclaim(&after) {
-        Ok(RailStep::Reclaim(tx)) => tx,
+        Ok(ReclaimStep::Send(tx)) => tx,
         other => panic!("past the deadline the reward is reclaimed: {other:?}"),
     };
     assert_eq!(reclaim.purpose, TxPurpose::Reclaim(after.quote_hash));
     assert_eq!(reclaim.chain_id, ChainId::BASE);
     assert_eq!(reclaim.to, config.eco_portal.unwrap());
     assert_eq!(reclaim.gas_limit, RECLAIM_GAS_LIMIT);
+    // the bytes are read back into the call they make, not matched by their prefix
     assert_eq!(
-        &reclaim.data[..4],
-        &[0x30, 0x8a, 0xda, 0xde],
-        "refund(uint64,bytes32,Reward)"
+        decode_eco_refund(&reclaim.data),
+        Some(EcoReclaim {
+            destination: ChainId::BASE,
+            route_hash: eco_route_hash(&[0xde, 0xad, 0xbe, 0xef]),
+            reward: Eco.reward(&after, &intent).unwrap(),
+        })
     );
-    assert_eq!(
-        &reclaim.data[36..68],
-        &eco_route_hash(&[0xde, 0xad, 0xbe, 0xef]),
-        "the route by its hash"
-    );
-    let without_intent = leg(&quote, &published, &config, None, None);
+    let without_intent = at(&quote, &published, &config, None, None);
     assert!(matches!(
         Eco.reclaim(&without_intent),
-        Ok(RailStep::Stuck(_))
+        Ok(ReclaimStep::Stuck(_))
     ));
 
     let no_portal = Config {
@@ -146,7 +153,7 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
         ..config.clone()
     };
     assert_eq!(
-        Eco.step(&leg(&quote, &fresh, &no_portal, None, Some(&intent)))
+        Eco.step(&at(&quote, &fresh, &no_portal, None, Some(&intent)))
             .map(drop),
         Err(RailError::NoEcoPortal)
     );
@@ -169,12 +176,12 @@ fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
     let intent = intent(2_000);
     let fresh = fixture_swap(None, None);
     assert_eq!(
-        Eco.step(&leg(&quote, &fresh, &off, None, Some(&intent)))
+        Eco.step(&at(&quote, &fresh, &off, None, Some(&intent)))
             .map(drop),
         Err(RailError::RailDisabled { rail: Rail::Eco })
     );
     let published = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
-    let mut past = leg(&quote, &published, &off, None, Some(&intent));
+    let mut past = at(&quote, &published, &off, None, Some(&intent));
     past.now = UnixSeconds::new(3_000);
     assert_eq!(
         Eco.reclaim(&past).map(drop),

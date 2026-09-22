@@ -242,8 +242,9 @@ fn the_engine_sends_the_burn_for_a_funded_swap_and_then_waits_on_it() {
     };
     assert_eq!(chain_id, BASE);
     assert_eq!(to, VAULT_BASE);
-    let (swap_ref, calls, _) = decode_vault_execute(&data).expect("an execute");
-    assert_eq!(swap_ref.into_bytes(), quote_hash);
+    let execute = decode_vault_execute(&data).expect("an execute");
+    let calls = execute.calls;
+    assert_eq!(execute.swap_ref.into_bytes(), quote_hash);
     let burn = decode_cctp_deposit_for_burn(&calls[0].data).expect("a depositForBurn");
     assert_eq!(burn.destination_domain, 3);
     assert_eq!(
@@ -306,10 +307,12 @@ fn a_halted_canister_drives_nothing() {
     );
 }
 
-/// A swap no leg leads from is stopped for a human with the reason: here a refund asked
-/// for a quote that names no refund address.
+/// A refund the canister cannot pay stops the swap for a human with the reason, rather
+/// than being retried every tick: the quote names no refund address, so `send_refund`
+/// freezes it with that. (A claim now refuses such a quote at the door; this swap is
+/// written straight into the fold, which is the shape an older line could still hold.)
 #[test]
-fn a_swap_no_leg_leads_from_is_frozen_with_the_reason() {
+fn a_refund_on_a_quote_with_no_refund_address_is_frozen_with_the_reason() {
     let (pic, canister, admin) = setup();
     let quote = types::Quote {
         refund_address: None,

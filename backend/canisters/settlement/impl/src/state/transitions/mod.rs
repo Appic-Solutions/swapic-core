@@ -285,18 +285,27 @@ impl<S: Store> State<S> {
         let Some(quote_hash) = purpose.quote_hash() else {
             return Ok(());
         };
+        // named rather than matched by `_`, so a new purpose has to be classified here
+        // instead of falling into the rules of a swap's own leg
         match purpose {
             TxPurpose::GaslessPull(_) => {
                 if self.store().swap(&quote_hash).is_some() {
                     return Err(TransitionError::SwapExists(quote_hash));
                 }
             }
-            _ => {
+            TxPurpose::Burn(_)
+            | TxPurpose::Mint(_)
+            | TxPurpose::Payout(_)
+            | TxPurpose::Refund(_)
+            | TxPurpose::Reclaim(_) => {
                 let swap = self.swap(&quote_hash)?;
                 swap.ensure_not_closed()?;
                 swap.ensure_not_waiting()?;
                 swap.ensure_no_open_attempt()?;
             }
+            // a cancel names no swap, so `quote_hash()` answered none and this function
+            // returned before the match
+            TxPurpose::Cancel(_) => return Ok(()),
         }
         // rule A4 from the swap's side: two sends for ONE swap that interleave at the
         // signature would otherwise both allocate, and the second's `TxSigned` would be
@@ -479,8 +488,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             // the payout's own amount, off the calldata this canister built: what the
             // record of a delivered swap is made from. Pure, so a replay rebuilds it.
             if let TxPurpose::Payout(quote_hash) = purpose {
-                let paid_out =
-                    types::abi::decode_vault_payout(data).map(|(_, _, _, amount)| amount);
+                let paid_out = types::abi::decode_vault_payout(data).map(|payout| payout.amount);
                 state.record_payout_created(quote_hash, paid_out);
             }
         }

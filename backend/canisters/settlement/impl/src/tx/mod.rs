@@ -121,7 +121,7 @@ pub enum TxError {
     },
     #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the bound of {MAX_TRANSACTION_COST}")]
     GasCostTooHigh { chain_id: ChainId, cost: Wei },
-    #[error("{0} names no swap, and a transaction is signed against a swap's attempt")]
+    #[error("{0} names no quote, and this path signs against the quote a transaction is for")]
     PurposeNeedsASwap(&'static str),
     #[error("swap {quote_hash} has used every attempt number there is")]
     NoAttemptLeft { quote_hash: QuoteHash },
@@ -226,9 +226,14 @@ pub async fn create_and_send(
     // sign anything, and refusing it here costs nothing, while refusing it after the append
     // would leave a number handed out for a transaction that never existed
     let attempt = match purpose.attempt_of() {
-        Some(swap) => Some(
-            read_state(|state| state.swap(&swap).ok().and_then(|swap| swap.next_attempt()))
-                .ok_or(TxError::NoAttemptLeft { quote_hash })?,
+        Some(attempts_of) => Some(
+            read_state(|state| {
+                state
+                    .swap(&attempts_of)
+                    .ok()
+                    .and_then(|swap| swap.next_attempt())
+            })
+            .ok_or(TxError::NoAttemptLeft { quote_hash })?,
         ),
         None => None,
     };

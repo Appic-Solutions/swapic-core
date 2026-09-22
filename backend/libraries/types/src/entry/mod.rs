@@ -78,13 +78,15 @@ pub enum AttestationError {
 /// new field is optional.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Attestation {
+    // private, so [`Attestation::new`] is the only way to make one and its bounds are the
+    // bounds of every attestation this canister holds
     #[cbor(n(0), with = "minicbor::bytes")]
-    pub message: Vec<u8>,
+    message: Vec<u8>,
     #[cbor(n(1), with = "minicbor::bytes")]
-    pub attestation: Vec<u8>,
+    attestation: Vec<u8>,
     /// Canister time, when the watcher handed it in.
     #[n(2)]
-    pub received_at: Timestamp,
+    received_at: Timestamp,
 }
 
 impl Attestation {
@@ -111,6 +113,21 @@ impl Attestation {
             attestation,
             received_at,
         })
+    }
+
+    /// Circle's message: what the destination's `receiveMessage` takes first.
+    pub fn message(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// The signatures over that message.
+    pub fn attestation(&self) -> &[u8] {
+        &self.attestation
+    }
+
+    /// When the watcher handed it in.
+    pub fn received_at(&self) -> Timestamp {
+        self.received_at
     }
 }
 

@@ -11,6 +11,6 @@ pub mod swap;
 pub mod tx;
 
 /// A length or position as the wire carries it.
-pub(crate) fn wire_len(len: usize) -> u64 {
+pub fn wire_len(len: usize) -> u64 {
     u64::try_from(len).expect("BUG: usize is at most 64 bits on every target")
 }

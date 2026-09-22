@@ -37,9 +37,9 @@ fn an_attestation_is_held_to_its_bounds_and_round_trips() {
     let at = Timestamp::from_nanos(1_700_000_000_000_000_000);
     let attestation = Attestation::new(vec![0xaa; 376], vec![0xbb; 130], at)
         .expect("a burn message and two signatures are inside the bounds");
-    assert_eq!(attestation.message, vec![0xaa; 376]);
-    assert_eq!(attestation.attestation, vec![0xbb; 130]);
-    assert_eq!(attestation.received_at, at);
+    assert_eq!(attestation.message(), vec![0xaa; 376]);
+    assert_eq!(attestation.attestation(), vec![0xbb; 130]);
+    assert_eq!(attestation.received_at(), at);
     assert_eq!(Attestation::from_bytes(attestation.to_bytes()), attestation);
 
     assert_eq!(
