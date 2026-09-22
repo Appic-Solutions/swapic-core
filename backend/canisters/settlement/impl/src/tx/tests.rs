@@ -465,6 +465,7 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         value: types::Wei::ZERO,
         data: vec![],
         gas_limit: GasAmount::from(120_000_u32),
+        refusal: None,
     }
 }
 

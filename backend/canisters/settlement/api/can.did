@@ -624,6 +624,8 @@ type Swap = record {
   // The transaction the latest attempt confirmed as, once it has.
   last_tx_hash : opt blob;
   src_chain : nat64;
+  // What the payout leg was signed to pay the user, once one has been.
+  paid_out : opt nat;
   // How the latest attempt ended: absent while it is open, or before any was signed.
   last_outcome : opt Outcome;
   amount_in : nat;

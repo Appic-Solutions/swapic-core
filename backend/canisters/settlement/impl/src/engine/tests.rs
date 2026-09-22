@@ -15,6 +15,7 @@ fn at(status: SwapStatus, last_leg: Option<Leg>, last_outcome: Option<Outcome>) 
         last_leg,
         last_outcome,
         last_tx_hash: None,
+        paid_out: None,
     }
 }
 
@@ -239,6 +240,60 @@ fn the_payout_is_the_stable_less_the_fee_and_never_below_min_out() {
             fee: TokenAmount::ZERO,
         }),
         "exactly the minimum is enough"
+    );
+}
+
+/// What the record says was paid is what the payout itself carried: the fee is the stable
+/// less the amount the payout leg was signed for, so a config the operator moved between
+/// the send and its confirmation changes nothing in the record, and a fee the live config
+/// would now refuse cannot leave a confirmed payout unrecorded.
+#[test]
+fn the_record_reads_the_fee_off_the_payout_that_was_sent() {
+    let paid = TokenAmount::from(24_995_000_u32);
+    let sent = TokenAmount::from(24_920_015_u32);
+    let mut swap = at(
+        SwapStatus::Delivering,
+        Some(Leg::Payout),
+        Some(Outcome::Confirmed),
+    );
+    swap.amount_paid = Some(paid);
+    swap.paid_out = Some(sent);
+    assert_eq!(
+        recorded_payout(&swap),
+        Ok(Payout {
+            amount: sent,
+            fee: TokenAmount::from(74_985_u32),
+        }),
+        "the fee is what the payout left behind, whatever the config says now"
+    );
+    let no_fee = Swap {
+        paid_out: Some(paid),
+        ..swap.clone()
+    };
+    assert_eq!(
+        recorded_payout(&no_fee),
+        Ok(Payout {
+            amount: paid,
+            fee: TokenAmount::ZERO,
+        })
+    );
+    // a payout leg whose amount the fold never read is a fold no line produces
+    let unread = Swap {
+        paid_out: None,
+        ..swap.clone()
+    };
+    assert_eq!(recorded_payout(&unread), Err(EngineError::NoPayoutRecorded));
+    // and one that paid more than arrived is not one either
+    let impossible = Swap {
+        paid_out: Some(TokenAmount::from(25_000_000_u32)),
+        ..swap
+    };
+    assert_eq!(
+        recorded_payout(&impossible),
+        Err(EngineError::PayoutAboveStable {
+            paid_out: TokenAmount::from(25_000_000_u32),
+            paid,
+        })
     );
 }
 

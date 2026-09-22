@@ -314,6 +314,7 @@ pub async fn create_and_send(
         // the calldata was copied once, into the log; the transaction's own moves on here
         data: tx.data,
         gas_limit,
+        refusal: None,
     });
     Ok(tx_hash)
 }
@@ -433,6 +434,7 @@ async fn cancel(key: NonceKey) {
         value: Wei::ZERO,
         data: Vec::new(),
         gas_limit,
+        refusal: None,
     });
     task_manager::outbox::arm();
 }
@@ -463,15 +465,20 @@ fn nonce_already_spent(message: &str) -> bool {
         .any(|phrase| message.contains(phrase))
 }
 
-/// Hands every queued transaction to its chain's provider, one batch per chain. An entry a
-/// provider refuses stays queued and goes out again on the next pass: the nonce is
-/// allocated either way, so the only way out is forward.
+/// Hands every queued transaction to its chain's provider, one batch per chain. The nonce
+/// is allocated either way, so the only way out is forward, and every answer a provider
+/// gives moves the entry on: it stays queued only when no answer came back at all.
 ///
-/// An entry leaves the queue on three answers, and only one of them is the provider
-/// accepting these bytes: a result, a provider that already holds the transaction, and a
-/// nonce the chain calls too low, which means one of this entry's EARLIER transactions is
-/// already mined. All three mean the same thing for the queue, that there is nothing left
-/// to broadcast and the receipt reader takes it from here.
+/// A result, a provider that already holds the transaction, and a nonce the chain calls
+/// too low (one of this entry's EARLIER transactions is already mined) all say there is
+/// nothing left to broadcast. Any other refusal is a hint like any other (rule A10): the
+/// bytes were offered to the chain and may well be in a mempool, so the entry is watched
+/// all the same, with the refusal kept on it, and the rebroadcast and replacement rules
+/// take it from there. A refusal for the price ends in a bump; one the chain will never
+/// accept ends at the fee ceiling with the bytes still going out, which is the rule the
+/// outbox has for a transaction the chain will not mine. Left queued instead, the same
+/// bytes would be refused every window forever and every later nonce on the chain would
+/// wait behind them.
 pub async fn flush() {
     // the emergency stop: a halted canister hands nothing new to a provider, whether it was
     // queued before the halt or re-queued during it. Nothing is abandoned, because the
@@ -498,21 +505,26 @@ pub async fn flush() {
             continue;
         };
         for (entry, answer) in batch.into_iter().zip(answers) {
-            let off_the_queue = match answer {
-                Ok(_) => true,
-                Err(RpcError::Rpc { message, .. }) => {
-                    already_on_the_network(&message) || nonce_already_spent(&message)
+            let refusal = match answer {
+                Ok(_) => None,
+                Err(RpcError::Rpc { message, .. })
+                    if already_on_the_network(&message) || nonce_already_spent(&message) =>
+                {
+                    None
                 }
-                Err(_) => false,
+                Err(RpcError::Rpc { message, .. }) => Some(message),
+                // no answer to this call: the bytes are offered again next window
+                Err(_) => continue,
             };
-            if off_the_queue {
-                // A3: the entry is the one this pass read, and the only field it moves is
-                // how far the broadcast got
-                if let Some(mut current) = outbox::get(entry.key()) {
-                    if current.tx_hash() == entry.tx_hash() {
-                        current.sent(now);
-                        outbox::put(current);
+            // A3: the entry is the one this pass read, and the only fields it moves are
+            // how far the broadcast got and what the provider said
+            if let Some(mut current) = outbox::get(entry.key()) {
+                if current.tx_hash() == entry.tx_hash() {
+                    match refusal {
+                        Some(message) => current.refused(now, &message),
+                        None => current.sent(now),
                     }
+                    outbox::put(current);
                 }
             }
         }

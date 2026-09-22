@@ -115,13 +115,41 @@ impl Storable for NonceKey {
     };
 }
 
+/// The most bytes of a provider's refusal an entry keeps: enough for every reason a node
+/// gives ("transaction underpriced", "max fee per gas less than block base fee", "invalid
+/// sender", "intrinsic gas too low"), and a bound a provider cannot pad past.
+pub const MAX_REFUSAL_BYTES: usize = 200;
+
+/// What a provider answered when it refused a broadcast, bounded. A hint for the receipt
+/// pass and for ops, never a decision: the bytes were offered to the chain either way.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(transparent)]
+pub struct Refusal(#[n(0)] String);
+
+impl Refusal {
+    /// The refusal, cut to [`MAX_REFUSAL_BYTES`] at a character boundary.
+    pub fn new(message: &str) -> Self {
+        let mut end = message.len().min(MAX_REFUSAL_BYTES);
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self(message[..end].to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One signed transaction on its way to a chain.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
 /// new field is optional. Fields are declared beside the ones they describe rather than in
-/// index order, so the indices below run 0 to 5, then 11 to 14, then 6 to 10 and 15: the
-/// numbers are the order they were added in, and the declaration is the order they read
-/// in.
+/// index order, so the indices below run 0 to 5, then 11 to 14, then 6 to 10, 15 and 16:
+/// the numbers are the order they were added in, and the declaration is the order they
+/// read in.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct OutboxEntry {
     #[n(0)]
@@ -168,6 +196,12 @@ pub struct OutboxEntry {
     /// bytes, so it starts the clock again.
     #[n(15)]
     pub first_sent_at: Option<Timestamp>,
+    /// What the provider answered when it refused the current bytes, if it did. A refused
+    /// broadcast is out like an accepted one (the chain's answer is a hint, and the bytes
+    /// may well be in a mempool), so the entry is watched, rebroadcast and replaced by the
+    /// same rules; the text is kept for the receipt pass and for ops.
+    #[n(16)]
+    pub refusal: Option<Refusal>,
 }
 
 impl OutboxEntry {
@@ -209,6 +243,14 @@ impl OutboxEntry {
         self.first_sent_at = self.first_sent_at.or(Some(at));
     }
 
+    /// Records that the current bytes were offered to a provider at `at` and refused with
+    /// `message`: out all the same, with both clocks running, so the rebroadcast and the
+    /// replacement rules apply and a bump follows when the reason was the price.
+    pub fn refused(&mut self, at: Timestamp, message: &str) {
+        self.sent(at);
+        self.refusal = Some(Refusal::new(message));
+    }
+
     /// Takes the same nonce to a new transaction at a higher fee: the old hash stays, so a
     /// receipt for it is still recognised, and the new bytes go out on the next pass.
     ///
@@ -239,6 +281,7 @@ impl OutboxEntry {
             created_at,
             last_sent_at: _,
             first_sent_at: _,
+            refusal: _,
         } = self;
         Self {
             purpose: *purpose,
@@ -259,6 +302,8 @@ impl OutboxEntry {
             // new bytes at a new price: the clock the next replacement is measured on
             // starts when these first reach a provider, not when the ones they replace did
             first_sent_at: None,
+            // and no provider has answered them yet
+            refusal: None,
         }
     }
 }

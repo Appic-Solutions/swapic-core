@@ -165,6 +165,13 @@ pub enum EngineError {
     FeeOverflow { amount: TokenAmount },
     #[error("the swap was paid in stable with no amount recorded")]
     NoAmountPaid,
+    #[error("the payout leg carries no amount this canister recorded")]
+    NoPayoutRecorded,
+    #[error("the payout of {paid_out} is above the {paid} the stable brought in")]
+    PayoutAboveStable {
+        paid_out: TokenAmount,
+        paid: TokenAmount,
+    },
     #[error("the quote names no refund address")]
     NoRefundAddress,
     #[error(transparent)]
@@ -325,10 +332,29 @@ fn quote_of(swap: &Swap) -> Result<Quote, EngineError> {
     Ok(Quote::parse(&swap.quote_bytes)?)
 }
 
-/// What a swap is paid out: the stable less the platform's fee, held to the quote.
+/// What a swap is to be paid out: the stable less the platform's fee as the config reads
+/// now, held to the quote. Priced once, where the payout is decided; what the record says
+/// afterwards comes from [`recorded_payout`] and never from here again.
 fn payout_for(swap: &Swap, quote: &Quote) -> Result<Payout, EngineError> {
     let paid = swap.amount_paid.ok_or(EngineError::NoAmountPaid)?;
     payout_of(paid, config::get().platform_fee, quote.min_out)
+}
+
+/// What the swap's own payout leg was signed for, and the fee it therefore left in the
+/// vault: the stable that arrived less the amount the payout pays out. Read off the fold,
+/// so a config the operator moved between the send and its confirmation changes nothing
+/// in the record, and a fee the live config would now refuse cannot leave a confirmed
+/// payout unrecorded.
+fn recorded_payout(swap: &Swap) -> Result<Payout, EngineError> {
+    let paid = swap.amount_paid.ok_or(EngineError::NoAmountPaid)?;
+    let amount = swap.paid_out.ok_or(EngineError::NoPayoutRecorded)?;
+    let fee = paid
+        .checked_sub(amount)
+        .ok_or(EngineError::PayoutAboveStable {
+            paid_out: amount,
+            paid,
+        })?;
+    Ok(Payout { amount, fee })
 }
 
 /// Hands one rail transaction to the send path.
@@ -398,18 +424,27 @@ async fn send_refund(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
     .await
 }
 
-/// The payout landed: the swap is done, and the platform's fee, if there is one, is
-/// accrued. The inboxes are done with the swap.
+/// The payout landed: the platform's fee, if there is one, is accrued, and then the swap
+/// is done. The fee comes from the payout the swap itself sent, so nothing here can
+/// refuse on a config that moved; the fee line goes first, because a refused line behind
+/// a closed swap would be lost and nothing retries it. A payout leg the fold holds no
+/// amount for is a fold no line produces, so the swap stops for a human rather than
+/// looping. The inboxes are done with the swap.
 fn record_done(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
-    let quote = quote_of(swap)?;
-    let payout = payout_for(swap, &quote)?;
-    append_event(EventType::SwapDone { quote_hash })?;
+    let payout = match recorded_payout(swap) {
+        Ok(payout) => payout,
+        Err(error @ (EngineError::NoPayoutRecorded | EngineError::PayoutAboveStable { .. })) => {
+            return freeze(quote_hash, &error.to_string())
+        }
+        Err(error) => return Err(error),
+    };
     if payout.fee > TokenAmount::ZERO {
         append_event(EventType::FeeAccrued {
             quote_hash,
             amount: payout.fee,
         })?;
     }
+    append_event(EventType::SwapDone { quote_hash })?;
     forget(quote_hash);
     Ok(Did::Recorded)
 }

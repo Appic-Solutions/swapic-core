@@ -87,6 +87,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
         last_leg: Some(types::Leg::Payout),
         last_outcome: Some(types::Outcome::Failed),
         last_tx_hash: Some(types::TxHash::new([9; 32])),
+        paid_out: Some(TokenAmount::from(24_920_015_u32)),
     };
     assert_eq!(
         Swap::from(swap),
@@ -103,6 +104,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
             last_leg: Some(Leg::Payout),
             last_outcome: Some(Outcome::Failed),
             last_tx_hash: Some([9; 32]),
+            paid_out: Some(Nat::from(24_920_015_u32)),
         }
     );
 }

@@ -50,6 +50,7 @@ pub fn fixture_swap(last_leg: Option<SwapLeg>, last_outcome: Option<Outcome>) ->
         last_leg,
         last_outcome,
         last_tx_hash: None,
+        paid_out: None,
     }
 }
 

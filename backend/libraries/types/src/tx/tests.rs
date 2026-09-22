@@ -22,6 +22,7 @@ fn entry() -> OutboxEntry {
         value: Wei::ZERO,
         data: vec![0xde, 0xad, 0xbe, 0xef],
         gas_limit: GasAmount::from(120_000_u32),
+        refusal: None,
     }
 }
 
@@ -108,6 +109,61 @@ fn a_replacement_keeps_the_nonce_and_remembers_the_hash_it_replaced() {
             sent.created_at,
         )
     );
+}
+
+/// A broadcast the provider refused is out all the same: the bytes were offered to the
+/// chain and its answer is a hint like any other, so the entry is watched and both clocks
+/// start, and the refusal is kept on it, bounded, for the receipt pass and for ops. A
+/// refusal a provider padded past the bound is cut at a character boundary.
+#[test]
+fn a_refused_broadcast_is_out_with_its_refusal_kept() {
+    let mut entry = entry();
+    entry.refused(
+        Timestamp::from_nanos(1_000_000_000),
+        "transaction underpriced",
+    );
+    assert_eq!(entry.status, OutboxStatus::Sent);
+    assert_eq!(
+        entry.last_sent_at,
+        Some(Timestamp::from_nanos(1_000_000_000))
+    );
+    assert_eq!(
+        entry.first_sent_at,
+        Some(Timestamp::from_nanos(1_000_000_000))
+    );
+    assert_eq!(
+        entry.refusal.as_ref().map(Refusal::as_str),
+        Some("transaction underpriced")
+    );
+    // a rebroadcast of the same bytes keeps the first clock and the refusal
+    entry.sent(Timestamp::from_nanos(2_000_000_000));
+    assert_eq!(
+        entry.first_sent_at,
+        Some(Timestamp::from_nanos(1_000_000_000))
+    );
+    assert_eq!(
+        entry.refusal.as_ref().map(Refusal::as_str),
+        Some("transaction underpriced")
+    );
+    // a replacement is new bytes with no answer yet
+    let replacement = entry.replaced(
+        TxHash::new([3; 32]),
+        vec![0x02, 0xff],
+        WeiPerGas::from(4_000_000_000_u64),
+        WeiPerGas::from(200_000_000_u64),
+    );
+    assert_eq!(replacement.refusal, None);
+
+    let padded = format!(
+        "{}\u{e9}{}",
+        "a".repeat(MAX_REFUSAL_BYTES - 1),
+        "b".repeat(50)
+    );
+    let refusal = Refusal::new(&padded);
+    assert_eq!(refusal.as_str(), "a".repeat(MAX_REFUSAL_BYTES - 1));
+    assert!(refusal.as_str().len() < MAX_REFUSAL_BYTES);
+    let exact = "x".repeat(MAX_REFUSAL_BYTES);
+    assert_eq!(Refusal::new(&exact).as_str(), exact);
 }
 
 /// How long the current bytes have been out, which is what decides a rebroadcast from a

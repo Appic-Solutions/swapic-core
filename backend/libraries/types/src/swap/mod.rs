@@ -136,6 +136,12 @@ pub struct Swap {
     /// while the attempt is open, after one that failed, and before any was signed.
     #[n(11)]
     pub last_tx_hash: Option<TxHash>,
+    /// What the payout leg was signed to pay the user, read off the calldata this canister
+    /// built for it. The record of a delivered swap is made from this and never from the
+    /// live config, so a fee the operator moved between the send and the confirmation
+    /// cannot change what the log says was paid.
+    #[n(12)]
+    pub paid_out: Option<TokenAmount>,
 }
 
 /// Why an event cannot move the state it was offered to.

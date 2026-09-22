@@ -23,6 +23,7 @@ fn entry(chain_id: ChainId, nonce: u64, status: OutboxStatus) -> OutboxEntry {
         value: types::Wei::ZERO,
         data: vec![],
         gas_limit: types::GasAmount::from(21_000_u32),
+        refusal: None,
     }
 }
 

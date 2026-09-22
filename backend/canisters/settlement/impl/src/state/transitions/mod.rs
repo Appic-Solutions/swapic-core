@@ -472,8 +472,18 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             purpose,
             chain_id,
             nonce,
+            data,
             ..
-        } => state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp),
+        } => {
+            state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp);
+            // the payout's own amount, off the calldata this canister built: what the
+            // record of a delivered swap is made from. Pure, so a replay rebuilds it.
+            if let TxPurpose::Payout(quote_hash) = purpose {
+                let paid_out =
+                    types::abi::decode_vault_payout(data).map(|(_, _, _, amount)| amount);
+                state.record_payout_created(quote_hash, paid_out);
+            }
+        }
         EventType::TxCancelled {
             chain_id, nonce, ..
         }

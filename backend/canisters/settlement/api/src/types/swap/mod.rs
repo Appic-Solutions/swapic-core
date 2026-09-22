@@ -75,6 +75,8 @@ pub struct Swap {
     pub last_outcome: Option<Outcome>,
     /// The transaction the latest attempt confirmed as, once it has.
     pub last_tx_hash: Option<Hash32>,
+    /// What the payout leg was signed to pay the user, once one has been.
+    pub paid_out: Option<Nat>,
 }
 
 impl From<types::SwapStatus> for SwapStatus {
@@ -109,6 +111,7 @@ impl From<types::Swap> for Swap {
             last_leg: swap.last_leg.map(Leg::from),
             last_outcome: swap.last_outcome.map(Outcome::from),
             last_tx_hash: swap.last_tx_hash.map(TxHash::into_bytes),
+            paid_out: swap.paid_out.map(Nat::from),
         }
     }
 }

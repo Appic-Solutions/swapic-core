@@ -55,10 +55,11 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
 /// key types, one nonce waiting for its signature, a cancel that has been out on the
 /// network, a sanctioned address as the sanctions set keys it, an in-flight marker, an
-/// attestation, a swap whose latest leg is known, an Eco intent, and a swap with the hash
-/// its latest attempt confirmed as. Every field of a sample differs from its neighbours,
-/// so a field that moves to another index decodes to a different value instead of
-/// passing unnoticed.
+/// attestation, a swap whose latest leg is known, an Eco intent, a swap with the hash its
+/// latest attempt confirmed as, an outbox entry the provider refused, and a swap with the
+/// amount its payout was signed for. Every field of a
+/// sample differs from its neighbours, so a field that moves to another index decodes to
+/// a different value instead of passing unnoticed.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
     assert_eq!(
@@ -96,6 +97,7 @@ fn samples() -> Vec<Sample> {
         last_leg: None,
         last_outcome: None,
         last_tx_hash: None,
+        paid_out: None,
     };
     let unpaid = Swap {
         quote_bytes: vec![],
@@ -110,6 +112,7 @@ fn samples() -> Vec<Sample> {
         last_leg: None,
         last_outcome: None,
         last_tx_hash: None,
+        paid_out: None,
     };
     let config = Config {
         platform_fee: crate::BasisPoints::new(10),
@@ -205,6 +208,7 @@ fn samples() -> Vec<Sample> {
                 value: Wei::ZERO,
                 data: vec![0xde, 0xad, 0xbe, 0xef],
                 gas_limit: GasAmount::from(120_000_u32),
+                refusal: None,
             },
         ),
         sample(
@@ -242,6 +246,9 @@ fn samples() -> Vec<Sample> {
                 value: Wei::ZERO,
                 data: vec![],
                 gas_limit: GasAmount::from(21_000_u32),
+                // absent, so this sample's bytes stay exactly the ones the golden pins;
+                // the entry appended below is the one that pins the field
+                refusal: None,
             },
         ),
         sample(
@@ -281,8 +288,9 @@ fn samples() -> Vec<Sample> {
                 last_leg: Some(crate::Leg::Mint),
                 last_outcome: Some(crate::Outcome::Failed),
                 // absent, so this sample's bytes stay exactly the ones the golden pins;
-                // the swap appended below is the one that pins the field
+                // the swap appended below is the one that pins the later fields
                 last_tx_hash: None,
+                paid_out: None,
             },
         ),
         sample(
@@ -312,6 +320,51 @@ fn samples() -> Vec<Sample> {
                 last_leg: Some(crate::Leg::Burn),
                 last_outcome: Some(crate::Outcome::Confirmed),
                 last_tx_hash: Some(TxHash::new([0x66; 32])),
+                // absent, so this sample's bytes stay exactly the ones the golden pins;
+                // the swap appended below is the one that pins the field
+                paid_out: None,
+            },
+        ),
+        sample(
+            "outbox entry the provider refused",
+            OutboxEntry {
+                purpose: TxPurpose::Payout(QuoteHash::new([0x67; 32])),
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(12),
+                attempt: Some(Attempt::new(3)),
+                hashes: vec![TxHash::new([0x68; 32])],
+                raw_tx: vec![0x02, 0xf8, 0x6d],
+                max_fee: WeiPerGas::from(4_000_000_000_u64),
+                max_priority_fee: WeiPerGas::from(300_000_000_u64),
+                status: OutboxStatus::Sent,
+                created_at: Timestamp::from_nanos(1_700_000_008_000_000_000),
+                last_sent_at: Some(Timestamp::from_nanos(1_700_000_009_000_000_000)),
+                first_sent_at: Some(Timestamp::from_nanos(1_700_000_009_000_000_000)),
+                to: "0x1111111111111111111111111111111111111111"
+                    .parse()
+                    .unwrap(),
+                value: Wei::ZERO,
+                data: vec![0x40, 0x10, 0x47, 0x63],
+                gas_limit: GasAmount::from(120_000_u32),
+                refusal: Some(crate::tx::Refusal::new("transaction underpriced")),
+            },
+        ),
+        sample(
+            "swap with the amount its payout was signed for",
+            Swap {
+                quote_bytes: vec![0xca, 0xfe, 0x02],
+                status: SwapStatus::Delivering,
+                last_attempt: Some(Attempt::new(3)),
+                open_attempt: None,
+                src_chain: ChainId::ARBITRUM,
+                src_token: "0x3".parse().unwrap(),
+                amount_in: TokenAmount::from(7_000_000_u32),
+                amount_paid: Some(TokenAmount::from(6_999_000_u32)),
+                waiting_since: None,
+                last_leg: Some(crate::Leg::Payout),
+                last_outcome: Some(crate::Outcome::Confirmed),
+                last_tx_hash: Some(TxHash::new([0x69; 32])),
+                paid_out: Some(TokenAmount::from(6_978_003_u32)),
             },
         ),
     ]);

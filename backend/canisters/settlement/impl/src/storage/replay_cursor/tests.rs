@@ -32,6 +32,7 @@ fn sample_fold() -> MemoryStore {
             last_leg: None,
             last_outcome: None,
             last_tx_hash: None,
+            paid_out: None,
         },
     );
     store.put_pocket(

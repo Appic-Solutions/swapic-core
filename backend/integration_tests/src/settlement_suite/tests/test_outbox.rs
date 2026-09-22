@@ -1023,6 +1023,123 @@ fn a_nonce_the_provider_calls_too_low_goes_to_the_receipt_reader() {
     );
 }
 
+/// A broadcast the provider refuses for its price is not a dead end: the bytes were
+/// offered to the chain and the answer is a hint like any other, so the entry is watched
+/// like an accepted one and, past the stuck window, replaced at a higher fee, which is the
+/// bump the refusal asked for. Left queued instead, the same bytes would be refused every
+/// window forever and every later nonce on the chain would wait behind them.
+#[test]
+fn an_underpriced_refusal_is_watched_and_then_replaced_at_a_higher_fee() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    let first_hash = send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(methods(&pending[0]), vec!["eth_sendRawTransaction"]);
+    reply_error(&pic, &pending[0], vec!["transaction underpriced"]);
+
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chain, one batch");
+    assert_eq!(
+        methods(&pending[0]),
+        vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+        "the refused entry is watched, not offered again as it is"
+    );
+    answer_pending(&pic, 19_000_000, &json!(null));
+
+    // long past the stuck window, with nothing mined: the replacement at a higher fee
+    advance(&pic, canister, Duration::from_secs(200));
+    answer_pending(&pic, 19_000_001, &json!(null));
+    let replaced = of_kind(events(&pic, canister), is_replaced);
+    assert_eq!(replaced.len(), 1, "one replacement");
+    let EventType::TxReplaced {
+        nonce,
+        max_fee_wei_per_gas,
+        tx_hash: replacement_hash,
+        ..
+    } = replaced[0].clone()
+    else {
+        unreachable!()
+    };
+    assert_eq!(nonce, 0, "the same nonce");
+    assert!(
+        max_fee_wei_per_gas > 2_100_000_000_u64,
+        "the replacement pays more than the refused bytes offered"
+    );
+    assert_ne!(replacement_hash, first_hash);
+    // and the replacement goes out
+    advance(&pic, canister, BATCH_WINDOW);
+    let asked = answer_pending(&pic, 19_000_002, &json!(null));
+    assert!(asked.contains(&"eth_sendRawTransaction".to_string()));
+}
+
+/// A refusal for any other reason follows the same path: watched, rebroadcast, replaced
+/// at a higher fee, and once the fee is at its ceiling nothing is bumped further while the
+/// bytes keep going out on the rebroadcast cadence. That is the rule the outbox has for a
+/// transaction the chain will not mine; the nonce is never abandoned, and a cancel at it
+/// needs the swap-less signed record the engine does not have.
+#[test]
+fn a_malformed_refusal_follows_the_same_path_and_stops_bumping_at_the_ceiling() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    send(&pic, canister, admin, 0).expect("the send goes through");
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    reply_error(&pic, &pending[0], vec!["invalid sender"]);
+    advance(&pic, canister, BATCH_WINDOW);
+    assert_eq!(
+        methods(&pic.get_canister_http()[0]),
+        vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+        "watched"
+    );
+    answer_pending(&pic, 19_000_000, &json!(null));
+
+    // the reading is base 1 gwei and tip 0.1 gwei, so the ceiling is 8.8 gwei per gas and
+    // the bids double from 2.1: 4.2, 8.4, then the ceiling, then nothing more
+    let mut sends_after_the_ceiling = 0;
+    for round in 0..8 {
+        advance(&pic, canister, Duration::from_secs(200));
+        let asked = answer_pending(&pic, 19_000_001 + round, &json!(null));
+        let fees = replacement_fees(&pic, canister);
+        if fees.len() == 3 {
+            sends_after_the_ceiling += asked
+                .iter()
+                .filter(|m| *m == "eth_sendRawTransaction")
+                .count();
+        }
+    }
+    assert_eq!(
+        replacement_fees(&pic, canister),
+        vec![
+            Nat::from(4_200_000_000_u64),
+            Nat::from(8_400_000_000_u64),
+            Nat::from(8_800_000_000_u64)
+        ],
+        "doubled to the ceiling and then no further"
+    );
+    assert!(
+        sends_after_the_ceiling > 0,
+        "and the bytes at the ceiling keep going out"
+    );
+    assert!(
+        tx_cancelled(&events(&pic, canister)).is_empty(),
+        "the nonce is never abandoned while its bytes are still out"
+    );
+}
+
+/// The fee of every replacement so far, in order.
+fn replacement_fees(pic: &PocketIc, canister: Principal) -> Vec<Nat> {
+    of_kind(events(pic, canister), is_replaced)
+        .into_iter()
+        .filter_map(|payload| match payload {
+            EventType::TxReplaced {
+                max_fee_wei_per_gas,
+                ..
+            } => Some(max_fee_wei_per_gas),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The cap on an outcall's answer follows the batch that outcall is for. A fixed cap is a
 /// cliff: one batch above it is rejected by the system, every later pass builds the same
 /// oversized batch, and nothing on that chain ever broadcasts or ever closes again.

@@ -364,6 +364,7 @@ impl<S: Store> State<S> {
                 last_leg: None,
                 last_outcome: None,
                 last_tx_hash: None,
+                paid_out: None,
             },
         );
     }
@@ -518,6 +519,13 @@ impl<S: Store> State<S> {
                 created_at: at,
             },
         );
+    }
+
+    /// What the payout leg this canister just created will pay the user, read off the
+    /// calldata the line carries: the record of a delivered swap is made from this, so it
+    /// is folded from the log like everything else the record says.
+    fn record_payout_created(&mut self, quote_hash: &QuoteHash, paid_out: Option<TokenAmount>) {
+        self.update_swap(quote_hash, |swap| swap.paid_out = paid_out);
     }
 
     /// The other ways an allocation ends: the nonce was spent by a cancel rather than by the

@@ -325,8 +325,13 @@ fn deposit_log(quote_hash: Hash32, block: u64, amount: u128) -> Value {
 }
 
 /// The install: every rail knob set, the two mock chains, the engine on a ten second tick
-/// so one iteration of the loop is one whole turn of the machine.
+/// so one iteration of the loop is one whole turn of the machine, and no platform fee.
 fn setup() -> (PocketIc, Principal, Principal) {
+    setup_at_fee(0)
+}
+
+/// The same, with the platform charging `platform_fee_bps` of what the stable brought in.
+fn setup_at_fee(platform_fee_bps: u16) -> (PocketIc, Principal, Principal) {
     let pic = PocketIcBuilder::new()
         .with_ii_subnet()
         .with_application_subnet()
@@ -338,6 +343,7 @@ fn setup() -> (PocketIc, Principal, Principal) {
     let arg = InitArg {
         config: Config {
             rail_status_max_age_s: STEP.as_secs(),
+            platform_fee_bps,
             ..config()
         },
         quoter: quoter(),
@@ -358,6 +364,7 @@ fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
 fn shape(payload: &EventType) -> String {
     match payload {
         EventType::FundsReceived { .. } => "FundsReceived".into(),
+        EventType::FeeAccrued { .. } => "FeeAccrued".into(),
         EventType::TxCreated { purpose, .. } => format!("TxCreated({})", purpose_name(*purpose)),
         EventType::TxSigned { attempt, .. } => format!("TxSigned({attempt})"),
         EventType::TxConfirmed { attempt, .. } => format!("TxConfirmed({attempt})"),
@@ -637,6 +644,135 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
         pic.get_canister_http().is_empty(),
         "nothing is left in flight"
     );
+}
+
+/// A platform fee above zero, end to end: the payout pays the stable the mint delivered
+/// less the fee, the fee is accrued in the log BEFORE the swap is closed (a line behind a
+/// closed swap would be lost and nothing retries it), and what the record says is what the
+/// payout itself carried, so a fee the operator moves between the send and the
+/// confirmation changes nothing in it.
+#[test]
+fn a_platform_fee_is_paid_out_accrued_and_recorded_as_it_was_sent() {
+    use crate::client::settlement::set_config;
+    let (pic, canister, admin) = setup_at_fee(30);
+    let mine: EvmAddress = evm_address(&pic, canister, admin)
+        .expect("derived")
+        .parse()
+        .unwrap();
+    let installed = events(&pic, canister).len();
+    let mut chains = Chains::new(19_000_000);
+    let quote = quote(5);
+    let quote_hash = claim(&pic, canister, &mut chains, &quote);
+    let message = attested_message(&quote, mine);
+
+    // the payout is decided once the mint has delivered; the fee moves right after, so
+    // the record is made under a config the payout never saw
+    let delivered = AMOUNT - FEE_EXECUTED;
+    let fee = delivered * 30 / 10_000;
+    let mut moved = false;
+    let mut raised = false;
+    for _ in 0..MAX_ITERATIONS {
+        turn(&pic, canister, &mut chains);
+        if let (Some(burn), false) = (burn_hash(&pic, canister, quote_hash), moved) {
+            push_attestation(
+                &pic,
+                canister,
+                watcher(),
+                quote_hash,
+                burn,
+                &message.encode(),
+                &ATTESTATION,
+            )
+            .expect("the watcher hands in the attestation");
+            moved = true;
+        }
+        let signed_payout = chains
+            .sent
+            .iter()
+            .any(|tx| decode_vault_payout(&tx.data).is_some());
+        if signed_payout && !raised {
+            // the operator raises the fee to the ceiling while the payout is in flight
+            set_config(
+                &pic,
+                canister,
+                admin,
+                &Config {
+                    rail_status_max_age_s: STEP.as_secs(),
+                    platform_fee_bps: 30 * 10,
+                    max_fee_bps: 30 * 10,
+                    ..config()
+                },
+            )
+            .expect("the controller moves the fee");
+            raised = true;
+        }
+        let swap =
+            get_swap(&pic, canister, Principal::anonymous(), quote_hash).expect("the swap exists");
+        if swap.status == SwapStatus::Done {
+            break;
+        }
+        assert_ne!(
+            swap.status,
+            SwapStatus::Frozen,
+            "the swap froze instead of closing; trail: {:#?}",
+            trail(&pic, canister, installed)
+        );
+    }
+
+    let swap_trail: Vec<String> = trail(&pic, canister, installed)
+        .into_iter()
+        .filter(|line| !line.starts_with("ConfigChanged"))
+        .collect();
+    assert_eq!(
+        swap_trail,
+        vec![
+            "FundsReceived",
+            "TxCreated(Burn)",
+            "TxSigned(1)",
+            "TxConfirmed(1)",
+            "TxCreated(Mint)",
+            "TxSigned(2)",
+            "TxConfirmed(2)",
+            "PaidInStable",
+            "TxCreated(Payout)",
+            "TxSigned(3)",
+            "TxConfirmed(3)",
+            "FeeAccrued",
+            "SwapDone",
+        ],
+        "the fee is accrued before the swap is closed"
+    );
+    let accrued = events(&pic, canister)
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventType::FeeAccrued { amount, .. } => Some(amount.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        accrued,
+        candid::Nat::from(fee),
+        "the fee the payout left behind, at the rate the payout was sent under"
+    );
+    let payout = chains
+        .sent
+        .iter()
+        .find_map(|tx| decode_vault_payout(&tx.data))
+        .expect("the payout went out");
+    assert_eq!(
+        payout,
+        (
+            types::QuoteHash::new(quote_hash),
+            USDC_ARBITRUM.parse().unwrap(),
+            USER.parse().unwrap(),
+            TokenAmount::from(delivered - fee),
+        )
+    );
+    let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
+    assert_eq!(swap.paid_out, Some(candid::Nat::from(delivered - fee)));
+    assert!(verify_chain(&pic, canister, Principal::anonymous()));
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+    assert!(deep_audit_is_clean(&pic, canister, admin));
 }
 
 /// An attestation is bound to its swap: two swaps burn, and the message of one pushed
