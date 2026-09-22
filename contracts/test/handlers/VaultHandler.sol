@@ -42,7 +42,8 @@ contract VaultHandler is Test {
     uint256 public batchItems;
     uint256 public payouts;
     uint256 public atomicSwaps;
-    uint256 public retentions;
+    uint256 public zeroCallsAccepted;
+    uint256 public zeroCallsRejected;
     uint256 public overApprovesAccepted;
     uint256 public overApprovesRejected;
 
@@ -270,39 +271,35 @@ contract VaultHandler is Test {
         }
     }
 
+    /// Splits the deposit across 1-3 calls with no slack at all: the public door
+    /// now requires every call to be funded by the deposit and every target to
+    /// take exactly what it was approved, so the parts must sum to the deposit.
+    /// The leftover-allowance reset is still fuzzed, on the canister paths.
     function user_atomic_swap(
         uint256 inSeed,
         uint256 outSeed,
         uint256 amountSeed,
-        uint256 pullSeed,
+        uint256 callsSeed,
         uint256 amountOutSeed,
         uint256 userSeed,
         bool keepInVault
     ) external {
         (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
-        uint256 amount = bound(amountSeed, 1, MAX_AMOUNT);
-        uint256 pull = bound(pullSeed, 0, amount);
+        uint256 n = bound(callsSeed, 1, 3);
+        uint256 amount = bound(amountSeed, n, MAX_AMOUNT); // at least one wei per call
         uint256 amountOut = bound(amountOutSeed, 0, MAX_AMOUNT);
         address user = _user(userSeed);
         address payoutTo = keepInVault ? address(0) : user;
 
-        // approves the whole deposit but lets the router pull less: the residue
-        // exercises the approval reset on the public path too
-        Vault.Call[] memory calls = new Vault.Call[](1);
-        calls[0] = Vault.Call(
-            address(router),
-            0,
-            abi.encodeCall(SwapRouterMock.swapAtoB, (address(tokenIn), address(tokenOut), pull, amountOut)),
-            address(tokenIn),
-            amount
-        );
+        Vault.Call[] memory calls =
+            _splitCalls(Leg(address(tokenIn), address(tokenOut), amount, amountOut, false), n, 0);
 
         _fund(tokenIn, user, amount);
         try vault.depositAndExecute(
             _fresh("atomic"), address(tokenIn), amount, calls, address(tokenOut), amountOut, payoutTo
         ) {
             ghostIn[address(tokenIn)] += amount;
-            ghostOut[address(tokenIn)] += pull;
+            ghostOut[address(tokenIn)] += amount;
             ghostIn[address(tokenOut)] += amountOut;
             if (payoutTo != address(0) && amountOut > 0) ghostOut[address(tokenOut)] += amountOut;
             atomicSwaps++;
@@ -312,19 +309,22 @@ contract VaultHandler is Test {
         vm.stopPrank();
     }
 
-    /// token == payoutToken with no calls: the deposit itself must never count
-    /// toward minOut, so nothing may be paid straight back out
-    function user_atomic_retention(uint256 tokenSeed, uint256 amountSeed, uint256 userSeed) external {
+    /// A public deposit that executes nothing: no calls, so none of the deposit is
+    /// spent. That used to be allowed, which is what made every allowlisted target
+    /// reachable for the price of a dust deposit. It must now always be refused,
+    /// so the success arm credits nothing on purpose.
+    function user_atomic_zero_call(uint256 tokenSeed, uint256 amountSeed, uint256 userSeed) external {
         TestToken t = _token(tokenSeed);
         uint256 amount = bound(amountSeed, 1, MAX_AMOUNT);
         address user = _user(userSeed);
 
         _fund(t, user, amount);
-        vault.depositAndExecute(_fresh("retain"), address(t), amount, new Vault.Call[](0), address(t), 0, user);
+        try vault.depositAndExecute(_fresh("retain"), address(t), amount, new Vault.Call[](0), address(t), 0, user) {
+            zeroCallsAccepted++;
+        } catch {
+            zeroCallsRejected++;
+        }
         vm.stopPrank();
-
-        ghostIn[address(t)] += amount;
-        retentions++;
     }
 
     /// a stranger depositing dust while approving the vault's pooled balance:

@@ -205,16 +205,40 @@ contract VaultDepositAndExecuteTest is Test {
         vm.stopPrank();
     }
 
+    /// Rewritten for the public door's spend rule: the no-call case this used to
+    /// reach with DeltaMissed is now refused earlier, because a deposit that funds
+    /// nothing is exactly the free call the door must not offer. The property the
+    /// test was written for, that the deposit cannot satisfy minOut on its own,
+    /// is proved below on a call that does spend the whole deposit.
     function test_deposit_itself_never_counts_toward_min_out() public {
-        // token == payoutToken with no calls: the payoutToken snapshot is taken after
-        // the pull, so the deposit cannot satisfy minOut on its own
         vm.startPrank(user);
-        a.approve(address(vault), 10e18);
-        vm.expectRevert(Vault.DeltaMissed.selector);
+        a.approve(address(vault), 100e18);
+        vm.expectRevert(Vault.DepositNotSpent.selector);
         vault.depositAndExecute("q11", address(a), 10e18, new Vault.Call[](0), address(a), 1, user);
         vm.stopPrank();
 
         assertEq(a.balanceOf(user), 100e18, "rolled back");
+
+        // token == payoutToken, deposit spent in full, and the router pays 9e18 of
+        // it back. The snapshot sits after the pull, so the delta is -1e18 and a
+        // minOut of 9e18 misses. Snapshot the balance before the pull instead and
+        // the same call would read +9e18 and pass, which is the bug this pins.
+        a.transfer(address(router), 100e18);
+        Vault.Call[] memory calls = new Vault.Call[](1);
+        calls[0] = Vault.Call(
+            address(router),
+            0,
+            abi.encodeCall(SwapRouterMock.swapAtoB, (address(a), address(a), 10e18, 9e18)),
+            address(a),
+            10e18
+        );
+
+        vm.startPrank(user);
+        vm.expectRevert(Vault.DeltaMissed.selector);
+        vault.depositAndExecute("q11b", address(a), 10e18, calls, address(a), 9e18, user);
+        vm.stopPrank();
+
+        assertEq(a.balanceOf(user), 100e18, "rolled back again");
     }
 
     function test_approval_sum_across_calls_rejected() public {

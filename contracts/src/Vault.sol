@@ -49,6 +49,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error OnlySelf();
     error ZeroCanister();
     error PublicCallNotAllowed();
+    error EmptyDeposit();
+    error DepositNotSpent();
     error SendFailed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
@@ -215,7 +217,11 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         return token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
     }
 
-    function _runCalls(Call[] calldata calls) internal {
+    /// Returns how much of the approvals the targets actually took, summed across
+    /// the calls. The sum is only meaningful to a caller that knows every call
+    /// approves the same token: `depositAndExecute` enforces that and reads it,
+    /// the canister paths do not and ignore it.
+    function _runCalls(Call[] calldata calls) internal returns (uint256 pulled) {
         for (uint256 i = 0; i < calls.length; i++) {
             Call calldata c = calls[i];
             // never let a call re-enter the vault, even if it were allowlisted:
@@ -232,7 +238,15 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
                 ok := call(gas(), target, value, add(data, 0x20), mload(data), 0, 0)
             }
             if (!ok) revert CallFailed();
-            if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, 0);
+            if (c.approveAmount > 0) {
+                // read what is left BEFORE the reset: afterwards every call would
+                // look fully spent and the measure would pass anything
+                uint256 left = IERC20(c.approveToken).allowance(address(this), c.target);
+                // a token that reports more than we approved adds nothing rather
+                // than panicking on the subtraction
+                if (left < c.approveAmount) pulled += c.approveAmount - left;
+                IERC20(c.approveToken).forceApprove(c.target, 0);
+            }
         }
     }
 
@@ -260,6 +274,26 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
 
     /// Atomic legacy same-chain path: the caller deposits and swaps in one tx.
     /// `payoutTo == address(0)` leaves the proceeds in the vault.
+    ///
+    /// Anyone may call this, so what keeps it safe is a property and not a list
+    /// of forbidden shapes:
+    ///   1. the caller's deposit must be non-zero;
+    ///   2. every call must be funded by and bounded by that deposit (no native
+    ///      value, approvals only of `token`, no call approving nothing, the
+    ///      approvals summing to at most what was received) AND every target must
+    ///      actually take what it was approved, so the deposit is spent in full;
+    ///   3. the payout is bounded by the delta those calls produced, snapshotted
+    ///      after the pull so the deposit can never pay for itself.
+    ///
+    /// (1) and (2) together mean a target reached through this door has to take
+    /// the caller's own money. A target that only ever pays the vault, an escrow
+    /// refund, a permissionless intent refund, a CCTP mint whose recipient is the
+    /// vault, cannot be reached at all. That is the hole this closes: before the
+    /// rule, a stranger depositing nothing and approving nothing could call any
+    /// allowlisted target that increases any vault balance and carry the increase
+    /// out through the payout leg, whatever receiver the target's own arguments
+    /// named. The allowlist tier (see `setRouterAllowlist`) is the second,
+    /// independent defence; neither one relies on the other.
     function depositAndExecute(
         bytes32 quoteHash,
         address token,
@@ -278,19 +312,30 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         uint256 beforeIn = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - beforeIn;
+        // nothing deposited is nothing to spend, and a door that runs calls for a
+        // caller who paid nothing is a free call to an allowlisted target
+        if (received == 0) revert EmptyDeposit();
 
         // anyone may call this, so the calls may only ever spend the caller's own
-        // deposit: no native value, approvals only of `token`, capped at `received`
-        uint256 totalApprove;
-        for (uint256 i = 0; i < calls.length; i++) {
-            if (calls[i].value != 0 || calls[i].approveToken != token) revert PublicCallNotAllowed();
-            totalApprove += calls[i].approveAmount;
+        // deposit: no native value, approvals only of `token`, never a call that
+        // spends none of it, and capped in total at `received`
+        {
+            uint256 totalApprove;
+            for (uint256 i = 0; i < calls.length; i++) {
+                if (calls[i].value != 0 || calls[i].approveToken != token || calls[i].approveAmount == 0) {
+                    revert PublicCallNotAllowed();
+                }
+                totalApprove += calls[i].approveAmount;
+            }
+            if (totalApprove > received) revert PublicCallNotAllowed();
         }
-        if (totalApprove > received) revert PublicCallNotAllowed();
 
         // snapshot after the pull so a token == payoutToken deposit never counts toward minOut
         uint256 beforeOut = _balance(payoutToken);
-        _runCalls(calls);
+        // every target had to take what it was approved, so the deposit is gone.
+        // With the cap above this forces pulled == totalApprove == received: a
+        // target that only pays the vault, and never takes from it, is unreachable.
+        if (_runCalls(calls) < received) revert DepositNotSpent();
         // signed: a payoutToken balance that fell reverts DeltaMissed, not an underflow panic
         int256 change = SafeCast.toInt256(_balance(payoutToken)) - SafeCast.toInt256(beforeOut);
         if (change < SafeCast.toInt256(minOut)) revert DeltaMissed();

@@ -22,7 +22,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         selectors[2] = VaultHandler.canister_execute_many.selector;
         selectors[3] = VaultHandler.canister_payout.selector;
         selectors[4] = VaultHandler.user_atomic_swap.selector;
-        selectors[5] = VaultHandler.user_atomic_retention.selector;
+        selectors[5] = VaultHandler.user_atomic_zero_call.selector;
         selectors[6] = VaultHandler.user_atomic_over_approve.selector;
 
         targetContract(address(handler));
@@ -59,7 +59,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(address(vault).balance, 0, "unexplained native balance");
     }
 
-    /// four entry points swallow reverts so that a bad bound cannot abort a run.
+    /// five entry points swallow reverts so that a bad bound cannot abort a run.
     /// These are the arms that must never fire: without this, a handler starved
     /// into its catch arms would leave the ghosts frozen and every invariant
     /// above would pass on a vault that was never exercised.
@@ -68,6 +68,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(handler.payoutFailures(), 0, "payout or refund reverted inside the handler");
         assertEq(handler.atomicSwapFailures(), 0, "atomic swap reverted inside the handler");
         assertEq(handler.overApprovesAccepted(), 0, "a stranger's over-approval was accepted");
+        assertEq(handler.zeroCallsAccepted(), 0, "a public deposit that executes nothing was accepted");
     }
 
     /// without this the invariants above could pass vacuously on a handler whose
@@ -78,8 +79,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
         handler.canister_execute_many(3, 7, 0);
         handler.canister_payout(0, 10e18, 2, false);
         handler.canister_payout(0, 10e18, 2, true);
-        handler.user_atomic_swap(0, 1, 100e18, 60e18, 55e18, 3, false);
-        handler.user_atomic_retention(1, 20e18, 4);
+        handler.user_atomic_swap(0, 1, 100e18, 3, 55e18, 3, false);
+        handler.user_atomic_zero_call(1, 20e18, 4);
         handler.user_atomic_over_approve(0, 1, 1e18, 500e18, 5);
 
         assertEq(handler.deposits(), 1, "deposit landed");
@@ -87,7 +88,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertGt(handler.batchItems(), 0, "at least one batch item landed");
         assertEq(handler.payouts(), 2, "payout and refund landed");
         assertEq(handler.atomicSwaps(), 1, "atomic swap landed");
-        assertEq(handler.retentions(), 1, "atomic retention landed");
+        assertEq(handler.zeroCallsRejected(), 1, "a public deposit that executes nothing was refused");
         assertEq(handler.overApprovesRejected(), 1, "over-approve rejected");
 
         invariant_no_router_allowance_survives();
