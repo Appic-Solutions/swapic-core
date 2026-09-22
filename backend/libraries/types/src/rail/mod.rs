@@ -2,8 +2,10 @@
 mod tests;
 
 use crate::chain::ChainId;
+use crate::config::ChainTable;
 use crate::evm::EvmAddress;
 use crate::numeric::UnixSeconds;
+use crate::quote::{Quote, QuoteAddressError, QuoteAddressField};
 use minicbor::{Decode, Encode};
 use std::fmt;
 use std::str::FromStr;
@@ -81,6 +83,55 @@ impl fmt::Display for Rail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Why a quote is not one its rail can carry: the rails carry the USDC the deploy
+/// configured and nothing else, so a quote naming any other token on either side would
+/// have the burn or the publish spend the vault's USDC against a deposit of something
+/// else, or pay out a token the mint never delivered.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RailTokenError {
+    #[error("the quote's {field} is {quoted}, and the {rail} rail carries {rail_token}")]
+    NotTheRailToken {
+        field: QuoteAddressField,
+        quoted: EvmAddress,
+        rail_token: EvmAddress,
+        rail: Rail,
+    },
+    #[error(transparent)]
+    QuoteAddress(#[from] QuoteAddressError),
+    #[error("chain {chain_id} has no token configured for the {rail} rail")]
+    NoRailToken { chain_id: ChainId, rail: Rail },
+}
+
+/// Pins both of a quote's tokens to its rail: the source token must be the source chain's
+/// entry in `rail_tokens` and the destination token the destination chain's, compared as
+/// addresses and never as text, so no spelling passes as another token. Every rail this
+/// canister drives carries the configured USDC on both sides, so one table serves them
+/// all. Refused by the field and the reason, before any outcall or any line.
+pub fn ensure_rail_tokens(
+    rail_tokens: &ChainTable<EvmAddress>,
+    quote: &Quote,
+) -> Result<(), RailTokenError> {
+    let rail = quote.rail;
+    for (field, chain_id) in [
+        (QuoteAddressField::SrcToken, quote.src_chain),
+        (QuoteAddressField::DstToken, quote.dst_chain),
+    ] {
+        let quoted = quote.evm_address(field)?;
+        let rail_token = rail_tokens
+            .get(chain_id)
+            .ok_or(RailTokenError::NoRailToken { chain_id, rail })?;
+        if quoted != rail_token {
+            return Err(RailTokenError::NotTheRailToken {
+                field,
+                quoted,
+                rail_token,
+                rail,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The most bytes an Eco route may be. A quoted route carries the calls the filler runs

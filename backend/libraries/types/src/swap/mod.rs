@@ -210,6 +210,15 @@ pub enum TransitionError {
     FeesOverflow,
     #[error("amount {0} is above u128::MAX, which no event can carry")]
     AmountOutOfRange(TokenAmount),
+    #[error("the funds arrived on chain {logged}, and the quote is for chain {quoted}")]
+    FundsChainNotTheQuotes { logged: ChainId, quoted: ChainId },
+    #[error("the funds that arrived are {logged}, and the quote is for {quoted}")]
+    FundsTokenNotTheQuotes { logged: TokenId, quoted: TokenId },
+    #[error("{logged} arrived, and the quote is for {quoted}")]
+    FundsAmountNotTheQuotes {
+        logged: TokenAmount,
+        quoted: TokenAmount,
+    },
     #[error("quote_bytes are not a quote this canister reads: {0}")]
     UnparseableQuote(#[from] QuoteError),
     #[error("quote_bytes hash to {computed}, and the event carries {declared}")]

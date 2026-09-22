@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::deposits::{self, DepositError, VaultError};
+use crate::deposits::{self, DepositError, DepositRead, VaultError, Wanted, WantedAmount};
 use crate::guards::require_not_halted;
 use crate::rails::{self, Leg as RailLeg, RailError, RailStep, RailTx};
 use crate::state::Store;
@@ -22,10 +22,10 @@ use std::cell::Cell;
 use thiserror::Error;
 use types::abi::{vault_payout, vault_refund};
 use types::events::TxPurpose;
-use types::quote::QuoteError;
+use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError};
 use types::{
-    BasisPoints, ChainId, EventType, EvmAddress, GasAmount, Leg, Outcome, Quote, QuoteHash, Swap,
-    SwapStatus, Timestamp, TokenAmount, Wei,
+    BasisPoints, ChainId, EventType, GasAmount, Leg, Outcome, Quote, QuoteHash, Swap, SwapStatus,
+    Timestamp, TokenAmount, Wei,
 };
 
 /// The gas a vault payout needs: one transfer and the vault's event.
@@ -166,8 +166,8 @@ pub enum EngineError {
     NoAmountPaid,
     #[error("the quote names no refund address")]
     NoRefundAddress,
-    #[error("the quote's {field} is not an EVM address")]
-    QuoteNotAnAddress { field: &'static str },
+    #[error(transparent)]
+    QuoteAddress(#[from] QuoteAddressError),
     #[error(transparent)]
     Tx(#[from] TxError),
     #[error(transparent)]
@@ -317,12 +317,6 @@ fn forget(quote_hash: QuoteHash) {
     eco_intents::remove(quote_hash);
 }
 
-/// The quote's `field` as an EVM address.
-fn quote_address(text: &str, field: &'static str) -> Result<EvmAddress, EngineError> {
-    text.parse()
-        .map_err(|_| EngineError::QuoteNotAnAddress { field })
-}
-
 /// The quote a swap is for, read off its own bytes.
 fn quote_of(swap: &Swap) -> Result<Quote, EngineError> {
     Ok(Quote::parse(&swap.quote_bytes)?)
@@ -363,8 +357,8 @@ async fn send_payout(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
         }
         Err(error) => return Err(error),
     };
-    let token = quote_address(quote.dst_token.as_str(), "dst_token")?;
-    let to = quote_address(quote.dst_address.as_str(), "dst_address")?;
+    let token = quote.evm_address(QuoteAddressField::DstToken)?;
+    let to = quote.evm_address(QuoteAddressField::DstAddress)?;
     let vault = deposits::vault_of(&config::get(), quote.dst_chain)?;
     send(RailTx {
         purpose: TxPurpose::Payout(quote_hash),
@@ -382,11 +376,13 @@ async fn send_payout(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
 /// this canister, which does not know the payer, and is frozen for a human.
 async fn send_refund(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
     let quote = quote_of(swap)?;
-    let Some(refund_address) = quote.refund_address.as_ref() else {
+    if quote.refund_address.is_none() {
         return freeze(quote_hash, "the quote names no refund address");
-    };
-    let to = quote_address(refund_address.as_str(), "refund_address")?;
-    let token = quote_address(swap.src_token.as_str(), "src_token")?;
+    }
+    let to = quote.evm_address(QuoteAddressField::RefundAddress)?;
+    // the fold's token names the same token as the quote's (the guard holds the line to
+    // it), so the refund is of the quote's token as the quote spells it
+    let token = quote.evm_address(QuoteAddressField::SrcToken)?;
     let vault = deposits::vault_of(&config::get(), quote.src_chain)?;
     send(RailTx {
         purpose: TxPurpose::Refund(quote_hash),
@@ -483,19 +479,30 @@ async fn rail_step(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
 }
 
 /// Reads the destination vault for the rail's fill: a deposit for the quote, in the token
-/// the user is paid, deep enough, is the stable arriving. Nothing there past the rail's
-/// deadline turns the swap into a refund; nothing there before it is waited on.
+/// the user is paid, of at least the least the user was quoted, deep enough, is the stable
+/// arriving. A deposit of another token or of less under the hash is somebody else's and
+/// not the fill. Nothing there past the rail's deadline turns the swap into a refund;
+/// nothing there before it is waited on.
 // todo_harden_reads: the read is the deposit read, single and unreplicated, bound to the
-// destination vault, the quote and the configured depth.
+// destination vault, the quote, the token and amount wanted, and the configured depth.
 async fn check_arrival(
     quote_hash: QuoteHash,
     quote: &Quote,
     chain_id: ChainId,
     expired: bool,
 ) -> Result<Did, EngineError> {
-    let token = quote_address(quote.dst_token.as_str(), "dst_token")?;
-    match deposits::verify_evm_deposit(chain_id, quote_hash).await {
-        Ok(deposit) if deposit.token == token => {
+    let token = quote.evm_address(QuoteAddressField::DstToken)?;
+    let read = DepositRead {
+        chain_id,
+        quote_hash,
+        wanted: Wanted {
+            token,
+            amount: WantedAmount::AtLeast(quote.min_out),
+        },
+        not_before: None,
+    };
+    match deposits::verify_evm_deposit(&read).await {
+        Ok(deposit) => {
             append_event(EventType::PaidInStable {
                 quote_hash,
                 chain_id,
@@ -503,15 +510,14 @@ async fn check_arrival(
             })?;
             Ok(Did::Recorded)
         }
-        // another token in the destination vault under this quote is not the fill
-        Ok(_) | Err(DepositError::NotFound { .. }) if expired => {
+        Err(DepositError::NotFound { .. } | DepositError::NoneMatches { .. }) if expired => {
             append_event(EventType::RefundStarted {
                 quote_hash,
                 reason: "the intent expired with nothing delivered".to_string(),
             })?;
             Ok(Did::Recorded)
         }
-        Ok(_) | Err(DepositError::NotFound { .. }) => Ok(Did::Nothing),
+        Err(DepositError::NotFound { .. } | DepositError::NoneMatches { .. }) => Ok(Did::Nothing),
         Err(error) => Err(error.into()),
     }
 }

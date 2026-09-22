@@ -11,7 +11,9 @@
 #[cfg(test)]
 mod tests;
 
-use crate::deposits::{self, DepositError, VaultError, VerifiedDeposit};
+use crate::deposits::{
+    self, DepositError, DepositRead, VaultError, VerifiedDeposit, Wanted, WantedAmount,
+};
 use crate::guards::{require_not_halted, require_quoter, require_quoter_or_watcher};
 use crate::state::{pending_quotes, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
@@ -24,11 +26,12 @@ use std::time::Duration;
 use thiserror::Error;
 use types::abi::vault_pull_with_permit;
 use types::events::TxPurpose;
-use types::evm::EvmAddressError;
 use types::quote::QuoteError;
+use types::quote::{QuoteAddressError, QuoteAddressField};
+use types::rail::{ensure_rail_tokens, RailTokenError};
 use types::{
-    Address, EventType, EvmAddress, GasAmount, GasMode, InFlight, InFlightKind, Quote, QuoteHash,
-    Timestamp, TokenAmount, TokenId, TxHash, UnixSeconds, Wei,
+    Address, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight, InFlightKind, Quote,
+    QuoteHash, Timestamp, TxHash, UnixSeconds, Wei,
 };
 
 /// The gas a `pullWithPermit` needs: the permit's signature check and storage write, the
@@ -56,23 +59,12 @@ pub enum ClaimError {
     Sanctioned { party: &'static str },
     #[error("a claim or a pull for this quote is already out since {}", .0.since)]
     InFlight(InFlight),
-    #[error("the quote's source token {token} is not an EVM address: {reason}")]
-    SourceTokenNotAnAddress {
-        token: TokenId,
-        reason: EvmAddressError,
-    },
+    #[error(transparent)]
+    RailToken(#[from] RailTokenError),
+    #[error(transparent)]
+    QuoteAddress(#[from] QuoteAddressError),
     #[error(transparent)]
     Deposit(#[from] DepositError),
-    #[error("the vault holds a deposit of {deposited} for the quote, which is for {quoted}")]
-    TokenMismatch {
-        quoted: EvmAddress,
-        deposited: EvmAddress,
-    },
-    #[error("the vault holds a deposit of {deposited} for the quote, which is for {quoted}")]
-    AmountMismatch {
-        quoted: TokenAmount,
-        deposited: TokenAmount,
-    },
     #[error(transparent)]
     Append(#[from] AppendError),
 }
@@ -96,6 +88,8 @@ pub enum PullError {
     },
     #[error("the permit's {field} is not the quote's")]
     PermitMismatch { field: &'static str },
+    #[error(transparent)]
+    QuoteAddress(#[from] QuoteAddressError),
     #[error("the {party} is sanctioned")]
     Sanctioned { party: &'static str },
     #[error("a claim or a pull for this quote is already out since {}", .0.since)]
@@ -152,40 +146,25 @@ pub fn sanctioned_party(quote: &Quote) -> Option<&'static str> {
     None
 }
 
-/// The quote's source token as the address the vault logs it under. A quote claimed on an
-/// EVM chain names a token contract, and one that does not can match no deposit.
-pub fn source_token(quote: &Quote) -> Result<EvmAddress, ClaimError> {
-    quote
-        .src_token
-        .as_str()
-        .parse()
-        .map_err(|reason| ClaimError::SourceTokenNotAnAddress {
-            token: quote.src_token.clone(),
-            reason,
-        })
+/// The quote's source token as the address the vault logs it under, once both of the
+/// quote's tokens are pinned to its rail: the rails carry the USDC the deploy configured
+/// and nothing else, so a quote naming any other token on either side is refused here,
+/// by the field, before an outcall is bought. Otherwise the burn would spend the vault's
+/// USDC against a deposit of whatever the quote named.
+pub fn rail_source_token(config: &Config, quote: &Quote) -> Result<EvmAddress, ClaimError> {
+    ensure_rail_tokens(&config.usdc_addresses, quote)?;
+    Ok(quote.evm_address(QuoteAddressField::SrcToken)?)
 }
 
-/// The deposit has to be the quote's: its token, and exactly its amount. Another token
-/// cannot ride the quote's rail, and another amount is neither the swap the user was quoted
-/// nor one this canister can price, so both stay in the vault for an operator.
-pub fn ensure_deposit_matches(
-    quote: &Quote,
-    token: EvmAddress,
-    deposit: &VerifiedDeposit,
-) -> Result<(), ClaimError> {
-    if deposit.token != token {
-        return Err(ClaimError::TokenMismatch {
-            quoted: token,
-            deposited: deposit.token,
-        });
+/// The deposit the claim looks for: the quote's token, in exactly its amount. Another
+/// token cannot ride the quote's rail, and another amount is neither the swap the user was
+/// quoted nor one this canister can price, so neither is the deposit, whatever else the
+/// vault holds under the hash, and it stays there for an operator.
+pub fn wanted(quote: &Quote, token: EvmAddress) -> Wanted {
+    Wanted {
+        token,
+        amount: WantedAmount::Exactly(quote.amount_in),
     }
-    if deposit.amount != quote.amount_in {
-        return Err(ClaimError::AmountMismatch {
-            quoted: quote.amount_in,
-            deposited: deposit.amount,
-        });
-    }
-    Ok(())
 }
 
 /// The line that creates the swap, carrying the chain's truth: the token as the vault
@@ -219,10 +198,11 @@ fn party(address: EvmAddress) -> Address {
 /// Claims the deposit a user made for `quote` and creates its swap.
 ///
 /// Money-first, in this order: the halt switch and the caller, the quote itself, the swap
-/// not existing yet, the quote still claimable, nobody it pays to sanctioned, its token an
-/// address; then the marker (A8), then the one outcall; then the deposit is held to the
-/// quote and the payer to the sanctions set, and `FundsReceived` is appended, which the fold
-/// checks again (A2). A refusal anywhere stores nothing.
+/// not existing yet, the quote still claimable, nobody it pays to sanctioned, its tokens
+/// the rail's; then the marker (A8), then the one read, which looks for the quote's token
+/// in exactly its amount among the logs under the hash; then the payer is held to the
+/// sanctions set, and `FundsReceived` is appended, which the fold checks again (A2). A
+/// refusal anywhere stores nothing.
 pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     require_not_halted().map_err(ClaimError::Guard)?;
     require_quoter_or_watcher().map_err(ClaimError::Guard)?;
@@ -232,17 +212,23 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         return Err(ClaimError::SwapExists(quote_hash));
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    ensure_claimable(&quote, now.as_secs(), config::get().permit_deadline)?;
+    let config = config::get();
+    ensure_claimable(&quote, now.as_secs(), config.permit_deadline)?;
     if let Some(party) = sanctioned_party(&quote) {
         return Err(ClaimError::Sanctioned { party });
     }
-    let token = source_token(&quote)?;
+    let token = rail_source_token(&config, &quote)?;
     inflight::take(quote_hash, InFlightKind::Claim, now).map_err(ClaimError::InFlight)?;
-    let verified = deposits::verify_evm_deposit(quote.src_chain, quote_hash).await;
+    let verified = deposits::verify_evm_deposit(&DepositRead {
+        chain_id: quote.src_chain,
+        quote_hash,
+        wanted: wanted(&quote, token),
+        not_before: None,
+    })
+    .await;
     // the message chain ends here whatever the read said: the marker was for the outcall
     inflight::release(quote_hash);
     let deposit = verified?;
-    ensure_deposit_matches(&quote, token, &deposit)?;
     if is_sanctioned(&party(deposit.from)) {
         return Err(ClaimError::Sanctioned { party: "from" });
     }
@@ -299,7 +285,7 @@ pub async fn start_gasless_pull(
             now: now.as_secs(),
         });
     }
-    let token = source_token(&quote).map_err(|_| PullError::PermitMismatch { field: "token" })?;
+    let token = quote.evm_address(QuoteAddressField::SrcToken)?;
     ensure_permit_matches(&quote, token, &permit)?;
     if is_sanctioned(&party(permit.owner)) {
         return Err(PullError::Sanctioned { party: "owner" });
@@ -357,21 +343,9 @@ impl From<ClaimError> for settlement_api::types::entry::ClaimError {
             ClaimError::InFlight(marker) => Self::InFlight {
                 since_ns: marker.since.as_nanos(),
             },
-            ClaimError::SourceTokenNotAnAddress { token, reason } => {
-                Self::SourceTokenNotAnAddress {
-                    token: token.to_string(),
-                    reason: reason.into(),
-                }
-            }
+            ClaimError::RailToken(error) => Self::RailToken(error.into()),
+            ClaimError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
             ClaimError::Deposit(error) => Self::Deposit(error.into()),
-            ClaimError::TokenMismatch { quoted, deposited } => Self::TokenMismatch {
-                quoted: quoted.to_string(),
-                deposited: deposited.to_string(),
-            },
-            ClaimError::AmountMismatch { quoted, deposited } => Self::AmountMismatch {
-                quoted: quoted.into(),
-                deposited: deposited.into(),
-            },
             ClaimError::Append(error) => Self::Append(error.into()),
         }
     }
@@ -395,6 +369,7 @@ impl From<PullError> for settlement_api::types::entry::PullError {
             PullError::PermitMismatch { field } => Self::PermitMismatch {
                 field: field.to_string(),
             },
+            PullError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
             PullError::Sanctioned { party } => Self::Sanctioned {
                 party: party.to_string(),
             },
@@ -431,11 +406,26 @@ impl From<DepositError> for settlement_api::types::entry::DepositError {
             DepositError::StaleChainData { chain_id } => Self::StaleChainData {
                 chain_id: chain_id.get(),
             },
+            DepositError::RangeTooWide {
+                from,
+                anchor,
+                windows,
+                cap,
+            } => Self::RangeTooWide {
+                from: from.get(),
+                anchor: anchor.get(),
+                windows,
+                cap,
+            },
             DepositError::Rpc(error) => Self::Rpc(error.into()),
             DepositError::UnreadableHead => Self::UnreadableHead,
             DepositError::UnreadableLogs => Self::UnreadableLogs,
             DepositError::NotFound { quote_hash } => Self::NotFound {
                 quote_hash: quote_hash.into_bytes(),
+            },
+            DepositError::NoneMatches { quote_hash, seen } => Self::NoneMatches {
+                quote_hash: quote_hash.into_bytes(),
+                seen,
             },
             DepositError::NotConfirmed {
                 block,

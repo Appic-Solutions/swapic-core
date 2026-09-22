@@ -457,3 +457,57 @@ fn every_quote_shape_round_trips_through_storage() {
         assert_eq!(Quote::from_bytes(q.to_bytes()), q);
     }
 }
+
+/// The four addresses a quote carries are read by field as EVM addresses, so a caller
+/// never parses the text itself, and one that is not an address is refused by the field
+/// at fault with the reason the text broke.
+#[test]
+fn a_quotes_addresses_are_read_by_field_and_a_bad_one_names_it() {
+    let quote = fixed_quote();
+    assert_eq!(
+        quote.evm_address(QuoteAddressField::SrcToken),
+        Ok("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap())
+    );
+    assert_eq!(
+        quote.evm_address(QuoteAddressField::DstAddress),
+        Ok("0x7551A66653f9a20979ed81835a0b7008EC83401b"
+            .parse()
+            .unwrap())
+    );
+    let odd = Quote {
+        dst_token: text("USDC"),
+        ..fixed_quote()
+    };
+    assert_eq!(
+        odd.evm_address(QuoteAddressField::DstToken),
+        Err(QuoteAddressError::NotAnAddress {
+            field: QuoteAddressField::DstToken,
+            reason: EvmAddressError::NoPrefix,
+        })
+    );
+    assert_eq!(
+        quote.evm_address(QuoteAddressField::RefundAddress),
+        Err(QuoteAddressError::Absent {
+            field: QuoteAddressField::RefundAddress
+        }),
+        "a quote naming no refund address has none to read"
+    );
+    let with_refund = Quote {
+        refund_address: Some(text("0x7551a66653f9a20979ed81835a0b7008ec83401b")),
+        ..fixed_quote()
+    };
+    assert_eq!(
+        with_refund.evm_address(QuoteAddressField::RefundAddress),
+        Ok("0x7551A66653f9a20979ed81835a0b7008EC83401b"
+            .parse()
+            .unwrap()),
+        "a lower-case spelling is the same address"
+    );
+    assert_eq!(QuoteAddressField::SrcToken.to_string(), "src_token");
+    assert_eq!(
+        QuoteAddressField::RefundAddress.to_string(),
+        "refund_address"
+    );
+}

@@ -36,20 +36,48 @@ impl<S: Store> State<S> {
             // waiting forever. The preimage must also be a quote this canister would hold:
             // parsing is the layout and `validate` is the rest, so the log cannot record a
             // version this wasm does not read, or the empty fields `register_quote` refuses
+            //
+            // And the money fields are the quote's own (A2): the line says which chain the
+            // funds arrived on, which token they are and how much, and each has to be what
+            // the quote it carries says, so no writer can record a swap the quote does not
+            // describe. The token is compared as a token, because the vault logs an address
+            // in its checksummed spelling and a quote may spell it in lower case.
             EventType::FundsReceived {
                 quote_hash,
                 quote_bytes,
+                chain_id,
+                token,
+                amount,
                 ..
             } => {
                 if self.store().swap(quote_hash).is_some() {
                     return Err(TransitionError::SwapExists(*quote_hash));
                 }
-                Quote::parse(quote_bytes)?.validate()?;
+                let quote = Quote::parse(quote_bytes)?;
+                quote.validate()?;
                 let computed = quote_hash_of(quote_bytes);
                 if computed != *quote_hash {
                     return Err(TransitionError::QuoteHashMismatch {
                         declared: *quote_hash,
                         computed,
+                    });
+                }
+                if *chain_id != quote.src_chain {
+                    return Err(TransitionError::FundsChainNotTheQuotes {
+                        logged: *chain_id,
+                        quoted: quote.src_chain,
+                    });
+                }
+                if !token.names_the_same_token(&quote.src_token) {
+                    return Err(TransitionError::FundsTokenNotTheQuotes {
+                        logged: token.clone(),
+                        quoted: quote.src_token,
+                    });
+                }
+                if *amount != quote.amount_in {
+                    return Err(TransitionError::FundsAmountNotTheQuotes {
+                        logged: *amount,
+                        quoted: quote.amount_in,
                     });
                 }
                 Ok(())

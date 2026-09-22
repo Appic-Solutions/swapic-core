@@ -19,15 +19,27 @@ fn word_of(address: &str) -> String {
     format!("0x{}", hex::encode(address.to_word()))
 }
 
-/// A `Deposited` log as a provider answers it, for `quote_hash` at `block`.
+/// A `Deposited` log as a provider answers it, for `quote_hash` at `block`: the fixture's
+/// token from the fixture's payer.
 fn deposit_log(quote_hash: QuoteHash, block: u64, amount: u64) -> Value {
+    deposit_log_of(quote_hash, block, USDC, USER, amount)
+}
+
+/// A `Deposited` log of `token` from `from`, for `quote_hash` at `block`.
+fn deposit_log_of(
+    quote_hash: QuoteHash,
+    block: u64,
+    token: &str,
+    from: &str,
+    amount: u64,
+) -> Value {
     json!({
         "address": VAULT.to_ascii_lowercase(),
         "topics": [
             format!("0x{}", hex::encode(deposited_topic())),
             format!("0x{}", hex::encode(quote_hash.as_ref())),
-            word_of(USDC),
-            word_of(USER),
+            word_of(token),
+            word_of(from),
         ],
         "data": format!("0x{:064x}", amount),
         "blockNumber": format!("0x{block:x}"),
@@ -38,6 +50,22 @@ fn deposit_log(quote_hash: QuoteHash, block: u64, amount: u64) -> Value {
     })
 }
 
+/// The deposit the claim wants: the fixture's token, exactly `amount`.
+fn exactly(amount: u64) -> Wanted {
+    Wanted {
+        token: USDC.parse().unwrap(),
+        amount: WantedAmount::Exactly(TokenAmount::from(amount)),
+    }
+}
+
+/// The deposit an arrival read wants: the fixture's token, at least `amount`.
+fn at_least(amount: u64) -> Wanted {
+    Wanted {
+        token: USDC.parse().unwrap(),
+        amount: WantedAmount::AtLeast(TokenAmount::from(amount)),
+    }
+}
+
 /// A valid log decodes to the deposit: the token and the payer out of the indexed words,
 /// the amount out of the data, and the transaction and block the chain holds it in.
 #[test]
@@ -46,6 +74,7 @@ fn a_valid_log_decodes_to_the_deposit() {
         &[deposit_log(quote_hash(), 19_000_000, 1_000_000)],
         vault(),
         quote_hash(),
+        &exactly(1_000_000),
         BlockNumber::new(19_000_000),
         BlockDepth::new(1),
     )
@@ -71,6 +100,7 @@ fn a_log_shallower_than_the_depth_is_not_confirmed() {
         &logs,
         vault(),
         quote_hash(),
+        &exactly(1),
         BlockNumber::new(19_000_006),
         BlockDepth::new(6),
     );
@@ -87,6 +117,7 @@ fn a_log_shallower_than_the_depth_is_not_confirmed() {
         &logs,
         vault(),
         quote_hash(),
+        &exactly(1),
         BlockNumber::new(19_000_004),
         BlockDepth::new(1),
     );
@@ -99,6 +130,7 @@ fn a_log_shallower_than_the_depth_is_not_confirmed() {
         &logs,
         vault(),
         quote_hash(),
+        &exactly(1),
         BlockNumber::new(19_000_010),
         BlockDepth::new(6)
     )
@@ -113,6 +145,7 @@ fn no_log_is_not_found() {
             &[],
             vault(),
             quote_hash(),
+            &exactly(1),
             BlockNumber::new(19_000_000),
             BlockDepth::new(1)
         ),
@@ -156,6 +189,7 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
             &noise,
             vault(),
             quote_hash(),
+            &exactly(7),
             BlockNumber::new(19_000_100),
             BlockDepth::new(1)
         ),
@@ -172,6 +206,7 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
         &with_ours,
         vault(),
         quote_hash(),
+        &exactly(7),
         BlockNumber::new(19_000_100),
         BlockDepth::new(1),
     )
@@ -180,19 +215,27 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
     assert_eq!(found.block, BlockNumber::new(19_000_001));
 }
 
-/// The read is one batch: the head, then the logs of the vault for this quote from the
-/// bounded lookback to the head, so the depth is measured against a height from the same
-/// answer.
+/// The read is one batch per window: the head, then the logs of the vault for this quote
+/// over the window, so the depth is measured against a height from the same answer. A
+/// lookback covers that many blocks ending at the anchor, so the default lookback is
+/// exactly one window, and the newest window is open at the head so a deposit the
+/// watcher's reading has not reached yet is still seen.
 #[test]
 fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     let from = range_from(BlockNumber::new(19_000_000), DepositLookback::new(10_000));
-    assert_eq!(from, BlockNumber::new(18_990_000));
+    assert_eq!(from, BlockNumber::new(18_990_001));
     assert_eq!(
         range_from(BlockNumber::new(5), DepositLookback::new(10_000)),
         BlockNumber::new(0),
         "a lookback past genesis starts at genesis"
     );
-    let calls = read_calls(vault(), quote_hash(), from);
+    let windows = windows(from, BlockNumber::new(19_000_000)).unwrap();
+    assert_eq!(
+        windows,
+        vec![Window { from, to: None }],
+        "the default lookback is one window, open at the head"
+    );
+    let calls = read_calls(vault(), quote_hash(), &windows[0]);
     assert_eq!(calls[0].0, "eth_blockNumber");
     assert_eq!(calls[0].1, json!([]));
     assert_eq!(calls[1].0, "eth_getLogs");
@@ -204,9 +247,183 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
                 "0xcfccc5211684bc31ce945214025a7453ba30a1ffcc38fcb691ce742437f3f256",
                 "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
             ],
-            "fromBlock": "0x121c3b0",
+            "fromBlock": "0x121c3b1",
             "toBlock": "latest",
         }])
     );
     assert_eq!(calls.len(), 2);
+    let closed = Window {
+        from: BlockNumber::new(18_980_001),
+        to: Some(BlockNumber::new(18_990_000)),
+    };
+    assert_eq!(
+        read_calls(vault(), quote_hash(), &closed)[1].1[0]["toBlock"],
+        json!("0x121c3b0"),
+        "an older window ends where the newer one starts"
+    );
+}
+
+/// A range wider than one window is walked in windows of [`LOGS_WINDOW_BLOCKS`], newest
+/// first: a user deposits and claims within minutes, so the deposit is in the newest
+/// window and the older ones are read only when it is not. The windows tile the range
+/// exactly, and a range that would take more than [`MAX_LOGS_WINDOWS`] is refused by name
+/// before any outcall rather than walked for minutes or cut short in silence.
+#[test]
+fn a_wide_range_is_walked_in_windows_newest_first_and_a_wider_one_is_refused() {
+    let anchor = BlockNumber::new(19_000_000);
+    let from = BlockNumber::new(18_975_000);
+    assert_eq!(
+        windows(from, anchor).unwrap(),
+        vec![
+            Window {
+                from: BlockNumber::new(18_990_001),
+                to: None,
+            },
+            Window {
+                from: BlockNumber::new(18_980_001),
+                to: Some(BlockNumber::new(18_990_000)),
+            },
+            Window {
+                from: BlockNumber::new(18_975_000),
+                to: Some(BlockNumber::new(18_980_000)),
+            },
+        ]
+    );
+    // a registration block past the anchor: one window, from it
+    assert_eq!(
+        windows(BlockNumber::new(19_000_003), anchor).unwrap(),
+        vec![Window {
+            from: BlockNumber::new(19_000_003),
+            to: None,
+        }]
+    );
+    let widest = BlockNumber::new(anchor.get() + 1 - LOGS_WINDOW_BLOCKS * MAX_LOGS_WINDOWS);
+    assert_eq!(
+        windows(widest, anchor).unwrap().len() as u64,
+        MAX_LOGS_WINDOWS,
+        "the cap is inclusive"
+    );
+    let too_wide = BlockNumber::new(widest.get() - 1);
+    assert_eq!(
+        windows(too_wide, anchor),
+        Err(DepositError::RangeTooWide {
+            from: too_wide,
+            anchor,
+            windows: MAX_LOGS_WINDOWS + 1,
+            cap: MAX_LOGS_WINDOWS,
+        })
+    );
+}
+
+/// The deposit that counts is the one that matches what the read is looking for, not the
+/// first one logged: the vault marks a quote per payer, so anyone can put a log ahead of
+/// the user's under the same hash, and a dust deposit ahead of the real one changes
+/// nothing. Forty of them still leave the real one found.
+#[test]
+fn the_deposit_that_counts_is_the_one_that_matches_not_the_first() {
+    let griefer = "0x1111111111111111111111111111111111111111";
+    let dust = deposit_log_of(quote_hash(), 18_999_990, USDC, griefer, 1);
+    let other_token = deposit_log_of(quote_hash(), 18_999_991, VAULT, griefer, 1_000_000);
+    let real = deposit_log(quote_hash(), 18_999_995, 1_000_000);
+    let found = decide(
+        &[dust.clone(), other_token.clone(), real.clone()],
+        vault(),
+        quote_hash(),
+        &exactly(1_000_000),
+        BlockNumber::new(19_000_000),
+        BlockDepth::new(1),
+    )
+    .expect("the real deposit behind the dust is the one");
+    assert_eq!(found.from, USER.parse().unwrap());
+    assert_eq!(found.amount, TokenAmount::from(1_000_000_u32));
+    assert_eq!(found.block, BlockNumber::new(18_999_995));
+
+    let mut forty_ahead: Vec<Value> = (0..40)
+        .map(|i| deposit_log_of(quote_hash(), 18_999_900 + i, USDC, griefer, 1 + i))
+        .collect();
+    forty_ahead.push(real);
+    let found = decide(
+        &forty_ahead,
+        vault(),
+        quote_hash(),
+        &exactly(1_000_000),
+        BlockNumber::new(19_000_000),
+        BlockDepth::new(1),
+    )
+    .expect("forty dust logs ahead change nothing");
+    assert_eq!(found.from, USER.parse().unwrap());
+
+    // logs about the quote that are none of them the deposit wanted: refused by count, so
+    // an operator can tell stranded funds from no deposit at all
+    assert_eq!(
+        decide(
+            &[dust, other_token],
+            vault(),
+            quote_hash(),
+            &exactly(1_000_000),
+            BlockNumber::new(19_000_000),
+            BlockDepth::new(1),
+        ),
+        Err(DepositError::NoneMatches {
+            quote_hash: quote_hash(),
+            seen: 2,
+        })
+    );
+}
+
+/// An arrival read wants at least the least the user was quoted, in the token the user is
+/// paid: a dust deposit into the destination vault under the quote's hash is not the fill
+/// and never becomes `PaidInStable`, and the fill behind it is.
+#[test]
+fn a_dust_arrival_on_the_destination_is_not_the_fill() {
+    let griefer = "0x1111111111111111111111111111111111111111";
+    let dust = deposit_log_of(quote_hash(), 18_999_990, USDC, griefer, 1);
+    assert_eq!(
+        decide(
+            std::slice::from_ref(&dust),
+            vault(),
+            quote_hash(),
+            &at_least(24_900_000),
+            BlockNumber::new(19_000_000),
+            BlockDepth::new(1),
+        ),
+        Err(DepositError::NoneMatches {
+            quote_hash: quote_hash(),
+            seen: 1,
+        })
+    );
+    let fill = deposit_log_of(quote_hash(), 18_999_995, USDC, griefer, 24_950_000);
+    let found = decide(
+        &[dust, fill],
+        vault(),
+        quote_hash(),
+        &at_least(24_900_000),
+        BlockNumber::new(19_000_000),
+        BlockDepth::new(1),
+    )
+    .expect("a fill of at least the minimum is the arrival");
+    assert_eq!(found.amount, TokenAmount::from(24_950_000_u32));
+    // exactly the minimum is enough, and one unit under is not
+    let exact = deposit_log_of(quote_hash(), 18_999_996, USDC, griefer, 24_900_000);
+    assert!(decide(
+        &[exact],
+        vault(),
+        quote_hash(),
+        &at_least(24_900_000),
+        BlockNumber::new(19_000_000),
+        BlockDepth::new(1),
+    )
+    .is_ok());
+    let short = deposit_log_of(quote_hash(), 18_999_996, USDC, griefer, 24_899_999);
+    assert!(matches!(
+        decide(
+            &[short],
+            vault(),
+            quote_hash(),
+            &at_least(24_900_000),
+            BlockNumber::new(19_000_000),
+            BlockDepth::new(1),
+        ),
+        Err(DepositError::NoneMatches { seen: 1, .. })
+    ));
 }

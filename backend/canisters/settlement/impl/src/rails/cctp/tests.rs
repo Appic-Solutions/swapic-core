@@ -5,6 +5,9 @@ use crate::rails::tests::{
 use crate::rails::{RailStep, WaitingFor};
 use types::abi::{decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute};
 use types::config::ChainTable;
+use types::evm::EvmAddressError;
+use types::quote::{QuoteAddressError, QuoteAddressField};
+use types::rail::RailTokenError;
 use types::{Attestation, ChainId, Config, EvmAddress, Outcome, Timestamp};
 
 fn fast() -> Cctp {
@@ -242,7 +245,59 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
     };
     assert_eq!(
         fast().step(&leg(&odd_token, &fresh, &config, None, None)),
-        Err(RailError::QuoteNotAnAddress { field: "dst_token" })
+        Err(RailError::RailToken(RailTokenError::QuoteAddress(
+            QuoteAddressError::NotAnAddress {
+                field: QuoteAddressField::DstToken,
+                reason: EvmAddressError::NoPrefix,
+            }
+        )))
     );
     let _ = USDC_ARBITRUM;
+}
+
+/// The rail carries the configured USDC and nothing else: a swap naming any other token on
+/// either side is refused before its first leg, by the field, so the vault's USDC is never
+/// burned against a deposit of something else and no other token is ever paid out.
+#[test]
+fn a_swap_naming_another_token_is_refused_before_the_burn() {
+    let config = config();
+    let swap = fixture_swap(None, None);
+    let worthless: EvmAddress = MINE.parse().unwrap();
+    let wrong_source = types::Quote {
+        src_token: MINE.parse().unwrap(),
+        ..quote()
+    };
+    assert_eq!(
+        fast()
+            .step(&leg(&wrong_source, &swap, &config, None, None))
+            .map(drop),
+        Err(RailError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::SrcToken,
+            quoted: worthless,
+            rail_token: USDC_BASE.parse().unwrap(),
+            rail: types::Rail::CctpV2Fast,
+        }))
+    );
+    let wrong_destination = types::Quote {
+        dst_token: MINE.parse().unwrap(),
+        ..quote()
+    };
+    assert_eq!(
+        standard()
+            .step(&leg(&wrong_destination, &swap, &config, None, None))
+            .map(drop),
+        Err(RailError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::DstToken,
+            quoted: worthless,
+            rail_token: USDC_ARBITRUM.parse().unwrap(),
+            // the rail the refusal names is the quote's, which is what the pin is for
+            rail: types::Rail::CctpV2Fast,
+        }))
+    );
+    // and a swap already burned is held to the same pin at every later step
+    let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
+    assert!(matches!(
+        fast().step(&leg(&wrong_source, &burned, &config, None, None)),
+        Err(RailError::RailToken(_))
+    ));
 }

@@ -166,6 +166,22 @@ pub enum TransitionError {
         computed: Hash32,
     },
     Pocket(PocketError),
+    /// The line says the funds arrived on `logged`, and the quote it carries is for
+    /// `quoted`.
+    FundsChainNotTheQuotes {
+        logged: u64,
+        quoted: u64,
+    },
+    /// The line says `logged` arrived, and the quote it carries is for `quoted`.
+    FundsTokenNotTheQuotes {
+        logged: String,
+        quoted: String,
+    },
+    /// The line says `logged` arrived, and the quote it carries is for `quoted`.
+    FundsAmountNotTheQuotes {
+        logged: Nat,
+        quoted: Nat,
+    },
 }
 
 /// Why a pocket cannot make a move.
@@ -251,6 +267,18 @@ impl From<types::TransitionError> for TransitionError {
                 computed: computed.into_bytes(),
             },
             Domain::Pocket(error) => Self::Pocket(error.into()),
+            Domain::FundsChainNotTheQuotes { logged, quoted } => Self::FundsChainNotTheQuotes {
+                logged: logged.get(),
+                quoted: quoted.get(),
+            },
+            Domain::FundsTokenNotTheQuotes { logged, quoted } => Self::FundsTokenNotTheQuotes {
+                logged: logged.to_string(),
+                quoted: quoted.to_string(),
+            },
+            Domain::FundsAmountNotTheQuotes { logged, quoted } => Self::FundsAmountNotTheQuotes {
+                logged: logged.into(),
+                quoted: quoted.into(),
+            },
         }
     }
 }

@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::{quote_address, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
+use super::{ensure_rail_tokens, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
 use crate::deposits::vault_of;
 use types::abi::{
     eco_publish_and_fund, eco_refund, eco_route_hash, vault_execute, EcoReward, VaultCall,
@@ -97,7 +97,9 @@ impl CallRail for Eco {
     }
 
     fn step(&self, leg: &Leg) -> Result<RailStep, RailError> {
-        quote_address(leg.quote.dst_token.as_str(), "dst_token")?;
+        // the publish locks the source USDC as the reward and the fill is read in the
+        // destination USDC, so both of the quote's tokens have to be those
+        ensure_rail_tokens(leg)?;
         let Some(intent) = leg.intent else {
             return Ok(RailStep::Wait(WaitingFor::Intent));
         };

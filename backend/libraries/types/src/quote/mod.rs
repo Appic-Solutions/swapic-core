@@ -4,6 +4,7 @@ pub(crate) mod tests;
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
+use crate::evm::{EvmAddress, EvmAddressError};
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
 use crate::rail::{Rail, UnknownRail};
@@ -139,6 +140,48 @@ impl QuoteError {
     }
 }
 
+/// The four fields of a quote that name an account or a token contract. A quote carries
+/// them as text, because a rail on another kind of chain names its accounts another way;
+/// on an EVM chain each is read as an address through [`Quote::evm_address`], which names
+/// the field it read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum QuoteAddressField {
+    SrcToken,
+    DstToken,
+    DstAddress,
+    RefundAddress,
+}
+
+impl QuoteAddressField {
+    /// The field's name as the wire and the preimage table spell it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SrcToken => "src_token",
+            Self::DstToken => "dst_token",
+            Self::DstAddress => "dst_address",
+            Self::RefundAddress => "refund_address",
+        }
+    }
+}
+
+impl std::fmt::Display for QuoteAddressField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a quote's field is not an EVM address, naming the field and the way its text broke.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum QuoteAddressError {
+    #[error("the quote's {field} is not an EVM address: {reason}")]
+    NotAnAddress {
+        field: QuoteAddressField,
+        reason: EvmAddressError,
+    },
+    #[error("the quote names no {field}")]
+    Absent { field: QuoteAddressField },
+}
+
 /// The swap id of a canonical preimage: sha256 over exactly those bytes. Parsing a preimage
 /// and encoding it again gives the same bytes back, so a stored preimage is checked against
 /// the id it was recorded under without being re-encoded, and without a failure case.
@@ -181,6 +224,28 @@ impl Quote {
             return Err(QuoteError::EmptyRefundAddress);
         }
         Ok(())
+    }
+
+    /// The text of `field`, or nothing for a refund address the quote does not name.
+    fn address_text(&self, field: QuoteAddressField) -> Option<&str> {
+        match field {
+            QuoteAddressField::SrcToken => Some(self.src_token.as_str()),
+            QuoteAddressField::DstToken => Some(self.dst_token.as_str()),
+            QuoteAddressField::DstAddress => Some(self.dst_address.as_str()),
+            QuoteAddressField::RefundAddress => self.refund_address.as_ref().map(Address::as_str),
+        }
+    }
+
+    /// The quote's `field` as an EVM address: what every EVM-side reader parses the text
+    /// through, so a field that is no address is refused by name with the reason, and no
+    /// caller spells the parse for itself. A lower-case and a checksummed spelling read as
+    /// the same address.
+    pub fn evm_address(&self, field: QuoteAddressField) -> Result<EvmAddress, QuoteAddressError> {
+        let text = self
+            .address_text(field)
+            .ok_or(QuoteAddressError::Absent { field })?;
+        text.parse()
+            .map_err(|reason| QuoteAddressError::NotAnAddress { field, reason })
     }
 
     /// The canonical preimage, or the amount it has no bytes for. Over validated quotes

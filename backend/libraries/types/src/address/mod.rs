@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::evm::EvmAddress;
 use ic_stable_structures::storable::{Bound, Storable};
 use minicbor::decode::{self, Decoder};
 use minicbor::{Decode, Encode};
@@ -103,6 +104,24 @@ text_type! {
     /// A token on some chain, kept as the exact text it arrived as. At most
     /// [`MAX_TEXT_BYTES`].
     TokenId
+}
+
+impl TokenId {
+    /// Whether `other` names the token this one names. A token that is an EVM address is
+    /// its twenty bytes, so two spellings of them (checksummed, lower case) are one token;
+    /// text that is no address is held to its exact spelling, because a base58 address is
+    /// another address in another case. What every comparison of a quote's token to the
+    /// vault's, the rail's or a line's runs through, so no spelling can pass as another
+    /// token or refuse the same one.
+    pub fn names_the_same_token(&self, other: &TokenId) -> bool {
+        match (
+            self.as_str().parse::<EvmAddress>(),
+            other.as_str().parse::<EvmAddress>(),
+        ) {
+            (Ok(mine), Ok(theirs)) => mine == theirs,
+            _ => self == other,
+        }
+    }
 }
 
 /// What a redacted secret prints as.

@@ -90,3 +90,29 @@ fn an_address_is_a_stable_key_of_its_utf8_bytes() {
     let at_cap: Address = "a".repeat(MAX_TEXT_BYTES).parse().unwrap();
     assert_eq!(Address::from_bytes(at_cap.to_bytes()), at_cap);
 }
+
+/// A token that is an EVM address is the same token in any spelling of its bytes, and
+/// text that is not one is compared exactly: a base58 token differs by case.
+#[test]
+fn two_spellings_of_one_evm_token_are_the_same_token_and_other_text_is_compared_exactly() {
+    let checksummed: TokenId = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let lower: TokenId = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        .parse()
+        .unwrap();
+    let other: TokenId = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        .parse()
+        .unwrap();
+    assert!(checksummed.names_the_same_token(&lower));
+    assert!(lower.names_the_same_token(&checksummed));
+    assert!(!checksummed.names_the_same_token(&other));
+    let usdc: TokenId = "USDC".parse().unwrap();
+    let usdc_lower: TokenId = "usdc".parse().unwrap();
+    assert!(usdc.names_the_same_token(&"USDC".parse().unwrap()));
+    assert!(
+        !usdc.names_the_same_token(&usdc_lower),
+        "text that is no address is held to its exact spelling"
+    );
+    assert!(!usdc.names_the_same_token(&checksummed));
+}

@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::{quote_address, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
+use super::{ensure_rail_tokens, usdc_on, CallRail, Leg, RailError, RailStep, RailTx, WaitingFor};
 use crate::deposits::vault_of;
 use types::abi::{
     cctp_deposit_for_burn, cctp_receive_message, vault_execute, Burn, VaultCall, VaultDelta,
@@ -150,9 +150,10 @@ impl CallRail for Cctp {
     }
 
     fn step(&self, leg: &Leg) -> Result<RailStep, RailError> {
-        // the payout's token has to be the USDC the mint delivers; refused before the burn
-        // rather than after the funds have crossed
-        quote_address(leg.quote.dst_token.as_str(), "dst_token")?;
+        // the burn spends the source USDC and the payout pays the destination USDC, so
+        // both of the quote's tokens have to be those; refused before the burn rather
+        // than after the funds have crossed
+        ensure_rail_tokens(leg)?;
         Ok(match leg.swap.last_leg {
             None => RailStep::Send(self.burn(leg)?),
             Some(SwapLeg::Burn) => match leg.attestation {

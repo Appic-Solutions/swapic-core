@@ -2,7 +2,7 @@
 
 use crate::types::errors::{AppendError, GuardError};
 use crate::types::events::{EvmAddressError, Hash32};
-use crate::types::quote::QuoteError;
+use crate::types::quote::{QuoteAddressError, QuoteError, RailTokenError};
 use crate::types::rpc::RpcError;
 use crate::types::tx::TxError;
 use candid::{CandidType, Nat};
@@ -91,12 +91,26 @@ pub enum DepositError {
     StaleChainData {
         chain_id: u64,
     },
+    /// The range from `from` to the head at `anchor` would take `windows` calls of ten
+    /// thousand blocks, above `cap`; refused before any call.
+    RangeTooWide {
+        from: u64,
+        anchor: u64,
+        windows: u64,
+        cap: u64,
+    },
     Rpc(RpcError),
     UnreadableHead,
     UnreadableLogs,
-    /// The vault's log holds no deposit for the quote in the lookback.
+    /// The vault's log holds no deposit for the quote in the range read.
     NotFound {
         quote_hash: Hash32,
+    },
+    /// The vault's log holds `seen` deposits for the quote, and none of them is the token
+    /// and amount wanted: funds under the hash for an operator, and no swap.
+    NoneMatches {
+        quote_hash: Hash32,
+        seen: u64,
     },
     /// The deposit is in a block the head has not reached by the configured depth.
     NotConfirmed {
@@ -127,22 +141,11 @@ pub enum ClaimError {
     InFlight {
         since_ns: u64,
     },
-    /// The quote's source token is not an EVM address, so no vault log can name it.
-    SourceTokenNotAnAddress {
-        token: String,
-        reason: EvmAddressError,
-    },
+    /// The quote's tokens are not its rail's: refused before any outcall.
+    RailToken(RailTokenError),
+    /// A field of the quote that the claim reads as an EVM address is not one.
+    QuoteAddress(QuoteAddressError),
     Deposit(DepositError),
-    /// The vault holds a deposit for the quote, but of another token.
-    TokenMismatch {
-        quoted: String,
-        deposited: String,
-    },
-    /// The vault holds a deposit for the quote, but of another amount.
-    AmountMismatch {
-        quoted: Nat,
-        deposited: Nat,
-    },
     Append(AppendError),
 }
 
@@ -164,6 +167,8 @@ pub enum PullError {
     PermitMismatch {
         field: String,
     },
+    /// A field of the quote that the pull reads as an EVM address is not one.
+    QuoteAddress(QuoteAddressError),
     /// `party` is `"owner"`, `"dst_address"` or `"refund_address"`.
     Sanctioned {
         party: String,

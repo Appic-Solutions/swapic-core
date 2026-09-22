@@ -1,8 +1,12 @@
 //! The deposit read: whether a user's funds for a quote have arrived in a chain's vault,
 //! read from the chain and held to the configured depth. It is the read `claim_swap`
 //! decides money on, so every answer is bound to what this canister asked for: the vault
-//! it configured, the event the vault emits, the quote it is claiming, and a height from
-//! the same answer.
+//! it configured, the event the vault emits, the quote it is claiming, the token and the
+//! amount it is looking for, and a height from the same answer.
+//!
+//! The vault marks a quote per payer, so anyone can log a deposit under a quote's hash
+//! ahead of the user's. The deposit that counts is therefore the one that matches what
+//! the read wants, among every log the hash names, and not the first one logged.
 
 #[cfg(test)]
 mod tests;
@@ -21,12 +25,24 @@ use types::{
 };
 
 /// The most one `eth_getLogs` answer may be: enough for a few dozen deposits naming one
-/// quote, which is more than the vault marks per payer, and refunded when unused under
-/// pay-as-you-go pricing.
+/// quote (forty dust logs ahead of the real one still fit, at about seven hundred bytes
+/// each as a provider prints a log), and refunded when unused under pay-as-you-go
+/// pricing. An answer over it is refused by the system, which the read reports as a
+/// typed transport failure rather than deciding on a part of the log.
 const MAX_LOGS_BYTES: u64 = 32 * 1024;
 
 /// The most an `eth_blockNumber` reply may be: a hex height and its JSON-RPC envelope.
 const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
+
+/// The most blocks one `eth_getLogs` asks for: ten thousand, the range most providers
+/// serve in one call. A wider range is read in windows of this many blocks.
+pub const LOGS_WINDOW_BLOCKS: u64 = 10_000;
+
+/// The most windows one read walks: forty, four hundred thousand blocks, which is above a
+/// day on the fastest chain this canister reads (Arbitrum, four blocks a second). A range
+/// wider than that is refused by name before any outcall, never walked for minutes and
+/// never cut short in silence.
+pub const MAX_LOGS_WINDOWS: u64 = 40;
 
 /// A deposit the chain holds for a quote, deep enough to decide on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +75,16 @@ pub enum DepositError {
     Vault(#[from] VaultError),
     #[error("chain {chain_id} has no chain data young enough to anchor the read on")]
     StaleChainData { chain_id: ChainId },
+    #[error(
+        "reading from block {from} to the head at {anchor} takes {windows} windows of \
+         {LOGS_WINDOW_BLOCKS} blocks, above the cap of {cap}"
+    )]
+    RangeTooWide {
+        from: BlockNumber,
+        anchor: BlockNumber,
+        windows: u64,
+        cap: u64,
+    },
     #[error(transparent)]
     Rpc(#[from] RpcError),
     #[error("the head block did not come back as a number")]
@@ -67,6 +93,11 @@ pub enum DepositError {
     UnreadableLogs,
     #[error("no deposit for quote {quote_hash} is in the vault's log")]
     NotFound { quote_hash: QuoteHash },
+    #[error(
+        "the vault's log holds {seen} deposits for quote {quote_hash}, and none of them is \
+         the one wanted"
+    )]
+    NoneMatches { quote_hash: QuoteHash, seen: u64 },
     #[error("the deposit in block {block} is not {depth} deep against a head at {latest}")]
     NotConfirmed {
         block: BlockNumber,
@@ -75,10 +106,97 @@ pub enum DepositError {
     },
 }
 
-/// Where the read starts: `lookback` blocks back from `anchor`, and genesis when the chain
-/// is younger than that.
+/// The amount a read is looking for: exactly the quote's, for the deposit that creates a
+/// swap, or at least the least the user was quoted, for the rail's fill on the
+/// destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WantedAmount {
+    Exactly(TokenAmount),
+    AtLeast(TokenAmount),
+}
+
+/// What a read is looking for among the logs the quote's hash names: a deposit of `token`
+/// in `amount`. Any other log under the hash is somebody else's and decides nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wanted {
+    pub token: EvmAddress,
+    pub amount: WantedAmount,
+}
+
+impl Wanted {
+    /// Whether `deposit` is the one wanted.
+    pub fn admits(&self, deposit: &VerifiedDeposit) -> bool {
+        if deposit.token != self.token {
+            return false;
+        }
+        match self.amount {
+            WantedAmount::Exactly(amount) => deposit.amount == amount,
+            WantedAmount::AtLeast(least) => deposit.amount >= least,
+        }
+    }
+}
+
+/// One read: the vault of `chain_id` for the deposit `wanted` under `quote_hash`, no
+/// earlier than `not_before` when the caller knows the deposit cannot precede a block (the
+/// quote's registration), and the bounded lookback otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DepositRead {
+    pub chain_id: ChainId,
+    pub quote_hash: QuoteHash,
+    pub wanted: Wanted,
+    pub not_before: Option<BlockNumber>,
+}
+
+/// Where the read starts: `lookback` blocks ending at `anchor`, the anchor's own block
+/// among them, and genesis when the chain is younger than that.
 pub fn range_from(anchor: BlockNumber, lookback: DepositLookback) -> BlockNumber {
-    BlockNumber::new(anchor.get().saturating_sub(u64::from(lookback.get())))
+    BlockNumber::new(
+        anchor
+            .get()
+            .saturating_add(1)
+            .saturating_sub(u64::from(lookback.get())),
+    )
+}
+
+/// One `eth_getLogs` range: `from` to `to`, and to the head for the newest window, so a
+/// deposit the watcher's reading has not reached yet is still seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub from: BlockNumber,
+    pub to: Option<BlockNumber>,
+}
+
+/// The windows that tile `from` to `anchor`, newest first: a user deposits and claims
+/// within minutes, so the deposit is in the newest window and the older ones are read
+/// only when it is not there. More than [`MAX_LOGS_WINDOWS`] of them is refused by name.
+pub fn windows(from: BlockNumber, anchor: BlockNumber) -> Result<Vec<Window>, DepositError> {
+    let span = anchor.get().saturating_sub(from.get()).saturating_add(1);
+    let count = span.div_ceil(LOGS_WINDOW_BLOCKS);
+    if count > MAX_LOGS_WINDOWS {
+        return Err(DepositError::RangeTooWide {
+            from,
+            anchor,
+            windows: count,
+            cap: MAX_LOGS_WINDOWS,
+        });
+    }
+    let mut windows = Vec::with_capacity(count as usize);
+    let mut to = anchor.get();
+    for newest in [true].into_iter().chain(std::iter::repeat(false)) {
+        let start = to
+            .saturating_add(1)
+            .saturating_sub(LOGS_WINDOW_BLOCKS)
+            .max(from.get());
+        windows.push(Window {
+            from: BlockNumber::new(start),
+            to: (!newest).then_some(BlockNumber::new(to)),
+        });
+        if start == from.get() {
+            break;
+        }
+        to = start - 1;
+    }
+    Ok(windows)
 }
 
 /// `0x` and the hex of `bytes`, which is how a chain takes a topic or a word.
@@ -86,14 +204,18 @@ fn hex0x(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// The batch: the head block, then the vault's `Deposited` logs naming `quote_hash` from
-/// `from_block` to the head. One request, so the depth is measured against a height from
-/// the same answer.
+/// The batch for one window: the head block, then the vault's `Deposited` logs naming
+/// `quote_hash` over the window. One request, so the depth is measured against a height
+/// from the same answer.
 fn read_calls(
     vault: EvmAddress,
     quote_hash: QuoteHash,
-    from_block: BlockNumber,
+    window: &Window,
 ) -> Vec<(&'static str, Value)> {
+    let to_block = match window.to {
+        Some(to) => format!("0x{:x}", to.get()),
+        None => "latest".to_string(),
+    };
     vec![
         ("eth_blockNumber", json!([])),
         (
@@ -101,8 +223,8 @@ fn read_calls(
             json!([{
                 "address": hex0x(vault.as_bytes()),
                 "topics": [hex0x(&deposited_topic()), hex0x(quote_hash.as_ref())],
-                "fromBlock": format!("0x{:x}", from_block.get()),
-                "toBlock": "latest",
+                "fromBlock": format!("0x{:x}", window.from.get()),
+                "toBlock": to_block,
             }]),
         ),
     ]
@@ -164,21 +286,30 @@ fn parse_deposit(
     })
 }
 
-/// What one answer says: the first log that is this quote's deposit into `vault`, provided
-/// it is `depth` deep against `latest`. Two payers can deposit against one quote (the
-/// vault marks a quote per payer), and the first the chain logged is the one the swap is
-/// for.
+/// What one answer says: among the logs that are this quote's deposits into `vault`, the
+/// first that is the deposit `wanted`, provided it is `depth` deep against `latest`. The
+/// vault marks a quote per payer, so the logs under one hash may be several payers' and
+/// anyone can put one ahead of the user's; the others decide nothing, and are counted so
+/// a caller can tell stranded funds from no deposit at all.
 pub fn decide(
     logs: &[Value],
     vault: EvmAddress,
     quote_hash: QuoteHash,
+    wanted: &Wanted,
     latest: BlockNumber,
     depth: BlockDepth,
 ) -> Result<VerifiedDeposit, DepositError> {
+    let mut seen = 0;
     let deposit = logs
         .iter()
-        .find_map(|value| parse_deposit(value, vault, quote_hash))
-        .ok_or(DepositError::NotFound { quote_hash })?;
+        .filter_map(|value| parse_deposit(value, vault, quote_hash))
+        .inspect(|_| seen += 1)
+        .find(|deposit| wanted.admits(deposit))
+        .ok_or(if seen == 0 {
+            DepositError::NotFound { quote_hash }
+        } else {
+            DepositError::NoneMatches { quote_hash, seen }
+        })?;
     if !is_confirmed(deposit.block, latest, depth) {
         return Err(DepositError::NotConfirmed {
             block: deposit.block,
@@ -201,40 +332,66 @@ pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress,
         .map_err(|reason| VaultError::NotAnAddress { chain_id, reason })
 }
 
-/// Reads whether the vault on `chain_id` holds a deposit for `quote_hash`, deep enough to
-/// decide on.
+/// Reads whether the vault holds the deposit `read` wants, deep enough to decide on.
 ///
 /// The range starts a bounded lookback (`deposit_lookback_blocks`) behind the head the
-/// watcher last pushed, and ends at the provider's head; the depth is measured against
-/// that head, asked for in the same batch, so no receipt is judged against a moment other
-/// than its own.
+/// watcher last pushed, or at the block the read says the deposit cannot precede when that
+/// is later, and ends at the provider's head. It is walked in windows, newest first, one
+/// outcall each, and the depth is measured against the head asked for in the same batch
+/// as the logs it decides on, so no deposit is judged against a moment other than its
+/// own. A window whose logs hold the deposit ends the walk; one that holds a deposit not
+/// deep enough ends it too, because every older window is deeper still and the newest
+/// deposit is the one wanted.
 // todo_harden_reads: single unreplicated read; upgrade to k-of-n later. Until then the
-// answer is bound to the vault this canister configured, the event that vault emits and
-// the quote being claimed, and held to the configured depth, so one provider can delay a
-// claim but cannot invent a deposit that is not in the vault's log.
-pub async fn verify_evm_deposit(
-    chain_id: ChainId,
-    quote_hash: QuoteHash,
-) -> Result<VerifiedDeposit, DepositError> {
+// answer is bound to the vault this canister configured, the event that vault emits, the
+// quote being claimed and the token and amount wanted, and held to the configured depth.
+// That binds a log to what this canister asked for and not to the chain: unlike a receipt,
+// which must carry a hash this canister signed, a deposit has no hash of ours to be bound
+// to, so one provider can invent a deposit as well as delay one. The deploy holds the
+// provider to that until the read is replicated or compared across providers.
+pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, DepositError> {
+    let DepositRead {
+        chain_id,
+        quote_hash,
+        wanted,
+        not_before,
+    } = *read;
     let config = config::get();
     let vault = vault_of(&config, chain_id)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let anchor = chain_data::fresh(chain_id, now, config.chain_data_max_age)
         .ok_or(DepositError::StaleChainData { chain_id })?
         .block;
-    let from_block = range_from(anchor, config.deposit_lookback_blocks);
+    let from = not_before
+        .into_iter()
+        .chain([range_from(anchor, config.deposit_lookback_blocks)])
+        .max()
+        .expect("BUG: the lookback is always a start");
     let depth = confirmations(&config, chain_id);
-    let calls = read_calls(vault, quote_hash, from_block);
-    // the whole batch or nothing: a decision needs both reads
-    let answers = rpc::rpc_batch(chain_id, &calls, MAX_BLOCK_NUMBER_BYTES + MAX_LOGS_BYTES).await?;
-    let latest = answers
-        .first()
-        .and_then(Value::as_str)
-        .and_then(parse_block_number)
-        .ok_or(DepositError::UnreadableHead)?;
-    let logs = answers
-        .get(1)
-        .and_then(Value::as_array)
-        .ok_or(DepositError::UnreadableLogs)?;
-    decide(logs, vault, quote_hash, latest, depth)
+    let mut seen = 0;
+    for window in windows(from, anchor)? {
+        let calls = read_calls(vault, quote_hash, &window);
+        // the whole batch or nothing: a decision needs both reads
+        let answers =
+            rpc::rpc_batch(chain_id, &calls, MAX_BLOCK_NUMBER_BYTES + MAX_LOGS_BYTES).await?;
+        let latest = answers
+            .first()
+            .and_then(Value::as_str)
+            .and_then(parse_block_number)
+            .ok_or(DepositError::UnreadableHead)?;
+        let logs = answers
+            .get(1)
+            .and_then(Value::as_array)
+            .ok_or(DepositError::UnreadableLogs)?;
+        match decide(logs, vault, quote_hash, &wanted, latest, depth) {
+            Err(DepositError::NotFound { .. }) => {}
+            Err(DepositError::NoneMatches { seen: here, .. }) => seen += here,
+            decided => return decided,
+        }
+    }
+    if seen == 0 {
+        Err(DepositError::NotFound { quote_hash })
+    } else {
+        Err(DepositError::NoneMatches { quote_hash, seen })
+    }
 }

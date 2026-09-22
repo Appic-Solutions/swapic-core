@@ -70,10 +70,15 @@ fn swap_id(quote: &types::Quote) -> Hash32 {
     quote.hash().expect("a valid quote has an id").into_bytes()
 }
 
+const ARBITRUM: u64 = 42161;
+
+/// A provider and a vault on Base, and the rails' token on both chains of the fixture
+/// quote, which is what a claim pins the quote's tokens to.
 fn config() -> Config {
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
         vault_addresses: BTreeMap::from([(BASE, VAULT.to_string())]),
+        usdc_addresses: BTreeMap::from([(BASE, USDC.to_string()), (ARBITRUM, USDC.to_string())]),
         ..Config::default()
     }
 }
@@ -177,6 +182,24 @@ fn word_of(address: &str) -> String {
 
 /// The vault's `Deposited` log for `quote_hash`, as a provider answers it.
 fn deposit_log(quote_hash: Hash32, block: u64, token: &str, from: &str, amount: u64) -> Value {
+    logged_deposit(quote_hash, block, token, from, amount, [0x77; 32])
+}
+
+/// A `Deposited` log for `quote_hash` from somebody else: a griefer's dust at `block`,
+/// in its own transaction.
+fn dust_log(quote_hash: Hash32, block: u64, amount: u64) -> Value {
+    let griefer = "0x1111111111111111111111111111111111111111";
+    logged_deposit(quote_hash, block, USDC, griefer, amount, [0x66; 32])
+}
+
+fn logged_deposit(
+    quote_hash: Hash32,
+    block: u64,
+    token: &str,
+    from: &str,
+    amount: u64,
+    tx_hash: Hash32,
+) -> Value {
     json!({
         "address": VAULT.to_ascii_lowercase(),
         "topics": [
@@ -188,7 +211,7 @@ fn deposit_log(quote_hash: Hash32, block: u64, token: &str, from: &str, amount: 
         "data": format!("0x{amount:064x}"),
         "blockNumber": format!("0x{block:x}"),
         "blockHash": format!("0x{}", hex::encode([0x42; 32])),
-        "transactionHash": format!("0x{}", hex::encode([0x77; 32])),
+        "transactionHash": format!("0x{}", hex::encode(tx_hash)),
         "logIndex": "0x2",
         "removed": false,
     })
@@ -331,7 +354,9 @@ fn no_deposit_means_nothing_stored() {
 }
 
 /// A deposit that is not the quote's, in token or in amount, is not the swap the user was
-/// quoted: refused, nothing stored, and the funds stay in the vault for an operator.
+/// quoted, whoever made it: the claim finds no deposit it wants, says how many it saw so
+/// an operator can tell stranded funds from none, stores nothing, and the funds stay in
+/// the vault.
 #[test]
 fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -348,10 +373,10 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     );
     assert_eq!(
         await_claim(&pic, call),
-        Err(ClaimError::TokenMismatch {
-            quoted: USDC.to_string(),
-            deposited: USER.to_string(),
-        })
+        Err(ClaimError::Deposit(DepositError::NoneMatches {
+            quote_hash,
+            seen: 1
+        }))
     );
 
     let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
@@ -369,12 +394,144 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     );
     assert_eq!(
         await_claim(&pic, call),
-        Err(ClaimError::AmountMismatch {
-            quoted: Nat::from(AMOUNT),
-            deposited: Nat::from(AMOUNT - 1),
-        })
+        Err(ClaimError::Deposit(DepositError::NoneMatches {
+            quote_hash,
+            seen: 1
+        }))
     );
     assert_eq!(count(&pic, canister), before, "nothing stored");
+}
+
+/// The vault marks a quote per payer, so anyone can log a deposit under the user's hash
+/// ahead of theirs. The deposit that counts is the one that matches the quote, not the
+/// first one logged: a dust deposit ahead of the real one changes nothing, and forty of
+/// them still leave the real one claimed.
+#[test]
+fn a_dust_deposit_ahead_of_the_real_one_still_claims() {
+    let (pic, canister, _admin) = setup();
+    let quote = quote(14);
+    let quote_hash = swap_id(&quote);
+
+    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    answer(
+        &pic,
+        &the_read(&pic, quote_hash),
+        HEAD,
+        vec![
+            dust_log(quote_hash, HEAD - 2, 1),
+            deposit_log(quote_hash, HEAD - 1, USDC, USER, AMOUNT.into()),
+        ],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    let EventType::FundsReceived { amount, tx_ref, .. } =
+        events(&pic, canister).last().unwrap().payload.clone()
+    else {
+        panic!("the claim appends the swap");
+    };
+    assert_eq!(amount, Nat::from(AMOUNT));
+    assert_eq!(
+        tx_ref,
+        format!("0x{}", hex::encode([0x77; 32])),
+        "the real deposit's transaction, not the dust's"
+    );
+
+    let behind_forty = self::quote(15);
+    let quote_hash = swap_id(&behind_forty);
+    let mut logs: Vec<Value> = (0..40)
+        .map(|i| dust_log(quote_hash, HEAD - 50 + i, 1 + i))
+        .collect();
+    logs.push(deposit_log(quote_hash, HEAD - 1, USDC, USER, AMOUNT.into()));
+    let call = submit_claim(&pic, canister, watcher(), &wire(&behind_forty));
+    answer(&pic, &the_read(&pic, quote_hash), HEAD, logs);
+    assert_eq!(
+        await_claim(&pic, call),
+        Ok(quote_hash),
+        "forty dust logs ahead change nothing"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The rails carry the configured USDC and nothing else: a quote naming a worthless token
+/// on either side is refused by the field before an outcall is bought, so the vault's
+/// USDC can never be burned against a deposit of something else. And the fold holds the
+/// line that creates a swap to the quote it carries: a hand-written `FundsReceived`
+/// naming another amount, token or chain than its quote's is refused at the append.
+#[test]
+fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
+    use crate::client::settlement::append;
+    use settlement_api::types::errors::{AppendError, TestAppendError};
+    use settlement_api::types::quote::{QuoteAddressField, RailTokenError};
+    use settlement_api::types::swap::TransitionError;
+    let (pic, canister, admin) = setup();
+    let worthless = types::Quote {
+        src_token: USER.parse().unwrap(),
+        ..quote(16)
+    };
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&worthless)),
+        Err(ClaimError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::SrcToken,
+            quoted: USER.to_string(),
+            rail_token: USDC.to_string(),
+            rail: "cctp_v2_fast".to_string(),
+        }))
+    );
+    let wrong_destination = types::Quote {
+        dst_token: USER.parse().unwrap(),
+        ..quote(17)
+    };
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&wrong_destination)),
+        Err(ClaimError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::DstToken,
+            quoted: USER.to_string(),
+            rail_token: USDC.to_string(),
+            rail: "cctp_v2_fast".to_string(),
+        }))
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+
+    let quote = quote(18);
+    let quote_hash = swap_id(&quote);
+    let before = count(&pic, canister);
+    let short = EventType::FundsReceived {
+        quote_hash,
+        quote_bytes: quote.canonical_bytes().unwrap(),
+        chain_id: BASE,
+        token: USDC.to_string(),
+        amount: Nat::from(AMOUNT - 1),
+        tx_ref: "0xhand".into(),
+    };
+    assert_eq!(
+        append(&pic, canister, admin, &short),
+        Err(TestAppendError::Append(AppendError::Transition(
+            TransitionError::FundsAmountNotTheQuotes {
+                logged: Nat::from(AMOUNT - 1),
+                quoted: Nat::from(AMOUNT),
+            }
+        )))
+    );
+    let elsewhere = EventType::FundsReceived {
+        quote_hash,
+        quote_bytes: quote.canonical_bytes().unwrap(),
+        chain_id: ARBITRUM,
+        token: USDC.to_string(),
+        amount: Nat::from(AMOUNT),
+        tx_ref: "0xhand".into(),
+    };
+    assert_eq!(
+        append(&pic, canister, admin, &elsewhere),
+        Err(TestAppendError::Append(AppendError::Transition(
+            TransitionError::FundsChainNotTheQuotes {
+                logged: ARBITRUM,
+                quoted: BASE,
+            }
+        )))
+    );
+    assert_eq!(count(&pic, canister), before, "nothing written");
 }
 
 /// The sanctions gate runs before an outcall is bought: a quote paying to a sanctioned
@@ -618,6 +775,46 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
         count(&pic, canister),
         before,
         "rail data is not a line in the log"
+    );
+}
+
+/// The token pin is the door's and the rails', never the fold's: the fold is the replay of
+/// the log, and a config the fold read would make the log's own history unreplayable the
+/// day a table moves. So a moved USDC table refuses every new claim and leaves every swap
+/// already recorded replaying clean.
+#[test]
+fn a_moved_token_table_refuses_new_claims_and_leaves_the_log_replayable() {
+    use crate::client::settlement::set_config;
+    use settlement_api::types::quote::RailTokenError;
+    let (pic, canister, admin) = setup();
+    let quote = quote(19);
+    let quote_hash = swap_id(&quote);
+    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    answer(
+        &pic,
+        &the_read(&pic, quote_hash),
+        HEAD,
+        vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+
+    let moved = Config {
+        usdc_addresses: BTreeMap::from([(BASE, USER.to_string()), (ARBITRUM, USER.to_string())]),
+        ..config()
+    };
+    set_config(&pic, canister, admin, &moved).expect("the controller moves the table");
+    assert!(
+        matches!(
+            claim_swap(&pic, canister, watcher(), &wire(&self::quote(20))),
+            Err(ClaimError::RailToken(
+                RailTokenError::NotTheRailToken { .. }
+            ))
+        ),
+        "a claim against the moved table is refused"
+    );
+    assert!(
+        verify_replay(&pic, canister, Principal::anonymous()),
+        "and the swap recorded under the old table still replays"
     );
 }
 

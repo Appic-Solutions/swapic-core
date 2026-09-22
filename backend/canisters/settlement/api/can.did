@@ -49,10 +49,10 @@ type ChainDataError = variant { FeeTooLarge : record { field : text } };
 type Choice = variant { Requote; Refund };
 // Why `claim_swap` created no swap. Nothing was written.
 type ClaimError = variant {
-  // The vault holds a deposit for the quote, but of another token.
-  TokenMismatch : record { deposited : text; quoted : text };
   // `party` is `"dst_address"`, `"refund_address"` or `"from"` (the payer).
   Sanctioned : record { party : text };
+  // The quote's tokens are not its rail's: refused before any outcall.
+  RailToken : RailTokenError;
   // Past the quote's expiry plus the permit window, nobody can pay the quote and no
   // deposit is claimed for it.
   QuoteExpired : record {
@@ -65,12 +65,10 @@ type ClaimError = variant {
   SwapExists : blob;
   // A claim or a pull for this quote is already out, since `since_ns`.
   InFlight : record { since_ns : nat64 };
-  // The quote's source token is not an EVM address, so no vault log can name it.
-  SourceTokenNotAnAddress : record { token : text; reason : EvmAddressError };
+  // A field of the quote that the claim reads as an EVM address is not one.
+  QuoteAddress : QuoteAddressError;
   Append : AppendError;
   InvalidQuote : QuoteError;
-  // The vault holds a deposit for the quote, but of another amount.
-  AmountMismatch : record { deposited : nat; quoted : nat };
 };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
@@ -150,8 +148,19 @@ type ConfigError = variant {
 type DepositError = variant {
   Rpc : RpcError;
   UnreadableHead;
+  // The range from `from` to the head at `anchor` would take `windows` calls of ten
+  // thousand blocks, above `cap`; refused before any call.
+  RangeTooWide : record {
+    cap : nat64;
+    from : nat64;
+    anchor : nat64;
+    windows : nat64;
+  };
   UnreadableLogs;
-  // The vault's log holds no deposit for the quote in the lookback.
+  // The vault's log holds `seen` deposits for the quote, and none of them is the token
+  // and amount wanted: funds under the hash for an operator, and no swap.
+  NoneMatches : record { quote_hash : blob; seen : nat64 };
+  // The vault's log holds no deposit for the quote in the range read.
   NotFound : record { quote_hash : blob };
   // The deposit is in a block the head has not reached by the configured depth.
   NotConfirmed : record { latest : nat64; block : nat64; depth : nat64 };
@@ -367,6 +376,8 @@ type PullError = variant {
   // A pull for this quote is signed and not yet landed; it is that transaction.
   AlreadyPulling : record { tx_hash : blob };
   InFlight : record { since_ns : nat64 };
+  // A field of the quote that the pull reads as an EVM address is not one.
+  QuoteAddress : QuoteAddressError;
   Vault : VaultError;
   // The quote's user pays their own gas.
   NotGasless;
@@ -424,6 +435,19 @@ type Quote = record {
   expected_out : nat;
   dst_token : text;
 };
+// Why a quote's field is not an EVM address: the field, and the way its text broke, or
+// that the quote does not name it.
+type QuoteAddressError = variant {
+  NotAnAddress : record { field : QuoteAddressField; reason : EvmAddressError };
+  Absent : record { field : QuoteAddressField };
+};
+// The four fields of a quote that name an account or a token contract.
+type QuoteAddressField = variant {
+  DstAddress;
+  SrcToken;
+  DstToken;
+  RefundAddress;
+};
 // Why a quote was refused, naming the field wherever one is at fault.
 type QuoteError = variant {
   NotUtf8 : record { field : text };
@@ -437,6 +461,20 @@ type QuoteError = variant {
   TrailingBytes : record { len : nat64; consumed : nat64 };
   Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
   AmountTooLarge : record { field : text };
+};
+// Why a quote is not one its rail can carry: the rails carry the configured USDC on both
+// sides and nothing else, compared as addresses. Addresses are EIP-55, the rail is its
+// id.
+type RailTokenError = variant {
+  NotTheRailToken : record {
+    field : QuoteAddressField;
+    rail : text;
+    rail_token : text;
+    quoted : text;
+  };
+  QuoteAddress : QuoteAddressError;
+  // The chain has no token configured for the rail.
+  NoRailToken : record { rail : text; chain_id : nat64 };
 };
 // Why `register_quote` stored nothing.
 type RegisterQuoteError = variant {
@@ -548,6 +586,9 @@ type SwapStatus = variant {
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
   NoUnsignedNonce : record { quote_hash : blob; chain_id : nat64 };
+  // The line says the funds arrived on `logged`, and the quote it carries is for
+  // `quoted`.
+  FundsChainNotTheQuotes : record { logged : nat64; quoted : nat64 };
   CannotAskWhileRefunding;
   NonceNeverAllocated : record {
     next : nat64;
@@ -580,6 +621,10 @@ type TransitionError = variant {
   CannotStartRefund : SwapStatus;
   NotInFlight : SwapStatus;
   NotWaitingForUser : SwapStatus;
+  // The line says `logged` arrived, and the quote it carries is for `quoted`.
+  FundsTokenNotTheQuotes : record { logged : text; quoted : text };
+  // The line says `logged` arrived, and the quote it carries is for `quoted`.
+  FundsAmountNotTheQuotes : record { logged : nat; quoted : nat };
   AlreadyPaid;
   UnknownPocket : nat64;
   NonceNotHeldForPull : record {

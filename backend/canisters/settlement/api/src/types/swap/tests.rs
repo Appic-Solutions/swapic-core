@@ -37,6 +37,39 @@ fn a_transition_error_keeps_what_it_names_on_the_wire() {
             requested: Nat::from(300_u32)
         })
     );
+    // the line that creates a swap, held to its quote: the wire names what each side said
+    assert_eq!(
+        TransitionError::from(types::TransitionError::FundsTokenNotTheQuotes {
+            logged: "usdt".parse().unwrap(),
+            quoted: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                .parse()
+                .unwrap(),
+        }),
+        TransitionError::FundsTokenNotTheQuotes {
+            logged: "usdt".to_string(),
+            quoted: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string()
+        }
+    );
+    assert_eq!(
+        TransitionError::from(types::TransitionError::FundsAmountNotTheQuotes {
+            logged: TokenAmount::from(99_u8),
+            quoted: TokenAmount::from(100_u8),
+        }),
+        TransitionError::FundsAmountNotTheQuotes {
+            logged: Nat::from(99_u8),
+            quoted: Nat::from(100_u8)
+        }
+    );
+    assert_eq!(
+        TransitionError::from(types::TransitionError::FundsChainNotTheQuotes {
+            logged: ChainId::ARBITRUM,
+            quoted: ChainId::BASE,
+        }),
+        TransitionError::FundsChainNotTheQuotes {
+            logged: 42161,
+            quoted: 8453
+        }
+    );
 }
 
 #[test]

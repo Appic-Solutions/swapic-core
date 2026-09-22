@@ -1,3 +1,4 @@
+use crate::types::events::EvmAddressError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 use types::{ChainId, TokenAmount, UnixSeconds};
@@ -205,6 +206,98 @@ impl From<types::QuoteError> for QuoteError {
             Domain::TrailingBytes { consumed, len } => Self::TrailingBytes {
                 consumed: crate::types::wire_len(consumed),
                 len: crate::types::wire_len(len),
+            },
+        }
+    }
+}
+
+/// The four fields of a quote that name an account or a token contract.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuoteAddressField {
+    SrcToken,
+    DstToken,
+    DstAddress,
+    RefundAddress,
+}
+
+impl From<types::quote::QuoteAddressField> for QuoteAddressField {
+    fn from(field: types::quote::QuoteAddressField) -> Self {
+        use types::quote::QuoteAddressField as Domain;
+        match field {
+            Domain::SrcToken => Self::SrcToken,
+            Domain::DstToken => Self::DstToken,
+            Domain::DstAddress => Self::DstAddress,
+            Domain::RefundAddress => Self::RefundAddress,
+        }
+    }
+}
+
+/// Why a quote's field is not an EVM address: the field, and the way its text broke, or
+/// that the quote does not name it.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum QuoteAddressError {
+    NotAnAddress {
+        field: QuoteAddressField,
+        reason: EvmAddressError,
+    },
+    Absent {
+        field: QuoteAddressField,
+    },
+}
+
+impl From<types::quote::QuoteAddressError> for QuoteAddressError {
+    fn from(error: types::quote::QuoteAddressError) -> Self {
+        use types::quote::QuoteAddressError as Domain;
+        match error {
+            Domain::NotAnAddress { field, reason } => Self::NotAnAddress {
+                field: field.into(),
+                reason: reason.into(),
+            },
+            Domain::Absent { field } => Self::Absent {
+                field: field.into(),
+            },
+        }
+    }
+}
+
+/// Why a quote is not one its rail can carry: the rails carry the configured USDC on both
+/// sides and nothing else, compared as addresses. Addresses are EIP-55, the rail is its
+/// id.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RailTokenError {
+    NotTheRailToken {
+        field: QuoteAddressField,
+        quoted: String,
+        rail_token: String,
+        rail: String,
+    },
+    QuoteAddress(QuoteAddressError),
+    /// The chain has no token configured for the rail.
+    NoRailToken {
+        chain_id: u64,
+        rail: String,
+    },
+}
+
+impl From<types::rail::RailTokenError> for RailTokenError {
+    fn from(error: types::rail::RailTokenError) -> Self {
+        use types::rail::RailTokenError as Domain;
+        match error {
+            Domain::NotTheRailToken {
+                field,
+                quoted,
+                rail_token,
+                rail,
+            } => Self::NotTheRailToken {
+                field: field.into(),
+                quoted: quoted.to_string(),
+                rail_token: rail_token.to_string(),
+                rail: rail.to_string(),
+            },
+            Domain::QuoteAddress(error) => Self::QuoteAddress(error.into()),
+            Domain::NoRailToken { chain_id, rail } => Self::NoRailToken {
+                chain_id: chain_id.get(),
+                rail: rail.to_string(),
             },
         }
     }

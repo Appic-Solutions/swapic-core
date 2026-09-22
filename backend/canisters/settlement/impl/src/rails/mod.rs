@@ -12,6 +12,8 @@ pub mod eco;
 use crate::deposits::VaultError;
 use thiserror::Error;
 use types::events::TxPurpose;
+use types::quote::QuoteAddressError;
+use types::rail::RailTokenError;
 use types::{
     Attestation, ChainId, Config, EcoIntent, EvmAddress, GasAmount, Quote, QuoteHash, Rail, Swap,
     TokenAmount, UnixSeconds, Wei,
@@ -80,8 +82,10 @@ pub enum RailError {
     Vault(#[from] VaultError),
     #[error("the fee of {amount} does not fit an amount")]
     FeeOverflow { amount: TokenAmount },
-    #[error("the quote's {field} is not an EVM address")]
-    QuoteNotAnAddress { field: &'static str },
+    #[error(transparent)]
+    RailToken(#[from] RailTokenError),
+    #[error(transparent)]
+    QuoteAddress(#[from] QuoteAddressError),
 }
 
 /// What a rail decides on: the swap as the fold holds it, its quote, the deploy's config,
@@ -137,10 +141,17 @@ fn usdc_on(config: &Config, chain_id: ChainId) -> Result<EvmAddress, RailError> 
         .ok_or(RailError::NoUsdc { chain_id })
 }
 
-/// The quote's `field` as an EVM address.
-fn quote_address(text: &str, field: &'static str) -> Result<EvmAddress, RailError> {
-    text.parse()
-        .map_err(|_| RailError::QuoteNotAnAddress { field })
+/// Both of the quote's tokens pinned to the rail before any leg is built: the rails carry
+/// the configured USDC and nothing else, so a swap naming another token on either side
+/// (one the claim would have refused, or one whose config moved since) has the vault's
+/// USDC spent for nothing, or a token paid out that the mint never delivered. Refused by
+/// the field, and retried on the next tick rather than frozen, because a knob an operator
+/// moves is what puts a claimed swap here.
+fn ensure_rail_tokens(leg: &Leg) -> Result<(), RailError> {
+    Ok(types::rail::ensure_rail_tokens(
+        &leg.config.usdc_addresses,
+        leg.quote,
+    )?)
 }
 
 /// The fixtures the two rails' tests share: a Base to Arbitrum USDC quote, a swap at any

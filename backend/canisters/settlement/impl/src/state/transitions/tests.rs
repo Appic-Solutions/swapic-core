@@ -269,6 +269,71 @@ fn funds_received_refuses_quote_bytes_that_are_not_a_quote() {
     ));
 }
 
+/// Rule A2 for the line that creates money: what the line says arrived must be what the
+/// quote said would, on the quote's own chain, in its own token and its own amount, so no
+/// writer can record a swap the quote does not describe. The token is compared as a token
+/// and never as text: the vault logs an address in its checksummed spelling, and a quote
+/// may spell the same address in lower case.
+#[test]
+fn funds_received_must_be_the_quotes_chain_token_and_amount() {
+    let state = HeapState::default();
+    let EventType::FundsReceived {
+        quote_hash,
+        quote_bytes,
+        tx_ref,
+        ..
+    } = funds(1)
+    else {
+        panic!("the fixture is a FundsReceived");
+    };
+    let line = |chain_id: ChainId, token: &str, amount_in: u128| EventType::FundsReceived {
+        quote_hash,
+        quote_bytes: quote_bytes.clone(),
+        chain_id,
+        token: token.parse().unwrap(),
+        amount: amount(amount_in),
+        tx_ref: tx_ref.clone(),
+    };
+    assert_eq!(
+        state.check(&line(ARBITRUM, "usdc", 100)),
+        Err(TransitionError::FundsChainNotTheQuotes {
+            logged: ARBITRUM,
+            quoted: BASE,
+        })
+    );
+    assert_eq!(
+        state.check(&line(BASE, "usdt", 100)),
+        Err(TransitionError::FundsTokenNotTheQuotes {
+            logged: "usdt".parse().unwrap(),
+            quoted: "usdc".parse().unwrap(),
+        })
+    );
+    assert_eq!(
+        state.check(&line(BASE, "usdc", 99)),
+        Err(TransitionError::FundsAmountNotTheQuotes {
+            logged: amount(99),
+            quoted: amount(100),
+        })
+    );
+    assert_eq!(state.check(&line(BASE, "usdc", 100)), Ok(()));
+
+    // the vault's checksummed spelling of the quote's lower-case token is the same token
+    let checksummed = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+    let evm = Quote {
+        src_token: checksummed.to_ascii_lowercase().parse().unwrap(),
+        ..quote(1)
+    };
+    let logged = EventType::FundsReceived {
+        quote_hash: id_of(&evm),
+        quote_bytes: evm.canonical_bytes().unwrap(),
+        chain_id: BASE,
+        token: checksummed.parse().unwrap(),
+        amount: amount(100),
+        tx_ref: "0xabc".into(),
+    };
+    assert_eq!(state.check(&logged), Ok(()));
+}
+
 #[test]
 fn replay_is_deterministic() {
     let qh = swap_id(1);

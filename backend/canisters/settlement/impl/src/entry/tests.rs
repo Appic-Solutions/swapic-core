@@ -1,17 +1,37 @@
 use super::*;
+use crate::deposits::{Wanted, WantedAmount};
 use crate::state::transitions::tests::quote;
 use crate::storage::{on_fresh_memory, sanctions};
+use std::collections::BTreeMap;
 use types::abi::Permit;
-use types::{BlockNumber, GasMode};
+use types::config::ChainTable;
+use types::evm::EvmAddressError;
+use types::quote::{QuoteAddressError, QuoteAddressField};
+use types::rail::RailTokenError;
+use types::{BlockNumber, ChainId, Config, GasMode, Rail, TokenAmount};
 
 const USDC: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const USDC_ARBITRUM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
 
-/// The fixture quote with an EVM token, which is what a claim on an EVM chain needs.
+/// The fixture quote with the rail's tokens on both sides, which is what a claim on an
+/// EVM chain needs.
 fn evm_quote(nonce: u64) -> Quote {
     Quote {
         src_token: USDC.parse().unwrap(),
+        dst_token: USDC_ARBITRUM.parse().unwrap(),
         ..quote(nonce)
+    }
+}
+
+/// The rails' tokens: the USDC of Base and of Arbitrum.
+fn rail_config() -> Config {
+    Config {
+        usdc_addresses: ChainTable(BTreeMap::from([
+            (ChainId::BASE, USDC.parse().unwrap()),
+            (ChainId::ARBITRUM, USDC_ARBITRUM.parse().unwrap()),
+        ])),
+        ..Config::default()
     }
 }
 
@@ -93,49 +113,94 @@ fn a_sanctioned_destination_or_refund_address_names_itself() {
     });
 }
 
-/// The deposit the vault holds must be the quote's: its token, and exactly its amount. A
+/// The deposit the claim wants is the quote's: its token, and exactly its amount. A
 /// deposit of another token cannot ride the quote's rail, and one of another amount is
-/// neither the swap the user was quoted nor one the canister can price, so both are refused
-/// and the funds stay where they are for an operator.
+/// neither the swap the user was quoted nor one the canister can price, so neither is the
+/// deposit, whatever else the vault holds under the hash, and the funds stay where they
+/// are for an operator.
 #[test]
-fn a_deposit_must_be_the_quotes_token_and_exactly_its_amount() {
+fn the_claim_wants_the_quotes_token_and_exactly_its_amount() {
     let quote = evm_quote(1);
     let token: EvmAddress = USDC.parse().unwrap();
+    let wanted = wanted(&quote, token);
     assert_eq!(
-        ensure_deposit_matches(&quote, token, &deposit(USDC, 100)),
-        Ok(())
+        wanted,
+        Wanted {
+            token,
+            amount: WantedAmount::Exactly(TokenAmount::from(100_u8)),
+        }
     );
-    assert_eq!(
-        ensure_deposit_matches(&quote, token, &deposit(USER, 100)),
-        Err(ClaimError::TokenMismatch {
-            quoted: token,
-            deposited: USER.parse().unwrap()
-        })
-    );
+    assert!(wanted.admits(&deposit(USDC, 100)));
+    assert!(!wanted.admits(&deposit(USER, 100)), "another token");
     for wrong in [99, 101] {
-        assert_eq!(
-            ensure_deposit_matches(&quote, token, &deposit(USDC, wrong)),
-            Err(ClaimError::AmountMismatch {
-                quoted: TokenAmount::from(100_u8),
-                deposited: TokenAmount::from(wrong)
-            })
-        );
+        assert!(!wanted.admits(&deposit(USDC, wrong)), "another amount");
     }
 }
 
-/// The source token of a quote claimed on an EVM chain has to be an address, and the
-/// refusal is made before any outcall.
+/// The tokens of a quote claimed on an EVM chain have to be the rail's, compared as
+/// addresses: a worthless token on either side is refused by the field before any outcall,
+/// as is text that is no address, and the source token the read then looks for is the
+/// rail's own.
 #[test]
 fn a_source_token_that_is_not_an_address_is_refused_by_name() {
+    let config = rail_config();
     let quote = quote(1);
     assert_eq!(
-        source_token(&quote),
-        Err(ClaimError::SourceTokenNotAnAddress {
-            token: quote.src_token.clone(),
-            reason: EvmAddressError::NoPrefix,
-        })
+        rail_source_token(&config, &quote),
+        Err(ClaimError::RailToken(RailTokenError::QuoteAddress(
+            QuoteAddressError::NotAnAddress {
+                field: QuoteAddressField::SrcToken,
+                reason: EvmAddressError::NoPrefix,
+            }
+        )))
     );
-    assert_eq!(source_token(&evm_quote(1)), Ok(USDC.parse().unwrap()));
+    assert_eq!(
+        rail_source_token(&config, &evm_quote(1)),
+        Ok(USDC.parse().unwrap())
+    );
+}
+
+/// The rails carry the configured USDC and nothing else: a quote naming any other token,
+/// on either side, is refused before an outcall is bought, so the burn can never spend the
+/// vault's USDC against a deposit of something else.
+#[test]
+fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
+    let config = rail_config();
+    let worthless: EvmAddress = USER.parse().unwrap();
+    let wrong_source = Quote {
+        src_token: USER.parse().unwrap(),
+        ..evm_quote(1)
+    };
+    assert_eq!(
+        rail_source_token(&config, &wrong_source),
+        Err(ClaimError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::SrcToken,
+            quoted: worthless,
+            rail_token: USDC.parse().unwrap(),
+            rail: Rail::CctpV2Fast,
+        }))
+    );
+    let wrong_destination = Quote {
+        dst_token: USER.parse().unwrap(),
+        ..evm_quote(1)
+    };
+    assert_eq!(
+        rail_source_token(&config, &wrong_destination),
+        Err(ClaimError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::DstToken,
+            quoted: worthless,
+            rail_token: USDC_ARBITRUM.parse().unwrap(),
+            rail: Rail::CctpV2Fast,
+        }))
+    );
+    let no_table = Config::default();
+    assert_eq!(
+        rail_source_token(&no_table, &evm_quote(1)),
+        Err(ClaimError::RailToken(RailTokenError::NoRailToken {
+            chain_id: ChainId::BASE,
+            rail: Rail::CctpV2Fast,
+        }))
+    );
 }
 
 /// The line the claim writes carries the chain's truth: the token as the vault logged it,
