@@ -27,6 +27,7 @@ fn swap(status: SwapStatus) -> Swap {
         waiting_since: None,
         last_leg: None,
         last_outcome: None,
+        last_tx_hash: None,
     }
 }
 

@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use types::events::TxPurpose;
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Leg, Nonce, NonceKey, Outcome,
-    Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, UnsignedTx,
-    WaitingKey,
+    Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, TxHash,
+    UnsignedTx, WaitingKey,
 };
 
 pub mod pending_quotes;
@@ -363,6 +363,7 @@ impl<S: Store> State<S> {
                 waiting_since: None,
                 last_leg: None,
                 last_outcome: None,
+                last_tx_hash: None,
             },
         );
     }
@@ -389,6 +390,7 @@ impl<S: Store> State<S> {
             swap.open_attempt = Some(attempt);
             swap.last_leg = leg;
             swap.last_outcome = None;
+            swap.last_tx_hash = None;
             match swap.status {
                 SwapStatus::FundsReceived => swap.status = SwapStatus::Executing,
                 SwapStatus::PaidInStable => swap.status = SwapStatus::Delivering,
@@ -398,11 +400,17 @@ impl<S: Store> State<S> {
     }
 
     /// The open attempt was confirmed or failed; either way it counts, and how it ended is
-    /// kept for the engine.
-    fn record_attempt_closed(&mut self, quote_hash: &QuoteHash, outcome: Outcome) {
+    /// kept for the engine, with the hash it confirmed as when it did.
+    fn record_attempt_closed(
+        &mut self,
+        quote_hash: &QuoteHash,
+        outcome: Outcome,
+        tx_hash: Option<TxHash>,
+    ) {
         self.update_swap(quote_hash, |swap| {
             swap.open_attempt = None;
             swap.last_outcome = Some(outcome);
+            swap.last_tx_hash = tx_hash;
         });
     }
 

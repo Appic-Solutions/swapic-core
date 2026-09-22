@@ -2,6 +2,7 @@ use crate::types::events::Hash32;
 use crate::types::quote::QuoteError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
+use types::TxHash;
 
 /// Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -72,6 +73,8 @@ pub struct Swap {
     pub last_leg: Option<Leg>,
     /// How the latest attempt ended: absent while it is open, or before any was signed.
     pub last_outcome: Option<Outcome>,
+    /// The transaction the latest attempt confirmed as, once it has.
+    pub last_tx_hash: Option<Hash32>,
 }
 
 impl From<types::SwapStatus> for SwapStatus {
@@ -105,6 +108,7 @@ impl From<types::Swap> for Swap {
             waiting_since_ns: swap.waiting_since.map(|since| since.as_nanos()),
             last_leg: swap.last_leg.map(Leg::from),
             last_outcome: swap.last_outcome.map(Outcome::from),
+            last_tx_hash: swap.last_tx_hash.map(TxHash::into_bytes),
         }
     }
 }

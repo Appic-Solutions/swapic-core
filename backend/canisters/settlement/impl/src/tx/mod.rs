@@ -20,7 +20,7 @@ mod tests;
 
 use crate::ecdsa::{self, EcdsaError};
 use crate::guards::require_not_halted;
-use crate::rpc::{self, parse_block_number, parse_hash32, RpcError};
+use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BLOCK_NUMBER_BYTES};
 use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::{chain_data, config, outbox};
@@ -83,11 +83,7 @@ const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 /// whose `logsBloom` alone is 514 characters of JSON, and the two dozen scalar fields, that
 /// is about four kilobytes. Eight is that with room for a fourth log, and a vault `execute`
 /// receipt is smaller.
-const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
-
-/// The most an `eth_blockNumber` reply may be: a hex height and the JSON-RPC envelope
-/// around it.
-const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
+pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
 
 /// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and
 /// a batch bigger than one outcall can hold is not an error the canister recovers from: the
@@ -439,11 +435,6 @@ async fn cancel(key: NonceKey) {
         gas_limit,
     });
     task_manager::outbox::arm();
-}
-
-/// `0x` and the hex of `bytes`, which is how a chain takes raw bytes.
-fn hex0x(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }
 
 /// A provider saying it already has this transaction is the same as it accepting it: the

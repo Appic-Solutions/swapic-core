@@ -55,9 +55,10 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// default, and an interior cap set), one cached chain reading, one outbox entry, the five
 /// key types, one nonce waiting for its signature, a cancel that has been out on the
 /// network, a sanctioned address as the sanctions set keys it, an in-flight marker, an
-/// attestation, a swap whose latest leg is known, and an Eco intent. Every field of a sample differs from
-/// its neighbours, so a field that moves to another index decodes to a different value
-/// instead of passing unnoticed.
+/// attestation, a swap whose latest leg is known, an Eco intent, and a swap with the hash
+/// its latest attempt confirmed as. Every field of a sample differs from its neighbours,
+/// so a field that moves to another index decodes to a different value instead of
+/// passing unnoticed.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
     assert_eq!(
@@ -91,9 +92,10 @@ fn samples() -> Vec<Sample> {
         amount_paid: Some(TokenAmount::from(24_990_000_u32)),
         waiting_since: Some(Timestamp::from_nanos(1_700_000_000_123_456_789)),
         // absent, so this sample's bytes stay exactly the ones the golden already pins; the
-        // swap appended at the end of `samples()` is the one that pins the two fields
+        // swaps appended at the end of `samples()` are the ones that pin the later fields
         last_leg: None,
         last_outcome: None,
+        last_tx_hash: None,
     };
     let unpaid = Swap {
         quote_bytes: vec![],
@@ -107,6 +109,7 @@ fn samples() -> Vec<Sample> {
         waiting_since: None,
         last_leg: None,
         last_outcome: None,
+        last_tx_hash: None,
     };
     let config = Config {
         platform_fee: crate::BasisPoints::new(10),
@@ -277,6 +280,9 @@ fn samples() -> Vec<Sample> {
                 waiting_since: None,
                 last_leg: Some(crate::Leg::Mint),
                 last_outcome: Some(crate::Outcome::Failed),
+                // absent, so this sample's bytes stay exactly the ones the golden pins;
+                // the swap appended below is the one that pins the field
+                last_tx_hash: None,
             },
         ),
         sample(
@@ -290,6 +296,23 @@ fn samples() -> Vec<Sample> {
                     .unwrap(),
             )
             .unwrap(),
+        ),
+        sample(
+            "swap with the hash its latest attempt confirmed as",
+            Swap {
+                quote_bytes: vec![0xca, 0xfe, 0x01],
+                status: SwapStatus::Executing,
+                last_attempt: Some(Attempt::new(1)),
+                open_attempt: None,
+                src_chain: ChainId::BASE,
+                src_token: "0x2".parse().unwrap(),
+                amount_in: TokenAmount::from(6_000_000_u32),
+                amount_paid: None,
+                waiting_since: None,
+                last_leg: Some(crate::Leg::Burn),
+                last_outcome: Some(crate::Outcome::Confirmed),
+                last_tx_hash: Some(TxHash::new([0x66; 32])),
+            },
         ),
     ]);
     all

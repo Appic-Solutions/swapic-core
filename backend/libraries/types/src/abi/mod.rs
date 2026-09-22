@@ -37,6 +37,10 @@ sol! {
     /// payer, and the amount the vault measured as received.
     event Deposited(bytes32 indexed quoteHash, address indexed token, address indexed from, uint256 amount);
 
+    /// What CCTP v2's token messenger logs when a message is received: the recipient, the
+    /// amount minted to it (the burn less the fee), the token, and the fee Circle kept.
+    event MintAndWithdraw(address indexed mintRecipient, uint256 amount, address indexed mintToken, uint256 feeCollected);
+
     function execute(bytes32 swapRef, Call[] calls, Delta[] deltas);
     function payout(bytes32 swapRef, address token, address to, uint256 amount);
     function refund(bytes32 ref, address token, address to, uint256 amount);
@@ -203,6 +207,13 @@ fn eco_reward(reward: Reward) -> EcoReward {
 /// the vault's logs by.
 pub fn deposited_topic() -> [u8; 32] {
     Deposited::SIGNATURE_HASH.0
+}
+
+/// The topic a `MintAndWithdraw` log carries first: the keccak of
+/// `MintAndWithdraw(address,uint256,address,uint256)`, which is what the mint read finds
+/// in a mint's receipt to learn what the destination vault was delivered.
+pub fn mint_and_withdraw_topic() -> [u8; 32] {
+    MintAndWithdraw::SIGNATURE_HASH.0
 }
 
 /// `execute(bytes32,(address,uint256,bytes,address,uint256)[],(address,int256)[])`.

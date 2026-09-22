@@ -332,6 +332,38 @@ type InitArg = record {
 };
 // The leg of a swap a transaction attempt was signed for.
 type Leg = variant { Payout; Burn; Mint; Refund; Reclaim };
+// Why bytes are not a CCTP v2 burn message.
+type MessageError = variant {
+  UnknownBodyVersion : record { version : nat32 };
+  ExpirationBlockTooLarge;
+  TooShort : record { len : nat64; wanted : nat64 };
+  UnknownVersion : record { version : nat32 };
+};
+// A field of a burn message the swap's burn determined.
+type MessageField = variant {
+  Amount;
+  MessageSender;
+  MintRecipient;
+  DestinationCaller;
+  Sender;
+  BurnToken;
+  DestinationDomain;
+  SourceDomain;
+  MaxFee;
+  Recipient;
+};
+// Why a pushed message is not the swap's own burn: the field that reads otherwise, with
+// what the swap's burn wrote (`expected`) and what the message carries (`found`). Words
+// are the 32-byte words the message carries.
+type MessageMismatch = variant {
+  Amount : record { field : MessageField; found : nat; expected : nat };
+  FeeAboveMaxFee : record { fee : nat; max_fee : nat };
+  Word : record { field : MessageField; found : blob; expected : blob };
+  HookData : record { len : nat64 };
+  Version : record { found : nat32 };
+  Domain : record { field : MessageField; found : nat32; expected : nat32 };
+  Threshold : record { found : nat32; expected : nat32 };
+};
 // How a swap's latest attempt ended.
 type Outcome = variant { Failed; Confirmed };
 // Why a permit is not one the vault can use, naming the field.
@@ -384,9 +416,20 @@ type PullError = variant {
 };
 // Why `push_attestation` stored nothing.
 type PushAttestationError = variant {
+  // The burn the push names is not the transaction the swap's burn confirmed as.
+  NotTheSwapsBurn : record { pushed : blob; confirmed : blob };
   Guard : GuardError;
+  // This canister's address is not derived yet, so the message's caller cannot be
+  // checked.
+  AddressNotDerived;
+  // The message does not bind to the swap's burn, or the rail cannot check it.
+  Rail : RailError;
+  // The swap's burn has not confirmed, so there is no burn for the message to be of.
+  NoBurnConfirmed : blob;
   UnknownSwap : blob;
   AttestationTooLong : record { cap : nat64; len : nat64 };
+  // The swap is not on a CCTP rail, so no attestation is its.
+  NotACctpSwap : blob;
   MessageTooLong : record { cap : nat64; len : nat64 };
 };
 // Why `push_chain_data` stored nothing.
@@ -461,6 +504,22 @@ type QuoteError = variant {
   TrailingBytes : record { len : nat64; consumed : nat64 };
   Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
   AmountTooLarge : record { field : text };
+};
+// Why a rail could not decide on a swap: a knob the deploy left unset, an address of the
+// quote or of the vault that is not one, or an attestation that is not the swap's.
+type RailError = variant {
+  RailToken : RailTokenError;
+  NoMessageTransmitter;
+  NoMintHash;
+  NoUsdc : record { chain_id : nat64 };
+  Message : MessageMismatch;
+  FeeOverflow : record { amount : nat };
+  NoTokenMessenger;
+  QuoteAddress : QuoteAddressError;
+  UnreadableMessage : MessageError;
+  Vault : VaultError;
+  NoEcoPortal;
+  NoDomain : record { chain_id : nat64 };
 };
 // Why a quote is not one its rail can carry: the rails carry the configured USDC on both
 // sides and nothing else, compared as addresses. Addresses are EIP-55, the rail is its
@@ -562,6 +621,8 @@ type Swap = record {
   waiting_since_ns : opt nat64;
   // Absent until the swap is paid in stable.
   amount_paid : opt nat;
+  // The transaction the latest attempt confirmed as, once it has.
+  last_tx_hash : opt blob;
   src_chain : nat64;
   // How the latest attempt ended: absent while it is open, or before any was signed.
   last_outcome : opt Outcome;
@@ -750,12 +811,20 @@ service : (InitArg) -> {
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
   // Watcher-only. Hands in what Circle attested for a swap's burn: the message the source
-  // chain emitted and the signatures over it, which the mint on the destination takes. The
-  // inbox is stable memory and holds one attestation per swap: the same push again changes
-  // nothing, and a different one replaces it, so a corrected attestation is the one the
-  // mint carries. Rail data and not money, so the halt switch does not gate it, and a wrong
-  // pair costs a reverted mint and nothing else. Only a known swap has an inbox slot.
-  push_attestation : (blob, blob, blob) -> (Result_6);
+  // chain emitted and the signatures over it, which the mint on the destination takes,
+  // named by the burn transaction the watcher fetched it for.
+  // 
+  // The message is bound to the swap before it is taken in: the swap must be on a CCTP
+  // rail with its burn confirmed, the burn named must be the transaction that burn
+  // confirmed as, and every field of the message that the burn determined must be the
+  // swap's own (the lane, the token, the amount, the destination vault, this canister as
+  // the caller, the rail's threshold and fee ceiling). A message of another burn, ours or
+  // anyone's, is refused by the field, so it can never be minted under this swap's name
+  // and paid out of the destination vault's pooled balance. The inbox is stable memory
+  // and holds one attestation per swap: the same push again changes nothing, and a
+  // different one that binds replaces it. Rail data and not money, so the halt switch
+  // does not gate it.
+  push_attestation : (blob, blob, blob, blob) -> (Result_6);
   // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
   // canister would otherwise spend an outcall on before every decision. It moves no money,
   // so the halt switch does not gate it: a halted canister still wants a current view of the

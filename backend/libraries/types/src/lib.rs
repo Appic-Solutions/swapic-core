@@ -4,6 +4,7 @@
 pub mod abi;
 pub mod address;
 pub mod canonical;
+pub mod cctp;
 pub mod chain;
 pub mod chain_data;
 pub mod checked_amount;

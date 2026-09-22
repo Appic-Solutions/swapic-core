@@ -74,6 +74,7 @@ fn waiting(bytes: Vec<u8>, since_ns: u64) -> Swap {
         waiting_since: Some(Timestamp::from_nanos(since_ns)),
         last_leg: None,
         last_outcome: None,
+        last_tx_hash: None,
     }
 }
 

@@ -689,8 +689,9 @@ fn a_stranger_and_a_halted_canister_claim_nothing() {
     assert!(pic.get_canister_http().is_empty());
 }
 
-/// The inbox is the watcher's, holds one attestation per known swap, and takes the same
-/// push twice without complaint.
+/// The inbox is the watcher's, has a slot only for a known swap whose burn has confirmed,
+/// holds a message to its bounds, and takes nothing for a swap with no burn to attest.
+/// The push that binds, and the same push twice, are proven end to end in Phase 0.
 #[test]
 fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
     let (pic, canister, _admin) = setup();
@@ -698,6 +699,7 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
     let quote_hash = swap_id(&quote);
     let message = vec![0xaa; 376];
     let attestation = vec![0xbb; 65];
+    let burn = [0x77; 32];
 
     assert_eq!(
         push_attestation(
@@ -705,6 +707,7 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
             canister,
             Principal::from_slice(&[9; 29]),
             quote_hash,
+            burn,
             &message,
             &attestation
         ),
@@ -718,6 +721,7 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
             canister,
             watcher(),
             quote_hash,
+            burn,
             &message,
             &attestation
         ),
@@ -740,29 +744,7 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
             canister,
             watcher(),
             quote_hash,
-            &message,
-            &attestation
-        ),
-        Ok(())
-    );
-    assert_eq!(
-        push_attestation(
-            &pic,
-            canister,
-            watcher(),
-            quote_hash,
-            &message,
-            &attestation
-        ),
-        Ok(()),
-        "idempotent"
-    );
-    assert_eq!(
-        push_attestation(
-            &pic,
-            canister,
-            watcher(),
-            quote_hash,
+            burn,
             &vec![0; 4_097],
             &attestation
         ),
@@ -770,6 +752,19 @@ fn push_attestation_is_the_watchers_and_needs_a_known_swap() {
             len: 4_097,
             cap: 4_096
         })
+    );
+    assert_eq!(
+        push_attestation(
+            &pic,
+            canister,
+            watcher(),
+            quote_hash,
+            burn,
+            &message,
+            &attestation
+        ),
+        Err(PushAttestationError::NoBurnConfirmed(quote_hash)),
+        "a swap whose burn has not confirmed has no burn to attest"
     );
     assert_eq!(
         count(&pic, canister),

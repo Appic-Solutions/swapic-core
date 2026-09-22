@@ -4,7 +4,7 @@ mod tests;
 use crate::address::TokenId;
 use crate::chain::ChainId;
 use crate::events::TxPurpose;
-use crate::hash::QuoteHash;
+use crate::hash::{QuoteHash, TxHash};
 use crate::numeric::{Attempt, Nonce, Timestamp, TokenAmount};
 use crate::quote::{Quote, QuoteError};
 use ic_stable_structures::storable::{Bound, Storable};
@@ -131,6 +131,11 @@ pub struct Swap {
     /// How the latest attempt ended: absent while it is open, or before any was signed.
     #[n(10)]
     pub last_outcome: Option<Outcome>,
+    /// The transaction the latest attempt confirmed as, once it has: what binds a pushed
+    /// attestation to the swap's own burn, and what the mint read is looked up by. Absent
+    /// while the attempt is open, after one that failed, and before any was signed.
+    #[n(11)]
+    pub last_tx_hash: Option<TxHash>,
 }
 
 /// Why an event cannot move the state it was offered to.

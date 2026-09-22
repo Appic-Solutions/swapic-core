@@ -9,14 +9,20 @@
 pub mod cctp;
 pub mod eco;
 
+#[cfg(test)]
+pub(crate) mod tests;
+
+pub use cctp::{MessageField, MessageMismatch};
+
 use crate::deposits::VaultError;
 use thiserror::Error;
+use types::cctp::MessageError;
 use types::events::TxPurpose;
 use types::quote::QuoteAddressError;
 use types::rail::RailTokenError;
 use types::{
     Attestation, ChainId, Config, EcoIntent, EvmAddress, GasAmount, Quote, QuoteHash, Rail, Swap,
-    TokenAmount, UnixSeconds, Wei,
+    TokenAmount, TxHash, UnixSeconds, Wei,
 };
 
 /// One transaction a rail asks the engine to send, ready for `tx::create_and_send`.
@@ -58,6 +64,10 @@ pub enum RailStep {
         chain_id: ChainId,
         amount: TokenAmount,
     },
+    /// Read the receipt of `tx_hash` on `chain_id`, the rail's mint, for what it delivered
+    /// to the destination vault: the engine appends `PaidInStable` for that amount, which
+    /// is what the chain says arrived and never what the burn promised.
+    ReadMint { chain_id: ChainId, tx_hash: TxHash },
     /// Send this transaction to take the funds back into the source vault, for a refund to
     /// follow.
     Reclaim(RailTx),
@@ -86,6 +96,12 @@ pub enum RailError {
     RailToken(#[from] RailTokenError),
     #[error(transparent)]
     QuoteAddress(#[from] QuoteAddressError),
+    #[error("the attestation's message is not a burn message: {0}")]
+    UnreadableMessage(#[from] MessageError),
+    #[error(transparent)]
+    Message(#[from] MessageMismatch),
+    #[error("the mint confirmed with no transaction hash recorded for it")]
+    NoMintHash,
 }
 
 /// What a rail decides on: the swap as the fold holds it, its quote, the deploy's config,
@@ -126,10 +142,9 @@ pub trait DepositRail {
 
 /// The rail a quote names, and never any other.
 pub fn for_rail(rail: Rail) -> Box<dyn CallRail> {
-    match rail {
-        Rail::CctpV2Fast => Box::new(cctp::Cctp { fast: true }),
-        Rail::CctpV2Standard => Box::new(cctp::Cctp { fast: false }),
-        Rail::Eco => Box::new(eco::Eco),
+    match cctp::Cctp::of(rail) {
+        Some(cctp) => Box::new(cctp),
+        None => Box::new(eco::Eco),
     }
 }
 
@@ -154,111 +169,87 @@ fn ensure_rail_tokens(leg: &Leg) -> Result<(), RailError> {
     )?)
 }
 
-/// The fixtures the two rails' tests share: a Base to Arbitrum USDC quote, a swap at any
-/// point of its life, and a config with every rail knob set.
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::Leg;
-    use std::collections::BTreeMap;
-    use types::config::ChainTable;
-    use types::{
-        Attestation, ChainId, Config, EcoIntent, EvmAddress, GasMode, Leg as SwapLeg, Outcome,
-        Quote, Rail, Swap, SwapStatus, TokenAmount, UnixSeconds,
-    };
-
-    pub const VAULT_BASE: &str = "0x1111111111111111111111111111111111111111";
-    pub const VAULT_ARBITRUM: &str = "0x2222222222222222222222222222222222222222";
-    pub const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-    pub const USDC_ARBITRUM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
-    pub const MINE: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
-
-    pub fn quote() -> Quote {
-        Quote {
-            version: 1,
-            src_chain: ChainId::BASE,
-            src_token: USDC_BASE.parse().unwrap(),
-            amount_in: TokenAmount::from(25_000_000_u32),
-            dst_chain: ChainId::ARBITRUM,
-            dst_token: USDC_ARBITRUM.parse().unwrap(),
-            expected_out: TokenAmount::from(24_990_000_u32),
-            min_out: TokenAmount::from(24_900_000_u32),
-            dst_address: MINE.parse().unwrap(),
-            refund_address: Some(MINE.parse().unwrap()),
-            auto_refund: true,
-            gas_mode: GasMode::Legacy,
-            rail: Rail::CctpV2Fast,
-            expires_at: UnixSeconds::new(1_800_000_000),
-            nonce: 1,
+impl From<RailError> for settlement_api::types::entry::RailError {
+    fn from(error: RailError) -> Self {
+        match error {
+            RailError::NoDomain { chain_id } => Self::NoDomain {
+                chain_id: chain_id.get(),
+            },
+            RailError::NoUsdc { chain_id } => Self::NoUsdc {
+                chain_id: chain_id.get(),
+            },
+            RailError::NoTokenMessenger => Self::NoTokenMessenger,
+            RailError::NoMessageTransmitter => Self::NoMessageTransmitter,
+            RailError::NoEcoPortal => Self::NoEcoPortal,
+            RailError::Vault(error) => Self::Vault(error.into()),
+            RailError::FeeOverflow { amount } => Self::FeeOverflow {
+                amount: amount.into(),
+            },
+            RailError::RailToken(error) => Self::RailToken(error.into()),
+            RailError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
+            RailError::UnreadableMessage(error) => Self::UnreadableMessage(error.into()),
+            RailError::Message(mismatch) => Self::Message(mismatch.into()),
+            RailError::NoMintHash => Self::NoMintHash,
         }
     }
+}
 
-    /// The swap of `quote()`, at the point its latest leg says.
-    pub fn fixture_swap(last_leg: Option<SwapLeg>, last_outcome: Option<Outcome>) -> Swap {
-        let quote = quote();
-        Swap {
-            quote_bytes: quote.canonical_bytes().unwrap(),
-            status: SwapStatus::Executing,
-            last_attempt: None,
-            open_attempt: None,
-            src_chain: quote.src_chain,
-            src_token: quote.src_token,
-            amount_in: quote.amount_in,
-            amount_paid: None,
-            waiting_since: None,
-            last_leg,
-            last_outcome,
+impl From<MessageField> for settlement_api::types::entry::MessageField {
+    fn from(field: MessageField) -> Self {
+        match field {
+            MessageField::SourceDomain => Self::SourceDomain,
+            MessageField::DestinationDomain => Self::DestinationDomain,
+            MessageField::Sender => Self::Sender,
+            MessageField::Recipient => Self::Recipient,
+            MessageField::DestinationCaller => Self::DestinationCaller,
+            MessageField::BurnToken => Self::BurnToken,
+            MessageField::MintRecipient => Self::MintRecipient,
+            MessageField::Amount => Self::Amount,
+            MessageField::MessageSender => Self::MessageSender,
+            MessageField::MaxFee => Self::MaxFee,
         }
     }
+}
 
-    pub fn config() -> Config {
-        Config {
-            vault_addresses: BTreeMap::from([
-                (ChainId::BASE, VAULT_BASE.parse().unwrap()),
-                (ChainId::ARBITRUM, VAULT_ARBITRUM.parse().unwrap()),
-            ]),
-            cctp_domains: ChainTable(BTreeMap::from([
-                (ChainId::BASE, types::CctpDomain::new(6)),
-                (ChainId::ARBITRUM, types::CctpDomain::new(3)),
-            ])),
-            usdc_addresses: ChainTable(BTreeMap::from([
-                (ChainId::BASE, USDC_BASE.parse().unwrap()),
-                (ChainId::ARBITRUM, USDC_ARBITRUM.parse().unwrap()),
-            ])),
-            token_messenger: Some(
-                "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
-                    .parse()
-                    .unwrap(),
-            ),
-            message_transmitter: Some(
-                "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
-                    .parse()
-                    .unwrap(),
-            ),
-            eco_portal: Some(
-                "0xEC000064576f9C95a8623Bc0eff3db6d296ea6df"
-                    .parse()
-                    .unwrap(),
-            ),
-            ..Config::default()
-        }
-    }
-
-    pub fn leg<'a>(
-        quote: &'a Quote,
-        swap: &'a Swap,
-        config: &'a Config,
-        attestation: Option<&'a Attestation>,
-        intent: Option<&'a EcoIntent>,
-    ) -> Leg<'a> {
-        Leg {
-            quote_hash: quote.hash().unwrap(),
-            quote,
-            swap,
-            config,
-            mine: MINE.parse::<EvmAddress>().unwrap(),
-            attestation,
-            intent,
-            now: UnixSeconds::new(1_000),
+impl From<MessageMismatch> for settlement_api::types::entry::MessageMismatch {
+    fn from(mismatch: MessageMismatch) -> Self {
+        match mismatch {
+            MessageMismatch::Version { found } => Self::Version { found },
+            MessageMismatch::Domain {
+                field,
+                expected,
+                found,
+            } => Self::Domain {
+                field: field.into(),
+                expected,
+                found,
+            },
+            MessageMismatch::Word {
+                field,
+                expected,
+                found,
+            } => Self::Word {
+                field: field.into(),
+                expected,
+                found,
+            },
+            MessageMismatch::Threshold { expected, found } => Self::Threshold { expected, found },
+            MessageMismatch::Amount {
+                field,
+                expected,
+                found,
+            } => Self::Amount {
+                field: field.into(),
+                expected: expected.into(),
+                found: found.into(),
+            },
+            MessageMismatch::FeeAboveMaxFee { fee, max_fee } => Self::FeeAboveMaxFee {
+                fee: fee.into(),
+                max_fee: max_fee.into(),
+            },
+            MessageMismatch::HookData { len } => Self::HookData {
+                len: u64::try_from(len).expect("BUG: usize is at most 64 bits on every target"),
+            },
         }
     }
 }

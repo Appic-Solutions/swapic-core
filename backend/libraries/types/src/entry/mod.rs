@@ -70,8 +70,9 @@ pub enum AttestationError {
 
 /// What Circle attested for a burn: the message the source chain emitted and the
 /// signatures over it, which together are what the destination's `receiveMessage` takes.
-/// A hint from outside, never money truth: a wrong pair makes the mint revert, and the
-/// receipt is what decides.
+/// A hint from outside, never money truth: the message is bound to the swap's own burn
+/// before it is taken in and before it is minted, a wrong pair makes the mint revert, and
+/// what the mint delivered is read off its receipt.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
 /// new field is optional.

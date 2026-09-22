@@ -31,6 +31,7 @@ fn sample_fold() -> MemoryStore {
             // is absent from every swap stored before it existed
             last_leg: None,
             last_outcome: None,
+            last_tx_hash: None,
         },
     );
     store.put_pocket(

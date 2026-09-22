@@ -291,6 +291,7 @@ fn replay_audit_halts_on_a_swap_no_event_created() {
             waiting_since: None,
             last_leg: None,
             last_outcome: None,
+            last_tx_hash: None,
         };
         StableStore(()).put_swap(quote, ghost);
         // the stable fold holds the ghost, so it admits the allocation and the signed

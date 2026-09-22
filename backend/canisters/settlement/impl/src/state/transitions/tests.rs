@@ -1689,6 +1689,52 @@ fn a_pull_record_spends_only_the_nonce_held_for_that_pull() {
 /// learns both from lines it already writes: the leg from the purpose of the number the
 /// signed record spends, the outcome from the line that closes the attempt. A replay
 /// rebuilds the same pair.
+/// The fold keeps the hash of the transaction the latest attempt confirmed as: what binds
+/// a pushed attestation to the swap's own burn and what the mint read is looked up by. It
+/// is set by the confirming line, cleared by the next signed record (a new attempt), and
+/// absent after a failure, and a replay rebuilds it.
+#[test]
+fn the_fold_keeps_the_hash_the_latest_attempt_confirmed_as() {
+    let qh = swap_id(1);
+    let mut state = fold(vec![funds(1)]);
+    let hash_of = |state: &HeapState| swap(state, qh).last_tx_hash;
+    let step = |state: &mut HeapState, payload: EventType| {
+        state.check(&payload).expect("guard admits");
+        let event = next_event(state, 1, payload);
+        apply_state_transition(state, &event);
+    };
+    assert_eq!(hash_of(&state), None, "nothing confirmed yet");
+    step(&mut state, created(TxPurpose::Burn(qh), BASE, 0));
+    step(&mut state, signed(qh, 1));
+    assert_eq!(hash_of(&state), None, "signed is not confirmed");
+    step(&mut state, confirmed(qh, 1));
+    assert_eq!(
+        hash_of(&state),
+        Some(TxHash::new([1; 32])),
+        "the confirming line's hash"
+    );
+    step(&mut state, created(TxPurpose::Mint(qh), BASE, 1));
+    step(&mut state, signed(qh, 2));
+    assert_eq!(
+        hash_of(&state),
+        None,
+        "a new attempt has not confirmed as anything yet"
+    );
+    step(&mut state, failed(qh, 2));
+    assert_eq!(
+        hash_of(&state),
+        None,
+        "a failed attempt confirmed as nothing"
+    );
+    let replayed = fold(vec![
+        funds(1),
+        created(TxPurpose::Burn(qh), BASE, 0),
+        signed(qh, 1),
+        confirmed(qh, 1),
+    ]);
+    assert_eq!(hash_of(&replayed), Some(TxHash::new([1; 32])));
+}
+
 #[test]
 fn the_fold_knows_the_latest_leg_and_how_it_ended() {
     use types::{Leg, Outcome};

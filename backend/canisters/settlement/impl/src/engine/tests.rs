@@ -14,6 +14,7 @@ fn at(status: SwapStatus, last_leg: Option<Leg>, last_outcome: Option<Outcome>) 
         waiting_since: None,
         last_leg,
         last_outcome,
+        last_tx_hash: None,
     }
 }
 

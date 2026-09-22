@@ -287,6 +287,17 @@ fn the_deposited_topic_is_the_one_the_vault_logs_under() {
     );
 }
 
+/// The mint read finds what a mint delivered by this topic, so it is pinned against what
+/// CCTP v2's token messenger emits: `cast sig-event "MintAndWithdraw(address indexed
+/// mintRecipient, uint256 amount, address indexed mintToken, uint256 feeCollected)"`.
+#[test]
+fn the_mint_and_withdraw_topic_is_the_one_the_token_messenger_logs_under() {
+    assert_eq!(
+        hex::encode(mint_and_withdraw_topic()),
+        "50c55e915134d457debfa58eb6f4342956f8b0616d51a89a3659360178e1ab63"
+    );
+}
+
 fn reward() -> EcoReward {
     EcoReward {
         deadline: UnixSeconds::new(1_788_357_691),

@@ -182,6 +182,15 @@ fn request_size(request: &HttpRequest) -> u64 {
     u64::try_from(bytes).expect("BUG: usize is at most 64 bits on every target")
 }
 
+/// The most an `eth_blockNumber` reply may be: a hex height and the JSON-RPC envelope
+/// around it.
+pub(crate) const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
+
+/// `0x` and the hex of `bytes`, which is how a chain takes raw bytes, a topic or a word.
+pub(crate) fn hex0x(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
 /// `0x`-prefixed hex as a block number.
 pub(crate) fn parse_block_number(text: &str) -> Option<BlockNumber> {
     u64::from_str_radix(text.strip_prefix("0x")?, 16)

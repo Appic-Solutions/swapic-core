@@ -15,8 +15,8 @@ use crate::client::settlement::{
 use crate::settlement_suite::init::watcher;
 use crate::settlement_suite::init::{install, quoter};
 use crate::settlement_suite::tests::test_engine::{
-    config, push_readings, quote, swap_id, MESSAGE_TRANSMITTER, TOKEN_MESSENGER, USDC_ARBITRUM,
-    USDC_BASE, USER, VAULT_ARBITRUM, VAULT_BASE,
+    config, push_readings, quote, swap_id, AMOUNT, MESSAGE_TRANSMITTER, TOKEN_MESSENGER,
+    USDC_ARBITRUM, USDC_BASE, USER, VAULT_ARBITRUM, VAULT_BASE,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::Header;
@@ -33,9 +33,23 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use types::abi::{
     decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute,
-    decode_vault_payout, decode_vault_refund, deposited_topic,
+    decode_vault_payout, decode_vault_refund, deposited_topic, mint_and_withdraw_topic,
 };
-use types::EvmAddress;
+use types::cctp::{BurnBody, BurnMessage, BURN_BODY_VERSION, MESSAGE_VERSION};
+use types::{BlockNumber, EvmAddress, TokenAmount};
+
+/// The fee Circle takes from the fixture's fast burn of 25 USDC: one basis point, inside
+/// the two the burn allowed, so what the mint delivers is the burn less this.
+const FEE_EXECUTED: u32 = 2_500;
+
+/// The fee Circle takes from a burn of `amount`: one basis point of it.
+fn fee_executed(amount: TokenAmount) -> TokenAmount {
+    amount.checked_div_floor(10_000_u16).unwrap()
+}
+
+/// The attestation bytes the fixture hands in beside a message: the chain is mocked, so
+/// nothing verifies them.
+const ATTESTATION: [u8; 65] = [0xbb; 65];
 
 /// How far the loop goes before it gives up on a swap that is not converging.
 const MAX_ITERATIONS: usize = 120;
@@ -155,12 +169,54 @@ impl Chains {
                         "blockHash": format!("0x{}", hex::encode([0x42; 32])),
                         "blockNumber": format!("0x{block:x}"),
                         "status": "0x1",
+                        "logs": self.logs_of(hash),
                     }),
                     None => Value::Null,
                 }
             }
             other => panic!("the canister asked for {other}, which the fixture does not answer"),
         }
+    }
+
+    /// What a transaction logged: a mint (a `receiveMessage` to the transmitter) logs the
+    /// token messenger's `MintAndWithdraw` to the destination vault of the burn less the
+    /// fee the attested message carries, and everything else logs nothing the canister
+    /// reads.
+    fn logs_of(&self, hash: Hash32) -> Vec<Value> {
+        let Some(tx) = self.sent.iter().find(|tx| tx.hash == hash) else {
+            return vec![];
+        };
+        if tx.to != MESSAGE_TRANSMITTER.parse::<EvmAddress>().unwrap() {
+            return vec![];
+        }
+        let (message, _) = decode_cctp_receive_message(&tx.data).expect("a receiveMessage");
+        let message = BurnMessage::parse(&message).expect("a burn message");
+        let delivered = message
+            .body
+            .amount
+            .checked_sub(message.body.fee_executed)
+            .unwrap();
+        let word = |address: &str| {
+            format!(
+                "0x{}",
+                hex::encode(address.parse::<EvmAddress>().unwrap().to_word())
+            )
+        };
+        vec![json!({
+            "address": TOKEN_MESSENGER.to_ascii_lowercase(),
+            "topics": [
+                format!("0x{}", hex::encode(mint_and_withdraw_topic())),
+                word(VAULT_ARBITRUM),
+                word(USDC_ARBITRUM),
+            ],
+            "data": format!(
+                "0x{}{}",
+                hex::encode(delivered.to_be_bytes()),
+                hex::encode(message.body.fee_executed.to_be_bytes())
+            ),
+            "logIndex": "0x2",
+            "removed": false,
+        })]
     }
 
     /// Answers every pending outcall from the fixture, each by the methods in its body,
@@ -194,6 +250,53 @@ impl Chains {
         self.head += 1;
         answered
     }
+}
+
+/// The message Circle attests for the fixture's fast burn of `quote`: every field as the
+/// burn emitted it, and the nonce, the fee and the expiration as the service fills them.
+fn attested_message(quote: &types::Quote, mine: EvmAddress) -> BurnMessage {
+    let word = |address: &str| address.parse::<EvmAddress>().unwrap().to_word();
+    BurnMessage {
+        version: MESSAGE_VERSION,
+        source_domain: 6,
+        destination_domain: 3,
+        nonce: [0x9a; 32],
+        sender: word(TOKEN_MESSENGER),
+        recipient: word(TOKEN_MESSENGER),
+        destination_caller: mine.to_word(),
+        min_finality_threshold: 1_000,
+        finality_threshold_executed: 1_000,
+        body: BurnBody {
+            version: BURN_BODY_VERSION,
+            burn_token: word(USDC_BASE),
+            mint_recipient: word(VAULT_ARBITRUM),
+            amount: quote.amount_in,
+            message_sender: word(VAULT_BASE),
+            max_fee: quote
+                .amount_in
+                .checked_mul(2_u8)
+                .and_then(|scaled| scaled.checked_div_ceil(10_000_u16))
+                .unwrap(),
+            fee_executed: fee_executed(quote.amount_in),
+            expiration_block: BlockNumber::new(19_000_500),
+            hook_data: vec![],
+        },
+    }
+}
+
+/// The transaction the swap's burn confirmed as, once it has.
+fn burn_hash(pic: &PocketIc, canister: Principal, quote_hash: Hash32) -> Option<Hash32> {
+    events(pic, canister)
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventType::TxConfirmed {
+                quote_hash: qh,
+                attempt: 1,
+                tx_hash,
+                ..
+            } if *qh == quote_hash => Some(*tx_hash),
+            _ => None,
+        })
 }
 
 /// The vault's `Deposited` log for `quote_hash` on the source chain.
@@ -317,8 +420,24 @@ fn claim(pic: &PocketIc, canister: Principal, chains: &mut Chains, quote: &types
     quote_hash
 }
 
+/// One whole turn of the machine: the clock moves, the readings stay young, the tick and
+/// the outbox pass run, and every outcall they made is answered.
+fn turn(pic: &PocketIc, canister: Principal, chains: &mut Chains) {
+    pic.advance_time(STEP);
+    push_readings(pic, canister, chains.head);
+    for _ in 0..12 {
+        pic.tick();
+    }
+    chains.respond_all(pic);
+    for _ in 0..12 {
+        pic.tick();
+    }
+    chains.respond_all(pic);
+}
+
 /// Turns the machine until the swap reaches `until`, answering every outcall and handing
-/// in the attestation once the burn has confirmed, or fails readably with the trail so far.
+/// in the attested `message` for the swap's burn once the burn has confirmed, or fails
+/// readably with the trail so far.
 fn drive_until(
     pic: &PocketIc,
     canister: Principal,
@@ -326,26 +445,24 @@ fn drive_until(
     quote_hash: Hash32,
     installed: usize,
     until: SwapStatus,
-    attestation: Option<(&[u8], &[u8])>,
+    message: Option<&BurnMessage>,
 ) {
     let mut pushed = false;
     for iteration in 0..MAX_ITERATIONS {
-        pic.advance_time(STEP);
-        push_readings(pic, canister, chains.head);
-        for _ in 0..12 {
-            pic.tick();
-        }
-        chains.respond_all(pic);
-        for _ in 0..12 {
-            pic.tick();
-        }
-        chains.respond_all(pic);
-        let burn_confirmed = events(pic, canister).iter().any(|event| {
-            matches!(&event.payload, EventType::TxConfirmed { quote_hash: qh, attempt: 1, .. } if *qh == quote_hash)
-        });
-        if let (Some((message, attestation)), true, false) = (attestation, burn_confirmed, pushed) {
-            push_attestation(pic, canister, watcher(), quote_hash, message, attestation)
-                .expect("the watcher hands in the attestation");
+        turn(pic, canister, chains);
+        if let (Some(message), Some(burn), false) =
+            (message, burn_hash(pic, canister, quote_hash), pushed)
+        {
+            push_attestation(
+                pic,
+                canister,
+                watcher(),
+                quote_hash,
+                burn,
+                &message.encode(),
+                &ATTESTATION,
+            )
+            .expect("the watcher hands in the attestation");
             pushed = true;
         }
         let swap =
@@ -371,6 +488,27 @@ fn drive_until(
     );
 }
 
+/// Turns the machine until the swap's burn has confirmed, and answers the transaction it
+/// confirmed as.
+fn drive_until_burn_confirmed(
+    pic: &PocketIc,
+    canister: Principal,
+    chains: &mut Chains,
+    quote_hash: Hash32,
+    installed: usize,
+) -> Hash32 {
+    for _ in 0..MAX_ITERATIONS {
+        turn(pic, canister, chains);
+        if let Some(burn) = burn_hash(pic, canister, quote_hash) {
+            return burn;
+        }
+    }
+    panic!(
+        "the burn did not confirm in {MAX_ITERATIONS} iterations of {STEP:?}; trail: {:#?}",
+        trail(pic, canister, installed)
+    );
+}
+
 /// The deep audit, run to its verdict.
 fn deep_audit_is_clean(pic: &PocketIc, canister: Principal, admin: Principal) -> bool {
     for _ in 0..100 {
@@ -384,11 +522,11 @@ fn deep_audit_is_clean(pic: &PocketIc, canister: Principal, admin: Principal) ->
 }
 
 /// The Phase 0 trail, exactly: the deposit becomes the swap, the burn is created, signed
-/// and confirmed, the attestation is handed in, the mint is created, signed and confirmed
-/// and lands the stable, the payout is created, signed and confirmed, and the swap is done.
-/// The three broadcasts decode to the vault's `execute` of `depositForBurn`, the
-/// transmitter's `receiveMessage` and the vault's `payout`, and the log holds up under
-/// every audit.
+/// and confirmed, the attestation is handed in, the mint is created, signed and confirmed,
+/// what it delivered is read off its receipt and lands the stable, the payout is created,
+/// signed and confirmed, and the swap is done. The three broadcasts decode to the vault's
+/// `execute` of `depositForBurn`, the transmitter's `receiveMessage` and the vault's
+/// `payout`, and the log holds up under every audit.
 #[test]
 fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     let (pic, canister, admin) = setup();
@@ -401,8 +539,7 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     let quote = quote(1);
     let quote_hash = claim(&pic, canister, &mut chains, &quote);
 
-    let message = vec![0xaa; 376];
-    let attestation = vec![0xbb; 65];
+    let message = attested_message(&quote, mine);
     drive_until(
         &pic,
         canister,
@@ -410,7 +547,7 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
         quote_hash,
         installed,
         SwapStatus::Done,
-        Some((&message, &attestation)),
+        Some(&message),
     );
 
     assert_eq!(
@@ -441,8 +578,9 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
         .unwrap();
     assert_eq!(
         paid,
-        (42161, candid::Nat::from(24_995_000_u32)),
-        "the stable landed on Arbitrum, the burn less the fast fee's ceiling"
+        (42161, candid::Nat::from(AMOUNT - FEE_EXECUTED)),
+        "the stable landed on Arbitrum: what the mint's receipt says was delivered, the \
+         burn less the fee Circle took, and never what the burn promised"
     );
 
     // the three broadcasts, decoded
@@ -473,7 +611,7 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     assert_eq!(mint.to, MESSAGE_TRANSMITTER.parse().unwrap());
     assert_eq!(
         decode_cctp_receive_message(&mint.data),
-        Some((message.clone(), attestation.clone())),
+        Some((message.encode(), ATTESTATION.to_vec())),
         "the mint carries what the watcher handed in"
     );
 
@@ -486,7 +624,7 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
             types::QuoteHash::new(quote_hash),
             USDC_ARBITRUM.parse().unwrap(),
             USER.parse().unwrap(),
-            types::TokenAmount::from(24_995_000_u32),
+            types::TokenAmount::from(AMOUNT - FEE_EXECUTED),
         ))
     );
     assert!(chains.sent.iter().all(|tx| tx.value == 0));
@@ -499,6 +637,127 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
         pic.get_canister_http().is_empty(),
         "nothing is left in flight"
     );
+}
+
+/// An attestation is bound to its swap: two swaps burn, and the message of one pushed
+/// under the other's hash is refused by the field that differs, as is a push naming a burn
+/// that is not the swap's own; each swap's own message is taken in, the same push twice
+/// changes nothing, and each swap is paid what its own mint delivered.
+#[test]
+fn a_message_of_another_swap_is_refused_and_each_swap_is_paid_its_own_mint() {
+    use settlement_api::types::entry::{
+        MessageField, MessageMismatch, PushAttestationError, RailError,
+    };
+    let (pic, canister, admin) = setup();
+    let mine: EvmAddress = evm_address(&pic, canister, admin)
+        .expect("derived")
+        .parse()
+        .unwrap();
+    let installed = events(&pic, canister).len();
+    let mut chains = Chains::new(19_000_000);
+    let big = quote(3);
+    let small = types::Quote {
+        amount_in: TokenAmount::from(10_000_000_u32),
+        expected_out: TokenAmount::from(9_996_000_u32),
+        min_out: TokenAmount::from(9_960_000_u32),
+        ..quote(4)
+    };
+    let big_hash = claim(&pic, canister, &mut chains, &big);
+    let small_hash = claim(&pic, canister, &mut chains, &small);
+    let big_burn = drive_until_burn_confirmed(&pic, canister, &mut chains, big_hash, installed);
+    let small_burn = drive_until_burn_confirmed(&pic, canister, &mut chains, small_hash, installed);
+    assert_ne!(big_burn, small_burn);
+
+    let big_message = attested_message(&big, mine).encode();
+    let small_message = attested_message(&small, mine).encode();
+    // the big swap's message under the small swap's hash, naming the small swap's burn:
+    // refused by the amount, which is the field that differs
+    assert_eq!(
+        push_attestation(
+            &pic,
+            canister,
+            watcher(),
+            small_hash,
+            small_burn,
+            &big_message,
+            &ATTESTATION
+        ),
+        Err(PushAttestationError::Rail(RailError::Message(
+            MessageMismatch::Amount {
+                field: MessageField::Amount,
+                expected: candid::Nat::from(10_000_000_u32),
+                found: candid::Nat::from(AMOUNT),
+            }
+        )))
+    );
+    // and naming the big swap's burn: refused as not the swap's own burn
+    assert_eq!(
+        push_attestation(
+            &pic,
+            canister,
+            watcher(),
+            small_hash,
+            big_burn,
+            &big_message,
+            &ATTESTATION
+        ),
+        Err(PushAttestationError::NotTheSwapsBurn {
+            pushed: big_burn,
+            confirmed: small_burn,
+        })
+    );
+    for (quote_hash, burn, message) in [
+        (big_hash, big_burn, &big_message),
+        (small_hash, small_burn, &small_message),
+    ] {
+        for _ in 0..2 {
+            assert_eq!(
+                push_attestation(
+                    &pic,
+                    canister,
+                    watcher(),
+                    quote_hash,
+                    burn,
+                    message,
+                    &ATTESTATION
+                ),
+                Ok(()),
+                "the swap's own message is taken in, the same push twice without complaint"
+            );
+        }
+    }
+    for quote_hash in [big_hash, small_hash] {
+        drive_until(
+            &pic,
+            canister,
+            &mut chains,
+            quote_hash,
+            installed,
+            SwapStatus::Done,
+            None,
+        );
+    }
+    let paid: Vec<(Hash32, candid::Nat)> = events(&pic, canister)
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventType::PaidInStable {
+                quote_hash, amount, ..
+            } => Some((*quote_hash, amount.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut expected = vec![
+        (big_hash, candid::Nat::from(AMOUNT - FEE_EXECUTED)),
+        (small_hash, candid::Nat::from(10_000_000_u32 - 1_000)),
+    ];
+    let mut paid = paid;
+    paid.sort();
+    expected.sort();
+    assert_eq!(
+        paid, expected,
+        "each swap is paid what its own mint delivered"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 
 /// The refund trail: a refund started on a funded swap sends the vault's `refund` of the

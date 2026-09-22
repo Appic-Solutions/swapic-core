@@ -431,12 +431,14 @@ pub fn start_gasless_pull(
     )
 }
 
-/// Positional, as the endpoint takes them: `(quote_hash, message, attestation)`.
+/// Positional, as the endpoint takes them: `(quote_hash, burn_tx_hash, message,
+/// attestation)`.
 pub fn push_attestation(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
     quote_hash: settlement_api::types::events::Hash32,
+    burn_tx_hash: settlement_api::types::events::Hash32,
     message: &[u8],
     attestation: &[u8],
 ) -> push_attestation::Response {
@@ -445,7 +447,13 @@ pub fn push_attestation(
         canister,
         sender,
         "push_attestation",
-        encode_args((quote_hash, message.to_vec(), attestation.to_vec())).unwrap(),
+        encode_args((
+            quote_hash,
+            burn_tx_hash,
+            message.to_vec(),
+            attestation.to_vec(),
+        ))
+        .unwrap(),
     )
 }
 

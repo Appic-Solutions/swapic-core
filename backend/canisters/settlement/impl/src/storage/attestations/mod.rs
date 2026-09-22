@@ -1,8 +1,10 @@
 //! The attestation inbox: what Circle attested for each swap's burn, handed in by the
-//! watcher and taken out by the engine once the mint it feeds has landed. Rail data, not
-//! money truth: `receiveMessage` verifies the pair on the chain, and a wrong one makes the
-//! mint revert, which the receipt then says. Not a fold of the event log, so it has a map
-//! of its own and the replay audit does not compare it. Stable, so a pushed attestation
+//! watcher and taken out by the engine once the mint it feeds has delivered. The door
+//! binds a pushed message to the swap's own burn field by field before it lands here, and
+//! the rail binds it again before it is minted, because a valid message of another burn
+//! of ours would mint under this swap's name: `receiveMessage` verifies the signatures on
+//! the chain, not whose burn they are. Not a fold of the event log, so it has a map of
+//! its own and the replay audit does not compare it. Stable, so a pushed attestation
 //! survives an upgrade (rule A9).
 
 use crate::storage::memory::{attestations_memory, Memory};

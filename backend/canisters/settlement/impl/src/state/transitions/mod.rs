@@ -427,11 +427,13 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             attempt,
             ..
         } => state.record_attempt_signed(quote_hash, *attempt),
-        EventType::TxConfirmed { quote_hash, .. } => {
-            state.record_attempt_closed(quote_hash, Outcome::Confirmed)
-        }
+        EventType::TxConfirmed {
+            quote_hash,
+            tx_hash,
+            ..
+        } => state.record_attempt_closed(quote_hash, Outcome::Confirmed, Some(*tx_hash)),
         EventType::TxFailed { quote_hash, .. } => {
-            state.record_attempt_closed(quote_hash, Outcome::Failed)
+            state.record_attempt_closed(quote_hash, Outcome::Failed, None)
         }
         EventType::PaidInStable {
             quote_hash, amount, ..

@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::rpc::{self, parse_block_number, parse_hash32, RpcError};
+use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BLOCK_NUMBER_BYTES};
 use crate::storage::{chain_data, config};
 use crate::tx::confirmations;
 use serde_json::{json, Value};
@@ -30,9 +30,6 @@ use types::{
 /// pricing. An answer over it is refused by the system, which the read reports as a
 /// typed transport failure rather than deciding on a part of the log.
 const MAX_LOGS_BYTES: u64 = 32 * 1024;
-
-/// The most an `eth_blockNumber` reply may be: a hex height and its JSON-RPC envelope.
-const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
 
 /// The most blocks one `eth_getLogs` asks for: ten thousand, the range most providers
 /// serve in one call. A wider range is read in windows of this many blocks.
@@ -197,11 +194,6 @@ pub fn windows(from: BlockNumber, anchor: BlockNumber) -> Result<Vec<Window>, De
         to = start - 1;
     }
     Ok(windows)
-}
-
-/// `0x` and the hex of `bytes`, which is how a chain takes a topic or a word.
-fn hex0x(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }
 
 /// The batch for one window: the head block, then the vault's `Deposited` logs naming

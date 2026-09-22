@@ -13,6 +13,7 @@ mod tests;
 
 use crate::deposits::{self, DepositError, DepositRead, VaultError, Wanted, WantedAmount};
 use crate::guards::require_not_halted;
+use crate::mints::{self, MintError};
 use crate::rails::{self, Leg as RailLeg, RailError, RailStep, RailTx};
 use crate::state::Store;
 use crate::storage::events::{append_event, read_state, AppendError};
@@ -25,7 +26,7 @@ use types::events::TxPurpose;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError};
 use types::{
     BasisPoints, ChainId, EventType, GasAmount, Leg, Outcome, Quote, QuoteHash, Swap, SwapStatus,
-    Timestamp, TokenAmount, Wei,
+    Timestamp, TokenAmount, TxHash, Wei,
 };
 
 /// The gas a vault payout needs: one transfer and the vault's event.
@@ -174,6 +175,8 @@ pub enum EngineError {
     Append(#[from] AppendError),
     #[error(transparent)]
     Deposit(#[from] DepositError),
+    #[error(transparent)]
+    Mint(#[from] MintError),
 }
 
 /// The payout for a swap paid `paid` in stable: less the platform's `fee` of it, rounded
@@ -473,9 +476,30 @@ async fn rail_step(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
         RailStep::CheckArrival { chain_id, expired } => {
             check_arrival(quote_hash, &quote, chain_id, expired).await
         }
+        RailStep::ReadMint { chain_id, tx_hash } => read_mint(quote_hash, chain_id, tx_hash).await,
         RailStep::Reclaim(tx) => send(tx).await,
         RailStep::Stuck(reason) => freeze(quote_hash, reason),
     }
+}
+
+/// Reads what the rail's mint delivered to the destination vault, off the mint's own
+/// receipt, and records it as the stable arriving: what the chain says arrived, never what
+/// the burn promised. The inbox is done with the attestation once the mint has delivered.
+// todo_harden_reads: the read is the mint read, single and unreplicated, bound to a hash
+// this canister signed, the configured messenger, vault and USDC, and the configured depth.
+async fn read_mint(
+    quote_hash: QuoteHash,
+    chain_id: ChainId,
+    tx_hash: TxHash,
+) -> Result<Did, EngineError> {
+    let minted = mints::read_mint(chain_id, tx_hash).await?;
+    append_event(EventType::PaidInStable {
+        quote_hash,
+        chain_id,
+        amount: minted.amount,
+    })?;
+    attestations::remove(quote_hash);
+    Ok(Did::Recorded)
 }
 
 /// Reads the destination vault for the rail's fill: a deposit for the quote, in the token
@@ -527,7 +551,9 @@ async fn reclaim(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError>
     let (_, step) = with_rail_leg(quote_hash, swap, |rail, leg| rail.reclaim(leg))?;
     match step {
         RailStep::Reclaim(tx) | RailStep::Send(tx) => send(tx).await,
-        RailStep::Wait(_) | RailStep::CheckArrival { .. } => Ok(Did::Nothing),
+        RailStep::Wait(_) | RailStep::CheckArrival { .. } | RailStep::ReadMint { .. } => {
+            Ok(Did::Nothing)
+        }
         RailStep::Arrived { .. } => Ok(Did::Nothing),
         RailStep::Stuck(reason) => freeze(quote_hash, reason),
     }

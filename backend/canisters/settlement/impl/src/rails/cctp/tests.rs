@@ -4,11 +4,49 @@ use crate::rails::tests::{
 };
 use crate::rails::{RailStep, WaitingFor};
 use types::abi::{decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute};
+use types::cctp::{BurnBody, BurnMessage, BURN_BODY_VERSION, MESSAGE_VERSION};
 use types::config::ChainTable;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::RailTokenError;
-use types::{Attestation, ChainId, Config, EvmAddress, Outcome, Timestamp};
+use types::{Attestation, BlockNumber, ChainId, Config, EvmAddress, Outcome, Timestamp, TxHash};
+
+fn word(address: &str) -> [u8; 32] {
+    address.parse::<EvmAddress>().unwrap().to_word()
+}
+
+/// The message Circle attests for the fixture swap's fast burn: every field the burn
+/// determined as the burn emitted it, and the nonce, the fee and the expiration as the
+/// attestation service filled them in.
+pub(crate) fn attested_message() -> BurnMessage {
+    let config = config();
+    BurnMessage {
+        version: MESSAGE_VERSION,
+        source_domain: 6,
+        destination_domain: 3,
+        nonce: [0x9a; 32],
+        sender: config.token_messenger.unwrap().to_word(),
+        recipient: config.token_messenger.unwrap().to_word(),
+        destination_caller: word(MINE),
+        min_finality_threshold: FAST_FINALITY_THRESHOLD,
+        finality_threshold_executed: FAST_FINALITY_THRESHOLD,
+        body: BurnBody {
+            version: BURN_BODY_VERSION,
+            burn_token: word(USDC_BASE),
+            mint_recipient: word(VAULT_ARBITRUM),
+            amount: TokenAmount::from(25_000_000_u32),
+            message_sender: word(VAULT_BASE),
+            max_fee: TokenAmount::from(5_000_u32),
+            fee_executed: TokenAmount::from(2_500_u32),
+            expiration_block: BlockNumber::new(19_000_100),
+            hook_data: vec![],
+        },
+    }
+}
+
+fn attestation_of(message: &BurnMessage) -> Attestation {
+    Attestation::new(message.encode(), vec![0xbb; 65], Timestamp::from_nanos(1)).unwrap()
+}
 
 fn fast() -> Cctp {
     Cctp { fast: true }
@@ -157,7 +195,7 @@ fn a_missing_knob_refuses_the_burn_by_name() {
         message_transmitter: None,
         ..config()
     };
-    let attestation = Attestation::new(vec![1], vec![2], Timestamp::from_nanos(1)).unwrap();
+    let attestation = attestation_of(&attested_message());
     let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     assert_eq!(
         fast()
@@ -194,8 +232,8 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
         fast().step(&leg(&quote, &burned, &config, None, None)),
         Ok(RailStep::Wait(WaitingFor::Attestation))
     );
-    let attestation =
-        Attestation::new(vec![0xaa; 376], vec![0xbb; 65], Timestamp::from_nanos(1)).unwrap();
+    let message = attested_message();
+    let attestation = attestation_of(&message);
     let mint = match fast().step(&leg(&quote, &burned, &config, Some(&attestation), None)) {
         Ok(RailStep::Send(tx)) => tx,
         other => panic!("the mint is sent once the attestation is in: {other:?}"),
@@ -209,23 +247,32 @@ fn the_steps_run_burn_attestation_mint_arrival_and_a_burn_is_final() {
     assert_eq!(mint.gas_limit, MINT_GAS_LIMIT);
     assert_eq!(
         decode_cctp_receive_message(&mint.data),
-        Some((vec![0xaa; 376], vec![0xbb; 65]))
+        Some((message.encode(), vec![0xbb; 65]))
     );
 
-    let minted = fixture_swap(Some(SwapLeg::Mint), Some(Outcome::Confirmed));
+    // the mint confirmed: what it delivered is read off its own receipt, never computed
+    let mut minted = fixture_swap(Some(SwapLeg::Mint), Some(Outcome::Confirmed));
+    minted.last_tx_hash = Some(TxHash::new([0x42; 32]));
     assert_eq!(
         fast().step(&leg(&quote, &minted, &config, None, None)),
-        Ok(RailStep::Arrived {
+        Ok(RailStep::ReadMint {
             chain_id: ChainId::ARBITRUM,
-            amount: TokenAmount::from(24_995_000_u32),
+            tx_hash: TxHash::new([0x42; 32]),
         })
     );
     assert_eq!(
         standard().step(&leg(&quote, &minted, &config, None, None)),
-        Ok(RailStep::Arrived {
+        Ok(RailStep::ReadMint {
             chain_id: ChainId::ARBITRUM,
-            amount: TokenAmount::from(25_000_000_u32),
+            tx_hash: TxHash::new([0x42; 32]),
         })
+    );
+    let mut no_hash = fixture_swap(Some(SwapLeg::Mint), Some(Outcome::Confirmed));
+    no_hash.last_tx_hash = None;
+    assert_eq!(
+        fast().step(&leg(&quote, &no_hash, &config, None, None)),
+        Err(RailError::NoMintHash),
+        "a confirmed mint with no hash recorded is a fold no line produces"
     );
 
     assert!(matches!(
@@ -299,5 +346,255 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
     assert!(matches!(
         fast().step(&leg(&wrong_source, &burned, &config, None, None)),
         Err(RailError::RailToken(_))
+    ));
+}
+
+/// The message the watcher hands in is bound to the swap before it is minted: every field
+/// the burn determined must be the swap's own, so a message of another burn (another
+/// amount, another lane, another recipient, another caller) is refused by the field, and
+/// only the fields the attestation service fills in (the nonce, the fee executed within
+/// the ceiling, the expiration) are free. A message that is not a burn message at all is
+/// refused by the way it is not.
+#[test]
+fn a_message_is_bound_to_its_swap_field_by_field() {
+    let quote = quote();
+    let config = config();
+    let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
+    let view = leg(&quote, &burned, &config, None, None);
+    let good = attested_message();
+    assert_eq!(fast().ensure_message_binds(&view, &good), Ok(()));
+
+    let messenger = config.token_messenger.unwrap().to_word();
+    let mine = word(MINE);
+    let cases: Vec<(&str, BurnMessage, MessageMismatch)> = vec![
+        (
+            "source domain",
+            BurnMessage {
+                source_domain: 7,
+                ..good.clone()
+            },
+            MessageMismatch::Domain {
+                field: MessageField::SourceDomain,
+                expected: 6,
+                found: 7,
+            },
+        ),
+        (
+            "destination domain",
+            BurnMessage {
+                destination_domain: 6,
+                ..good.clone()
+            },
+            MessageMismatch::Domain {
+                field: MessageField::DestinationDomain,
+                expected: 3,
+                found: 6,
+            },
+        ),
+        (
+            "sender",
+            BurnMessage {
+                sender: mine,
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::Sender,
+                expected: messenger,
+                found: mine,
+            },
+        ),
+        (
+            "recipient",
+            BurnMessage {
+                recipient: mine,
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::Recipient,
+                expected: messenger,
+                found: mine,
+            },
+        ),
+        (
+            "destination caller",
+            BurnMessage {
+                destination_caller: [0; 32],
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::DestinationCaller,
+                expected: mine,
+                found: [0; 32],
+            },
+        ),
+        (
+            "finality threshold",
+            BurnMessage {
+                min_finality_threshold: STANDARD_FINALITY_THRESHOLD,
+                ..good.clone()
+            },
+            MessageMismatch::Threshold {
+                expected: FAST_FINALITY_THRESHOLD,
+                found: STANDARD_FINALITY_THRESHOLD,
+            },
+        ),
+        (
+            "burn token",
+            BurnMessage {
+                body: BurnBody {
+                    burn_token: mine,
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::BurnToken,
+                expected: word(USDC_BASE),
+                found: mine,
+            },
+        ),
+        (
+            "mint recipient",
+            BurnMessage {
+                body: BurnBody {
+                    mint_recipient: mine,
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::MintRecipient,
+                expected: word(VAULT_ARBITRUM),
+                found: mine,
+            },
+        ),
+        (
+            "amount",
+            BurnMessage {
+                body: BurnBody {
+                    amount: TokenAmount::from(10_000_000_u32),
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Amount {
+                field: MessageField::Amount,
+                expected: TokenAmount::from(25_000_000_u32),
+                found: TokenAmount::from(10_000_000_u32),
+            },
+        ),
+        (
+            "message sender",
+            BurnMessage {
+                body: BurnBody {
+                    message_sender: mine,
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Word {
+                field: MessageField::MessageSender,
+                expected: word(VAULT_BASE),
+                found: mine,
+            },
+        ),
+        (
+            "max fee",
+            BurnMessage {
+                body: BurnBody {
+                    max_fee: TokenAmount::from(6_000_u32),
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Amount {
+                field: MessageField::MaxFee,
+                expected: TokenAmount::from(5_000_u32),
+                found: TokenAmount::from(6_000_u32),
+            },
+        ),
+        (
+            "fee above the ceiling",
+            BurnMessage {
+                body: BurnBody {
+                    fee_executed: TokenAmount::from(5_001_u32),
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::FeeAboveMaxFee {
+                fee: TokenAmount::from(5_001_u32),
+                max_fee: TokenAmount::from(5_000_u32),
+            },
+        ),
+        (
+            "hook data",
+            BurnMessage {
+                body: BurnBody {
+                    hook_data: vec![1, 2, 3],
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::HookData { len: 3 },
+        ),
+    ];
+    for (case, message, mismatch) in cases {
+        assert_eq!(
+            fast().ensure_message_binds(&view, &message),
+            Err(RailError::Message(mismatch)),
+            "{case}"
+        );
+    }
+    // the fields the attestation service fills in are free
+    let filled = BurnMessage {
+        nonce: [0x11; 32],
+        finality_threshold_executed: 2_000,
+        body: BurnBody {
+            fee_executed: TokenAmount::from(5_000_u32),
+            expiration_block: BlockNumber::new(1),
+            ..good.body.clone()
+        },
+        ..good.clone()
+    };
+    assert_eq!(fast().ensure_message_binds(&view, &filled), Ok(()));
+    // the standard rail asks the standard threshold and no fee
+    let standard_message = BurnMessage {
+        min_finality_threshold: STANDARD_FINALITY_THRESHOLD,
+        body: BurnBody {
+            max_fee: TokenAmount::ZERO,
+            fee_executed: TokenAmount::ZERO,
+            ..good.body.clone()
+        },
+        ..good.clone()
+    };
+    assert_eq!(
+        standard().ensure_message_binds(&view, &standard_message),
+        Ok(())
+    );
+
+    // the mint is refused on a message that does not bind, and on bytes that are no message
+    let other_amount = BurnMessage {
+        body: BurnBody {
+            amount: TokenAmount::from(10_000_000_u32),
+            ..good.body.clone()
+        },
+        ..good.clone()
+    };
+    assert!(matches!(
+        fast().step(&leg(
+            &quote,
+            &burned,
+            &config,
+            Some(&attestation_of(&other_amount)),
+            None
+        )),
+        Err(RailError::Message(MessageMismatch::Amount { .. }))
+    ));
+    let garbage =
+        Attestation::new(vec![0xaa; 376], vec![0xbb; 65], Timestamp::from_nanos(1)).unwrap();
+    assert!(matches!(
+        fast().step(&leg(&quote, &burned, &config, Some(&garbage), None)),
+        Err(RailError::UnreadableMessage(_))
     ));
 }

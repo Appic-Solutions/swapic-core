@@ -4,6 +4,7 @@ pub mod engine;
 pub mod entry;
 pub mod guards;
 pub mod lifecycle;
+pub mod mints;
 pub mod queries;
 pub mod rails;
 pub mod rpc;

@@ -184,13 +184,126 @@ pub enum PullError {
     Tx(TxError),
 }
 
-/// Why `push_attestation` stored nothing.
+/// Why bytes are not a CCTP v2 burn message.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MessageError {
+    TooShort { len: u64, wanted: u64 },
+    UnknownVersion { version: u32 },
+    UnknownBodyVersion { version: u32 },
+    ExpirationBlockTooLarge,
+}
+
+impl From<types::cctp::MessageError> for MessageError {
+    fn from(error: types::cctp::MessageError) -> Self {
+        use types::cctp::MessageError as Domain;
+        match error {
+            Domain::TooShort { len, wanted } => Self::TooShort {
+                len: crate::types::wire_len(len),
+                wanted: crate::types::wire_len(wanted),
+            },
+            Domain::UnknownVersion { version } => Self::UnknownVersion { version },
+            Domain::UnknownBodyVersion { version } => Self::UnknownBodyVersion { version },
+            Domain::ExpirationBlockTooLarge => Self::ExpirationBlockTooLarge,
+        }
+    }
+}
+
+/// A field of a burn message the swap's burn determined.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageField {
+    SourceDomain,
+    DestinationDomain,
+    Sender,
+    Recipient,
+    DestinationCaller,
+    BurnToken,
+    MintRecipient,
+    Amount,
+    MessageSender,
+    MaxFee,
+}
+
+/// Why a pushed message is not the swap's own burn: the field that reads otherwise, with
+/// what the swap's burn wrote (`expected`) and what the message carries (`found`). Words
+/// are the 32-byte words the message carries.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum MessageMismatch {
+    Version {
+        found: u32,
+    },
+    Domain {
+        field: MessageField,
+        expected: u32,
+        found: u32,
+    },
+    Word {
+        field: MessageField,
+        expected: Hash32,
+        found: Hash32,
+    },
+    Threshold {
+        expected: u32,
+        found: u32,
+    },
+    Amount {
+        field: MessageField,
+        expected: Nat,
+        found: Nat,
+    },
+    FeeAboveMaxFee {
+        fee: Nat,
+        max_fee: Nat,
+    },
+    HookData {
+        len: u64,
+    },
+}
+
+/// Why a rail could not decide on a swap: a knob the deploy left unset, an address of the
+/// quote or of the vault that is not one, or an attestation that is not the swap's.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum RailError {
+    NoDomain { chain_id: u64 },
+    NoUsdc { chain_id: u64 },
+    NoTokenMessenger,
+    NoMessageTransmitter,
+    NoEcoPortal,
+    Vault(VaultError),
+    FeeOverflow { amount: Nat },
+    RailToken(RailTokenError),
+    QuoteAddress(QuoteAddressError),
+    UnreadableMessage(MessageError),
+    Message(MessageMismatch),
+    NoMintHash,
+}
+
+/// Why `push_attestation` stored nothing.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum PushAttestationError {
     Guard(GuardError),
     UnknownSwap(Hash32),
-    MessageTooLong { len: u64, cap: u64 },
-    AttestationTooLong { len: u64, cap: u64 },
+    /// The swap is not on a CCTP rail, so no attestation is its.
+    NotACctpSwap(Hash32),
+    MessageTooLong {
+        len: u64,
+        cap: u64,
+    },
+    AttestationTooLong {
+        len: u64,
+        cap: u64,
+    },
+    /// The swap's burn has not confirmed, so there is no burn for the message to be of.
+    NoBurnConfirmed(Hash32),
+    /// The burn the push names is not the transaction the swap's burn confirmed as.
+    NotTheSwapsBurn {
+        pushed: Hash32,
+        confirmed: Hash32,
+    },
+    /// This canister's address is not derived yet, so the message's caller cannot be
+    /// checked.
+    AddressNotDerived,
+    /// The message does not bind to the swap's burn, or the rail cannot check it.
+    Rail(RailError),
 }
 
 #[cfg(test)]
