@@ -16,6 +16,6 @@ mod swaps;
 pub use chain::get_chain_data;
 pub use config::{get_config, get_config_full};
 pub use events::{event_count, events_page, verify_chain, verify_replay};
-pub use ops::{evm_address, halted, version};
+pub use ops::{evm_address, halted, test_outbox_armed, version};
 pub use quotes::get_pending;
 pub use swaps::get_swap;

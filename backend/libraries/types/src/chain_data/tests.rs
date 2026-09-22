@@ -65,3 +65,40 @@ fn chain_data_round_trips_through_storage() {
     let data = reading(19_000_000).pushed_at(at(1_700_000_000));
     assert_eq!(ChainData::from_bytes(data.to_bytes()), data);
 }
+
+/// A ceiling capped from below lowers both fields to the cap, and the tip stays inside the
+/// ceiling it is paid out of; a cap above the ceiling changes nothing. What lets a bound on
+/// the whole bill, which a large gas limit turns into a low price per unit, take the place
+/// of the fee ceiling in a replacement.
+#[test]
+fn a_ceiling_capped_below_itself_lowers_both_fields() {
+    let gwei = |n: u64| WeiPerGas::from(n * 1_000_000_000);
+    let ceiling = reading(1).pushed_at(at(1)).fee_ceiling();
+    assert_eq!(
+        ceiling.max_fee(),
+        gwei(8)
+            .checked_add(WeiPerGas::from(800_000_000_u64))
+            .unwrap()
+    );
+
+    let capped = ceiling.capped(gwei(5));
+    assert_eq!(capped.max_fee(), gwei(5));
+    assert_eq!(capped.max_priority_fee(), gwei(5));
+    assert_eq!(
+        ceiling.capped(gwei(10)),
+        ceiling,
+        "a cap above the ceiling is no cap"
+    );
+
+    let fees = Fees::new(gwei(4), gwei(1)).unwrap();
+    assert_eq!(
+        fees.capped(gwei(2)),
+        Fees::new(gwei(2), gwei(1)).unwrap(),
+        "a tip already under the cap is left alone"
+    );
+    assert_eq!(
+        fees.capped(WeiPerGas::ZERO),
+        Fees::new(WeiPerGas::ZERO, WeiPerGas::ZERO).unwrap(),
+        "and the tip never ends up above the ceiling"
+    );
+}

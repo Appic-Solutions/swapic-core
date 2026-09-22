@@ -5,13 +5,14 @@
 //! transaction that is not signed is not a transaction.
 
 use crate::client::settlement::{
-    append, derive_evm_address, events_page, evm_address, push_chain_data, set_halted, test_send,
-    verify_replay,
+    append, derive_evm_address, events_page, evm_address, push_chain_data, set_halted,
+    test_outbox_armed, test_send, verify_replay,
 };
 use crate::settlement_suite::init::{install, quoter, upgrade, watcher};
 use candid::{encode_args, Nat, Principal};
 use pocket_ic::common::rest::{
-    CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse, MockCanisterHttpResponse,
+    CanisterHttpReject, CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse,
+    MockCanisterHttpResponse,
 };
 use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde_json::{json, Value};
@@ -1301,4 +1302,174 @@ fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
         "nothing was abandoned"
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The system refusing an answer bigger than the cap the outcall reserved, which is how an
+/// oversized reply reaches the canister on the network: not as bytes, but as a rejection of
+/// the whole call. pocket-ic delivers a mocked body whatever its size, so the refusal is
+/// mocked the way the replica makes it.
+fn reject_oversized(pic: &PocketIc, request: &CanisterHttpRequest) {
+    let cap = request
+        .max_response_bytes
+        .expect("every outcall reserves a cap");
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: request.subnet_id,
+        request_id: request.request_id,
+        response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+            reject_code: 1,
+            message: format!("Http body exceeds size limit of {cap} bytes."),
+        }),
+        additional_responses: vec![],
+    });
+    for _ in 0..12 {
+        pic.tick();
+    }
+}
+
+/// A chunk whose answer does not come back whole is read again one entry at a time, so one
+/// receipt too big for the reply stalls nothing but its own entry: the other two close on
+/// their own answers, and the one that cannot be read is not left silent, its bytes go out
+/// again on the rebroadcast cadence like a transaction no receipt came back for. Without
+/// the re-read every pass builds the same chunk, the same answer is refused, and nothing on
+/// the chain ever closes again.
+#[test]
+fn a_chunk_whose_answer_does_not_come_back_whole_is_read_one_entry_at_a_time() {
+    let (pic, canister, admin) = setup_with_swaps(3);
+    let hashes: Vec<Hash32> = (0..3)
+        .map(|swap| send(&pic, canister, admin, swap).expect("the send goes through"))
+        .collect();
+    let signed = tx_signed(&events(&pic, canister));
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one batch of three broadcasts");
+    assert_eq!(methods(&pending[0]).len(), 3);
+    reply(
+        &pic,
+        &pending[0],
+        vec![json!("0xa"), json!("0xb"), json!("0xc")],
+    );
+
+    // the three receipts are asked for in one chunk, and one of them is bigger than the
+    // whole answer may be, so the system refuses the answer
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "one chunk for the three");
+    assert_eq!(methods(&pending[0]).len(), 4, "the head and three receipts");
+    reject_oversized(&pic, &pending[0]);
+    assert!(
+        of_kind(events(&pic, canister), is_confirmed).is_empty(),
+        "an answer that did not come back whole decides nothing"
+    );
+
+    // so each entry is read on its own, and the first two close on their own answers
+    let deep = 19_000_010;
+    let head = json!(format!("0x{deep:x}"));
+    for (entry, hash) in hashes.iter().take(2).enumerate() {
+        let pending = pic.get_canister_http();
+        assert_eq!(pending.len(), 1, "entry {entry} is read alone");
+        assert_eq!(
+            methods(&pending[0]),
+            vec!["eth_blockNumber", "eth_getTransactionReceipt"],
+            "entry {entry}: the head and its one receipt"
+        );
+        assert_eq!(
+            params(&pending[0], 1),
+            json!([format!("0x{}", hex::encode(hash))]),
+            "entry {entry}: its own hash"
+        );
+        reply(
+            &pic,
+            &pending[0],
+            vec![head.clone(), receipt(deep, true, *hash)],
+        );
+    }
+    assert_eq!(
+        of_kind(events(&pic, canister), is_confirmed).len(),
+        2,
+        "the two that could be read closed"
+    );
+
+    // the third's answer is the oversized one, refused on its own too, which decides
+    // nothing about it
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "the third is read alone");
+    assert_eq!(
+        params(&pending[0], 1),
+        json!([format!("0x{}", hex::encode(hashes[2]))])
+    );
+    reject_oversized(&pic, &pending[0]);
+    assert_eq!(of_kind(events(&pic, canister), is_confirmed).len(), 2);
+    assert!(
+        of_kind(events(&pic, canister), is_failed).is_empty(),
+        "a receipt that cannot be read is no failure"
+    );
+
+    // and it is not left silent: past the rebroadcast window its receipt is asked for
+    // again, and when that cannot be read either its bytes go out again
+    advance(&pic, canister, Duration::from_secs(30));
+    let pending = pic.get_canister_http();
+    assert_eq!(pending.len(), 1, "the third is still watched");
+    assert_eq!(
+        params(&pending[0], 1),
+        json!([format!("0x{}", hex::encode(hashes[2]))])
+    );
+    reject_oversized(&pic, &pending[0]);
+    advance(&pic, canister, BATCH_WINDOW);
+    let pending = pic.get_canister_http();
+    let sends: Vec<&CanisterHttpRequest> = pending
+        .iter()
+        .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
+        .collect();
+    assert_eq!(sends.len(), 1, "the unread entry is pushed again");
+    assert_eq!(
+        params(sends[0], 0),
+        json!([format!("0x{}", hex::encode(&signed[2]))]),
+        "with the bytes the log recorded for it"
+    );
+}
+
+/// A halted canister rests. The pass it had armed runs once, finds work it may not do, and
+/// does not put itself on the next window; the halt switch is what wakes it, so lifting
+/// the halt arms the pass and it does what it could not. Without that a halted canister
+/// runs an empty pass every window for as long as the halt lasts.
+#[test]
+fn a_halted_canister_rests_until_the_halt_lifts() {
+    let (pic, canister, admin) = setup_with_swaps(1);
+    append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
+    set_halted(&pic, canister, admin, true).expect("a controller may halt");
+
+    // the number is stranded and the armed pass finds it, but a halted canister may not
+    // cancel it
+    advance(&pic, canister, STRANDED_AFTER);
+    assert!(
+        of_kind(events(&pic, canister), is_cancelled).is_empty(),
+        "a halted canister signs no cancel"
+    );
+    assert!(
+        !test_outbox_armed(&pic, canister, Principal::anonymous()),
+        "and the pass does not re-arm for work it may not do"
+    );
+    for window in 1..=3 {
+        advance(&pic, canister, BATCH_WINDOW);
+        assert!(
+            !test_outbox_armed(&pic, canister, Principal::anonymous()),
+            "window {window}: still resting"
+        );
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "window {window}: and nothing goes out"
+        );
+    }
+
+    set_halted(&pic, canister, admin, false).expect("a controller may resume");
+    assert!(
+        test_outbox_armed(&pic, canister, Principal::anonymous()),
+        "lifting the halt wakes the pass"
+    );
+    advance(&pic, canister, BATCH_WINDOW);
+    settle(&pic);
+    assert_eq!(
+        tx_cancelled(&events(&pic, canister)).len(),
+        1,
+        "and it does what it could not while halted"
+    );
 }

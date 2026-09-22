@@ -219,6 +219,60 @@ fn a_replacement_doubles_its_fee_up_to_a_ceiling_and_then_stops() {
     );
 }
 
+/// A replacement is bounded by the bill as well as by the price: a large gas limit lowers
+/// the price this canister can afford per unit of gas, and the bump clamps to that the way
+/// it clamps to the fee ceiling, so the bids keep rising in smaller steps up to the cost
+/// cap instead of stopping dead one doubling short of it. Refusing there would leave a
+/// transaction underpriced at a bid the bound still had room above.
+#[test]
+fn a_large_gas_limit_keeps_bumping_in_smaller_steps_up_to_the_cost_cap() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(100_000_000_u64),
+            },
+            at(100),
+        );
+        // one ether over two hundred million gas is five gwei per gas: above the floor of
+        // 2.1 gwei the reading prices at, below the 8.8 gwei the fee ceiling allows
+        let gas_limit = GasAmount::from(200_000_000_u64);
+        let mut entry = entry_with(0, 1);
+        entry.gas_limit = gas_limit;
+        entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
+        entry.max_priority_fee = WeiPerGas::from(100_000_000_u64);
+
+        let mut bids = Vec::new();
+        while let Some(next) = bumped(&entry, ChainId::BASE, at(100)) {
+            assert!(
+                next.worst_cost(gas_limit).expect("the bill fits") <= MAX_TRANSACTION_COST,
+                "every bid stays inside the bound"
+            );
+            assert!(next.max_fee() > entry.max_fee, "every bid is higher");
+            entry.max_fee = next.max_fee();
+            entry.max_priority_fee = next.max_priority_fee();
+            bids.push(next.max_fee());
+            assert!(bids.len() < 10, "the cap has to stop this");
+        }
+        assert_eq!(
+            bids,
+            vec![
+                WeiPerGas::from(4_200_000_000_u64),
+                WeiPerGas::from(5_000_000_000_u64),
+            ],
+            "double, then the cost cap, then nothing"
+        );
+        assert_eq!(
+            entry.max_fee.transaction_cost(gas_limit),
+            Some(MAX_TRANSACTION_COST),
+            "the last bid spends exactly the bound"
+        );
+    });
+}
+
 /// The tip a transaction offers is never above the ceiling it is paid out of: under
 /// EIP-1559 the producer keeps min(tip, ceiling - base fee), so a tip above the ceiling is
 /// not an error the chain reports, it is a number that quietly means something else.
@@ -514,4 +568,62 @@ fn closing_an_entry_never_invents_an_attempt() {
             "a swap's entry with no attempt is left alone, not closed as attempt one"
         );
     });
+}
+
+/// The answers of one chunk are sliced per entry in call order: the head first, then each
+/// entry's receipts in the order its hashes were asked for, so an entry that has been
+/// replaced is decided on whichever of its own transactions landed, and never on another
+/// entry's. An answer with no head, or with fewer answers than calls, decides nothing.
+#[test]
+fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
+    let first = entry_with(0, 1);
+    let replaced = entry_with(1, 2);
+    let head = Ok(json!("0x121eaca"));
+    let landed_second = a_receipt([1; 32], "0x1");
+    let answers: Vec<Result<Value, RpcError>> = vec![
+        head.clone(),
+        Ok(json!(null)),
+        Ok(json!(null)),
+        Ok(landed_second.clone()),
+    ];
+    let (latest, per_entry) =
+        landed(&[first.clone(), replaced.clone()], &answers).expect("a whole answer is read");
+    assert_eq!(latest, BlockNumber::new(19_000_010));
+    assert_eq!(
+        per_entry,
+        vec![
+            None,
+            Some(parse_receipt(&landed_second, &replaced.hashes).expect("its own receipt"))
+        ],
+        "the first entry has nothing, the second landed its replacement"
+    );
+
+    // the same receipt read against the wrong entry is not that entry's
+    let crossed: Vec<Result<Value, RpcError>> = vec![
+        head.clone(),
+        Ok(landed_second),
+        Ok(json!(null)),
+        Ok(json!(null)),
+    ];
+    let (_, per_entry) =
+        landed(&[first.clone(), replaced.clone()], &crossed).expect("a whole answer is read");
+    assert_eq!(
+        per_entry,
+        vec![None, None],
+        "a receipt for hash 1 is not the receipt of an entry that never carried it"
+    );
+
+    assert_eq!(
+        landed(
+            std::slice::from_ref(&first),
+            &[Ok(json!("not a number")), Ok(json!(null))]
+        ),
+        None,
+        "no head, no depth, nothing to decide"
+    );
+    assert_eq!(
+        landed(&[first, replaced], &[head, Ok(json!(null))]),
+        None,
+        "fewer answers than calls is not an answer to this chunk"
+    );
 }

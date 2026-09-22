@@ -9,7 +9,11 @@ fn post_upgrade() {
     // the layouts, but only from this wasm on: the previously deployed wasm stored
     // candid-encoded envelopes, which these types do not read, so a canister running it
     // cannot take this upgrade. It traps on the check below and keeps the wasm it has, which
-    // is the right outcome; this build wants a fresh install.
+    // is the right outcome; this build wants a fresh install. For the same reason the
+    // transition rules need no replay path for a log written before the chain layer: no
+    // deployed canister holds one, so every log this wasm ever folds was written by rules
+    // that already required `TxCreated` before `TxSigned`, and the head check below is the
+    // only compatibility check an upgrade makes.
     storage::init();
     // a fold out of step with its log would take the upgrade and then refuse every append,
     // so the upgrade traps instead, and a trap here leaves the old wasm running

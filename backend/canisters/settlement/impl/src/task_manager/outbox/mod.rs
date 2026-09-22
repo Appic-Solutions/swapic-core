@@ -10,6 +10,7 @@
 //! drop, including on a trap.
 
 use crate::storage::events::read_state;
+use crate::storage::halt::is_halted;
 use crate::storage::{config, outbox};
 use crate::tx;
 use ic_cdk_timers::TimerId;
@@ -61,14 +62,20 @@ fn still_waiting(due: Option<Timestamp>, now: Timestamp) -> bool {
     due.is_some_and(|due| due > now)
 }
 
+/// Whether a pass is on its way: the recorded timer still lies ahead.
+pub fn is_armed() -> bool {
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
+    let due = FLUSH_TIMER.with(|timer| timer.get()).map(|(_, due)| due);
+    still_waiting(due, now)
+}
+
 /// Puts the next pass on the batch window, unless one is already on its way. Called when a
 /// transaction is queued, and again at the end of every pass that leaves work behind.
 pub fn arm() {
-    let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let due = FLUSH_TIMER.with(|timer| timer.get()).map(|(_, due)| due);
-    if still_waiting(due, now) {
+    if is_armed() {
         return;
     }
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
     let window = config::get().batch_window;
     let timer = ic_cdk_timers::set_timer(window, || ic_cdk::spawn(run()));
     let due = Timestamp::from_nanos(now.as_nanos().saturating_add(window.as_nanos() as u64));
@@ -105,7 +112,11 @@ async fn run() {
     tx::cancel_stranded().await;
     tx::flush().await;
     tx::check_open().await;
-    if work_is_pending() {
+    // a halted canister rests: the two passes that create transactions return at once,
+    // and an empty pass every window until an operator lifts the halt is spinning. The
+    // halt is read after the passes, because it can be set during their awaits, and
+    // `set_halted` arms the pass again when the halt lifts, so nothing waits for nothing.
+    if !is_halted() && work_is_pending() {
         arm();
     }
 }

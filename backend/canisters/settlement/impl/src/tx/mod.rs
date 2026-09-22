@@ -32,8 +32,8 @@ use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, NonceKey,
-    OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
+    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount,
+    NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
 };
 
 /// How long the current bytes stay out before they are handed to a provider again. A
@@ -102,7 +102,7 @@ const MAX_SEND_BYTES_PER_ITEM: u64 = 1_024;
 /// safe floor rather than a free pass: `is_confirmed` counts the receipt's own block as the
 /// first confirmation, so a depth of one still refuses a receipt from a block the head has
 /// not reached, which is a provider answering from two different moments of the chain.
-const DEFAULT_CONFIRMATIONS: types::BlockDepth = types::BlockDepth::new(1);
+const DEFAULT_CONFIRMATIONS: BlockDepth = BlockDepth::new(1);
 
 /// Why no transaction was created, or why a pass could not finish one.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -481,10 +481,29 @@ pub async fn flush() {
     }
 }
 
+/// What one receipt pass did. Returned rather than logged, like the sweep's, so a pass can
+/// be read without the event log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReceiptPass {
+    /// entries that left the outbox on a receipt deep enough, confirmed or reverted
+    pub closed: usize,
+    /// chunks whose answer did not come back whole and were read again one entry at a time
+    pub reread: usize,
+    /// entries whose own answer did not come back either, left to the rebroadcast rule
+    pub unread: usize,
+}
+
 /// Reads what happened to every transaction still out, one batch per chain: the head
 /// block, then a receipt for every hash ever broadcast at each open nonce. A receipt deep
 /// enough closes the attempt, a reverted one at the same depth fails it, and a transaction
 /// that is not landing is re-sent and then replaced.
+///
+/// A chunk whose answer does not come back whole, one reply too big for the cap, a
+/// provider error, a head that does not parse, is read again one entry at a time, so one
+/// bad answer stalls nothing but its own entry. An entry whose own answer does not come
+/// back either is handed to the rebroadcast rule, the way an entry no receipt came back
+/// for is, and counted: left where it is, every pass would build the same chunk, be
+/// refused the same answer, and nothing on that chain would close again.
 ///
 /// This is the read that decides money: the lines that close an attempt are appended from
 /// what it answers.
@@ -492,78 +511,157 @@ pub async fn flush() {
 // answers are bound to what this canister signed (`parse_receipt` refuses a receipt for a
 // hash this entry never broadcast) and held to the configured depth, so one provider can
 // delay a decision but cannot invent one.
-pub async fn check_open() {
+pub async fn check_open() -> ReceiptPass {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
     let limit = config.max_batch_items as usize;
+    let mut pass = ReceiptPass::default();
     for chain_id in outbox::chains() {
         let open = outbox::by_status(chain_id, OutboxStatus::Sent, limit);
         let depth = confirmations(&config, chain_id);
         // split so the answer fits one outcall: the head comes with every chunk, so each
         // chunk's receipts are read against a height from the same answer
         for chunk in receipt_chunks(open) {
-            let receipt_calls: usize = chunk.iter().map(|entry| entry.hashes.len()).sum();
-            let mut calls: Vec<(&str, Value)> = vec![("eth_blockNumber", json!([]))];
-            for entry in &chunk {
-                for hash in &entry.hashes {
-                    calls.push(("eth_getTransactionReceipt", json!([hex0x(hash.as_ref())])));
+            match read_receipts(chain_id, &chunk).await {
+                Ok((latest, landed)) => {
+                    for (entry, landed) in chunk.iter().zip(landed) {
+                        pass.closed += decide(entry, chain_id, landed, latest, depth, now).await;
+                    }
                 }
-            }
-            let cap = receipt_cap(receipt_calls);
-            let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, cap).await else {
-                continue;
-            };
-            let Some(latest) = answers.first().and_then(|answer| {
-                answer
-                    .as_ref()
-                    .ok()
-                    .and_then(|value| value.as_str())
-                    .and_then(parse_block_number)
-            }) else {
-                continue;
-            };
-            // `rpc_batch_each` answers exactly one result per call, in call order, so the head
-            // is at 0 and each entry's receipts follow in the order the calls were built
-            let mut receipts_from = 1;
-            for entry in chunk {
-                let receipts = &answers[receipts_from..receipts_from + entry.hashes.len()];
-                receipts_from += entry.hashes.len();
-                let landed = receipts
-                    .iter()
-                    .filter_map(|answer| answer.as_ref().ok())
-                    .find_map(|value| parse_receipt(value, &entry.hashes).ok());
-                match landed {
-                    // rule A10: only a receipt at the configured depth closes an attempt, and
-                    // that holds however the transaction ended. A reverted receipt closed at
-                    // once would free the swap to be re-signed at a fresh nonce, and a one-block
-                    // reorg that drops the revert and includes the replacement then pays twice.
-                    Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
-                        let Receipt {
-                            tx_hash,
-                            block,
-                            success,
-                        } = receipt;
-                        if success {
-                            close(&entry, |quote_hash, attempt| EventType::TxConfirmed {
-                                quote_hash,
-                                attempt,
-                                chain_id,
-                                tx_hash,
-                                block,
-                            });
-                        } else {
-                            close(&entry, |quote_hash, attempt| EventType::TxFailed {
-                                quote_hash,
-                                attempt,
-                                reason: "the transaction reverted on the chain".to_string(),
-                            });
+                Err(_) if chunk.len() > 1 => {
+                    pass.reread += 1;
+                    for entry in &chunk {
+                        match read_receipts(chain_id, std::slice::from_ref(entry)).await {
+                            Ok((latest, landed)) => {
+                                let landed = landed.into_iter().next().flatten();
+                                pass.closed +=
+                                    decide(entry, chain_id, landed, latest, depth, now).await;
+                            }
+                            Err(_) => {
+                                pass.unread += 1;
+                                push_again(entry, chain_id, now).await;
+                            }
                         }
                     }
-                    // mined but not deep enough: nothing to do but wait
-                    Some(_) => {}
-                    None => push_again(&entry, chain_id, now).await,
+                }
+                // a chunk of one: its answer is the entry's own
+                Err(_) => {
+                    pass.unread += chunk.len();
+                    for entry in &chunk {
+                        push_again(entry, chain_id, now).await;
+                    }
                 }
             }
+        }
+    }
+    pass
+}
+
+/// Why a chunk's answer decided nothing about any entry in it. The pass does the same
+/// either way, re-read the chunk one entry at a time or leave the entry to the rebroadcast
+/// rule, so neither carries more than its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unread {
+    /// the call itself failed: unreachable, refused by the system, a provider error, or an
+    /// answer that is not the batch asked for
+    Rpc,
+    /// the head block did not come back as a number, so no receipt has a depth
+    NoHead,
+}
+
+/// The head and every receipt of `entries` in one outcall, answered as the head and the
+/// receipt that landed for each entry, in order.
+async fn read_receipts(
+    chain_id: ChainId,
+    entries: &[OutboxEntry],
+) -> Result<(BlockNumber, Vec<Option<Receipt>>), Unread> {
+    let mut calls: Vec<(&str, Value)> = vec![("eth_blockNumber", json!([]))];
+    for entry in entries {
+        for hash in &entry.hashes {
+            calls.push(("eth_getTransactionReceipt", json!([hex0x(hash.as_ref())])));
+        }
+    }
+    let cap = receipt_cap(calls.len() - 1);
+    let answers = rpc::rpc_batch_each(chain_id, &calls, cap)
+        .await
+        .map_err(|_| Unread::Rpc)?;
+    landed(entries, &answers).ok_or(Unread::NoHead)
+}
+
+/// The head and the receipt that landed for each entry, sliced out of one chunk's answers
+/// in call order: `rpc_batch_each` answers exactly one result per call, so the head is at
+/// 0 and each entry's receipts follow in the order the calls were built. Nothing at all
+/// when the head is not a number, or the answers are fewer than the calls.
+fn landed(
+    entries: &[OutboxEntry],
+    answers: &[Result<Value, RpcError>],
+) -> Option<(BlockNumber, Vec<Option<Receipt>>)> {
+    let latest = answers
+        .first()?
+        .as_ref()
+        .ok()?
+        .as_str()
+        .and_then(parse_block_number)?;
+    let mut receipts_from = 1;
+    let mut landed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let receipts = answers.get(receipts_from..receipts_from + entry.hashes.len())?;
+        receipts_from += entry.hashes.len();
+        landed.push(
+            receipts
+                .iter()
+                .filter_map(|answer| answer.as_ref().ok())
+                .find_map(|value| parse_receipt(value, &entry.hashes).ok()),
+        );
+    }
+    Some((latest, landed))
+}
+
+/// Acts on what one entry's answer said, and answers how many entries it closed: one when
+/// a receipt deep enough closed the attempt, none while a receipt waits for depth, and none
+/// when no receipt came back, in which case the transaction is not landing and is re-sent
+/// and then replaced.
+async fn decide(
+    entry: &OutboxEntry,
+    chain_id: ChainId,
+    landed: Option<Receipt>,
+    latest: BlockNumber,
+    depth: BlockDepth,
+    now: Timestamp,
+) -> usize {
+    match landed {
+        // rule A10: only a receipt at the configured depth closes an attempt, and that
+        // holds however the transaction ended. A reverted receipt closed at once would
+        // free the swap to be re-signed at a fresh nonce, and a one-block reorg that drops
+        // the revert and includes the replacement then pays twice.
+        Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
+            let Receipt {
+                tx_hash,
+                block,
+                success,
+            } = receipt;
+            let left = if success {
+                close(entry, |quote_hash, attempt| EventType::TxConfirmed {
+                    quote_hash,
+                    attempt,
+                    chain_id,
+                    tx_hash,
+                    block,
+                })
+            } else {
+                close(entry, |quote_hash, attempt| EventType::TxFailed {
+                    quote_hash,
+                    attempt,
+                    reason: "the transaction reverted on the chain".to_string(),
+                })
+            };
+            usize::from(left)
+        }
+        // mined but not deep enough: nothing to do but wait
+        Some(_) => 0,
+        None => {
+            push_again(entry, chain_id, now).await;
+            0
         }
     }
 }
@@ -608,7 +706,7 @@ fn send_cap(sends: usize) -> u64 {
 ///
 /// A chain the config forgot confirms at [`DEFAULT_CONFIRMATIONS`], which is the safe floor
 /// and not a free pass: a receipt still has to be in a block the head has reached.
-fn confirmations(config: &types::Config, chain_id: ChainId) -> types::BlockDepth {
+fn confirmations(config: &types::Config, chain_id: ChainId) -> BlockDepth {
     config
         .confirmations
         .get(&chain_id)
@@ -616,9 +714,9 @@ fn confirmations(config: &types::Config, chain_id: ChainId) -> types::BlockDepth
         .unwrap_or(DEFAULT_CONFIRMATIONS)
 }
 
-/// Drops the entry, appending the line that closes its attempt when it has one. A refused
-/// append leaves the entry where it is, so the next pass sees the same receipt and tries
-/// again.
+/// Drops the entry, appending the line that closes its attempt when it has one, and
+/// answers whether the entry left the outbox. A refused append leaves the entry where it
+/// is, so the next pass sees the same receipt and tries again.
 ///
 /// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
 /// fate before the bytes went out, so what the chain did with them changes nothing in the
@@ -630,15 +728,20 @@ fn confirmations(config: &types::Config, chain_id: ChainId) -> types::BlockDepth
 /// the entry is being removed, not edited, and the only writer that could have put another
 /// entry at this key is `create_and_send`, which only ever writes at a number the allocator
 /// has just handed out and this one is not.
-fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) {
+fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) -> bool {
     match (entry.purpose.quote_hash(), entry.attempt) {
-        (None, _) => outbox::remove(entry.key()),
+        (None, _) => {
+            outbox::remove(entry.key());
+            true
+        }
         (Some(quote_hash), Some(attempt)) => {
-            if append_event(payload(quote_hash, attempt)).is_ok() {
+            let appended = append_event(payload(quote_hash, attempt)).is_ok();
+            if appended {
                 outbox::remove(entry.key());
             }
+            appended
         }
-        (Some(_), None) => {}
+        (Some(_), None) => false,
     }
 }
 
@@ -731,16 +834,30 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
 }
 
 /// The fees a replacement pays: double what the transaction being replaced paid, never
-/// below what the chain is asking now, and never above what the freshest reading allows.
-/// Nothing at all once the entry is already at that ceiling, or when the chain reading is
-/// too old to price a bid against.
+/// below what the chain is asking now, and never above what the freshest reading allows or
+/// what [`MAX_TRANSACTION_COST`] buys per unit of this transaction's gas, whichever is
+/// lower. Nothing at all once the entry is already at that ceiling, or when the chain
+/// reading is too old to price a bid against.
 fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
     let reading = fresh_reading(chain_id, now).ok()?;
     let floor = reading.fees()?;
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
-    let bumped = current.bumped(floor, reading.fee_ceiling())?;
-    affordable(chain_id, bumped, entry.gas_limit).ok()?;
-    Some(bumped)
+    // the bill is bounded as well as the price: a large gas limit lowers what can be paid
+    // per unit, and the bump clamps to that the way it clamps to the fee ceiling, so the
+    // bids keep rising in smaller steps up to the bound instead of stopping one doubling
+    // short of it, and a bid is refused only once nothing can be raised
+    let ceiling = reading
+        .fee_ceiling()
+        .capped(affordable_per_gas(entry.gas_limit)?);
+    current.bumped(floor, ceiling)
+}
+
+/// The most a transaction burning `gas_limit` may pay per unit of gas and stay inside
+/// [`MAX_TRANSACTION_COST`]. Nothing for a gas limit of zero, which no transaction has.
+fn affordable_per_gas(gas_limit: GasAmount) -> Option<WeiPerGas> {
+    MAX_TRANSACTION_COST
+        .checked_div_floor(gas_limit.into_inner())
+        .map(|cost| cost.change_units())
 }
 
 /// What a receipt says.

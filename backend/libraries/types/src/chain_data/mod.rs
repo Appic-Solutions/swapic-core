@@ -178,6 +178,17 @@ impl Fees {
         self.max_fee.transaction_cost(gas)
     }
 
+    /// This pair with both fields held to `cap`: what a ceiling becomes when a bound other
+    /// than the per-gas one, such as the most a whole transaction may cost, sits below
+    /// it. A cap above both fields changes nothing.
+    pub fn capped(self, cap: WeiPerGas) -> Self {
+        Self {
+            max_fee: self.max_fee.min(cap),
+            max_priority_fee: self.max_priority_fee.min(cap),
+        }
+        .clamped()
+    }
+
     /// The fees a replacement pays: double what the transaction being replaced offered, but
     /// never below what the chain is asking now and never above `ceiling`.
     ///

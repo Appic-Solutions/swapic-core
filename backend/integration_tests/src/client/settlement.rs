@@ -7,7 +7,7 @@ use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
     event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
-    get_pending, get_swap, halted, verify_chain, verify_replay,
+    get_pending, get_swap, halted, test_outbox_armed, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
@@ -212,6 +212,21 @@ pub fn get_chain_data(
 
 pub fn halted(pic: &PocketIc, canister: Principal, sender: Principal) -> halted::Response {
     query(pic, canister, sender, "halted", encode_one(()).unwrap())
+}
+
+/// The test door onto the outbox timer: whether a pass is on its way.
+pub fn test_outbox_armed(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> test_outbox_armed::Response {
+    query(
+        pic,
+        canister,
+        sender,
+        "test_outbox_armed",
+        encode_one(()).unwrap(),
+    )
 }
 
 pub fn set_halted(
