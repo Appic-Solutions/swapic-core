@@ -339,3 +339,87 @@ fn a_swap_no_leg_leads_from_is_frozen_with_the_reason() {
     assert!(pic.get_canister_http().is_empty(), "nothing was sent");
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
+
+/// Sanctions are checked where the money leaves, not only where the swap starts: an
+/// address listed while the swap was executing (minutes on CCTP) is not paid, the swap
+/// stops for a human with the party named, and nothing goes out.
+#[test]
+fn an_address_listed_after_the_claim_is_not_paid_out() {
+    use crate::client::settlement::set_sanctioned;
+    let (pic, canister, admin) = setup();
+    let quote = quote(4);
+    let quote_hash = funded(&pic, canister, admin, &quote);
+    // the stable is on the destination side, so the next tick pays the user out
+    append(
+        &pic,
+        canister,
+        admin,
+        &EventType::PaidInStable {
+            quote_hash,
+            chain_id: ARBITRUM,
+            amount: Nat::from(24_995_000_u32),
+        },
+    )
+    .expect("the swap is paid in stable");
+    set_sanctioned(
+        &pic,
+        canister,
+        watcher(),
+        &[&USER.to_ascii_lowercase()],
+        &[],
+    )
+    .expect("the watcher lists the address");
+
+    advance(&pic, canister, TICK, 19_000_001);
+    let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
+    assert_eq!(swap.status, SwapStatus::Frozen);
+    assert_eq!(
+        events(&pic, canister).last().unwrap().payload,
+        EventType::Frozen {
+            quote_hash,
+            reason: "the quote's dst_address is sanctioned".into(),
+        }
+    );
+    assert!(pic.get_canister_http().is_empty(), "nothing was sent");
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The same where the funds go back: a refund address listed after the claim is not paid
+/// either, and the swap stops for a human rather than sending to it.
+#[test]
+fn a_refund_address_listed_after_the_claim_is_not_paid_out() {
+    use crate::client::settlement::set_sanctioned;
+    let (pic, canister, admin) = setup();
+    let quote = quote(5);
+    let quote_hash = funded(&pic, canister, admin, &quote);
+    append(
+        &pic,
+        canister,
+        admin,
+        &EventType::RefundStarted {
+            quote_hash,
+            reason: "the user asked".into(),
+        },
+    )
+    .expect("a funded swap can start a refund");
+    set_sanctioned(
+        &pic,
+        canister,
+        watcher(),
+        &[&USER.to_ascii_lowercase()],
+        &[],
+    )
+    .expect("the watcher lists the address");
+
+    advance(&pic, canister, TICK, 19_000_001);
+    let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
+    assert_eq!(swap.status, SwapStatus::Frozen);
+    assert_eq!(
+        events(&pic, canister).last().unwrap().payload,
+        EventType::Frozen {
+            quote_hash,
+            reason: "the quote's refund_address is sanctioned".into(),
+        }
+    );
+    assert!(pic.get_canister_http().is_empty(), "nothing was sent");
+}

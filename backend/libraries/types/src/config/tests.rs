@@ -611,3 +611,31 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
     let empty: ChainTable<CctpDomain> = minicbor::decode(&[0xf6]).unwrap();
     assert!(empty.0.is_empty());
 }
+
+/// The Eco rail is off until its route is designed, so the knob that turns it on is off by
+/// default and writes nothing while it is: a config written before the knob existed reads
+/// back with Eco off and the golden lines do not move. Turned on, it round-trips, and a
+/// null where it sits reads as off.
+#[test]
+fn eco_is_off_by_default_and_absent_from_storage_while_it_is() {
+    let defaults = Config::default();
+    assert!(!defaults.eco_enabled.is_on());
+    assert_eq!(
+        defaults.to_bytes()[0],
+        0x91,
+        "the knob at its default writes nothing of its own"
+    );
+    let on = Config {
+        eco_enabled: EcoEnabled::ON,
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(on.to_bytes()), on);
+    assert!(on.eco_enabled.is_on());
+    assert_eq!(
+        on.to_bytes()[..2],
+        [0x98, 27],
+        "twenty-seven fields up to the knob"
+    );
+    let off: EcoEnabled = minicbor::decode(&[0xf6]).unwrap();
+    assert!(!off.is_on(), "a null where the knob sits is Eco off");
+}

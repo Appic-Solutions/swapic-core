@@ -222,6 +222,62 @@ fn the_funds_received_line_carries_what_the_vault_logged() {
     );
 }
 
+/// The Eco rail is off until its route is designed: a quote naming it is refused at the
+/// claim, before an outcall is bought, and the refusal says which knob turns it on. Every
+/// other rail is unaffected, and with the knob on an Eco quote is admitted like any other.
+#[test]
+fn an_eco_quote_is_refused_while_the_rail_is_off() {
+    let off = rail_config();
+    let eco = Quote {
+        rail: Rail::Eco,
+        ..evm_quote(1)
+    };
+    assert_eq!(
+        ensure_rail_is_enabled(&off, &eco),
+        Err(ClaimError::RailUnavailable { rail: Rail::Eco })
+    );
+    assert_eq!(ensure_rail_is_enabled(&off, &evm_quote(1)), Ok(()));
+    let on = Config {
+        eco_enabled: types::config::EcoEnabled::ON,
+        ..rail_config()
+    };
+    assert_eq!(ensure_rail_is_enabled(&on, &eco), Ok(()));
+}
+
+/// A swap that cannot be refunded is a swap that can freeze with the user's funds in the
+/// vault, and this canister does not record the payer, so the refund address is the only
+/// way back. Both doors refuse a quote without one, before anything is read or signed.
+#[test]
+fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
+    let no_refund = Quote {
+        refund_address: None,
+        ..evm_quote(1)
+    };
+    assert_eq!(
+        ensure_refundable(&no_refund),
+        Err(ClaimError::QuoteAddress(QuoteAddressError::Absent {
+            field: QuoteAddressField::RefundAddress,
+        }))
+    );
+    let with_refund = Quote {
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(1)
+    };
+    assert_eq!(ensure_refundable(&with_refund), Ok(()));
+    // and it has to be an address a refund can be paid to
+    let not_an_address = Quote {
+        refund_address: Some("0xrefund".parse().unwrap()),
+        ..evm_quote(1)
+    };
+    assert_eq!(
+        ensure_refundable(&not_an_address),
+        Err(ClaimError::QuoteAddress(QuoteAddressError::NotAnAddress {
+            field: QuoteAddressField::RefundAddress,
+            reason: EvmAddressError::WrongLength { len: 6 },
+        }))
+    );
+}
+
 /// The pull needs the quote's own permit: the vault pulls the quote's token and amount, so
 /// a permit for anything else would either fail on the chain or take the wrong funds.
 #[test]

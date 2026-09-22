@@ -29,7 +29,12 @@ fn quote(auto_refund: bool, nonce: u64) -> Quote {
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
         dst_address: "0xuser".parse().unwrap(),
-        refund_address: None,
+        // the store takes only a quote a refund can be paid on
+        refund_address: Some(
+            "0x7551A66653f9a20979ed81835a0b7008EC83401b"
+                .parse()
+                .unwrap(),
+        ),
         auto_refund,
         gas_mode: GasMode::Gasless,
         rail: Rail::CctpV2Fast,

@@ -141,6 +141,10 @@ pub enum ClaimError {
     InFlight {
         since_ns: u64,
     },
+    /// The quote names a rail this deploy does not run, by its id.
+    RailUnavailable {
+        rail: String,
+    },
     /// The quote's tokens are not its rail's: refused before any outcall.
     RailToken(RailTokenError),
     /// A field of the quote that the claim reads as an EVM address is not one.
@@ -263,13 +267,23 @@ pub enum MessageMismatch {
 /// quote or of the vault that is not one, or an attestation that is not the swap's.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum RailError {
-    NoDomain { chain_id: u64 },
-    NoUsdc { chain_id: u64 },
+    NoDomain {
+        chain_id: u64,
+    },
+    NoUsdc {
+        chain_id: u64,
+    },
     NoTokenMessenger,
     NoMessageTransmitter,
     NoEcoPortal,
+    /// The rail, by its id, is one this deploy does not run.
+    RailDisabled {
+        rail: String,
+    },
     Vault(VaultError),
-    FeeOverflow { amount: Nat },
+    FeeOverflow {
+        amount: Nat,
+    },
     RailToken(RailTokenError),
     QuoteAddress(QuoteAddressError),
     UnreadableMessage(MessageError),
@@ -329,6 +343,9 @@ pub enum PushEcoIntentError {
     UnknownSwap(Hash32),
     /// The swap is not on the Eco rail.
     NotAnEcoSwap(Hash32),
+    /// The swap has already published an intent, and the one it published is the one its
+    /// reclaim must name.
+    AlreadyPublished(Hash32),
     ProverNotAnAddress {
         reason: EvmAddressError,
     },

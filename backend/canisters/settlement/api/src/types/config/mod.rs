@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
-use types::config::{AuditChunk, ChainTable, DepositLookback, EvictionsPerSweep, RefundsPerSweep};
+use types::config::{
+    AuditChunk, ChainTable, DepositLookback, EcoEnabled, EvictionsPerSweep, RefundsPerSweep,
+};
 use types::rail::CctpDomain;
 use types::{BasisPoints, BlockDepth, ChainId, EvmAddress, UsdAmount};
 
@@ -48,6 +50,9 @@ pub struct Config {
     pub message_transmitter: Option<String>,
     /// Eco's `Portal`, the same address on every chain.
     pub eco_portal: Option<String>,
+    /// Whether the Eco rail may be used. False until its route is designed: a quote
+    /// naming it is refused at the claim.
+    pub eco_enabled: bool,
 }
 
 impl Default for Config {
@@ -88,6 +93,7 @@ impl fmt::Debug for Config {
             token_messenger,
             message_transmitter,
             eco_portal,
+            eco_enabled,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -118,6 +124,7 @@ impl fmt::Debug for Config {
             .field("token_messenger", token_messenger)
             .field("message_transmitter", message_transmitter)
             .field("eco_portal", eco_portal)
+            .field("eco_enabled", eco_enabled)
             .finish()
     }
 }
@@ -173,6 +180,7 @@ impl From<types::Config> for Config {
             token_messenger,
             message_transmitter,
             eco_portal,
+            eco_enabled,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -219,6 +227,7 @@ impl From<types::Config> for Config {
             token_messenger: token_messenger.map(|address| address.to_string()),
             message_transmitter: message_transmitter.map(|address| address.to_string()),
             eco_portal: eco_portal.map(|address| address.to_string()),
+            eco_enabled: eco_enabled.is_on(),
         }
     }
 }
@@ -331,6 +340,7 @@ impl TryFrom<Config> for types::Config {
                 .as_deref()
                 .map(|address| evm_address("eco_portal", None, address))
                 .transpose()?,
+            eco_enabled: EcoEnabled::new(config.eco_enabled),
         })
     }
 }

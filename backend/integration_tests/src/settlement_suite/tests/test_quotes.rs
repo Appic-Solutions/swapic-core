@@ -13,7 +13,11 @@ use types::quote::MAX_QUOTE_LIFETIME;
 
 /// The same fixture as the types crate's `quote/tests.rs`, field for field. The golden assert in
 /// `the_quoter_registers_a_quote_and_gets_the_golden_hash` keeps the two identical.
-fn fixed_quote() -> Quote {
+/// The cross-repo vector: the quote `golden/quote_hash_v1.txt` pins the hash of, field for
+/// field. It names no refund address, which is a shape the preimage has to hold and the
+/// pending store no longer takes (a swap nobody could be refunded on), so what registers
+/// is [`fixed_quote`] and what the golden is checked against is this.
+fn golden_quote() -> Quote {
     Quote {
         version: 1,
         src_chain: 8453,
@@ -30,6 +34,16 @@ fn fixed_quote() -> Quote {
         rail: "cctp_v2_fast".into(),
         expires_at_s: 1_800_000_000,
         nonce: 7,
+    }
+}
+
+/// The vector's quote with a refund address, which is what the store takes: a quote a
+/// refund could never be paid on is one whose swap could only freeze with the user's
+/// funds in the vault.
+fn fixed_quote() -> Quote {
+    Quote {
+        refund_address: Some("0x1111111111111111111111111111111111111111".into()),
+        ..golden_quote()
     }
 }
 
@@ -159,14 +173,18 @@ fn set_roles_refuses_the_anonymous_principal() {
     assert_eq!(err, SetRolesError::AnonymousRole(Role::Watcher), "say why");
 }
 
-/// The cross-repo contract, end to end: what the endpoint returns is the golden hash that
-/// swapic-backend's quoter computes on its own side.
+/// The cross-repo contract, end to end: what the endpoint returns is the id the other
+/// side computes on its own, written here byte by byte from the frozen layout, and that
+/// writer is pinned against the golden vector in the same breath. The vector's own quote
+/// names no refund address, which the store refuses, so the vector is checked through the
+/// writer and the endpoint through the quote a quoter would really register.
 #[test]
 fn the_quoter_registers_a_quote_and_gets_the_golden_hash() {
     let (pic, canister, _) = with_roles();
     let before = event_count(&pic, canister);
+    assert_eq!(hash_by_hand(&golden_quote()), golden_hash());
     let hash = register_quote(&pic, canister, quoter(), &fixed_quote()).unwrap();
-    assert_eq!(hash, golden_hash());
+    assert_eq!(hash, hash_by_hand(&fixed_quote()));
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash).unwrap(),
         Some(fixed_quote())
@@ -286,7 +304,7 @@ fn register_quote_refuses_a_string_over_the_byte_cap() {
     // refused at conversion, so the canister never computed an id for it: the id it would
     // have is built by hand, and the builder is checked against the golden first
     assert!(types::Quote::try_from(over.clone()).is_err());
-    assert_eq!(hash_by_hand(&fixed_quote()), golden_hash());
+    assert_eq!(hash_by_hand(&golden_quote()), golden_hash());
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash_by_hand(&over)).unwrap(),
         None,

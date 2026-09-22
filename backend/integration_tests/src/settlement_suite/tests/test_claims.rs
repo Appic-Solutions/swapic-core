@@ -37,6 +37,7 @@ const BASE: u64 = 8453;
 const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
+const REFUND: &str = "0x1111111111111111111111111111111111111111";
 const HEAD: u64 = 19_000_000;
 const AMOUNT: u32 = 25_000_000;
 
@@ -53,7 +54,8 @@ fn quote(nonce: u64) -> types::Quote {
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
         dst_address: "0xuser".parse().unwrap(),
-        refund_address: Some("0xrefund".parse().unwrap()),
+        // a refund has to be payable, so the quote names an address and not any text
+        refund_address: Some(REFUND.parse().unwrap()),
         auto_refund: true,
         gas_mode: GasMode::Legacy,
         rail: Rail::CctpV2Fast,
@@ -555,7 +557,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
         pic.get_canister_http().is_empty(),
         "refused before any outcall"
     );
-    set_sanctioned(&pic, canister, watcher(), &["0xrefund"], &["0xuser"]).unwrap();
+    set_sanctioned(&pic, canister, watcher(), &[REFUND], &["0xuser"]).unwrap();
     assert_eq!(
         claim_swap(&pic, canister, watcher(), &wire(&quote)),
         Err(ClaimError::Sanctioned {
@@ -571,7 +573,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
         canister,
         watcher(),
         &[&USER.to_ascii_lowercase()],
-        &["0xrefund"],
+        &[REFUND],
     )
     .unwrap();
     let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
@@ -970,88 +972,246 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 
-/// The Eco intent inbox is the watcher's, holds one intent per known swap on the Eco rail,
-/// and refuses an intent for a swap on another rail, so no CCTP swap can be steered onto
-/// a publish.
+/// The Eco rail is off until its route is designed: a quote naming it is refused at the
+/// claim before an outcall is bought, so no Eco swap exists to push an intent for, and the
+/// inbox door is the watcher's and refuses a swap on another rail. With the rail on, the
+/// intent lands, the same push again changes nothing, and a push once the publish has been
+/// signed is refused: the intent the Portal holds is the one the reclaim must name.
 #[test]
-fn push_eco_intent_is_the_watchers_and_needs_a_known_eco_swap() {
+fn eco_is_off_until_its_route_is_designed_and_an_intent_is_the_publishs_own() {
+    use crate::client::settlement::{append, set_config};
     use settlement_api::types::entry::{EcoIntent, PushEcoIntentError};
     use settlement_api::types::events::EvmAddressError;
-    let (pic, canister, _admin) = setup();
+    let (pic, canister, admin) = setup();
     let intent = EcoIntent {
         destination_chain: BASE,
         route: vec![0xde, 0xad, 0xbe, 0xef],
         deadline_s: 1_800_000_500,
         prover: "0xeC00008537c1F26E739486BCFCC818d81234d5aD".to_string(),
     };
-
-    // a swap on CCTP, and one on Eco, both claimed
-    let cctp = quote(12);
     let eco = types::Quote {
         rail: Rail::Eco,
         ..quote(13)
     };
-    for quote in [&cctp, &eco] {
-        let quote_hash = swap_id(quote);
-        assert_eq!(
-            push_eco_intent(&pic, canister, watcher(), quote_hash, &intent),
-            Err(PushEcoIntentError::UnknownSwap(quote_hash)),
-            "no swap, no inbox slot"
-        );
-        let call = submit_claim(&pic, canister, watcher(), &wire(quote));
-        answer(
-            &pic,
-            &the_read(&pic, quote_hash),
-            HEAD,
-            vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
-        );
-        assert_eq!(await_claim(&pic, call), Ok(quote_hash));
-    }
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&eco)),
+        Err(ClaimError::RailUnavailable {
+            rail: "eco".to_string()
+        }),
+        "the rail is off on a deploy"
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+
+    // a CCTP swap, which no intent may steer onto a publish
+    let cctp = quote(12);
+    let cctp_hash = swap_id(&cctp);
+    let call = submit_claim(&pic, canister, watcher(), &wire(&cctp));
+    answer(
+        &pic,
+        &the_read(&pic, cctp_hash),
+        HEAD,
+        vec![deposit_log(cctp_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(cctp_hash));
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), cctp_hash, &intent),
+        Err(PushEcoIntentError::NotAnEcoSwap(cctp_hash))
+    );
+
+    // the deploy turns the rail on, and the Eco quote is claimed like any other
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            eco_enabled: true,
+            ..config()
+        },
+    )
+    .expect("the controller turns the rail on");
+    let eco_hash = swap_id(&eco);
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), eco_hash, &intent),
+        Err(PushEcoIntentError::UnknownSwap(eco_hash)),
+        "no swap, no inbox slot"
+    );
+    let call = submit_claim(&pic, canister, watcher(), &wire(&eco));
+    answer(
+        &pic,
+        &the_read(&pic, eco_hash),
+        HEAD,
+        vec![deposit_log(eco_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(eco_hash));
 
     assert_eq!(
         push_eco_intent(
             &pic,
             canister,
             Principal::from_slice(&[9; 29]),
-            swap_id(&eco),
+            eco_hash,
             &intent
         ),
         Err(PushEcoIntentError::Guard(GuardError::CallerNotRole(
             settlement_api::types::errors::Role::Watcher
         )))
     );
-    assert_eq!(
-        push_eco_intent(&pic, canister, watcher(), swap_id(&cctp), &intent),
-        Err(PushEcoIntentError::NotAnEcoSwap(swap_id(&cctp)))
-    );
-    assert_eq!(
-        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &intent),
-        Ok(())
-    );
-    assert_eq!(
-        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &intent),
-        Ok(()),
-        "idempotent"
-    );
+    for _ in 0..2 {
+        assert_eq!(
+            push_eco_intent(&pic, canister, watcher(), eco_hash, &intent),
+            Ok(()),
+            "the intent lands, and the same push again changes nothing"
+        );
+    }
     let bad_prover = EcoIntent {
         prover: "prover".to_string(),
         ..intent.clone()
     };
     assert_eq!(
-        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &bad_prover),
+        push_eco_intent(&pic, canister, watcher(), eco_hash, &bad_prover),
         Err(PushEcoIntentError::ProverNotAnAddress {
             reason: EvmAddressError::NoPrefix
         })
     );
     let long_route = EcoIntent {
         route: vec![0; 8_193],
-        ..intent
+        ..intent.clone()
     };
     assert_eq!(
-        push_eco_intent(&pic, canister, watcher(), swap_id(&eco), &long_route),
+        push_eco_intent(&pic, canister, watcher(), eco_hash, &long_route),
         Err(PushEcoIntentError::RouteTooLong {
             len: 8_193,
             cap: 8_192
         })
     );
+
+    // the publish is signed: from here the intent the Portal holds is the swap's own
+    append(
+        &pic,
+        canister,
+        admin,
+        &EventType::TxCreated {
+            purpose: TxPurpose::Burn(eco_hash),
+            chain_id: BASE,
+            nonce: 0,
+            to: VAULT.to_string(),
+            value_wei: Nat::from(0_u8),
+            data: vec![],
+            gas_limit: Nat::from(450_000_u32),
+            max_fee_wei_per_gas: Nat::from(2_000_000_000_u64),
+            max_priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+    )
+    .expect("the allocation is admitted");
+    append(
+        &pic,
+        canister,
+        admin,
+        &EventType::TxSigned {
+            quote_hash: eco_hash,
+            attempt: 1,
+            chain_id: BASE,
+            tx_hash: [0x55; 32],
+            raw_tx: vec![0x02],
+        },
+    )
+    .expect("the publish is signed");
+    let moved = EcoIntent {
+        deadline_s: 1_900_000_000,
+        ..intent
+    };
+    assert_eq!(
+        push_eco_intent(&pic, canister, watcher(), eco_hash, &moved),
+        Err(PushEcoIntentError::AlreadyPublished(eco_hash)),
+        "the intent the publish carries is the one the reclaim names"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// A quote no refund could ever be paid on is refused at both doors, before anything is
+/// read or stored: the fold does not hold the payer, so the refund address is the only way
+/// the user's funds come back, and a swap without one could only freeze with them in the
+/// vault.
+#[test]
+fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
+    use crate::client::settlement::register_quote;
+    use settlement_api::types::errors::RegisterQuoteError;
+    use settlement_api::types::quote::{QuoteAddressError, QuoteAddressField};
+    let (pic, canister, _admin) = setup();
+    let none = types::Quote {
+        refund_address: None,
+        ..live_quote(&pic, 21)
+    };
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &wire(&none)),
+        Err(RegisterQuoteError::NoRefundAddress)
+    );
+    assert_eq!(
+        claim_swap(&pic, canister, watcher(), &wire(&none)),
+        Err(ClaimError::QuoteAddress(QuoteAddressError::Absent {
+            field: QuoteAddressField::RefundAddress
+        }))
+    );
+    let not_an_address = types::Quote {
+        refund_address: Some("0xrefund".parse().unwrap()),
+        ..live_quote(&pic, 22)
+    };
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &wire(&not_an_address)),
+        Err(RegisterQuoteError::RefundAddressNotAnAddress {
+            reason: settlement_api::types::events::EvmAddressError::WrongLength { len: 6 }
+        })
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+    assert_eq!(
+        count(&pic, canister),
+        2,
+        "the install's two lines, and no more"
+    );
+}
+
+/// The halt is read again after the read comes back: a claim whose outcall was already out
+/// when the operator halted records nothing, so no swap appears while everything is
+/// supposed to be stopped, and the same claim goes through once the halt lifts.
+#[test]
+fn a_claim_whose_read_returns_after_a_halt_records_nothing() {
+    let (pic, canister, admin) = setup();
+    let quote = quote(23);
+    let quote_hash = swap_id(&quote);
+    let before = count(&pic, canister);
+
+    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    let read = the_read(&pic, quote_hash);
+    set_halted(&pic, canister, admin, true).expect("the operator halts");
+    answer(
+        &pic,
+        &read,
+        HEAD,
+        vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(
+        await_claim(&pic, call),
+        Err(ClaimError::Guard(GuardError::Halted))
+    );
+    assert_eq!(count(&pic, canister), before, "nothing was recorded");
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), quote_hash),
+        None
+    );
+
+    set_halted(&pic, canister, admin, false).expect("the operator lifts the halt");
+    let call = submit_claim(&pic, canister, watcher(), &wire(&quote));
+    answer(
+        &pic,
+        &the_read(&pic, quote_hash),
+        HEAD,
+        vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
 }

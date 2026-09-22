@@ -25,7 +25,13 @@ fn fixed_quote() -> Quote {
         dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b"
             .parse()
             .unwrap(),
-        refund_address: None,
+        // the store takes only a quote a refund can be paid on, so the fixture names one;
+        // the cross-repo hash vector is the types crate's, which keeps the absent field
+        refund_address: Some(
+            "0x7551A66653f9a20979ed81835a0b7008EC83401b"
+                .parse()
+                .unwrap(),
+        ),
         auto_refund: true,
         gas_mode: GasMode::Legacy,
         rail: Rail::CctpV2Fast,
@@ -53,6 +59,35 @@ fn seconds_before(q: &Quote, secs: u64) -> UnixSeconds {
 
 fn just_before_expiry(q: &Quote) -> UnixSeconds {
     seconds_before(q, 1)
+}
+
+/// A quote nobody could be refunded on is one whose swap could only freeze with the
+/// user's funds in the vault, so the quoter learns at registration and not after the
+/// money has arrived.
+#[test]
+fn register_refuses_a_quote_that_names_no_refund_address() {
+    clear();
+    let none = Quote {
+        refund_address: None,
+        ..pending_quote(9_010)
+    };
+    assert_eq!(
+        register(none.clone(), just_before_expiry(&none)),
+        Err(RegisterError::NoRefundAddress)
+    );
+    let not_an_address = Quote {
+        refund_address: Some("0xrefund".parse().unwrap()),
+        ..pending_quote(9_011)
+    };
+    assert_eq!(
+        register(not_an_address.clone(), just_before_expiry(&not_an_address)),
+        Err(RegisterError::RefundAddressNotAnAddress {
+            reason: types::evm::EvmAddressError::WrongLength { len: 6 },
+        })
+    );
+    assert!(all_pending().is_empty(), "nothing was stored");
+    let good = pending_quote(9_012);
+    assert!(register(good.clone(), just_before_expiry(&good)).is_ok());
 }
 
 #[test]
@@ -120,10 +155,21 @@ fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
         set(&mut at_cap, "a".repeat(MAX_TEXT_BYTES));
         let at_cap = Quote::try_from(at_cap).expect("the cap itself converts");
         let now = just_before_expiry(&at_cap);
-        assert!(
-            register(at_cap, now).is_ok(),
-            "{field} at the cap is allowed"
-        );
+        let registered = register(at_cap, now);
+        // text at the cap crosses the wire; the refund address is held to more than a
+        // length, because a refund has to be payable to it
+        if field == "refund_address" {
+            assert!(
+                matches!(
+                    registered,
+                    Err(RegisterError::RefundAddressNotAnAddress { .. })
+                ),
+                "{field} at the cap is text, and a refund address must be an address: \
+                 {registered:?}"
+            );
+        } else {
+            assert!(registered.is_ok(), "{field} at the cap is allowed");
+        }
     }
 
     for rail in ["a".repeat(MAX_TEXT_BYTES + 1), "a".repeat(MAX_TEXT_BYTES)] {

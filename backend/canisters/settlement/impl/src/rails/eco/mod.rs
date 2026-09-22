@@ -1,6 +1,27 @@
 //! Eco: the intent published and funded on the source chain through the vault, a solver's
 //! fill arriving in the destination vault on its own, and the permissionless refund of an
 //! intent nobody filled.
+//!
+//! THE RAIL IS OFF (`eco_enabled`, default off), and a quote naming it is refused at the
+//! claim. Three things must be true before a deploy turns it on:
+//!
+//! 1. The route must end in a deposit into OUR destination vault under the quote hash.
+//!    The fill is detected by reading that vault's `Deposited` log for the quote, and the
+//!    route is what a filler runs on the destination: a route that delivers anywhere else
+//!    is filled, the reward is claimed, and this canister sees nothing and refunds after
+//!    the deadline. The research's quoted route (`eco_intent_1_quote.json`) calls
+//!    `approve` and `depositForBurn`, which is not that, so the quoter must build the
+//!    route, and this canister must check it rather than publish what the watcher pushed.
+//! 2. The reward must not be claimable without a delivery. The prover decides who may say
+//!    an intent was filled, and today it is whatever the watcher pushed: it must be
+//!    pinned to a configured per-chain value, and the destination to the quote's own
+//!    chain mapping, before the vault locks `amount_in` against an intent.
+//! 3. The allowlist law gets an explicit ruling on the Portal. The publish is a vault
+//!    `execute` whose target is the Portal, so the Portal has to be on the vault's router
+//!    allowlist, and the law (handoff section 8) admits only stateless routers, never
+//!    anything holding vault-claimable balances. Either the law gains an exception, with
+//!    the vault's public `depositAndExecute` path reviewed against it, or the publish
+//!    leaves the vault another way.
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +44,14 @@ pub const RECLAIM_GAS_LIMIT: GasAmount = GasAmount::new(250_000);
 
 /// The Eco rail.
 pub struct Eco;
+
+/// The rail moves nothing while the deploy has it off.
+fn ensure_enabled(leg: &Leg) -> Result<(), RailError> {
+    if !leg.config.eco_enabled.is_on() {
+        return Err(RailError::RailDisabled { rail: Rail::Eco });
+    }
+    Ok(())
+}
 
 impl Eco {
     /// The reward the vault locks for the filler: the swap's whole amount of the source
@@ -97,6 +126,9 @@ impl CallRail for Eco {
     }
 
     fn step(&self, leg: &Leg) -> Result<RailStep, RailError> {
+        // the rail is off until its route is designed: a swap claimed while it was on,
+        // or through a door that did not check, moves nothing
+        ensure_enabled(leg)?;
         // the publish locks the source USDC as the reward and the fill is read in the
         // destination USDC, so both of the quote's tokens have to be those
         ensure_rail_tokens(leg)?;
@@ -121,6 +153,7 @@ impl CallRail for Eco {
     }
 
     fn reclaim(&self, leg: &Leg) -> Result<RailStep, RailError> {
+        ensure_enabled(leg)?;
         let Some(intent) = leg.intent else {
             return Ok(RailStep::Stuck(
                 "the intent this swap published is no longer in the inbox",

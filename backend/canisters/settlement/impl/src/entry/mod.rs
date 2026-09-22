@@ -31,7 +31,7 @@ use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::{ensure_rail_tokens, RailTokenError};
 use types::{
     Address, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight, InFlightKind, Quote,
-    QuoteHash, Timestamp, TxHash, UnixSeconds, Wei,
+    QuoteHash, Rail, Timestamp, TxHash, UnixSeconds, Wei,
 };
 
 /// The gas a `pullWithPermit` needs: the permit's signature check and storage write, the
@@ -59,6 +59,8 @@ pub enum ClaimError {
     Sanctioned { party: &'static str },
     #[error("a claim or a pull for this quote is already out since {}", .0.since)]
     InFlight(InFlight),
+    #[error("the {rail} rail is not available on this deploy")]
+    RailUnavailable { rail: Rail },
     #[error(transparent)]
     RailToken(#[from] RailTokenError),
     #[error(transparent)]
@@ -132,6 +134,25 @@ pub fn ensure_claimable(
         }),
         None => Ok(()),
     }
+}
+
+/// The rail a quote names has to be one this deploy runs. The Eco rail is off until its
+/// route is designed (see `rails::eco`), so a quote naming it is refused here, before an
+/// outcall is bought, rather than becoming a swap whose funds the canister cannot move.
+pub fn ensure_rail_is_enabled(config: &Config, quote: &Quote) -> Result<(), ClaimError> {
+    if quote.rail == Rail::Eco && !config.eco_enabled.is_on() {
+        return Err(ClaimError::RailUnavailable { rail: quote.rail });
+    }
+    Ok(())
+}
+
+/// A quote has to name a refund address a refund can be paid to. The fold does not hold
+/// the payer (`FundsReceived` carries none and its layout is frozen), so the refund
+/// address is the only way the user's funds come back: a swap without one can only be
+/// frozen with the funds in the vault, so no swap is created for a quote that has none.
+pub fn ensure_refundable(quote: &Quote) -> Result<(), ClaimError> {
+    quote.evm_address(QuoteAddressField::RefundAddress)?;
+    Ok(())
 }
 
 /// Which of the addresses the quote pays to is sanctioned, if either is: the destination
@@ -214,6 +235,8 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
     ensure_claimable(&quote, now.as_secs(), config.permit_deadline)?;
+    ensure_rail_is_enabled(&config, &quote)?;
+    ensure_refundable(&quote)?;
     if let Some(party) = sanctioned_party(&quote) {
         return Err(ClaimError::Sanctioned { party });
     }
@@ -232,6 +255,9 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     if is_sanctioned(&party(deposit.from)) {
         return Err(ClaimError::Sanctioned { party: "from" });
     }
+    // the halt can land while the read is out, and a line appended after it would create a
+    // swap the operator believes is not there; re-read with no await before the append
+    require_not_halted().map_err(ClaimError::Guard)?;
     append_event(funds_received(&quote, &deposit))?;
     Ok(quote_hash)
 }
@@ -342,6 +368,9 @@ impl From<ClaimError> for settlement_api::types::entry::ClaimError {
             },
             ClaimError::InFlight(marker) => Self::InFlight {
                 since_ns: marker.since.as_nanos(),
+            },
+            ClaimError::RailUnavailable { rail } => Self::RailUnavailable {
+                rail: rail.to_string(),
             },
             ClaimError::RailToken(error) => Self::RailToken(error.into()),
             ClaimError::QuoteAddress(error) => Self::QuoteAddress(error.into()),

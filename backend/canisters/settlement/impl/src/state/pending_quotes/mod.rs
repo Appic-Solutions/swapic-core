@@ -4,7 +4,8 @@ use settlement_api::types::errors::RegisterQuoteError;
 use std::cell::RefCell;
 use std::time::Duration;
 use thiserror::Error;
-use types::quote::{QuoteError, MAX_QUOTE_LIFETIME};
+use types::evm::EvmAddressError;
+use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError, MAX_QUOTE_LIFETIME};
 use types::{ExpiryKey, Quote, QuoteHash, UnixSeconds};
 
 /// How many quotes may sit in the pending store at once. The quoter is the only writer, so
@@ -53,6 +54,10 @@ pub enum RegisterError {
     },
     #[error("pending store is full at {MAX_PENDING} quotes")]
     StoreFull,
+    #[error("the quote names no refund address, so no refund could ever be paid on it")]
+    NoRefundAddress,
+    #[error("the quote's refund address is not an EVM address: {reason}")]
+    RefundAddressNotAnAddress { reason: EvmAddressError },
 }
 
 impl From<RegisterError> for RegisterQuoteError {
@@ -71,6 +76,12 @@ impl From<RegisterError> for RegisterQuoteError {
             RegisterError::StoreFull => Self::StoreFull {
                 capacity: MAX_PENDING,
             },
+            RegisterError::NoRefundAddress => Self::NoRefundAddress,
+            RegisterError::RefundAddressNotAnAddress { reason } => {
+                Self::RefundAddressNotAnAddress {
+                    reason: reason.into(),
+                }
+            }
         }
     }
 }
@@ -86,6 +97,16 @@ pub fn init() {
 /// testable without a canister.
 pub fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
     quote.validate()?;
+    // a quote a refund could never be paid on is a swap that can only freeze with the
+    // user's funds in the vault: the fold does not hold the payer, so the refund address
+    // is the only way back, and the quoter learns here rather than after the money arrives
+    match quote.evm_address(QuoteAddressField::RefundAddress) {
+        Ok(_) => {}
+        Err(QuoteAddressError::Absent { .. }) => return Err(RegisterError::NoRefundAddress),
+        Err(QuoteAddressError::NotAnAddress { reason, .. }) => {
+            return Err(RegisterError::RefundAddressNotAnAddress { reason })
+        }
+    }
     let expires_at = quote.expires_at;
     // the quote is good through the whole of its expiry second
     if now > expires_at {

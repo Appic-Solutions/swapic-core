@@ -31,7 +31,8 @@ fn quote_live_at(pic: &PocketIc) -> Quote {
         expected_out: 24_990_000_u32.into(),
         min_out: 24_900_000_u32.into(),
         dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
-        refund_address: None,
+        // the store takes only a quote a refund can be paid on
+        refund_address: Some("0x1111111111111111111111111111111111111111".into()),
         auto_refund: true,
         gas_mode: GasMode::Gasless,
         rail: "cctp_v2_fast".into(),

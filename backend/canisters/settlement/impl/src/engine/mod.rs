@@ -17,6 +17,7 @@ use crate::mints::{self, MintError};
 use crate::rails::{self, Leg as RailLeg, RailError, RailStep, RailTx};
 use crate::state::Store;
 use crate::storage::events::{append_event, read_state, AppendError};
+use crate::storage::sanctions::is_sanctioned;
 use crate::storage::{attestations, config, ecdsa_address, eco_intents};
 use crate::tx::{self, TxError};
 use std::cell::Cell;
@@ -25,8 +26,8 @@ use types::abi::{vault_payout, vault_refund};
 use types::events::TxPurpose;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError};
 use types::{
-    BasisPoints, ChainId, EventType, GasAmount, Leg, Outcome, Quote, QuoteHash, Swap, SwapStatus,
-    Timestamp, TokenAmount, TxHash, Wei,
+    BasisPoints, ChainId, EventType, EvmAddress, GasAmount, Leg, Outcome, Quote, QuoteHash, Swap,
+    SwapStatus, Timestamp, TokenAmount, TxHash, Wei,
 };
 
 /// The gas a vault payout needs: one transfer and the vault's event.
@@ -172,6 +173,8 @@ pub enum EngineError {
         paid_out: TokenAmount,
         paid: TokenAmount,
     },
+    #[error("the canister was halted while the read was out, so nothing was recorded")]
+    Halted,
     #[error("the quote names no refund address")]
     NoRefundAddress,
     #[error(transparent)]
@@ -327,6 +330,21 @@ fn forget(quote_hash: QuoteHash) {
     eco_intents::remove(quote_hash);
 }
 
+/// Nobody on the sanctions set is paid. The set is checked at the claim, and again here,
+/// where the money actually leaves: an address listed while a swap was executing (minutes
+/// on CCTP) would otherwise be paid by a canister that screened it only at intake. A hit
+/// freezes the swap with the party named, so the funds stay in the vault for an operator.
+fn ensure_unsanctioned(to: EvmAddress, party: &'static str) -> Result<(), &'static str> {
+    if is_sanctioned(
+        &to.to_string()
+            .parse::<types::Address>()
+            .expect("BUG: an EIP-55 address is 42 bytes"),
+    ) {
+        return Err(party);
+    }
+    Ok(())
+}
+
 /// The quote a swap is for, read off its own bytes.
 fn quote_of(swap: &Swap) -> Result<Quote, EngineError> {
     Ok(Quote::parse(&swap.quote_bytes)?)
@@ -388,6 +406,9 @@ async fn send_payout(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
     };
     let token = quote.evm_address(QuoteAddressField::DstToken)?;
     let to = quote.evm_address(QuoteAddressField::DstAddress)?;
+    if let Err(party) = ensure_unsanctioned(to, "dst_address") {
+        return freeze(quote_hash, &format!("the quote's {party} is sanctioned"));
+    }
     let vault = deposits::vault_of(&config::get(), quote.dst_chain)?;
     send(RailTx {
         purpose: TxPurpose::Payout(quote_hash),
@@ -409,6 +430,9 @@ async fn send_refund(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
         return freeze(quote_hash, "the quote names no refund address");
     }
     let to = quote.evm_address(QuoteAddressField::RefundAddress)?;
+    if let Err(party) = ensure_unsanctioned(to, "refund_address") {
+        return freeze(quote_hash, &format!("the quote's {party} is sanctioned"));
+    }
     // the fold's token names the same token as the quote's (the guard holds the line to
     // it), so the refund is of the quote's token as the quote spells it
     let token = quote.evm_address(QuoteAddressField::SrcToken)?;
@@ -528,6 +552,9 @@ async fn read_mint(
     tx_hash: TxHash,
 ) -> Result<Did, EngineError> {
     let minted = mints::read_mint(chain_id, tx_hash).await?;
+    // the halt can land while the read is out, the same rule as every other append after
+    // an await
+    require_not_halted().map_err(|_| EngineError::Halted)?;
     append_event(EventType::PaidInStable {
         quote_hash,
         chain_id,
@@ -560,7 +587,11 @@ async fn check_arrival(
         },
         not_before: None,
     };
-    match deposits::verify_evm_deposit(&read).await {
+    let read = deposits::verify_evm_deposit(&read).await;
+    // the halt can land while the read is out, and a line appended after it would move a
+    // swap the operator believes is stopped; re-read with no await before the append
+    require_not_halted().map_err(|_| EngineError::Halted)?;
+    match read {
         Ok(deposit) => {
             append_event(EventType::PaidInStable {
                 quote_hash,

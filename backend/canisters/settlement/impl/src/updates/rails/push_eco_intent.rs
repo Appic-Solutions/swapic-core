@@ -9,8 +9,9 @@ use types::{ChainId, Quote, QuoteHash, Rail, UnixSeconds};
 
 /// Watcher-only. Hands in what Eco's quote response gave a swap on the Eco rail: the
 /// destination Eco named, the route, the reward's deadline and the prover. The inbox holds
-/// one intent per swap, and a push replaces the one before it, so a corrected intent is the
-/// one the publish carries. Rail data and not money: the vault locks only the swap's own
+/// one intent per swap, and a push replaces the one before it until the publish is signed,
+/// so a corrected intent is the one the publish carries and never one the Portal never
+/// saw. Rail data and not money: the vault locks only the swap's own
 /// amount whatever the intent says, so the halt switch does not gate it. Only a known swap
 /// on the Eco rail has an inbox slot.
 #[update]
@@ -22,6 +23,14 @@ pub fn push_eco_intent(quote_hash: Hash32, intent: EcoIntent) -> Result<(), Push
     let on_eco = Quote::parse(&swap.quote_bytes).is_ok_and(|quote| quote.rail == Rail::Eco);
     if !on_eco {
         return Err(PushEcoIntentError::NotAnEcoSwap(quote_hash.into_bytes()));
+    }
+    // once the publish is signed, the intent it carries is what the Portal holds: a later
+    // push would move the deadline the arrival is judged against and make the reclaim
+    // name an intent the Portal never saw, which reverts and freezes the swap
+    if swap.last_leg.is_some() {
+        return Err(PushEcoIntentError::AlreadyPublished(
+            quote_hash.into_bytes(),
+        ));
     }
     let prover = intent
         .prover

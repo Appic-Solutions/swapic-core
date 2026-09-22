@@ -3,7 +3,7 @@
 
 use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
-use crate::types::events::{CanonicalError, EventError, Hash32};
+use crate::types::events::{CanonicalError, EventError, EvmAddressError, Hash32};
 use crate::types::evm::EcdsaError;
 use crate::types::quote::QuoteError;
 use crate::types::rpc::RpcError;
@@ -67,6 +67,12 @@ pub enum RegisterQuoteError {
     },
     StoreFull {
         capacity: u64,
+    },
+    /// The quote names no refund address, so no refund could ever be paid on it.
+    NoRefundAddress,
+    /// The quote's refund address is not an EVM address.
+    RefundAddressNotAnAddress {
+        reason: EvmAddressError,
     },
 }
 

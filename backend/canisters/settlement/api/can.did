@@ -67,6 +67,8 @@ type ClaimError = variant {
   InFlight : record { since_ns : nat64 };
   // A field of the quote that the claim reads as an EVM address is not one.
   QuoteAddress : QuoteAddressError;
+  // The quote names a rail this deploy does not run, by its id.
+  RailUnavailable : record { rail : text };
   Append : AppendError;
   InvalidQuote : QuoteError;
 };
@@ -86,6 +88,9 @@ type Config = record {
   rpc_urls : vec record { nat64; text };
   simulate_before_sign : bool;
   vault_addresses : vec record { nat64; text };
+  // Whether the Eco rail may be used. False until its route is designed: a quote
+  // naming it is refused at the claim.
+  eco_enabled : bool;
   platform_fee_bps : nat16;
   permit_deadline_s : nat64;
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
@@ -445,6 +450,9 @@ type PushEcoIntentError = variant {
   Guard : GuardError;
   UnknownSwap : blob;
   ProverNotAnAddress : record { reason : EvmAddressError };
+  // The swap has already published an intent, and the one it published is the one its
+  // reclaim must name.
+  AlreadyPublished : blob;
 };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
@@ -508,6 +516,8 @@ type QuoteError = variant {
 // Why a rail could not decide on a swap: a knob the deploy left unset, an address of the
 // quote or of the vault that is not one, or an attestation that is not the swap's.
 type RailError = variant {
+  // The rail, by its id, is one this deploy does not run.
+  RailDisabled : record { rail : text };
   RailToken : RailTokenError;
   NoMessageTransmitter;
   NoMintHash;
@@ -544,8 +554,12 @@ type RegisterQuoteError = variant {
   };
   Guard : GuardError;
   StoreFull : record { capacity : nat64 };
+  // The quote names no refund address, so no refund could ever be paid on it.
+  NoRefundAddress;
   InvalidQuote : QuoteError;
   Expired : record { now_s : nat64; expires_at_s : nat64 };
+  // The quote's refund address is not an EVM address.
+  RefundAddressNotAnAddress : record { reason : EvmAddressError };
 };
 // Why the log does not fold. The replay stopped at `index` and applied nothing from there.
 type ReplayError = variant {
@@ -838,8 +852,9 @@ service : (InitArg) -> {
   push_chain_data : (nat64, ChainData) -> (Result_7);
   // Watcher-only. Hands in what Eco's quote response gave a swap on the Eco rail: the
   // destination Eco named, the route, the reward's deadline and the prover. The inbox holds
-  // one intent per swap, and a push replaces the one before it, so a corrected intent is the
-  // one the publish carries. Rail data and not money: the vault locks only the swap's own
+  // one intent per swap, and a push replaces the one before it until the publish is signed,
+  // so a corrected intent is the one the publish carries and never one the Portal never
+  // saw. Rail data and not money: the vault locks only the swap's own
   // amount whatever the intent says, so the halt switch does not gate it. Only a known swap
   // on the Eco rail has an inbox slot.
   push_eco_intent : (blob, EcoIntent) -> (Result_8);

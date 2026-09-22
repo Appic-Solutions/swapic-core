@@ -133,6 +133,60 @@ impl<'b, C, const DEFAULT: u32, const CEILING: u32> Decode<'b, C> for Cap<DEFAUL
     }
 }
 
+/// Whether the Eco rail may be used at all. Off until its route is designed (see
+/// `impl/src/rails/eco`), and off is what a config that never set it reads as, so it
+/// writes nothing of its own while it is off and the stored bytes of every config written
+/// before it existed are unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EcoEnabled(bool);
+
+impl EcoEnabled {
+    /// The Eco rail turned on, which a deploy does only once the route is designed.
+    pub const ON: Self = Self(true);
+    /// The default: no quote on the Eco rail is claimed or executed.
+    pub const OFF: Self = Self(false);
+
+    pub const fn new(on: bool) -> Self {
+        Self(on)
+    }
+
+    pub const fn is_on(self) -> bool {
+        self.0
+    }
+}
+
+/// Stored as one bool, and as nothing at all while it is off.
+impl<C> Encode<C> for EcoEnabled {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.bool(self.0)?;
+        Ok(())
+    }
+
+    fn is_nil(&self) -> bool {
+        !self.0
+    }
+}
+
+impl<'b, C> Decode<'b, C> for EcoEnabled {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the knob absent in the middle
+        // reads back, and it means the same as the knob missing off the end
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::OFF);
+        }
+        Ok(Self(d.bool()?))
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::OFF)
+    }
+}
+
 /// A per-chain table of deploy-time facts. Absent from storage while empty, so a config
 /// written before the table existed reads back with it empty, and one that never fills it
 /// keeps the bytes the golden file pins.
@@ -263,6 +317,10 @@ pub struct Config {
     /// Eco's `Portal`, one address on every chain Eco deploys to.
     #[n(25)]
     pub eco_portal: Option<EvmAddress>,
+    /// Whether the Eco rail may be used. Off until its route is designed: a quote naming
+    /// it is refused at the claim, and a swap already on it is stopped for a human.
+    #[n(26)]
+    pub eco_enabled: EcoEnabled,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -376,6 +434,8 @@ impl Default for Config {
             token_messenger: None,
             message_transmitter: None,
             eco_portal: None,
+            // the Eco route is a later plan's; until then no Eco quote is claimed
+            eco_enabled: EcoEnabled::OFF,
         }
     }
 }

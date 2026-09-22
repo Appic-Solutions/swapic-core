@@ -88,6 +88,8 @@ pub enum RailError {
     NoMessageTransmitter,
     #[error("no Eco portal is configured")]
     NoEcoPortal,
+    #[error("the {rail} rail is not available on this deploy")]
+    RailDisabled { rail: Rail },
     #[error(transparent)]
     Vault(#[from] VaultError),
     #[error("the fee of {amount} does not fit an amount")]
@@ -181,6 +183,9 @@ impl From<RailError> for settlement_api::types::entry::RailError {
             RailError::NoTokenMessenger => Self::NoTokenMessenger,
             RailError::NoMessageTransmitter => Self::NoMessageTransmitter,
             RailError::NoEcoPortal => Self::NoEcoPortal,
+            RailError::RailDisabled { rail } => Self::RailDisabled {
+                rail: rail.to_string(),
+            },
             RailError::Vault(error) => Self::Vault(error.into()),
             RailError::FeeOverflow { amount } => Self::FeeOverflow {
                 amount: amount.into(),

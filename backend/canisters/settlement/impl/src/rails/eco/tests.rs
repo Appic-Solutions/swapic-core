@@ -2,7 +2,8 @@ use super::*;
 use crate::rails::tests::{config, fixture_swap, leg, quote, USDC_BASE, VAULT_BASE};
 use crate::rails::{RailStep, WaitingFor};
 use types::abi::{decode_eco_publish_and_fund, decode_vault_execute};
-use types::{ChainId, Config, EvmAddress, Outcome, TokenAmount, UnixSeconds};
+use types::config::EcoEnabled;
+use types::{ChainId, Config, EvmAddress, Outcome, Rail, TokenAmount, UnixSeconds};
 
 const PROVER: &str = "0xeC00008537c1F26E739486BCFCC818d81234d5aD";
 
@@ -148,5 +149,35 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
         Eco.step(&leg(&quote, &fresh, &no_portal, None, Some(&intent)))
             .map(drop),
         Err(RailError::NoEcoPortal)
+    );
+}
+
+/// The rail is off until its route is designed (see the module doc for what must be true
+/// first), so with the knob at its default it moves nothing at all: no publish, and no
+/// reclaim of a swap that published while the knob was on.
+#[test]
+fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
+    let quote = quote();
+    let off = Config {
+        eco_enabled: EcoEnabled::OFF,
+        ..config()
+    };
+    assert!(
+        !Config::default().eco_enabled.is_on(),
+        "and off is what a deploy gets"
+    );
+    let intent = intent(2_000);
+    let fresh = fixture_swap(None, None);
+    assert_eq!(
+        Eco.step(&leg(&quote, &fresh, &off, None, Some(&intent)))
+            .map(drop),
+        Err(RailError::RailDisabled { rail: Rail::Eco })
+    );
+    let published = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
+    let mut past = leg(&quote, &published, &off, None, Some(&intent));
+    past.now = UnixSeconds::new(3_000);
+    assert_eq!(
+        Eco.reclaim(&past).map(drop),
+        Err(RailError::RailDisabled { rail: Rail::Eco })
     );
 }

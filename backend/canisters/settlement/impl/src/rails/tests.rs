@@ -83,6 +83,9 @@ pub fn config() -> Config {
                 .parse()
                 .unwrap(),
         ),
+        // the rail is off on a deploy; the Eco tests turn it on for themselves, and one
+        // of them pins what the rail does while it is off
+        eco_enabled: types::config::EcoEnabled::ON,
         ..Config::default()
     }
 }
