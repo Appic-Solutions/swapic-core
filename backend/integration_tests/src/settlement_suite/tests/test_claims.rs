@@ -1010,8 +1010,12 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
 }
 
 /// Rule A8: two claims for one quote that are both in flight buy one set of reads. The
-/// second finds the first's marker and is refused at once, and the first goes on to create
-/// the swap.
+/// later one finds the earlier one's marker and is refused at once, and the earlier one
+/// goes on to create the swap.
+///
+/// Rewritten for the hardening pass: it assumed the subnet runs the two messages in the
+/// order they were submitted, which the hardening commit's bigger wasm reversed; it now
+/// holds the rule whichever message runs first.
 #[test]
 fn concurrent_claims_buy_one_outcall() {
     let (pic, canister, _admin) = setup();
@@ -1038,10 +1042,23 @@ fn concurrent_claims_buy_one_outcall() {
     pic.tick();
     pic.tick();
     let read = the_read(&pic, quote_hash);
-    let refused = await_claim(&pic, second);
+    // which of the two messages the subnet runs first is the induction order, not the
+    // order they were submitted in (a bigger wasm moved it once already): the rule is
+    // that one takes the marker and buys the one outcall, and the other, already
+    // answered without an outcall, is refused by that marker, whichever comes first
+    let (holder, refused) = match (
+        pic.ingress_status(first.clone()),
+        pic.ingress_status(second.clone()),
+    ) {
+        (None, Some(done)) => (first, done),
+        (Some(done), None) => (second, done),
+        other => panic!("exactly one claim is answered before the read returns: {other:?}"),
+    };
+    let refused: Result<Hash32, ClaimError> =
+        candid::decode_one(&refused.expect("the refused claim returns")).unwrap();
     assert!(
         matches!(refused, Err(ClaimError::InFlight { .. })),
-        "the second claim is refused by the first's marker: {refused:?}"
+        "the later claim is refused by the first's marker: {refused:?}"
     );
     answer(
         &pic,
@@ -1049,7 +1066,7 @@ fn concurrent_claims_buy_one_outcall() {
         HEAD,
         vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
     );
-    assert_eq!(await_claim(&pic, first), Ok(quote_hash));
+    assert_eq!(await_claim(&pic, holder), Ok(quote_hash));
 
     // and the marker went with the message chain: the quote is not held after it
     assert_eq!(
