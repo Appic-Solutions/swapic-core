@@ -55,6 +55,25 @@ pub type EvictionsPerSweep = Cap<200, 5_000>;
 /// ceiling is what a timer message affords with room to spare.
 pub type AuditChunk = Cap<1_000, 10_000>;
 
+/// The most blocks one `eth_getLogs` of the deposit read asks for: ten thousand, the range
+/// most providers serve in one call. A wider range is read in windows of this many blocks.
+pub const LOGS_WINDOW_BLOCKS: u64 = 10_000;
+
+/// The most windows one deposit read walks: forty, four hundred thousand blocks, which is
+/// above a day on the fastest chain this canister reads (Arbitrum, four blocks a second).
+/// A range wider than that is refused by name before any outcall, never walked for minutes
+/// and never cut short in silence.
+pub const MAX_LOGS_WINDOWS: u64 = 40;
+
+/// The widest range the deposit read walks, [`MAX_LOGS_WINDOWS`] windows of
+/// [`LOGS_WINDOW_BLOCKS`], and so the most a lookback may be: spelled from the two, so the
+/// knob's ceiling cannot drift from what the read can cover.
+pub const MAX_LOOKBACK_BLOCKS: u32 = {
+    let blocks = MAX_LOGS_WINDOWS * LOGS_WINDOW_BLOCKS;
+    assert!(blocks <= u32::MAX as u64, "a lookback is a u32 of blocks");
+    blocks as u32
+};
+
 /// How many blocks back from a chain's head the deposit read looks for a user's deposit.
 ///
 /// A quote is claimable for its lifetime (a day) plus the permit window, so the deposit a
@@ -64,9 +83,11 @@ pub type AuditChunk = Cap<1_000, 10_000>;
 /// blocks a second), which is the widest a day is in blocks and covers a day on every
 /// slower chain many times over. It is read in windows of [`LOGS_WINDOW_BLOCKS`] and a
 /// claim for a quote the store still holds starts at that quote's registration block
-/// instead, so the width costs an outcall only where the entry is gone. The ceiling is a
-/// range no walk of the windows the read caps itself at can cover.
-pub type DepositLookback = Cap<345_600, 1_000_000>;
+/// instead, so the width costs outcalls only where no registration height is known. The
+/// ceiling is [`MAX_LOOKBACK_BLOCKS`], the widest range the read walks: a lookback above
+/// it would have every read refused as too wide, every claim and every arrival check with
+/// it.
+pub type DepositLookback = Cap<345_600, MAX_LOOKBACK_BLOCKS>;
 
 /// The least deep a receipt or a deposit on Ethereum mainnet may be taken as final. A
 /// one-block reorg there is routine, and a depth below this would claim a deposit that

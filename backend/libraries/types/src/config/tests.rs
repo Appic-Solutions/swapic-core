@@ -594,6 +594,44 @@ fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
     assert_eq!(Config::from_bytes(Cow::Owned(bytes)), set);
 }
 
+/// The lookback's ceiling is the widest range the deposit read walks, its window cap times
+/// its window, so no config the door accepts makes the read refuse every range as too
+/// wide (every claim and every arrival check would fail from then on). The old ceiling of
+/// a million blocks is refused by name, the walk's own width is accepted, and one block
+/// more is refused.
+#[test]
+fn the_lookback_ceiling_is_the_range_the_read_can_walk() {
+    let lookback = |blocks| Config {
+        deposit_lookback_blocks: DepositLookback::new(blocks),
+        ..Config::default()
+    };
+    assert_eq!(
+        lookback(1_000_000).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "deposit_lookback_blocks",
+            cap: 1_000_000,
+            ceiling: 400_000,
+        }),
+        "the ceiling the read could never walk"
+    );
+    lookback(400_000)
+        .validate()
+        .expect("forty windows of ten thousand blocks is the walk's own width");
+    assert_eq!(
+        lookback(400_001).validate(),
+        Err(ConfigError::CapOutOfRange {
+            field: "deposit_lookback_blocks",
+            cap: 400_001,
+            ceiling: 400_000,
+        })
+    );
+    assert_eq!(
+        u64::from(DepositLookback::CEILING),
+        MAX_LOGS_WINDOWS * LOGS_WINDOW_BLOCKS,
+        "the ceiling is spelled from the walk's own constants"
+    );
+}
+
 /// The rail knobs are deploy-time facts like the vault addresses: per-chain tables and
 /// three contract addresses. Unset, they are absent from the stored config, so a config
 /// written before they existed reads back with them empty and the golden lines do not

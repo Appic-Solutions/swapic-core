@@ -50,6 +50,21 @@ fn deposit_log_of(
     })
 }
 
+/// One answer walked as the whole range: what the read decides when the range is one
+/// window, which is how the tests below pin the rule inside a window.
+fn decide(
+    logs: &[Value],
+    vault: EvmAddress,
+    quote_hash: QuoteHash,
+    wanted: &Wanted,
+    latest: BlockNumber,
+    depth: BlockDepth,
+) -> Result<VerifiedDeposit, DepositError> {
+    let mut walk = Walk::new(quote_hash, depth);
+    walk.take(find(logs, vault, quote_hash, wanted, latest, depth))
+        .ok_or_else(|| walk.end())
+}
+
 /// The deposit the claim wants: the fixture's token, exactly `amount`.
 fn exactly(amount: u64) -> Wanted {
     Wanted {
@@ -263,29 +278,32 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     );
 }
 
-/// A range wider than one window is walked in windows of [`LOGS_WINDOW_BLOCKS`], newest
-/// first: a user deposits and claims within minutes, so the deposit is in the newest
-/// window and the older ones are read only when it is not. The windows tile the range
-/// exactly, and a range that would take more than [`MAX_LOGS_WINDOWS`] is refused by name
+/// A range wider than one window is walked in windows of [`LOGS_WINDOW_BLOCKS`], oldest
+/// first: the deposit that counts is the oldest deep one in range, so the first window
+/// holding one ends the walk. The windows tile the range exactly, the newest open at the
+/// head, and a range that would take more than [`MAX_LOGS_WINDOWS`] is refused by name
 /// before any outcall rather than walked for minutes or cut short in silence.
+///
+/// Rewritten for fix wave 4 (N2): this was the newest-first walk, which let a window's
+/// boundary decide which of two deposits counted.
 #[test]
-fn a_wide_range_is_walked_in_windows_newest_first_and_a_wider_one_is_refused() {
+fn a_wide_range_is_walked_in_windows_oldest_first_and_a_wider_one_is_refused() {
     let anchor = BlockNumber::new(19_000_000);
     let from = BlockNumber::new(18_975_000);
     assert_eq!(
         windows(from, anchor).unwrap(),
         vec![
             Window {
-                from: BlockNumber::new(18_990_001),
-                to: None,
+                from: BlockNumber::new(18_975_000),
+                to: Some(BlockNumber::new(18_980_000)),
             },
             Window {
                 from: BlockNumber::new(18_980_001),
                 to: Some(BlockNumber::new(18_990_000)),
             },
             Window {
-                from: BlockNumber::new(18_975_000),
-                to: Some(BlockNumber::new(18_980_000)),
+                from: BlockNumber::new(18_990_001),
+                to: None,
             },
         ]
     );
@@ -425,5 +443,134 @@ fn a_dust_arrival_on_the_destination_is_not_the_fill() {
             BlockDepth::new(1),
         ),
         Err(DepositError::NoneMatches { seen: 1, .. })
+    ));
+}
+
+/// A deposit of the fixture's token from the fixture's payer at `block`.
+fn deposit_at(block: u64) -> VerifiedDeposit {
+    VerifiedDeposit {
+        token: USDC.parse().unwrap(),
+        from: USER.parse().unwrap(),
+        amount: TokenAmount::from(1_u8),
+        tx_ref: TxHash::new([0x77; 32]),
+        block: BlockNumber::new(block),
+    }
+}
+
+/// The range's verdict, windows taken oldest first: the first deep match ends the walk and
+/// is the one, a match not deep enough in an older window does not stop the walk and never
+/// hides a deep one in a newer window, and a range with no deep match is refused as not
+/// confirmed at its oldest shallow match, or by the count of what matched nothing, or as
+/// no deposit at all.
+#[test]
+fn the_walk_takes_the_oldest_deep_match_and_a_shallow_one_never_masks_it() {
+    let depth = BlockDepth::new(6);
+    let mut walk = Walk::new(quote_hash(), depth);
+    assert_eq!(walk.take(Finding::Unmatched { seen: 1 }), None);
+    assert_eq!(
+        walk.take(Finding::Shallow {
+            block: BlockNumber::new(18_985_000),
+            latest: BlockNumber::new(18_985_002),
+        }),
+        None,
+        "a shallow match does not end the walk"
+    );
+    assert_eq!(
+        walk.take(Finding::Deep(deposit_at(18_995_000))),
+        Some(deposit_at(18_995_000)),
+        "the deep match after it is the one"
+    );
+
+    let mut shallow_only = Walk::new(quote_hash(), depth);
+    for (block, latest) in [(18_985_000, 18_985_002), (18_995_000, 18_995_001)] {
+        assert_eq!(
+            shallow_only.take(Finding::Shallow {
+                block: BlockNumber::new(block),
+                latest: BlockNumber::new(latest),
+            }),
+            None
+        );
+    }
+    assert_eq!(shallow_only.take(Finding::Unmatched { seen: 3 }), None);
+    assert_eq!(
+        shallow_only.end(),
+        DepositError::NotConfirmed {
+            block: BlockNumber::new(18_985_000),
+            latest: BlockNumber::new(18_985_002),
+            depth,
+        },
+        "the oldest shallow match, against its own window's head"
+    );
+
+    let mut unmatched = Walk::new(quote_hash(), depth);
+    assert_eq!(unmatched.take(Finding::Unmatched { seen: 1 }), None);
+    assert_eq!(unmatched.take(Finding::Unmatched { seen: 2 }), None);
+    assert_eq!(
+        unmatched.end(),
+        DepositError::NoneMatches {
+            quote_hash: quote_hash(),
+            seen: 3,
+        },
+        "counted across every window"
+    );
+    assert_eq!(
+        Walk::new(quote_hash(), depth).end(),
+        DepositError::NotFound {
+            quote_hash: quote_hash(),
+        }
+    );
+}
+
+/// Inside one window the oldest deep match counts by its block, whatever order the
+/// provider lists the logs in, and a shallow match listed first hides nothing; two in one
+/// block keep the order they were logged in.
+#[test]
+fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
+    let latest = BlockNumber::new(19_000_000);
+    let depth = BlockDepth::new(6);
+    let payer = "0x1111111111111111111111111111111111111111";
+    let newer = deposit_log_of(quote_hash(), 18_999_000, USDC, payer, 5);
+    let older = deposit_log(quote_hash(), 18_998_000, 5);
+    let shallow = deposit_log_of(quote_hash(), 18_999_998, USDC, payer, 5);
+    for logs in [
+        vec![newer.clone(), older.clone()],
+        vec![shallow.clone(), newer.clone(), older.clone()],
+    ] {
+        assert_eq!(
+            find(&logs, vault(), quote_hash(), &exactly(5), latest, depth),
+            Finding::Deep(VerifiedDeposit {
+                token: USDC.parse().unwrap(),
+                from: USER.parse().unwrap(),
+                amount: TokenAmount::from(5_u8),
+                tx_ref: TxHash::new([0x77; 32]),
+                block: BlockNumber::new(18_998_000),
+            })
+        );
+    }
+    assert_eq!(
+        find(
+            &[shallow],
+            vault(),
+            quote_hash(),
+            &exactly(5),
+            latest,
+            depth
+        ),
+        Finding::Shallow {
+            block: BlockNumber::new(18_999_998),
+            latest,
+        }
+    );
+    let first_in_block = deposit_log_of(quote_hash(), 18_998_000, USDC, payer, 5);
+    assert!(matches!(
+        find(
+            &[first_in_block, older],
+            vault(),
+            quote_hash(),
+            &exactly(5),
+            latest,
+            depth
+        ),
+        Finding::Deep(VerifiedDeposit { from, .. }) if from == payer.parse().unwrap()
     ));
 }

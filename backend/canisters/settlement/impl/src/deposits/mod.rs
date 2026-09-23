@@ -6,7 +6,10 @@
 //!
 //! The vault marks a quote per payer, so anyone can log a deposit under a quote's hash
 //! ahead of the user's. The deposit that counts is therefore the one that matches what
-//! the read wants, among every log the hash names, and not the first one logged.
+//! the read wants, among every log the hash names, and not the first one logged. Among
+//! several that match, it is the oldest one in the whole range that is deep enough to
+//! decide on, wherever the read's windows fall; a match not deep enough yet is reported
+//! only when the range holds no deep one.
 
 #[cfg(test)]
 mod tests;
@@ -31,15 +34,9 @@ use types::{
 /// typed transport failure rather than deciding on a part of the log.
 const MAX_LOGS_BYTES: u64 = 32 * 1024;
 
-/// The most blocks one `eth_getLogs` asks for: ten thousand, the range most providers
-/// serve in one call. A wider range is read in windows of this many blocks.
-pub const LOGS_WINDOW_BLOCKS: u64 = 10_000;
-
-/// The most windows one read walks: forty, four hundred thousand blocks, which is above a
-/// day on the fastest chain this canister reads (Arbitrum, four blocks a second). A range
-/// wider than that is refused by name before any outcall, never walked for minutes and
-/// never cut short in silence.
-pub const MAX_LOGS_WINDOWS: u64 = 40;
+/// The window and the window cap, kept beside the lookback knob they bound (see
+/// `types::config`), so the knob's ceiling is what this read can walk.
+pub use types::config::{LOGS_WINDOW_BLOCKS, MAX_LOGS_WINDOWS};
 
 /// A deposit the chain holds for a quote, deep enough to decide on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,9 +162,9 @@ pub struct Window {
     pub to: Option<BlockNumber>,
 }
 
-/// The windows that tile `from` to `anchor`, newest first: a user deposits and claims
-/// within minutes, so the deposit is in the newest window and the older ones are read
-/// only when it is not there. More than [`MAX_LOGS_WINDOWS`] of them is refused by name.
+/// The windows that tile `from` to `anchor`, oldest first, the newest open at the head:
+/// the deposit that counts is the oldest deep one in range, so the first window that
+/// holds one ends the walk. More than [`MAX_LOGS_WINDOWS`] of them is refused by name.
 pub fn windows(from: BlockNumber, anchor: BlockNumber) -> Result<Vec<Window>, DepositError> {
     let span = anchor.get().saturating_sub(from.get()).saturating_add(1);
     let count = span.div_ceil(LOGS_WINDOW_BLOCKS);
@@ -195,6 +192,8 @@ pub fn windows(from: BlockNumber, anchor: BlockNumber) -> Result<Vec<Window>, De
         }
         to = start - 1;
     }
+    // tiled back from the anchor, so the newest is whole; read forward from the oldest
+    windows.reverse();
     Ok(windows)
 }
 
@@ -280,38 +279,108 @@ fn parse_deposit(
     })
 }
 
+/// What one window's logs hold of the deposit a read wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finding {
+    /// The oldest match in the window that is deep enough to decide on.
+    Deep(VerifiedDeposit),
+    /// Matches, none deep enough against the window's head: the oldest of them.
+    Shallow {
+        block: BlockNumber,
+        latest: BlockNumber,
+    },
+    /// No match: how many of the quote's deposits into the vault the window holds that are
+    /// not the one wanted, none at all included.
+    Unmatched { seen: u64 },
+}
+
 /// What one answer says: among the logs that are this quote's deposits into `vault`, the
-/// first that is the deposit `wanted`, provided it is `depth` deep against `latest`. The
-/// vault marks a quote per payer, so the logs under one hash may be several payers' and
-/// anyone can put one ahead of the user's; the others decide nothing, and are counted so
-/// a caller can tell stranded funds from no deposit at all.
-pub fn decide(
+/// oldest that is the deposit `wanted` and `depth` deep against `latest`, else the oldest
+/// that is the deposit wanted, else how many were not. Oldest by block, and in the
+/// provider's order within a block. The vault marks a quote per payer, so the logs under
+/// one hash may be several payers' and anyone can put one ahead of the user's; the others
+/// decide nothing, and are counted so a caller can tell stranded funds from no deposit at
+/// all.
+pub fn find(
     logs: &[Value],
     vault: EvmAddress,
     quote_hash: QuoteHash,
     wanted: &Wanted,
     latest: BlockNumber,
     depth: BlockDepth,
-) -> Result<VerifiedDeposit, DepositError> {
-    let mut seen = 0;
-    let deposit = logs
+) -> Finding {
+    let deposits: Vec<VerifiedDeposit> = logs
         .iter()
         .filter_map(|value| parse_deposit(value, vault, quote_hash))
-        .inspect(|_| seen += 1)
-        .find(|deposit| wanted.admits(deposit))
-        .ok_or(if seen == 0 {
-            DepositError::NotFound { quote_hash }
-        } else {
-            DepositError::NoneMatches { quote_hash, seen }
-        })?;
-    if !is_confirmed(deposit.block, latest, depth) {
-        return Err(DepositError::NotConfirmed {
-            block: deposit.block,
-            latest,
-            depth,
-        });
+        .collect();
+    let matches = || deposits.iter().filter(|deposit| wanted.admits(deposit));
+    // `min_by_key` keeps the first of equals, so a block's deposits stay in log order
+    if let Some(deep) = matches()
+        .filter(|deposit| is_confirmed(deposit.block, latest, depth))
+        .min_by_key(|deposit| deposit.block)
+    {
+        return Finding::Deep(*deep);
     }
-    Ok(deposit)
+    match matches().min_by_key(|deposit| deposit.block) {
+        Some(shallow) => Finding::Shallow {
+            block: shallow.block,
+            latest,
+        },
+        None => Finding::Unmatched {
+            seen: deposits.len() as u64,
+        },
+    }
+}
+
+/// The verdict over a range, built from its windows' findings oldest window first. The
+/// first window holding a deep match holds the oldest deep match in range, so it ends the
+/// walk. Until then the walk keeps the oldest match that was not deep enough and counts
+/// the logs that matched nothing, so a match not deep enough is the answer only when no
+/// window holds a deep one, and a range with no match at all is refused by its count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Walk {
+    quote_hash: QuoteHash,
+    depth: BlockDepth,
+    shallow: Option<(BlockNumber, BlockNumber)>,
+    seen: u64,
+}
+
+impl Walk {
+    pub fn new(quote_hash: QuoteHash, depth: BlockDepth) -> Self {
+        Self {
+            quote_hash,
+            depth,
+            shallow: None,
+            seen: 0,
+        }
+    }
+
+    /// Takes the next window's finding, oldest window first: the deposit, when the window
+    /// holds one deep enough, which ends the walk.
+    pub fn take(&mut self, finding: Finding) -> Option<VerifiedDeposit> {
+        match finding {
+            Finding::Deep(deposit) => return Some(deposit),
+            Finding::Shallow { block, latest } => {
+                self.shallow.get_or_insert((block, latest));
+            }
+            Finding::Unmatched { seen } => self.seen += seen,
+        }
+        None
+    }
+
+    /// Why the range holds no deposit to decide on, once every window was taken.
+    pub fn end(self) -> DepositError {
+        let quote_hash = self.quote_hash;
+        match (self.shallow, self.seen) {
+            (Some((block, latest)), _) => DepositError::NotConfirmed {
+                block,
+                latest,
+                depth: self.depth,
+            },
+            (None, 0) => DepositError::NotFound { quote_hash },
+            (None, seen) => DepositError::NoneMatches { quote_hash, seen },
+        }
+    }
 }
 
 /// The vault the config names for `chain_id`, as an address.
@@ -330,12 +399,13 @@ pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress,
 ///
 /// The range starts a bounded lookback (`deposit_lookback_blocks`) behind the head the
 /// watcher last pushed, or at the block the read says the deposit cannot precede when that
-/// is later, and ends at the provider's head. It is walked in windows, newest first, one
+/// is later, and ends at the provider's head. It is walked in windows, oldest first, one
 /// outcall each, and the depth is measured against the head asked for in the same batch
 /// as the logs it decides on, so no deposit is judged against a moment other than its
-/// own. A window whose logs hold the deposit ends the walk; one that holds a deposit not
-/// deep enough ends it too, because every older window is deeper still and the newest
-/// deposit is the one wanted.
+/// own. The deposit that counts is the oldest deep match in the whole range (see
+/// [`Walk`]), so the first window holding a deep match ends the walk, a match not deep
+/// enough yet never hides a deep one in a later window, and a range whose deposit sits in
+/// its newest window is read to the end.
 // todo_harden_reads: single unreplicated read; upgrade to k-of-n later. Until then the
 // answer is bound to the vault this canister configured, the event that vault emits, the
 // quote being claimed and the token and amount wanted, and held to the configured depth.
@@ -362,7 +432,7 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
         .max()
         .expect("BUG: the lookback is always a start");
     let depth = confirmations(&config, chain_id)?;
-    let mut seen = 0;
+    let mut walk = Walk::new(quote_hash, depth);
     for window in windows(from, anchor)? {
         let calls = read_calls(vault, quote_hash, &window);
         // the whole batch or nothing: a decision needs both reads
@@ -377,15 +447,9 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
             .get(1)
             .and_then(Value::as_array)
             .ok_or(DepositError::UnreadableLogs)?;
-        match decide(logs, vault, quote_hash, &wanted, latest, depth) {
-            Err(DepositError::NotFound { .. }) => {}
-            Err(DepositError::NoneMatches { seen: here, .. }) => seen += here,
-            decided => return decided,
+        if let Some(deposit) = walk.take(find(logs, vault, quote_hash, &wanted, latest, depth)) {
+            return Ok(deposit);
         }
     }
-    if seen == 0 {
-        Err(DepositError::NotFound { quote_hash })
-    } else {
-        Err(DepositError::NoneMatches { quote_hash, seen })
-    }
+    Err(walk.end())
 }

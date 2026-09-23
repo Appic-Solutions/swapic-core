@@ -241,6 +241,9 @@ fn a_config_error_names_its_knob_on_the_wire() {
 
 /// The deposit lookback crosses the wire as a plain block count like the per-pass caps,
 /// and one outside its range comes back named.
+///
+/// Rewritten for fix wave 4 (N3): the refusal names the ceiling the read can walk,
+/// 400,000 blocks, where it named 1,000,000.
 #[test]
 fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let wire = Config {
@@ -263,7 +266,7 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
         ConfigError::CapOutOfRange {
             field: "deposit_lookback_blocks".to_string(),
             cap: 0,
-            ceiling: 1_000_000
+            ceiling: 400_000
         }
     );
 }

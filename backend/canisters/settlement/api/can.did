@@ -113,7 +113,8 @@ type Config = record {
   // CCTP v2's `MessageTransmitterV2`, the same address on every chain.
   message_transmitter : opt text;
   // How many blocks back from a chain's head the deposit read looks for a user's
-  // deposit, 1 to 1,000,000.
+  // deposit, 1 to 400,000: the widest range the read walks, forty windows of ten
+  // thousand blocks.
   deposit_lookback_blocks : nat32;
 };
 // Why a config was refused, naming the knob at fault.

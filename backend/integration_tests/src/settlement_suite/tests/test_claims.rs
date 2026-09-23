@@ -1383,6 +1383,11 @@ fn a_claim_needs_a_quote_the_quoter_registered() {
 /// store holds no height for is read from the lookback, which is a day of blocks on the
 /// chain whose blocks come fastest: a deposit made while the canister was halted is still
 /// in the range.
+///
+/// Rewritten for fix wave 4 (N2): the lookback is now walked from its oldest window
+/// forward, since the deposit that counts is the oldest deep one in range, so the
+/// controller's claim reads every window up to the one holding the deposit instead of
+/// starting at the newest.
 #[test]
 fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     let (pic, canister, admin) = setup();
@@ -1422,23 +1427,16 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     );
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
 
-    // a quote the store holds nothing for: the controller's door, read from the lookback
+    // a quote the store holds nothing for: the controller's door, read from the lookback,
+    // oldest window first, up to the window that holds the deposit
     let by_hand = self::quote(33);
     let by_hand_hash = swap_id(&by_hand);
     let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
-    let read = the_read(&pic, by_hand_hash);
-    assert_eq!(
-        from_block(&read),
-        HEAD + 5_000 + 1 - 10_000,
-        "the newest window of the day-wide lookback"
-    );
-    // the deposit is in that window, so the walk ends there; a walk that found nothing
-    // would read the older windows of the lookback, up to the cap the read refuses above
-    answer(
+    let reads = walk_the_reads(
         &pic,
-        &read,
+        by_hand_hash,
         HEAD + 5_000,
-        vec![deposit_log(
+        &[deposit_log(
             by_hand_hash,
             HEAD + 4_000,
             USDC,
@@ -1447,6 +1445,194 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
         )],
     );
     assert_eq!(await_claim(&pic, call), Ok(by_hand_hash));
+    assert_eq!(
+        reads.first(),
+        Some(&(HEAD + 5_000 + 1 - 345_600)),
+        "the oldest window of the day-wide lookback is read first"
+    );
+    assert_eq!(
+        reads.len(),
+        35,
+        "and every window after it, up to the newest, which holds the deposit"
+    );
+}
+
+/// The block a read asks the provider to end at: the head for the newest window.
+fn to_block(request: &CanisterHttpRequest, latest: u64) -> u64 {
+    let filter = params(request, 1);
+    match filter[0]["toBlock"].as_str().expect("a toBlock") {
+        "latest" => latest,
+        text => u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex block"),
+    }
+}
+
+/// Answers one read the way a provider does over the range it names: the head at
+/// `latest`, and those of `logs` whose block is inside the range, in the order given.
+fn answer_in_range(pic: &PocketIc, request: &CanisterHttpRequest, latest: u64, logs: &[Value]) {
+    let (from, to) = (from_block(request), to_block(request, latest));
+    let within = logs
+        .iter()
+        .filter(|log| {
+            let text = log["blockNumber"].as_str().expect("a block number");
+            let block = u64::from_str_radix(text.trim_start_matches("0x"), 16).unwrap();
+            (from..=to).contains(&block)
+        })
+        .cloned()
+        .collect();
+    answer(pic, request, latest, within);
+}
+
+/// Answers every window a claim reads, one outcall at a time, until it asks for nothing
+/// more, and gives back the block each read started at, in the order they were asked.
+fn walk_the_reads(pic: &PocketIc, quote_hash: Hash32, latest: u64, logs: &[Value]) -> Vec<u64> {
+    let mut froms = Vec::new();
+    while !pic.get_canister_http().is_empty() {
+        let read = the_read(pic, quote_hash);
+        froms.push(from_block(&read));
+        answer_in_range(pic, &read, latest, logs);
+    }
+    froms
+}
+
+/// A lookback of two windows and a depth of six on Base, so a test can put a deposit in
+/// each window and one of them short of the depth.
+fn two_windows_six_deep(pic: &PocketIc, canister: Principal, admin: Principal) {
+    use crate::client::settlement::{get_config_full, set_config};
+    let config = get_config_full(pic, canister, admin).expect("the controller reads it");
+    set_config(
+        pic,
+        canister,
+        admin,
+        &Config {
+            deposit_lookback_blocks: 20_000,
+            confirmations: BTreeMap::from([(1, 12), (BASE, 6)]),
+            ..config
+        },
+    )
+    .expect("the controller sets it");
+}
+
+/// The `tx_ref` the claim's `FundsReceived` recorded for `quote_hash`: which deposit it took.
+fn claimed_tx_ref(pic: &PocketIc, canister: Principal, quote_hash: Hash32) -> String {
+    events(pic, canister)
+        .into_iter()
+        .find_map(|event| match event.payload {
+            EventType::FundsReceived {
+                quote_hash: claimed,
+                tx_ref,
+                ..
+            } if claimed == quote_hash => Some(tx_ref),
+            _ => None,
+        })
+        .expect("the claim recorded the swap")
+}
+
+/// The deposit that counts is the oldest one in the whole range that is deep enough, and a
+/// matching deposit that is not deep yet in a newer window never masks it: the claim reads
+/// the range window by window from the oldest and takes the user's deep deposit in the
+/// older window, although another payer's deposit of the same quote and amount sits in the
+/// newer one short of the depth.
+#[test]
+fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
+    let (pic, canister, admin) = setup();
+    two_windows_six_deep(&pic, canister, admin);
+    let quote = quote(40);
+    let quote_hash = swap_id(&quote);
+    let deep = logged_deposit(
+        quote_hash,
+        HEAD - 15_000,
+        USDC,
+        USER,
+        AMOUNT.into(),
+        [0x71; 32],
+    );
+    let shallow = logged_deposit(
+        quote_hash,
+        HEAD - 2,
+        USDC,
+        REFUND,
+        AMOUNT.into(),
+        [0x72; 32],
+    );
+    // the controller's door, so no registration height narrows the read to one window
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&quote));
+    let reads = walk_the_reads(&pic, quote_hash, HEAD, &[deep, shallow]);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        claimed_tx_ref(&pic, canister, quote_hash),
+        format!("0x{}", hex::encode([0x71; 32])),
+        "the deep deposit in the older window"
+    );
+    assert_eq!(
+        reads,
+        vec![HEAD + 1 - 20_000],
+        "the older window is read first, and the deep deposit in it ends the walk"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// Among several deep deposits in range the claim takes the oldest, the first the quote's
+/// hash was paid with, wherever the window boundaries fall: across two windows the older
+/// window's, and inside one window the lower block's, whatever order the provider lists
+/// them in.
+#[test]
+fn the_oldest_of_several_deep_deposits_is_the_one_claimed() {
+    let (pic, canister, admin) = setup();
+    two_windows_six_deep(&pic, canister, admin);
+    let across = quote(41);
+    let across_hash = swap_id(&across);
+    let older = logged_deposit(
+        across_hash,
+        HEAD - 15_000,
+        USDC,
+        USER,
+        AMOUNT.into(),
+        [0x71; 32],
+    );
+    let newer = logged_deposit(
+        across_hash,
+        HEAD - 5_000,
+        USDC,
+        REFUND,
+        AMOUNT.into(),
+        [0x72; 32],
+    );
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&across));
+    walk_the_reads(&pic, across_hash, HEAD, &[older, newer]);
+    assert_eq!(await_claim(&pic, call), Ok(across_hash));
+    assert_eq!(
+        claimed_tx_ref(&pic, canister, across_hash),
+        format!("0x{}", hex::encode([0x71; 32])),
+        "the older window's deposit, not the newer window's"
+    );
+
+    let within = quote(42);
+    let within_hash = swap_id(&within);
+    let later = logged_deposit(
+        within_hash,
+        HEAD - 8_000,
+        USDC,
+        REFUND,
+        AMOUNT.into(),
+        [0x73; 32],
+    );
+    let earlier = logged_deposit(
+        within_hash,
+        HEAD - 9_000,
+        USDC,
+        USER,
+        AMOUNT.into(),
+        [0x74; 32],
+    );
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&within));
+    walk_the_reads(&pic, within_hash, HEAD, &[later, earlier]);
+    assert_eq!(await_claim(&pic, call), Ok(within_hash));
+    assert_eq!(
+        claimed_tx_ref(&pic, canister, within_hash),
+        format!("0x{}", hex::encode([0x74; 32])),
+        "the lower block's deposit, although the provider listed it second"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 
 /// A depth decides money on both sides, so a chain the deploy gave no depth decides

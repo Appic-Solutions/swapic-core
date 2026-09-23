@@ -38,7 +38,8 @@ pub struct Config {
     pub max_evictions_per_sweep: u32,
     pub audit_chunk_events: u32,
     /// How many blocks back from a chain's head the deposit read looks for a user's
-    /// deposit, 1 to 1,000,000.
+    /// deposit, 1 to 400,000: the widest range the read walks, forty windows of ten
+    /// thousand blocks.
     pub deposit_lookback_blocks: u32,
     /// CCTP's domain id per chain: Circle's own numbering, never a chain id.
     pub cctp_domains: BTreeMap<u64, u32>,
