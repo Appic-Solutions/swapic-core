@@ -53,7 +53,7 @@ fn pending_quote(nonce: u64) -> Quote {
 /// registered at: the height is the claim's business, and the test below that cares about
 /// it calls the store's own function.
 fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
-    super::register(quote, now, None)
+    super::register(quote, now, None, &Config::default())
 }
 
 fn seconds_after(q: &Quote, secs: u64) -> UnixSeconds {
@@ -263,8 +263,13 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
     clear();
     let q = pending_quote(9_020);
     let at = types::BlockNumber::new(19_000_123);
-    let h = super::register(q.clone(), just_before_expiry(&q), Some(at))
-        .expect("a live quote registers");
+    let h = super::register(
+        q.clone(),
+        just_before_expiry(&q),
+        Some(at),
+        &Config::default(),
+    )
+    .expect("a live quote registers");
     assert_eq!(
         get_pending(&h),
         Some(types::PendingQuote {
@@ -277,7 +282,12 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
     // calls, and a later height would start the claim's read past that deposit
     let later = types::BlockNumber::new(19_000_500);
     assert_eq!(
-        super::register(q.clone(), just_before_expiry(&q), Some(later)),
+        super::register(
+            q.clone(),
+            just_before_expiry(&q),
+            Some(later),
+            &Config::default()
+        ),
         Ok(h)
     );
     assert_eq!(get_pending(&h).unwrap().registered_at, Some(at));
@@ -290,7 +300,8 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
         super::register(
             blind_first.clone(),
             just_before_expiry(&blind_first),
-            Some(later)
+            Some(later),
+            &Config::default()
         ),
         Ok(h)
     );
@@ -339,7 +350,9 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
 
 /// Small quotes, distinct only by nonce, so a fill to the cap is cheap. The destination is
 /// an address, the one text field the store holds to more than its length besides the
-/// refund address (fix wave 4, N6, moved it off the text `c`).
+/// refund address (fix wave 4, N6, moved it off the text `c`). The rail is CCTP's fast
+/// path, which every deploy runs (fix wave 5, N8, moved it off Eco, which the store now
+/// refuses while the rail is off).
 fn tiny(nonce: u64) -> Quote {
     Quote {
         src_token: "a".parse().unwrap(),
@@ -347,7 +360,7 @@ fn tiny(nonce: u64) -> Quote {
         dst_address: "0x4444444444444444444444444444444444444444"
             .parse()
             .unwrap(),
-        rail: Rail::Eco,
+        rail: Rail::CctpV2Fast,
         nonce,
         ..fixed_quote()
     }
@@ -594,4 +607,98 @@ fn clear_empties_a_full_store_and_registration_works_again() {
     assert_eq!(register(next.clone(), now), Ok(next.hash().unwrap()));
     assert_eq!(clear(), 1);
     assert_eq!(clear(), 0, "an empty store clears to nothing");
+}
+
+/// Rule A5: the store refuses a quote whose rail the claim would refuse. A quote on the
+/// Eco rail while the deploy has it off is a quote a user could pay and nobody could claim,
+/// so the quoter learns at registration, and nothing is stored; with the rail on it
+/// registers.
+#[test]
+fn register_refuses_a_quote_on_a_rail_the_deploy_has_off() {
+    clear();
+    let eco = Quote {
+        rail: Rail::Eco,
+        ..pending_quote(9_030)
+    };
+    assert_eq!(
+        register(eco.clone(), just_before_expiry(&eco)),
+        Err(RegisterError::RailUnavailable { rail: Rail::Eco })
+    );
+    assert!(all_pending().is_empty(), "nothing was stored");
+    let on = Config {
+        eco_enabled: types::config::EcoEnabled::ON,
+        ..Config::default()
+    };
+    assert!(super::register(eco.clone(), just_before_expiry(&eco), None, &on).is_ok());
+}
+
+/// The vault's `_send` reverts on the zero address, so a quote paying its user or its
+/// refund there would freeze after the burn and the mint: the store refuses the zero
+/// address as either payee, by the field, and stores nothing (review 4, L1).
+#[test]
+fn register_refuses_the_zero_address_as_either_payee() {
+    use types::quote::{QuoteAddressError, QuoteAddressField};
+    clear();
+    let zero: types::Address = "0x0000000000000000000000000000000000000000"
+        .parse()
+        .unwrap();
+    let to_nobody = Quote {
+        dst_address: zero.clone(),
+        ..pending_quote(9_040)
+    };
+    assert_eq!(
+        register(to_nobody.clone(), just_before_expiry(&to_nobody)),
+        Err(RegisterError::QuoteAddress(QuoteAddressError::Zero {
+            field: QuoteAddressField::DstAddress
+        }))
+    );
+    let back_to_nobody = Quote {
+        refund_address: Some(zero),
+        ..pending_quote(9_041)
+    };
+    assert_eq!(
+        register(back_to_nobody.clone(), just_before_expiry(&back_to_nobody)),
+        Err(RegisterError::QuoteAddress(QuoteAddressError::Zero {
+            field: QuoteAddressField::RefundAddress
+        }))
+    );
+    assert!(all_pending().is_empty(), "nothing was stored");
+}
+
+/// A full store is not a refusal while it holds quotes no claim can be asked for any
+/// more: a registration first evicts, up to the sweep's own cap, the quotes whose claim's
+/// grace has ended, and takes the new quote in the room that makes. A flood of
+/// registrations cannot hold the store full against quotes that are only waiting for the
+/// next sweep. A store full of quotes still in their window still refuses.
+#[test]
+fn a_full_store_evicts_quotes_whose_grace_has_ended_before_it_refuses() {
+    clear();
+    let now = fill_to_the_cap();
+    let config = Config::default();
+    let next = tiny(MAX_PENDING);
+    assert_eq!(
+        super::register(next.clone(), now, None, &config),
+        Err(RegisterError::StoreFull),
+        "every quote in the store may still be claimed"
+    );
+
+    // the fill's quotes expire with the fixture's, and past that plus the claim window
+    // no claim may be asked for any of them
+    let later = Quote {
+        expires_at: UnixSeconds::new(tiny(0).expires_at.get() + 7_200),
+        ..next
+    };
+    let past_the_grace =
+        UnixSeconds::new(tiny(0).expires_at.get() + config.claim_window().as_secs() + 1);
+    assert_eq!(
+        super::register(later.clone(), past_the_grace, None, &config),
+        Ok(later.hash().unwrap())
+    );
+    let evicted = config.max_evictions_per_sweep.as_usize();
+    assert_eq!(
+        all_pending().len(),
+        MAX_PENDING as usize - evicted + 1,
+        "the sweep's cap of stale quotes went, and the new quote came in"
+    );
+    assert_eq!(expiry_index().len(), all_pending().len());
 }

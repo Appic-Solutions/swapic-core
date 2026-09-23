@@ -333,19 +333,22 @@ pub fn ensure_rail_is_enabled(config: &Config, quote: &Quote) -> Result<(), Clai
 /// A quote has to name a refund address a refund can be paid to. The fold does not hold
 /// the payer (`FundsReceived` carries none and its layout is frozen), so the refund
 /// address is the only way the user's funds come back: a swap without one can only be
-/// frozen with the funds in the vault, so no swap is created for a quote that has none.
-pub fn ensure_refundable(quote: &Quote) -> Result<(), ClaimError> {
-    quote.evm_address(QuoteAddressField::RefundAddress)?;
+/// frozen with the funds in the vault, so no swap is created for a quote that has none,
+/// or whose refund address the vault cannot pay (the zero address, which its `_send`
+/// reverts on). One rule for the claim, the pull and the store (A5).
+pub fn ensure_refundable(quote: &Quote) -> Result<(), QuoteAddressError> {
+    quote.payable_address(QuoteAddressField::RefundAddress)?;
     Ok(())
 }
 
 /// A quote has to name a destination a payout can be sent to. The payout is the swap's
-/// last leg, after the burn and the mint, so a destination that is no address would be
-/// found out only once the funds had crossed, and retried on every tick after; it is
-/// refused here instead, before an outcall is bought. Every chain this canister pays is an
-/// EVM chain, through its vault there, so the destination must be an EVM address.
-pub fn ensure_payable(quote: &Quote) -> Result<(), ClaimError> {
-    quote.evm_address(QuoteAddressField::DstAddress)?;
+/// last leg, after the burn and the mint, so a destination that is no address, or the
+/// zero address the vault's `_send` reverts on, would be found out only once the funds had
+/// crossed; it is refused here instead, before an outcall is bought. Every chain this
+/// canister pays is an EVM chain, through its vault there, so the destination must be an
+/// EVM address. One rule for the claim, the pull and the store (A5).
+pub fn ensure_payable(quote: &Quote) -> Result<(), QuoteAddressError> {
+    quote.payable_address(QuoteAddressField::DstAddress)?;
     Ok(())
 }
 
@@ -487,6 +490,36 @@ pub fn ensure_gasless(quote: &Quote) -> Result<(), PullError> {
     Ok(())
 }
 
+/// Every refusal the claim makes on the quote alone, made for a pull before anything is
+/// allocated or signed (rule A5), and the one refusal only a pull makes: the quote must be
+/// gasless. A pull the claim then refused would leave the user's funds in the vault under
+/// a quote that never becomes a swap, so the pull checks for itself rather than trusting
+/// the store to have: a deposit deadline not yet passed (a pull makes a deposit), a rail
+/// the deploy runs, the rail's tokens, and payees the vault can pay. Answers the source
+/// token the vault pulls. `now` is the caller's, so a unit test runs without a canister.
+pub fn ensure_pullable(
+    quote: &Quote,
+    config: &Config,
+    now: UnixSeconds,
+) -> Result<EvmAddress, PullError> {
+    ensure_gasless(quote)?;
+    // a pull makes a deposit, so it is refused once no deposit for the quote could count
+    if let Some(claim_until) = missed_deposit_deadline(quote, now, config) {
+        return Err(PullError::QuoteExpired {
+            expires_at: quote.expires_at,
+            claim_until,
+            now,
+        });
+    }
+    if let Some(rail) = unavailable_rail(config, quote) {
+        return Err(PullError::RailUnavailable { rail });
+    }
+    ensure_rail_tokens(&config.usdc_addresses, quote)?;
+    ensure_refundable(quote)?;
+    ensure_payable(quote)?;
+    Ok(quote.evm_address(QuoteAddressField::SrcToken)?)
+}
+
 /// The permit has to be this quote's own, in every field the user signed.
 ///
 /// The witness is the quote hash, so a signature made for one quote frees nothing under
@@ -556,22 +589,9 @@ pub async fn start_gasless_pull(
     require_not_halted().map_err(PullError::Guard)?;
     require_quoter().map_err(PullError::Guard)?;
     let quote = pending_quotes::quote_of(&quote_hash).ok_or(PullError::UnknownQuote(quote_hash))?;
-    ensure_gasless(&quote)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
-    // a pull makes a deposit, so it is refused once no deposit for the quote could count
-    if let Some(claim_until) = missed_deposit_deadline(&quote, now.as_secs(), &config) {
-        return Err(PullError::QuoteExpired {
-            expires_at: quote.expires_at,
-            claim_until,
-            now: now.as_secs(),
-        });
-    }
-    if let Some(rail) = unavailable_rail(&config, &quote) {
-        return Err(PullError::RailUnavailable { rail });
-    }
-    ensure_rail_tokens(&config.usdc_addresses, &quote)?;
-    let token = quote.evm_address(QuoteAddressField::SrcToken)?;
+    let token = ensure_pullable(&quote, &config, now.as_secs())?;
     let vault = deposits::vault_of(&config, quote.src_chain)?;
     ensure_permit_binds(quote_hash, &quote, token, vault, now.as_secs(), &permit)?;
     if is_sanctioned(&party(permit.owner)) {

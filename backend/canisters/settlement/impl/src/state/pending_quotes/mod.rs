@@ -6,7 +6,7 @@ use std::time::Duration;
 use thiserror::Error;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError, MAX_QUOTE_LIFETIME};
-use types::{BlockNumber, ExpiryKey, PendingQuote, Quote, QuoteHash, UnixSeconds};
+use types::{BlockNumber, Config, ExpiryKey, PendingQuote, Quote, QuoteHash, Rail, UnixSeconds};
 
 /// How many quotes may sit in the pending store at once. The quoter is the only writer, so
 /// this is a backstop against a compromised or looping quoter filling stable memory, not a
@@ -60,6 +60,10 @@ pub enum RegisterError {
     RefundAddressNotAnAddress { reason: EvmAddressError },
     #[error("the quote's destination address is not an EVM address: {reason}")]
     DstAddressNotAnAddress { reason: EvmAddressError },
+    #[error("the {rail} rail is not available on this deploy")]
+    RailUnavailable { rail: Rail },
+    #[error(transparent)]
+    QuoteAddress(QuoteAddressError),
 }
 
 impl From<RegisterError> for RegisterQuoteError {
@@ -87,6 +91,10 @@ impl From<RegisterError> for RegisterQuoteError {
             RegisterError::DstAddressNotAnAddress { reason } => Self::DstAddressNotAnAddress {
                 reason: reason.into(),
             },
+            RegisterError::RailUnavailable { rail } => Self::RailUnavailable {
+                rail: rail.to_string(),
+            },
+            RegisterError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
         }
     }
 }
@@ -100,31 +108,51 @@ pub fn init() {
 
 /// Records a quote against its hash, with the height of the quote's source chain the
 /// canister held a fresh reading of, if any: the deposit that pays this quote cannot be in
-/// an earlier block, so a claim's log read starts a margin below it. A quote already in the store
-/// keeps the earliest height it was ever registered at, because a retry must never narrow
-/// the window past a deposit made in the meantime. `now` and `registered_at` are the
-/// caller's, so every rule here is testable without a canister.
+/// an earlier block, so a claim's log read starts a margin below it. A quote already in
+/// the store keeps the earliest height it was ever registered at, because a retry must
+/// never narrow the window past a deposit made in the meantime.
+///
+/// Rule A5: a quote the claim would refuse by what it names is refused here too, before a
+/// user is handed it to pay: a rail the deploy has off, and a payee the vault cannot pay.
+/// A full store first evicts, up to the sweep's own cap, the quotes whose claim's grace
+/// has ended, and refuses only if that makes no room. `now`, `registered_at` and the
+/// config are the caller's, so every rule here is testable without a canister.
 pub fn register(
     quote: Quote,
     now: UnixSeconds,
     registered_at: Option<BlockNumber>,
+    config: &Config,
 ) -> Result<QuoteHash, RegisterError> {
     quote.validate()?;
+    if let Some(rail) = crate::entry::unavailable_rail(config, &quote) {
+        return Err(RegisterError::RailUnavailable { rail });
+    }
     // a quote a refund could never be paid on is a swap that can only freeze with the
     // user's funds in the vault: the fold does not hold the payer, so the refund address
     // is the only way back, and the quoter learns here rather than after the money arrives
-    match quote.evm_address(QuoteAddressField::RefundAddress) {
+    match quote.payable_address(QuoteAddressField::RefundAddress) {
         Ok(_) => {}
         Err(QuoteAddressError::Absent { .. }) => return Err(RegisterError::NoRefundAddress),
         Err(QuoteAddressError::NotAnAddress { reason, .. }) => {
             return Err(RegisterError::RefundAddressNotAnAddress { reason })
         }
+        Err(error @ QuoteAddressError::Zero { .. }) => {
+            return Err(RegisterError::QuoteAddress(error))
+        }
     }
     // the destination is where the payout goes, after the burn and the mint: text no
     // payout could be sent to is refused here, not found out once the funds have crossed
-    quote
-        .dst_evm_address()
-        .map_err(|reason| RegisterError::DstAddressNotAnAddress { reason })?;
+    match quote.payable_address(QuoteAddressField::DstAddress) {
+        Ok(_) => {}
+        Err(QuoteAddressError::NotAnAddress { reason, .. }) => {
+            return Err(RegisterError::DstAddressNotAnAddress { reason })
+        }
+        // every quote names a destination, so it is never absent; either goes out as the
+        // field's own refusal rather than as a panic
+        Err(error @ (QuoteAddressError::Absent { .. } | QuoteAddressError::Zero { .. })) => {
+            return Err(RegisterError::QuoteAddress(error))
+        }
+    }
     let expires_at = quote.expires_at;
     // the quote is good through the whole of its expiry second
     if now > expires_at {
@@ -140,6 +168,15 @@ pub fn register(
     let hash = quote.hash().expect(
         "BUG: Quote::validate refuses every amount above u128::MAX, and text is capped at 256 bytes",
     );
+    // a flood of registrations cannot hold the store full against quotes no claim may be
+    // asked for any more: those go first, as many as one sweep would drop
+    if is_full() && get_pending(&hash).is_none() {
+        sweep_expired(
+            now,
+            config.claim_window(),
+            config.max_evictions_per_sweep.as_usize(),
+        );
+    }
     PENDING.with(|p| {
         let mut pending = p.borrow_mut();
         // a re-registration is always allowed, cap or no cap: the hash covers every field,
@@ -175,6 +212,11 @@ pub fn register(
         })
     });
     Ok(hash)
+}
+
+/// Whether the store holds as many quotes as it may.
+fn is_full() -> bool {
+    PENDING.with(|p| p.borrow().len() >= MAX_PENDING)
 }
 
 /// The entry the store holds for a quote: the quote the quoter registered and the height

@@ -180,6 +180,8 @@ pub enum QuoteAddressError {
     },
     #[error("the quote names no {field}")]
     Absent { field: QuoteAddressField },
+    #[error("the quote's {field} is the zero address, which the vault cannot pay")]
+    Zero { field: QuoteAddressField },
 }
 
 /// The swap id of a canonical preimage: sha256 over exactly those bytes. Parsing a preimage
@@ -248,12 +250,20 @@ impl Quote {
             .map_err(|reason| QuoteAddressError::NotAnAddress { field, reason })
     }
 
-    /// The quote's destination as an EVM address, the address its payout is sent to. Every
-    /// quote names one, so unlike [`Quote::evm_address`] it is never absent, only possibly
-    /// not an address; and every chain this canister pays is an EVM chain, through its
-    /// vault there, so an EVM address is the one kind a destination can be.
-    pub fn dst_evm_address(&self) -> Result<EvmAddress, EvmAddressError> {
-        self.dst_address.as_str().parse()
+    /// The quote's `field` as an address the vault can pay: an EVM address, through
+    /// [`Quote::evm_address`], and not the zero address, which the vault's `_send` reverts
+    /// on. A payout or a refund to it would revert after the funds had moved, and freeze the
+    /// swap for a human, so both doors refuse it. Every chain this canister pays is an EVM
+    /// chain, through its vault there, so an EVM address is the one kind a payee can be.
+    pub fn payable_address(
+        &self,
+        field: QuoteAddressField,
+    ) -> Result<EvmAddress, QuoteAddressError> {
+        let address = self.evm_address(field)?;
+        if address == EvmAddress::ZERO {
+            return Err(QuoteAddressError::Zero { field });
+        }
+        Ok(address)
     }
 
     /// The canonical preimage, or the amount it has no bytes for. Over validated quotes

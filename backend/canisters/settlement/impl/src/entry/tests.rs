@@ -300,6 +300,9 @@ fn an_eco_quote_is_refused_while_the_rail_is_off() {
 /// A swap that cannot be refunded is a swap that can freeze with the user's funds in the
 /// vault, and this canister does not record the payer, so the refund address is the only
 /// way back. Both doors refuse a quote without one, before anything is read or signed.
+///
+/// Rewritten for fix wave 5 (N-a): the rule answers the field's own error, which the
+/// claim, the pull and the store each carry, where it answered the claim's.
 #[test]
 fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
     let no_refund = Quote {
@@ -308,9 +311,9 @@ fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
     };
     assert_eq!(
         ensure_refundable(&no_refund),
-        Err(ClaimError::QuoteAddress(QuoteAddressError::Absent {
+        Err(QuoteAddressError::Absent {
             field: QuoteAddressField::RefundAddress,
-        }))
+        })
     );
     let with_refund = Quote {
         refund_address: Some(USER.parse().unwrap()),
@@ -324,10 +327,10 @@ fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
     };
     assert_eq!(
         ensure_refundable(&not_an_address),
-        Err(ClaimError::QuoteAddress(QuoteAddressError::NotAnAddress {
+        Err(QuoteAddressError::NotAnAddress {
             field: QuoteAddressField::RefundAddress,
             reason: EvmAddressError::WrongLength { len: 6 },
-        }))
+        })
     );
 }
 
@@ -558,4 +561,91 @@ fn a_2612_permit_and_an_oversized_signature_are_refused() {
         ..permit2()
     };
     assert!(PullPermit::try_from(PullRequest::Permit2(at_the_cap)).is_ok());
+}
+
+/// Rule A5 at the pull: every refusal the claim makes on the quote alone is made before
+/// anything is allocated or signed, by the pull itself and not by trusting the store to
+/// have made it (review 4, N-a). A payee the vault cannot pay, the zero address as the
+/// destination or the refund address, or no refund address at all, is refused by the
+/// field, and a quote that is right in all of them answers the token the vault pulls.
+#[test]
+fn a_pull_refuses_a_payee_the_vault_cannot_pay() {
+    let config = rail_config();
+    let gasless = Quote {
+        gas_mode: GasMode::Gasless,
+        dst_address: "0x4444444444444444444444444444444444444444"
+            .parse()
+            .unwrap(),
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(3)
+    };
+    let now = UnixSeconds::new(gasless.expires_at.get() - 60);
+    assert_eq!(
+        ensure_pullable(&gasless, &config, now),
+        Ok(USDC.parse().unwrap())
+    );
+    let zero: types::Address = "0x0000000000000000000000000000000000000000"
+        .parse()
+        .unwrap();
+    for (quote, field) in [
+        (
+            Quote {
+                dst_address: zero.clone(),
+                ..gasless.clone()
+            },
+            QuoteAddressField::DstAddress,
+        ),
+        (
+            Quote {
+                refund_address: Some(zero.clone()),
+                ..gasless.clone()
+            },
+            QuoteAddressField::RefundAddress,
+        ),
+    ] {
+        assert_eq!(
+            ensure_pullable(&quote, &config, now),
+            Err(PullError::QuoteAddress(QuoteAddressError::Zero { field })),
+            "{field}"
+        );
+    }
+    let no_refund = Quote {
+        refund_address: None,
+        ..gasless
+    };
+    assert_eq!(
+        ensure_pullable(&no_refund, &config, now),
+        Err(PullError::QuoteAddress(QuoteAddressError::Absent {
+            field: QuoteAddressField::RefundAddress
+        }))
+    );
+}
+
+/// The claim's own door refuses the zero address as either payee before an outcall is
+/// bought, the same rule the store and the pull hold a quote to (review 4, L1).
+#[test]
+fn the_claim_refuses_the_zero_address_as_either_payee() {
+    let zero: types::Address = "0x0000000000000000000000000000000000000000"
+        .parse()
+        .unwrap();
+    let to_nobody = Quote {
+        dst_address: zero.clone(),
+        ..evm_quote(4)
+    };
+    assert_eq!(
+        ensure_payable(&to_nobody),
+        Err(QuoteAddressError::Zero {
+            field: QuoteAddressField::DstAddress
+        })
+    );
+    let back_to_nobody = Quote {
+        refund_address: Some(zero),
+        ..evm_quote(4)
+    };
+    assert_eq!(
+        ensure_refundable(&back_to_nobody),
+        Err(QuoteAddressError::Zero {
+            field: QuoteAddressField::RefundAddress
+        })
+    );
 }

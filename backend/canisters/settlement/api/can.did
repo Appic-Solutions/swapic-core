@@ -591,6 +591,9 @@ type Quote = record {
 // Why a quote's field is not an EVM address: the field, and the way its text broke, or
 // that the quote does not name it.
 type QuoteAddressError = variant {
+  // The field is the zero address, which the vault's `_send` reverts on: a payout or a
+  // refund to it would freeze the swap after the funds had moved.
+  Zero : record { field : QuoteAddressField };
   NotAnAddress : record { field : QuoteAddressField; reason : EvmAddressError };
   Absent : record { field : QuoteAddressField };
 };
@@ -662,6 +665,12 @@ type RegisterQuoteError = variant {
   // The quote's destination address is not an address the destination chain can be
   // paid at: every chain this canister pays is an EVM chain, so not an EVM address.
   DstAddressNotAnAddress : record { reason : EvmAddressError };
+  // A payee the quote names is one the vault cannot pay: the zero address as the
+  // destination or the refund address.
+  QuoteAddress : QuoteAddressError;
+  // The quote names a rail this deploy does not run, by its id: its claim would be
+  // refused, so the quote is not handed to a user to pay.
+  RailUnavailable : record { rail : text };
   // The quote names no refund address, so no refund could ever be paid on it.
   NoRefundAddress;
   InvalidQuote : QuoteError;
@@ -978,7 +987,10 @@ service : (InitArg) -> {
   push_eco_intent : (blob, EcoIntent) -> (Result_8);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
-  // must carry. Pre-money, so nothing is written to the log.
+  // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
+  // refuse by the quote alone: a rail the deploy has off, and a payee that is no address or
+  // the zero address. Halted, the canister registers nothing: no new swaps during a halt.
+  // A full store first drops quotes whose claim's grace has ended.
   register_quote : (Quote) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,

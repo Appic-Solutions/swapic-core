@@ -5,7 +5,7 @@ use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
 use crate::types::events::{CanonicalError, EventError, EvmAddressError, Hash32};
 use crate::types::evm::EcdsaError;
-use crate::types::quote::QuoteError;
+use crate::types::quote::{QuoteAddressError, QuoteError};
 use crate::types::rpc::RpcError;
 use crate::types::swap::TransitionError;
 use candid::CandidType;
@@ -82,6 +82,14 @@ pub enum RegisterQuoteError {
     DstAddressNotAnAddress {
         reason: EvmAddressError,
     },
+    /// The quote names a rail this deploy does not run, by its id: its claim would be
+    /// refused, so the quote is not handed to a user to pay.
+    RailUnavailable {
+        rail: String,
+    },
+    /// A payee the quote names is one the vault cannot pay: the zero address as the
+    /// destination or the refund address.
+    QuoteAddress(QuoteAddressError),
 }
 
 /// Why `push_chain_data` stored nothing.

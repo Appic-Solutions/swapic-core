@@ -2020,10 +2020,14 @@ fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
 /// funds in the vault under a quote that never becomes a swap. A source token that is not
 /// the rail's USDC, and a rail the deploy has off, are both refused before anything is
 /// allocated or signed.
+///
+/// Rewritten for fix wave 5 (N8): the store no longer takes an Eco quote while the rail is
+/// off, so the Eco quote registers with the rail on and the deploy turns it off before the
+/// pull, which is the pull's own refusal this test is for.
 #[test]
 fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
     use settlement_api::types::quote::{QuoteAddressField, RailTokenError};
-    let (pic, canister, _admin) = setup_with_keys();
+    let (pic, canister, admin) = setup_with_keys();
     let worthless = "0x2222222222222222222222222222222222222222";
     let wrong_token = types::Quote {
         gas_mode: GasMode::Gasless,
@@ -2058,7 +2062,7 @@ fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
         rail: Rail::Eco,
         ..live_quote(&pic, 47)
     };
-    let eco_hash = registered(&pic, canister, &eco);
+    let eco_hash = with_eco_on(&pic, canister, admin, || registered(&pic, canister, &eco));
     assert_eq!(
         start_gasless_pull(&pic, canister, quoter(), eco_hash, &permit(&eco)),
         Err(PullError::RailUnavailable {
@@ -2073,6 +2077,26 @@ fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
         "nothing was allocated"
     );
     assert!(pic.get_canister_http().is_empty(), "and nothing sent");
+}
+
+/// Runs `register` with the Eco rail on, and turns it off again after: the store takes an
+/// Eco quote only while the deploy runs the rail.
+fn with_eco_on<T>(
+    pic: &PocketIc,
+    canister: Principal,
+    admin: Principal,
+    register: impl FnOnce() -> T,
+) -> T {
+    use crate::client::settlement::{get_config_full, set_config};
+    let off = get_config_full(pic, canister, admin).expect("the controller reads it");
+    let on = Config {
+        eco_enabled: true,
+        ..off.clone()
+    };
+    set_config(pic, canister, admin, &on).expect("the controller turns the rail on");
+    let registered = register();
+    set_config(pic, canister, admin, &off).expect("and off again");
+    registered
 }
 
 /// A quote pays its user at `dst_address`, after the burn and the mint, so text no payout
@@ -2433,4 +2457,83 @@ fn a_batch_the_provider_refuses_is_read_one_window_at_a_time() {
     let mut froms = provider.froms();
     froms.dedup();
     assert_eq!(froms.len(), 35, "each window once");
+}
+
+/// Registration refuses what a claim would refuse by the quote alone (rule A5), so no quote
+/// is handed to a user to pay that no claim could then take: a halted canister registers
+/// nothing (no new swaps during a halt), a quote on the Eco rail while the deploy has it
+/// off is refused by its rail, and the zero address as the destination or the refund
+/// address, which the vault cannot pay, is refused by the field at both doors. Nothing is
+/// stored and nothing is read.
+#[test]
+fn registration_refuses_what_a_claim_would_refuse() {
+    use settlement_api::types::errors::RegisterQuoteError;
+    use settlement_api::types::quote::{QuoteAddressError, QuoteAddressField};
+    let (pic, canister, admin) = setup();
+
+    set_halted(&pic, canister, admin, true).expect("the operator halts");
+    let during = quote(80);
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &wire(&during)),
+        Err(RegisterQuoteError::Guard(GuardError::Halted)),
+        "no new swaps during a halt"
+    );
+    set_halted(&pic, canister, admin, false).expect("the operator lifts the halt");
+    assert_eq!(
+        get_pending(&pic, canister, watcher(), swap_id(&during)).unwrap(),
+        None,
+        "nothing was registered during the halt"
+    );
+
+    let before = count(&pic, canister);
+    let eco = types::Quote {
+        rail: Rail::Eco,
+        ..quote(81)
+    };
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &wire(&eco)),
+        Err(RegisterQuoteError::RailUnavailable {
+            rail: "eco".to_string()
+        }),
+        "the claim would refuse the rail, so the store does"
+    );
+
+    let zero: types::Address = "0x0000000000000000000000000000000000000000"
+        .parse()
+        .unwrap();
+    for (quote, field) in [
+        (
+            types::Quote {
+                dst_address: zero.clone(),
+                ..quote(82)
+            },
+            QuoteAddressField::DstAddress,
+        ),
+        (
+            types::Quote {
+                refund_address: Some(zero.clone()),
+                ..quote(83)
+            },
+            QuoteAddressField::RefundAddress,
+        ),
+    ] {
+        assert_eq!(
+            register_quote(&pic, canister, quoter(), &wire(&quote)),
+            Err(RegisterQuoteError::QuoteAddress(QuoteAddressError::Zero {
+                field
+            })),
+            "registering a zero {field:?}"
+        );
+        assert_eq!(
+            claim_swap(&pic, canister, watcher(), &wire(&quote)),
+            Err(ClaimError::QuoteAddress(QuoteAddressError::Zero { field })),
+            "claiming a zero {field:?}"
+        );
+        assert_eq!(
+            get_pending(&pic, canister, watcher(), swap_id(&quote)).unwrap(),
+            None
+        );
+    }
+    assert!(pic.get_canister_http().is_empty(), "nothing was read");
+    assert_eq!(count(&pic, canister), before, "nothing stored");
 }

@@ -243,6 +243,11 @@ pub enum QuoteAddressError {
     Absent {
         field: QuoteAddressField,
     },
+    /// The field is the zero address, which the vault's `_send` reverts on: a payout or a
+    /// refund to it would freeze the swap after the funds had moved.
+    Zero {
+        field: QuoteAddressField,
+    },
 }
 
 impl From<types::quote::QuoteAddressError> for QuoteAddressError {
@@ -254,6 +259,9 @@ impl From<types::quote::QuoteAddressError> for QuoteAddressError {
                 reason: reason.into(),
             },
             Domain::Absent { field } => Self::Absent {
+                field: field.into(),
+            },
+            Domain::Zero { field } => Self::Zero {
                 field: field.into(),
             },
         }

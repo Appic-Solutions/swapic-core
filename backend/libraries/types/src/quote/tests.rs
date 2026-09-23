@@ -511,3 +511,56 @@ fn a_quotes_addresses_are_read_by_field_and_a_bad_one_names_it() {
         "refund_address"
     );
 }
+
+/// A quote pays its destination and refunds to its refund address through the vault,
+/// whose `_send` reverts on the zero address: a payee is an EVM address and not that one,
+/// or it is refused by the field, and a refund address the quote does not name is absent.
+#[test]
+fn a_payee_is_an_evm_address_and_never_the_zero_address() {
+    let zero: Address = text("0x0000000000000000000000000000000000000000");
+    let quote = Quote {
+        refund_address: Some(text("0x1111111111111111111111111111111111111111")),
+        ..fixed_quote()
+    };
+    assert_eq!(
+        quote.payable_address(QuoteAddressField::DstAddress),
+        Ok(text("0x7551A66653f9a20979ed81835a0b7008EC83401b"))
+    );
+    assert!(quote
+        .payable_address(QuoteAddressField::RefundAddress)
+        .is_ok());
+    let to_nobody = Quote {
+        dst_address: zero.clone(),
+        ..quote.clone()
+    };
+    assert_eq!(
+        to_nobody.payable_address(QuoteAddressField::DstAddress),
+        Err(QuoteAddressError::Zero {
+            field: QuoteAddressField::DstAddress
+        })
+    );
+    let back_to_nobody = Quote {
+        refund_address: Some(zero),
+        ..quote.clone()
+    };
+    assert_eq!(
+        back_to_nobody.payable_address(QuoteAddressField::RefundAddress),
+        Err(QuoteAddressError::Zero {
+            field: QuoteAddressField::RefundAddress
+        })
+    );
+    assert_eq!(
+        fixed_quote().payable_address(QuoteAddressField::RefundAddress),
+        Err(QuoteAddressError::Absent {
+            field: QuoteAddressField::RefundAddress
+        })
+    );
+    let text_only = Quote {
+        dst_address: text("hello"),
+        ..quote
+    };
+    assert!(matches!(
+        text_only.payable_address(QuoteAddressField::DstAddress),
+        Err(QuoteAddressError::NotAnAddress { .. })
+    ));
+}
