@@ -555,15 +555,8 @@ impl<S: Store> State<S> {
                 .expect("BUG: State::check refuses a fee that overflows fees_accrued"),
             ..meta
         });
-        // fees_accrued holds every swap's fees, this one's among them, so what fit there
-        // fits here
-        self.update_swap(quote_hash, |swap| {
-            swap.fee_accrued = Some(swap.fee_accrued.map_or(amount, |accrued| {
-                accrued
-                    .checked_add(amount)
-                    .expect("BUG: a swap's fees are part of fees_accrued, which did not overflow")
-            }))
-        });
+        // the guard admits one fee line per swap, so this one is the swap's fee
+        self.update_swap(quote_hash, |swap| swap.fee_accrued = Some(amount));
     }
 
     fn record_pocket_funded(&mut self, chain_id: ChainId, amount: TokenAmount) {

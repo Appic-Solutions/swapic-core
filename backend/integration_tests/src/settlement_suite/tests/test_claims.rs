@@ -7,7 +7,7 @@
 //! window, and the time of the block a deposit landed in when a claim comes late.
 
 use crate::client::settlement::{
-    claim_swap, derive_evm_address, event_count, events_page, get_pending, get_swap,
+    claim_swap, derive_evm_address, event_count, events_page, get_pending, get_swap, paused_swaps,
     push_attestation, push_chain_data, push_eco_intent, register_quote, set_halted, set_sanctioned,
     start_gasless_pull, verify_replay,
 };
@@ -2536,4 +2536,62 @@ fn registration_refuses_what_a_claim_would_refuse() {
     }
     assert!(pic.get_canister_http().is_empty(), "nothing was read");
     assert_eq!(count(&pic, canister), before, "nothing stored");
+}
+
+/// Turning a rail off pauses the swaps on it and never stops them (review 4, L3): an Eco
+/// swap funded while the rail ran is refused its next move on every engine tick while the
+/// deploy has the rail off, stays where it was with no line appended, and is counted by the
+/// world-readable `paused_swaps` query, so the pause is seen (E6). With the rail back on
+/// it is no longer counted.
+#[test]
+fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
+    use crate::client::settlement::{get_config_full, set_config};
+    let (pic, canister, admin) = setup();
+    let off = get_config_full(&pic, canister, admin).expect("the controller reads it");
+    let on = Config {
+        eco_enabled: true,
+        ..off.clone()
+    };
+    set_config(&pic, canister, admin, &on).expect("the controller turns the rail on");
+    let eco = types::Quote {
+        rail: Rail::Eco,
+        ..quote(90)
+    };
+    let eco_hash = swap_id(&eco);
+    let call = submit_claim(&pic, canister, watcher(), &eco);
+    answer(
+        &pic,
+        &the_read(&pic, eco_hash),
+        HEAD,
+        vec![deposit_log(eco_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(eco_hash));
+    assert_eq!(paused_swaps(&pic, canister, Principal::anonymous()), 0);
+
+    set_config(&pic, canister, admin, &off).expect("the controller turns it off");
+    let before = count(&pic, canister);
+    assert_eq!(
+        paused_swaps(&pic, canister, Principal::anonymous()),
+        1,
+        "the swap the rail holds is counted, for anyone to see"
+    );
+    // a few engine ticks: the swap is refused its move and nothing is appended
+    for _ in 0..3 {
+        pic.advance_time(Duration::from_secs(30));
+        for _ in 0..4 {
+            pic.tick();
+        }
+    }
+    assert!(pic.get_canister_http().is_empty(), "the rail read nothing");
+    assert_eq!(count(&pic, canister), before, "and no line was written");
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), eco_hash)
+            .expect("the swap exists")
+            .status,
+        SwapStatus::FundsReceived,
+        "paused where it was, not frozen"
+    );
+
+    set_config(&pic, canister, admin, &on).expect("the controller turns it back on");
+    assert_eq!(paused_swaps(&pic, canister, Principal::anonymous()), 0);
 }

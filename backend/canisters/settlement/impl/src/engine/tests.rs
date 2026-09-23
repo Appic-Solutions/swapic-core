@@ -489,3 +489,51 @@ fn a_fee_already_accrued_is_not_accrued_again() {
         );
     });
 }
+
+/// The swaps a rail the deploy has off holds are counted for the operator (E6): an open
+/// swap on that rail whose next move is the rail's, a step or a reclaim, is paused, not
+/// stopped, and moves again when the rail is back on. A swap on a rail that runs, one on
+/// the paused rail whose next move is not the rail's (a refund out of the vault, which
+/// needs no rail), and a closed one are not counted.
+#[test]
+fn the_swaps_a_disabled_rail_holds_are_counted() {
+    use crate::state::transitions::tests::quote;
+    use types::config::EcoEnabled;
+    let on = |rail: types::Rail, swap: Swap| Swap {
+        quote_bytes: Quote {
+            rail,
+            ..quote(swap.last_attempt.map_or(0, |attempt| attempt.get().into()))
+        }
+        .canonical_bytes()
+        .unwrap(),
+        ..swap
+    };
+    let swaps = [
+        on(types::Rail::Eco, at(SwapStatus::FundsReceived, None, None)),
+        on(
+            types::Rail::Eco,
+            at(
+                SwapStatus::Refunding,
+                Some(Leg::Burn),
+                Some(Outcome::Confirmed),
+            ),
+        ),
+        on(types::Rail::Eco, at(SwapStatus::Refunding, None, None)),
+        on(types::Rail::Eco, at(SwapStatus::Done, None, None)),
+        on(
+            types::Rail::CctpV2Fast,
+            at(SwapStatus::FundsReceived, None, None),
+        ),
+    ];
+    let off = types::Config::default();
+    assert_eq!(
+        paused_on_disabled_rails(&off, swaps.iter()),
+        2,
+        "the step and the reclaim of the Eco swaps, and nothing else"
+    );
+    let running = types::Config {
+        eco_enabled: EcoEnabled::ON,
+        ..types::Config::default()
+    };
+    assert_eq!(paused_on_disabled_rails(&running, swaps.iter()), 0);
+}

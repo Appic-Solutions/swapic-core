@@ -7,7 +7,7 @@ use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
     event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
-    get_pending, get_swap, halted, test_outbox_armed, verify_chain, verify_replay,
+    get_pending, get_swap, halted, paused_swaps, test_outbox_armed, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
@@ -208,6 +208,20 @@ pub fn get_chain_data(
         sender,
         "get_chain_data",
         encode_one(chain_id).unwrap(),
+    )
+}
+
+pub fn paused_swaps(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> paused_swaps::Response {
+    query(
+        pic,
+        canister,
+        sender,
+        "paused_swaps",
+        encode_one(()).unwrap(),
     )
 }
 

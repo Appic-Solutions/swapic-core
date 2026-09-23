@@ -325,6 +325,26 @@ enum Did {
     Nothing,
 }
 
+/// How many of `swaps` wait on a rail the deploy has off: open swaps whose next move is
+/// the rail's, a step or a reclaim, on a rail `config` does not run. Each is paused, not
+/// stopped: the rail refuses it with a retryable `RailDisabled` every tick and it moves
+/// again when the rail is back on. What the `paused_swaps` query answers, so the pause a
+/// knob holds is seen by an operator rather than found in a counter nobody reads (E6).
+pub fn paused_on_disabled_rails<'a>(
+    config: &types::Config,
+    swaps: impl IntoIterator<Item = &'a Swap>,
+) -> u64 {
+    let paused = swaps
+        .into_iter()
+        .filter(|swap| matches!(next_action(swap), Action::Rail | Action::RailReclaim))
+        .filter(|swap| {
+            Quote::parse(&swap.quote_bytes)
+                .is_ok_and(|quote| crate::entry::unavailable_rail(config, &quote).is_some())
+        })
+        .count();
+    u64::try_from(paused).expect("BUG: usize is at most 64 bits on every target")
+}
+
 /// Decides and acts on one swap.
 async fn drive_one(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
     match next_action(swap) {

@@ -195,6 +195,8 @@ pub enum TransitionError {
         logged: Nat,
         quoted: Nat,
     },
+    /// The swap already holds its platform fee: one fee line per swap.
+    FeeAlreadyAccrued(Hash32),
 }
 
 /// Why a pocket cannot make a move.
@@ -292,6 +294,9 @@ impl From<types::TransitionError> for TransitionError {
                 logged: logged.into(),
                 quoted: quoted.into(),
             },
+            Domain::FeeAlreadyAccrued(quote_hash) => {
+                Self::FeeAlreadyAccrued(quote_hash.into_bytes())
+            }
         }
     }
 }

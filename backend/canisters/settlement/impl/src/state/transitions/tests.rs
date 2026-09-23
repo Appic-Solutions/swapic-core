@@ -1871,3 +1871,23 @@ fn a_cctp_burn_records_the_fee_it_offered_and_a_publish_records_none() {
         "calldata that is no CCTP burn records no fee"
     );
 }
+
+/// One fee line per swap is a rule of the fold (rule A6), not only a habit of its one
+/// writer: the second `FeeAccrued` for a swap that already holds its fee is refused with
+/// the swap named, so no path, a retried `record_done` or a hand-written line, can accrue a
+/// swap's fee twice. Another swap's fee still lands.
+#[test]
+fn a_second_fee_line_for_one_swap_is_refused() {
+    let qh = swap_id(1);
+    let fee = |qh, units| EventType::FeeAccrued {
+        quote_hash: qh,
+        amount: amount(units),
+    };
+    let state = fold(vec![funds(1), funds(2), fee(qh, 7)]);
+    assert_eq!(swap(&state, qh).fee_accrued, Some(amount(7)));
+    assert_eq!(
+        state.check(&fee(qh, 3)),
+        Err(TransitionError::FeeAlreadyAccrued(qh))
+    );
+    assert_eq!(state.check(&fee(swap_id(2), 3)), Ok(()));
+}

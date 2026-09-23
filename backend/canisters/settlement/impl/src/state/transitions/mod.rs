@@ -143,8 +143,12 @@ impl<S: Store> State<S> {
                 swap.ensure_not_closed()?;
                 swap.ensure_no_open_attempt()
             }
+            // one fee line per swap (rule A6): the line records the fee the swap's own
+            // payout left behind, so a second one could only accrue that fee twice
             EventType::FeeAccrued { quote_hash, amount } => {
-                self.swap(quote_hash)?;
+                if self.swap(quote_hash)?.fee_accrued.is_some() {
+                    return Err(TransitionError::FeeAlreadyAccrued(*quote_hash));
+                }
                 self.meta()
                     .fees_accrued
                     .checked_add(*amount)

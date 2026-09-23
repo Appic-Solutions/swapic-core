@@ -445,7 +445,8 @@ pub struct Config {
     #[n(25)]
     pub eco_portal: Option<EvmAddress>,
     /// Whether the Eco rail may be used. Off until its route is designed: a quote naming
-    /// it is refused at the claim, and a swap already on it is stopped for a human.
+    /// it is refused at registration and at the claim, and a swap already on it is paused
+    /// until the rail is on again (the `paused_swaps` query counts them).
     #[n(26)]
     pub eco_enabled: EcoEnabled,
     /// How long after a quote's deposit deadline a claim for a deposit that landed by it

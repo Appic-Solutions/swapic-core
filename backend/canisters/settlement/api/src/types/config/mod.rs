@@ -53,7 +53,8 @@ pub struct Config {
     /// Eco's `Portal`, the same address on every chain.
     pub eco_portal: Option<String>,
     /// Whether the Eco rail may be used. False until its route is designed: a quote
-    /// naming it is refused at the claim.
+    /// naming it is refused at registration and at the claim, and a swap already on it is
+    /// paused until the rail is on again (counted by `paused_swaps`).
     pub eco_enabled: bool,
     /// How long after a quote's deposit deadline (its expiry plus the permit window) a
     /// claim for a deposit that landed by that deadline is still admitted, from any

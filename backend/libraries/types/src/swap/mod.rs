@@ -251,6 +251,8 @@ pub enum TransitionError {
     },
     #[error(transparent)]
     Pocket(#[from] PocketError),
+    #[error("swap {0} already holds the fee the platform accrued on it")]
+    FeeAlreadyAccrued(QuoteHash),
 }
 
 impl Swap {

@@ -161,12 +161,17 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
 
 /// The rail is off until its route is designed (see the module doc for what must be true
 /// first), so with the knob at its default it moves nothing at all: no publish, and no
-/// reclaim of a swap that published while the knob was on. A swap whose reward is locked
-/// in the Portal is stuck for a human rather than refused every tick in silence, as the
-/// knob's doc promises.
+/// reclaim of a swap that published while the knob was on. Both answer the same retryable
+/// refusal, so turning the knob off pauses every swap on the rail and turning it back on
+/// resumes them: a knob flip never freezes a swap for good, and the reward locked in the
+/// Portal stays refundable. The paused swaps are counted by the `paused_swaps` query.
 ///
 /// Rewritten for fix wave 4 (N5, finding 7): the reclaim answered `RailDisabled`, which the
 /// engine retried each tick without ever stopping the swap.
+///
+/// Rewritten again for fix wave 5 (L3): the reclaim answered `Stuck`, which froze a
+/// refunding swap for good on a minute's knob flip while an executing one only paused, so
+/// it answers `RailDisabled` like the step again, and the pause is surfaced instead.
 #[test]
 fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
     let quote = quote();
@@ -188,11 +193,20 @@ fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
     let published = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     let mut past = at(&quote, &published, &off, None, Some(&intent));
     past.now = UnixSeconds::new(3_000);
-    assert!(
-        matches!(Eco.reclaim(&past), Ok(ReclaimStep::Stuck(_))),
-        "the reward is locked and the rail is off: a human decides"
+    assert_eq!(
+        Eco.reclaim(&past).map(drop),
+        Err(RailError::RailDisabled { rail: Rail::Eco }),
+        "the reward is locked and the rail is off: the swap waits for the knob"
     );
     // before the deadline too: nothing the rail could do later is done with it off
     let before = at(&quote, &published, &off, None, Some(&intent));
-    assert!(matches!(Eco.reclaim(&before), Ok(ReclaimStep::Stuck(_))));
+    assert_eq!(
+        Eco.reclaim(&before).map(drop),
+        Err(RailError::RailDisabled { rail: Rail::Eco })
+    );
+    // and the knob back on resumes it where it was
+    let on = config();
+    let mut resumed = at(&quote, &published, &on, None, Some(&intent));
+    resumed.now = UnixSeconds::new(3_000);
+    assert!(matches!(Eco.reclaim(&resumed), Ok(ReclaimStep::Send(_))));
 }

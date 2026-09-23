@@ -102,7 +102,8 @@ type Config = record {
   simulate_before_sign : bool;
   vault_addresses : vec record { nat64; text };
   // Whether the Eco rail may be used. False until its route is designed: a quote
-  // naming it is refused at the claim.
+  // naming it is refused at registration and at the claim, and a swap already on it is
+  // paused until the rail is on again (counted by `paused_swaps`).
   eco_enabled : bool;
   platform_fee_bps : nat16;
   permit_deadline_s : nat64;
@@ -838,6 +839,8 @@ type TransitionError = variant {
   CannotStartRefund : SwapStatus;
   NotInFlight : SwapStatus;
   NotWaitingForUser : SwapStatus;
+  // The swap already holds its platform fee: one fee line per swap.
+  FeeAlreadyAccrued : blob;
   // The line says `logged` arrived, and the quote it carries is for `quoted`.
   FundsTokenNotTheQuotes : record { logged : text; quoted : text };
   // The line says `logged` arrived, and the quote it carries is for `quoted`.
@@ -967,6 +970,12 @@ service : (InitArg) -> {
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
+  // World-readable. How many open swaps wait on a rail the deploy has turned off: each is
+  // paused, not stopped, refused with a retryable `RailDisabled` on every engine tick, and
+  // moves again once the rail is back on. A count and nothing else, so it says nothing about
+  // any one swap that the public event log does not already. It reads every swap the fold
+  // holds, which is what one engine tick reads too.
+  paused_swaps : () -> (nat64) query;
   // Watcher-only. Hands in what Circle attested for a swap's burn: the message the source
   // chain emitted and the signatures over it, which the mint on the destination takes,
   // named by the burn transaction the watcher fetched it for.
