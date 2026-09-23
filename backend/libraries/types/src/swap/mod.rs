@@ -142,6 +142,12 @@ pub struct Swap {
     /// cannot change what the log says was paid.
     #[n(12)]
     pub paid_out: Option<TokenAmount>,
+    /// The platform's fee on this swap, once the log has accrued it: what `record_done`
+    /// reads, so a swap recorded again after a refused `SwapDone` does not accrue its fee
+    /// twice. Absent while nothing was accrued, so a swap written before it existed reads
+    /// back without one.
+    #[n(13)]
+    pub fee_accrued: Option<TokenAmount>,
 }
 
 /// Why an event cannot move the state it was offered to.

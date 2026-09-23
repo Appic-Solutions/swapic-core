@@ -102,6 +102,7 @@ fn samples() -> Vec<Sample> {
         last_outcome: None,
         last_tx_hash: None,
         paid_out: None,
+        fee_accrued: None,
     };
     let unpaid = Swap {
         quote_bytes: vec![],
@@ -117,6 +118,7 @@ fn samples() -> Vec<Sample> {
         last_outcome: None,
         last_tx_hash: None,
         paid_out: None,
+        fee_accrued: None,
     };
     // the depths the default held when this line was written. A default that moves changes
     // what every config encodes, and a golden line never changes, so the two lines below
@@ -308,6 +310,7 @@ fn samples() -> Vec<Sample> {
                 // the swap appended below is the one that pins the later fields
                 last_tx_hash: None,
                 paid_out: None,
+                fee_accrued: None,
             },
         ),
         sample(
@@ -340,6 +343,7 @@ fn samples() -> Vec<Sample> {
                 // absent, so this sample's bytes stay exactly the ones the golden pins;
                 // the swap appended below is the one that pins the field
                 paid_out: None,
+                fee_accrued: None,
             },
         ),
         sample(
@@ -382,6 +386,7 @@ fn samples() -> Vec<Sample> {
                 last_outcome: Some(crate::Outcome::Confirmed),
                 last_tx_hash: Some(TxHash::new([0x69; 32])),
                 paid_out: Some(TokenAmount::from(6_978_003_u32)),
+                fee_accrued: None,
             },
         ),
         // the entry the pending store holds now: the quote with the height the watcher had
@@ -401,6 +406,27 @@ fn samples() -> Vec<Sample> {
             Config {
                 ecdsa_key_name: "key_1".to_string(),
                 ..Config::default()
+            },
+        ),
+        // the swap samples above leave the fee absent, so their bytes stay the ones the
+        // golden pins; this one pins it
+        sample(
+            "swap with the fee the log accrued for it",
+            Swap {
+                quote_bytes: vec![0xca, 0xfe, 0x03],
+                status: SwapStatus::Delivering,
+                last_attempt: Some(Attempt::new(3)),
+                open_attempt: None,
+                src_chain: ChainId::ARBITRUM,
+                src_token: "0x4".parse().unwrap(),
+                amount_in: TokenAmount::from(8_000_000_u32),
+                amount_paid: Some(TokenAmount::from(7_999_000_u32)),
+                waiting_since: None,
+                last_leg: Some(crate::Leg::Payout),
+                last_outcome: Some(crate::Outcome::Confirmed),
+                last_tx_hash: Some(TxHash::new([0x6a; 32])),
+                paid_out: Some(TokenAmount::from(7_975_003_u32)),
+                fee_accrued: Some(TokenAmount::from(23_997_u32)),
             },
         ),
     ]);

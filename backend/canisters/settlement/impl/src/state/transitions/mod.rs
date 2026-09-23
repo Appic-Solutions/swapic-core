@@ -457,7 +457,9 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         EventType::Refunded { quote_hash, .. } => state.record_refunded(quote_hash),
         EventType::SwapDone { quote_hash } => state.record_swap_done(quote_hash),
         EventType::Frozen { quote_hash, .. } => state.record_frozen(quote_hash),
-        EventType::FeeAccrued { amount, .. } => state.record_fee_accrued(*amount),
+        EventType::FeeAccrued { quote_hash, amount } => {
+            state.record_fee_accrued(quote_hash, *amount)
+        }
         EventType::PocketFunded { chain_id, amount } => {
             state.record_pocket_funded(*chain_id, *amount)
         }

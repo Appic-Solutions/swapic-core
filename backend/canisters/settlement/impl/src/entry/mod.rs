@@ -212,6 +212,10 @@ pub enum PullError {
     Vault(#[from] VaultError),
     #[error(transparent)]
     Tx(#[from] TxError),
+    #[error("the {rail} rail is not available on this deploy")]
+    RailUnavailable { rail: Rail },
+    #[error(transparent)]
+    RailToken(#[from] RailTokenError),
 }
 
 /// The last second a quote may still be claimed or paid: its expiry, and the window a
@@ -246,14 +250,23 @@ pub fn ensure_claimable(
     }
 }
 
-/// The rail a quote names has to be one this deploy runs. The Eco rail is off until its
-/// route is designed (see `rails::eco`), so a quote naming it is refused here, before an
-/// outcall is bought, rather than becoming a swap whose funds the canister cannot move.
-pub fn ensure_rail_is_enabled(config: &Config, quote: &Quote) -> Result<(), ClaimError> {
-    if quote.rail == Rail::Eco && !config.eco_enabled.is_on() {
-        return Err(ClaimError::RailUnavailable { rail: quote.rail });
+/// The rail a quote names, if this deploy does not run it. The Eco rail is off until its
+/// route is designed (see `rails::eco`).
+pub fn unavailable_rail(config: &Config, quote: &Quote) -> Option<Rail> {
+    match quote.rail {
+        Rail::Eco if !config.eco_enabled.is_on() => Some(quote.rail),
+        Rail::Eco | Rail::CctpV2Fast | Rail::CctpV2Standard => None,
     }
-    Ok(())
+}
+
+/// The rail a quote names has to be one this deploy runs, so a quote naming the Eco rail
+/// while it is off is refused here, before an outcall is bought, rather than becoming a
+/// swap whose funds the canister cannot move.
+pub fn ensure_rail_is_enabled(config: &Config, quote: &Quote) -> Result<(), ClaimError> {
+    match unavailable_rail(config, quote) {
+        Some(rail) => Err(ClaimError::RailUnavailable { rail }),
+        None => Ok(()),
+    }
 }
 
 /// A quote has to name a refund address a refund can be paid to. The fold does not hold
@@ -445,10 +458,13 @@ pub fn ensure_permit_binds(
 /// Pulls a gasless user's funds into the vault with the permit they signed, and answers the
 /// hash of the transaction that does it.
 ///
-/// Pre-money: the quote must be pending and gasless, still payable, the permit its own, and
-/// nobody it involves sanctioned; then the marker (A8), then the one send path, which
-/// allocates, signs, records `PullSigned` and queues. The deposit the transaction makes is
-/// what `claim_swap` then verifies, so nothing here creates a swap.
+/// Pre-money: the quote must be pending and gasless, still payable, on a rail the deploy
+/// runs and naming that rail's tokens, the permit its own, and nobody it involves
+/// sanctioned; then the marker (A8), then the one send path, which allocates, signs,
+/// records `PullSigned` and queues. The deposit the transaction makes is what `claim_swap`
+/// then verifies, so nothing here creates a swap, and every refusal the claim makes on the
+/// quote alone is made here first (rule A5): a pull the claim then refused would leave the
+/// user's funds in the vault under a quote that never becomes a swap.
 pub async fn start_gasless_pull(
     quote_hash: QuoteHash,
     permit: PullPermit,
@@ -466,6 +482,10 @@ pub async fn start_gasless_pull(
             now: now.as_secs(),
         });
     }
+    if let Some(rail) = unavailable_rail(&config, &quote) {
+        return Err(PullError::RailUnavailable { rail });
+    }
+    ensure_rail_tokens(&config.usdc_addresses, &quote)?;
     let token = quote.evm_address(QuoteAddressField::SrcToken)?;
     let vault = deposits::vault_of(&config, quote.src_chain)?;
     ensure_permit_binds(quote_hash, &quote, token, vault, now.as_secs(), &permit)?;
@@ -559,6 +579,10 @@ impl From<PullError> for settlement_api::types::entry::PullError {
             },
             PullError::Vault(error) => Self::Vault(error.into()),
             PullError::Tx(error) => Self::Tx(error.into()),
+            PullError::RailUnavailable { rail } => Self::RailUnavailable {
+                rail: rail.to_string(),
+            },
+            PullError::RailToken(error) => Self::RailToken(error.into()),
         }
     }
 }

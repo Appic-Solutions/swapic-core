@@ -113,14 +113,33 @@ fn decode_eip1559(raw: &[u8]) -> SentTx {
     }
 }
 
+/// One `eth_getLogs` the canister made: the vault it read, the range it asked for (`to`
+/// is `None` for a range open at the head), and the head when it was answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LogRead {
+    address: String,
+    from: u64,
+    to: Option<u64>,
+    head: u64,
+}
+
 /// Everything the mocked chains know: a head that grows with every answer, the deposits
-/// the vaults hold, and every transaction that was broadcast with the block it was mined
-/// in.
+/// the vaults hold, every transaction that was broadcast with the block it was mined in,
+/// and every log read the canister made.
 struct Chains {
     head: u64,
     deposits: Vec<Value>,
     sent: Vec<SentTx>,
     mined: BTreeMap<Hash32, u64>,
+    log_reads: Vec<LogRead>,
+}
+
+/// A block number as a JSON-RPC quantity or tag carries it, with `latest` as `head`.
+fn block_of(value: &Value, head: u64) -> u64 {
+    match value.as_str().expect("a block") {
+        "latest" => head,
+        text => u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex block"),
+    }
 }
 
 impl Chains {
@@ -130,6 +149,7 @@ impl Chains {
             deposits: Vec::new(),
             sent: Vec::new(),
             mined: BTreeMap::new(),
+            log_reads: Vec::new(),
         }
     }
 
@@ -141,10 +161,19 @@ impl Chains {
             "eth_getLogs" => {
                 let filter = &params[0];
                 let wanted = filter["topics"][1].as_str().expect("a quote hash topic");
+                let from = block_of(&filter["fromBlock"], self.head);
+                let to = block_of(&filter["toBlock"], self.head);
+                self.log_reads.push(LogRead {
+                    address: filter["address"].as_str().unwrap().to_string(),
+                    from,
+                    to: (filter["toBlock"] != "latest").then_some(to),
+                    head: self.head,
+                });
                 let logs: Vec<Value> = self
                     .deposits
                     .iter()
                     .filter(|log| log["topics"][1] == wanted && log["address"] == filter["address"])
+                    .filter(|log| (from..=to).contains(&block_of(&log["blockNumber"], self.head)))
                     .cloned()
                     .collect();
                 json!(logs)
@@ -812,6 +841,11 @@ fn a_platform_fee_is_paid_out_accrued_and_recorded_as_it_was_sent() {
     );
     let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
     assert_eq!(swap.paid_out, Some(candid::Nat::from(delivered - fee)));
+    assert_eq!(
+        swap.fee_accrued,
+        Some(candid::Nat::from(fee)),
+        "the swap holds the fee the log accrued for it"
+    );
     assert!(verify_chain(&pic, canister, Principal::anonymous()));
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
     assert!(deep_audit_is_clean(&pic, canister, admin));
@@ -1063,6 +1097,133 @@ fn a_message_of_an_identical_burn_is_refused_under_the_other_swap() {
     assert_eq!(minted, own, "each message is minted once, by its own swap");
     assert_eq!(burned_hook(&chains, first_hash), first_hash.to_vec());
     assert_eq!(burned_hook(&chains, second_hash), second_hash.to_vec());
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// The destination vault's `Deposited` log for `quote_hash`: a filler delivering `amount`
+/// of Arbitrum's USDC at `block`.
+fn fill_log(quote_hash: Hash32, block: u64, amount: u128) -> Value {
+    let word = |address: &str| {
+        format!(
+            "0x{}",
+            hex::encode(address.parse::<EvmAddress>().unwrap().to_word())
+        )
+    };
+    json!({
+        "address": VAULT_ARBITRUM.to_ascii_lowercase(),
+        "topics": [
+            format!("0x{}", hex::encode(deposited_topic())),
+            format!("0x{}", hex::encode(quote_hash)),
+            word(USDC_ARBITRUM),
+            word("0x3333333333333333333333333333333333333333"),
+        ],
+        "data": format!("0x{amount:064x}"),
+        "blockNumber": format!("0x{block:x}"),
+        "blockHash": format!("0x{}", hex::encode([0x43; 32])),
+        "transactionHash": format!("0x{}", hex::encode([0x78; 32])),
+        "logIndex": "0x0",
+        "removed": false,
+    })
+}
+
+/// The Eco rail's wait for the fill is bounded: while the intent is live, each tick reads
+/// the newest window of the destination vault's log, one outcall, and not the whole
+/// day-wide lookback, which would be thirty-five outcalls per swap per tick. The decision
+/// a read that finds nothing leads to, the refund once the intent's deadline has passed,
+/// rests on the whole lookback read first, so a fill the newest window no longer holds is
+/// still found and paid, not refunded.
+#[test]
+fn an_eco_swap_waits_on_the_newest_window_and_reads_the_lookback_before_refunding() {
+    use crate::client::settlement::{push_eco_intent, set_config};
+    use settlement_api::types::entry::EcoIntent;
+    let (pic, canister, admin) = setup();
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            rail_status_max_age_s: STEP.as_secs(),
+            eco_enabled: true,
+            eco_portal: Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string()),
+            ..config()
+        },
+    )
+    .expect("the controller turns the rail on");
+    let installed = events(&pic, canister).len();
+    let mut chains = Chains::new(19_000_000);
+    let eco = types::Quote {
+        rail: types::Rail::Eco,
+        ..quote(8)
+    };
+    let quote_hash = claim(&pic, canister, &mut chains, &eco);
+    let now_s = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000;
+    push_eco_intent(
+        &pic,
+        canister,
+        watcher(),
+        quote_hash,
+        &EcoIntent {
+            destination_chain: 42161,
+            route: vec![0xde, 0xad, 0xbe, 0xef],
+            deadline_s: now_s + 600,
+            prover: "0xeC00008537c1F26E739486BCFCC818d81234d5aD".to_string(),
+        },
+    )
+    .expect("the watcher hands in the intent");
+    drive_until_burn_confirmed(&pic, canister, &mut chains, quote_hash, installed);
+
+    // the intent is live: every read of the destination is one window, open at the head
+    let waited = chains.log_reads.len();
+    for _ in 0..3 {
+        turn(&pic, canister, &mut chains);
+    }
+    let arrivals: Vec<LogRead> = chains.log_reads[waited..]
+        .iter()
+        .filter(|read| read.address == VAULT_ARBITRUM.to_ascii_lowercase())
+        .cloned()
+        .collect();
+    assert!(!arrivals.is_empty(), "the engine reads the destination");
+    for read in &arrivals {
+        assert!(
+            read.to.is_none() && read.from + 10_001 >= read.head,
+            "one window at the head, not the lookback: {read:?}"
+        );
+    }
+    assert_eq!(
+        trail(&pic, canister, installed).last().map(String::as_str),
+        Some("TxConfirmed(1)"),
+        "nothing arrived, and nothing was decided"
+    );
+
+    // the fill landed a while back, older than the newest window; the deadline passes
+    let paid = 24_950_000_u128;
+    chains
+        .deposits
+        .push(fill_log(quote_hash, chains.head - 20_000, paid));
+    pic.advance_time(Duration::from_secs(600));
+    let before = chains.log_reads.len();
+    drive_until(
+        &pic,
+        canister,
+        &mut chains,
+        quote_hash,
+        installed,
+        SwapStatus::Done,
+        None,
+    );
+    let trail = trail(&pic, canister, installed);
+    assert!(
+        trail.contains(&"PaidInStable".to_string())
+            && !trail.contains(&"RefundStarted".to_string()),
+        "the fill is paid, not refunded: {trail:#?}"
+    );
+    assert!(
+        chains.log_reads[before..]
+            .iter()
+            .any(|read| read.address == VAULT_ARBITRUM.to_ascii_lowercase()
+                && read.from + 345_600 <= read.head + 1),
+        "the lookback's oldest window was read before deciding"
+    );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 

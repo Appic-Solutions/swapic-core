@@ -161,7 +161,12 @@ fn the_steps_run_intent_publish_arrival_and_reclaim_after_the_deadline() {
 
 /// The rail is off until its route is designed (see the module doc for what must be true
 /// first), so with the knob at its default it moves nothing at all: no publish, and no
-/// reclaim of a swap that published while the knob was on.
+/// reclaim of a swap that published while the knob was on. A swap whose reward is locked
+/// in the Portal is stuck for a human rather than refused every tick in silence, as the
+/// knob's doc promises.
+///
+/// Rewritten for fix wave 4 (N5, finding 7): the reclaim answered `RailDisabled`, which the
+/// engine retried each tick without ever stopping the swap.
 #[test]
 fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
     let quote = quote();
@@ -183,8 +188,11 @@ fn the_rail_moves_nothing_while_the_deploy_has_it_off() {
     let published = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
     let mut past = at(&quote, &published, &off, None, Some(&intent));
     past.now = UnixSeconds::new(3_000);
-    assert_eq!(
-        Eco.reclaim(&past).map(drop),
-        Err(RailError::RailDisabled { rail: Rail::Eco })
+    assert!(
+        matches!(Eco.reclaim(&past), Ok(ReclaimStep::Stuck(_))),
+        "the reward is locked and the rail is off: a human decides"
     );
+    // before the deadline too: nothing the rail could do later is done with it off
+    let before = at(&quote, &published, &off, None, Some(&intent));
+    assert!(matches!(Eco.reclaim(&before), Ok(ReclaimStep::Stuck(_))));
 }

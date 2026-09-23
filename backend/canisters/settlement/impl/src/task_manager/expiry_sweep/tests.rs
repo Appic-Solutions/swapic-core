@@ -82,6 +82,7 @@ fn waiting(bytes: Vec<u8>, since_ns: u64) -> Swap {
         last_outcome: None,
         last_tx_hash: None,
         paid_out: None,
+        fee_accrued: None,
     }
 }
 

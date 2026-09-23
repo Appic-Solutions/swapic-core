@@ -16,6 +16,7 @@ fn at(status: SwapStatus, last_leg: Option<Leg>, last_outcome: Option<Outcome>) 
         last_outcome,
         last_tx_hash: None,
         paid_out: None,
+        fee_accrued: None,
     }
 }
 
@@ -380,4 +381,110 @@ fn the_window_starts_after_the_last_swap_driven_and_wraps() {
         7
     );
     assert!(window(&[], None, 50).is_empty());
+}
+
+/// The allocation of `purpose` on `chain` at `nonce`, carrying `data`: what
+/// `create_and_send` appends before it signs.
+fn allocated(purpose: TxPurpose, chain: ChainId, nonce: u64, data: Vec<u8>) -> EventType {
+    EventType::TxCreated {
+        purpose,
+        chain_id: chain,
+        nonce: types::Nonce::new(nonce),
+        to: "0x2222222222222222222222222222222222222222"
+            .parse()
+            .unwrap(),
+        value: Wei::ZERO,
+        data,
+        gas_limit: types::GasAmount::from(120_000_u32),
+        max_fee: types::WeiPerGas::from(2_000_000_000_u64),
+        max_priority_fee: types::WeiPerGas::from(100_000_000_u64),
+    }
+}
+
+/// Attempt `attempt` of the swap, signed on `chain` and then confirmed there.
+fn signed_and_confirmed(qh: QuoteHash, attempt: u32, chain: ChainId) -> [EventType; 2] {
+    let tx_hash = TxHash::new([attempt as u8; 32]);
+    [
+        EventType::TxSigned {
+            quote_hash: qh,
+            attempt: Attempt::new(attempt),
+            chain_id: chain,
+            tx_hash,
+            raw_tx: vec![],
+        },
+        EventType::TxConfirmed {
+            quote_hash: qh,
+            attempt: Attempt::new(attempt),
+            chain_id: chain,
+            tx_hash,
+            block: types::BlockNumber::new(1),
+        },
+    ]
+}
+
+/// A fee is accrued once per swap. `record_done` writes the fee line ahead of `SwapDone`
+/// as two appends, so a `SwapDone` refused after the fee line committed leaves the swap to
+/// be recorded again on the next tick. That second time finds the fee already accrued for
+/// the swap and writes only `SwapDone`, so the platform's fees count it once.
+#[test]
+fn a_fee_already_accrued_is_not_accrued_again() {
+    use crate::state::transitions::tests::{funds, swap_id};
+    use crate::storage::events::{append_event_at, event_count, read_state};
+    use crate::storage::on_fresh_memory;
+    on_fresh_memory(|| {
+        let qh = swap_id(1);
+        let payout = types::abi::vault_payout(
+            qh,
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+                .parse()
+                .unwrap(),
+            "0x7551A66653f9a20979ed81835a0b7008EC83401b"
+                .parse()
+                .unwrap(),
+            TokenAmount::from(97_u8),
+        );
+        let [burn_signed, burn_confirmed] = signed_and_confirmed(qh, 1, ChainId::BASE);
+        let [payout_signed, payout_confirmed] = signed_and_confirmed(qh, 2, ChainId::ARBITRUM);
+        let trail = [
+            funds(1),
+            allocated(TxPurpose::Burn(qh), ChainId::BASE, 0, vec![]),
+            burn_signed,
+            burn_confirmed,
+            EventType::PaidInStable {
+                quote_hash: qh,
+                chain_id: ChainId::ARBITRUM,
+                amount: TokenAmount::from(99_u8),
+            },
+            allocated(TxPurpose::Payout(qh), ChainId::ARBITRUM, 0, payout),
+            payout_signed,
+            payout_confirmed,
+            // what an earlier `record_done` committed before its `SwapDone` was refused
+            EventType::FeeAccrued {
+                quote_hash: qh,
+                amount: TokenAmount::from(2_u8),
+            },
+        ];
+        for (n, event) in trail.into_iter().enumerate() {
+            append_event_at(event, Timestamp::from_nanos(n as u64 + 1))
+                .expect("the fold admits it");
+        }
+        let swap = read_state(|state| state.store().swap(&qh)).expect("the swap exists");
+        assert_eq!(next_action(&swap), Action::RecordDone);
+        let before = event_count();
+
+        assert_eq!(
+            record_done(qh, &swap, Timestamp::from_nanos(100)),
+            Ok(Did::Recorded)
+        );
+        assert_eq!(
+            read_state(|state| state.meta().fees_accrued),
+            TokenAmount::from(2_u8),
+            "the fee is accrued once"
+        );
+        assert_eq!(event_count(), before + 1, "one line: the swap done");
+        assert_eq!(
+            read_state(|state| state.store().swap(&qh)).map(|swap| swap.status),
+            Some(SwapStatus::Done)
+        );
+    });
 }

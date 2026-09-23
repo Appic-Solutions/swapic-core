@@ -254,6 +254,14 @@ pub enum PullError {
     },
     Vault(VaultError),
     Tx(TxError),
+    /// The quote names a rail this deploy does not run, by its id: its claim would be
+    /// refused, so its funds are not pulled into the vault.
+    RailUnavailable {
+        rail: String,
+    },
+    /// The quote's tokens are not its rail's: its claim would be refused, so its funds are
+    /// not pulled into the vault.
+    RailToken(RailTokenError),
 }
 
 /// Why bytes are not a CCTP v2 burn message.

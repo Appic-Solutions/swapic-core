@@ -467,6 +467,9 @@ type PullError = variant {
   Tx : TxError;
   // `party` is `"owner"`, `"dst_address"` or `"refund_address"`.
   Sanctioned : record { party : text };
+  // The quote's tokens are not its rail's: its claim would be refused, so its funds are
+  // not pulled into the vault.
+  RailToken : RailTokenError;
   QuoteExpired : record {
     claim_until_s : nat64;
     now_s : nat64;
@@ -483,6 +486,9 @@ type PullError = variant {
   InFlight : record { kind : InFlightKind; since_ns : nat64 };
   // A field of the quote that the pull reads as an EVM address is not one.
   QuoteAddress : QuoteAddressError;
+  // The quote names a rail this deploy does not run, by its id: its claim would be
+  // refused, so its funds are not pulled into the vault.
+  RailUnavailable : record { rail : text };
   Vault : VaultError;
   // The quote's user pays their own gas.
   NotGasless;
@@ -709,6 +715,8 @@ type SignError = variant { Guard : GuardError; Ecdsa : EcdsaError };
 type Swap = record {
   status : SwapStatus;
   quote_bytes : blob;
+  // The platform's fee on this swap, once the log has accrued it.
+  fee_accrued : opt nat;
   src_token : text;
   waiting_since_ns : opt nat64;
   // Absent until the swap is paid in stable.

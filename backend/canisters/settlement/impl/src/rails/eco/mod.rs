@@ -143,7 +143,14 @@ impl CallRail for Eco {
     }
 
     fn reclaim(&self, at: &Position) -> Result<ReclaimStep, RailError> {
-        ensure_enabled(at)?;
+        // the engine asks only once the publish has confirmed, so the reward is locked in
+        // the Portal: with the rail off nothing is sent for it, and the swap stops for a
+        // human instead of being refused on every tick with nothing to show for it
+        if !at.config.eco_enabled.is_on() {
+            return Ok(ReclaimStep::Stuck(
+                "the Eco rail is off with this swap's reward locked in the Portal",
+            ));
+        }
         let Some(intent) = at.intent else {
             return Ok(ReclaimStep::Stuck(
                 "the intent this swap published is no longer in the inbox",

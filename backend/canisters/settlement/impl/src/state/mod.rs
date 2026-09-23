@@ -365,6 +365,7 @@ impl<S: Store> State<S> {
                 last_outcome: None,
                 last_tx_hash: None,
                 paid_out: None,
+                fee_accrued: None,
             },
         );
     }
@@ -536,7 +537,7 @@ impl<S: Store> State<S> {
             .remove_unsigned_nonce(&NonceKey { chain_id, nonce });
     }
 
-    fn record_fee_accrued(&mut self, amount: TokenAmount) {
+    fn record_fee_accrued(&mut self, quote_hash: &QuoteHash, amount: TokenAmount) {
         let meta = self.store.meta();
         self.store.put_meta(LedgerMeta {
             fees_accrued: meta
@@ -544,6 +545,15 @@ impl<S: Store> State<S> {
                 .checked_add(amount)
                 .expect("BUG: State::check refuses a fee that overflows fees_accrued"),
             ..meta
+        });
+        // fees_accrued holds every swap's fees, this one's among them, so what fit there
+        // fits here
+        self.update_swap(quote_hash, |swap| {
+            swap.fee_accrued = Some(swap.fee_accrued.map_or(amount, |accrued| {
+                accrued
+                    .checked_add(amount)
+                    .expect("BUG: a swap's fees are part of fees_accrued, which did not overflow")
+            }))
         });
     }
 

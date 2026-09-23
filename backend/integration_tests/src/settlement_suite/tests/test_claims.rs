@@ -1804,3 +1804,63 @@ fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
+
+/// Rule A5 at the door that moves money: a pull is refused for a quote its claim would
+/// refuse by the quote alone, because a pull the claim then refuses leaves the user's
+/// funds in the vault under a quote that never becomes a swap. A source token that is not
+/// the rail's USDC, and a rail the deploy has off, are both refused before anything is
+/// allocated or signed.
+#[test]
+fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
+    use settlement_api::types::quote::{QuoteAddressField, RailTokenError};
+    let (pic, canister, _admin) = setup_with_keys();
+    let worthless = "0x2222222222222222222222222222222222222222";
+    let wrong_token = types::Quote {
+        gas_mode: GasMode::Gasless,
+        src_token: worthless.parse().unwrap(),
+        ..live_quote(&pic, 46)
+    };
+    let wrong_hash = registered(&pic, canister, &wrong_token);
+    let PullRequest::Permit2(signed) = permit(&wrong_token) else {
+        panic!("the fixture is a Permit2 permit");
+    };
+    assert_eq!(
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            wrong_hash,
+            &PullRequest::Permit2(Permit2Sig {
+                token: worthless.to_string(),
+                ..signed
+            })
+        ),
+        Err(PullError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::SrcToken,
+            quoted: worthless.to_string(),
+            rail_token: USDC.to_string(),
+            rail: "cctp_v2_fast".to_string(),
+        }))
+    );
+
+    let eco = types::Quote {
+        gas_mode: GasMode::Gasless,
+        rail: Rail::Eco,
+        ..live_quote(&pic, 47)
+    };
+    let eco_hash = registered(&pic, canister, &eco);
+    assert_eq!(
+        start_gasless_pull(&pic, canister, quoter(), eco_hash, &permit(&eco)),
+        Err(PullError::RailUnavailable {
+            rail: "eco".to_string()
+        }),
+        "the rail is off on a deploy"
+    );
+    assert!(
+        events(&pic, canister)
+            .iter()
+            .all(|event| !matches!(event.payload, EventType::TxCreated { .. })),
+        "nothing was allocated"
+    );
+    assert!(pic.get_canister_http().is_empty(), "and nothing sent");
+}

@@ -16,13 +16,14 @@ use crate::guards::require_not_halted;
 use crate::mints::{self, MintError};
 use crate::rails::{self, Position, RailError, RailStep, RailTx, ReclaimStep};
 use crate::state::Store;
-use crate::storage::events::{append_event, read_state, AppendError};
+use crate::storage::events::{append_event, append_event_at, read_state, AppendError};
 use crate::storage::sanctions::is_sanctioned;
-use crate::storage::{attestations, config, ecdsa_address, eco_intents, engine_cursor};
+use crate::storage::{attestations, chain_data, config, ecdsa_address, eco_intents, engine_cursor};
 use crate::tx::{self, TxError};
 use std::cell::Cell;
 use thiserror::Error;
 use types::abi::{vault_payout, vault_refund};
+use types::config::DepositLookback;
 use types::events::TxPurpose;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError};
 use types::{
@@ -35,6 +36,10 @@ pub const PAYOUT_GAS_LIMIT: GasAmount = GasAmount::new(120_000);
 
 /// The gas a vault refund needs: the same shape as a payout.
 pub const REFUND_GAS_LIMIT: GasAmount = GasAmount::new(120_000);
+
+/// How far back a waiting arrival read looks: one window of the deposit read, the newest,
+/// so a tick costs the swap one outcall. The whole lookback is read only before a refund.
+const ONE_WINDOW: DepositLookback = DepositLookback::new(deposits::LOGS_WINDOW_BLOCKS as u32);
 
 /// The most swaps one tick acts on. A tick awaits a signature per transaction it sends,
 /// so an unbounded tick under a backlog would run for minutes; the rest wait for the next
@@ -337,7 +342,9 @@ async fn drive_one(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
             })?;
             Ok(Did::Recorded)
         }
-        Action::RecordDone => record_done(quote_hash, swap),
+        Action::RecordDone => {
+            record_done(quote_hash, swap, Timestamp::from_nanos(ic_cdk::api::time()))
+        }
         Action::RecordRefunded => record_refunded(quote_hash, swap),
         Action::SendPayout => send_payout(quote_hash, swap).await,
         Action::SendRefund => send_refund(quote_hash, swap).await,
@@ -478,10 +485,12 @@ async fn send_refund(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineEr
 /// The payout landed: the platform's fee, if there is one, is accrued, and then the swap
 /// is done. The fee comes from the payout the swap itself sent, so nothing here can
 /// refuse on a config that moved; the fee line goes first, because a refused line behind
-/// a closed swap would be lost and nothing retries it. A payout leg the fold holds no
-/// amount for is a fold no line produces, so the swap stops for a human rather than
-/// looping. The inboxes are done with the swap.
-fn record_done(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
+/// a closed swap would be lost and nothing retries it, and it is written once: a swap the
+/// fold already holds a fee for is recorded done without another. A payout leg the fold
+/// holds no amount for is a fold no line produces, so the swap stops for a human rather
+/// than looping. The inboxes are done with the swap. `now` is the caller's, so a unit test
+/// runs without a canister.
+fn record_done(quote_hash: QuoteHash, swap: &Swap, now: Timestamp) -> Result<Did, EngineError> {
     let payout = match recorded_payout(swap) {
         Ok(payout) => payout,
         Err(error @ (EngineError::NoPayoutRecorded | EngineError::PayoutAboveStable { .. })) => {
@@ -489,13 +498,18 @@ fn record_done(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
         }
         Err(error) => return Err(error),
     };
-    if payout.fee > TokenAmount::ZERO {
-        append_event(EventType::FeeAccrued {
-            quote_hash,
-            amount: payout.fee,
-        })?;
+    // the two lines are two appends, so a `SwapDone` refused after the fee line committed
+    // brings the swap back here on the next tick, with its fee already accrued
+    if payout.fee > TokenAmount::ZERO && swap.fee_accrued.is_none() {
+        append_event_at(
+            EventType::FeeAccrued {
+                quote_hash,
+                amount: payout.fee,
+            },
+            now,
+        )?;
     }
-    append_event(EventType::SwapDone { quote_hash })?;
+    append_event_at(EventType::SwapDone { quote_hash }, now)?;
     forget(quote_hash);
     Ok(Did::Recorded)
 }
@@ -595,6 +609,14 @@ async fn read_mint(
 /// arriving. A deposit of another token or of less under the hash is somebody else's and
 /// not the fill. Nothing there past the rail's deadline turns the swap into a refund;
 /// nothing there before it is waited on.
+///
+/// While the swap waits, each tick reads the newest window of the destination's log, one
+/// outcall: a fill lands minutes after the publish, and the tick comes round far oftener
+/// than a window's worth of blocks. The heights the canister holds for the swap are the
+/// source chain's (its registration, its publish), so they cannot bound a read of the
+/// destination. The refund is the one decision a read that finds nothing leads to, so it
+/// rests on the whole lookback, read first: a fill the newest window no longer holds, after
+/// a long halt, is still found and paid rather than refunded.
 // todo_harden_reads: the read is the deposit read, single and unreplicated, bound to the
 // destination vault, the quote, the token and amount wanted, and the configured depth.
 async fn check_arrival(
@@ -604,16 +626,24 @@ async fn check_arrival(
     expired: bool,
 ) -> Result<Did, EngineError> {
     let token = quote.evm_address(QuoteAddressField::DstToken)?;
-    let read = DepositRead {
+    let read = |not_before| DepositRead {
         chain_id,
         quote_hash,
         wanted: Wanted {
             token,
             amount: WantedAmount::AtLeast(quote.min_out),
         },
-        not_before: None,
+        not_before,
     };
-    let read = deposits::verify_evm_deposit(&read).await;
+    let config = config::get();
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
+    let newest_window = chain_data::fresh(chain_id, now, config.chain_data_max_age)
+        .map(|data| deposits::range_from(data.block, ONE_WINDOW));
+    let mut arrived = deposits::verify_evm_deposit(&read(newest_window)).await;
+    if expired && arrived.as_ref().is_err_and(DepositError::found_nothing) {
+        arrived = deposits::verify_evm_deposit(&read(None)).await;
+    }
+    let read = arrived;
     // the halt can land while the read is out, and a line appended after it would move a
     // swap the operator believes is stopped; re-read with no await before the append
     require_not_halted().map_err(|_| EngineError::Halted)?;
