@@ -66,6 +66,28 @@ pub use types::config::{LOGS_WINDOW_BLOCKS, MAX_LOGS_WINDOWS};
 /// left is a later deposit of the same quote above the floor being taken first.
 pub const FLOOR_MARGIN_BLOCKS: u64 = 2 * LOGS_WINDOW_BLOCKS;
 
+/// How many windows one outcall reads, as one JSON-RPC batch of `eth_getLogs` calls.
+///
+/// Each window's answer is held to [`MAX_LOGS_BYTES`], a few dozen deposits under one
+/// quote, so a batch's answer is held to ten of them, 320 KiB, a sixth of the two
+/// megabytes an outcall's answer may be. Ten calls is a short batch,
+/// and a provider that refuses it, or answers any call of it with an error, costs the
+/// read one outcall more per window rather than the read: the batch is read again one
+/// window at a time. The default lookback, 35 windows, is then four outcalls where it was
+/// thirty-five.
+pub const WINDOWS_PER_BATCH: usize = 10;
+
+/// The most windows one read walks: its own range and the rest of the lookback are tiled
+/// apart, so the widest lookback can split into one window more than it holds whole.
+pub const MAX_WINDOWS_PER_READ: u64 = MAX_LOGS_WINDOWS + 1;
+
+/// The most outcalls one claim's reads can make, which the in-flight marker's bound is
+/// sized from: the provider's head, one batch for every [`WINDOWS_PER_BATCH`] windows of
+/// each of the two ranges, every window again on its own after a batch the provider
+/// refused, and the time of the deposit's block. 1 + 6 + 41 + 1 = 49.
+pub const MAX_READ_OUTCALLS: u64 =
+    1 + (MAX_WINDOWS_PER_READ.div_ceil(WINDOWS_PER_BATCH as u64) + 1) + MAX_WINDOWS_PER_READ + 1;
+
 /// How far back a waiting arrival read looks: one window, the newest, so a tick costs the
 /// swap one window. The whole lookback is read only before a refund.
 const ONE_WINDOW: DepositLookback = DepositLookback::new(LOGS_WINDOW_BLOCKS as u32);
@@ -564,7 +586,8 @@ pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress,
 /// First the provider's head, alone, since every window is built from it (see [`Plan`]).
 /// Then the range from the read's start to the anchor, and, when `widen` and nothing the
 /// read wants is in it, the rest of the lookback before it. Each is walked in windows,
-/// oldest first, one outcall each, and a window starting above the head is never sent.
+/// oldest first, [`WINDOWS_PER_BATCH`] to an outcall (a batch the provider refuses is read
+/// again one window at a time), and a window starting above the head is never sent.
 /// The depth is measured against the head read first, which the chain has only passed by
 /// the time the logs come back, so a deposit is never taken as deeper than it is. The
 /// deposit that counts is the oldest deep match in the whole range (see [`Walk`]), so the
@@ -604,16 +627,12 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
         depth,
     };
     let mut walk = Walk::new(quote_hash, depth);
-    for window in plan.narrow()? {
-        if let Some(deposit) = reader.read(&window, &mut walk).await? {
-            return Ok(deposit);
-        }
+    if let Some(deposit) = reader.walk(&plan.narrow()?, &mut walk).await? {
+        return Ok(deposit);
     }
     if widen && walk.found_nothing() {
-        for window in plan.rest()? {
-            if let Some(deposit) = reader.read(&window, &mut walk).await? {
-                return Ok(deposit);
-            }
+        if let Some(deposit) = reader.walk(&plan.rest()?, &mut walk).await? {
+            return Ok(deposit);
         }
     }
     Err(walk.end())
@@ -646,31 +665,66 @@ struct Reader {
 }
 
 impl Reader {
-    /// Reads one window and hands its finding to the walk: the deposit, when the window
-    /// holds one deep enough. A window starting above the head is never sent, and found
-    /// nothing.
-    async fn read(
+    /// Reads `windows`, oldest first, [`WINDOWS_PER_BATCH`] to an outcall, and hands each
+    /// window's finding to the walk in order: the deposit, as soon as a window holds one
+    /// deep enough. A window starting above the head is never sent: it holds nothing the
+    /// provider has, so leaving it out is the same as finding nothing in it. A batch the
+    /// provider refuses, or answers any window of with an error, is read again one window
+    /// at a time, and a window that fails on its own fails the read.
+    async fn walk(
         &self,
-        window: &Window,
+        windows: &[Window],
         walk: &mut Walk,
     ) -> Result<Option<VerifiedDeposit>, DepositError> {
-        if above_head(window, self.head) {
-            return Ok(walk.take(Finding::Unmatched { seen: 0 }));
+        let sendable: Vec<&Window> = windows
+            .iter()
+            .filter(|window| !above_head(window, self.head))
+            .collect();
+        for batch in sendable.chunks(WINDOWS_PER_BATCH) {
+            let answers = match self.batch(batch).await {
+                Ok(answers) => answers,
+                Err(_) => {
+                    let mut answers = Vec::with_capacity(batch.len());
+                    for window in batch {
+                        answers.extend(self.batch(&[*window]).await?);
+                    }
+                    answers
+                }
+            };
+            for logs in &answers {
+                let finding = find(
+                    logs,
+                    self.vault,
+                    self.quote_hash,
+                    &self.wanted,
+                    self.head,
+                    self.depth,
+                );
+                if let Some(deposit) = walk.take(finding) {
+                    return Ok(Some(deposit));
+                }
+            }
         }
-        let call = logs_call(self.vault, self.quote_hash, window);
-        let answers = rpc::rpc_batch(self.chain_id, &[call], MAX_LOGS_BYTES).await?;
-        let logs = answers
-            .first()
-            .and_then(Value::as_array)
-            .ok_or(DepositError::UnreadableLogs)?;
-        Ok(walk.take(find(
-            logs,
-            self.vault,
-            self.quote_hash,
-            &self.wanted,
-            self.head,
-            self.depth,
-        )))
+        Ok(None)
+    }
+
+    /// The logs of each of `windows`, in order, from one outcall: one `eth_getLogs` per
+    /// window in a single JSON-RPC batch, whose answer is held to [`MAX_LOGS_BYTES`] a
+    /// window, 320 KiB for a whole batch of [`WINDOWS_PER_BATCH`].
+    async fn batch(&self, windows: &[&Window]) -> Result<Vec<Vec<Value>>, DepositError> {
+        let calls: Vec<(&str, Value)> = windows
+            .iter()
+            .map(|window| logs_call(self.vault, self.quote_hash, window))
+            .collect();
+        let cap = MAX_LOGS_BYTES * windows.len() as u64;
+        rpc::rpc_batch(self.chain_id, &calls, cap)
+            .await?
+            .into_iter()
+            .map(|answer| match answer {
+                Value::Array(logs) => Ok(logs),
+                _ => Err(DepositError::UnreadableLogs),
+            })
+            .collect()
     }
 }
 

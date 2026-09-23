@@ -286,6 +286,11 @@ struct Provider {
     block_reads: Vec<String>,
     /// How many outcalls were answered.
     outcalls: usize,
+    /// The most calls one batch may carry: a longer batch is refused whole, the way a
+    /// provider with a batch limit refuses it.
+    max_batch: Option<usize>,
+    /// How many batches were refused for their length.
+    refused_batches: usize,
 }
 
 /// A hex quantity as a number.
@@ -307,6 +312,16 @@ impl Provider {
             log_reads: Vec::new(),
             block_reads: Vec::new(),
             outcalls: 0,
+            max_batch: None,
+            refused_batches: 0,
+        }
+    }
+
+    /// A provider that refuses any batch of more than `calls` calls.
+    fn batches_of_at_most(self, calls: usize) -> Self {
+        Self {
+            max_batch: Some(calls),
+            ..self
         }
     }
 
@@ -387,12 +402,22 @@ impl Provider {
         }
     }
 
-    /// Answers one pending outcall, each call in its batch for itself.
+    /// Answers one pending outcall, each call in its batch for itself, or refuses the batch
+    /// whole with one error object when it is longer than the provider takes.
     fn reply(&mut self, pic: &PocketIc, request: &CanisterHttpRequest) {
         let body: Value = serde_json::from_slice(&request.body).expect("the body is json");
-        let replies: Vec<Value> = body
-            .as_array()
-            .expect("a batch is an array")
+        let calls = body.as_array().expect("a batch is an array");
+        if self.max_batch.is_some_and(|most| calls.len() > most) {
+            self.refused_batches += 1;
+            let refusal = json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32600, "message": "batch too large"},
+            });
+            self.mock(pic, request, refusal);
+            return;
+        }
+        let replies: Vec<Value> = calls
             .iter()
             .map(|call| {
                 let id = call["id"].clone();
@@ -406,13 +431,19 @@ impl Provider {
                 }
             })
             .collect();
+        self.mock(pic, request, Value::Array(replies));
+    }
+
+    /// Hands `body` back as the answer to `request`, and gives the canister the rounds it
+    /// needs to act on it.
+    fn mock(&mut self, pic: &PocketIc, request: &CanisterHttpRequest, body: Value) {
         pic.mock_canister_http_response(MockCanisterHttpResponse {
             subnet_id: request.subnet_id,
             request_id: request.request_id,
             response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
                 status: 200,
                 headers: vec![],
-                body: Value::Array(replies).to_string().into_bytes(),
+                body: body.to_string().into_bytes(),
             }),
             additional_responses: vec![],
         });
@@ -835,9 +866,9 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
     assert_eq!(count(&pic, canister), before, "nothing stored");
 }
 
-/// Rule A8: two claims for one quote that are both in flight buy one outcall. The second
-/// finds the first's marker and is refused at once, and the first goes on to create the
-/// swap.
+/// Rule A8: two claims for one quote that are both in flight buy one set of reads. The
+/// second finds the first's marker and is refused at once, and the first goes on to create
+/// the swap.
 #[test]
 fn concurrent_claims_buy_one_outcall() {
     let (pic, canister, _admin) = setup();
@@ -1721,6 +1752,9 @@ fn claimed_tx_ref(pic: &PocketIc, canister: Principal, quote_hash: Hash32) -> St
 /// the range window by window from the oldest and takes the user's deep deposit in the
 /// older window, although another payer's deposit of the same quote and amount sits in the
 /// newer one short of the depth.
+///
+/// Rewritten for fix wave 5 (N11): the two windows now go out in one batch, so both are
+/// read, oldest first, and the older window's deep deposit is still the one taken.
 #[test]
 fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
     let (pic, canister, admin) = setup();
@@ -1754,8 +1788,8 @@ fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
     );
     assert_eq!(
         reads,
-        vec![HEAD + 1 - 20_000],
-        "the older window is read first, and the deep deposit in it ends the walk"
+        vec![HEAD + 1 - 20_000, HEAD + 1 - 10_000],
+        "both windows in one batch, the older first, and the deep deposit in it is taken"
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
@@ -2344,4 +2378,59 @@ fn a_deposit_below_a_lying_height_counts_before_a_later_one_above_it() {
         format!("0x{}", hex::encode([0x71; 32])),
         "the user's deposit below the height, the oldest, and not the later one above it"
     );
+}
+
+/// The widest read, the whole default lookback of 345,600 blocks, is 35 windows, and it
+/// is read in a handful of outcalls: the provider's head, then the windows ten to a
+/// JSON-RPC batch, where it took one outcall a window. A controller's claim of a quote the
+/// store never held reads it all when the deposit sits in the newest window.
+#[test]
+fn the_default_lookback_is_read_in_a_handful_of_outcalls() {
+    let (pic, canister, admin) = setup();
+    let by_hand = quote(70);
+    let quote_hash = swap_id(&by_hand);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let mut provider = Provider::at(
+        HEAD,
+        &[deposit_log(quote_hash, HEAD - 3, USDC, USER, AMOUNT.into())],
+    )
+    .for_quote(quote_hash);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(provider.log_reads.len(), 35, "every window of the lookback");
+    assert_eq!(
+        provider.outcalls, 5,
+        "the head, then four batches of at most ten windows"
+    );
+}
+
+/// A provider that refuses a batch of windows does not fail the read: the batch is read
+/// again one window at a time, every window of it, and the deposit in the newest is
+/// claimed.
+#[test]
+fn a_batch_the_provider_refuses_is_read_one_window_at_a_time() {
+    let (pic, canister, admin) = setup();
+    let by_hand = quote(71);
+    let quote_hash = swap_id(&by_hand);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let mut provider = Provider::at(
+        HEAD,
+        &[deposit_log(quote_hash, HEAD - 3, USDC, USER, AMOUNT.into())],
+    )
+    .for_quote(quote_hash)
+    .batches_of_at_most(1);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        provider.refused_batches, 4,
+        "each batch of windows was offered and refused"
+    );
+    assert_eq!(
+        provider.log_reads.len(),
+        35,
+        "and every window was read on its own after it"
+    );
+    let mut froms = provider.froms();
+    froms.dedup();
+    assert_eq!(froms.len(), 35, "each window once");
 }

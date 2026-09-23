@@ -2,11 +2,12 @@
 //! are pulled into the vault so they can.
 //!
 //! `claim_swap` is the only creator of swaps and is money-first: every refusal that needs
-//! no chain is made before an outcall is bought, a marker is committed before that outcall
-//! (rule A8), and `FundsReceived` is appended only for a deposit the chain holds at depth,
-//! with nothing stored when it does not. `start_gasless_pull` is pre-money: it sends the
-//! vault's `pullWithPermit` through the one send path, and the deposit that transaction
-//! makes is what a later claim verifies, so a pull creates no swap.
+//! no chain is made before an outcall is bought, a marker is committed before the first of
+//! its outcalls (rule A8), and `FundsReceived` is appended only for a deposit the chain
+//! holds at depth that landed in the quote's window, with nothing stored when it does not.
+//! `start_gasless_pull` is pre-money: it sends the vault's `pullWithPermit2` through the
+//! one send path, and the deposit that transaction makes is what a later claim verifies,
+//! so a pull creates no swap.
 
 #[cfg(test)]
 mod tests;

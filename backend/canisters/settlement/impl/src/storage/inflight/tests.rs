@@ -82,3 +82,23 @@ fn clearing_frees_every_quote() {
         assert_eq!(take(qh(2), InFlightKind::Claim, at(100)), Ok(()));
     });
 }
+
+/// The marker holds a claim for as long as the longest read a claim can make takes: the
+/// provider's head, every batch of windows, every window again on its own after each batch
+/// the provider refused, and the time of the deposit's block, each at an outcall's round
+/// trip on a loaded subnet. And it gives the quote back before the shortest grace a claim
+/// can be asked in has run, so a marker a trap left behind never outlives the window in
+/// which the claim could still be asked.
+#[test]
+fn the_bound_fits_the_longest_claim_and_ends_inside_the_grace() {
+    assert_eq!(READ_OUTCALLS, 49, "1 head, 6 batches, 41 windows, 1 block");
+    let longest = OUTCALL_ROUND_TRIP * u32::try_from(READ_OUTCALLS).unwrap();
+    assert!(
+        IN_FLIGHT_BOUND >= longest,
+        "the bound {IN_FLIGHT_BOUND:?} holds the longest claim, {longest:?}"
+    );
+    assert!(
+        IN_FLIGHT_BOUND < types::config::MIN_CLAIM_GRACE,
+        "and ends inside the shortest grace"
+    );
+}

@@ -1147,11 +1147,13 @@ fn fill_log(quote_hash: Hash32, block: u64, amount: u128) -> Value {
 }
 
 /// The Eco rail's wait for the fill is bounded: while the intent is live, each tick reads
-/// the newest window of the destination vault's log, one outcall, and not the whole
-/// day-wide lookback, which would be thirty-five outcalls per swap per tick. The decision
-/// a read that finds nothing leads to, the refund once the intent's deadline has passed,
-/// rests on the whole lookback read first, so a fill the newest window no longer holds is
-/// still found and paid, not refunded.
+/// the provider's head and the newest window of the destination vault's log, and not the
+/// whole day-wide lookback. The decision a read that finds nothing leads to, the refund
+/// once the intent's deadline has passed, rests on the whole lookback read first, so a
+/// fill the newest window no longer holds is still found and paid, not refunded.
+///
+/// Fix wave 5 (M1, N11) changed only this doc: the head is now its own outcall before the
+/// window, and the lookback is read ten windows to an outcall.
 #[test]
 fn an_eco_swap_waits_on_the_newest_window_and_reads_the_lookback_before_refunding() {
     use crate::client::settlement::{push_eco_intent, set_config};
