@@ -3,8 +3,9 @@ pragma solidity 0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// Eco's Portal in miniature, the worked example of a canister-tier target. It
-/// keeps the three exits that decide the tier, with Eco's authorization rules:
+/// Eco's Portal in miniature, the worked example of a listed target that holds
+/// balances the vault can claim. It keeps the three exits that decide whether
+/// listing it is safe, with Eco's authorization rules:
 ///   - `publishAndFund` pulls the reward from the caller and holds it past the
 ///     transaction (Eco holds it in a per-intent escrow clone; here the mock
 ///     holds it itself, which is the same thing to the vault);
@@ -12,7 +13,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 ///   - `refundTo` is allowed only when `msg.sender == reward.creator`, and pays
 ///     whoever the caller names.
 /// With the vault as creator, the vault itself is the only key to `refundTo`,
-/// which is exactly why no public door may make the vault call this contract.
+/// which is exactly why only the canister may ever make the vault call this
+/// contract, and why the vault has no public door that runs calls.
 contract EcoPortalMock {
     struct Reward {
         uint64 deadline;

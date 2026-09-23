@@ -10,7 +10,7 @@ import "../mocks/EvilRouterMock.sol";
 
 /// The invariant fuzzer's only entry point. It owns the whole world (vault,
 /// tokens, routers) and doubles as the canister, so canister-only calls are
-/// plain calls while public-path calls are pranked as users. Every entry point
+/// plain calls while a user's calls are pranked as that user. Every entry point
 /// bounds its inputs so that a revert out of the handler is a handler bug, not
 /// a wasted run: `fail_on_revert = true` turns that into a loud failure.
 contract VaultHandler is Test {
@@ -19,6 +19,12 @@ contract VaultHandler is Test {
     uint256 internal constant ROUTER_FLOAT = 1e26;
     uint256 internal constant VAULT_SEED = 1e24;
     bytes32 internal constant ITEM_RESULT = keccak256("ItemResult(bytes32,bool)");
+    /// the removed public door's exact signature, called the only way it still can be
+    bytes4 internal constant DEPOSIT_AND_EXECUTE = bytes4(
+        keccak256(
+            "depositAndExecute(bytes32,address,uint256,(address,uint256,bytes,address,uint256)[],address,uint256,address)"
+        )
+    );
 
     struct Leg {
         address tokenIn;
@@ -31,9 +37,6 @@ contract VaultHandler is Test {
     Vault public immutable vault;
     SwapRouterMock public immutable router;
     EvilRouterMock public immutable evilRouter;
-    /// an honest router like `router`, but on the canister tier alone: the
-    /// canister's doors must reach it and the public door never may
-    SwapRouterMock public immutable canisterRouter;
     TestToken[TOKEN_COUNT] public tokens;
 
     /// everything that should have entered / left the vault, per token
@@ -44,20 +47,16 @@ contract VaultHandler is Test {
     uint256 public executes;
     uint256 public batchItems;
     uint256 public payouts;
-    uint256 public atomicSwaps;
-    uint256 public zeroCallsAccepted;
-    uint256 public zeroCallsRejected;
-    uint256 public overApprovesAccepted;
-    uint256 public overApprovesRejected;
-    uint256 public canisterTierExecutes;
-    uint256 public canisterTierAccepted;
-    uint256 public canisterTierRejected;
+    /// a stranger's reach for a target, per door: accepted must stay zero, and a
+    /// refusal for any reason but the door's own is a misfire
+    uint256 public strangerCallsAccepted;
+    uint256 public strangerCallsRefused;
+    uint256 public strangerCallsMisfired;
 
     /// catch arms that must never fire: these entry points swallow reverts so a
     /// bad bound cannot abort a run, which would otherwise hide a starved handler
     uint256 public executeFailures;
     uint256 public payoutFailures;
-    uint256 public atomicSwapFailures;
 
     uint256 private _nonce;
 
@@ -67,24 +66,20 @@ contract VaultHandler is Test {
         Vault v = Vault(payable(address(new ERC1967Proxy(address(impl), init))));
         SwapRouterMock r = new SwapRouterMock();
         EvilRouterMock e = new EvilRouterMock();
-        SwapRouterMock c = new SwapRouterMock();
         vault = v;
         router = r;
         evilRouter = e;
-        canisterRouter = c;
 
         for (uint256 i = 0; i < TOKEN_COUNT; i++) {
             TestToken t = new TestToken();
             tokens[i] = t;
             t.transfer(address(r), ROUTER_FLOAT);
-            t.transfer(address(c), ROUTER_FLOAT);
             t.transfer(address(v), VAULT_SEED);
             ghostIn[address(t)] += VAULT_SEED;
         }
 
-        v.setRouterAllowlist(address(r), true, true);
-        v.setRouterAllowlist(address(e), true, true);
-        v.setRouterAllowlist(address(c), true, false);
+        v.setRouterAllowlist(address(r), true);
+        v.setRouterAllowlist(address(e), true);
     }
 
     /// fresh by construction: a pair the vault has already burned would revert
@@ -186,40 +181,6 @@ contract VaultHandler is Test {
         }
     }
 
-    /// The canister tier under the fuzzer: an honest swap through a router only
-    /// the canister's doors may call. It must always land.
-    function canister_execute_canister_tier(
-        uint256 inSeed,
-        uint256 outSeed,
-        uint256 amountInSeed,
-        uint256 amountOutSeed
-    ) external {
-        (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
-        uint256 pooled = tokenIn.balanceOf(address(vault));
-        if (pooled == 0) return;
-
-        Leg memory leg = Leg(
-            address(tokenIn),
-            address(tokenOut),
-            bound(amountInSeed, 1, pooled > MAX_AMOUNT ? MAX_AMOUNT : pooled),
-            bound(amountOutSeed, 0, MAX_AMOUNT),
-            false
-        );
-        Vault.Delta[] memory deltas = new Vault.Delta[](2);
-        deltas[0] = Vault.Delta(leg.tokenIn, -int256(leg.amountIn));
-        deltas[1] = Vault.Delta(leg.tokenOut, int256(leg.amountOut));
-        Vault.Call[] memory calls = _splitCalls(leg, 1, 0);
-        calls[0].target = address(canisterRouter);
-
-        try vault.execute(_fresh("canister-tier"), calls, deltas) {
-            ghostOut[leg.tokenIn] += leg.amountIn;
-            ghostIn[leg.tokenOut] += leg.amountOut;
-            canisterTierExecutes++;
-        } catch {
-            executeFailures++;
-        }
-    }
-
     function canister_execute_many(uint256 countSeed, uint256 seed, uint256 gasSeed) external {
         uint256 n = bound(countSeed, 1, 3);
         Vault.Item[] memory items = new Vault.Item[](n);
@@ -315,125 +276,75 @@ contract VaultHandler is Test {
         }
     }
 
-    /// Splits the deposit across 1-3 calls with no slack at all: the public door
-    /// now requires every call to be funded by the deposit and every target to
-    /// take exactly what it was approved, so the parts must sum to the deposit.
-    /// The leftover-allowance reset is still fuzzed, on the canister paths.
-    function user_atomic_swap(
-        uint256 inSeed,
-        uint256 outSeed,
-        uint256 amountSeed,
-        uint256 callsSeed,
-        uint256 amountOutSeed,
-        uint256 userSeed,
-        bool keepInVault
-    ) external {
-        (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
-        uint256 n = bound(callsSeed, 1, 3);
-        uint256 amount = bound(amountSeed, n, MAX_AMOUNT); // at least one wei per call
-        uint256 amountOut = bound(amountOutSeed, 0, MAX_AMOUNT);
-        address user = _user(userSeed);
-        address payoutTo = keepInVault ? address(0) : user;
-
-        Vault.Call[] memory calls =
-            _splitCalls(Leg(address(tokenIn), address(tokenOut), amount, amountOut, false), n, 0);
-
-        _fund(tokenIn, user, amount);
-        try vault.depositAndExecute(
-            _fresh("atomic"), address(tokenIn), amount, calls, address(tokenOut), amountOut, payoutTo
-        ) {
-            ghostIn[address(tokenIn)] += amount;
-            ghostOut[address(tokenIn)] += amount;
-            ghostIn[address(tokenOut)] += amountOut;
-            if (payoutTo != address(0) && amountOut > 0) ghostOut[address(tokenOut)] += amountOut;
-            atomicSwaps++;
-        } catch {
-            atomicSwapFailures++;
-        }
-        vm.stopPrank();
-    }
-
-    /// A public deposit that executes nothing: no calls, so none of the deposit is
-    /// spent. That used to be allowed, which is what made every allowlisted target
-    /// reachable for the price of a dust deposit. It must now always be refused,
-    /// so the success arm credits nothing on purpose.
-    function user_atomic_zero_call(uint256 tokenSeed, uint256 amountSeed, uint256 userSeed) external {
-        TestToken t = _token(tokenSeed);
-        uint256 amount = bound(amountSeed, 1, MAX_AMOUNT);
-        address user = _user(userSeed);
-
-        _fund(t, user, amount);
-        try vault.depositAndExecute(_fresh("retain"), address(t), amount, new Vault.Call[](0), address(t), 0, user) {
-            zeroCallsAccepted++;
-        } catch {
-            zeroCallsRejected++;
-        }
-        vm.stopPrank();
-    }
-
-    /// A public swap that passes every other rule of the door (a real deposit,
-    /// approved and taken in full, by an honest router) aimed at a router on the
-    /// canister tier alone. The tier is the only thing that can refuse it, and it
-    /// must always refuse it, so the success arm credits nothing on purpose.
-    function user_atomic_canister_tier(
+    /// A stranger reaching for the pool through every door that makes the vault
+    /// issue a call, and through the removed public door's selector with the
+    /// honest swap it used to accept. None may ever land, and each must refuse
+    /// for its own reason, so the success arm credits nothing on purpose.
+    function stranger_reaches_for_a_target(
         uint256 inSeed,
         uint256 outSeed,
         uint256 amountSeed,
         uint256 amountOutSeed,
-        uint256 userSeed
-    ) external {
-        (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
-        uint256 amount = bound(amountSeed, 1, MAX_AMOUNT);
-        uint256 amountOut = bound(amountOutSeed, 0, MAX_AMOUNT);
-        address user = _user(userSeed);
-
-        Vault.Call[] memory calls =
-            _splitCalls(Leg(address(tokenIn), address(tokenOut), amount, amountOut, false), 1, 0);
-        calls[0].target = address(canisterRouter);
-
-        _fund(tokenIn, user, amount);
-        try vault.depositAndExecute(
-            _fresh("canister-tier"), address(tokenIn), amount, calls, address(tokenOut), amountOut, user
-        ) {
-            canisterTierAccepted++;
-        } catch {
-            canisterTierRejected++;
-        }
-        vm.stopPrank();
-    }
-
-    /// a stranger depositing dust while approving the vault's pooled balance:
-    /// this must always revert, so the success arm credits nothing on purpose
-    function user_atomic_over_approve(
-        uint256 inSeed,
-        uint256 outSeed,
-        uint256 dustSeed,
-        uint256 grabSeed,
         uint256 userSeed
     ) external {
         (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
         uint256 pooled = tokenIn.balanceOf(address(vault));
         if (pooled == 0) return;
+        address stranger = _user(userSeed);
 
-        uint256 dust = bound(dustSeed, 1, 1e18);
-        uint256 grab = dust + bound(grabSeed, 1, pooled);
-        address user = _user(userSeed);
-
-        Vault.Call[] memory calls = new Vault.Call[](1);
-        calls[0] = Vault.Call(
-            address(router),
-            0,
-            abi.encodeCall(SwapRouterMock.swapAtoB, (address(tokenIn), address(tokenOut), grab, 0)),
+        // the evil router takes what it is approved and pays nothing back
+        Vault.Call[] memory drain = _splitCalls(
+            Leg(
+                address(tokenIn),
+                address(tokenOut),
+                bound(amountSeed, 1, pooled > MAX_AMOUNT ? MAX_AMOUNT : pooled),
+                0,
+                true
+            ),
+            1,
+            0
+        );
+        // what the removed door accepted: the stranger's own deposit, spent in
+        // full through a listed router, proceeds paid to the stranger
+        uint256 deposit = bound(amountSeed, 1, MAX_AMOUNT);
+        Vault.Call[] memory honest = _splitCalls(
+            Leg(address(tokenIn), address(tokenOut), deposit, bound(amountOutSeed, 0, MAX_AMOUNT), false), 1, 0
+        );
+        bytes memory publicDoor = abi.encodeWithSelector(
+            DEPOSIT_AND_EXECUTE,
+            _fresh("public"),
             address(tokenIn),
-            grab
+            deposit,
+            honest,
+            address(tokenOut),
+            uint256(0),
+            stranger
         );
 
-        _fund(tokenIn, user, dust);
-        try vault.depositAndExecute(_fresh("grab"), address(tokenIn), dust, calls, address(tokenOut), 0, user) {
-            overApprovesAccepted++;
-        } catch {
-            overApprovesRejected++;
-        }
+        _fund(tokenIn, stranger, deposit); // leaves the prank running as the stranger
+        _attemptEveryDoor(drain, publicDoor);
         vm.stopPrank();
+    }
+
+    function _attemptEveryDoor(Vault.Call[] memory calls, bytes memory publicDoor) internal {
+        Vault.Delta[] memory none = new Vault.Delta[](0);
+        Vault.Item[] memory items = new Vault.Item[](1);
+        items[0] = Vault.Item(_fresh("stranger"), calls, none, 0);
+        bytes[] memory selfCalls = new bytes[](1);
+        selfCalls[0] = abi.encodeCall(Vault.execute, (items[0].swapRef, calls, none));
+        bytes memory onlyCanister = abi.encodeWithSelector(Vault.OnlyCanister.selector);
+
+        _attempt(abi.encodeCall(Vault.execute, (items[0].swapRef, calls, none)), onlyCanister);
+        _attempt(abi.encodeCall(Vault.executeMany, (items)), onlyCanister);
+        _attempt(abi.encodeCall(Vault.multicall, (selfCalls)), onlyCanister);
+        _attempt(abi.encodeCall(Vault.runItem, (items[0])), abi.encodeWithSelector(Vault.OnlySelf.selector));
+        _attempt(publicDoor, "");
+    }
+
+    function _attempt(bytes memory data, bytes memory reason) internal {
+        (bool ok, bytes memory ret) = address(vault).call(data);
+        if (ok) strangerCallsAccepted++;
+        else if (keccak256(ret) == keccak256(reason)) strangerCallsRefused++;
+        else strangerCallsMisfired++;
     }
 }

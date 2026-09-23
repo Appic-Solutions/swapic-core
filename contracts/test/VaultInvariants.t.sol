@@ -16,16 +16,12 @@ contract VaultInvariantsTest is StdInvariant, Test {
         vault = handler.vault();
         canister = address(handler);
 
-        bytes4[] memory selectors = new bytes4[](9);
+        bytes4[] memory selectors = new bytes4[](5);
         selectors[0] = VaultHandler.user_deposit.selector;
         selectors[1] = VaultHandler.canister_execute.selector;
         selectors[2] = VaultHandler.canister_execute_many.selector;
         selectors[3] = VaultHandler.canister_payout.selector;
-        selectors[4] = VaultHandler.user_atomic_swap.selector;
-        selectors[5] = VaultHandler.user_atomic_zero_call.selector;
-        selectors[6] = VaultHandler.user_atomic_over_approve.selector;
-        selectors[7] = VaultHandler.canister_execute_canister_tier.selector;
-        selectors[8] = VaultHandler.user_atomic_canister_tier.selector;
+        selectors[4] = VaultHandler.stranger_reaches_for_a_target.selector;
 
         targetContract(address(handler));
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
@@ -33,8 +29,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
 
     /// no call sequence may leave the vault standing as a spender on a router
     function invariant_no_router_allowance_survives() public view {
-        address[3] memory routers =
-            [address(handler.router()), address(handler.evilRouter()), address(handler.canisterRouter())];
+        address[2] memory routers = [address(handler.router()), address(handler.evilRouter())];
         for (uint256 i = 0; i < 3; i++) {
             TestToken t = handler.tokens(i);
             for (uint256 j = 0; j < routers.length; j++) {
@@ -44,8 +39,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
     }
 
     /// the handler credits a token only for flows the vault is supposed to make:
-    /// deposits and swap proceeds in, payouts/refunds/atomic payouts and swap
-    /// inputs out. Anything else moving the balance is leakage.
+    /// deposits and swap proceeds in, payouts/refunds and swap inputs out.
+    /// Anything else moving the balance is leakage.
     function invariant_balances_match_sanctioned_flows() public view {
         for (uint256 i = 0; i < 3; i++) {
             address t = address(handler.tokens(i));
@@ -62,19 +57,17 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(address(vault).balance, 0, "unexplained native balance");
     }
 
-    /// seven entry points swallow reverts so that a bad bound cannot abort a run.
+    /// three entry points swallow reverts so that a bad bound cannot abort a run.
     /// These are the arms that must never fire: without this, a handler starved
     /// into its catch arms would leave the ghosts frozen and every invariant
     /// above would pass on a vault that was never exercised.
     function invariant_no_silent_handler_failures() public view {
         assertEq(handler.executeFailures(), 0, "execute reverted inside the handler");
         assertEq(handler.payoutFailures(), 0, "payout or refund reverted inside the handler");
-        assertEq(handler.atomicSwapFailures(), 0, "atomic swap reverted inside the handler");
-        assertEq(handler.overApprovesAccepted(), 0, "a stranger's over-approval was accepted");
-        assertEq(handler.zeroCallsAccepted(), 0, "a public deposit that executes nothing was accepted");
-        // the tier's own property: no AtomicSwap for a call to a target that is
-        // not on the public tier, however honest the rest of the call is
-        assertEq(handler.canisterTierAccepted(), 0, "the public door reached a canister-tier target");
+        // the property the one allowlist rests on: no caller but the canister
+        // can make the vault issue a call, through any door or the removed one
+        assertEq(handler.strangerCallsAccepted(), 0, "a stranger made the vault call a target");
+        assertEq(handler.strangerCallsMisfired(), 0, "a stranger was refused for the wrong reason");
     }
 
     /// without this the invariants above could pass vacuously on a handler whose
@@ -85,21 +78,13 @@ contract VaultInvariantsTest is StdInvariant, Test {
         handler.canister_execute_many(3, 7, 0);
         handler.canister_payout(0, 10e18, 2, false);
         handler.canister_payout(0, 10e18, 2, true);
-        handler.user_atomic_swap(0, 1, 100e18, 3, 55e18, 3, false);
-        handler.user_atomic_zero_call(1, 20e18, 4);
-        handler.user_atomic_over_approve(0, 1, 1e18, 500e18, 5);
-        handler.canister_execute_canister_tier(1, 1, 30e18, 20e18);
-        handler.user_atomic_canister_tier(0, 1, 10e18, 9e18, 6);
+        handler.stranger_reaches_for_a_target(0, 1, 10e18, 9e18, 6);
 
         assertEq(handler.deposits(), 1, "deposit landed");
         assertEq(handler.executes(), 1, "execute landed");
         assertGt(handler.batchItems(), 0, "at least one batch item landed");
         assertEq(handler.payouts(), 2, "payout and refund landed");
-        assertEq(handler.atomicSwaps(), 1, "atomic swap landed");
-        assertEq(handler.zeroCallsRejected(), 1, "a public deposit that executes nothing was refused");
-        assertEq(handler.overApprovesRejected(), 1, "over-approve rejected");
-        assertEq(handler.canisterTierExecutes(), 1, "the canister reached its own tier");
-        assertEq(handler.canisterTierRejected(), 1, "the public door was refused the canister tier");
+        assertEq(handler.strangerCallsRefused(), 5, "every door refused the stranger for its own reason");
 
         invariant_no_router_allowance_survives();
         invariant_balances_match_sanctioned_flows();
@@ -126,10 +111,6 @@ contract VaultInvariantsTest is StdInvariant, Test {
         vm.prank(payer);
         vm.expectRevert(Vault.QuoteHashUsed.selector);
         vault.depositNative(quoteHash);
-
-        vm.prank(payer);
-        vm.expectRevert(Vault.QuoteHashUsed.selector);
-        vault.depositAndExecute(quoteHash, token, 0, new Vault.Call[](0), token, 0, address(0));
 
         vm.prank(canister);
         vm.expectRevert(Vault.QuoteHashUsed.selector);

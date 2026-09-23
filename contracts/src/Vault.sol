@@ -59,9 +59,6 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error CallFailed();
     error OnlySelf();
     error ZeroCanister();
-    error PublicCallNotAllowed();
-    error EmptyDeposit();
-    error DepositNotSpent();
     error PermitExpired();
     error PermitNotAuthorized();
     error NotAPermitToken();
@@ -85,42 +82,20 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// keccak256(abi.encode(quoteHash, payer)) => spent. Scoped per payer so a
     /// stranger cannot burn someone else's quote hash as a griefing DoS.
     mapping(bytes32 => bool) public usedQuoteKey;
-    /// The public tier, the strict one: what every door may call, the public
-    /// `depositAndExecute` included. This is the slot the single allowlist has
-    /// always lived in (it was `allowedRouter`), so every entry made before the
-    /// tiers existed is on this tier and keeps exactly the reach it had: the
-    /// migration is the layout itself, with no step anyone could forget.
-    mapping(address => bool) private _publicRouter;
-    /// The canister tier's own entries: what only the canister's doors may call.
-    /// Appended after every slot the vault already had, so nothing moves.
-    mapping(address => bool) private _canisterOnlyRouter;
+    /// What the canister's `execute` and `executeMany` may call, and nothing
+    /// else reads it: see `setRouterAllowlist` for the law an entry must meet.
+    mapping(address => bool) public allowedRouter;
 
     event GuardianSet(address guardian);
     event NativeReceived(address from, uint256 amount);
     event ClassPaused(uint8 class_);
     event ClassUnpaused(uint8 class_);
     event Deposited(bytes32 indexed quoteHash, address indexed token, address indexed from, uint256 amount);
-    /// the tier stored, never the flags sent: `publicOk` is true only with `ok`
-    event AllowlistSet(address target, bool ok, bool publicOk);
+    event AllowlistSet(address target, bool ok);
     event Executed(bytes32 indexed swapRef);
     event ItemResult(bytes32 indexed swapRef, bool ok);
     event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
     event Refunded(bytes32 indexed ref, address token, address to, uint256 amount);
-    /// The public path's whole log record. Distinct from Deposited on purpose: the
-    /// atomic path settles in-tx, so it must never look like a cross-chain deposit
-    /// the canister would credit a second time. Executed, ItemResult, Payout and
-    /// Refunded stay canister-only for the same reason: they are logs the settlement
-    /// canister trusts, so no public entry point may be able to forge one.
-    /// `payoutTo == address(0)` means the proceeds stayed in the vault.
-    event AtomicSwap(
-        bytes32 indexed quoteHash,
-        address token,
-        address from,
-        uint256 amountIn,
-        address payoutToken,
-        uint256 amountOut,
-        address payoutTo
-    );
 
     modifier onlyCanister() {
         if (msg.sender != canister) revert OnlyCanister();
@@ -364,53 +339,50 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
-    /// Puts `target` on exactly one tier, or on neither. `ok` allows it at all and
-    /// `publicOk` also opens the public door to it; `publicOk` means nothing
-    /// without `ok`, so no target is ever public without being allowed. Moving a
-    /// target between tiers is one call, and so is taking it off both.
+    /// The one allowlist, and the law an entry must meet.
     ///
-    /// The law for each tier, which the deploy runbook records per entry with its
-    /// reason: the public tier holds only stateless swap routers, whose every
-    /// reachable function increases a vault balance only as the direct product of
-    /// the caller's own deposit being spent. The canister tier may additionally
-    /// hold an immutable escrow whose every permissionless exit pays the vault,
-    /// each one named and reviewed; Eco's Portal is the case it exists for.
-    /// Neither tier ever holds a token-like contract or the CCTP message
-    /// transmitter.
-    function setRouterAllowlist(address target, bool ok, bool publicOk) external onlyCanister {
-        bool isPublic = ok && publicOk;
-        _publicRouter[target] = isPublic;
-        _canisterOnlyRouter[target] = ok && !publicOk;
-        emit AllowlistSet(target, ok, isPublic);
-    }
-
-    /// What the canister's own doors may call (`execute`, `executeMany`, and
-    /// `multicall` through them): a target on either tier.
-    function allowedRouter(address target) public view returns (bool) {
-        return _publicRouter[target] || _canisterOnlyRouter[target];
-    }
-
-    /// What the public `depositAndExecute` door may call: the public tier alone,
-    /// always a subset of `allowedRouter`.
-    function allowedPublicRouter(address target) public view returns (bool) {
-        return _publicRouter[target];
+    /// The vault has no public execution door. A door that pays out what a
+    /// pooled vault gained cannot be made safe: any hook token on any router's
+    /// path gives the caller's code a turn, and that code can make a third
+    /// party pay the vault (a permissionless escrow refund, a solver filling
+    /// our own intent) while the door is measuring. So the only calls the vault
+    /// ever issues are the canister's, through `execute` and `executeMany`
+    /// (and `multicall` over them), and the law follows from that:
+    ///   - every target is called only with calldata the canister chose. No
+    ///     stranger can make the vault issue a call, so no stranger can speak
+    ///     for the vault to anything on this list;
+    ///   - so a target may hold balances the vault can claim. Eco's Portal
+    ///     escrows a reward whose creator is the vault, and only the vault may
+    ///     name where `refundTo` sends it: listing it is safe because only the
+    ///     canister can make the vault call it;
+    ///   - never a token contract. A listed token would let a call move the
+    ///     vault's funds by the token's own `transfer`, around `_send`, the
+    ///     single choke point `payout` and `refund` share.
+    ///
+    /// Carried to Plan 5 (security review L1). The canister's own swap leg can
+    /// still hand foreign code a turn inside `execute`: a hook in the token, or
+    /// in a token on a pool the route walks. That code can trigger the same
+    /// third-party payments to the vault while the leg runs, and
+    /// `Delta.minChange` is a vault-wide balance delta, so it would count them
+    /// toward the leg's floor. A canister swap leg over a token the canister has
+    /// not vetted must not trust the vault-wide balance delta while foreign code
+    /// runs.
+    function setRouterAllowlist(address target, bool ok) external onlyCanister {
+        allowedRouter[target] = ok;
+        emit AllowlistSet(target, ok);
     }
 
     function _balance(address token) internal view returns (uint256) {
         return token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
     }
 
-    /// Returns how much of the approvals the targets actually took, summed across
-    /// the calls. The sum is only meaningful to a caller that knows every call
-    /// approves the same token: `depositAndExecute` enforces that and reads it,
-    /// the canister paths do not and ignore it.
-    function _runCalls(Call[] calldata calls) internal returns (uint256 pulled) {
+    function _runCalls(Call[] calldata calls) internal {
         for (uint256 i = 0; i < calls.length; i++) {
             Call calldata c = calls[i];
             // never let a call re-enter the vault, even if it were allowlisted:
             // runItem is self-only but carries no reentrancy guard
             if (c.target == address(this)) revert TargetNotAllowed();
-            if (!allowedRouter(c.target)) revert TargetNotAllowed();
+            if (!allowedRouter[c.target]) revert TargetNotAllowed();
             if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, c.approveAmount);
             bool ok;
             address target = c.target;
@@ -421,15 +393,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
                 ok := call(gas(), target, value, add(data, 0x20), mload(data), 0, 0)
             }
             if (!ok) revert CallFailed();
-            if (c.approveAmount > 0) {
-                // read what is left BEFORE the reset: afterwards every call would
-                // look fully spent and the measure would pass anything
-                uint256 left = IERC20(c.approveToken).allowance(address(this), c.target);
-                // a token that reports more than we approved adds nothing rather
-                // than panicking on the subtraction
-                if (left < c.approveAmount) pulled += c.approveAmount - left;
-                IERC20(c.approveToken).forceApprove(c.target, 0);
-            }
+            if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, 0);
         }
     }
 
@@ -453,95 +417,6 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         _runCalls(calls);
         _checkDeltas(deltas, beforeBalances);
         emit Executed(swapRef);
-    }
-
-    /// Atomic legacy same-chain path: the caller deposits and swaps in one tx.
-    /// `payoutTo == address(0)` leaves the proceeds in the vault.
-    ///
-    /// Anyone may call this, so what keeps it safe is a property and not a list
-    /// of forbidden shapes:
-    ///   1. the caller's deposit must be non-zero;
-    ///   2. every call must be funded by and bounded by that deposit (no native
-    ///      value, approvals only of `token`, no call approving nothing, the
-    ///      approvals summing to at most what was received) AND every target must
-    ///      actually take what it was approved, so the deposit is spent in full;
-    ///   3. the payout is bounded by the delta those calls produced, snapshotted
-    ///      after the pull so the deposit can never pay for itself.
-    ///
-    /// (1) and (2) together mean a target reached through this door has to take
-    /// the caller's own money. A target that only ever pays the vault, an escrow
-    /// refund, a permissionless intent refund, a CCTP mint whose recipient is the
-    /// vault, cannot be reached at all. That is the hole this closes: before the
-    /// rule, a stranger depositing nothing and approving nothing could call any
-    /// allowlisted target that increases any vault balance and carry the increase
-    /// out through the payout leg, whatever receiver the target's own arguments
-    /// named.
-    ///
-    /// The allowlist tier is the second, independent defence: every target must
-    /// be on the public tier (`allowedPublicRouter`), so a target only the
-    /// canister may call, an escrow like Eco's Portal whose `refundTo` answers to
-    /// the vault itself, is refused here before any call runs. Neither defence
-    /// relies on the other.
-    function depositAndExecute(
-        bytes32 quoteHash,
-        address token,
-        uint256 amount,
-        Call[] calldata calls,
-        address payoutToken,
-        uint256 minOut,
-        address payoutTo
-    ) external nonReentrant whenNotPaused(PauseClass.Deposits) {
-        // this path runs router calls, so it answers to the Executions pause as well
-        if (_paused[PauseClass.Executions]) revert IsPaused();
-        // paying out is Payouts-gated too; keeping proceeds in the vault is not
-        if (payoutTo != address(0) && _paused[PauseClass.Payouts]) revert IsPaused();
-        _markQuote(quoteHash, msg.sender);
-
-        uint256 beforeIn = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        uint256 received = IERC20(token).balanceOf(address(this)) - beforeIn;
-        // nothing deposited is nothing to spend, and a door that runs calls for a
-        // caller who paid nothing is a free call to an allowlisted target
-        if (received == 0) revert EmptyDeposit();
-
-        // anyone may call this, so the calls may only ever spend the caller's own
-        // deposit: no native value, approvals only of `token`, never a call that
-        // spends none of it, and capped in total at `received`. And only ever to
-        // the public tier: a target on neither tier gets the refusal every door
-        // gives it, one on the canister tier alone gets this door's own
-        {
-            uint256 totalApprove;
-            for (uint256 i = 0; i < calls.length; i++) {
-                if (calls[i].value != 0 || calls[i].approveToken != token || calls[i].approveAmount == 0) {
-                    revert PublicCallNotAllowed();
-                }
-                if (!_publicRouter[calls[i].target]) {
-                    if (_canisterOnlyRouter[calls[i].target]) revert PublicCallNotAllowed();
-                    revert TargetNotAllowed();
-                }
-                totalApprove += calls[i].approveAmount;
-            }
-            if (totalApprove > received) revert PublicCallNotAllowed();
-        }
-
-        // snapshot after the pull so a token == payoutToken deposit never counts toward minOut
-        uint256 beforeOut = _balance(payoutToken);
-        // every target had to take what it was approved, so the deposit is gone.
-        // With the cap above this forces pulled == totalApprove == received: a
-        // target that only pays the vault, and never takes from it, is unreachable.
-        if (_runCalls(calls) < received) revert DepositNotSpent();
-        // signed: a payoutToken balance that fell reverts DeltaMissed, not an underflow panic
-        int256 change = SafeCast.toInt256(_balance(payoutToken)) - SafeCast.toInt256(beforeOut);
-        if (change < SafeCast.toInt256(minOut)) revert DeltaMissed();
-
-        uint256 out = uint256(change);
-        if (payoutTo != address(0) && out > 0) {
-            // through the same door as payout/refund: native-safe, and one place for caps
-            _send(payoutToken, payoutTo, out);
-        }
-        // the single log this path leaves, emitted after the payout leg so it
-        // reports what actually moved. Executed and Payout stay canister-only.
-        emit AtomicSwap(quoteHash, token, msg.sender, received, payoutToken, out, payoutTo);
     }
 
     function executeMany(Item[] calldata items)
