@@ -757,6 +757,14 @@ impl From<DepositError> for settlement_api::types::entry::DepositError {
             },
             DepositError::NoBlock { block } => Self::NoBlock { block: block.get() },
             DepositError::UnreadableBlock => Self::UnreadableBlock,
+            DepositError::BlockTooLarge { block, cap } => Self::BlockTooLarge {
+                block: block.get(),
+                cap,
+            },
+            DepositError::OutOfOutcalls { from, spent } => Self::OutOfOutcalls {
+                from: from.get(),
+                spent,
+            },
         }
     }
 }

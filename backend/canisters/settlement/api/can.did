@@ -209,6 +209,11 @@ type DepositError = variant {
   // The vault's log holds `seen` deposits for the quote, and none of them is the token
   // and amount wanted: funds under the hash for an operator, and no swap.
   NoneMatches : record { quote_hash : blob; seen : nat64 };
+  // The quote's logs in block `block` alone are more than `cap` bytes, the largest
+  // answer an outcall may be, so no read can see what that block holds. Logs under a
+  // quote's public hash are anyone's to add, so this is dust, and asked again it answers
+  // the same: the funds stay in the vault for an operator.
+  BlockTooLarge : record { cap : nat64; block : nat64 };
   // The provider holds no block `block` under the hash the deposit's log named: reorged
   // away, or not reached by the provider asked. Asked again, it may answer.
   NoBlock : record { block : nat64 };
@@ -221,6 +226,10 @@ type DepositError = variant {
   NoDepth : record { chain_id : nat64 };
   // The watcher has pushed nothing young enough to anchor the read on.
   StaleChainData : record { chain_id : nat64 };
+  // The read spent the `spent` outcalls one read may make before it reached block
+  // `from`, reading around dust too large to answer whole. Asked again, it answers the
+  // same unless the chain has moved.
+  OutOfOutcalls : record { from : nat64; spent : nat64 };
   Vault : VaultError;
 };
 // Why a key or a signature is not one this canister can use. A refused management call is
@@ -737,6 +746,9 @@ type RpcError = variant {
   Unreachable : record { reason : text };
   // No reply carries this call's id.
   Unanswered : record { method : text };
+  // The system refused the answer as larger than the `cap` bytes the outcall reserved.
+  // A read that can ask again with a larger cap, or over less, does so.
+  AnswerTooLarge : record { cap : nat64 };
   // Two replies carry one id, so one call has two answers and another has none.
   DuplicateReplyId : record { id : nat64 };
   // A reply carries an id the batch never used, so nothing says which call it answers.

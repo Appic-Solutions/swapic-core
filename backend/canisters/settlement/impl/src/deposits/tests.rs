@@ -240,6 +240,9 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
 /// Rewritten for fix wave 5 (M1): the head is asked before any window is built, because
 /// every window is built from it, so a window's call is its logs alone where it was the
 /// head and the logs in one batch.
+/// Rewritten for fix wave 6 (H1): the call names the token wanted as the third topic, so a
+/// deposit of any other token under the quote's public hash, native dust among them, never
+/// comes back to fill the answer.
 #[test]
 fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     let from = range_from(BlockNumber::new(19_000_000), DepositLookback::new(10_000));
@@ -255,7 +258,8 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
         vec![Window { from, to: None }],
         "a lookback of one window is one window, open at the head"
     );
-    let (method, params) = logs_call(vault(), quote_hash(), &windows[0]);
+    let usdc: EvmAddress = USDC.parse().unwrap();
+    let (method, params) = logs_call(vault(), quote_hash(), usdc, &windows[0]);
     assert_eq!(method, "eth_getLogs");
     assert_eq!(
         params,
@@ -264,6 +268,7 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
             "topics": [
                 "0xcfccc5211684bc31ce945214025a7453ba30a1ffcc38fcb691ce742437f3f256",
                 "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
             ],
             "fromBlock": "0x121c3b1",
             "toBlock": "latest",
@@ -274,7 +279,7 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
         to: Some(BlockNumber::new(18_990_000)),
     };
     assert_eq!(
-        logs_call(vault(), quote_hash(), &closed).1[0]["toBlock"],
+        logs_call(vault(), quote_hash(), usdc, &closed).1[0]["toBlock"],
         json!("0x121c3b0"),
         "an older window ends where the newer one starts"
     );
@@ -769,5 +774,191 @@ fn a_block_answer_is_the_block_the_log_named_or_nothing() {
     assert_eq!(
         block_time(None, &deposit),
         Err(DepositError::UnreadableBlock)
+    );
+}
+
+fn block(number: u64) -> BlockNumber {
+    BlockNumber::new(number)
+}
+
+fn closed(from: u64, to: u64) -> Window {
+    Window {
+        from: block(from),
+        to: Some(block(to)),
+    }
+}
+
+fn open(from: u64) -> Window {
+    Window {
+        from: block(from),
+        to: None,
+    }
+}
+
+/// A window whose answer is over its cap is asked for again with a cap four times larger,
+/// up to the largest answer an outcall may be, two megabytes (DFINITY's own pattern in
+/// `evm-rpc-canister`): from the tight cap a window starts at, four caps in all, and none
+/// after the largest.
+#[test]
+fn a_window_refused_for_size_is_asked_again_with_a_larger_cap_up_to_the_largest() {
+    assert_eq!(MAX_RESPONSE_BYTES, 2_000_000, "the system's own ceiling");
+    assert_eq!(grown(MAX_LOGS_BYTES), Some(128 * 1024));
+    assert_eq!(grown(128 * 1024), Some(512 * 1024));
+    assert_eq!(
+        grown(512 * 1024),
+        Some(MAX_RESPONSE_BYTES),
+        "never above the largest"
+    );
+    assert_eq!(grown(MAX_RESPONSE_BYTES), None, "and nothing after it");
+    assert_eq!(CAP_STEPS, 4, "32 KiB, 128 KiB, 512 KiB, 2 MB");
+}
+
+/// A window no answer can hold is read in halves, the older first. A closed window splits
+/// at its middle block. The newest window is open at the head, so it splits at the middle
+/// of what the provider's head holds, and its newer half stays open, so nothing past the
+/// head a provider serves is lost. One block, closed or open at the head, has no halves.
+#[test]
+fn a_window_halves_the_older_first_and_a_single_block_does_not() {
+    assert_eq!(
+        closed(100, 199).halves(block(500)),
+        Some((closed(100, 149), closed(150, 199)))
+    );
+    assert_eq!(
+        closed(100, 101).halves(block(500)),
+        Some((closed(100, 100), closed(101, 101)))
+    );
+    assert_eq!(closed(7, 7).halves(block(500)), None, "one block");
+    assert_eq!(
+        open(100).halves(block(200)),
+        Some((closed(100, 150), open(151))),
+        "the newer half open at the head"
+    );
+    assert_eq!(
+        open(199).halves(block(200)),
+        Some((closed(199, 199), open(200)))
+    );
+    assert_eq!(open(200).halves(block(200)), None, "from the head on");
+    assert_eq!(open(201).halves(block(200)), None);
+}
+
+/// The ranges `split` hands out while a range covering `dust` is too large to answer and
+/// the walk ends at the first range covering `deposit` that is not: what a read of one
+/// window asks for, in order, with dust in one block. `None` in place of the reads when a
+/// single block is refused by name.
+fn reads_around(
+    window: Window,
+    head: BlockNumber,
+    dust: u64,
+    deposit: u64,
+) -> Result<Vec<Window>, DepositError> {
+    let covers = |range: &Window, number: u64| {
+        range.from.get() <= number && range.to.map_or(head.get(), BlockNumber::get) >= number
+    };
+    let mut split = Split::new(window);
+    let mut reads = Vec::new();
+    while let Some(range) = split.oldest() {
+        reads.push(range);
+        if covers(&range, dust) {
+            split.halve(range, head)?;
+        } else if covers(&range, deposit) {
+            return Ok(reads);
+        }
+    }
+    Ok(reads)
+}
+
+/// A window no answer can hold is read in halves, the older half first and a half no
+/// answer can hold halved again, down to single blocks: the walk sees the window's blocks
+/// oldest first, so the oldest deep match is still the first one it finds (N2). With dust
+/// only in or after the deposit's block, which is all an outsider can place once the
+/// deposit reveals the quote's hash, a window of ten thousand blocks takes at most two
+/// reads a level, 28, to reach the deposit.
+#[test]
+fn a_split_reads_the_window_oldest_first_down_to_the_deposit() {
+    let head = block(1_000);
+    assert_eq!(
+        reads_around(closed(0, 15), head, 9, 8).unwrap(),
+        vec![
+            closed(0, 15),
+            closed(0, 7),
+            closed(8, 15),
+            closed(8, 11),
+            closed(8, 9),
+            closed(8, 8),
+        ]
+    );
+    assert_eq!(
+        SPLIT_DEPTH, 14,
+        "ten thousand blocks halve to one in fourteen"
+    );
+    let window = closed(1_000_000, 1_000_000 + LOGS_WINDOW_BLOCKS - 1);
+    for deposit in [0, 1, 4_999, 5_000, 9_998] {
+        let deposit = 1_000_000 + deposit;
+        let reads = reads_around(window, block(2_000_000), deposit + 1, deposit).unwrap();
+        assert!(
+            reads.len() as u64 <= 1 + 2 * SPLIT_DEPTH,
+            "{} reads to the deposit at {deposit}",
+            reads.len()
+        );
+        assert!(
+            reads.windows(2).all(|pair| pair[0].from <= pair[1].from),
+            "oldest first"
+        );
+        let last = reads.last().unwrap();
+        assert!(
+            last.from.get() <= deposit && last.to == Some(block(deposit)),
+            "the last read ends at the deposit's block, short of the dust: {last:?}"
+        );
+    }
+    // the newest window, open at the head, the same way
+    let newest = open(2_000_000 + 1 - LOGS_WINDOW_BLOCKS);
+    let reads = reads_around(newest, block(2_000_000), 1_999_998, 1_999_997).unwrap();
+    assert!(reads.len() as u64 <= 1 + 2 * SPLIT_DEPTH);
+    let last = reads.last().unwrap();
+    assert!(last.from.get() <= 1_999_997 && last.to == Some(block(1_999_997)));
+}
+
+/// A single block whose logs no answer can hold cannot be read by any outcall, so the
+/// split refuses it by name, with the block and the largest cap, and never a transport
+/// failure the caller would retry in silence: a closed block, and an open window that
+/// starts at the head.
+#[test]
+fn a_single_block_no_answer_can_hold_is_refused_by_name() {
+    let too_large = |number| DepositError::BlockTooLarge {
+        block: block(number),
+        cap: MAX_RESPONSE_BYTES,
+    };
+    assert_eq!(
+        reads_around(closed(0, 15), block(1_000), 8, 8),
+        Err(too_large(8))
+    );
+    assert_eq!(
+        Split::new(closed(5, 5)).halve(closed(5, 5), block(1_000)),
+        Err(too_large(5))
+    );
+    assert_eq!(
+        Split::new(open(1_000)).halve(open(1_000), block(1_000)),
+        Err(too_large(1_000))
+    );
+}
+
+/// One read's log outcalls are held to a budget, so every loop in it ends and the
+/// in-flight marker's bound covers the longest read. The budget is the larger of the two
+/// longest reads the walk can make: every batch refused and every window read again alone
+/// (6 + 41), and dust only in or after the deposit's block, which reads every batch up to
+/// the deposit's, the nine windows before it in that batch alone, and the deposit's window
+/// at every cap and then two halves a level (6 + 9 + 4 + 28). Both are 47.
+#[test]
+fn the_read_is_held_to_a_budget_both_long_reads_fit() {
+    let batches = MAX_WINDOWS_PER_READ.div_ceil(WINDOWS_PER_BATCH as u64) + 1;
+    assert_eq!(batches, 6);
+    let refused = batches + MAX_WINDOWS_PER_READ;
+    let dusty = batches + (WINDOWS_PER_BATCH as u64 - 1) + CAP_STEPS + 2 * SPLIT_DEPTH;
+    assert_eq!((refused, dusty), (47, 47));
+    assert_eq!(MAX_LOGS_OUTCALLS, refused.max(dusty));
+    assert_eq!(
+        MAX_READ_OUTCALLS,
+        1 + MAX_LOGS_OUTCALLS + 1,
+        "the head, the logs, and the deposit's block"
     );
 }

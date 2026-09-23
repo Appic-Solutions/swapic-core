@@ -14,8 +14,8 @@ use crate::client::settlement::{
 use crate::settlement_suite::init::{empty_canister, install, quoter, watcher};
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::common::rest::{
-    CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse, MockCanisterHttpResponse,
-    RawMessageId,
+    CanisterHttpReject, CanisterHttpReply, CanisterHttpRequest, CanisterHttpResponse,
+    MockCanisterHttpResponse, RawMessageId,
 };
 use pocket_ic::{PocketIc, PocketIcBuilder, Time};
 use serde_json::{json, Value};
@@ -294,6 +294,18 @@ struct Provider {
     /// A block whose logs the provider cannot serve: any range covering it is refused, the
     /// way a provider refuses a range whose answer would be too large.
     unservable: Option<u64>,
+    /// For every outcall answered, the cap the canister reserved and the length of the body
+    /// the provider had for it.
+    sizes: Vec<(Option<u64>, usize)>,
+    /// Whether an answer longer than the cap its outcall reserved is refused the way the
+    /// replica refuses it (pocket-ic hands a mocked body back whatever its size).
+    enforce_cap: bool,
+    /// The token word every `eth_getLogs` filtered on (`topics[2]`), null where it named
+    /// none.
+    token_topics: Vec<Value>,
+    /// For every outcall answered, how many log reads had been asked by the end of it, so
+    /// a test can tell which log reads came after a given outcall.
+    answered: Vec<usize>,
 }
 
 /// A hex quantity as a number.
@@ -318,7 +330,28 @@ impl Provider {
             max_batch: None,
             refused_batches: 0,
             unservable: None,
+            sizes: Vec::new(),
+            enforce_cap: false,
+            token_topics: Vec::new(),
+            answered: Vec::new(),
         }
+    }
+
+    /// A provider behind the replica's size rule: an answer longer than the cap its outcall
+    /// reserved is refused, as the replica refuses it, and not handed over.
+    fn enforcing_caps(self) -> Self {
+        Self {
+            enforce_cap: true,
+            ..self
+        }
+    }
+
+    /// The outcalls whose answer was longer than the cap they reserved, as (cap, length).
+    fn oversized(&self) -> Vec<(u64, usize)> {
+        self.sizes
+            .iter()
+            .filter_map(|(cap, len)| cap.filter(|cap| *len as u64 > *cap).map(|cap| (cap, *len)))
+            .collect()
     }
 
     /// A provider that refuses any range covering `block`.
@@ -389,10 +422,15 @@ impl Provider {
                 }
                 let last = to.unwrap_or(self.tip).min(self.tip);
                 let wanted = &filter["topics"][1];
+                // a node filters on every topic the filter names, the token among them
+                let token = filter["topics"].get(2).cloned().unwrap_or(Value::Null);
+                self.token_topics.push(token.clone());
+                let lower = |word: &Value| word.as_str().map(str::to_ascii_lowercase);
                 Ok(json!(self
                     .logs
                     .iter()
                     .filter(|log| log["topics"][1] == *wanted)
+                    .filter(|log| token.is_null() || lower(&log["topics"][2]) == lower(&token))
                     .filter(|log| {
                         let block = hex_u64(log["blockNumber"].as_str().expect("a block"));
                         (from..=last).contains(&block)
@@ -453,13 +491,36 @@ impl Provider {
     /// Hands `body` back as the answer to `request`, and gives the canister the rounds it
     /// needs to act on it.
     fn mock(&mut self, pic: &PocketIc, request: &CanisterHttpRequest, body: Value) {
+        let body = body.to_string();
+        self.sizes.push((request.max_response_bytes, body.len()));
+        self.answered.push(self.log_reads.len());
+        let cap = request
+            .max_response_bytes
+            .expect("every outcall reserves a cap");
+        if self.enforce_cap && body.len() as u64 > cap {
+            // as the replica refuses it, and as `test_outbox`'s `reject_oversized` mocks it
+            pic.mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+                    reject_code: 1,
+                    message: format!("Http body exceeds size limit of {cap} bytes."),
+                }),
+                additional_responses: vec![],
+            });
+            self.outcalls += 1;
+            for _ in 0..4 {
+                pic.tick();
+            }
+            return;
+        }
         pic.mock_canister_http_response(MockCanisterHttpResponse {
             subnet_id: request.subnet_id,
             request_id: request.request_id,
             response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
                 status: 200,
                 headers: vec![],
-                body: body.to_string().into_bytes(),
+                body: body.into_bytes(),
             }),
             additional_responses: vec![],
         });
@@ -646,6 +707,9 @@ fn no_deposit_means_nothing_stored() {
 /// Rewritten for fix wave 4 (N4): a claim that finds nothing it wants above the height the
 /// quote was registered at reads the plain lookback before it refuses, and the count is
 /// that read's.
+/// Rewritten for fix wave 6 (H1): the read asks for the quote's token alone, so a deposit
+/// of another token under the hash is not in the answer at all, and the claim finds no
+/// deposit, where it counted one it did not want.
 #[test]
 fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -662,10 +726,7 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     );
     assert_eq!(
         await_claim(&pic, call),
-        Err(ClaimError::Deposit(DepositError::NoneMatches {
-            quote_hash,
-            seen: 1
-        }))
+        Err(ClaimError::Deposit(DepositError::NotFound { quote_hash }))
     );
 
     let call = submit_claim(&pic, canister, watcher(), &quote);
@@ -2642,5 +2703,329 @@ fn a_window_that_cannot_be_read_does_not_hide_an_older_deposit_in_its_batch() {
         provider.froms()[3..],
         [HEAD + 1 - 30_000],
         "after the refused batch, the oldest window alone, which holds the deposit"
+    );
+}
+
+/// A deposit of one unit of the quote's own token under `quote_hash` from payer number
+/// `n`, in its own transaction: dust anyone can log under a user's public quote hash, once
+/// per payer (the vault marks a quote per payer), for gas and one unit. It is the quote's
+/// token, so no filter on the token drops it.
+fn token_dust(quote_hash: Hash32, block: u64, n: u64) -> Value {
+    let payer = format!("0x{:040x}", 0x1000 + n);
+    let mut tx = [0u8; 32];
+    tx[..8].copy_from_slice(&n.to_be_bytes());
+    tx[31] = 0xdd;
+    logged_deposit(quote_hash, block, USDC, &payer, 1, tx)
+}
+
+/// A zero-value `depositNative(quote_hash)` from payer number `n`: dust for gas alone,
+/// which a read that asks for the quote's token never gets back.
+fn native_dust(quote_hash: Hash32, block: u64, n: u64) -> Value {
+    let payer = format!("0x{:040x}", 0x9000 + n);
+    let mut tx = [0u8; 32];
+    tx[..8].copy_from_slice(&n.to_be_bytes());
+    tx[31] = 0xee;
+    logged_deposit(
+        quote_hash,
+        block,
+        "0x0000000000000000000000000000000000000000",
+        &payer,
+        0,
+        tx,
+    )
+}
+
+/// The user's deposit at `HEAD - 3`, and `dust` deposits of one unit of the quote's token
+/// from distinct payers at `block`.
+fn dusted(quote_hash: Hash32, dust: u64, block: u64) -> Vec<Value> {
+    let mut logs = vec![deposit_log(quote_hash, HEAD - 3, USDC, USER, AMOUNT.into())];
+    logs.extend((0..dust).map(|n| token_dust(quote_hash, block, n)));
+    logs
+}
+
+/// One claim of `quote` by `who` against a provider at `HEAD` holding `logs`, behind the
+/// replica's size rule: what the claim answers, and the provider, for what it was asked.
+fn dusty_claim(
+    pic: &PocketIc,
+    canister: Principal,
+    who: Principal,
+    quote: &types::Quote,
+    logs: &[Value],
+) -> (Result<Hash32, ClaimError>, Provider) {
+    push_head(pic, canister, HEAD);
+    let call = submit_claim_unregistered(pic, canister, who, &wire(quote));
+    let mut provider = Provider::at(HEAD, logs)
+        .for_quote(swap_id(quote))
+        .enforcing_caps();
+    provider.drive(pic);
+    (await_claim(pic, call), provider)
+}
+
+/// The largest answer an outcall may be, as the system holds it: two megabytes.
+const LARGEST_ANSWER: u64 = 2_000_000;
+
+/// Dust enough that one block of it is more than [`LARGEST_ANSWER`]: about 646 bytes a
+/// log as this mock prints one, so 3,300 logs are about 2.13 megabytes.
+const BLOCK_OF_DUST: u64 = 3_300;
+
+/// Ported from review 5's first proof of concept (H1, G7). Dust logs one block after the
+/// user's deposit, in the same window, put that window's answer past its cap. The claim
+/// asks for the window again with a larger cap until the answer fits, and the watcher's
+/// first claim takes the deposit, where every claim used to fail on the read until the
+/// quote expired and the deposit never became a swap. Thirty dust logs, the control, fit
+/// the first cap. Native dust, which costs gas alone, never comes back at all: every read
+/// asks for the quote's token.
+#[test]
+fn a_deposit_behind_160_dust_logs_in_its_own_window_is_claimed() {
+    let (pic, canister, _admin) = setup();
+
+    let control = quote(900);
+    let control_hash = registered(&pic, canister, &control);
+    let (claimed, provider) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &control,
+        &dusted(control_hash, 30, HEAD - 2),
+    );
+    assert_eq!(claimed, Ok(control_hash), "the control is claimed");
+    assert_eq!(provider.oversized(), vec![], "and fits the first cap");
+
+    let victim = quote(901);
+    let victim_hash = registered(&pic, canister, &victim);
+    let mut logs = dusted(victim_hash, 160, HEAD - 2);
+    logs.extend((0..160).map(|n| native_dust(victim_hash, HEAD - 2, n)));
+    let before = count(&pic, canister);
+    let (claimed, provider) = dusty_claim(&pic, canister, watcher(), &victim, &logs);
+    println!("sizes (cap, body): {:?}", provider.sizes);
+    assert_eq!(
+        claimed,
+        Ok(victim_hash),
+        "the watcher's first claim takes it"
+    );
+    assert!(
+        !provider.oversized().is_empty(),
+        "an answer was over the cap it reserved, and was asked for again"
+    );
+    assert!(
+        provider
+            .token_topics
+            .iter()
+            .all(|token| *token == json!(word_of(USDC))),
+        "every read asks for the quote's token alone: {:?}",
+        provider.token_topics
+    );
+    assert_eq!(
+        count(&pic, canister),
+        before + 1,
+        "the swap's FundsReceived"
+    );
+    assert!(get_swap(&pic, canister, Principal::anonymous(), victim_hash).is_some());
+}
+
+/// Ported from review 5's second proof of concept (H1, G7). At 160 dust logs the PoC found
+/// one escape: empty the pending store, raise the lookback to its ceiling and claim by
+/// hand, at the cost of every other pending quote, each of which then needed a claim by
+/// hand. The watcher's own claim now takes the deposit, so the store keeps the other
+/// quote and the lookback is left alone; and the operator's door, over the widest
+/// lookback, still reads a deposit behind the same dust for a quote the store never held.
+#[test]
+fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
+    let (pic, canister, admin) = setup();
+    let bystander = quote(902);
+    let bystander_hash = registered(&pic, canister, &bystander);
+    let victim = quote(903);
+    let victim_hash = registered(&pic, canister, &victim);
+    let (claimed, _) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &victim,
+        &dusted(victim_hash, 160, HEAD - 2),
+    );
+    assert_eq!(claimed, Ok(victim_hash), "the watcher's claim takes it");
+    assert!(
+        get_pending(&pic, canister, watcher(), bystander_hash)
+            .unwrap()
+            .is_some(),
+        "and every other pending quote stays where it was"
+    );
+
+    lookback_of(&pic, canister, admin, 400_000);
+    let by_hand = quote(904);
+    let by_hand_hash = swap_id(&by_hand);
+    let (claimed, _) = dusty_claim(
+        &pic,
+        canister,
+        admin,
+        &by_hand,
+        &dusted(by_hand_hash, 160, HEAD - 2),
+    );
+    assert_eq!(
+        claimed,
+        Ok(by_hand_hash),
+        "the operator's door reads it too"
+    );
+}
+
+/// Ported from review 5's third proof of concept (H1, G7). 520 dust logs in the deposit's
+/// own block are over the ten-window batch of the widest lookback and over a window's own
+/// cap, which closed every path, the operator's escape included, and left the deposit to
+/// become `QuoteExpired`. The window's cap now grows until the answer fits: the watcher's
+/// claim takes the deposit, and so does the operator's door over the widest lookback.
+#[test]
+fn a_deposit_behind_520_dust_logs_in_its_own_block_is_claimed() {
+    let (pic, canister, admin) = setup();
+    let victim = quote(905);
+    let victim_hash = registered(&pic, canister, &victim);
+    let before = count(&pic, canister);
+    let (claimed, provider) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &victim,
+        &dusted(victim_hash, 520, HEAD - 3),
+    );
+    println!("sizes (cap, body): {:?}", provider.sizes);
+    assert_eq!(claimed, Ok(victim_hash), "the watcher's claim takes it");
+    assert_eq!(
+        count(&pic, canister),
+        before + 1,
+        "the swap's FundsReceived"
+    );
+
+    lookback_of(&pic, canister, admin, 400_000);
+    let by_hand = quote(906);
+    let by_hand_hash = swap_id(&by_hand);
+    let (claimed, _) = dusty_claim(
+        &pic,
+        canister,
+        admin,
+        &by_hand,
+        &dusted(by_hand_hash, 520, HEAD - 3),
+    );
+    assert_eq!(
+        claimed,
+        Ok(by_hand_hash),
+        "the operator's door reads it too"
+    );
+}
+
+/// A block of dust more than the largest answer an outcall may be, one block after the
+/// deposit in the same window: no cap fits the window, so it is read in halves, the older
+/// half first, and a half no cap fits is halved again, until the part holding the deposit
+/// fits and the deposit is claimed. Every half is read at the largest cap, and every range
+/// read after the first split lies inside the window.
+#[test]
+fn a_window_no_answer_can_hold_is_split_until_the_deposit_shows() {
+    let (pic, canister, _admin) = setup();
+    let quote = quote(907);
+    let quote_hash = registered(&pic, canister, &quote);
+    let (claimed, provider) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &quote,
+        &dusted(quote_hash, BLOCK_OF_DUST, HEAD - 2),
+    );
+    println!("reads: {:?}", provider.log_reads);
+    println!("sizes (cap, body): {:?}", provider.sizes);
+    assert_eq!(claimed, Ok(quote_hash), "the deposit is claimed");
+    let first_split = provider
+        .sizes
+        .iter()
+        .position(|(cap, len)| *cap == Some(LARGEST_ANSWER) && *len as u64 > LARGEST_ANSWER)
+        .expect("the window was refused at the largest cap");
+    let halves = &provider.log_reads[provider.answered[first_split]..];
+    let window_from = HEAD + 1 - 10_000;
+    assert_eq!(
+        halves[0],
+        (window_from, Some(window_from + (HEAD - window_from) / 2)),
+        "the older half of the window first"
+    );
+    assert!(
+        halves
+            .iter()
+            .all(|(from, to)| *from >= window_from && to.is_none_or(|to| to <= HEAD)),
+        "every half inside the window"
+    );
+    assert!(
+        provider.sizes[first_split + 1..]
+            .iter()
+            .all(|(cap, _)| *cap == Some(LARGEST_ANSWER)),
+        "and every half read at the largest cap"
+    );
+    let (from, to) = *halves.last().unwrap();
+    assert!(
+        from <= HEAD - 3 && to == Some(HEAD - 3),
+        "the last read ends at the deposit's block, short of the dust: {from}..{to:?}"
+    );
+}
+
+/// A single block whose dust alone is more than the largest answer an outcall may be
+/// cannot be read by any outcall. The claim reads its window down to that one block and
+/// refuses by name, with the block and the cap, rather than as a transport failure: the
+/// watcher can tell it from a provider that is down, and it never stalls in silence.
+/// Nothing is stored.
+#[test]
+fn a_block_no_answer_can_hold_is_refused_by_name() {
+    let (pic, canister, _admin) = setup();
+    let quote = quote(908);
+    let quote_hash = registered(&pic, canister, &quote);
+    let before = count(&pic, canister);
+    let (claimed, provider) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &quote,
+        &dusted(quote_hash, BLOCK_OF_DUST, HEAD - 3),
+    );
+    println!("reads: {:?}", provider.log_reads);
+    assert_eq!(
+        claimed,
+        Err(ClaimError::Deposit(DepositError::BlockTooLarge {
+            block: HEAD - 3,
+            cap: LARGEST_ANSWER,
+        }))
+    );
+    assert_eq!(count(&pic, canister), before, "nothing stored");
+    assert!(
+        provider.outcalls <= 49,
+        "inside the bound the in-flight marker is sized from: {}",
+        provider.outcalls
+    );
+}
+
+/// A block no answer can hold, above the height the quote was registered at, does not
+/// hide the user's deposit below that height: the rest of the lookback, every block of
+/// it older than the one that cannot be read, is read before the claim refuses, and the
+/// deposit there, the oldest in range, is claimed.
+#[test]
+fn a_block_no_answer_can_hold_does_not_hide_an_older_deposit() {
+    let (pic, canister, _admin) = setup();
+    // a watcher's head ahead of the chain, which the quote is registered at
+    push_head(&pic, canister, HEAD + 50_000);
+    let quote = quote(909);
+    let quote_hash = registered(&pic, canister, &quote);
+    let mut logs = vec![deposit_log(
+        quote_hash,
+        HEAD + 10,
+        USDC,
+        USER,
+        AMOUNT.into(),
+    )];
+    logs.extend((0..BLOCK_OF_DUST).map(|n| token_dust(quote_hash, HEAD + 59_000, n)));
+    push_head(&pic, canister, HEAD + 60_000);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let mut provider = Provider::at(HEAD + 60_000, &logs)
+        .for_quote(quote_hash)
+        .enforcing_caps();
+    provider.drive(&pic);
+    println!("reads: {:?}", provider.log_reads);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert!(
+        provider.outcalls <= 49,
+        "inside the bound the in-flight marker is sized from: {}",
+        provider.outcalls
     );
 }

@@ -20,8 +20,9 @@ pub const OUTCALL_ROUND_TRIP: Duration = Duration::from_secs(10);
 
 /// How long a marker holds its quote before the next caller may take it over: the longest
 /// a claim's reads can run, [`MAX_READ_OUTCALLS`] outcalls one after another (the head,
-/// every batch of windows, every window again after a batch the provider refused, and the
-/// deposit's block), at [`OUTCALL_ROUND_TRIP`] each: 490 seconds. A pull holds it for one
+/// the log reads the read's budget allows, every larger cap and every half of a window
+/// too large to answer among them, and the deposit's block), at [`OUTCALL_ROUND_TRIP`]
+/// each: 490 seconds. A pull holds it for one
 /// signing round trip of about ten seconds. A marker older than this was left behind by a
 /// message that never came back, a trap after an await or an upgrade in the middle, and
 /// holding the quote any longer would only keep its user waiting. It ends inside the

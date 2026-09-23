@@ -50,4 +50,9 @@ pub enum RpcError {
         method: String,
         message: String,
     },
+    /// The system refused the answer as larger than the `cap` bytes the outcall reserved.
+    /// A read that can ask again with a larger cap, or over less, does so.
+    AnswerTooLarge {
+        cap: u64,
+    },
 }

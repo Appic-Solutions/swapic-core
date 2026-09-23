@@ -84,14 +84,17 @@ fn clearing_frees_every_quote() {
 }
 
 /// The marker holds a claim for as long as the longest read a claim can make takes: the
-/// provider's head, every batch of windows, every window again on its own after each batch
-/// the provider refused, and the time of the deposit's block, each at an outcall's round
-/// trip on a loaded subnet. And it gives the quote back before the shortest grace a claim
-/// can be asked in has run, so a marker a trap left behind never outlives the window in
-/// which the claim could still be asked.
+/// provider's head, every log read the read's budget allows, and the time of the
+/// deposit's block, each at an outcall's round trip on a loaded subnet. And it gives the
+/// quote back before the shortest grace a claim can be asked in has run, so a marker a
+/// trap left behind never outlives the window in which the claim could still be asked.
+///
+/// Rewritten for fix wave 6 (H1): the log reads are a budget, 47, which holds both the
+/// read whose every batch is refused (6 batches and 41 windows) and the read of a window
+/// dust fills (every cap, then its halves down to the deposit); the count is unchanged.
 #[test]
 fn the_bound_fits_the_longest_claim_and_ends_inside_the_grace() {
-    assert_eq!(READ_OUTCALLS, 49, "1 head, 6 batches, 41 windows, 1 block");
+    assert_eq!(READ_OUTCALLS, 49, "1 head, 47 log reads, 1 block");
     let longest = OUTCALL_ROUND_TRIP * u32::try_from(READ_OUTCALLS).unwrap();
     assert!(
         IN_FLIGHT_BOUND >= longest,

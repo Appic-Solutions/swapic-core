@@ -256,3 +256,49 @@ fn a_summary_is_bounded_and_carries_no_control_characters() {
     assert!(wide.starts_with(summary.as_str()));
     assert_eq!(summary.as_str().chars().count(), MAX_SUMMARY_BYTES / 2);
 }
+
+/// The replica refuses an answer longer than the cap its outcall reserved by rejecting the
+/// whole call, `SysFatal` with "Http body exceeds size limit of N bytes" (DFINITY's
+/// `evm-rpc-canister` reads a "length limit" the same way). That one refusal is typed, so
+/// a read can ask again with a larger cap; every other rejection stays a transport
+/// failure, summarised.
+#[test]
+fn an_answer_over_its_cap_is_refused_by_name() {
+    assert_eq!(
+        refusal(
+            RejectionCode::SysFatal,
+            "Http body exceeds size limit of 32768 bytes.",
+            32_768
+        ),
+        RpcError::AnswerTooLarge { cap: 32_768 }
+    );
+    assert_eq!(
+        refusal(
+            RejectionCode::SysFatal,
+            "Header size exceeds specified response length limit",
+            512
+        ),
+        RpcError::AnswerTooLarge { cap: 512 }
+    );
+    assert_eq!(
+        refusal(
+            RejectionCode::SysTransient,
+            "Http body exceeds size limit of 32768 bytes.",
+            32_768
+        ),
+        RpcError::Unreachable {
+            reason: Summary::of("SysTransient: Http body exceeds size limit of 32768 bytes.")
+        },
+        "only the system's fatal refusal is the size rule"
+    );
+    assert_eq!(
+        refusal(
+            RejectionCode::SysFatal,
+            "Connecting to example.com failed",
+            512
+        ),
+        RpcError::Unreachable {
+            reason: Summary::of("SysFatal: Connecting to example.com failed")
+        }
+    );
+}

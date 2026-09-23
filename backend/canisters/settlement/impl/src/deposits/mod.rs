@@ -24,6 +24,7 @@ use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BL
 use crate::storage::{chain_data, config};
 use crate::tx::{confirmations, NoDepth};
 use serde_json::{json, Value};
+use std::cell::Cell;
 use thiserror::Error;
 pub use types::abi::deposited_topic;
 use types::config::DepositLookback;
@@ -34,12 +35,43 @@ use types::{
     UnixSeconds,
 };
 
-/// The most one `eth_getLogs` answer may be: enough for a few dozen deposits naming one
-/// quote (forty dust logs ahead of the real one still fit, at about seven hundred bytes
-/// each as a provider prints a log), and refunded when unused under pay-as-you-go
-/// pricing. An answer over it is refused by the system, which the read reports as a
-/// typed transport failure rather than deciding on a part of the log.
+/// The cap one `eth_getLogs` answer is first asked at: enough for a few dozen deposits of
+/// the quote's token under its hash (forty dust logs ahead of the real one still fit, at
+/// about seven hundred bytes each as a provider prints a log), and refunded when unused
+/// under pay-as-you-go pricing. An answer over it is refused by the system, never handed
+/// over in part, and the read asks for it again with a larger cap (see [`grown`]).
 const MAX_LOGS_BYTES: u64 = 32 * 1024;
+
+/// The largest answer an outcall may be: the system refuses a `max_response_bytes` above
+/// two megabytes (2,000,000 bytes, not 2 MiB).
+pub const MAX_RESPONSE_BYTES: u64 = 2_000_000;
+
+/// How many times larger each retry of a range refused for size asks for: four, so a
+/// window refused at [`MAX_LOGS_BYTES`] reaches [`MAX_RESPONSE_BYTES`] in three retries.
+pub const CAP_GROWTH: u64 = 4;
+
+/// The cap to ask again with after an answer too large for `cap`: [`CAP_GROWTH`] times it,
+/// and never above [`MAX_RESPONSE_BYTES`]; none once `cap` was already the largest. This is
+/// DFINITY's own pattern in `evm-rpc-canister` (`ResponseSizeEstimate::adjust`).
+pub fn grown(cap: u64) -> Option<u64> {
+    (cap < MAX_RESPONSE_BYTES).then(|| cap.saturating_mul(CAP_GROWTH).min(MAX_RESPONSE_BYTES))
+}
+
+/// How many caps one window is asked at, from [`MAX_LOGS_BYTES`] up to
+/// [`MAX_RESPONSE_BYTES`]: 32 KiB, 128 KiB, 512 KiB and 2 MB, four.
+pub const CAP_STEPS: u64 = {
+    let mut steps = 1;
+    let mut cap = MAX_LOGS_BYTES;
+    while cap < MAX_RESPONSE_BYTES {
+        cap *= CAP_GROWTH;
+        steps += 1;
+    }
+    steps
+};
+
+/// How many times a window can be halved before every piece of it is one block: the bit
+/// length of [`LOGS_WINDOW_BLOCKS`] less one, fourteen for ten thousand blocks.
+pub const SPLIT_DEPTH: u64 = (u64::BITS - (LOGS_WINDOW_BLOCKS - 1).leading_zeros()) as u64;
 
 /// The window and the window cap, kept beside the lookback knob they bound (see
 /// `types::config`), so the knob's ceiling is what this read can walk.
@@ -68,25 +100,59 @@ pub const FLOOR_MARGIN_BLOCKS: u64 = 2 * LOGS_WINDOW_BLOCKS;
 
 /// How many windows one outcall reads, as one JSON-RPC batch of `eth_getLogs` calls.
 ///
-/// Each window's answer is held to [`MAX_LOGS_BYTES`], a few dozen deposits under one
-/// quote, so a batch's answer is held to ten of them, 320 KiB, a sixth of the two
+/// Each window's answer is first asked at [`MAX_LOGS_BYTES`], a few dozen deposits under
+/// one quote, so a batch's answer is held to ten of them, 320 KiB, a sixth of the two
 /// megabytes an outcall's answer may be. Ten calls is a short batch,
-/// and a provider that refuses it, or answers any call of it with an error, costs the
-/// read one outcall more per window rather than the read: the batch is read again one
-/// window at a time. The default lookback, 35 windows, is then four outcalls where it was
-/// thirty-five.
+/// and a provider that refuses it, or answers any call of it with an error, or an answer
+/// too large for it, costs the read one outcall more per window rather than the read: the
+/// batch is read again one window at a time. The default lookback, 35 windows, is then
+/// four outcalls where it was thirty-five.
 pub const WINDOWS_PER_BATCH: usize = 10;
 
 /// The most windows one read walks: its own range and the rest of the lookback are tiled
 /// apart, so the widest lookback can split into one window more than it holds whole.
 pub const MAX_WINDOWS_PER_READ: u64 = MAX_LOGS_WINDOWS + 1;
 
+/// The most batches the two ranges of one read are sent in: one for every
+/// [`WINDOWS_PER_BATCH`] windows, and one more because the two ranges are tiled apart. Six.
+const MAX_BATCHES_PER_READ: u64 = MAX_WINDOWS_PER_READ.div_ceil(WINDOWS_PER_BATCH as u64) + 1;
+
+/// The most outcalls one window read on its own takes to reach the deposit when the dust
+/// in it sits only in the deposit's block or after it, which is all an outsider can place
+/// once the deposit reveals the quote's hash: the window at each of the [`CAP_STEPS`]
+/// caps, then two halves a level for [`SPLIT_DEPTH`] levels (the older half holds no dust
+/// and answers, the newer is too large and is halved again). 4 + 28 = 32. The newest
+/// window is split at the provider's head, so this holds while that head is within about
+/// six thousand blocks of the watcher's reading, as a fresh reading is (ten seconds old at
+/// most by default); past that the budget still ends the read.
+const MAX_DUSTY_WINDOW_OUTCALLS: u64 = CAP_STEPS + 2 * SPLIT_DEPTH;
+
+/// The most `eth_getLogs` outcalls one read makes, the budget [`Reader`] holds it to so that
+/// every loop in it ends. The larger of its two longest walks, both 47:
+///
+/// - every batch refused and every window read again on its own: 6 + 41;
+/// - dust in or after the deposit's block: every batch up to the deposit's, the nine
+///   windows before the deposit's in that batch alone, and the deposit's own window
+///   ([`MAX_DUSTY_WINDOW_OUTCALLS`]): 6 + 9 + 32.
+///
+/// A read that would go past it (dust placed before the deposit, which takes the quote's
+/// hash before the deposit shows it, or a provider that refuses every batch while dust
+/// fills a window) is refused by name, `OutOfOutcalls`, and never cut short in silence.
+pub const MAX_LOGS_OUTCALLS: u64 = {
+    let refused = MAX_BATCHES_PER_READ + MAX_WINDOWS_PER_READ;
+    let dusty = MAX_BATCHES_PER_READ + (WINDOWS_PER_BATCH as u64 - 1) + MAX_DUSTY_WINDOW_OUTCALLS;
+    if refused > dusty {
+        refused
+    } else {
+        dusty
+    }
+};
+
 /// The most outcalls one claim's reads can make, which the in-flight marker's bound is
-/// sized from: the provider's head, one batch for every [`WINDOWS_PER_BATCH`] windows of
-/// each of the two ranges, every window again on its own after a batch the provider
-/// refused, and the time of the deposit's block. 1 + 6 + 41 + 1 = 49.
-pub const MAX_READ_OUTCALLS: u64 =
-    1 + (MAX_WINDOWS_PER_READ.div_ceil(WINDOWS_PER_BATCH as u64) + 1) + MAX_WINDOWS_PER_READ + 1;
+/// sized from: the provider's head, the [`MAX_LOGS_OUTCALLS`] log reads, and the time of
+/// the deposit's block. 1 + 47 + 1 = 49. A block too large for any answer is found by the
+/// last of the log reads, so it is inside the count.
+pub const MAX_READ_OUTCALLS: u64 = 1 + MAX_LOGS_OUTCALLS + 1;
 
 /// How far back a waiting arrival read looks: one window, the newest, so a tick costs the
 /// swap one window. The whole lookback is read only before a refund.
@@ -175,6 +241,13 @@ pub enum DepositError {
     NoBlock { block: BlockNumber },
     #[error("the block did not come back as the one asked for, with a time")]
     UnreadableBlock,
+    #[error(
+        "the quote's logs in block {block} alone are more than the {cap} bytes an outcall's \
+         answer may be"
+    )]
+    BlockTooLarge { block: BlockNumber, cap: u64 },
+    #[error("the read spent its {spent} outcalls before it reached block {from}")]
+    OutOfOutcalls { from: BlockNumber, spent: u64 },
 }
 
 impl DepositError {
@@ -193,7 +266,9 @@ impl DepositError {
             | Self::UnreadableLogs
             | Self::NotConfirmed { .. }
             | Self::NoBlock { .. }
-            | Self::UnreadableBlock => false,
+            | Self::UnreadableBlock
+            | Self::BlockTooLarge { .. }
+            | Self::OutOfOutcalls { .. } => false,
         }
     }
 }
@@ -271,6 +346,65 @@ pub fn range_from(anchor: BlockNumber, lookback: DepositLookback) -> BlockNumber
 pub struct Window {
     pub from: BlockNumber,
     pub to: Option<BlockNumber>,
+}
+
+impl Window {
+    /// The window's two halves, the older first, when no answer can hold it; none when it
+    /// is one block. A closed window splits at its middle block. The newest window is open
+    /// at the head, so it splits at the middle of what the provider's `head` holds, and its
+    /// newer half stays open, so a log past the head a provider serves is still read; from
+    /// the head on it is one block.
+    pub fn halves(&self, head: BlockNumber) -> Option<(Window, Window)> {
+        let from = self.from.get();
+        let last = self.to.unwrap_or(head).get();
+        if from >= last {
+            return None;
+        }
+        let middle = from + (last - from) / 2;
+        Some((
+            Window {
+                from: self.from,
+                to: Some(BlockNumber::new(middle)),
+            },
+            Window {
+                from: BlockNumber::new(middle + 1),
+                to: self.to,
+            },
+        ))
+    }
+}
+
+/// The ranges of one window still to be read, the oldest on top. A range no answer can
+/// hold is put back as its two halves, the older to be read next, so the walk sees the
+/// window's blocks oldest first and the oldest deep match is still the first it finds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    pending: Vec<Window>,
+}
+
+impl Split {
+    pub fn new(window: Window) -> Self {
+        Self {
+            pending: vec![window],
+        }
+    }
+
+    /// The oldest range not read yet.
+    pub fn oldest(&mut self) -> Option<Window> {
+        self.pending.pop()
+    }
+
+    /// Puts the halves of `range`, which no answer could hold, in its place, the older to
+    /// be read next; or refuses by name a range that is one block, which no read can see.
+    pub fn halve(&mut self, range: Window, head: BlockNumber) -> Result<(), DepositError> {
+        let (older, newer) = range.halves(head).ok_or(DepositError::BlockTooLarge {
+            block: range.from,
+            cap: MAX_RESPONSE_BYTES,
+        })?;
+        self.pending.push(newer);
+        self.pending.push(older);
+        Ok(())
+    }
 }
 
 /// The windows that tile `from` to `anchor`, oldest first, the newest open at the head:
@@ -384,9 +518,17 @@ impl Plan {
     }
 }
 
-/// The call that reads one window: the vault's `Deposited` logs naming `quote_hash` from
-/// the window's first block to its last, or to the head for the newest.
-fn logs_call(vault: EvmAddress, quote_hash: QuoteHash, window: &Window) -> (&'static str, Value) {
+/// The call that reads one window: the vault's `Deposited` logs naming `quote_hash` and
+/// `token` from the window's first block to its last, or to the head for the newest. The
+/// event indexes the quote hash, the token and the payer in that order, so the token is
+/// the third topic: a deposit of any other token under the quote's public hash, native
+/// dust logged for gas alone among them, is never in the answer to fill it.
+fn logs_call(
+    vault: EvmAddress,
+    quote_hash: QuoteHash,
+    token: EvmAddress,
+    window: &Window,
+) -> (&'static str, Value) {
     let to_block = match window.to {
         Some(to) => format!("0x{:x}", to.get()),
         None => "latest".to_string(),
@@ -395,7 +537,11 @@ fn logs_call(vault: EvmAddress, quote_hash: QuoteHash, window: &Window) -> (&'st
         "eth_getLogs",
         json!([{
             "address": hex0x(vault.as_bytes()),
-            "topics": [hex0x(&deposited_topic()), hex0x(quote_hash.as_ref())],
+            "topics": [
+                hex0x(&deposited_topic()),
+                hex0x(quote_hash.as_ref()),
+                hex0x(&token.to_word()),
+            ],
             "fromBlock": format!("0x{:x}", window.from.get()),
             "toBlock": to_block,
         }]),
@@ -594,6 +740,13 @@ pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress,
 /// first window holding a deep match ends the walk, a match not deep enough yet never
 /// hides a deep one in a later window, and a range whose deposit sits in its newest window
 /// is read to the end.
+///
+/// Logs under the quote's public hash are anyone's to add, so a window's answer can be
+/// too large: it is asked for again with a larger cap and then read in halves (see
+/// [`Reader`]), and a single block too large for any answer is refused by name. Such a
+/// block decides nothing older than itself, and the rest of the lookback is older than
+/// every block of the read's own range, so the rest is still read before the refusal. The
+/// whole read makes at most [`MAX_READ_OUTCALLS`] outcalls.
 // todo_harden_reads: single unreplicated read; upgrade to k-of-n later. Until then the
 // answer is bound to the vault this canister configured, the event that vault emits, the
 // quote being claimed and the token and amount wanted, and held to the configured depth.
@@ -625,17 +778,21 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
         wanted,
         head,
         depth,
+        spent: Cell::new(0),
     };
     let mut walk = Walk::new(quote_hash, depth);
-    if let Some(deposit) = reader.walk(&plan.narrow()?, &mut walk).await? {
-        return Ok(deposit);
-    }
+    let unreadable = match reader.walk(&plan.narrow()?, &mut walk).await {
+        Ok(Some(deposit)) => return Ok(deposit),
+        Ok(None) => None,
+        Err(too_large @ DepositError::BlockTooLarge { .. }) => Some(too_large),
+        Err(error) => return Err(error),
+    };
     if widen && walk.found_nothing() {
         if let Some(deposit) = reader.walk(&plan.rest()?, &mut walk).await? {
             return Ok(deposit);
         }
     }
-    Err(walk.end())
+    Err(unreadable.unwrap_or_else(|| walk.end()))
 }
 
 /// The provider's own head, asked alone: what every window of the read is built from.
@@ -654,7 +811,8 @@ async fn read_head(chain_id: ChainId) -> Result<BlockNumber, DepositError> {
 }
 
 /// What every window of one read is read against: the chain and its vault, the quote and
-/// the deposit wanted, and the head and depth the findings are judged by.
+/// the deposit wanted, and the head and depth the findings are judged by; and the log
+/// outcalls the read has made so far, held to [`MAX_LOGS_OUTCALLS`].
 struct Reader {
     chain_id: ChainId,
     vault: EvmAddress,
@@ -662,6 +820,7 @@ struct Reader {
     wanted: Wanted,
     head: BlockNumber,
     depth: BlockDepth,
+    spent: Cell<u64>,
 }
 
 impl Reader {
@@ -670,12 +829,13 @@ impl Reader {
     /// deep enough. A window starting above the head is never sent: it holds nothing the
     /// provider has, so leaving it out is the same as finding nothing in it.
     ///
-    /// A batch the provider refuses, or answers any window of with an error, is read again
-    /// one window at a time, and each window's finding is taken as it comes back: a deep
+    /// A batch the provider refuses, or answers any window of with an error, or whose
+    /// answer is too large for its cap, is read again one window at a time (see
+    /// [`Self::window`]), and each window's finding is taken as it comes back: a deep
     /// deposit in an older window ends the walk before a newer window is asked for, as the
-    /// window by window walk did, so a window the provider cannot serve (dust logs under
-    /// the quote's public hash can push one past its cap) hides nothing older than itself.
-    /// A window that fails on its own, with nothing older having decided, fails the read.
+    /// window by window walk did, so a window the provider cannot serve hides nothing older
+    /// than itself. A window that fails on its own, with nothing older having decided,
+    /// fails the read.
     async fn walk(
         &self,
         windows: &[Window],
@@ -686,7 +846,7 @@ impl Reader {
             .filter(|window| !above_head(window, self.head))
             .collect();
         for batch in sendable.chunks(WINDOWS_PER_BATCH) {
-            match self.batch(batch).await {
+            match self.batch(batch, MAX_LOGS_BYTES * batch.len() as u64).await {
                 Ok(answers) => {
                     for logs in &answers {
                         if let Some(deposit) = walk.take(self.find(logs)) {
@@ -696,16 +856,68 @@ impl Reader {
                 }
                 Err(_) => {
                     for window in batch {
-                        for logs in &self.batch(&[*window]).await? {
-                            if let Some(deposit) = walk.take(self.find(logs)) {
-                                return Ok(Some(deposit));
-                            }
+                        if let Some(deposit) = self.window(window, walk).await? {
+                            return Ok(Some(deposit));
                         }
                     }
                 }
             }
         }
         Ok(None)
+    }
+
+    /// Reads one window on its own and hands what it holds to the walk: the deposit, as
+    /// soon as a part of it holds one deep enough.
+    ///
+    /// An answer too large for its cap is asked for again with a larger one, up to the
+    /// largest an outcall may be (see [`grown`]). A window no answer can hold is read in
+    /// halves, the older first, each at the largest cap, and a half no answer can hold is
+    /// halved again (see [`Split`]), so the walk still sees the window's blocks oldest
+    /// first; a single block no answer can hold is refused by name. Every loop here ends:
+    /// the caps are four, each halving leaves smaller ranges, and every outcall is counted
+    /// against the read's budget (see [`Self::batch`]).
+    async fn window(
+        &self,
+        window: &Window,
+        walk: &mut Walk,
+    ) -> Result<Option<VerifiedDeposit>, DepositError> {
+        let mut split = Split::new(*window);
+        let mut cap = MAX_LOGS_BYTES;
+        while let Some(range) = split.oldest() {
+            match self.grown_logs(&range, &mut cap).await? {
+                Some(logs) => {
+                    if let Some(deposit) = walk.take(self.find(&logs)) {
+                        return Ok(Some(deposit));
+                    }
+                }
+                None => split.halve(range, self.head)?,
+            }
+        }
+        Ok(None)
+    }
+
+    /// The logs of `range`, asked at `cap` and again at every larger cap after an answer
+    /// too large for it, which leaves `cap` at the one it fitted; none when even the
+    /// largest cannot hold them.
+    async fn grown_logs(
+        &self,
+        range: &Window,
+        cap: &mut u64,
+    ) -> Result<Option<Vec<Value>>, DepositError> {
+        loop {
+            match self.batch(&[range], *cap).await {
+                Ok(answers) => {
+                    return Ok(Some(answers.into_iter().next().expect(
+                        "BUG: a batch is answered by one reply per call, and this is one call",
+                    )))
+                }
+                Err(DepositError::Rpc(RpcError::AnswerTooLarge { .. })) => match grown(*cap) {
+                    Some(larger) => *cap = larger,
+                    None => return Ok(None),
+                },
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// What one window's logs hold of the deposit this read wants.
@@ -721,14 +933,23 @@ impl Reader {
     }
 
     /// The logs of each of `windows`, in order, from one outcall: one `eth_getLogs` per
-    /// window in a single JSON-RPC batch, whose answer is held to [`MAX_LOGS_BYTES`] a
-    /// window, 320 KiB for a whole batch of [`WINDOWS_PER_BATCH`].
-    async fn batch(&self, windows: &[&Window]) -> Result<Vec<Vec<Value>>, DepositError> {
+    /// window in a single JSON-RPC batch, whose answer is held to `cap`. The outcall is
+    /// counted against the read's budget, and one past [`MAX_LOGS_OUTCALLS`] is refused by
+    /// name, with the first block it would have read, before it is made.
+    async fn batch(&self, windows: &[&Window], cap: u64) -> Result<Vec<Vec<Value>>, DepositError> {
+        let from = windows
+            .first()
+            .expect("BUG: every batch and every range reads at least one window")
+            .from;
+        let spent = self.spent.get();
+        if spent >= MAX_LOGS_OUTCALLS {
+            return Err(DepositError::OutOfOutcalls { from, spent });
+        }
+        self.spent.set(spent + 1);
         let calls: Vec<(&str, Value)> = windows
             .iter()
-            .map(|window| logs_call(self.vault, self.quote_hash, window))
+            .map(|window| logs_call(self.vault, self.quote_hash, self.wanted.token, window))
             .collect();
-        let cap = MAX_LOGS_BYTES * windows.len() as u64;
         rpc::rpc_batch(self.chain_id, &calls, cap)
             .await?
             .into_iter()

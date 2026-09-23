@@ -189,6 +189,21 @@ pub enum DepositError {
     },
     /// The block the deposit is in did not come back as that block, with a time.
     UnreadableBlock,
+    /// The quote's logs in block `block` alone are more than `cap` bytes, the largest
+    /// answer an outcall may be, so no read can see what that block holds. Logs under a
+    /// quote's public hash are anyone's to add, so this is dust, and asked again it answers
+    /// the same: the funds stay in the vault for an operator.
+    BlockTooLarge {
+        block: u64,
+        cap: u64,
+    },
+    /// The read spent the `spent` outcalls one read may make before it reached block
+    /// `from`, reading around dust too large to answer whole. Asked again, it answers the
+    /// same unless the chain has moved.
+    OutOfOutcalls {
+        from: u64,
+        spent: u64,
+    },
 }
 
 /// Why `claim_swap` created no swap. Nothing was written.

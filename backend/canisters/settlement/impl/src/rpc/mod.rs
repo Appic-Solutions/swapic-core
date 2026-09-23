@@ -13,7 +13,7 @@
 
 use crate::storage::config;
 use candid::{CandidType, Principal};
-use ic_cdk::api::call::call_with_payment128;
+use ic_cdk::api::call::{call_with_payment128, RejectionCode};
 use ic_cdk::api::management_canister::http_request::{
     HttpHeader, HttpMethod, HttpResponse, TransformContext,
 };
@@ -137,6 +137,8 @@ pub enum RpcError {
     NeitherResultNorError { method: String },
     #[error("{method} answered an error: {message}")]
     Rpc { method: String, message: String },
+    #[error("the answer is larger than the {cap} bytes the outcall reserved")]
+    AnswerTooLarge { cap: u64 },
 }
 
 /// The outcall argument for one POST to `url`. The one place `is_replicated` and
@@ -195,9 +197,7 @@ async fn http_post(
         cycles,
     )
     .await
-    .map_err(|(code, message)| RpcError::Unreachable {
-        reason: Summary::of(&format!("{code:?}: {message}")),
-    })?;
+    .map_err(|(code, message)| refusal(code, &message, max_response_bytes))?;
     // a status outside a u16 is no http status at all, and is not a 2xx either
     let status: u16 = response.status.0.try_into().unwrap_or(u16::MAX);
     if !(200..300).contains(&status) {
@@ -207,6 +207,21 @@ async fn http_post(
         });
     }
     Ok(response.body)
+}
+
+/// Why the system refused an outcall reserved at `cap` bytes, from its reject code and
+/// message. An answer longer than the cap is refused whole, `SysFatal` with "Http body
+/// exceeds size limit of N bytes" (or a "length limit" for the headers): that refusal is
+/// typed, as DFINITY's `evm-rpc-canister` reads it (`is_response_too_large`), so a read
+/// can ask again with a larger cap. Every other refusal is the system's, summarised.
+fn refusal(code: RejectionCode, message: &str, cap: u64) -> RpcError {
+    let too_large = message.contains("size limit") || message.contains("length limit");
+    if code == RejectionCode::SysFatal && too_large {
+        return RpcError::AnswerTooLarge { cap };
+    }
+    RpcError::Unreachable {
+        reason: Summary::of(&format!("{code:?}: {message}")),
+    }
 }
 
 /// What the pricing formula counts as the request: the url, the headers and the body.
@@ -403,6 +418,7 @@ impl From<RpcError> for settlement_api::types::rpc::RpcError {
             RpcError::Unanswered { method } => Self::Unanswered { method },
             RpcError::NeitherResultNorError { method } => Self::NeitherResultNorError { method },
             RpcError::Rpc { method, message } => Self::Rpc { method, message },
+            RpcError::AnswerTooLarge { cap } => Self::AnswerTooLarge { cap },
         }
     }
 }
