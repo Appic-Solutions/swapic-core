@@ -58,6 +58,10 @@ fn deposit(token: &str, amount: u128) -> VerifiedDeposit {
 ///
 /// Rewritten for fix wave 5 (N7): the claim was refused past the permit window, which
 /// judged a deposit by when the claim came rather than by when it landed.
+/// Rewritten for the hardening pass (H2): the two deadlines are fixed once, from the
+/// config the quote is registered under, and the doors are held to them rather than to
+/// the config as it reads when they are asked; a deadline past the end of time is the
+/// last second there is, which holds every deposit and every claim the same way.
 #[test]
 fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
     let quote = evm_quote(1);
@@ -67,13 +71,13 @@ fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
         ..Config::default()
     };
     let expires_at = quote.expires_at.get();
+    let deadlines = QuoteDeadlines::under(quote.expires_at, &config);
     assert_eq!(
-        deposit_deadline(&quote, &config),
-        Some(UnixSeconds::new(expires_at + 120))
-    );
-    assert_eq!(
-        claim_deadline(&quote, &config),
-        Some(UnixSeconds::new(expires_at + 720))
+        deadlines,
+        QuoteDeadlines {
+            deposit_until: UnixSeconds::new(expires_at + 120),
+            claim_until: UnixSeconds::new(expires_at + 720),
+        }
     );
     for now in [
         expires_at - 1,
@@ -82,13 +86,13 @@ fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
         expires_at + 720,
     ] {
         assert_eq!(
-            ensure_claimable(&quote, UnixSeconds::new(now), &config),
+            ensure_claimable(&quote, &deadlines, UnixSeconds::new(now)),
             Ok(()),
             "claimable at {now}"
         );
     }
     assert_eq!(
-        ensure_claimable(&quote, UnixSeconds::new(expires_at + 721), &config),
+        ensure_claimable(&quote, &deadlines, UnixSeconds::new(expires_at + 721)),
         Err(ClaimError::QuoteExpired {
             expires_at: quote.expires_at,
             claim_until: UnixSeconds::new(expires_at + 720),
@@ -97,11 +101,11 @@ fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
     );
     // a pull makes a deposit, so it stops at the deposit deadline and not at the grace
     assert_eq!(
-        missed_deposit_deadline(&quote, UnixSeconds::new(expires_at + 120), &config),
+        missed_deposit_deadline(&deadlines, UnixSeconds::new(expires_at + 120)),
         None
     );
     assert_eq!(
-        missed_deposit_deadline(&quote, UnixSeconds::new(expires_at + 121), &config),
+        missed_deposit_deadline(&deadlines, UnixSeconds::new(expires_at + 121)),
         Some(UnixSeconds::new(expires_at + 120))
     );
     // a window past the end of time holds every claim
@@ -109,10 +113,48 @@ fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
         expires_at: UnixSeconds::new(u64::MAX - 1),
         ..evm_quote(1)
     };
-    assert_eq!(claim_deadline(&forever, &config), None);
+    let forever_deadlines = QuoteDeadlines::under(forever.expires_at, &config);
+    assert_eq!(forever_deadlines.claim_until, UnixSeconds::new(u64::MAX));
     assert_eq!(
-        ensure_claimable(&forever, UnixSeconds::new(u64::MAX), &config),
+        ensure_claimable(&forever, &forever_deadlines, UnixSeconds::new(u64::MAX)),
         Ok(())
+    );
+}
+
+/// The deadlines a door holds a quote to are the ones its pending entry recorded when the
+/// quoter registered it (rule A3), whatever the config reads when the door is asked; a
+/// controller's claim of a quote the store does not hold has no record, and is held to
+/// the config as it reads now.
+#[test]
+fn a_door_holds_a_quote_to_the_deadlines_it_was_registered_under() {
+    let quote = evm_quote(1);
+    let expires_at = quote.expires_at.get();
+    let registered_under = QuoteDeadlines {
+        deposit_until: UnixSeconds::new(expires_at + 120),
+        claim_until: UnixSeconds::new(expires_at + 3_720),
+    };
+    let entry = PendingQuote {
+        quote: quote.clone(),
+        registered_at: None,
+        deadlines: Some(registered_under),
+    };
+    let now = Config {
+        permit_deadline: Duration::from_secs(60),
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..Config::default()
+    };
+    assert_eq!(
+        deadlines_of(&quote, Some(&entry), &now),
+        registered_under,
+        "the recorded ones, not the config's now"
+    );
+    assert_eq!(
+        deadlines_of(&quote, None, &now),
+        QuoteDeadlines {
+            deposit_until: UnixSeconds::new(expires_at + 60),
+            claim_until: UnixSeconds::new(expires_at + 660),
+        },
+        "no record: the config's now"
     );
 }
 
@@ -377,9 +419,9 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
         },
         signature: vec![0x22; 65],
     };
-    let config = rail_config();
+    let deadlines = QuoteDeadlines::under(quote.expires_at, &rail_config());
     let binds = |permit: &PullPermit| {
-        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+        ensure_permit_binds(quote_hash, &quote, &deadlines, token, vault, now, permit)
     };
     assert_eq!(binds(&signed), Ok(()));
 
@@ -441,7 +483,7 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
         ensure_permit_binds(
             quote_hash,
             &quote,
-            &config,
+            &deadlines,
             token,
             vault,
             now,
@@ -479,7 +521,7 @@ fn a_permit_signed_by_another_wallet_than_the_refund_address_is_refused() {
     let quote_hash = quote.hash().unwrap();
     let token: EvmAddress = USDC.parse().unwrap();
     let vault: EvmAddress = VAULT.parse().unwrap();
-    let config = rail_config();
+    let deadlines = QuoteDeadlines::under(quote.expires_at, &rail_config());
     let now = UnixSeconds::new(1_799_999_000);
     let signed_by = |owner: &str| PullPermit {
         witness: quote_hash,
@@ -494,7 +536,7 @@ fn a_permit_signed_by_another_wallet_than_the_refund_address_is_refused() {
         signature: vec![0x22; 65],
     };
     let binds = |permit: &PullPermit| {
-        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+        ensure_permit_binds(quote_hash, &quote, &deadlines, token, vault, now, permit)
     };
     assert_eq!(
         binds(&signed_by(USER)),
@@ -544,7 +586,8 @@ fn a_permit_that_outlasts_the_deposit_deadline_is_refused() {
         ..rail_config()
     };
     let deposit_until = UnixSeconds::new(quote.expires_at.get() + 120);
-    assert_eq!(deposit_deadline(&quote, &config), Some(deposit_until));
+    let deadlines = QuoteDeadlines::under(quote.expires_at, &config);
+    assert_eq!(deadlines.deposit_until, deposit_until);
     let good_until = |deadline: UnixSeconds| PullPermit {
         witness: quote_hash,
         owner: USER.parse().unwrap(),
@@ -559,7 +602,7 @@ fn a_permit_that_outlasts_the_deposit_deadline_is_refused() {
     };
     let now = UnixSeconds::new(quote.expires_at.get() - 60);
     let binds = |permit: &PullPermit| {
-        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+        ensure_permit_binds(quote_hash, &quote, &deadlines, token, vault, now, permit)
     };
     assert_eq!(
         binds(&good_until(deposit_until)),
@@ -724,8 +767,9 @@ fn a_pull_refuses_a_payee_the_vault_cannot_pay() {
         ..evm_quote(3)
     };
     let now = UnixSeconds::new(gasless.expires_at.get() - 60);
+    let deadlines = QuoteDeadlines::under(gasless.expires_at, &config);
     assert_eq!(
-        ensure_pullable(&gasless, &config, now),
+        ensure_pullable(&gasless, &config, &deadlines, now),
         Ok(USDC.parse().unwrap())
     );
     let zero: types::Address = "0x0000000000000000000000000000000000000000"
@@ -748,7 +792,7 @@ fn a_pull_refuses_a_payee_the_vault_cannot_pay() {
         ),
     ] {
         assert_eq!(
-            ensure_pullable(&quote, &config, now),
+            ensure_pullable(&quote, &config, &deadlines, now),
             Err(PullError::QuoteAddress(QuoteAddressError::Zero { field })),
             "{field}"
         );
@@ -758,7 +802,7 @@ fn a_pull_refuses_a_payee_the_vault_cannot_pay() {
         ..gasless
     };
     assert_eq!(
-        ensure_pullable(&no_refund, &config, now),
+        ensure_pullable(&no_refund, &config, &deadlines, now),
         Err(PullError::QuoteAddress(QuoteAddressError::Absent {
             field: QuoteAddressField::RefundAddress
         }))

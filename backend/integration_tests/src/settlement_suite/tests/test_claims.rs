@@ -2442,6 +2442,68 @@ fn a_deposit_that_landed_late_is_refused_whoever_asks() {
     );
 }
 
+/// The permit window and the claim's grace, as a controller sets them, at the config's
+/// other knobs as they stand.
+fn claim_window_of(
+    pic: &PocketIc,
+    canister: Principal,
+    admin: Principal,
+    permit_s: u64,
+    grace_s: u64,
+) {
+    use crate::client::settlement::{get_config_full, set_config};
+    let config = get_config_full(pic, canister, admin).expect("the controller reads it");
+    set_config(
+        pic,
+        canister,
+        admin,
+        &Config {
+            permit_deadline_s: permit_s,
+            claim_grace_s: grace_s,
+            ..config
+        },
+    )
+    .expect("the controller sets it");
+}
+
+/// A quote keeps the deadlines it was registered under (rule A3, review 5 L5): the permit
+/// window and the grace are read from the config once, when the quoter registers the
+/// quote, and an operator who shortens both afterwards moves neither deadline of a quote
+/// already handed to a user. The claim below comes after the shortened grace has ended,
+/// and its deposit landed after the shortened permit window closed; both are inside the
+/// windows the quote was registered under, so the deposit is claimed.
+#[test]
+fn a_config_change_after_registration_moves_neither_deadline() {
+    let (pic, canister, admin) = setup();
+    let quote = quote(64);
+    // registered under the defaults: a two minute permit window and an hour of grace
+    let quote_hash = registered(&pic, canister, &quote);
+    claim_window_of(&pic, canister, admin, 60, 600);
+    let block_hash = [0x54; 32];
+    // past the shortened claim deadline, the expiry plus 60 and 600 seconds
+    walk_the_clock_to(&pic, EXPIRES_AT + 60 + 600 + 300);
+    assert!(
+        get_pending(&pic, canister, watcher(), quote_hash)
+            .unwrap()
+            .is_some(),
+        "the store keeps the quote to the claim deadline it was registered under"
+    );
+    push_head(&pic, canister, HEAD + 400);
+    let before = count(&pic, canister);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let mut provider = Provider::at(
+        HEAD + 400,
+        &[deposit_in_block(quote_hash, HEAD + 5, block_hash)],
+    )
+    .for_quote(quote_hash)
+    // after the shortened permit window, inside the one the quote was registered under
+    .block(block_hash, HEAD + 5, EXPIRES_AT + 100);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(count(&pic, canister), before + 1, "the swap");
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
 /// The controller's claim, the ops path for a deposit the services never claimed, is held
 /// to the same window as theirs: a deposit that landed in time is claimed by hand after
 /// the window closed, and once the grace has ended the controller is refused like anyone

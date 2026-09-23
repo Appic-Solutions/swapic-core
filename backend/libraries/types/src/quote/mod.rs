@@ -4,6 +4,7 @@ pub(crate) mod tests;
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
+use crate::config::Config;
 use crate::evm::{EvmAddress, EvmAddressError};
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
@@ -446,43 +447,102 @@ crate::storable_as_cbor!(Quote);
 /// own head, and does not stop there: when nothing matches above that, it reads the rest
 /// of the lookback before refusing, so no height a watcher pushed strands a deposit.
 ///
+/// The entry also holds the deadlines the quote was registered under (rule A3), which are
+/// what its claim, its pull and the store's sweep read: a config the operator moves after
+/// the registration moves neither of them.
+///
 /// Stored as minicbor: `#[n]` indices are append-only, and the height is absent while
-/// unknown, so an entry written before it existed reads back without one.
+/// unknown, so an entry written before it existed reads back without one. The deadlines
+/// are absent from an entry written before they were recorded, which no deploy holds: the
+/// entry's layout and the expiry index's key changed with them, and both want a fresh
+/// install.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct PendingQuote {
     #[n(0)]
     pub quote: Quote,
     #[n(1)]
     pub registered_at: Option<crate::numeric::BlockNumber>,
+    #[n(2)]
+    pub deadlines: Option<QuoteDeadlines>,
+}
+
+impl PendingQuote {
+    /// The deadlines the quote is held to: the ones it was registered under, or, for an
+    /// entry written before they were recorded, the ones `config` puts on it now.
+    pub fn held_to(&self, config: &Config) -> QuoteDeadlines {
+        self.deadlines
+            .unwrap_or_else(|| QuoteDeadlines::under(self.quote.expires_at, config))
+    }
 }
 
 crate::storable_as_cbor!(PendingQuote);
 
-/// A pending quote as the expiry index keys it: by the second it expires, then by swap id,
-/// so a walk from the first key meets the soonest expiry first and stops at the first quote
-/// still inside its window.
+/// The two deadlines a quote is held to, fixed when the quoter registers it (rule A3): the
+/// permit window and the claim's grace are read from the config once, at registration, so
+/// an operator who moves either afterwards moves no deadline of a quote already handed to
+/// a user. A deposit that landed in time under the window the quote was registered under
+/// stays claimable, and one that landed late under it stays refused.
+///
+/// Stored as minicbor inside [`PendingQuote`]: `#[n]` indices are append-only, never
+/// renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct QuoteDeadlines {
+    /// The last second a deposit for the quote may land, by the chain's own clock: its
+    /// expiry and the permit window after it. What a deposit is judged by, and what a pull,
+    /// which makes a deposit, is refused past.
+    #[n(0)]
+    pub deposit_until: UnixSeconds,
+    /// The last second a claim for the quote may be asked, whoever asks: the deposit
+    /// deadline and the claim's grace after it. The pending store keeps the quote until
+    /// then.
+    #[n(1)]
+    pub claim_until: UnixSeconds,
+}
+
+impl QuoteDeadlines {
+    /// The deadlines `config` puts on a quote expiring at `expires_at`. A deadline past the
+    /// last second a `u64` holds is that second: every deadline is judged by `>`, and
+    /// nothing is later than it, so it holds every deposit and never closes, which is what
+    /// a deadline past the end of time means.
+    pub fn under(expires_at: UnixSeconds, config: &Config) -> Self {
+        let at_most_the_end =
+            |deadline: Option<UnixSeconds>| deadline.unwrap_or(UnixSeconds::new(u64::MAX));
+        Self {
+            deposit_until: at_most_the_end(expires_at.checked_add(config.permit_deadline)),
+            claim_until: at_most_the_end(expires_at.checked_add(config.claim_window())),
+        }
+    }
+}
+
+/// A pending quote as the expiry index keys it: by the last second a claim for it may be
+/// asked (its recorded [`QuoteDeadlines::claim_until`]), then by swap id, so a walk from the
+/// first key meets the soonest deadline first and stops at the first quote still
+/// claimable, and no quote is decoded to decide its fate.
+///
+/// The key once held the quote's expiry in the same forty bytes; what they mean changed
+/// with the recorded deadlines, which want a fresh install.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExpiryKey {
-    pub expires_at: UnixSeconds,
+    pub claim_until: UnixSeconds,
     pub quote_hash: QuoteHash,
 }
 
-/// Forty bytes: the eight big-endian bytes of `expires_at`, then the hash, so byte order and
-/// key order agree.
+/// Forty bytes: the eight big-endian bytes of `claim_until`, then the hash, so byte order
+/// and key order agree.
 impl Storable for ExpiryKey {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         let mut bytes = Vec::with_capacity(40);
-        bytes.extend_from_slice(&self.expires_at.get().to_be_bytes());
+        bytes.extend_from_slice(&self.claim_until.get().to_be_bytes());
         bytes.extend_from_slice(self.quote_hash.as_ref());
         Cow::Owned(bytes)
     }
 
     fn from_bytes(bytes: Cow<[u8]>) -> Self {
-        let (expires_at, quote_hash) = bytes
+        let (claim_until, quote_hash) = bytes
             .split_first_chunk::<8>()
             .expect("BUG: a stored expiry key is written as exactly 40 bytes");
         Self {
-            expires_at: UnixSeconds::new(u64::from_be_bytes(*expires_at)),
+            claim_until: UnixSeconds::new(u64::from_be_bytes(*claim_until)),
             quote_hash: QuoteHash::new(
                 quote_hash
                     .try_into()

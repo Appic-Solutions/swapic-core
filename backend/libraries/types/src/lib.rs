@@ -35,7 +35,7 @@ pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Permit2Nonce,
     Timestamp, TokenAmount, UnixSeconds, UsdAmount, Wei, WeiPerGas,
 };
-pub use quote::{ExpiryKey, GasMode, PendingQuote, Quote, QuoteError};
+pub use quote::{ExpiryKey, GasMode, PendingQuote, Quote, QuoteDeadlines, QuoteError};
 pub use rail::{CctpDomain, CctpMinFee, EcoIntent, Rail};
 pub use swap::{Leg, Outcome, Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
 pub use tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};

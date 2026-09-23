@@ -2,11 +2,13 @@ use crate::storage::memory::{pending_expiry_memory, pending_quotes_memory, Memor
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet};
 use settlement_api::types::errors::RegisterQuoteError;
 use std::cell::RefCell;
-use std::time::Duration;
 use thiserror::Error;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError, MAX_QUOTE_LIFETIME};
-use types::{BlockNumber, Config, ExpiryKey, PendingQuote, Quote, QuoteHash, Rail, UnixSeconds};
+use types::{
+    BlockNumber, Config, ExpiryKey, PendingQuote, Quote, QuoteDeadlines, QuoteHash, Rail,
+    UnixSeconds,
+};
 
 /// How many quotes may sit in the pending store at once. The quoter is the only writer, so
 /// this is a backstop against a compromised or looping quoter filling stable memory, not a
@@ -20,9 +22,10 @@ thread_local! {
     static PENDING: RefCell<StableBTreeMap<QuoteHash, PendingQuote, Memory>> =
         RefCell::new(StableBTreeMap::init(pending_quotes_memory()));
 
-    // The pending store keyed by expiry, so an eviction pass walks the quotes that can be
-    // stale and stops at the first one that cannot: without it a pass decodes every stored
-    // quote to find the few it may drop, however distant their expiries are.
+    // The pending store keyed by the claim deadline each quote was registered under, so an
+    // eviction pass walks the quotes that can be stale and stops at the first one that
+    // cannot: without it a pass decodes every stored quote to find the few it may drop,
+    // however distant their deadlines are.
     //
     // Derived from PENDING and nothing else, and PENDING is not in the event log, so this
     // index is no part of the fold: it stays out of `State::matches` and out of the replay
@@ -112,6 +115,12 @@ pub fn init() {
 /// the store keeps the earliest height it was ever registered at, because a retry must
 /// never narrow the window past a deposit made in the meantime.
 ///
+/// Rule A3: the entry records the deadlines `config` puts on the quote now (its deposit
+/// deadline and its claim deadline), and they are what its claim, its pull and the sweep
+/// read, so an operator who moves the permit window or the grace later moves no deadline
+/// of a quote already handed to a user. A quote already in the store keeps the deadlines
+/// it was first registered under, for the same reason, and so keeps its one index key.
+///
 /// Rule A5: a quote the claim would refuse by what it names is refused here too, before a
 /// user is handed it to pay: a rail the deploy has off, and a payee the vault cannot pay.
 /// A full store first evicts, up to the sweep's own cap, the quotes whose claim's grace
@@ -171,13 +180,9 @@ pub fn register(
     // a flood of registrations cannot hold the store full against quotes no claim may be
     // asked for any more: those go first, as many as one sweep would drop
     if is_full() && get_pending(&hash).is_none() {
-        sweep_expired(
-            now,
-            config.claim_window(),
-            config.max_evictions_per_sweep.as_usize(),
-        );
+        sweep_expired(now, config.max_evictions_per_sweep.as_usize());
     }
-    PENDING.with(|p| {
+    let deadlines = PENDING.with(|p| {
         let mut pending = p.borrow_mut();
         // a re-registration is always allowed, cap or no cap: the hash covers every field,
         // so an overwrite replaces a quote with itself
@@ -185,29 +190,34 @@ pub fn register(
         if pending.len() >= MAX_PENDING && held.is_none() {
             return Err(RegisterError::StoreFull);
         }
+        let now_under = QuoteDeadlines::under(expires_at, config);
         // the height may only ever move earlier. The user may have deposited between this
         // call and the one before it, so a retry that moved the height forward would start
         // the claim's read past their deposit and leave it unclaimable; no height at all
         // is the widest read of all, and `None` sorts below every height, so the smaller of
-        // the two is always the safe one.
-        let registered_at = match held {
-            Some(entry) => entry.registered_at.min(registered_at),
-            None => registered_at,
+        // the two is always the safe one. The deadlines never move at all.
+        let (registered_at, deadlines) = match held {
+            Some(entry) => (
+                entry.registered_at.min(registered_at),
+                entry.deadlines.unwrap_or(now_under),
+            ),
+            None => (registered_at, now_under),
         };
         pending.insert(
             hash,
             PendingQuote {
                 quote,
                 registered_at,
+                deadlines: Some(deadlines),
             },
         );
-        Ok(hash)
+        Ok(deadlines)
     })?;
-    // the hash covers `expires_at`, so a re-registration carries the same key: the index
+    // a re-registration keeps the deadlines it held, so it carries the same key: the index
     // entry is written again rather than moved, and no stale key can be left behind
     PENDING_EXPIRY.with(|index| {
         index.borrow_mut().insert(ExpiryKey {
-            expires_at,
+            claim_until: deadlines.claim_until,
             quote_hash: hash,
         })
     });
@@ -243,15 +253,16 @@ pub struct Evicted {
     pub more: bool,
 }
 
-/// Drops the quotes no claim may be asked for any more: past their expiry plus `window`,
-/// which is the permit window and the claim's grace after it (`Config::claim_window`).
-/// Keyed on the expiry, never on when the quote was registered.
+/// Drops the quotes no claim may be asked for any more: past the claim deadline each was
+/// registered under (its expiry, the permit window and the grace, as the config read at
+/// its registration), never by the config as it reads now and never by when the quote was
+/// registered.
 ///
-/// Walks the expiry index rather than the store, in expiry order, so the pass stops at the
-/// first quote still inside its window: everything behind it expires later. At most `cap`
+/// Walks the expiry index rather than the store, in deadline order, so the pass stops at
+/// the first quote still claimable: everything behind it closes later. At most `cap`
 /// entries are visited and at most `cap` quotes go, so a pass costs what it evicts and not
 /// what the store holds, and no quote is decoded to decide its fate.
-pub fn sweep_expired(now: UnixSeconds, window: Duration, cap: usize) -> Evicted {
+pub fn sweep_expired(now: UnixSeconds, cap: usize) -> Evicted {
     let mut stale: Vec<ExpiryKey> = Vec::new();
     let mut visited = 0;
     let mut more = false;
@@ -259,13 +270,8 @@ pub fn sweep_expired(now: UnixSeconds, window: Duration, cap: usize) -> Evicted 
     PENDING_EXPIRY.with(|index| {
         for key in index.borrow().iter() {
             visited += 1;
-            // a deadline past u64::MAX seconds never closes, and nothing behind this key
-            // closes earlier
-            let closed = key
-                .expires_at
-                .checked_add(window)
-                .is_some_and(|deadline| now > deadline);
-            if !closed {
+            // nothing behind this key closes earlier
+            if now <= key.claim_until {
                 break;
             }
             // one key past the cap is the evidence that work remains, and it is the entry

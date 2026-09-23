@@ -58,7 +58,9 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// in-flight marker, an attestation, a swap whose latest leg is known, an Eco intent, a
 /// swap with the hash its latest attempt confirmed as, an outbox entry the provider
 /// refused, a swap with the amount its payout was signed for, a pending quote entry with
-/// the height it was registered at, and a config at the depths a deploy gets.
+/// the height it was registered at, a config at the depths a deploy gets, two swaps with
+/// the fees their record holds, and a pending quote entry with the deadlines it was
+/// registered under.
 ///
 /// Every field of a sample differs from its neighbours, so a field that moves to another
 /// index decodes to a different value instead of passing unnoticed. The file is append
@@ -192,7 +194,7 @@ fn samples() -> Vec<Sample> {
         sample(
             "expiry key",
             ExpiryKey {
-                expires_at: UnixSeconds::new(1_800_000_000),
+                claim_until: UnixSeconds::new(1_800_000_000),
                 quote_hash: QuoteHash::new([0x5b; 32]),
             },
         ),
@@ -402,6 +404,9 @@ fn samples() -> Vec<Sample> {
             crate::PendingQuote {
                 quote: crate::quote::tests::fixed_quote(),
                 registered_at: Some(BlockNumber::new(19_000_123)),
+                // absent, so this sample's bytes stay exactly the ones the golden pins; the
+                // entry appended at the end of `samples()` is the one that pins the field
+                deadlines: None,
             },
         ),
         // the depths a deploy now gets, mainnet's floor among them: the two config lines
@@ -454,6 +459,19 @@ fn samples() -> Vec<Sample> {
                 paid_out: None,
                 fee_accrued: None,
                 burn_max_fee: Some(TokenAmount::from(12_500_u32)),
+            },
+        ),
+        // the pending entry with the deadlines it was registered under: the entry above
+        // leaves them absent, so its bytes stay the ones the golden pins
+        sample(
+            "pending quote entry with the deadlines it was registered under",
+            crate::PendingQuote {
+                quote: crate::quote::tests::fixed_quote(),
+                registered_at: Some(BlockNumber::new(19_000_456)),
+                deadlines: Some(crate::QuoteDeadlines {
+                    deposit_until: UnixSeconds::new(1_800_000_120),
+                    claim_until: UnixSeconds::new(1_800_003_720),
+                }),
             },
         ),
     ]);

@@ -33,7 +33,8 @@ use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::{ensure_rail_tokens, RailTokenError};
 use types::{
     Address, BlockNumber, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight,
-    InFlightKind, Quote, QuoteHash, Rail, Timestamp, TokenAmount, TxHash, UnixSeconds, Wei,
+    InFlightKind, PendingQuote, Quote, QuoteDeadlines, QuoteHash, Rail, Timestamp, TokenAmount,
+    TxHash, UnixSeconds, Wei,
 };
 
 /// The gas a `pullWithPermit2` needs: Permit2's signature and witness check and the
@@ -258,45 +259,49 @@ pub enum PullError {
     RailToken(#[from] RailTokenError),
 }
 
-/// The last second a deposit for the quote may land, by the chain's own clock: its
-/// expiry, and the window a permit signed against it stays valid after that. What a
-/// deposit is judged by, and what a pull, which makes a deposit, is refused past. `None`
-/// past the end of time, which holds every deposit.
-pub fn deposit_deadline(quote: &Quote, config: &Config) -> Option<UnixSeconds> {
-    quote.expires_at.checked_add(config.permit_deadline)
-}
-
-/// The last second a claim for the quote may be asked, whoever asks: the deposit deadline
-/// and the grace after it (`claim_grace`), which is also how long the pending store keeps
-/// the quote. The services that ask can be slow or down, and a deposit that landed in time
-/// is still the user's swap when the claim for it comes late. `None` past the end of time.
-pub fn claim_deadline(quote: &Quote, config: &Config) -> Option<UnixSeconds> {
-    quote.expires_at.checked_add(config.claim_window())
+/// The deadlines a claim or a pull for `quote` is held to (see [`QuoteDeadlines`]): the
+/// deposit deadline, which a deposit is judged by and a pull is refused past, and the
+/// claim deadline, the grace after it, which is also how long the pending store keeps the
+/// quote. The services that ask can be slow or down, and a deposit that landed in time is
+/// still the user's swap when the claim for it comes late.
+///
+/// Rule A3: they are the ones the store recorded when the quoter registered the quote, so
+/// a config the operator moved since moves neither. A controller's claim of a quote the
+/// store does not hold, never registered or already dropped, has no record to read, and is
+/// held to the ones the config puts on the quote now.
+pub fn deadlines_of(
+    quote: &Quote,
+    pending: Option<&PendingQuote>,
+    config: &Config,
+) -> QuoteDeadlines {
+    match pending {
+        Some(entry) => entry.held_to(config),
+        None => QuoteDeadlines::under(quote.expires_at, config),
+    }
 }
 
 /// The deposit deadline the quote is past at `now`, if it is: what a pull refuses on.
 pub fn missed_deposit_deadline(
-    quote: &Quote,
+    deadlines: &QuoteDeadlines,
     now: UnixSeconds,
-    config: &Config,
 ) -> Option<UnixSeconds> {
-    deposit_deadline(quote, config).filter(|deposit_until| now > *deposit_until)
+    Some(deadlines.deposit_until).filter(|deposit_until| now > *deposit_until)
 }
 
 /// Refuses a quote no claim is admitted for any more, before an outcall is spent on it.
 pub fn ensure_claimable(
     quote: &Quote,
+    deadlines: &QuoteDeadlines,
     now: UnixSeconds,
-    config: &Config,
 ) -> Result<(), ClaimError> {
-    match claim_deadline(quote, config).filter(|claim_until| now > *claim_until) {
-        Some(claim_until) => Err(ClaimError::QuoteExpired {
+    if now > deadlines.claim_until {
+        return Err(ClaimError::QuoteExpired {
             expires_at: quote.expires_at,
-            claim_until,
+            claim_until: deadlines.claim_until,
             now,
-        }),
-        None => Ok(()),
+        });
     }
+    Ok(())
 }
 
 /// A deposit counts only if its block was made by the deposit deadline, by the chain's
@@ -327,12 +332,10 @@ pub fn ensure_landed_by(
 /// they drift apart by, which a deposit made in the deadline's last seconds sits inside.
 async fn ensure_landed_in_time(
     quote: &Quote,
-    config: &Config,
+    deadlines: &QuoteDeadlines,
     deposit: VerifiedDeposit,
 ) -> Result<VerifiedDeposit, ClaimError> {
-    let Some(deposit_until) = deposit_deadline(quote, config) else {
-        return Ok(deposit);
-    };
+    let deposit_until = deadlines.deposit_until;
     let read_back_at = Timestamp::from_nanos(ic_cdk::api::time()).as_secs();
     if read_back_at <= deposit_until {
         return Ok(deposit);
@@ -469,7 +472,9 @@ fn party(address: EvmAddress) -> Address {
 /// deposit whose block was made by the quote's expiry plus the permit window is claimed
 /// whenever the claim comes, from any caller the door admits, the controller included,
 /// until the grace after that deadline ends. A deposit that landed later is refused, and
-/// its funds stay in the vault.
+/// its funds stay in the vault. Both deadlines are the ones the store recorded when the
+/// quoter registered the quote (rule A3, see [`deadlines_of`]): an operator who moves the
+/// permit window or the grace afterwards moves neither.
 ///
 /// The read starts a margin below the height the quote was registered at, when the store
 /// kept one, or below the provider's own head if that is lower, and reads a few windows
@@ -487,7 +492,9 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
-    ensure_claimable(&quote, now.as_secs(), &config)?;
+    let pending = pending_quotes::get_pending(&quote_hash);
+    let deadlines = deadlines_of(&quote, pending.as_ref(), &config);
+    ensure_claimable(&quote, &deadlines, now.as_secs())?;
     ensure_rail_is_enabled(&config, &quote)?;
     ensure_refundable(&quote)?;
     ensure_payable(&quote)?;
@@ -498,7 +505,6 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     let payer = paying_wallet(&quote)?;
     // a swap's economics are the quoter's: only a quote the store holds is claimed, and a
     // controller stands in where a deposit has to be claimed by hand
-    let pending = pending_quotes::get_pending(&quote_hash);
     if pending.is_none() && !ic_cdk::api::is_controller(&ic_cdk::api::caller()) {
         return Err(ClaimError::NotRegistered(quote_hash));
     }
@@ -516,7 +522,7 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         widen: true,
     };
     let judged = match deposits::verify_evm_deposit(&read).await {
-        Ok(deposit) => ensure_landed_in_time(&quote, &config, deposit).await,
+        Ok(deposit) => ensure_landed_in_time(&quote, &deadlines, deposit).await,
         Err(error) => Err(error.into()),
     };
     // the message chain ends here whatever the reads said: the marker was for the outcalls
@@ -550,11 +556,12 @@ pub fn ensure_gasless(quote: &Quote) -> Result<(), PullError> {
 pub fn ensure_pullable(
     quote: &Quote,
     config: &Config,
+    deadlines: &QuoteDeadlines,
     now: UnixSeconds,
 ) -> Result<EvmAddress, PullError> {
     ensure_gasless(quote)?;
     // a pull makes a deposit, so it is refused once no deposit for the quote could count
-    if let Some(claim_until) = missed_deposit_deadline(quote, now, config) {
+    if let Some(claim_until) = missed_deposit_deadline(deadlines, now) {
         return Err(PullError::QuoteExpired {
             expires_at: quote.expires_at,
             claim_until,
@@ -586,7 +593,7 @@ pub fn ensure_pullable(
 pub fn ensure_permit_binds(
     quote_hash: QuoteHash,
     quote: &Quote,
-    config: &Config,
+    deadlines: &QuoteDeadlines,
     token: EvmAddress,
     vault: EvmAddress,
     now: UnixSeconds,
@@ -634,12 +641,10 @@ pub fn ensure_permit_binds(
         }
         .into());
     }
-    if let Some(deposit_until) =
-        deposit_deadline(quote, config).filter(|until| permit.permit.deadline > *until)
-    {
+    if permit.permit.deadline > deadlines.deposit_until {
         return Err(PermitMismatch::OutlastsDeposit {
             deadline: permit.permit.deadline,
-            deposit_until,
+            deposit_until: deadlines.deposit_until,
         }
         .into());
     }
@@ -662,15 +667,19 @@ pub async fn start_gasless_pull(
 ) -> Result<TxHash, PullError> {
     require_not_halted().map_err(PullError::Guard)?;
     require_quoter().map_err(PullError::Guard)?;
-    let quote = pending_quotes::quote_of(&quote_hash).ok_or(PullError::UnknownQuote(quote_hash))?;
+    let entry =
+        pending_quotes::get_pending(&quote_hash).ok_or(PullError::UnknownQuote(quote_hash))?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
-    let token = ensure_pullable(&quote, &config, now.as_secs())?;
+    // the deadlines the quote was registered under (rule A3), never the config's now
+    let deadlines = entry.held_to(&config);
+    let quote = entry.quote;
+    let token = ensure_pullable(&quote, &config, &deadlines, now.as_secs())?;
     let vault = deposits::vault_of(&config, quote.src_chain)?;
     ensure_permit_binds(
         quote_hash,
         &quote,
-        &config,
+        &deadlines,
         token,
         vault,
         now.as_secs(),

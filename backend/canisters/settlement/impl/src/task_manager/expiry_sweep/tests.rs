@@ -275,6 +275,48 @@ fn a_halted_sweep_still_drops_stale_quotes() {
     set_halted(false);
 }
 
+/// A quote is swept by the claim deadline it was registered under, never by the live
+/// config (rule A3): an operator who lowers the grace after a registration does not drop
+/// the quote before its own deadline, and one who raises it does not keep a quote past the
+/// deadline it was registered under.
+#[test]
+fn a_config_change_after_registration_moves_no_quotes_eviction() {
+    use std::time::Duration;
+    use types::config::ClaimGrace;
+    pending_quotes::clear();
+    let config = config::get();
+    assert_eq!(config.claim_window(), Duration::from_secs(3_720));
+    let q = quote(true, 3_010);
+    let expires_at = expires_at_s(&q);
+    let long = registered_at(&q, expires_at);
+
+    // the operator lowers the grace to ten minutes after the registration
+    let short_grace = types::Config {
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..config.clone()
+    };
+    config::test_set(short_grace);
+    assert_eq!(run_expiry_sweep(at(expires_at + 721)).dropped, 0);
+    assert!(
+        pending_quotes::get_pending(&long).is_some(),
+        "kept to the claim deadline it was registered under"
+    );
+
+    // a quote registered under the short grace, after which the operator raises it again
+    let q = quote(true, 3_011);
+    let short = registered_at(&q, expires_at);
+    config::test_set(config.clone());
+    assert_eq!(run_expiry_sweep(at(expires_at + 721)).dropped, 1);
+    assert_eq!(
+        pending_quotes::get_pending(&short),
+        None,
+        "dropped at the claim deadline it was registered under"
+    );
+    assert!(pending_quotes::get_pending(&long).is_some());
+    assert_eq!(run_expiry_sweep(at(expires_at + 3_721)).dropped, 1);
+    assert_eq!(pending_quotes::get_pending(&long), None);
+}
+
 fn append_at(payload: EventType, at: Timestamp) {
     events::append_event_at(payload, at).expect("the fold admits it");
 }

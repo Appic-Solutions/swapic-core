@@ -564,3 +564,55 @@ fn a_payee_is_an_evm_address_and_never_the_zero_address() {
         Err(QuoteAddressError::NotAnAddress { .. })
     ));
 }
+
+/// The deadlines a quote is held to are its expiry and the permit window after it, and
+/// that and the claim's grace after it, as the config reads when they are fixed; a
+/// deadline past the last second a `u64` holds is that second. An entry that recorded its
+/// deadlines is held to them whatever the config reads later, and an entry written before
+/// they were recorded is held to the ones the config puts on it.
+#[test]
+fn a_quote_is_held_to_the_deadlines_it_was_registered_under() {
+    use crate::config::{ClaimGrace, Config};
+    let quote = fixed_quote();
+    let expires_at = quote.expires_at.get();
+    let registered_under = Config {
+        permit_deadline: Duration::from_secs(120),
+        claim_grace: ClaimGrace::new(Duration::from_secs(3_600)),
+        ..Config::default()
+    };
+    let deadlines = QuoteDeadlines::under(quote.expires_at, &registered_under);
+    assert_eq!(
+        deadlines,
+        QuoteDeadlines {
+            deposit_until: UnixSeconds::new(expires_at + 120),
+            claim_until: UnixSeconds::new(expires_at + 3_720),
+        }
+    );
+    assert_eq!(
+        QuoteDeadlines::under(UnixSeconds::new(u64::MAX - 1), &registered_under),
+        QuoteDeadlines {
+            deposit_until: UnixSeconds::new(u64::MAX),
+            claim_until: UnixSeconds::new(u64::MAX),
+        },
+        "past the end of time is the last second there is"
+    );
+    let moved = Config {
+        permit_deadline: Duration::from_secs(60),
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..Config::default()
+    };
+    let entry = PendingQuote {
+        quote: quote.clone(),
+        registered_at: None,
+        deadlines: Some(deadlines),
+    };
+    assert_eq!(entry.held_to(&moved), deadlines, "the recorded ones");
+    let unrecorded = PendingQuote {
+        deadlines: None,
+        ..entry
+    };
+    assert_eq!(
+        unrecorded.held_to(&moved),
+        QuoteDeadlines::under(quote.expires_at, &moved)
+    );
+}

@@ -959,6 +959,11 @@ service : (InitArg) -> {
   // block was made after the expiry plus the permit window, or a sanctioned payer, is
   // refused after them. A refusal stores nothing. Halted, the canister claims nothing.
   // 
+  // The permit window and the grace are the ones the config held when the quoter
+  // registered the quote, recorded with it: a config changed afterwards moves neither
+  // deadline of a registered quote. A controller's claim of a quote the store does not hold
+  // is held to the config as it reads now.
+  // 
   // A deposit counts only from the wallet the quote names: on an EVM source chain the
   // quote's `refund_address` IS the paying wallet. The read asks the provider for the
   // vault's `Deposited` logs whose indexed payer (`topics[3]`) is that address, and refuses
@@ -1061,7 +1066,9 @@ service : (InitArg) -> {
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
   // refuse by the quote alone: a rail the deploy has off, and a payee that is no address or
   // the zero address. Halted, the canister registers nothing: no new swaps during a halt.
-  // A full store first drops quotes whose claim's grace has ended.
+  // A full store first drops quotes whose claim's grace has ended. The quote's deposit and
+  // claim deadlines are fixed here, from the permit window and the grace the config holds
+  // now, and a later config change moves neither.
   register_quote : (Quote) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,

@@ -14,6 +14,11 @@ pub use settlement_api::types::quote::Quote;
 /// block was made after the expiry plus the permit window, or a sanctioned payer, is
 /// refused after them. A refusal stores nothing. Halted, the canister claims nothing.
 ///
+/// The permit window and the grace are the ones the config held when the quoter
+/// registered the quote, recorded with it: a config changed afterwards moves neither
+/// deadline of a registered quote. A controller's claim of a quote the store does not hold
+/// is held to the config as it reads now.
+///
 /// A deposit counts only from the wallet the quote names: on an EVM source chain the
 /// quote's `refund_address` IS the paying wallet. The read asks the provider for the
 /// vault's `Deposited` logs whose indexed payer (`topics[3]`) is that address, and refuses

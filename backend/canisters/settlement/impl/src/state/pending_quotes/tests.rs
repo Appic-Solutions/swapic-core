@@ -258,6 +258,9 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
 /// the store keeps the height the canister knew then and a claim starts its log read
 /// there. An entry registered with no reading to go by keeps none, and the claim falls
 /// back to the lookback.
+///
+/// Rewritten for the hardening pass (H2): the entry also records the deadlines the quote
+/// was registered under.
 #[test]
 fn register_keeps_the_height_the_quote_was_registered_at() {
     clear();
@@ -275,6 +278,10 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
         Some(types::PendingQuote {
             quote: q.clone(),
             registered_at: Some(at),
+            deadlines: Some(types::QuoteDeadlines::under(
+                q.expires_at,
+                &Config::default()
+            )),
         })
     );
     // the quoter retrying is the same quote (the hash covers every field of it), and the
@@ -312,10 +319,61 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
     assert_eq!(
         get_pending(&h),
         Some(types::PendingQuote {
+            deadlines: Some(types::QuoteDeadlines::under(
+                blind.expires_at,
+                &Config::default()
+            )),
             quote: blind,
             registered_at: None,
         }),
         "no reading, no height, and the claim reads the whole lookback"
+    );
+}
+
+/// A quote is held to the deadlines it was registered under (rule A3): the permit window
+/// and the claim's grace are read once, at registration, and recorded in the entry, and a
+/// repeat registration after the operator moved either keeps the ones the quote was first
+/// registered under, as the height does, so the expiry index keeps the one key it has.
+#[test]
+fn register_records_the_deadlines_and_a_repeat_keeps_them() {
+    use types::config::ClaimGrace;
+    use types::QuoteDeadlines;
+    clear();
+    let q = pending_quote(9_050);
+    let expires_at = q.expires_at.get();
+    let first = Config {
+        permit_deadline: Duration::from_secs(120),
+        claim_grace: ClaimGrace::new(Duration::from_secs(3_600)),
+        ..Config::default()
+    };
+    let h = super::register(q.clone(), just_before_expiry(&q), None, &first)
+        .expect("a live quote registers");
+    let recorded = QuoteDeadlines {
+        deposit_until: UnixSeconds::new(expires_at + 120),
+        claim_until: UnixSeconds::new(expires_at + 3_720),
+    };
+    assert_eq!(get_pending(&h).unwrap().deadlines, Some(recorded));
+    let moved = Config {
+        permit_deadline: Duration::from_secs(60),
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..first
+    };
+    assert_eq!(
+        super::register(q.clone(), just_before_expiry(&q), None, &moved),
+        Ok(h)
+    );
+    assert_eq!(
+        get_pending(&h).unwrap().deadlines,
+        Some(recorded),
+        "a repeat keeps the deadlines the quote was first registered under"
+    );
+    assert_eq!(
+        expiry_index(),
+        vec![ExpiryKey {
+            claim_until: recorded.claim_until,
+            quote_hash: h,
+        }],
+        "and the index its one key, by the recorded claim deadline"
     );
 }
 
@@ -382,12 +440,16 @@ fn expiring(nonce: u64, expires_at: u64) -> Quote {
     }
 }
 
-/// The expiry index as a full scan of the store would build it.
+/// The expiry index as a full scan of the store would build it: by the claim deadline each
+/// entry recorded.
 fn scanned_index() -> Vec<ExpiryKey> {
     let mut keys: Vec<ExpiryKey> = all_pending()
         .into_iter()
         .map(|(quote_hash, entry)| ExpiryKey {
-            expires_at: entry.quote.expires_at,
+            claim_until: entry
+                .deadlines
+                .expect("every entry records its deadlines")
+                .claim_until,
             quote_hash,
         })
         .collect();
@@ -396,15 +458,19 @@ fn scanned_index() -> Vec<ExpiryKey> {
 }
 
 /// What the cap has to bound: a full store of quotes nobody can evict yet. The pass walks
-/// the index in expiry order, so it reads the soonest expiry, sees the window is open and
-/// stops, instead of decoding ten thousand quotes to evict none of them.
+/// the index in deadline order, so it reads the soonest deadline, sees it is still open
+/// and stops, instead of decoding ten thousand quotes to evict none of them.
+///
+/// Rewritten for the hardening pass (H2): the pass reads the claim deadline each quote
+/// was registered under off its index key, and takes no window of its own, so the times
+/// here are measured from that recorded deadline.
 #[test]
 fn a_pass_over_a_full_store_of_live_quotes_reads_one_entry_and_evicts_nothing() {
     clear();
     let cap = 200;
     let now = fill_to_the_cap();
 
-    let swept = sweep_expired(now, Duration::from_secs(120), cap);
+    let swept = sweep_expired(now, cap);
     assert!(
         swept.visited <= cap,
         "the cap bounds the work: {} entries read",
@@ -424,6 +490,10 @@ fn a_pass_over_a_full_store_of_live_quotes_reads_one_entry_and_evicts_nothing() 
 
 /// And with stale quotes at the head of the index the same pass evicts its cap, reads one
 /// entry past it to learn that work remains, and never reaches the live quotes behind them.
+///
+/// Rewritten for the hardening pass (H2): the pass reads the claim deadline each quote
+/// was registered under off its index key, and takes no window of its own, so the times
+/// here are measured from that recorded deadline.
 #[test]
 fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
     clear();
@@ -431,7 +501,7 @@ fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
     let stale: usize = 50;
     let base = 1_800_000_000;
     let now = UnixSeconds::new(base);
-    let window = Duration::from_secs(120);
+    let window = Config::default().claim_window();
     for nonce in 0..stale as u64 {
         register(expiring(nonce, base + 10), now).expect("a live quote registers");
     }
@@ -441,7 +511,7 @@ fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
 
     let after = UnixSeconds::new(base + 10 + window.as_secs() + 1);
     assert_eq!(
-        sweep_expired(after, window, cap),
+        sweep_expired(after, cap),
         Evicted {
             dropped: cap,
             visited: cap + 1,
@@ -453,10 +523,10 @@ fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
     // the rest of the stale head drains over the next passes, and then the pass stops at
     // the first quote whose window is still open, whatever sits behind it
     for expected in [cap, stale - 2 * cap] {
-        assert_eq!(sweep_expired(after, window, cap).dropped, expected);
+        assert_eq!(sweep_expired(after, cap).dropped, expected);
     }
     assert_eq!(
-        sweep_expired(after, window, cap),
+        sweep_expired(after, cap),
         Evicted {
             dropped: 0,
             visited: 1,
@@ -469,6 +539,9 @@ fn a_pass_evicts_its_cap_from_the_head_and_stops_at_the_first_live_quote() {
 
 /// The index is the store keyed by expiry and nothing else, at every point the store moves:
 /// a registration, a repeat of one already held, an eviction, a clear.
+///
+/// Rewritten for the hardening pass (H2): the index is keyed by the claim deadline each
+/// entry recorded at its registration, and the full scan reads it off the entries.
 #[test]
 fn the_expiry_index_matches_a_full_scan_of_the_store() {
     clear();
@@ -495,13 +568,13 @@ fn the_expiry_index_matches_a_full_scan_of_the_store() {
     );
     assert_eq!(expiry_index().len(), 4);
 
-    // the hash covers `expires_at`, so a repeat is the same key written again
+    // a repeat keeps the deadlines it held, so it is the same key written again
     register(expiring(3, base + 50), now).expect("a repeat registers");
     assert_eq!(expiry_index(), scanned_index(), "after a repeat");
     assert_eq!(expiry_index().len(), 4);
 
-    let window = Duration::from_secs(120);
-    let swept = sweep_expired(UnixSeconds::new(base + 5 + window.as_secs() + 1), window, 2);
+    let window = Config::default().claim_window();
+    let swept = sweep_expired(UnixSeconds::new(base + 5 + window.as_secs() + 1), 2);
     assert_eq!((swept.dropped, swept.more), (2, false));
     assert_eq!(expiry_index(), scanned_index(), "after an eviction");
     assert_eq!(expiry_index().len(), 2);
@@ -531,6 +604,9 @@ fn a_full_store_refuses_a_new_quote_and_still_takes_a_repeat() {
 }
 
 /// A permit deadline that reaches past the last representable second never closes.
+///
+/// Rewritten for the hardening pass (H2): the deadline is recorded at registration as the
+/// last second there is, which the pass never passes.
 #[test]
 fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
     clear();
@@ -540,7 +616,7 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
     };
     register(q.clone(), UnixSeconds::new(u64::MAX - 20)).expect("a live quote registers");
     assert_eq!(
-        sweep_expired(UnixSeconds::new(u64::MAX), Duration::from_secs(120), 200),
+        sweep_expired(UnixSeconds::new(u64::MAX), 200),
         Evicted {
             dropped: 0,
             visited: 1,
@@ -553,6 +629,10 @@ fn sweep_keeps_a_quote_whose_permit_window_never_closes() {
 
 /// One pass evicts at most its cap, so a store full of stale quotes cannot put every
 /// removal in one message. The passes after it drain the rest.
+///
+/// Rewritten for the hardening pass (H2): the pass reads the claim deadline each quote
+/// was registered under off its index key, and takes no window of its own, so the times
+/// here are measured from that recorded deadline.
 #[test]
 fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
     clear();
@@ -561,12 +641,11 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
     for nonce in 0..10 {
         register(tiny(nonce), now).expect("a live quote registers");
     }
-    let stale = seconds_after(&q, 121);
-    let window = Duration::from_secs(120);
+    let stale = seconds_after(&q, Config::default().claim_window().as_secs() + 1);
 
     // one entry past the cap is read, and it is the evidence that work remains
     assert_eq!(
-        sweep_expired(stale, window, 4),
+        sweep_expired(stale, 4),
         Evicted {
             dropped: 4,
             visited: 5,
@@ -574,7 +653,7 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
         }
     );
     assert_eq!(
-        sweep_expired(stale, window, 4),
+        sweep_expired(stale, 4),
         Evicted {
             dropped: 4,
             visited: 5,
@@ -582,7 +661,7 @@ fn sweep_evicts_at_most_the_cap_and_says_that_work_remains() {
         }
     );
     assert_eq!(
-        sweep_expired(stale, window, 4),
+        sweep_expired(stale, 4),
         Evicted {
             dropped: 2,
             visited: 2,
