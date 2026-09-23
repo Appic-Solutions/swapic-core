@@ -6,12 +6,13 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "../src/Vault.sol";
 import "../src/interfaces/IERC3009.sol";
+import "./helpers/AcceptanceSigner.sol";
 
 /// Both gasless doors against the real Circle USDC on a Base fork. This is the
-/// only place the digest work is proved end to end: the mocks agree with the
+/// only place the signature work is proved end to end: the mocks agree with the
 /// standard, and the standard is not what a user's wallet signs against, the
 /// deployed token is. Skips itself without BASE_RPC_URL, like VaultPermit2.
-contract VaultForkUSDCTest is Test {
+contract VaultForkUSDCTest is AcceptanceSigner {
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint256 constant FORK_BLOCK = 50960000;
     uint256 constant AMOUNT = 100e6;
@@ -69,15 +70,22 @@ contract VaultForkUSDCTest is Test {
 
     // ---------------------------------------------------------------- EIP-2612
 
+    function _acceptance(bytes32 quoteHash, uint256 deadline) internal view returns (Vault.QuoteAcceptance memory) {
+        return
+            Vault.QuoteAcceptance(quoteHash, USDC, user, AMOUNT, deadline, DST_CHAIN, DST_TOKEN, DST_ADDRESS, MIN_OUT);
+    }
+
     function test_fork_2612_happy_path_against_real_usdc() public {
         _skipWithoutFork();
 
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = IERC20Permit(USDC).nonces(user);
         (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, address(vault), nonce, deadline);
+        Vault.QuoteAcceptance memory a = _acceptance("q1", deadline);
+        bytes memory sig = _signFor(userKey, a, address(vault), block.chainid);
 
         vm.prank(canister);
-        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, v, r, s);
+        vault.pullWithPermit(a, sig, Vault.Signature(v, r, s));
 
         assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed");
         assertEq(IERC20(USDC).balanceOf(user), 0, "the user paid");
@@ -85,48 +93,51 @@ contract VaultForkUSDCTest is Test {
         assertEq(IERC20(USDC).allowance(user, address(vault)), 0, "the permit's allowance was spent in full");
     }
 
-    /// The catch branch against the real token: the digest the vault rebuilds
-    /// from USDC's own DOMAIN_SEPARATOR() and nonces() matches what the wallet
-    /// signed, so a griefer landing the identical permit first changes nothing.
+    /// A griefer lands the identical permit on the real token first. Our own
+    /// `permit` call then reverts inside USDC, the catch swallows it, and the
+    /// pull lands on the owner's acceptance and the allowance the griefer set.
     function test_fork_2612_survives_a_real_front_run() public {
         _skipWithoutFork();
 
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = IERC20Permit(USDC).nonces(user);
         (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, address(vault), nonce, deadline);
+        Vault.QuoteAcceptance memory a = _acceptance("q1", deadline);
+        bytes memory sig = _signFor(userKey, a, address(vault), block.chainid);
 
         vm.prank(stranger);
         IERC20Permit(USDC).permit(user, address(vault), AMOUNT, deadline, v, r, s);
 
         vm.prank(canister);
-        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, v, r, s);
+        vault.pullWithPermit(a, sig, Vault.Signature(v, r, s));
 
         assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed after the front-run");
         assertEq(IERC20Permit(USDC).nonces(user), nonce + 1, "exactly one nonce was spent");
     }
 
-    /// The hole, against the real token: a standing maximum allowance and a
-    /// forged signature. A genuine permit to somebody else is mined first so the
-    /// nonce has moved, which makes the rebuilt digest the thing that refuses it
-    /// rather than the zero-nonce shortcut.
-    function test_fork_2612_forged_signature_is_refused_against_real_usdc() public {
+    /// The worst case against the real token: a standing maximum allowance and
+    /// even a genuine permit for the vault, under an acceptance signed by
+    /// somebody else. It is refused before the vault touches USDC at all.
+    function test_fork_2612_forged_acceptance_is_refused_against_real_usdc() public {
         _skipWithoutFork();
-
-        uint256 deadline = block.timestamp + 1 hours;
-        uint256 nonce = IERC20Permit(USDC).nonces(user);
-        (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, stranger, nonce, deadline);
-        IERC20Permit(USDC).permit(user, stranger, AMOUNT, deadline, v, r, s);
-        assertGt(IERC20Permit(USDC).nonces(user), 0, "the nonce has moved");
 
         vm.prank(user);
         IERC20(USDC).approve(address(vault), type(uint256).max); // the worst case
 
-        vm.prank(canister);
-        vm.expectRevert(Vault.PermitNotAuthorized.selector);
-        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, 27, bytes32(uint256(1)), bytes32(uint256(2)));
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = IERC20Permit(USDC).nonces(user);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, address(vault), nonce, deadline);
+        Vault.QuoteAcceptance memory a = _acceptance("q1", deadline);
+        bytes memory forged = _signFor(strangerKey, a, address(vault), block.chainid);
 
-        assertEq(IERC20(USDC).balanceOf(address(vault)), 0, "a standing allowance moved nothing");
-        assertEq(IERC20(USDC).balanceOf(user), AMOUNT, "the user kept every unit");
+        vm.startStateDiffRecording();
+        vm.prank(canister);
+        vm.expectRevert(Vault.QuoteNotAccepted.selector);
+        vault.pullWithPermit(a, forged, Vault.Signature(v, r, s));
+        Vm.AccountAccess[] memory accesses = vm.stopAndReturnStateDiff();
+        for (uint256 i = 0; i < accesses.length; i++) {
+            assertTrue(accesses[i].account != USDC, "USDC was called before the acceptance was checked");
+        }
     }
 
     // ---------------------------------------------------------------- EIP-3009

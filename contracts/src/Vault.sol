@@ -9,11 +9,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import "@openzeppelin/contracts/interfaces/IERC5267.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "./interfaces/IERC3009.sol";
 import "./interfaces/ISignatureTransfer.sol";
 
-contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
+contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IERC5267 {
     using SafeERC20 for IERC20;
 
     enum PauseClass {
@@ -50,6 +52,25 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         bytes32 s;
     }
 
+    /// What the owner signs to authorize a relayed 2612 pull: EIP-712 typed
+    /// data over this vault's own domain, field for field the type string in
+    /// ACCEPTANCE_TYPEHASH. It carries the quote's readable economics so a
+    /// wallet shows the deal and not an opaque hash. `dstToken` and
+    /// `dstAddress` are the quote's own text forms, since a destination may be
+    /// on Solana or the IC; the vault treats them as opaque signed bytes, and
+    /// the canister checks every field against the quote.
+    struct QuoteAcceptance {
+        bytes32 quoteHash;
+        address token;
+        address owner;
+        uint256 amount;
+        uint256 deadline;
+        uint256 dstChainId;
+        string dstToken;
+        string dstAddress;
+        uint256 minOut;
+    }
+
     error OnlyCanister();
     error OnlyGuardianOrCanister();
     error IsPaused();
@@ -60,18 +81,22 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error OnlySelf();
     error ZeroCanister();
     error PermitExpired();
-    error PermitNotAuthorized();
-    error NotAPermitToken();
+    error QuoteNotAccepted();
     error SendFailed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
     string private constant WITNESS_TYPE =
         "QuoteWitness witness)QuoteWitness(bytes32 quoteHash)TokenPermissions(address token,uint256 amount)";
 
-    /// keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
-    /// the EIP-2612 typehash, and the value every USDC deployment that exposes a
-    /// `PERMIT_TYPEHASH()` getter returns
-    bytes32 private constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
+    /// 0xae7d93fab40caaa623490511b488bb043eeeabacb34720e8ed73aad1299deeec. Never
+    /// reuse it for another door unless the struct names that door.
+    bytes32 private constant ACCEPTANCE_TYPEHASH = keccak256(
+        "QuoteAcceptance(bytes32 quoteHash,address token,address owner,uint256 amount,uint256 deadline,uint256 dstChainId,string dstToken,string dstAddress,uint256 minOut)"
+    );
+    bytes32 private constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    string private constant DOMAIN_NAME = "Swapic Vault";
+    string private constant DOMAIN_VERSION = "1";
 
     ISignatureTransfer private constant PERMIT2 = ISignatureTransfer(0x000000000022D473030F116dDEE9F6B43aC78BA3);
 
@@ -183,8 +208,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// Nothing in this function checks a signature, and that is the point: the
     /// token does all of it, and does it better than a relayer can.
     ///   - no prior approval is needed, so it is gasless for a first-time user;
-    ///   - no allowance is ever created, so the standing-allowance precondition
-    ///     that makes a swallowed permit dangerous never exists;
+    ///   - no allowance is ever created, so the door leaves no standing
+    ///     authorization behind for anything to spend later;
     ///   - the token requires `to == msg.sender`, so only this vault can submit
     ///     this authorization and there is no front-run to defend against;
     ///   - the nonce is an arbitrary 32 byte value in a used-or-not map, so
@@ -215,108 +240,128 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// EIP-3009: in Phase 0 that means the bridged USDC.e, nothing else. Which
     /// door a token takes is settled by the quoter and the canister's config.
     ///
-    /// The try/catch stays, because a permit is a bearer authorization: anyone
-    /// who sees it may submit it, doing so spends the owner's nonce, and our own
-    /// `permit` call then reverts through no fault of the user. Being front-run
-    /// that way is griefing, not theft, and refusing the pull would hand a
-    /// griefer a permanent denial of the gasless door for the price of one cheap
-    /// transaction. What the catch branch may not do is shrug. It proves the
-    /// permit the token consumed was ours: the token's own `DOMAIN_SEPARATOR()`
-    /// and `nonces(owner)` are read, the EIP-2612 digest is rebuilt for the nonce
-    /// just spent against (owner, this vault, amount, deadline), and the signature
-    /// must recover to `owner`. A forged or borrowed signature cannot pass, so the
-    /// standing allowance that every legacy depositor holds is no longer enough to
-    /// move their funds. EOA only: raw ecrecover cannot verify an ERC-1271 wallet,
-    /// which uses the Permit2 door instead (the 3009 door above takes only the
-    /// (v, r, s) overload, so it is EOA only too).
+    /// The industry pattern for a relayed third-party permit (Across's
+    /// SpokePoolPeriphery, 1inch's OrderMixin): the permit carries no authority
+    /// at all. What authorizes the pull is the owner's QuoteAcceptance, EIP-712
+    /// typed data over this vault's own domain, checked before the permit and
+    /// before the pull. The permit is only how the allowance gets there without
+    /// the user paying gas, so its outcome is swallowed with nothing in the
+    /// catch: a griefer who mines it first has set the very allowance we need,
+    /// a token with no 2612 simply leaves the allowance to be there already, and
+    /// neither can authorize anything.
     ///
-    /// What the success branch trusts: that a `permit` which returns has checked
-    /// the signature, as every EIP-2612 token does. A token whose `permit`
-    /// returns without checking anything (a permissive fallback, WETH9's shape)
-    /// is not a 2612 token, and the canister must never configure one for this
-    /// door: on such a token the standing-allowance hole is open again.
+    /// The order is the contract: the deadline, then the quote key, then the
+    /// acceptance, then the permit, then the pull, then `Deposited` with the
+    /// measured delta. The acceptance is checked before anything is asked of
+    /// the token, so a refused pull never touches it.
     ///
-    /// THE RESIDUAL, WHICH IS OPEN AND ACCEPTED, NOT CLOSED. An EIP-2612 permit
-    /// names (owner, spender, value, deadline) and never names a quote, unlike
-    /// Permit2's witness or 3009's nonce. So a genuine permit signed for quote A
-    /// can be spent under quote B for the same token, amount and open deadline by
-    /// whoever holds the quoter role, which both registers quotes and starts
-    /// pulls. Against an outsider the door is closed; against a compromised
-    /// quoter it is not. The owner has accepted this rather than adding a second
-    /// typed-data prompt, on four grounds: it reaches only tokens that have 2612
-    /// and not 3009, which in Phase 0 is bridged USDC.e alone; the loss is bounded
-    /// by max_swap; it is bounded again by the permit window (the deadline and the
-    /// canister's permit_deadline); and both the canister and this vault can be
-    /// paused. Do not read the checks below as closing it.
+    /// Verification. ECDSA first: the owner's own key is accepted whether or
+    /// not the owner has code, so an EIP-7702 account's key still speaks for it
+    /// (OpenZeppelin 5.1's `isValidSignatureNow` would skip ECDSA for any owner
+    /// with code). Only when that fails, and only for an owner with code, is
+    /// ERC-1271 asked, so contract wallets are accepted as Permit2 and Across
+    /// accept them. An ERC-1271 acceptance is exactly as strong as the wallet's
+    /// own `isValidSignature`, which is the wallet's responsibility.
+    ///
+    /// The domain is (name "Swapic Vault", version "1", `block.chainid`, this
+    /// vault's address), computed on every call and never cached: behind the
+    /// proxy `address(this)` is the proxy, so an immutable cache built by the
+    /// implementation's constructor would never hit, and a stored one would
+    /// need a storage slot and a rebuild on a chain fork. `eip712Domain()`
+    /// reports it (EIP-5267) so a wallet can build it without a frontend.
+    ///
+    /// BOTH 2612 RESIDUALS OF THE EARLIER DOOR ARE CLOSED, AND THIS IS WHY.
+    ///   1. A compromised quoter can no longer move a permit to another quote.
+    ///      The authority is the acceptance, and it names the quote hash, the
+    ///      token, the owner, the amount, the deadline and the destination the
+    ///      owner read, under this vault's domain on this chain. The quote key
+    ///      spends it once. A genuine permit, even one this vault already
+    ///      consumed, buys a replay nothing without a fresh acceptance of the
+    ///      new quote, which only the owner can sign.
+    ///   2. A phantom-permit token (one whose `permit` returns without checking
+    ///      anything, WETH9's fallback shape) can no longer authorize anything.
+    ///      A `permit` that returns is no longer read as a signature having
+    ///      been checked; the vault checks the owner's signature itself, first.
     function pullWithPermit(
-        bytes32 quoteHash,
-        address token,
-        address owner,
-        uint256 amount,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
+        QuoteAcceptance calldata acceptance,
+        bytes calldata acceptanceSignature,
+        Signature calldata permit
     ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
-        // the vault enforces the deadline itself, before anything else: `permit`
-        // would enforce it on the success branch only, and the catch branch must
-        // never run for an authorization that has already expired
-        if (block.timestamp > deadline) revert PermitExpired();
-        _markQuote(quoteHash, owner);
+        // the permit and the acceptance share the deadline, and the vault
+        // enforces it itself before anything else
+        if (block.timestamp > acceptance.deadline) revert PermitExpired();
+        address owner = acceptance.owner;
+        _markQuote(acceptance.quoteHash, owner);
+        if (!_accepted(acceptance, acceptanceSignature)) revert QuoteNotAccepted();
 
-        try IERC20Permit(token).permit(owner, address(this), amount, deadline, v, r, s) {
-            // unspent: the token has just set the allowance to exactly `amount`
-        } catch {
-            // the one tolerated failure is that this very permit was already mined
-            // by somebody else, which spends exactly one nonce. Prove that, or refuse.
-            _requireOurPermitWasConsumed(token, owner, amount, deadline, v, r, s);
-        }
+        IERC20 token = IERC20(acceptance.token);
+        uint256 amount = acceptance.amount;
+        try IERC20Permit(address(token)).permit(
+            owner, address(this), amount, acceptance.deadline, permit.v, permit.r, permit.s
+        ) {} catch {}
 
-        uint256 before = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransferFrom(owner, address(this), amount);
-        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
+        uint256 before = token.balanceOf(address(this));
+        token.safeTransferFrom(owner, address(this), amount);
+        emit Deposited(acceptance.quoteHash, address(token), owner, token.balanceOf(address(this)) - before);
     }
 
-    /// The signature the canister holds is the one the token just consumed, so
-    /// the allowance it left behind is this vault's to spend. Reverts otherwise,
-    /// which is every forged signature, every signature made for another spender,
-    /// amount or deadline, and every permit with another one mined after it.
-    function _requireOurPermitWasConsumed(
-        address token,
-        address owner,
-        uint256 amount,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) private view {
-        uint256 next;
-        bytes32 domain;
-        // both getters are mandatory under EIP-2612, so a token missing either is
-        // not a 2612 token. Where the missing getter reverts, as on USDbC and
-        // Binance-Peg USDC, the refusal is named here; a token or address that
-        // answers with no data at all still fails closed, but through the ABI
-        // decoder's own revert, which try/catch does not catch
-        try IERC20Permit(token).nonces(owner) returns (uint256 n) {
-            next = n;
-        } catch {
-            revert NotAPermitToken();
-        }
-        try IERC20Permit(token).DOMAIN_SEPARATOR() returns (bytes32 d) {
-            domain = d;
-        } catch {
-            revert NotAPermitToken();
-        }
-        // nothing was ever consumed for this owner, so nothing can have been ours
-        if (next == 0) revert PermitNotAuthorized();
+    /// Whether `signature` is the owner's acceptance of exactly `acceptance`,
+    /// for this vault on this chain: the owner's own key first, then, for an
+    /// owner with code, the owner's ERC-1271 answer.
+    function _accepted(QuoteAcceptance calldata acceptance, bytes calldata signature) private view returns (bool) {
+        bytes32 digest = MessageHashUtils.toTypedDataHash(_domainSeparator(), _hashAcceptance(acceptance));
+        address owner = acceptance.owner;
+        // tryRecover refuses a high `s`, a `v` other than 27 or 28 and a
+        // recovery to the zero address, so an owner of zero never matches
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (err == ECDSA.RecoverError.NoError && recovered == owner) return true;
+        return owner.code.length > 0 && SignatureChecker.isValidERC1271SignatureNow(owner, digest, signature);
+    }
 
-        // the domain is read, never recomputed: Polygon's bridged USDC.e signs
-        // under an EIP712Domain with a salt and no chainId, which no chainId-based
-        // formula produces
-        bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, owner, address(this), amount, next - 1, deadline));
-        bytes32 digest = MessageHashUtils.toTypedDataHash(domain, structHash);
-        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, v, r, s);
-        if (err != ECDSA.RecoverError.NoError || signer != owner) revert PermitNotAuthorized();
+    function _hashAcceptance(QuoteAcceptance calldata a) private pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ACCEPTANCE_TYPEHASH,
+                a.quoteHash,
+                a.token,
+                a.owner,
+                a.amount,
+                a.deadline,
+                a.dstChainId,
+                keccak256(bytes(a.dstToken)),
+                keccak256(bytes(a.dstAddress)),
+                a.minOut
+            )
+        );
+    }
+
+    function _domainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes(DOMAIN_NAME)),
+                keccak256(bytes(DOMAIN_VERSION)),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    /// EIP-5267: the acceptance's domain, as the vault computes it on this call.
+    function eip712Domain()
+        external
+        view
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (hex"0f", DOMAIN_NAME, DOMAIN_VERSION, block.chainid, address(this), bytes32(0), new uint256[](0));
     }
 
     function pullWithPermit2(
