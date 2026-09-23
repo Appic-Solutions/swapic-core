@@ -7,6 +7,8 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "./interfaces/IERC3009.sol";
 import "./interfaces/ISignatureTransfer.sol";
@@ -60,11 +62,19 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     error PublicCallNotAllowed();
     error EmptyDeposit();
     error DepositNotSpent();
+    error PermitExpired();
+    error PermitNotAuthorized();
+    error NotAPermitToken();
     error SendFailed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
     string private constant WITNESS_TYPE =
         "QuoteWitness witness)QuoteWitness(bytes32 quoteHash)TokenPermissions(address token,uint256 amount)";
+
+    /// keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
+    /// the EIP-2612 typehash, and the value every USDC deployment that exposes a
+    /// `PERMIT_TYPEHASH()` getter returns
+    bytes32 private constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
 
     ISignatureTransfer private constant PERMIT2 = ISignatureTransfer(0x000000000022D473030F116dDEE9F6B43aC78BA3);
 
@@ -217,6 +227,42 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
+    /// The second gasless door, and only for a token that has EIP-2612 and not
+    /// EIP-3009: in Phase 0 that means the bridged USDC.e, nothing else. Which
+    /// door a token takes is settled by the quoter and the canister's config.
+    ///
+    /// The try/catch stays, because a permit is a bearer authorization: anyone
+    /// who sees it may submit it, doing so spends the owner's nonce, and our own
+    /// `permit` call then reverts through no fault of the user. Being front-run
+    /// that way is griefing, not theft, and refusing the pull would hand a
+    /// griefer a permanent denial of the gasless door for the price of one cheap
+    /// transaction. What the catch branch may not do is shrug. It proves the
+    /// permit the token consumed was ours: the token's own `DOMAIN_SEPARATOR()`
+    /// and `nonces(owner)` are read, the EIP-2612 digest is rebuilt for the nonce
+    /// just spent against (owner, this vault, amount, deadline), and the signature
+    /// must recover to `owner`. A forged or borrowed signature cannot pass, so the
+    /// standing allowance that every legacy depositor holds is no longer enough to
+    /// move their funds. EOA only: raw ecrecover cannot verify an ERC-1271 wallet,
+    /// which uses the Permit2 door or 3009's bytes overload instead.
+    ///
+    /// What the success branch trusts: that a `permit` which returns has checked
+    /// the signature, as every EIP-2612 token does. A token whose `permit`
+    /// returns without checking anything (a permissive fallback, WETH9's shape)
+    /// is not a 2612 token, and the canister must never configure one for this
+    /// door: on such a token the standing-allowance hole is open again.
+    ///
+    /// THE RESIDUAL, WHICH IS OPEN AND ACCEPTED, NOT CLOSED. An EIP-2612 permit
+    /// names (owner, spender, value, deadline) and never names a quote, unlike
+    /// Permit2's witness or 3009's nonce. So a genuine permit signed for quote A
+    /// can be spent under quote B for the same token, amount and open deadline by
+    /// whoever holds the quoter role, which both registers quotes and starts
+    /// pulls. Against an outsider the door is closed; against a compromised
+    /// quoter it is not. The owner has accepted this rather than adding a second
+    /// typed-data prompt, on four grounds: it reaches only tokens that have 2612
+    /// and not 3009, which in Phase 0 is bridged USDC.e alone; the loss is bounded
+    /// by max_swap; it is bounded again by the permit window (the deadline and the
+    /// canister's permit_deadline); and both the canister and this vault can be
+    /// paused. Do not read the checks below as closing it.
     function pullWithPermit(
         bytes32 quoteHash,
         address token,
@@ -227,12 +273,65 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         bytes32 r,
         bytes32 s
     ) external onlyCanister nonReentrant whenNotPaused(PauseClass.Deposits) {
+        // the vault enforces the deadline itself, before anything else: `permit`
+        // would enforce it on the success branch only, and the catch branch must
+        // never run for an authorization that has already expired
+        if (block.timestamp > deadline) revert PermitExpired();
         _markQuote(quoteHash, owner);
-        // try/ignore: a front-run permit already set the allowance; transferFrom is the truth
-        try IERC20Permit(token).permit(owner, address(this), amount, deadline, v, r, s) {} catch {}
+
+        try IERC20Permit(token).permit(owner, address(this), amount, deadline, v, r, s) {
+            // unspent: the token has just set the allowance to exactly `amount`
+        } catch {
+            // the one tolerated failure is that this very permit was already mined
+            // by somebody else, which spends exactly one nonce. Prove that, or refuse.
+            _requireOurPermitWasConsumed(token, owner, amount, deadline, v, r, s);
+        }
+
         uint256 before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(owner, address(this), amount);
         emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
+    }
+
+    /// The signature the canister holds is the one the token just consumed, so
+    /// the allowance it left behind is this vault's to spend. Reverts otherwise,
+    /// which is every forged signature, every signature made for another spender,
+    /// amount or deadline, and every permit with another one mined after it.
+    function _requireOurPermitWasConsumed(
+        address token,
+        address owner,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) private view {
+        uint256 next;
+        bytes32 domain;
+        // both getters are mandatory under EIP-2612, so a token missing either is
+        // not a 2612 token. Where the missing getter reverts, as on USDbC and
+        // Binance-Peg USDC, the refusal is named here; a token or address that
+        // answers with no data at all still fails closed, but through the ABI
+        // decoder's own revert, which try/catch does not catch
+        try IERC20Permit(token).nonces(owner) returns (uint256 n) {
+            next = n;
+        } catch {
+            revert NotAPermitToken();
+        }
+        try IERC20Permit(token).DOMAIN_SEPARATOR() returns (bytes32 d) {
+            domain = d;
+        } catch {
+            revert NotAPermitToken();
+        }
+        // nothing was ever consumed for this owner, so nothing can have been ours
+        if (next == 0) revert PermitNotAuthorized();
+
+        // the domain is read, never recomputed: Polygon's bridged USDC.e signs
+        // under an EIP712Domain with a salt and no chainId, which no chainId-based
+        // formula produces
+        bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, owner, address(this), amount, next - 1, deadline));
+        bytes32 digest = MessageHashUtils.toTypedDataHash(domain, structHash);
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, v, r, s);
+        if (err != ECDSA.RecoverError.NoError || signer != owner) revert PermitNotAuthorized();
     }
 
     function pullWithPermit2(

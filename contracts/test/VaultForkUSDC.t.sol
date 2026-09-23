@@ -18,6 +18,8 @@ contract VaultForkUSDCTest is Test {
 
     /// keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32 constant RECEIVE_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
+    /// keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)")
+    bytes32 constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
     string forkUrl;
     Vault vault;
     address canister = address(0xCA);
@@ -55,16 +57,87 @@ contract VaultForkUSDCTest is Test {
         return Vault.Signature(v, r, s);
     }
 
+    function _signPermit(uint256 key, address spender, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (uint8 v, bytes32 r, bytes32 s)
+    {
+        bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, user, spender, AMOUNT, nonce, deadline));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC).DOMAIN_SEPARATOR(), structHash));
+        (v, r, s) = vm.sign(key, digest);
+    }
+
+    // ---------------------------------------------------------------- EIP-2612
+
+    function test_fork_2612_happy_path_against_real_usdc() public {
+        _skipWithoutFork();
+
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = IERC20Permit(USDC).nonces(user);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, address(vault), nonce, deadline);
+
+        vm.prank(canister);
+        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, v, r, s);
+
+        assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed");
+        assertEq(IERC20(USDC).balanceOf(user), 0, "the user paid");
+        assertEq(IERC20Permit(USDC).nonces(user), nonce + 1, "the vault's own permit spent the nonce");
+        assertEq(IERC20(USDC).allowance(user, address(vault)), 0, "the permit's allowance was spent in full");
+    }
+
+    /// The catch branch against the real token: the digest the vault rebuilds
+    /// from USDC's own DOMAIN_SEPARATOR() and nonces() matches what the wallet
+    /// signed, so a griefer landing the identical permit first changes nothing.
+    function test_fork_2612_survives_a_real_front_run() public {
+        _skipWithoutFork();
+
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = IERC20Permit(USDC).nonces(user);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, address(vault), nonce, deadline);
+
+        vm.prank(stranger);
+        IERC20Permit(USDC).permit(user, address(vault), AMOUNT, deadline, v, r, s);
+
+        vm.prank(canister);
+        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, v, r, s);
+
+        assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed after the front-run");
+        assertEq(IERC20Permit(USDC).nonces(user), nonce + 1, "exactly one nonce was spent");
+    }
+
+    /// The hole, against the real token: a standing maximum allowance and a
+    /// forged signature. A genuine permit to somebody else is mined first so the
+    /// nonce has moved, which makes the rebuilt digest the thing that refuses it
+    /// rather than the zero-nonce shortcut.
+    function test_fork_2612_forged_signature_is_refused_against_real_usdc() public {
+        _skipWithoutFork();
+
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = IERC20Permit(USDC).nonces(user);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(userKey, stranger, nonce, deadline);
+        IERC20Permit(USDC).permit(user, stranger, AMOUNT, deadline, v, r, s);
+        assertGt(IERC20Permit(USDC).nonces(user), 0, "the nonce has moved");
+
+        vm.prank(user);
+        IERC20(USDC).approve(address(vault), type(uint256).max); // the worst case
+
+        vm.prank(canister);
+        vm.expectRevert(Vault.PermitNotAuthorized.selector);
+        vault.pullWithPermit("q1", USDC, user, AMOUNT, deadline, 27, bytes32(uint256(1)), bytes32(uint256(2)));
+
+        assertEq(IERC20(USDC).balanceOf(address(vault)), 0, "a standing allowance moved nothing");
+        assertEq(IERC20(USDC).balanceOf(user), AMOUNT, "the user kept every unit");
+    }
+
     // ---------------------------------------------------------------- EIP-3009
 
     function test_fork_3009_pull_with_the_quote_hash_as_the_nonce() public {
         _skipWithoutFork();
 
         uint256 validBefore = block.timestamp + 1 hours;
+        Vault.Signature memory sig = _signAuthorization(userKey, 0, validBefore, "q1");
         vm.prank(canister);
-        vault.pullWithAuthorization(
-            "q1", USDC, user, AMOUNT, 0, validBefore, _signAuthorization(userKey, 0, validBefore, "q1")
-        );
+        vault.pullWithAuthorization("q1", USDC, user, AMOUNT, 0, validBefore, sig);
 
         assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed");
         assertEq(IERC20(USDC).balanceOf(user), 0, "the user paid");
@@ -95,11 +168,10 @@ contract VaultForkUSDCTest is Test {
         IERC20(USDC).approve(address(vault), type(uint256).max); // the worst case
 
         uint256 validBefore = block.timestamp + 1 hours;
+        Vault.Signature memory forged = _signAuthorization(strangerKey, 0, validBefore, "q1");
         vm.prank(canister);
         vm.expectRevert("FiatTokenV2: invalid signature");
-        vault.pullWithAuthorization(
-            "q1", USDC, user, AMOUNT, 0, validBefore, _signAuthorization(strangerKey, 0, validBefore, "q1")
-        );
+        vault.pullWithAuthorization("q1", USDC, user, AMOUNT, 0, validBefore, forged);
 
         assertEq(IERC20(USDC).balanceOf(address(vault)), 0, "a standing allowance moved nothing");
     }
@@ -109,34 +181,23 @@ contract VaultForkUSDCTest is Test {
     function test_fork_3009_window_bounds_are_strict() public {
         _skipWithoutFork();
 
+        // every signature is taken into a local first: an inline helper call in
+        // an argument position staticcalls the token and spends the prank
+        uint256 now_ = block.timestamp;
+        Vault.Signature memory afterEq = _signAuthorization(userKey, now_, now_ + 1 hours, "q1");
+        Vault.Signature memory beforeEq = _signAuthorization(userKey, 0, now_, "q2");
+        Vault.Signature memory inside = _signAuthorization(userKey, now_ - 1, now_ + 1, "q3");
+
         vm.prank(canister);
         vm.expectRevert("FiatTokenV2: authorization is not yet valid");
-        vault.pullWithAuthorization(
-            "q1",
-            USDC,
-            user,
-            AMOUNT,
-            block.timestamp,
-            block.timestamp + 1 hours,
-            _signAuthorization(userKey, block.timestamp, block.timestamp + 1 hours, "q1")
-        );
+        vault.pullWithAuthorization("q1", USDC, user, AMOUNT, now_, now_ + 1 hours, afterEq);
 
         vm.prank(canister);
         vm.expectRevert("FiatTokenV2: authorization is expired");
-        vault.pullWithAuthorization(
-            "q2", USDC, user, AMOUNT, 0, block.timestamp, _signAuthorization(userKey, 0, block.timestamp, "q2")
-        );
+        vault.pullWithAuthorization("q2", USDC, user, AMOUNT, 0, now_, beforeEq);
 
         vm.prank(canister);
-        vault.pullWithAuthorization(
-            "q3",
-            USDC,
-            user,
-            AMOUNT,
-            block.timestamp - 1,
-            block.timestamp + 1,
-            _signAuthorization(userKey, block.timestamp - 1, block.timestamp + 1, "q3")
-        );
+        vault.pullWithAuthorization("q3", USDC, user, AMOUNT, now_ - 1, now_ + 1, inside);
         assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "one second either side works");
     }
 }

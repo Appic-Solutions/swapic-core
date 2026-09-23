@@ -97,8 +97,10 @@ contract VaultInvariantsTest is StdInvariant, Test {
     }
 
     /// every entry point that marks a quote must reject a pair already spent,
-    /// whatever the rest of its arguments look like: _markQuote runs first, so
-    /// zero-filled payloads are enough to reach it
+    /// whatever the rest of its arguments look like: _markQuote runs before
+    /// anything reads the payload, so zero-filled payloads are enough to reach
+    /// it. The one exception is the 2612 door, which refuses an expired deadline
+    /// before anything else by design, so it is handed a live one here.
     function testFuzz_spent_quote_key_is_rejected_everywhere(bytes32 quoteHash, address payer, address other) public {
         vm.assume(payer != other);
         address token = address(handler.tokens(0));
@@ -121,7 +123,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
 
         vm.prank(canister);
         vm.expectRevert(Vault.QuoteHashUsed.selector);
-        vault.pullWithPermit(quoteHash, token, payer, 0, 0, 0, bytes32(0), bytes32(0));
+        vault.pullWithPermit(quoteHash, token, payer, 0, type(uint256).max, 0, bytes32(0), bytes32(0));
 
         vm.prank(canister);
         vm.expectRevert(Vault.QuoteHashUsed.selector);
