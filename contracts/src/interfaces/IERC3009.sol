@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// EIP-3009 transfer with authorization, the two members the vault uses.
+/// EIP-3009 transfer with authorization, the one member the vault uses.
 ///
 /// `receiveWithAuthorization` is the relayer-safe half of the standard: the token
 /// requires `to == msg.sender`, so an authorization made out to this vault can
@@ -21,6 +21,4 @@ interface IERC3009 {
         bytes32 r,
         bytes32 s
     ) external;
-
-    function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
 }

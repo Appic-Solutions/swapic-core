@@ -33,6 +33,7 @@ contract VaultBatchTest is Test {
         router = new SwapRouterMock();
         evilRouter = new EvilRouterMock();
         reentrant = new ReentrantRouterMock(vault);
+        vm.deal(address(reentrant), 1 ether); // its one-wei deposit is its own
         hog = new GasHogMock();
         bomber = new ReturnBombRouterMock();
 
@@ -175,8 +176,9 @@ contract VaultBatchTest is Test {
 
         assertEq(b.balanceOf(address(vault)), 95e18, "later item unaffected by reentry attempt");
         // depositNative has no canister gate and no other revert condition
-        // active here (not paused, fresh quote hash): only the nonReentrant
-        // guard held by the outer executeMany can explain this not landing.
+        // active here (not paused, fresh quote hash, one wei sent): only the
+        // nonReentrant guard held by the outer executeMany can explain this
+        // not landing.
         assertFalse(
             vault.quoteKeyUsed("reentrant-deposit", address(reentrant)), "reentrant deposit blocked by reentrancy guard"
         );

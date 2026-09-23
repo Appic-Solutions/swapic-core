@@ -8,6 +8,12 @@ import "../src/Vault.sol";
 import "../src/interfaces/IERC3009.sol";
 import "./helpers/AcceptanceSigner.sol";
 
+/// The one 3009 read the vault never makes: the tests check the token's own
+/// replay guard with it, so it lives here and not in the production interface.
+interface IAuthorizationState {
+    function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
+}
+
 /// Both gasless doors against the real Circle USDC on a Base fork. This is the
 /// only place the signature work is proved end to end: the mocks agree with the
 /// standard, and the standard is not what a user's wallet signs against, the
@@ -152,7 +158,7 @@ contract VaultForkUSDCTest is AcceptanceSigner {
 
         assertEq(IERC20(USDC).balanceOf(address(vault)), AMOUNT, "the pull landed");
         assertEq(IERC20(USDC).balanceOf(user), 0, "the user paid");
-        assertTrue(IERC3009(USDC).authorizationState(user, "q1"), "the token burned the quote hash");
+        assertTrue(IAuthorizationState(USDC).authorizationState(user, "q1"), "the token burned the quote hash");
         // the door's whole claim: no standing authorization is left behind
         assertEq(IERC20(USDC).allowance(user, address(vault)), 0, "an allowance was created");
     }

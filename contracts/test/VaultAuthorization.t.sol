@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "../src/Vault.sol";
 import "./mocks/AuthorizationToken.sol";
 import "./mocks/TestToken.sol";
+import "./mocks/FallbackToken.sol";
 
 /// The EIP-3009 door. There is much less to test here than on the 2612 door and
 /// that is the point: the token checks the signature, the payee and the window,
@@ -190,6 +191,30 @@ contract VaultAuthorizationTest is Test {
         vault.pullWithAuthorization("q1", address(plain), user, AMOUNT, 0, validBefore, sig);
 
         assertEq(plain.balanceOf(address(vault)), 0, "no silent fallthrough onto the allowance");
+    }
+
+    /// The review's AuthorizationEdges case: on a token whose fallback swallows
+    /// `receiveWithAuthorization`, the call "succeeds" and moves nothing. The
+    /// door used to burn the owner's key for it and log a Deposited of zero;
+    /// it now refuses. So does an honest authorization for a value of zero.
+    function test_an_authorization_that_moves_nothing_is_refused() public {
+        FallbackToken hollow = new FallbackToken();
+        uint256 validBefore = block.timestamp + 1 hours;
+        Vault.Signature memory sig = _auth("q1");
+
+        vm.prank(canister);
+        vm.expectRevert(Vault.NothingReceived.selector);
+        vault.pullWithAuthorization("q1", address(hollow), user, AMOUNT, 0, validBefore, sig);
+
+        Vault.Signature memory zero = _sign(userKey, 0, 0, validBefore, "q1");
+        vm.prank(canister);
+        vm.expectRevert(Vault.NothingReceived.selector);
+        vault.pullWithAuthorization("q1", address(token), user, 0, 0, validBefore, zero);
+
+        // the positive control: the same key takes an authorization that pays
+        vm.prank(canister);
+        vault.pullWithAuthorization("q1", address(token), user, AMOUNT, 0, validBefore, sig);
+        assertEq(token.balanceOf(address(vault)), AMOUNT, "a real pull on the same key landed");
     }
 
     function test_quote_hash_cannot_be_reused() public {

@@ -10,6 +10,7 @@ import "./mocks/PhantomPermitToken.sol";
 import "./mocks/ContractWalletMock.sol";
 import "./mocks/BatchOnlyDelegate.sol";
 import "./mocks/TestToken.sol";
+import "./mocks/FallbackToken.sol";
 import "./helpers/AcceptanceSigner.sol";
 
 /// The EIP-2612 door, on the pattern Across's SpokePoolPeriphery and 1inch's
@@ -618,6 +619,33 @@ contract VaultPermitTest is AcceptanceSigner {
         vault.pullWithPermit(a, sig, permit);
 
         assertEq(feeToken.balanceOf(address(vault)), 50e18 - 0.5e18, "the fee was taken");
+    }
+
+    /// With the owner's genuine acceptance, a pull that receives nothing is
+    /// still refused: a token whose fallback "succeeds" at the permit and the
+    /// transfer alike, and an honest token asked for zero.
+    function test_a_pull_that_receives_nothing_is_refused() public {
+        FallbackToken hollow = new FallbackToken();
+        Vault.QuoteAcceptance memory a = _acceptance("q1", address(hollow), 50e18, block.timestamp + 1 hours);
+        bytes memory sig = _accept(a);
+        vm.prank(canister);
+        vm.expectRevert(Vault.NothingReceived.selector);
+        vault.pullWithPermit(a, sig, _garbagePermit());
+
+        vm.prank(user);
+        permitToken.approve(address(vault), type(uint256).max);
+        Vault.QuoteAcceptance memory zero = _acceptance("q1", address(permitToken), 0, block.timestamp + 1 hours);
+        bytes memory zeroSig = _accept(zero);
+        vm.prank(canister);
+        vm.expectRevert(Vault.NothingReceived.selector);
+        vault.pullWithPermit(zero, zeroSig, _garbagePermit());
+
+        // the positive control: the same key takes a pull that arrives
+        Vault.QuoteAcceptance memory real = _acceptance("q1", address(permitToken), 50e18, block.timestamp + 1 hours);
+        bytes memory realSig = _accept(real);
+        vm.prank(canister);
+        vault.pullWithPermit(real, realSig, _garbagePermit());
+        assertEq(permitToken.balanceOf(address(vault)), 50e18, "a real pull on the same key landed");
     }
 
     function test_quote_hash_cannot_be_reused() public {

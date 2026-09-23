@@ -5,6 +5,8 @@ import "forge-std/Test.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "../src/Vault.sol";
 import "../src/interfaces/ISignatureTransfer.sol";
+import "./mocks/Permit2Mock.sol";
+import "./mocks/TestToken.sol";
 
 contract VaultPermit2Test is Test {
     ISignatureTransfer constant PERMIT2 = ISignatureTransfer(0x000000000022D473030F116dDEE9F6B43aC78BA3);
@@ -75,6 +77,38 @@ contract VaultPermit2Test is Test {
 
         vm.expectRevert(Vault.OnlyCanister.selector);
         local.pullWithPermit2(bytes32(0), user, permit, "");
+    }
+
+    /// no fork: a Permit2 that accepts the witness transfer and moves nothing,
+    /// etched at Permit2's address, must not burn the owner's key or log a
+    /// Deposited of zero. Brings its own vault, like the test above.
+    function test_a_permit2_pull_that_receives_nothing_is_refused() public {
+        Vault impl = new Vault();
+        bytes memory init = abi.encodeCall(Vault.initialize, (canister, guardian));
+        Vault local = Vault(payable(address(new ERC1967Proxy(address(impl), init))));
+        TestToken token = new TestToken();
+        token.transfer(user, AMOUNT);
+        vm.prank(user);
+        token.approve(address(PERMIT2), type(uint256).max);
+
+        ISignatureTransfer.PermitTransferFrom memory permit = ISignatureTransfer.PermitTransferFrom({
+            permitted: ISignatureTransfer.TokenPermissions({token: address(token), amount: AMOUNT}),
+            nonce: 0,
+            deadline: block.timestamp + 1 hours
+        });
+
+        vm.etch(address(PERMIT2), address(new Permit2Mock(false)).code);
+        vm.prank(canister);
+        vm.expectRevert(Vault.NothingReceived.selector);
+        local.pullWithPermit2("q1", user, permit, "");
+
+        // the positive control: on a Permit2 that pays, the same key lands and
+        // logs what arrived, so the refusal above was the empty delta alone
+        vm.etch(address(PERMIT2), address(new Permit2Mock(true)).code);
+        vm.expectEmit(address(local));
+        emit Vault.Deposited("q1", address(token), user, AMOUNT);
+        vm.prank(canister);
+        local.pullWithPermit2("q1", user, permit, "");
     }
 
     function test_pull_with_permit2_witness_moves_usdc() public {

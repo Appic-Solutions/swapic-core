@@ -82,6 +82,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
     error ZeroCanister();
     error PermitExpired();
     error QuoteNotAccepted();
+    error NothingReceived();
     error SendFailed();
 
     /// completes Permit2's PermitWitnessTransferFrom typehash stub
@@ -189,13 +190,22 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
         _markQuote(quoteHash, msg.sender);
         uint256 before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        uint256 received = IERC20(token).balanceOf(address(this)) - before;
-        emit Deposited(quoteHash, token, msg.sender, received);
+        _logDeposit(quoteHash, token, msg.sender, IERC20(token).balanceOf(address(this)) - before);
     }
 
     function depositNative(bytes32 quoteHash) external payable nonReentrant whenNotPaused(PauseClass.Deposits) {
         _markQuote(quoteHash, msg.sender);
-        emit Deposited(quoteHash, address(0), msg.sender, msg.value);
+        _logDeposit(quoteHash, address(0), msg.sender, msg.value);
+    }
+
+    /// Where every entry door ends, with the balance change it measured. A door
+    /// that received nothing is refused, so a token that "succeeds" at moving
+    /// nothing (a permissive fallback, WETH9's shape, or an amount of zero)
+    /// cannot burn the payer's quote key or log a deposit of zero. Anything
+    /// else is logged as measured, never as the amount that was asked for.
+    function _logDeposit(bytes32 quoteHash, address token, address from, uint256 received) private {
+        if (received == 0) revert NothingReceived();
+        emit Deposited(quoteHash, token, from, received);
     }
 
     /// The first of the four gasless doors, and the one to reach for whenever the
@@ -233,7 +243,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
         IERC3009(token).receiveWithAuthorization(
             owner, address(this), amount, validAfter, validBefore, quoteHash, sig.v, sig.r, sig.s
         );
-        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
+        _logDeposit(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
     /// The second gasless door, and only for a token that has EIP-2612 and not
@@ -302,7 +312,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
 
         uint256 before = token.balanceOf(address(this));
         token.safeTransferFrom(owner, address(this), amount);
-        emit Deposited(acceptance.quoteHash, address(token), owner, token.balanceOf(address(this)) - before);
+        _logDeposit(acceptance.quoteHash, address(token), owner, token.balanceOf(address(this)) - before);
     }
 
     /// Whether `signature` is the owner's acceptance of exactly `acceptance`,
@@ -381,7 +391,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
             WITNESS_TYPE,
             signature
         );
-        emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
+        _logDeposit(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
     /// The one allowlist, and the law an entry must meet.

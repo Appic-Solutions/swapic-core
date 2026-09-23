@@ -101,8 +101,12 @@ contract VaultInvariantsTest is StdInvariant, Test {
         vm.assume(payer != other);
         address token = address(handler.tokens(0));
 
+        // one wei each: a deposit of nothing is refused, after the mark
+        vm.deal(payer, 1);
+        vm.deal(other, 1);
+
         vm.prank(payer);
-        vault.depositNative(quoteHash);
+        vault.depositNative{value: 1}(quoteHash);
         assertTrue(vault.quoteKeyUsed(quoteHash, payer), "pair burned");
 
         vm.prank(payer);
@@ -136,7 +140,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
 
         // the mark is per payer, so the same hash is still open for anyone else
         vm.prank(other);
-        vault.depositNative(quoteHash);
+        vault.depositNative{value: 1}(quoteHash);
         assertTrue(vault.quoteKeyUsed(quoteHash, other), "other payer unaffected");
     }
 }
