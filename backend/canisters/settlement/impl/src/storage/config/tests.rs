@@ -10,6 +10,7 @@ const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 ///
 /// Rewritten for fix wave 5 (N7, N12): the wire view gained `claim_grace_s` and then
 /// `cctp_min_fees`, so the line ends with them.
+/// Rewritten for fix wave 6 (M1): the default lookback is the ceiling, 400,000 blocks.
 #[test]
 fn a_config_change_logs_json_of_the_redacted_wire_view() {
     let config = Config {
@@ -32,7 +33,7 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""rpc_urls":{"1":"***"},"vault_addresses":{"8453":"0xvault"},"#,
             r#""ecdsa_key_name":"key_1","max_refunds_per_sweep":50,"#,
             r#""max_evictions_per_sweep":200,"audit_chunk_events":1000,"#,
-            r#""deposit_lookback_blocks":345600,"cctp_domains":{},"usdc_addresses":{},"#,
+            r#""deposit_lookback_blocks":400000,"cctp_domains":{},"usdc_addresses":{},"#,
             r#""token_messenger":null,"message_transmitter":null,"eco_portal":null,"#,
             r#""eco_enabled":false,"claim_grace_s":3600,"cctp_min_fees":{}}"#
         )

@@ -133,8 +133,10 @@ type Config = record {
   // CCTP v2's `MessageTransmitterV2`, the same address on every chain.
   message_transmitter : opt text;
   // How many blocks back from a chain's head the deposit read looks for a user's
-  // deposit, 1 to 400,000: the widest range the read walks, forty windows of ten
-  // thousand blocks.
+  // deposit: at most 400,000, the widest range the read walks, forty windows of ten
+  // thousand blocks, and the default; and more than a claim may be asked after its
+  // deposit at four blocks a second (the longest quote, `permit_deadline_s` and
+  // `claim_grace_s`), which `LookbackShorterThanClaims` refuses.
   deposit_lookback_blocks : nat32;
 };
 // Why a config was refused, naming the knob at fault.
@@ -143,6 +145,15 @@ type ConfigError = variant {
   // every vault on every chain is configured to obey that address.
   EcdsaKeyNameFixed : record { requested : text; current : text };
   EmptyEcdsaKeyName;
+  // A claim may be asked `span_s` after the deposit it reads for (the longest quote
+  // lifetime, `permit_deadline_s` and `claim_grace_s`), `needed_blocks` at four blocks a
+  // second, and `deposit_lookback_blocks` does not reach that far back: a claim the door
+  // admits would read past the deposit and leave it in the vault.
+  LookbackShorterThanClaims : record {
+    needed_blocks : nat64;
+    span_s : nat64;
+    lookback_blocks : nat32;
+  };
   MaxFeeAboveHundredPercent : nat16;
   VaultAddressTooLong : record { len : nat64; chain_id : nat64 };
   CapOutOfRange : record { cap : nat32; field : text; ceiling : nat32 };
@@ -483,6 +494,11 @@ type PermitMismatch = variant {
   Spender : record { vault : text; signed_for : text };
   // The permit's own deadline has passed.
   Expired : record { deadline_s : nat64; now_s : nat64 };
+  // The permit is good until `deadline_s`, after `deposit_until_s`, the last second a
+  // deposit for the quote may land: a pull sent near that second could land after it,
+  // and the claim would refuse the deposit with the funds in the vault. A permit good
+  // no later than the deposit deadline makes Permit2 revert a late pull instead.
+  OutlastsDeposit : record { deadline_s : nat64; deposit_until_s : nat64 };
 };
 // An EIP-2612 permit a user signed for a token contract, with what it permits: the token
 // and the amount of the quote, from the user's own account, until `deadline_s`. `r` and

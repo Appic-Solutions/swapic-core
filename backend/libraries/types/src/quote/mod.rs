@@ -433,7 +433,7 @@ crate::storable_as_cbor!(Quote);
 ///
 /// The deposit a claim looks for cannot be older than the quote it pays, so that height is
 /// where the claim's log read starts, less a margin. Without it the read walks the whole
-/// lookback, which is a day of blocks on the fastest chain; with it the usual claim reads
+/// lookback, which is more than a day of blocks on the fastest chain; with it the usual claim reads
 /// a few windows. The reading is the watcher's, stamped by the canister on arrival and
 /// taken only while it is younger than `chain_data_max_age`, so the height is the
 /// watcher's word: it may lag the chain's head, and it may run ahead of it. A claim

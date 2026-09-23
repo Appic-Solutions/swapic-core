@@ -28,9 +28,10 @@ fn defaults_match_spec() {
                 .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
         )
     );
-    // a day of the chain whose blocks come fastest, so a deposit made while the canister
-    // was halted is still in the range a claim reads
-    assert_eq!(c.deposit_lookback_blocks, DepositLookback::new(345_600));
+    // the widest range the read walks, 100,000 seconds of the chain whose blocks come
+    // fastest, so every deposit a claim may be asked for is in the range it reads
+    // (rewritten for fix wave 6, M1: it was a day, 345,600, which fell short)
+    assert_eq!(c.deposit_lookback_blocks, DepositLookback::new(400_000));
     assert_eq!(c.max_refunds_per_sweep, RefundsPerSweep::new(50));
     assert_eq!(c.max_evictions_per_sweep, EvictionsPerSweep::new(200));
     assert_eq!(c.audit_chunk_events, AuditChunk::new(1_000));
@@ -305,6 +306,10 @@ fn validate_rejects_an_empty_rpc_url() {
 /// Every duration knob is bounded, and each rejection names its field and its cap. A knob
 /// near `u64::MAX` overflows the deadline it is added to, and the comparison that deadline
 /// feeds then never fires: no pending quote is ever evicted, no wait ever times out.
+///
+/// Rewritten for fix wave 6 (M1): a permit window at its cap, a day, passes its own bound
+/// and is then refused because the lookback cannot reach a deposit that old, so for that
+/// knob the cap itself is refused by that rule, not by its own.
 #[test]
 fn validate_rejects_every_duration_knob_above_its_cap() {
     /// One duration knob: its wire name, its cap, and a config with that knob set.
@@ -349,7 +354,15 @@ fn validate_rejects_every_duration_knob_above_its_cap() {
             }
         );
         assert!(err.to_string().contains(field), "{err}");
-        with(cap).validate().expect("the cap itself is allowed");
+        let at_cap = with(cap).validate();
+        if field == "permit_deadline_s" {
+            assert!(
+                matches!(at_cap, Err(ConfigError::LookbackShorterThanClaims { .. })),
+                "a day of permit window is past what the lookback reaches: {at_cap:?}"
+            );
+        } else {
+            at_cap.expect("the cap itself is allowed");
+        }
         // the near-overflow shape the bound exists for
         assert!(with(Duration::from_secs(u64::MAX)).validate().is_err());
     }
@@ -544,13 +557,16 @@ fn validate_rejects_a_batch_size_outside_its_range() {
 /// user's deposit. A lookback of nothing finds nothing, and an unbounded one is a range no
 /// provider serves, so the knob is a cap like the per-pass ones: one to its ceiling, at its
 /// default absent from storage so the stored config's bytes do not move.
+///
+/// Rewritten for fix wave 6 (M1): the default is the ceiling, and a lookback inside the
+/// cap's own range but short of the claims the door admits (one block back) is refused by
+/// that rule instead of accepted.
 #[test]
 fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
-    // a day of the chain whose blocks come fastest, which is a day on every slower chain
-    // many times over
+    // the widest range the read walks, which covers the longest claim at the default grace
     assert_eq!(
         Config::default().deposit_lookback_blocks,
-        DepositLookback::new(345_600)
+        DepositLookback::new(400_000)
     );
     let lookback = |blocks| Config {
         deposit_lookback_blocks: DepositLookback::new(blocks),
@@ -576,7 +592,13 @@ fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
     lookback(DepositLookback::CEILING)
         .validate()
         .expect("the ceiling itself is allowed");
-    lookback(1).validate().expect("one block back is allowed");
+    assert!(
+        matches!(
+            lookback(1).validate(),
+            Err(ConfigError::LookbackShorterThanClaims { lookback: 1, .. })
+        ),
+        "one block back is inside the cap and short of every claim"
+    );
 
     // at its default the knob writes nothing, so the stored bytes are the ones the golden
     // file already pins; set, it is the twenty-first element
@@ -752,6 +774,10 @@ fn the_claim_grace_is_an_hour_by_default_and_absent_from_storage_while_it_is() {
 /// A grace shorter than a watcher restart strands the deposits the restart held up, and
 /// one longer than a day keeps a quote in the pending store for longer than any window
 /// inside one swap may be, so both are refused by name. The bounds themselves are allowed.
+///
+/// Rewritten for fix wave 6 (M1): the grace's own bounds still allow a day, but a whole
+/// config holding one is refused, because no lookback the read can walk reaches a deposit
+/// a day's quote and a day's grace old; the floor is allowed as before.
 #[test]
 fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
     let with = |secs| Config {
@@ -775,9 +801,16 @@ fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
         })
     );
     with(600).validate().expect("the floor itself is allowed");
-    with(86_400)
+    ClaimGrace::new(Duration::from_secs(86_400))
         .validate()
-        .expect("the ceiling itself is allowed");
+        .expect("the ceiling itself is inside the grace's own bounds");
+    assert!(
+        matches!(
+            with(86_400).validate(),
+            Err(ConfigError::LookbackShorterThanClaims { .. })
+        ),
+        "and past what the widest lookback reaches"
+    );
     assert_eq!(
         with(599).validate().unwrap_err().to_string(),
         "claim_grace_s is 599s, below the floor of 600s"
@@ -835,5 +868,78 @@ fn the_cctp_minimum_fees_are_a_table_absent_while_empty_and_below_the_whole() {
             min_fee: CctpMinFee::new(MIN_FEE_MULTIPLIER),
             ceiling: MIN_FEE_MULTIPLIER,
         })
+    );
+}
+
+/// A claim may be asked until the quote's expiry, the permit window and the grace after
+/// it, and the deposit it reads for can be a whole quote lifetime older than that expiry.
+/// The read never looks further back than the lookback, so the lookback has to reach that
+/// far at the fastest chain's rate, four blocks a second (Arbitrum's), or a claim the door
+/// admits reads past the deposit and strands it (review 5, M1). At the defaults a claim can
+/// come 90,120 seconds after its deposit, 360,480 blocks: a lookback of exactly that many
+/// is one short, because it counts the anchor's own block, and one more reaches it. A
+/// longer grace or permit window needs a longer lookback.
+#[test]
+fn the_lookback_reaches_every_deposit_a_claim_may_be_asked_for() {
+    assert_eq!(
+        FASTEST_BLOCKS_PER_SECOND, 4,
+        "Arbitrum's block every 250 ms"
+    );
+    Config::default()
+        .validate()
+        .expect("the defaults hold together");
+    let span = crate::quote::MAX_QUOTE_LIFETIME + Config::default().claim_window();
+    assert_eq!(span, Duration::from_secs(86_400 + 120 + 3_600));
+    let lookback = |blocks| Config {
+        deposit_lookback_blocks: DepositLookback::new(blocks),
+        ..Config::default()
+    };
+    assert_eq!(
+        lookback(360_480).validate(),
+        Err(ConfigError::LookbackShorterThanClaims {
+            lookback: 360_480,
+            span,
+            needed: 360_480,
+        })
+    );
+    lookback(360_481)
+        .validate()
+        .expect("one block more reaches the oldest deposit a claim may be asked for");
+    assert_eq!(
+        lookback(345_600).validate().unwrap_err().to_string(),
+        "deposit_lookback_blocks is 345600, and a claim may be asked 90120s after the \
+         deposit it reads for (the longest quote, permit_deadline_s and claim_grace_s), \
+         360480 blocks at 4 blocks a second: the lookback must be above that",
+        "the old default, a day of Arbitrum, fell short"
+    );
+
+    // at the widest lookback the permit window and the grace may be 13,599 seconds together
+    let grace = |secs| Config {
+        claim_grace: ClaimGrace::new(Duration::from_secs(secs)),
+        deposit_lookback_blocks: DepositLookback::new(400_000),
+        ..Config::default()
+    };
+    grace(13_479)
+        .validate()
+        .expect("99,999 seconds is 399,996 blocks");
+    assert!(matches!(
+        grace(13_480).validate(),
+        Err(ConfigError::LookbackShorterThanClaims {
+            needed: 400_000,
+            ..
+        })
+    ));
+    let permit = Config {
+        permit_deadline: Duration::from_secs(13_481),
+        claim_grace: ClaimGrace::new(MIN_CLAIM_GRACE),
+        deposit_lookback_blocks: DepositLookback::new(400_000),
+        ..Config::default()
+    };
+    assert!(
+        matches!(
+            permit.validate(),
+            Err(ConfigError::LookbackShorterThanClaims { .. })
+        ),
+        "the permit window counts the same"
     );
 }

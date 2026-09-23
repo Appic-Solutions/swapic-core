@@ -162,6 +162,14 @@ pub enum PermitMismatch {
         deadline: UnixSeconds,
         now: UnixSeconds,
     },
+    #[error(
+        "the permit is good until {deadline}, after {deposit_until}, the last second a \
+         deposit for the quote may land"
+    )]
+    OutlastsDeposit {
+        deadline: UnixSeconds,
+        deposit_until: UnixSeconds,
+    },
 }
 
 impl From<PermitMismatch> for settlement_api::types::entry::PermitMismatch {
@@ -185,6 +193,13 @@ impl From<PermitMismatch> for settlement_api::types::entry::PermitMismatch {
             PermitMismatch::Expired { deadline, now } => Self::Expired {
                 deadline_s: deadline.get(),
                 now_s: now.get(),
+            },
+            PermitMismatch::OutlastsDeposit {
+                deadline,
+                deposit_until,
+            } => Self::OutlastsDeposit {
+                deadline_s: deadline.get(),
+                deposit_until_s: deposit_until.get(),
             },
         }
     }
@@ -525,11 +540,16 @@ pub fn ensure_pullable(
 /// The witness is the quote hash, so a signature made for one quote frees nothing under
 /// another; the token and the amount are the quote's, so the vault pulls what the swap is
 /// for and no more; the spender is the vault the pull would call, which is the address
-/// Permit2 takes from its caller; and the deadline has not passed, so the pull is not gas
-/// spent on a signature Permit2 will refuse.
+/// Permit2 takes from its caller; the deadline has not passed, so the pull is not gas
+/// spent on a signature Permit2 will refuse; and the deadline is no later than the
+/// quote's deposit deadline. A pull is admitted until that deadline but the claim judges
+/// the deposit by when it lands, so a permit good for longer would let a pull sent in its
+/// last seconds land a deposit the claim refuses as late, with the funds in the vault.
+/// Held to it, Permit2 reverts a late pull on the chain and nothing moves.
 pub fn ensure_permit_binds(
     quote_hash: QuoteHash,
     quote: &Quote,
+    config: &Config,
     token: EvmAddress,
     vault: EvmAddress,
     now: UnixSeconds,
@@ -569,6 +589,15 @@ pub fn ensure_permit_binds(
         }
         .into());
     }
+    if let Some(deposit_until) =
+        deposit_deadline(quote, config).filter(|until| permit.permit.deadline > *until)
+    {
+        return Err(PermitMismatch::OutlastsDeposit {
+            deadline: permit.permit.deadline,
+            deposit_until,
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -593,7 +622,15 @@ pub async fn start_gasless_pull(
     let config = config::get();
     let token = ensure_pullable(&quote, &config, now.as_secs())?;
     let vault = deposits::vault_of(&config, quote.src_chain)?;
-    ensure_permit_binds(quote_hash, &quote, token, vault, now.as_secs(), &permit)?;
+    ensure_permit_binds(
+        quote_hash,
+        &quote,
+        &config,
+        token,
+        vault,
+        now.as_secs(),
+        &permit,
+    )?;
     if is_sanctioned(&party(permit.owner)) {
         return Err(PullError::Sanctioned { party: "owner" });
     }

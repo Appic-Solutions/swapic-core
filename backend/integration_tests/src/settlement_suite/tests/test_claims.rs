@@ -644,6 +644,9 @@ fn a_valid_mocked_deposit_appends_funds_received_and_returns_the_hash() {
 /// Rewritten for fix wave 5 (L4, N-d): the read starts twenty thousand blocks below the
 /// height (three windows), and the fallback reads only the rest of the lookback, older than
 /// that, where it read the whole lookback again.
+///
+/// Rewritten for fix wave 6 (M1): the default lookback is 400,000 blocks, so the rest of
+/// it is 38 windows after the three, where it was 33.
 #[test]
 fn no_deposit_means_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -659,7 +662,7 @@ fn no_deposit_means_nothing_stored() {
     );
     assert_eq!(
         (reads[0], reads[3], reads.len()),
-        (HEAD - 20_000, HEAD + 1 - 345_600, 36),
+        (HEAD - 20_000, HEAD + 1 - 400_000, 41),
         "the margin below the registration height to the head, then the rest of the \
          lookback from its oldest"
     );
@@ -1267,6 +1270,9 @@ fn a_pull_for_an_unknown_or_legacy_quote_is_refused() {
 /// as `PullSigned` before they are broadcast, and what goes out is the vault's
 /// `pullWithPermit2`, witnessed by the quote. A second pull while the first is on its way is refused, and no swap
 /// exists until a claim verifies the deposit the pull made.
+///
+/// Extended for fix wave 6 (M2): a permit good past the deposit deadline is refused by
+/// name before anything is allocated.
 #[test]
 fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
     let (pic, canister, _admin) = setup_with_keys();
@@ -1331,6 +1337,25 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
             })
         ),
         Err(PullError::Permit(PermitError::NotAPermit2Permit))
+    );
+    // a permit good past the deposit deadline would let a late pull land a deposit the
+    // claim refuses (review 5, M2)
+    let deposit_until = quote.expires_at.get() + 120;
+    assert_eq!(
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            quote_hash,
+            &PullRequest::Permit2(Permit2Sig {
+                deadline_s: deposit_until + 1,
+                ..signed.clone()
+            })
+        ),
+        Err(PullError::PermitMismatch(PermitMismatch::OutlastsDeposit {
+            deadline_s: deposit_until + 1,
+            deposit_until_s: deposit_until,
+        }))
     );
 
     let tx_hash = start_gasless_pull(&pic, canister, quoter(), quote_hash, &permit(&quote))
@@ -1711,6 +1736,8 @@ fn a_claim_needs_a_quote_the_quoter_registered() {
 /// Rewritten for fix wave 5 (L4, M1): the read starts twenty thousand blocks (the
 /// margin) below the height, where it started at the height itself, and the provider's
 /// head is asked first, alone, and is no log read.
+/// Rewritten for fix wave 6 (M1): the controller's read covers the default lookback of
+/// 400,000 blocks, forty windows, where it covered 345,600 in 35.
 #[test]
 fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     let (pic, canister, admin) = setup();
@@ -1769,12 +1796,12 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     assert_eq!(await_claim(&pic, call), Ok(by_hand_hash));
     assert_eq!(
         reads.first(),
-        Some(&(HEAD + 5_000 + 1 - 345_600)),
-        "the oldest window of the day-wide lookback is read first"
+        Some(&(HEAD + 5_000 + 1 - 400_000)),
+        "the oldest window of the lookback is read first"
     );
     assert_eq!(
         reads.len(),
-        35,
+        40,
         "and every window after it, up to the newest, which holds the deposit"
     );
 }
@@ -1791,9 +1818,12 @@ fn walk_the_reads(pic: &PocketIc, quote_hash: Hash32, latest: u64, logs: &[Value
     provider.froms()
 }
 
-/// A lookback of two windows and a depth of six on Base, so a test can put a deposit in
-/// each window and one of them short of the depth.
-fn two_windows_six_deep(pic: &PocketIc, canister: Principal, admin: Principal) {
+/// A depth of six on Base, so a test can put a deposit in each of the two newest windows
+/// and one of them short of the depth.
+///
+/// Rewritten for fix wave 6 (M1): the lookback stays at its default, forty windows; a
+/// lookback of two windows is shorter than the claims the door admits, and is refused.
+fn six_deep(pic: &PocketIc, canister: Principal, admin: Principal) {
     use crate::client::settlement::{get_config_full, set_config};
     let config = get_config_full(pic, canister, admin).expect("the controller reads it");
     set_config(
@@ -1801,7 +1831,6 @@ fn two_windows_six_deep(pic: &PocketIc, canister: Principal, admin: Principal) {
         canister,
         admin,
         &Config {
-            deposit_lookback_blocks: 20_000,
             confirmations: BTreeMap::from([(1, 12), (BASE, 6)]),
             ..config
         },
@@ -1832,10 +1861,12 @@ fn claimed_tx_ref(pic: &PocketIc, canister: Principal, quote_hash: Hash32) -> St
 ///
 /// Rewritten for fix wave 5 (N11): the two windows now go out in one batch, so both are
 /// read, oldest first, and the older window's deep deposit is still the one taken.
+/// Rewritten for fix wave 6 (M1): the two windows are the newest two of the default
+/// forty, in the last batch, and every window before them is read first.
 #[test]
 fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
     let (pic, canister, admin) = setup();
-    two_windows_six_deep(&pic, canister, admin);
+    six_deep(&pic, canister, admin);
     let quote = quote(40);
     let quote_hash = swap_id(&quote);
     let deep = logged_deposit(
@@ -1865,8 +1896,15 @@ fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
     );
     assert_eq!(
         reads,
-        vec![HEAD + 1 - 20_000, HEAD + 1 - 10_000],
-        "both windows in one batch, the older first, and the deep deposit in it is taken"
+        (0..40)
+            .map(|window| HEAD + 1 - 400_000 + window * 10_000)
+            .collect::<Vec<u64>>(),
+        "every window oldest first, the two holding the deposits last, in one batch"
+    );
+    assert_eq!(
+        reads[38..],
+        [HEAD + 1 - 20_000, HEAD + 1 - 10_000],
+        "the deep deposit's window, then the shallow one's"
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
@@ -1878,7 +1916,7 @@ fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
 #[test]
 fn the_oldest_of_several_deep_deposits_is_the_one_claimed() {
     let (pic, canister, admin) = setup();
-    two_windows_six_deep(&pic, canister, admin);
+    six_deep(&pic, canister, admin);
     let across = quote(41);
     let across_hash = swap_id(&across);
     let older = logged_deposit(
@@ -2031,10 +2069,12 @@ fn lookback_of(pic: &PocketIc, canister: Principal, admin: Principal, blocks: u3
 /// A reading older than `chain_data_max_age` is no height at all, by the rule every money
 /// decision on the cache takes: a quote registered behind it holds none, so its claim reads
 /// the plain lookback from its oldest window, and the deposit is claimed.
+///
+/// Rewritten for fix wave 6 (M1): the plain lookback is the default forty windows, where
+/// the test set it to two, which is shorter than the claims the door admits.
 #[test]
 fn a_stale_reading_registers_no_height_and_the_quote_stays_claimable() {
-    let (pic, canister, admin) = setup();
-    lookback_of(&pic, canister, admin, 20_000);
+    let (pic, canister, _admin) = setup();
     // the reading the setup pushed ages past the ten seconds the config allows
     pic.advance_time(Duration::from_secs(11));
     let quote = quote(43);
@@ -2057,7 +2097,9 @@ fn a_stale_reading_registers_no_height_and_the_quote_stays_claimable() {
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
     assert_eq!(
         reads,
-        vec![HEAD + 1_000 + 1 - 20_000, HEAD + 1_000 + 1 - 10_000],
+        (0..40)
+            .map(|window| HEAD + 1_000 + 1 - 400_000 + window * 10_000)
+            .collect::<Vec<u64>>(),
         "no height, so the plain lookback from its oldest window, and not the stale head"
     );
 }
@@ -2071,10 +2113,11 @@ fn a_stale_reading_registers_no_height_and_the_quote_stays_claimable() {
 ///
 /// Rewritten for fix wave 5 (L4, N-d): the read starts the margin below the height, and
 /// the fallback reads only the rest of the lookback, older than that.
+/// Rewritten for fix wave 6 (M1): the lookback is the default 400,000 blocks, where the
+/// test set it to 100,000, which is shorter than the claims the door admits.
 #[test]
 fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
-    let (pic, canister, admin) = setup();
-    lookback_of(&pic, canister, admin, 100_000);
+    let (pic, canister, _admin) = setup();
     push_head(&pic, canister, HEAD + 50_000);
     let quote = quote(44);
     let quote_hash = registered(&pic, canister, &quote);
@@ -2085,7 +2128,7 @@ fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
     assert_eq!(
         (reads[0], reads[4]),
-        (HEAD + 30_000, HEAD + 60_000 + 1 - 100_000),
+        (HEAD + 30_000, HEAD + 60_000 + 1 - 400_000),
         "from the margin below the height the quote was registered at, then, with nothing \
          above it, the rest of the lookback from its oldest window"
     );
@@ -2481,10 +2524,12 @@ fn a_deposit_below_a_lying_height_counts_before_a_later_one_above_it() {
     );
 }
 
-/// The widest read, the whole default lookback of 345,600 blocks, is 35 windows, and it
+/// The widest read, the whole default lookback of 400,000 blocks, is 40 windows, and it
 /// is read in a handful of outcalls: the provider's head, then the windows ten to a
 /// JSON-RPC batch, where it took one outcall a window. A controller's claim of a quote the
 /// store never held reads it all when the deposit sits in the newest window.
+///
+/// Rewritten for fix wave 6 (M1): the default lookback was 345,600 blocks, 35 windows.
 #[test]
 fn the_default_lookback_is_read_in_a_handful_of_outcalls() {
     let (pic, canister, admin) = setup();
@@ -2498,7 +2543,7 @@ fn the_default_lookback_is_read_in_a_handful_of_outcalls() {
     .for_quote(quote_hash);
     provider.drive(&pic);
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
-    assert_eq!(provider.log_reads.len(), 35, "every window of the lookback");
+    assert_eq!(provider.log_reads.len(), 40, "every window of the lookback");
     assert_eq!(
         provider.outcalls, 5,
         "the head, then four batches of at most ten windows"
@@ -2508,6 +2553,8 @@ fn the_default_lookback_is_read_in_a_handful_of_outcalls() {
 /// A provider that refuses a batch of windows does not fail the read: the batch is read
 /// again one window at a time, every window of it, and the deposit in the newest is
 /// claimed.
+///
+/// Rewritten for fix wave 6 (M1): the default lookback is forty windows, where it was 35.
 #[test]
 fn a_batch_the_provider_refuses_is_read_one_window_at_a_time() {
     let (pic, canister, admin) = setup();
@@ -2528,12 +2575,12 @@ fn a_batch_the_provider_refuses_is_read_one_window_at_a_time() {
     );
     assert_eq!(
         provider.log_reads.len(),
-        35,
+        40,
         "and every window was read on its own after it"
     );
     let mut froms = provider.froms();
     froms.dedup();
-    assert_eq!(froms.len(), 35, "each window once");
+    assert_eq!(froms.len(), 40, "each window once");
 }
 
 /// Registration refuses what a claim would refuse by the quote alone (rule A5), so no quote
@@ -2678,30 +2725,35 @@ fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
 /// although a newer window of the same batch cannot be read, just as the window by window
 /// walk before batching claimed it without ever asking for the newer one. A window that
 /// cannot be read decides nothing it did not reach.
+///
+/// Rewritten for fix wave 6 (M1): the batch is the first ten windows of the default
+/// lookback, the deposit in its oldest and the block the provider cannot serve in its
+/// newest, where the test set a lookback of three windows, which is shorter than the
+/// claims the door admits.
 #[test]
 fn a_window_that_cannot_be_read_does_not_hide_an_older_deposit_in_its_batch() {
     let (pic, canister, admin) = setup();
-    lookback_of(&pic, canister, admin, 30_000);
     let by_hand = quote(72);
     let quote_hash = swap_id(&by_hand);
     let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let oldest = HEAD + 1 - 400_000;
     let mut provider = Provider::at(
         HEAD,
         &[deposit_log(
             quote_hash,
-            HEAD - 25_000,
+            oldest + 5_000,
             USDC,
             USER,
             AMOUNT.into(),
         )],
     )
     .for_quote(quote_hash)
-    .refusing_block(HEAD - 5);
+    .refusing_block(oldest + 95_000);
     provider.drive(&pic);
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
     assert_eq!(
-        provider.froms()[3..],
-        [HEAD + 1 - 30_000],
+        provider.froms()[10..],
+        [oldest],
         "after the refused batch, the oldest window alone, which holds the deposit"
     );
 }

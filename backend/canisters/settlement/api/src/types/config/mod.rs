@@ -39,8 +39,10 @@ pub struct Config {
     pub max_evictions_per_sweep: u32,
     pub audit_chunk_events: u32,
     /// How many blocks back from a chain's head the deposit read looks for a user's
-    /// deposit, 1 to 400,000: the widest range the read walks, forty windows of ten
-    /// thousand blocks.
+    /// deposit: at most 400,000, the widest range the read walks, forty windows of ten
+    /// thousand blocks, and the default; and more than a claim may be asked after its
+    /// deposit at four blocks a second (the longest quote, `permit_deadline_s` and
+    /// `claim_grace_s`), which `LookbackShorterThanClaims` refuses.
     pub deposit_lookback_blocks: u32,
     /// CCTP's domain id per chain: Circle's own numbering, never a chain id.
     pub cctp_domains: BTreeMap<u64, u32>,
@@ -459,6 +461,15 @@ pub enum ConfigError {
         chain_id: Option<u64>,
         reason: EvmAddressError,
     },
+    /// A claim may be asked `span_s` after the deposit it reads for (the longest quote
+    /// lifetime, `permit_deadline_s` and `claim_grace_s`), `needed_blocks` at four blocks a
+    /// second, and `deposit_lookback_blocks` does not reach that far back: a claim the door
+    /// admits would read past the deposit and leave it in the vault.
+    LookbackShorterThanClaims {
+        lookback_blocks: u32,
+        span_s: u64,
+        needed_blocks: u64,
+    },
 }
 
 /// Whole milliseconds, for an error to carry. A duration past `u64::MAX` of them, which is
@@ -570,6 +581,15 @@ impl From<types::ConfigError> for ConfigError {
                 field: field.to_string(),
                 chain_id: chain.map(ChainId::get),
                 reason: reason.into(),
+            },
+            Domain::LookbackShorterThanClaims {
+                lookback,
+                span,
+                needed,
+            } => Self::LookbackShorterThanClaims {
+                lookback_blocks: lookback,
+                span_s: span.as_secs(),
+                needed_blocks: needed,
             },
         }
     }

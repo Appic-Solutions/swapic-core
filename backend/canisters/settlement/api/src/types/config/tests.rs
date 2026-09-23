@@ -244,6 +244,8 @@ fn a_config_error_names_its_knob_on_the_wire() {
 ///
 /// Rewritten for fix wave 4 (N3): the refusal names the ceiling the read can walk,
 /// 400,000 blocks, where it named 1,000,000.
+/// Rewritten for fix wave 6 (M1): the default is that ceiling, and a lookback too short
+/// for the claims the door admits crosses back named.
 #[test]
 fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let wire = Config {
@@ -253,8 +255,22 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let domain = types::Config::try_from(wire.clone()).unwrap();
     assert_eq!(domain.deposit_lookback_blocks.get(), 4_321);
     assert_eq!(Config::unredacted(domain), wire);
-    // a day of the chain whose blocks come fastest
-    assert_eq!(Config::default().deposit_lookback_blocks, 345_600);
+    // the widest range the read walks, which reaches every deposit a claim may be asked
+    // for at the default grace
+    assert_eq!(Config::default().deposit_lookback_blocks, 400_000);
+    let short = types::Config::try_from(Config {
+        deposit_lookback_blocks: 345_600,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(short.validate().unwrap_err()),
+        ConfigError::LookbackShorterThanClaims {
+            lookback_blocks: 345_600,
+            span_s: 90_120,
+            needed_blocks: 360_480,
+        }
+    );
 
     let zero = types::Config::try_from(Config {
         deposit_lookback_blocks: 0,

@@ -5,6 +5,7 @@ use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
+use crate::quote::MAX_QUOTE_LIFETIME;
 use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
@@ -76,19 +77,28 @@ pub const MAX_LOOKBACK_BLOCKS: u32 = {
 
 /// How many blocks back from a chain's head the deposit read looks for a user's deposit.
 ///
-/// A quote is claimable for its lifetime (a day) plus the permit window and the grace, so
-/// the deposit a claim looks for can be a day old: a canister halted for an hour, a quoter
-/// outage, or a user who deposits late must not put the funds out of reach. The default is
-/// therefore a day of the chain whose blocks come fastest among the configured ones
-/// (Arbitrum, four blocks a second), which is the widest a day is in blocks and covers a
-/// day on every slower chain many times over. It is read in windows of
-/// [`LOGS_WINDOW_BLOCKS`] and a claim for a quote the store still holds starts a margin
-/// below that quote's registration block instead, so the width costs outcalls only where
-/// no registration height is known or nothing turns up above it. The
-/// ceiling is [`MAX_LOOKBACK_BLOCKS`], the widest range the read walks: a lookback above
-/// it would have every read refused as too wide, every claim and every arrival check with
-/// it.
-pub type DepositLookback = Cap<345_600, MAX_LOOKBACK_BLOCKS>;
+/// A quote is claimable for its lifetime (up to a day) plus the permit window and the
+/// grace, so the deposit a claim looks for can be more than a day old: a canister halted
+/// for an hour, a quoter outage, or a user who deposits late must not put the funds out of
+/// reach. `Config::validate` holds the lookback to that whole span at the fastest chain's
+/// rate ([`FASTEST_BLOCKS_PER_SECOND`], Arbitrum's), which covers it on every slower chain
+/// many times over. The default is the ceiling, [`MAX_LOOKBACK_BLOCKS`], the widest range
+/// the read walks: 100,000 seconds of Arbitrum, room for the longest quote, the permit
+/// window and a grace of up to about three and three quarter hours (a lookback above the ceiling
+/// would have every read refused as too wide, every claim and every arrival check with
+/// it). It is read in windows of [`LOGS_WINDOW_BLOCKS`] and a claim for a quote the store
+/// still holds starts a margin below that quote's registration block instead, so the width
+/// costs outcalls only where no registration height is known or nothing turns up above it.
+///
+/// Raised for fix wave 6 (M1) from 345,600, a day of Arbitrum, which fell short of a
+/// day's quote claimed at its deadline. A stored config at the old default wrote nothing
+/// for the knob, so it reads back as the new one.
+pub type DepositLookback = Cap<MAX_LOOKBACK_BLOCKS, MAX_LOOKBACK_BLOCKS>;
+
+/// The most blocks a second any chain this canister reads makes: four, Arbitrum's, a block
+/// every 250 milliseconds. A span of time is at most this many blocks a second on every
+/// chain, so a lookback that covers a span at this rate covers it everywhere.
+pub const FASTEST_BLOCKS_PER_SECOND: u64 = 4;
 
 /// The least deep a receipt or a deposit on Ethereum mainnet may be taken as final. A
 /// one-block reorg there is routine, and a depth below this would claim a deposit that
@@ -547,6 +557,18 @@ pub enum ConfigError {
         chain: Option<ChainId>,
         reason: crate::evm::EvmAddressError,
     },
+    #[error(
+        "deposit_lookback_blocks is {lookback}, and a claim may be asked {}s after the \
+         deposit it reads for (the longest quote, permit_deadline_s and claim_grace_s), \
+         {needed} blocks at {FASTEST_BLOCKS_PER_SECOND} blocks a second: the lookback \
+         must be above that",
+        span.as_secs()
+    )]
+    LookbackShorterThanClaims {
+        lookback: u32,
+        span: Duration,
+        needed: u64,
+    },
 }
 
 /// Which timer intervals a config write moved, so only those timers restart.
@@ -697,6 +719,7 @@ impl Config {
         self.deposit_lookback_blocks
             .validate("deposit_lookback_blocks")?;
         self.claim_grace.validate()?;
+        self.ensure_lookback_reaches_claims()?;
         // Circle's own setter refuses a minimum at or above the whole amount, so a table
         // holding one is a typo, and every burn from that chain would revert on it
         if let Some((chain, min_fee)) = self
@@ -733,6 +756,28 @@ impl Config {
             .find_map(|(chain, url)| url.expose().is_empty().then_some(*chain))
         {
             return Err(ConfigError::EmptyRpcUrl { chain });
+        }
+        Ok(())
+    }
+
+    /// The lookback has to reach every deposit a claim may still be asked for. A claim is
+    /// admitted until the quote's expiry, the permit window and the grace after it, and the
+    /// deposit can be as old as the quote's whole lifetime before that expiry (at most
+    /// [`MAX_QUOTE_LIFETIME`], which registration holds a quote to). The read never looks
+    /// further back than the lookback, and counts the anchor's own block in it, so the
+    /// blocks that span holds at [`FASTEST_BLOCKS_PER_SECOND`] must be fewer than the
+    /// lookback: otherwise a claim the door admits reads past the deposit and leaves it in
+    /// the vault.
+    fn ensure_lookback_reaches_claims(&self) -> Result<(), ConfigError> {
+        let span = MAX_QUOTE_LIFETIME.saturating_add(self.claim_window());
+        let needed = span.as_secs().saturating_mul(FASTEST_BLOCKS_PER_SECOND);
+        let lookback = self.deposit_lookback_blocks.get();
+        if needed >= u64::from(lookback) {
+            return Err(ConfigError::LookbackShorterThanClaims {
+                lookback,
+                span,
+                needed,
+            });
         }
         Ok(())
     }

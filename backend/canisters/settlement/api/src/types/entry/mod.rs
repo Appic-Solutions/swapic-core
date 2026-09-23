@@ -93,6 +93,14 @@ pub enum PermitMismatch {
         deadline_s: u64,
         now_s: u64,
     },
+    /// The permit is good until `deadline_s`, after `deposit_until_s`, the last second a
+    /// deposit for the quote may land: a pull sent near that second could land after it,
+    /// and the claim would refuse the deposit with the funds in the vault. A permit good
+    /// no later than the deposit deadline makes Permit2 revert a late pull instead.
+    OutlastsDeposit {
+        deadline_s: u64,
+        deposit_until_s: u64,
+    },
 }
 
 /// Which door holds the marker: a claim reading the chain, or a pull being signed.

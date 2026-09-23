@@ -105,8 +105,8 @@ pub const FLOOR_MARGIN_BLOCKS: u64 = 2 * LOGS_WINDOW_BLOCKS;
 /// megabytes an outcall's answer may be. Ten calls is a short batch,
 /// and a provider that refuses it, or answers any call of it with an error, or an answer
 /// too large for it, costs the read one outcall more per window rather than the read: the
-/// batch is read again one window at a time. The default lookback, 35 windows, is then
-/// four outcalls where it was thirty-five.
+/// batch is read again one window at a time. The default lookback, 40 windows, is then
+/// four outcalls where it was forty.
 pub const WINDOWS_PER_BATCH: usize = 10;
 
 /// The most windows one read walks: its own range and the rest of the lookback are tiled

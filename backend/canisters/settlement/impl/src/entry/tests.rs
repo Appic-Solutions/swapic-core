@@ -357,8 +357,10 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
         },
         signature: vec![0x22; 65],
     };
-    let binds =
-        |permit: &PullPermit| ensure_permit_binds(quote_hash, &quote, token, vault, now, permit);
+    let config = rail_config();
+    let binds = |permit: &PullPermit| {
+        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+    };
     assert_eq!(binds(&signed), Ok(()));
 
     let other_quote = evm_quote(2).hash().unwrap();
@@ -419,6 +421,7 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
         ensure_permit_binds(
             quote_hash,
             &quote,
+            &config,
             token,
             vault,
             now,
@@ -441,6 +444,66 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
     };
     assert_eq!(ensure_gasless(&legacy), Err(PullError::NotGasless));
     assert_eq!(ensure_gasless(&quote), Ok(()));
+}
+
+/// A pull is admitted until the deposit deadline, but the claim judges the deposit it makes
+/// by when it lands. A permit good for longer lets a pull sent in the deadline's last
+/// seconds, or held up behind an earlier nonce, land after it, and the claim then refuses
+/// the deposit `LandedLate` with the user's funds in the vault (review 5, M2). So the
+/// permit may be good no later than the deposit deadline, the quote's expiry and the
+/// permit window: Permit2 then reverts a late pull on the chain and nothing moves.
+#[test]
+fn a_permit_that_outlasts_the_deposit_deadline_is_refused() {
+    let quote = evm_quote(1);
+    let quote_hash = quote.hash().unwrap();
+    let token: EvmAddress = USDC.parse().unwrap();
+    let vault: EvmAddress = VAULT.parse().unwrap();
+    let config = Config {
+        permit_deadline: Duration::from_secs(120),
+        ..rail_config()
+    };
+    let deposit_until = UnixSeconds::new(quote.expires_at.get() + 120);
+    assert_eq!(deposit_deadline(&quote, &config), Some(deposit_until));
+    let good_until = |deadline: UnixSeconds| PullPermit {
+        witness: quote_hash,
+        owner: USER.parse().unwrap(),
+        spender: vault,
+        permit: Permit2Permit {
+            token,
+            amount: quote.amount_in,
+            nonce: types::Permit2Nonce::from(7_u8),
+            deadline,
+        },
+        signature: vec![0x22; 65],
+    };
+    let now = UnixSeconds::new(quote.expires_at.get() - 60);
+    let binds = |permit: &PullPermit| {
+        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+    };
+    assert_eq!(
+        binds(&good_until(deposit_until)),
+        Ok(()),
+        "good until the deposit deadline itself"
+    );
+    let later = UnixSeconds::new(deposit_until.get() + 1);
+    assert_eq!(
+        binds(&good_until(later)),
+        Err(PullError::PermitMismatch(PermitMismatch::OutlastsDeposit {
+            deadline: later,
+            deposit_until,
+        })),
+        "a second past it is refused before anything is signed"
+    );
+    assert_eq!(
+        settlement_api::types::entry::PermitMismatch::from(PermitMismatch::OutlastsDeposit {
+            deadline: later,
+            deposit_until,
+        }),
+        settlement_api::types::entry::PermitMismatch::OutlastsDeposit {
+            deadline_s: later.get(),
+            deposit_until_s: deposit_until.get(),
+        }
+    );
 }
 
 const PERMIT_USDC: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
