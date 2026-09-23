@@ -13,7 +13,8 @@
 mod tests;
 
 use crate::deposits::{
-    self, DepositError, DepositRead, Start, VaultError, VerifiedDeposit, Wanted, WantedAmount,
+    self, DepositError, DepositRead, Payer, Start, VaultError, VerifiedDeposit, Wanted,
+    WantedAmount,
 };
 use crate::guards::{require_not_halted, require_quoter, require_quoter_watcher_or_controller};
 use crate::state::{pending_quotes, Store};
@@ -170,6 +171,14 @@ pub enum PermitMismatch {
         deadline: UnixSeconds,
         deposit_until: UnixSeconds,
     },
+    #[error(
+        "the permit is signed by {signed_by}, and the quote's paying wallet, its refund \
+         address, is {refund_address}"
+    )]
+    Owner {
+        signed_by: EvmAddress,
+        refund_address: EvmAddress,
+    },
 }
 
 impl From<PermitMismatch> for settlement_api::types::entry::PermitMismatch {
@@ -200,6 +209,13 @@ impl From<PermitMismatch> for settlement_api::types::entry::PermitMismatch {
             } => Self::OutlastsDeposit {
                 deadline_s: deadline.get(),
                 deposit_until_s: deposit_until.get(),
+            },
+            PermitMismatch::Owner {
+                signed_by,
+                refund_address,
+            } => Self::Owner {
+                signed_by: signed_by.to_string(),
+                refund_address: refund_address.to_string(),
             },
         }
     }
@@ -389,13 +405,25 @@ pub fn rail_source_token(config: &Config, quote: &Quote) -> Result<EvmAddress, C
     Ok(quote.evm_address(QuoteAddressField::SrcToken)?)
 }
 
-/// The deposit the claim looks for: the quote's token, in exactly its amount. Another
-/// token cannot ride the quote's rail, and another amount is neither the swap the user was
-/// quoted nor one this canister can price, so neither is the deposit, whatever else the
-/// vault holds under the hash, and it stays there for an operator.
-pub fn wanted(quote: &Quote, token: EvmAddress) -> Wanted {
+/// The wallet that pays the quote: on an EVM source chain the quote's refund address IS
+/// the paying wallet. The quoter and the UI fill it with the connected wallet, so the
+/// deposit that pays the quote is the one that wallet makes, and a deposit from any other
+/// wallet is not the quote's deposit. The claim reads that wallet's deposits alone, and a
+/// gasless pull pulls from it alone (the owner the vault logs as the payer), so a refund
+/// goes back to the wallet the funds came from.
+pub fn paying_wallet(quote: &Quote) -> Result<EvmAddress, QuoteAddressError> {
+    quote.payable_address(QuoteAddressField::RefundAddress)
+}
+
+/// The deposit the claim looks for: the quote's token, from the quote's paying wallet, in
+/// exactly its amount. Another token cannot ride the quote's rail, another wallet's
+/// deposit is not the one the quote names, and another amount is neither the swap the user
+/// was quoted nor one this canister can price, so none of them is the deposit, whatever
+/// else the vault holds under the hash, and it stays there for an operator.
+pub fn wanted(quote: &Quote, token: EvmAddress, payer: EvmAddress) -> Wanted {
     Wanted {
         token,
+        payer: Payer::Only(payer),
         amount: WantedAmount::Exactly(quote.amount_in),
     }
 }
@@ -426,10 +454,16 @@ fn party(address: EvmAddress) -> Address {
 /// Money-first, in this order: the halt switch and the caller, the quote itself, the swap
 /// not existing yet, the claim still asked in time, its rail on, its refund and
 /// destination addresses payable, nobody it pays to sanctioned, its tokens the rail's;
-/// then the marker (A8), then the read, which looks for the quote's token in exactly its
-/// amount among the logs under the hash, then the deposit's own time; then the payer is
-/// held to the sanctions set, and `FundsReceived` is appended, which the fold checks again
-/// (A2). A refusal anywhere stores nothing.
+/// then the marker (A8), then the read, which looks for the quote's token from the quote's
+/// paying wallet in exactly its amount among the logs under the hash, then the deposit's
+/// own time; then the payer is held to the sanctions set, and `FundsReceived` is appended,
+/// which the fold checks again (A2). A refusal anywhere stores nothing.
+///
+/// A deposit counts only from the wallet the quote names. On an EVM source chain the
+/// quote's refund address IS the paying wallet (see [`paying_wallet`]): the read asks the
+/// provider for the vault's logs whose indexed payer is that address, and refuses any
+/// other log it is handed, so a deposit from any other wallet is not the quote's deposit
+/// and a stranger's dust under the quote's public hash never reaches the read at all.
 ///
 /// The claim is judged by when the deposit landed, not by when the claim is asked: a
 /// deposit whose block was made by the quote's expiry plus the permit window is claimed
@@ -461,6 +495,7 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         return Err(ClaimError::Sanctioned { party });
     }
     let token = rail_source_token(&config, &quote)?;
+    let payer = paying_wallet(&quote)?;
     // a swap's economics are the quoter's: only a quote the store holds is claimed, and a
     // controller stands in where a deposit has to be claimed by hand
     let pending = pending_quotes::get_pending(&quote_hash);
@@ -473,7 +508,7 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     let read = DepositRead {
         chain_id: quote.src_chain,
         quote_hash,
-        wanted: wanted(&quote, token),
+        wanted: wanted(&quote, token, payer),
         start: match pending.and_then(|entry| entry.registered_at) {
             Some(height) => Start::Registered(height),
             None => Start::Lookback,
@@ -538,11 +573,13 @@ pub fn ensure_pullable(
 /// The permit has to be this quote's own, in every field the user signed.
 ///
 /// The witness is the quote hash, so a signature made for one quote frees nothing under
-/// another; the token and the amount are the quote's, so the vault pulls what the swap is
-/// for and no more; the spender is the vault the pull would call, which is the address
-/// Permit2 takes from its caller; the deadline has not passed, so the pull is not gas
-/// spent on a signature Permit2 will refuse; and the deadline is no later than the
-/// quote's deposit deadline. A pull is admitted until that deadline but the claim judges
+/// another; the owner is the quote's paying wallet, its refund address, because the vault
+/// logs the pull's owner as the deposit's payer and a deposit counts only from that wallet
+/// (see [`paying_wallet`]); the token and the amount are the quote's, so the vault pulls
+/// what the swap is for and no more; the spender is the vault the pull would call, which
+/// is the address Permit2 takes from its caller; the deadline has not passed, so the pull
+/// is not gas spent on a signature Permit2 will refuse; and the deadline is no later than
+/// the quote's deposit deadline. A pull is admitted until that deadline but the claim judges
 /// the deposit by when it lands, so a permit good for longer would let a pull sent in its
 /// last seconds land a deposit the claim refuses as late, with the funds in the vault.
 /// Held to it, Permit2 reverts a late pull on the chain and nothing moves.
@@ -558,6 +595,14 @@ pub fn ensure_permit_binds(
     if permit.witness != quote_hash {
         return Err(PermitMismatch::Witness {
             signed_for: permit.witness,
+        }
+        .into());
+    }
+    let refund_address = paying_wallet(quote)?;
+    if permit.owner != refund_address {
+        return Err(PermitMismatch::Owner {
+            signed_by: permit.owner,
+            refund_address,
         }
         .into());
     }

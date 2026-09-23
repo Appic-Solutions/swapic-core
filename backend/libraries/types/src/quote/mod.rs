@@ -87,6 +87,11 @@ pub struct Quote {
     pub min_out: TokenAmount,
     #[n(8)]
     pub dst_address: Address,
+    /// Where a refund is paid, and on an EVM source chain the paying wallet itself: the
+    /// quoter and the UI fill it with the connected wallet. A deposit counts only from this
+    /// address (the claim reads the vault's logs whose indexed payer is it), a gasless
+    /// pull's permit must be signed by it, and a deposit from any other wallet is not the
+    /// quote's deposit.
     #[n(9)]
     pub refund_address: Option<Address>,
     #[n(10)]

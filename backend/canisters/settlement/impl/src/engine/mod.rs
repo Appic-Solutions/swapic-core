@@ -11,7 +11,9 @@
 #[cfg(test)]
 mod tests;
 
-use crate::deposits::{self, DepositError, DepositRead, Start, VaultError, Wanted, WantedAmount};
+use crate::deposits::{
+    self, DepositError, DepositRead, Payer, Start, VaultError, Wanted, WantedAmount,
+};
 use crate::guards::require_not_halted;
 use crate::mints::{self, MintError};
 use crate::rails::{self, Position, RailError, RailStep, RailTx, ReclaimStep};
@@ -644,8 +646,10 @@ async fn check_arrival(
     let read = deposits::verify_evm_deposit(&DepositRead {
         chain_id,
         quote_hash,
+        // the filler pays the fill, so the read takes anyone's deposit of the token
         wanted: Wanted {
             token,
+            payer: Payer::Anyone,
             amount: WantedAmount::AtLeast(quote.min_out),
         },
         start: Start::NewestWindow,

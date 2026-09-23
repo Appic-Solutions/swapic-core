@@ -101,6 +101,14 @@ pub enum PermitMismatch {
         deadline_s: u64,
         deposit_until_s: u64,
     },
+    /// The permit is signed by another wallet than the quote's refund address. On an EVM
+    /// source chain the refund address is the paying wallet, and the vault logs the pull's
+    /// owner as the deposit's payer, so a pull from any other wallet would land funds no
+    /// claim counts as the quote's deposit.
+    Owner {
+        signed_by: String,
+        refund_address: String,
+    },
 }
 
 /// Which door holds the marker: a claim reading the chain, or a pull being signed.

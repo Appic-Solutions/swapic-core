@@ -13,6 +13,13 @@ pub use settlement_api::types::quote::Quote;
 /// the reads are out; and a deposit that is not the quote's token and amount, one whose
 /// block was made after the expiry plus the permit window, or a sanctioned payer, is
 /// refused after them. A refusal stores nothing. Halted, the canister claims nothing.
+///
+/// A deposit counts only from the wallet the quote names: on an EVM source chain the
+/// quote's `refund_address` IS the paying wallet. The read asks the provider for the
+/// vault's `Deposited` logs whose indexed payer (`topics[3]`) is that address, and refuses
+/// any other it is handed, so a deposit from any other wallet is not the quote's deposit
+/// (it answers `NotFound`), and nobody else's dust under the quote's public hash reaches
+/// the read.
 #[update]
 pub async fn claim_swap(quote: Quote) -> Result<Hash32, ClaimError> {
     let quote = types::Quote::try_from(quote).map_err(|e| ClaimError::InvalidQuote(e.into()))?;

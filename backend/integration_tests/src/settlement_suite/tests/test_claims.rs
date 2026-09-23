@@ -38,8 +38,12 @@ use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 const BASE: u64 = 8453;
 const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+/// The user's wallet: the fixture quote's refund address, which on an EVM source chain is
+/// the paying wallet, so it is the wallet every deposit of the user's comes from.
 const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
-const REFUND: &str = "0x1111111111111111111111111111111111111111";
+/// A wallet that is not the quote's: whatever it deposits under the quote's hash is not
+/// the quote's deposit.
+const STRANGER: &str = "0x1111111111111111111111111111111111111111";
 /// Where the fixture quote pays its user: an address, as a quote must name one.
 const DST: &str = "0x4444444444444444444444444444444444444444";
 const HEAD: u64 = 19_000_000;
@@ -61,9 +65,10 @@ fn quote(nonce: u64) -> types::Quote {
         dst_token: USDC.parse().unwrap(),
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
-        // a payout and a refund have to be payable, so the quote names addresses, not text
+        // a payout and a refund have to be payable, so the quote names addresses, not text;
+        // the refund address is the paying wallet, the one the user's deposits come from
         dst_address: DST.parse().unwrap(),
-        refund_address: Some(REFUND.parse().unwrap()),
+        refund_address: Some(USER.parse().unwrap()),
         auto_refund: true,
         gas_mode: GasMode::Legacy,
         rail: Rail::CctpV2Fast,
@@ -227,8 +232,7 @@ fn deposit_log(quote_hash: Hash32, block: u64, token: &str, from: &str, amount: 
 /// A `Deposited` log for `quote_hash` from somebody else: a griefer's dust at `block`,
 /// in its own transaction.
 fn dust_log(quote_hash: Hash32, block: u64, amount: u64) -> Value {
-    let griefer = "0x1111111111111111111111111111111111111111";
-    logged_deposit(quote_hash, block, USDC, griefer, amount, [0x66; 32])
+    logged_deposit(quote_hash, block, USDC, STRANGER, amount, [0x66; 32])
 }
 
 fn logged_deposit(
@@ -303,6 +307,12 @@ struct Provider {
     /// The token word every `eth_getLogs` filtered on (`topics[2]`), null where it named
     /// none.
     token_topics: Vec<Value>,
+    /// The payer word every `eth_getLogs` filtered on (`topics[3]`), null where it named
+    /// none.
+    payer_topics: Vec<Value>,
+    /// Whether the provider ignores the payer a filter names and answers every payer's
+    /// logs, as a node that does not listen would. A real node filters on every topic.
+    deaf_to_the_payer: bool,
     /// For every outcall answered, how many log reads had been asked by the end of it, so
     /// a test can tell which log reads came after a given outcall.
     answered: Vec<usize>,
@@ -333,7 +343,19 @@ impl Provider {
             sizes: Vec::new(),
             enforce_cap: false,
             token_topics: Vec::new(),
+            payer_topics: Vec::new(),
+            deaf_to_the_payer: false,
             answered: Vec::new(),
+        }
+    }
+
+    /// A provider that ignores the payer a filter names and hands over every payer's logs:
+    /// the one way a stranger's dust under the quote's hash still reaches the read, which
+    /// the canister then refuses log by log.
+    fn deaf_to_the_payer(self) -> Self {
+        Self {
+            deaf_to_the_payer: true,
+            ..self
         }
     }
 
@@ -422,15 +444,24 @@ impl Provider {
                 }
                 let last = to.unwrap_or(self.tip).min(self.tip);
                 let wanted = &filter["topics"][1];
-                // a node filters on every topic the filter names, the token among them
+                // a node filters on every topic the filter names, the token and the payer
+                // among them
                 let token = filter["topics"].get(2).cloned().unwrap_or(Value::Null);
                 self.token_topics.push(token.clone());
+                let payer = filter["topics"].get(3).cloned().unwrap_or(Value::Null);
+                self.payer_topics.push(payer.clone());
+                let payer = if self.deaf_to_the_payer {
+                    Value::Null
+                } else {
+                    payer
+                };
                 let lower = |word: &Value| word.as_str().map(str::to_ascii_lowercase);
                 Ok(json!(self
                     .logs
                     .iter()
                     .filter(|log| log["topics"][1] == *wanted)
                     .filter(|log| token.is_null() || lower(&log["topics"][2]) == lower(&token))
+                    .filter(|log| payer.is_null() || lower(&log["topics"][3]) == lower(&payer))
                     .filter(|log| {
                         let block = hex_u64(log["blockNumber"].as_str().expect("a block"));
                         (from..=last).contains(&block)
@@ -893,6 +924,10 @@ fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
 ///
 /// Fix wave 4 (N6) moved the fixture's destination from the text `0xuser` to an address,
 /// so the destination this test lists is that address.
+/// Rewritten for the hardening pass (H1): the payer is the quote's refund address, so a
+/// payer listed before the claim is refused as the refund address before any outcall. The
+/// check after the read is what catches the payer listed while the read was out, which
+/// is the case this test now lists it in.
 #[test]
 fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
     let (pic, canister, _admin) = setup();
@@ -911,7 +946,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
         pic.get_canister_http().is_empty(),
         "refused before any outcall"
     );
-    set_sanctioned(&pic, canister, watcher(), &[REFUND], &[DST]).unwrap();
+    set_sanctioned(&pic, canister, watcher(), &[USER], &[DST]).unwrap();
     assert_eq!(
         claim_swap(&pic, canister, watcher(), &wire(&quote)),
         Err(ClaimError::Sanctioned {
@@ -920,20 +955,22 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
     );
     assert!(pic.get_canister_http().is_empty());
 
-    // the payer is on the chain, so the read happens, and then the refusal: the payer is
-    // an EVM address, so its spelling does not matter
+    // the payer listed while the read is out: the read happens, and then the refusal. The
+    // payer is an EVM address, so its spelling does not matter
+    set_sanctioned(&pic, canister, watcher(), &[], &[USER]).unwrap();
+    let call = submit_claim(&pic, canister, watcher(), &quote);
+    let read = the_read(&pic, quote_hash);
     set_sanctioned(
         &pic,
         canister,
         watcher(),
         &[&USER.to_ascii_lowercase()],
-        &[REFUND],
+        &[],
     )
     .unwrap();
-    let call = submit_claim(&pic, canister, watcher(), &quote);
     answer(
         &pic,
-        &the_read(&pic, quote_hash),
+        &read,
         HEAD,
         vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
     );
@@ -1273,6 +1310,8 @@ fn a_pull_for_an_unknown_or_legacy_quote_is_refused() {
 ///
 /// Extended for fix wave 6 (M2): a permit good past the deposit deadline is refused by
 /// name before anything is allocated.
+/// Extended for the hardening pass (H1): a permit signed by another wallet than the
+/// quote's refund address is refused by name before anything is allocated.
 #[test]
 fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
     let (pic, canister, _admin) = setup_with_keys();
@@ -1317,6 +1356,24 @@ fn a_pending_gasless_quote_is_pulled_through_the_send_path() {
         ),
         Err(PullError::PermitMismatch(PermitMismatch::Witness {
             signed_for: elsewhere
+        }))
+    );
+    // a permit signed by another wallet than the quote's refund address would land funds
+    // the vault logs as that wallet's, which no claim counts as the quote's deposit
+    assert_eq!(
+        start_gasless_pull(
+            &pic,
+            canister,
+            quoter(),
+            quote_hash,
+            &PullRequest::Permit2(Permit2Sig {
+                owner: STRANGER.to_string(),
+                ..signed.clone()
+            })
+        ),
+        Err(PullError::PermitMismatch(PermitMismatch::Owner {
+            signed_by: STRANGER.to_string(),
+            refund_address: USER.to_string(),
         }))
     );
     // and the 2612 door is not one this canister pulls through
@@ -1856,13 +1913,17 @@ fn claimed_tx_ref(pic: &PocketIc, canister: Principal, quote_hash: Hash32) -> St
 /// The deposit that counts is the oldest one in the whole range that is deep enough, and a
 /// matching deposit that is not deep yet in a newer window never masks it: the claim reads
 /// the range window by window from the oldest and takes the user's deep deposit in the
-/// older window, although another payer's deposit of the same quote and amount sits in the
-/// newer one short of the depth.
+/// older window, although another deposit of the same quote and amount sits in the newer
+/// one short of the depth.
 ///
 /// Rewritten for fix wave 5 (N11): the two windows now go out in one batch, so both are
 /// read, oldest first, and the older window's deep deposit is still the one taken.
 /// Rewritten for fix wave 6 (M1): the two windows are the newest two of the default
 /// forty, in the last batch, and every window before them is read first.
+/// Rewritten for the hardening pass (H1): a deposit counts only from the quote's paying
+/// wallet, its refund address, so every deposit here is from that wallet, told apart by
+/// its transaction. The vault marks a quote once per payer and would not take two, but
+/// the canister does not rely on the vault's mark, so the walk's order is still pinned.
 #[test]
 fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
     let (pic, canister, admin) = setup();
@@ -1877,14 +1938,7 @@ fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
         AMOUNT.into(),
         [0x71; 32],
     );
-    let shallow = logged_deposit(
-        quote_hash,
-        HEAD - 2,
-        USDC,
-        REFUND,
-        AMOUNT.into(),
-        [0x72; 32],
-    );
+    let shallow = logged_deposit(quote_hash, HEAD - 2, USDC, USER, AMOUNT.into(), [0x72; 32]);
     // the controller's door, so no registration height narrows the read to one window
     let call = submit_claim_unregistered(&pic, canister, admin, &wire(&quote));
     let reads = walk_the_reads(&pic, quote_hash, HEAD, &[deep, shallow]);
@@ -1913,6 +1967,11 @@ fn a_deep_deposit_in_an_older_window_claims_behind_a_shallow_one_in_a_newer() {
 /// hash was paid with, wherever the window boundaries fall: across two windows the older
 /// window's, and inside one window the lower block's, whatever order the provider lists
 /// them in.
+///
+/// Rewritten for the hardening pass (H1): a deposit counts only from the quote's paying
+/// wallet, its refund address, so every deposit here is from that wallet, told apart by
+/// its transaction. The vault marks a quote once per payer and would not take two, but
+/// the canister does not rely on the vault's mark, so the walk's order is still pinned.
 #[test]
 fn the_oldest_of_several_deep_deposits_is_the_one_claimed() {
     let (pic, canister, admin) = setup();
@@ -1931,7 +1990,7 @@ fn the_oldest_of_several_deep_deposits_is_the_one_claimed() {
         across_hash,
         HEAD - 5_000,
         USDC,
-        REFUND,
+        USER,
         AMOUNT.into(),
         [0x72; 32],
     );
@@ -1950,7 +2009,7 @@ fn the_oldest_of_several_deep_deposits_is_the_one_claimed() {
         within_hash,
         HEAD - 8_000,
         USDC,
-        REFUND,
+        USER,
         AMOUNT.into(),
         [0x73; 32],
     );
@@ -2498,6 +2557,11 @@ fn a_permissive_provider_is_never_asked_for_a_range_above_its_head() {
 /// later deposit of the same quote and amount lands above it once the chain has passed
 /// it: the user's, the oldest, is the one claimed, because the read starts a margin below
 /// the height rather than at it.
+///
+/// Rewritten for the hardening pass (H1): a deposit counts only from the quote's paying
+/// wallet, its refund address, so every deposit here is from that wallet, told apart by
+/// its transaction. The vault marks a quote once per payer and would not take two, but
+/// the canister does not rely on the vault's mark, so the walk's order is still pinned.
 #[test]
 fn a_deposit_below_a_lying_height_counts_before_a_later_one_above_it() {
     let (pic, canister, _admin) = setup();
@@ -2509,7 +2573,7 @@ fn a_deposit_below_a_lying_height_counts_before_a_later_one_above_it() {
         quote_hash,
         HEAD + 2_000,
         USDC,
-        REFUND,
+        USER,
         AMOUNT.into(),
         [0x72; 32],
     );
@@ -2804,13 +2868,49 @@ fn dusty_claim(
     quote: &types::Quote,
     logs: &[Value],
 ) -> (Result<Hash32, ClaimError>, Provider) {
+    claim_against(pic, canister, who, quote, Provider::at(HEAD, logs))
+}
+
+/// The same against a provider deaf to the payer the read names: every payer's logs come
+/// back, a stranger's dust among them, and the canister refuses them log by log.
+fn deaf_dusty_claim(
+    pic: &PocketIc,
+    canister: Principal,
+    who: Principal,
+    quote: &types::Quote,
+    logs: &[Value],
+) -> (Result<Hash32, ClaimError>, Provider) {
+    claim_against(
+        pic,
+        canister,
+        who,
+        quote,
+        Provider::at(HEAD, logs).deaf_to_the_payer(),
+    )
+}
+
+/// One claim of `quote` by `who` against `provider`, behind the replica's size rule.
+fn claim_against(
+    pic: &PocketIc,
+    canister: Principal,
+    who: Principal,
+    quote: &types::Quote,
+    provider: Provider,
+) -> (Result<Hash32, ClaimError>, Provider) {
     push_head(pic, canister, HEAD);
     let call = submit_claim_unregistered(pic, canister, who, &wire(quote));
-    let mut provider = Provider::at(HEAD, logs)
-        .for_quote(swap_id(quote))
-        .enforcing_caps();
+    let mut provider = provider.for_quote(swap_id(quote)).enforcing_caps();
     provider.drive(pic);
     (await_claim(pic, call), provider)
+}
+
+/// Whether every log read named the user's wallet as the payer (`topics[3]`).
+fn every_read_names_the_user(provider: &Provider) -> bool {
+    !provider.payer_topics.is_empty()
+        && provider
+            .payer_topics
+            .iter()
+            .all(|payer| *payer == json!(word_of(USER)))
 }
 
 /// The largest answer an outcall may be, as the system holds it: two megabytes.
@@ -2827,6 +2927,10 @@ const BLOCK_OF_DUST: u64 = 3_300;
 /// quote expired and the deposit never became a swap. Thirty dust logs, the control, fit
 /// the first cap. Native dust, which costs gas alone, never comes back at all: every read
 /// asks for the quote's token.
+///
+/// Rewritten for the hardening pass (H1): the dust comes from other wallets, as the proof
+/// of concept sent it, and every read names the user's wallet as the payer, so a node
+/// hands none of it back. The deposit fits the first cap, in the head and one batch.
 #[test]
 fn a_deposit_behind_160_dust_logs_in_its_own_window_is_claimed() {
     let (pic, canister, _admin) = setup();
@@ -2855,10 +2959,12 @@ fn a_deposit_behind_160_dust_logs_in_its_own_window_is_claimed() {
         Ok(victim_hash),
         "the watcher's first claim takes it"
     );
-    assert!(
-        !provider.oversized().is_empty(),
-        "an answer was over the cap it reserved, and was asked for again"
+    assert_eq!(
+        provider.oversized(),
+        vec![],
+        "no answer was over its cap: the dust is never in it"
     );
+    assert_eq!(provider.outcalls, 2, "the head and one batch");
     assert!(
         provider
             .token_topics
@@ -2866,6 +2972,11 @@ fn a_deposit_behind_160_dust_logs_in_its_own_window_is_claimed() {
             .all(|token| *token == json!(word_of(USDC))),
         "every read asks for the quote's token alone: {:?}",
         provider.token_topics
+    );
+    assert!(
+        every_read_names_the_user(&provider),
+        "every read asks for the user's wallet alone: {:?}",
+        provider.payer_topics
     );
     assert_eq!(
         count(&pic, canister),
@@ -2881,6 +2992,9 @@ fn a_deposit_behind_160_dust_logs_in_its_own_window_is_claimed() {
 /// hand. The watcher's own claim now takes the deposit, so the store keeps the other
 /// quote and the lookback is left alone; and the operator's door, over the widest
 /// lookback, still reads a deposit behind the same dust for a quote the store never held.
+///
+/// Rewritten for the hardening pass (H1): the dust comes from other wallets and every read
+/// names the user's wallet as the payer, so neither claim is handed any of it.
 #[test]
 fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
     let (pic, canister, admin) = setup();
@@ -2888,7 +3002,7 @@ fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
     let bystander_hash = registered(&pic, canister, &bystander);
     let victim = quote(903);
     let victim_hash = registered(&pic, canister, &victim);
-    let (claimed, _) = dusty_claim(
+    let (claimed, provider) = dusty_claim(
         &pic,
         canister,
         watcher(),
@@ -2896,6 +3010,12 @@ fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
         &dusted(victim_hash, 160, HEAD - 2),
     );
     assert_eq!(claimed, Ok(victim_hash), "the watcher's claim takes it");
+    assert_eq!(
+        provider.oversized(),
+        vec![],
+        "and no answer was over its cap"
+    );
+    assert!(every_read_names_the_user(&provider));
     assert!(
         get_pending(&pic, canister, watcher(), bystander_hash)
             .unwrap()
@@ -2906,7 +3026,7 @@ fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
     lookback_of(&pic, canister, admin, 400_000);
     let by_hand = quote(904);
     let by_hand_hash = swap_id(&by_hand);
-    let (claimed, _) = dusty_claim(
+    let (claimed, provider) = dusty_claim(
         &pic,
         canister,
         admin,
@@ -2918,6 +3038,12 @@ fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
         Ok(by_hand_hash),
         "the operator's door reads it too"
     );
+    assert_eq!(
+        provider.oversized(),
+        vec![],
+        "and no answer was over its cap"
+    );
+    assert!(every_read_names_the_user(&provider));
 }
 
 /// Ported from review 5's third proof of concept (H1, G7). 520 dust logs in the deposit's
@@ -2925,6 +3051,9 @@ fn a_deposit_behind_160_dust_logs_needs_no_operator_escape() {
 /// cap, which closed every path, the operator's escape included, and left the deposit to
 /// become `QuoteExpired`. The window's cap now grows until the answer fits: the watcher's
 /// claim takes the deposit, and so does the operator's door over the widest lookback.
+///
+/// Rewritten for the hardening pass (H1): the dust comes from other wallets and every read
+/// names the user's wallet as the payer, so no answer holds it and no cap has to grow.
 #[test]
 fn a_deposit_behind_520_dust_logs_in_its_own_block_is_claimed() {
     let (pic, canister, admin) = setup();
@@ -2940,6 +3069,12 @@ fn a_deposit_behind_520_dust_logs_in_its_own_block_is_claimed() {
     );
     println!("sizes (cap, body): {:?}", provider.sizes);
     assert_eq!(claimed, Ok(victim_hash), "the watcher's claim takes it");
+    assert_eq!(
+        provider.oversized(),
+        vec![],
+        "and no answer was over its cap"
+    );
+    assert!(every_read_names_the_user(&provider));
     assert_eq!(
         count(&pic, canister),
         before + 1,
@@ -2968,12 +3103,17 @@ fn a_deposit_behind_520_dust_logs_in_its_own_block_is_claimed() {
 /// half first, and a half no cap fits is halved again, until the part holding the deposit
 /// fits and the deposit is claimed. Every half is read at the largest cap, and every range
 /// read after the first split lies inside the window.
+///
+/// Rewritten for the hardening pass (H1): a node that filters on the payer never hands a
+/// stranger's dust over, so the dust reaches the read here only through a provider deaf to
+/// the payer. The split still reads down to the deposit, and the canister refuses every
+/// dust log it is handed.
 #[test]
 fn a_window_no_answer_can_hold_is_split_until_the_deposit_shows() {
     let (pic, canister, _admin) = setup();
     let quote = quote(907);
     let quote_hash = registered(&pic, canister, &quote);
-    let (claimed, provider) = dusty_claim(
+    let (claimed, provider) = deaf_dusty_claim(
         &pic,
         canister,
         watcher(),
@@ -3019,13 +3159,17 @@ fn a_window_no_answer_can_hold_is_split_until_the_deposit_shows() {
 /// refuses by name, with the block and the cap, rather than as a transport failure: the
 /// watcher can tell it from a provider that is down, and it never stalls in silence.
 /// Nothing is stored.
+///
+/// Rewritten for the hardening pass (H1): a node that filters on the payer never hands a
+/// stranger's dust over, so a block of it reaches the read here only through a provider
+/// deaf to the payer, the one shape left in which a block no answer can hold is met.
 #[test]
 fn a_block_no_answer_can_hold_is_refused_by_name() {
     let (pic, canister, _admin) = setup();
     let quote = quote(908);
     let quote_hash = registered(&pic, canister, &quote);
     let before = count(&pic, canister);
-    let (claimed, provider) = dusty_claim(
+    let (claimed, provider) = deaf_dusty_claim(
         &pic,
         canister,
         watcher(),
@@ -3052,6 +3196,9 @@ fn a_block_no_answer_can_hold_is_refused_by_name() {
 /// hide the user's deposit below that height: the rest of the lookback, every block of
 /// it older than the one that cannot be read, is read before the claim refuses, and the
 /// deposit there, the oldest in range, is claimed.
+///
+/// Rewritten for the hardening pass (H1): the dust reaches the read only through a
+/// provider deaf to the payer, as in the two tests above.
 #[test]
 fn a_block_no_answer_can_hold_does_not_hide_an_older_deposit() {
     let (pic, canister, _admin) = setup();
@@ -3070,6 +3217,7 @@ fn a_block_no_answer_can_hold_does_not_hide_an_older_deposit() {
     push_head(&pic, canister, HEAD + 60_000);
     let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
     let mut provider = Provider::at(HEAD + 60_000, &logs)
+        .deaf_to_the_payer()
         .for_quote(quote_hash)
         .enforcing_caps();
     provider.drive(&pic);
@@ -3079,5 +3227,53 @@ fn a_block_no_answer_can_hold_does_not_hide_an_older_deposit() {
         provider.outcalls <= 49,
         "inside the bound the in-flight marker is sized from: {}",
         provider.outcalls
+    );
+}
+
+/// A deposit counts only from the wallet the quote names: on an EVM source chain the
+/// quote's refund address is the paying wallet. A deposit of the quote's token, in exactly
+/// its amount, from any other wallet is not the quote's deposit: every read names the
+/// user's wallet as the payer, so a node never hands the stranger's deposit over and the
+/// claim finds none. A provider deaf to the payer hands it over anyway, and the canister
+/// refuses it itself. Nothing is stored either way.
+#[test]
+fn a_deposit_from_another_wallet_is_not_the_quotes_deposit() {
+    let (pic, canister, _admin) = setup();
+    let quote = quote(910);
+    let quote_hash = registered(&pic, canister, &quote);
+    let before = count(&pic, canister);
+    let theirs = deposit_log(quote_hash, HEAD - 3, USDC, STRANGER, AMOUNT.into());
+
+    let (claimed, provider) = dusty_claim(
+        &pic,
+        canister,
+        watcher(),
+        &quote,
+        std::slice::from_ref(&theirs),
+    );
+    assert_eq!(
+        claimed,
+        Err(ClaimError::Deposit(DepositError::NotFound { quote_hash })),
+        "a node filters on the payer, so the stranger's deposit never comes back"
+    );
+    assert!(
+        every_read_names_the_user(&provider),
+        "every read asks for the user's wallet alone: {:?}",
+        provider.payer_topics
+    );
+
+    let (claimed, _) = deaf_dusty_claim(&pic, canister, watcher(), &quote, &[theirs]);
+    assert_eq!(
+        claimed,
+        Err(ClaimError::Deposit(DepositError::NoneMatches {
+            quote_hash,
+            seen: 1
+        })),
+        "handed over anyway, it is refused by the canister itself"
+    );
+    assert_eq!(count(&pic, canister), before, "nothing stored");
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), quote_hash),
+        None
     );
 }

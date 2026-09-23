@@ -36,6 +36,11 @@ pub struct Quote {
     pub expected_out: Nat,
     pub min_out: Nat,
     pub dst_address: String,
+    /// Where a refund is paid, and on an EVM source chain the paying wallet itself: the
+    /// quoter and the UI fill it with the connected wallet. A deposit counts only from this
+    /// address (`claim_swap` reads the vault's `Deposited` logs whose indexed payer is it),
+    /// a gasless pull's permit must be signed by it, and a deposit from any other wallet is
+    /// not the quote's deposit.
     pub refund_address: Option<String>,
     pub auto_refund: bool,
     pub gas_mode: GasMode,

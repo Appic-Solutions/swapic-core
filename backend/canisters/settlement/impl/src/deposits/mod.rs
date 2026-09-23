@@ -282,19 +282,39 @@ pub enum WantedAmount {
     AtLeast(TokenAmount),
 }
 
+/// Whose deposit a read is looking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Payer {
+    /// The quote's own wallet, and no other: the deposit that creates a swap. On an EVM
+    /// source chain the quote's refund address is the paying wallet, so a deposit from any
+    /// other wallet is not the quote's deposit. The read asks the provider for this payer's
+    /// logs alone, so a stranger's dust under the quote's public hash never fills an answer.
+    Only(EvmAddress),
+    /// Anyone's: the rail's fill on the destination, which the filler pays.
+    Anyone,
+}
+
 /// What a read is looking for among the logs the quote's hash names: a deposit of `token`
-/// in `amount`. Any other log under the hash is somebody else's and decides nothing.
+/// from `payer` in `amount`. Any other log under the hash is somebody else's and decides
+/// nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Wanted {
     pub token: EvmAddress,
+    pub payer: Payer,
     pub amount: WantedAmount,
 }
 
 impl Wanted {
-    /// Whether `deposit` is the one wanted.
+    /// Whether `deposit` is the one wanted. The provider is asked for the payer's logs
+    /// alone, and is not trusted to have listened: a deposit from another wallet is
+    /// refused here as well.
     pub fn admits(&self, deposit: &VerifiedDeposit) -> bool {
         if deposit.token != self.token {
             return false;
+        }
+        match self.payer {
+            Payer::Only(payer) if deposit.from != payer => return false,
+            Payer::Only(_) | Payer::Anyone => {}
         }
         match self.amount {
             WantedAmount::Exactly(amount) => deposit.amount == amount,
@@ -518,30 +538,38 @@ impl Plan {
     }
 }
 
-/// The call that reads one window: the vault's `Deposited` logs naming `quote_hash` and
-/// `token` from the window's first block to its last, or to the head for the newest. The
-/// event indexes the quote hash, the token and the payer in that order, so the token is
-/// the third topic: a deposit of any other token under the quote's public hash, native
-/// dust logged for gas alone among them, is never in the answer to fill it.
+/// The call that reads one window: the vault's `Deposited` logs naming `quote_hash`, the
+/// token wanted and, when the read names one, the payer, from the window's first block to
+/// its last, or to the head for the newest. The event indexes the quote hash, the token
+/// and the payer in that order, so the token is the third topic and the payer the fourth:
+/// a deposit of any other token under the quote's public hash, native dust logged for gas
+/// alone among them, and a deposit from any wallet but the quote's, is never in the answer
+/// to fill it. A read that takes anyone's deposit names three topics, which leaves the
+/// fourth open.
 fn logs_call(
     vault: EvmAddress,
     quote_hash: QuoteHash,
-    token: EvmAddress,
+    wanted: &Wanted,
     window: &Window,
 ) -> (&'static str, Value) {
     let to_block = match window.to {
         Some(to) => format!("0x{:x}", to.get()),
         None => "latest".to_string(),
     };
+    let mut topics = vec![
+        hex0x(&deposited_topic()),
+        hex0x(quote_hash.as_ref()),
+        hex0x(&wanted.token.to_word()),
+    ];
+    match wanted.payer {
+        Payer::Only(payer) => topics.push(hex0x(&payer.to_word())),
+        Payer::Anyone => {}
+    }
     (
         "eth_getLogs",
         json!([{
             "address": hex0x(vault.as_bytes()),
-            "topics": [
-                hex0x(&deposited_topic()),
-                hex0x(quote_hash.as_ref()),
-                hex0x(&token.to_word()),
-            ],
+            "topics": topics,
             "fromBlock": format!("0x{:x}", window.from.get()),
             "toBlock": to_block,
         }]),
@@ -948,7 +976,7 @@ impl Reader {
         self.spent.set(spent + 1);
         let calls: Vec<(&str, Value)> = windows
             .iter()
-            .map(|window| logs_call(self.vault, self.quote_hash, self.wanted.token, window))
+            .map(|window| logs_call(self.vault, self.quote_hash, &self.wanted, window))
             .collect();
         rpc::rpc_batch(self.chain_id, &calls, cap)
             .await?

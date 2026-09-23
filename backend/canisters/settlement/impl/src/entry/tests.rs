@@ -171,15 +171,24 @@ fn a_sanctioned_destination_or_refund_address_names_itself() {
 /// neither the swap the user was quoted nor one the canister can price, so neither is the
 /// deposit, whatever else the vault holds under the hash, and the funds stay where they
 /// are for an operator.
+///
+/// Rewritten for the hardening pass (H1): the claim also wants the deposit from the quote's
+/// paying wallet, its refund address, and a deposit from any other wallet is not the one.
 #[test]
 fn the_claim_wants_the_quotes_token_and_exactly_its_amount() {
-    let quote = evm_quote(1);
+    let quote = Quote {
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(1)
+    };
     let token: EvmAddress = USDC.parse().unwrap();
-    let wanted = wanted(&quote, token);
+    let payer = paying_wallet(&quote).expect("the quote names its paying wallet");
+    assert_eq!(payer, USER.parse().unwrap());
+    let wanted = wanted(&quote, token, payer);
     assert_eq!(
         wanted,
         Wanted {
             token,
+            payer: Payer::Only(payer),
             amount: WantedAmount::Exactly(TokenAmount::from(100_u8)),
         }
     );
@@ -188,6 +197,11 @@ fn the_claim_wants_the_quotes_token_and_exactly_its_amount() {
     for wrong in [99, 101] {
         assert!(!wanted.admits(&deposit(USDC, wrong)), "another amount");
     }
+    let from_a_stranger = VerifiedDeposit {
+        from: VAULT.parse().unwrap(),
+        ..deposit(USDC, 100)
+    };
+    assert!(!wanted.admits(&from_a_stranger), "another wallet");
 }
 
 /// The tokens of a quote claimed on an EVM chain have to be the rail's, compared as
@@ -338,9 +352,15 @@ fn a_quote_naming_no_refund_address_is_refused_at_both_doors() {
 /// the quote, the token and the amount are the quote's, the spender is the vault the pull
 /// calls, and the deadline has not passed. A permit that misses any of them frees funds
 /// this swap has no claim on, so it is refused before anything is signed, by name.
+///
+/// Rewritten for the hardening pass (H1): the owner the permit is signed by must be the
+/// quote's paying wallet, its refund address, so the quote names one.
 #[test]
 fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
-    let quote = evm_quote(1);
+    let quote = Quote {
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(1)
+    };
     let quote_hash = quote.hash().unwrap();
     let token: EvmAddress = USDC.parse().unwrap();
     let vault: EvmAddress = VAULT.parse().unwrap();
@@ -446,15 +466,76 @@ fn a_permit_must_be_witnessed_by_the_quote_it_pays() {
     assert_eq!(ensure_gasless(&quote), Ok(()));
 }
 
+/// A deposit counts only from the wallet the quote names, and the vault logs a pull's
+/// owner as the deposit's payer. So a permit signed by any other wallet than the quote's
+/// refund address would land funds no claim ever counts as the quote's deposit: it is
+/// refused by name, with both wallets, before anything is signed.
+#[test]
+fn a_permit_signed_by_another_wallet_than_the_refund_address_is_refused() {
+    let quote = Quote {
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(1)
+    };
+    let quote_hash = quote.hash().unwrap();
+    let token: EvmAddress = USDC.parse().unwrap();
+    let vault: EvmAddress = VAULT.parse().unwrap();
+    let config = rail_config();
+    let now = UnixSeconds::new(1_799_999_000);
+    let signed_by = |owner: &str| PullPermit {
+        witness: quote_hash,
+        owner: owner.parse().unwrap(),
+        spender: vault,
+        permit: Permit2Permit {
+            token,
+            amount: quote.amount_in,
+            nonce: types::Permit2Nonce::from(7_u8),
+            deadline: UnixSeconds::new(1_800_000_000),
+        },
+        signature: vec![0x22; 65],
+    };
+    let binds = |permit: &PullPermit| {
+        ensure_permit_binds(quote_hash, &quote, &config, token, vault, now, permit)
+    };
+    assert_eq!(
+        binds(&signed_by(USER)),
+        Ok(()),
+        "the refund address signed it"
+    );
+    let stranger = "0x2222222222222222222222222222222222222222";
+    assert_eq!(
+        binds(&signed_by(stranger)),
+        Err(PullError::PermitMismatch(PermitMismatch::Owner {
+            signed_by: stranger.parse().unwrap(),
+            refund_address: USER.parse().unwrap(),
+        }))
+    );
+    assert_eq!(
+        settlement_api::types::entry::PermitMismatch::from(PermitMismatch::Owner {
+            signed_by: stranger.parse().unwrap(),
+            refund_address: USER.parse().unwrap(),
+        }),
+        settlement_api::types::entry::PermitMismatch::Owner {
+            signed_by: stranger.to_string(),
+            refund_address: USER.to_string(),
+        }
+    );
+}
+
 /// A pull is admitted until the deposit deadline, but the claim judges the deposit it makes
 /// by when it lands. A permit good for longer lets a pull sent in the deadline's last
 /// seconds, or held up behind an earlier nonce, land after it, and the claim then refuses
 /// the deposit `LandedLate` with the user's funds in the vault (review 5, M2). So the
 /// permit may be good no later than the deposit deadline, the quote's expiry and the
 /// permit window: Permit2 then reverts a late pull on the chain and nothing moves.
+///
+/// Rewritten for the hardening pass (H1): the owner the permit is signed by must be the
+/// quote's paying wallet, its refund address, so the quote names one.
 #[test]
 fn a_permit_that_outlasts_the_deposit_deadline_is_refused() {
-    let quote = evm_quote(1);
+    let quote = Quote {
+        refund_address: Some(USER.parse().unwrap()),
+        ..evm_quote(1)
+    };
     let quote_hash = quote.hash().unwrap();
     let token: EvmAddress = USDC.parse().unwrap();
     let vault: EvmAddress = VAULT.parse().unwrap();

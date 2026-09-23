@@ -65,18 +65,22 @@ fn decide(
         .ok_or_else(|| walk.end())
 }
 
-/// The deposit the claim wants: the fixture's token, exactly `amount`.
+/// The deposit the claim wants: the fixture's token, from the fixture's payer (the quote's
+/// refund address, its paying wallet), exactly `amount`.
 fn exactly(amount: u64) -> Wanted {
     Wanted {
         token: USDC.parse().unwrap(),
+        payer: Payer::Only(USER.parse().unwrap()),
         amount: WantedAmount::Exactly(TokenAmount::from(amount)),
     }
 }
 
-/// The deposit an arrival read wants: the fixture's token, at least `amount`.
+/// The deposit an arrival read wants: the fixture's token, from anyone (the filler pays the
+/// fill), at least `amount`.
 fn at_least(amount: u64) -> Wanted {
     Wanted {
         token: USDC.parse().unwrap(),
+        payer: Payer::Anyone,
         amount: WantedAmount::AtLeast(TokenAmount::from(amount)),
     }
 }
@@ -243,6 +247,8 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
 /// Rewritten for fix wave 6 (H1): the call names the token wanted as the third topic, so a
 /// deposit of any other token under the quote's public hash, native dust among them, never
 /// comes back to fill the answer.
+/// Rewritten for the hardening pass (H1): the claim's call also names the quote's paying
+/// wallet as the fourth topic, so a deposit from any other wallet never comes back either.
 #[test]
 fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     let from = range_from(BlockNumber::new(19_000_000), DepositLookback::new(10_000));
@@ -258,8 +264,7 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
         vec![Window { from, to: None }],
         "a lookback of one window is one window, open at the head"
     );
-    let usdc: EvmAddress = USDC.parse().unwrap();
-    let (method, params) = logs_call(vault(), quote_hash(), usdc, &windows[0]);
+    let (method, params) = logs_call(vault(), quote_hash(), &exactly(1), &windows[0]);
     assert_eq!(method, "eth_getLogs");
     assert_eq!(
         params,
@@ -269,6 +274,7 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
                 "0xcfccc5211684bc31ce945214025a7453ba30a1ffcc38fcb691ce742437f3f256",
                 "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
                 "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+                "0x0000000000000000000000007551a66653f9a20979ed81835a0b7008ec83401b",
             ],
             "fromBlock": "0x121c3b1",
             "toBlock": "latest",
@@ -279,10 +285,73 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
         to: Some(BlockNumber::new(18_990_000)),
     };
     assert_eq!(
-        logs_call(vault(), quote_hash(), usdc, &closed).1[0]["toBlock"],
+        logs_call(vault(), quote_hash(), &exactly(1), &closed).1[0]["toBlock"],
         json!("0x121c3b0"),
         "an older window ends where the newer one starts"
     );
+}
+
+/// The payer topic is the quote's paying wallet as the event indexes an address: the
+/// twenty bytes left-padded with zeros to a word, as `cast` encodes it. The claim names
+/// it as the fourth topic, and a read that takes anyone's deposit (the rail's fill on the
+/// destination, which the filler pays) names only three, which leaves the payer open.
+#[test]
+fn the_payer_topic_is_the_paying_wallet_padded_to_a_word() {
+    // cast abi-encode "f(address)" 0x7551A66653f9a20979ed81835a0b7008EC83401b
+    // (cast 1.3.5)
+    let padded = "0x0000000000000000000000007551a66653f9a20979ed81835a0b7008ec83401b";
+    let window = Window {
+        from: BlockNumber::new(18_990_001),
+        to: None,
+    };
+    let claim = logs_call(vault(), quote_hash(), &exactly(1), &window).1;
+    let topics = claim[0]["topics"].as_array().unwrap();
+    assert_eq!(topics.len(), 4, "the quote hash, the token and the payer");
+    assert_eq!(topics[3], json!(padded));
+    assert_eq!(topics[3], json!(word_of(USER)));
+    let arrival = logs_call(vault(), quote_hash(), &at_least(1), &window).1;
+    assert_eq!(
+        arrival[0]["topics"].as_array().unwrap().len(),
+        3,
+        "anyone's deposit: the payer is left open"
+    );
+}
+
+/// A deposit counts only from the wallet the quote names: a deposit of the quote's token
+/// and exact amount from any other wallet is not the quote's deposit, and is counted with
+/// what matched nothing, so a provider that hands it over anyway decides nothing with it.
+/// The same deposit from the paying wallet is the one.
+#[test]
+fn a_deposit_from_another_wallet_is_not_the_quotes_deposit() {
+    let stranger = "0x1111111111111111111111111111111111111111";
+    let theirs = deposit_log_of(quote_hash(), 19_000_000, USDC, stranger, 1_000_000);
+    assert_eq!(
+        decide(
+            std::slice::from_ref(&theirs),
+            vault(),
+            quote_hash(),
+            &exactly(1_000_000),
+            BlockNumber::new(19_000_010),
+            BlockDepth::new(1),
+        ),
+        Err(DepositError::NoneMatches {
+            quote_hash: quote_hash(),
+            seen: 1,
+        }),
+        "another wallet's deposit, whatever its token and amount"
+    );
+    let ours = deposit_log(quote_hash(), 19_000_001, 1_000_000);
+    let found = decide(
+        &[theirs, ours],
+        vault(),
+        quote_hash(),
+        &exactly(1_000_000),
+        BlockNumber::new(19_000_010),
+        BlockDepth::new(1),
+    )
+    .expect("the paying wallet's deposit is the one");
+    assert_eq!(found.from, USER.parse().unwrap());
+    assert_eq!(found.block, BlockNumber::new(19_000_001));
 }
 
 /// A range wider than one window is walked in windows of [`LOGS_WINDOW_BLOCKS`], oldest
@@ -532,6 +601,11 @@ fn the_walk_takes_the_oldest_deep_match_and_a_shallow_one_never_masks_it() {
 /// Inside one window the oldest deep match counts by its block, whatever order the
 /// provider lists the logs in, and a shallow match listed first hides nothing; two in one
 /// block keep the order they were logged in.
+///
+/// Rewritten for the hardening pass (H1): the claim now takes its paying wallet's deposit
+/// alone, so the order among several payers' deposits is pinned on the read that still
+/// takes anyone's, the arrival read (at least the amount, from anyone). The logs and the
+/// verdicts are the ones this test pinned before.
 #[test]
 fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
     let latest = BlockNumber::new(19_000_000);
@@ -545,7 +619,7 @@ fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
         vec![shallow.clone(), newer.clone(), older.clone()],
     ] {
         assert_eq!(
-            find(&logs, vault(), quote_hash(), &exactly(5), latest, depth),
+            find(&logs, vault(), quote_hash(), &at_least(5), latest, depth),
             Finding::Deep(VerifiedDeposit {
                 token: USDC.parse().unwrap(),
                 from: USER.parse().unwrap(),
@@ -562,7 +636,7 @@ fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
             &[shallow],
             vault(),
             quote_hash(),
-            &exactly(5),
+            &at_least(5),
             latest,
             depth
         ),
@@ -577,7 +651,7 @@ fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
             &[first_in_block, older],
             vault(),
             quote_hash(),
-            &exactly(5),
+            &at_least(5),
             latest,
             depth
         ),
