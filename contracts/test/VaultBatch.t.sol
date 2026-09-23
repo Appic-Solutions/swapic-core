@@ -40,11 +40,11 @@ contract VaultBatchTest is Test {
         b.transfer(address(router), 1000e18);
 
         vm.startPrank(canister);
-        vault.setRouterAllowlist(address(router), true);
-        vault.setRouterAllowlist(address(evilRouter), true);
-        vault.setRouterAllowlist(address(reentrant), true);
-        vault.setRouterAllowlist(address(hog), true);
-        vault.setRouterAllowlist(address(bomber), true);
+        vault.setRouterAllowlist(address(router), true, true);
+        vault.setRouterAllowlist(address(evilRouter), true, true);
+        vault.setRouterAllowlist(address(reentrant), true, true);
+        vault.setRouterAllowlist(address(hog), true, true);
+        vault.setRouterAllowlist(address(bomber), true, true);
         vm.stopPrank();
     }
 

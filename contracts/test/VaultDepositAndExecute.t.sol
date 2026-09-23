@@ -39,7 +39,7 @@ contract VaultDepositAndExecuteTest is Test {
         b.transfer(address(router), 500e18);
 
         vm.prank(canister);
-        vault.setRouterAllowlist(address(router), true);
+        vault.setRouterAllowlist(address(router), true, true);
     }
 
     function _swapCalls(uint256 amountIn, uint256 amountOut) internal view returns (Vault.Call[] memory calls) {
@@ -352,7 +352,7 @@ contract VaultDepositAndExecuteTest is Test {
         // so this pins the atomic path's native payout to _send
         address eoa = makeAddr("nativeReceiver");
         vm.prank(canister);
-        vault.setRouterAllowlist(address(nativeRouter), true);
+        vault.setRouterAllowlist(address(nativeRouter), true, true);
 
         Vault.Call[] memory calls = new Vault.Call[](1);
         calls[0] = Vault.Call(

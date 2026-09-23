@@ -85,14 +85,23 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// keccak256(abi.encode(quoteHash, payer)) => spent. Scoped per payer so a
     /// stranger cannot burn someone else's quote hash as a griefing DoS.
     mapping(bytes32 => bool) public usedQuoteKey;
-    mapping(address => bool) public allowedRouter;
+    /// The public tier, the strict one: what every door may call, the public
+    /// `depositAndExecute` included. This is the slot the single allowlist has
+    /// always lived in (it was `allowedRouter`), so every entry made before the
+    /// tiers existed is on this tier and keeps exactly the reach it had: the
+    /// migration is the layout itself, with no step anyone could forget.
+    mapping(address => bool) private _publicRouter;
+    /// The canister tier's own entries: what only the canister's doors may call.
+    /// Appended after every slot the vault already had, so nothing moves.
+    mapping(address => bool) private _canisterOnlyRouter;
 
     event GuardianSet(address guardian);
     event NativeReceived(address from, uint256 amount);
     event ClassPaused(uint8 class_);
     event ClassUnpaused(uint8 class_);
     event Deposited(bytes32 indexed quoteHash, address indexed token, address indexed from, uint256 amount);
-    event AllowlistSet(address target, bool ok);
+    /// the tier stored, never the flags sent: `publicOk` is true only with `ok`
+    event AllowlistSet(address target, bool ok, bool publicOk);
     event Executed(bytes32 indexed swapRef);
     event ItemResult(bytes32 indexed swapRef, bool ok);
     event Payout(bytes32 indexed ref, address token, address to, uint256 amount);
@@ -243,7 +252,8 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// must recover to `owner`. A forged or borrowed signature cannot pass, so the
     /// standing allowance that every legacy depositor holds is no longer enough to
     /// move their funds. EOA only: raw ecrecover cannot verify an ERC-1271 wallet,
-    /// which uses the Permit2 door or 3009's bytes overload instead.
+    /// which uses the Permit2 door instead (the 3009 door above takes only the
+    /// (v, r, s) overload, so it is EOA only too).
     ///
     /// What the success branch trusts: that a `permit` which returns has checked
     /// the signature, as every EIP-2612 token does. A token whose `permit`
@@ -354,9 +364,36 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
         emit Deposited(quoteHash, token, owner, IERC20(token).balanceOf(address(this)) - before);
     }
 
-    function setRouterAllowlist(address target, bool ok) external onlyCanister {
-        allowedRouter[target] = ok;
-        emit AllowlistSet(target, ok);
+    /// Puts `target` on exactly one tier, or on neither. `ok` allows it at all and
+    /// `publicOk` also opens the public door to it; `publicOk` means nothing
+    /// without `ok`, so no target is ever public without being allowed. Moving a
+    /// target between tiers is one call, and so is taking it off both.
+    ///
+    /// The law for each tier, which the deploy runbook records per entry with its
+    /// reason: the public tier holds only stateless swap routers, whose every
+    /// reachable function increases a vault balance only as the direct product of
+    /// the caller's own deposit being spent. The canister tier may additionally
+    /// hold an immutable escrow whose every permissionless exit pays the vault,
+    /// each one named and reviewed; Eco's Portal is the case it exists for.
+    /// Neither tier ever holds a token-like contract or the CCTP message
+    /// transmitter.
+    function setRouterAllowlist(address target, bool ok, bool publicOk) external onlyCanister {
+        bool isPublic = ok && publicOk;
+        _publicRouter[target] = isPublic;
+        _canisterOnlyRouter[target] = ok && !publicOk;
+        emit AllowlistSet(target, ok, isPublic);
+    }
+
+    /// What the canister's own doors may call (`execute`, `executeMany`, and
+    /// `multicall` through them): a target on either tier.
+    function allowedRouter(address target) public view returns (bool) {
+        return _publicRouter[target] || _canisterOnlyRouter[target];
+    }
+
+    /// What the public `depositAndExecute` door may call: the public tier alone,
+    /// always a subset of `allowedRouter`.
+    function allowedPublicRouter(address target) public view returns (bool) {
+        return _publicRouter[target];
     }
 
     function _balance(address token) internal view returns (uint256) {
@@ -373,7 +410,7 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
             // never let a call re-enter the vault, even if it were allowlisted:
             // runItem is self-only but carries no reentrancy guard
             if (c.target == address(this)) revert TargetNotAllowed();
-            if (!allowedRouter[c.target]) revert TargetNotAllowed();
+            if (!allowedRouter(c.target)) revert TargetNotAllowed();
             if (c.approveAmount > 0) IERC20(c.approveToken).forceApprove(c.target, c.approveAmount);
             bool ok;
             address target = c.target;
@@ -438,8 +475,13 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     /// rule, a stranger depositing nothing and approving nothing could call any
     /// allowlisted target that increases any vault balance and carry the increase
     /// out through the payout leg, whatever receiver the target's own arguments
-    /// named. The allowlist tier (see `setRouterAllowlist`) is the second,
-    /// independent defence; neither one relies on the other.
+    /// named.
+    ///
+    /// The allowlist tier is the second, independent defence: every target must
+    /// be on the public tier (`allowedPublicRouter`), so a target only the
+    /// canister may call, an escrow like Eco's Portal whose `refundTo` answers to
+    /// the vault itself, is refused here before any call runs. Neither defence
+    /// relies on the other.
     function depositAndExecute(
         bytes32 quoteHash,
         address token,
@@ -464,12 +506,18 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
 
         // anyone may call this, so the calls may only ever spend the caller's own
         // deposit: no native value, approvals only of `token`, never a call that
-        // spends none of it, and capped in total at `received`
+        // spends none of it, and capped in total at `received`. And only ever to
+        // the public tier: a target on neither tier gets the refusal every door
+        // gives it, one on the canister tier alone gets this door's own
         {
             uint256 totalApprove;
             for (uint256 i = 0; i < calls.length; i++) {
                 if (calls[i].value != 0 || calls[i].approveToken != token || calls[i].approveAmount == 0) {
                     revert PublicCallNotAllowed();
+                }
+                if (!_publicRouter[calls[i].target]) {
+                    if (_canisterOnlyRouter[calls[i].target]) revert PublicCallNotAllowed();
+                    revert TargetNotAllowed();
                 }
                 totalApprove += calls[i].approveAmount;
             }

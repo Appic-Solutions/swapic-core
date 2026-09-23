@@ -16,7 +16,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         vault = handler.vault();
         canister = address(handler);
 
-        bytes4[] memory selectors = new bytes4[](7);
+        bytes4[] memory selectors = new bytes4[](9);
         selectors[0] = VaultHandler.user_deposit.selector;
         selectors[1] = VaultHandler.canister_execute.selector;
         selectors[2] = VaultHandler.canister_execute_many.selector;
@@ -24,6 +24,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
         selectors[4] = VaultHandler.user_atomic_swap.selector;
         selectors[5] = VaultHandler.user_atomic_zero_call.selector;
         selectors[6] = VaultHandler.user_atomic_over_approve.selector;
+        selectors[7] = VaultHandler.canister_execute_canister_tier.selector;
+        selectors[8] = VaultHandler.user_atomic_canister_tier.selector;
 
         targetContract(address(handler));
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
@@ -31,7 +33,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
 
     /// no call sequence may leave the vault standing as a spender on a router
     function invariant_no_router_allowance_survives() public view {
-        address[2] memory routers = [address(handler.router()), address(handler.evilRouter())];
+        address[3] memory routers =
+            [address(handler.router()), address(handler.evilRouter()), address(handler.canisterRouter())];
         for (uint256 i = 0; i < 3; i++) {
             TestToken t = handler.tokens(i);
             for (uint256 j = 0; j < routers.length; j++) {
@@ -59,7 +62,7 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(address(vault).balance, 0, "unexplained native balance");
     }
 
-    /// five entry points swallow reverts so that a bad bound cannot abort a run.
+    /// seven entry points swallow reverts so that a bad bound cannot abort a run.
     /// These are the arms that must never fire: without this, a handler starved
     /// into its catch arms would leave the ghosts frozen and every invariant
     /// above would pass on a vault that was never exercised.
@@ -69,6 +72,9 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(handler.atomicSwapFailures(), 0, "atomic swap reverted inside the handler");
         assertEq(handler.overApprovesAccepted(), 0, "a stranger's over-approval was accepted");
         assertEq(handler.zeroCallsAccepted(), 0, "a public deposit that executes nothing was accepted");
+        // the tier's own property: no AtomicSwap for a call to a target that is
+        // not on the public tier, however honest the rest of the call is
+        assertEq(handler.canisterTierAccepted(), 0, "the public door reached a canister-tier target");
     }
 
     /// without this the invariants above could pass vacuously on a handler whose
@@ -82,6 +88,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
         handler.user_atomic_swap(0, 1, 100e18, 3, 55e18, 3, false);
         handler.user_atomic_zero_call(1, 20e18, 4);
         handler.user_atomic_over_approve(0, 1, 1e18, 500e18, 5);
+        handler.canister_execute_canister_tier(1, 1, 30e18, 20e18);
+        handler.user_atomic_canister_tier(0, 1, 10e18, 9e18, 6);
 
         assertEq(handler.deposits(), 1, "deposit landed");
         assertEq(handler.executes(), 1, "execute landed");
@@ -90,6 +98,8 @@ contract VaultInvariantsTest is StdInvariant, Test {
         assertEq(handler.atomicSwaps(), 1, "atomic swap landed");
         assertEq(handler.zeroCallsRejected(), 1, "a public deposit that executes nothing was refused");
         assertEq(handler.overApprovesRejected(), 1, "over-approve rejected");
+        assertEq(handler.canisterTierExecutes(), 1, "the canister reached its own tier");
+        assertEq(handler.canisterTierRejected(), 1, "the public door was refused the canister tier");
 
         invariant_no_router_allowance_survives();
         invariant_balances_match_sanctioned_flows();

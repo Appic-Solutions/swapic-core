@@ -43,8 +43,8 @@ contract VaultPublicDrainTest is Test {
         usdc.transfer(user, 100e18);
 
         vm.startPrank(canister);
-        vault.setRouterAllowlist(address(payer), true);
-        vault.setRouterAllowlist(address(router), true);
+        vault.setRouterAllowlist(address(payer), true, true);
+        vault.setRouterAllowlist(address(router), true, true);
         vm.stopPrank();
 
         vm.prank(attacker);

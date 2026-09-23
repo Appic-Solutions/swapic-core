@@ -31,6 +31,9 @@ contract VaultHandler is Test {
     Vault public immutable vault;
     SwapRouterMock public immutable router;
     EvilRouterMock public immutable evilRouter;
+    /// an honest router like `router`, but on the canister tier alone: the
+    /// canister's doors must reach it and the public door never may
+    SwapRouterMock public immutable canisterRouter;
     TestToken[TOKEN_COUNT] public tokens;
 
     /// everything that should have entered / left the vault, per token
@@ -46,6 +49,9 @@ contract VaultHandler is Test {
     uint256 public zeroCallsRejected;
     uint256 public overApprovesAccepted;
     uint256 public overApprovesRejected;
+    uint256 public canisterTierExecutes;
+    uint256 public canisterTierAccepted;
+    uint256 public canisterTierRejected;
 
     /// catch arms that must never fire: these entry points swallow reverts so a
     /// bad bound cannot abort a run, which would otherwise hide a starved handler
@@ -61,20 +67,24 @@ contract VaultHandler is Test {
         Vault v = Vault(payable(address(new ERC1967Proxy(address(impl), init))));
         SwapRouterMock r = new SwapRouterMock();
         EvilRouterMock e = new EvilRouterMock();
+        SwapRouterMock c = new SwapRouterMock();
         vault = v;
         router = r;
         evilRouter = e;
+        canisterRouter = c;
 
         for (uint256 i = 0; i < TOKEN_COUNT; i++) {
             TestToken t = new TestToken();
             tokens[i] = t;
             t.transfer(address(r), ROUTER_FLOAT);
+            t.transfer(address(c), ROUTER_FLOAT);
             t.transfer(address(v), VAULT_SEED);
             ghostIn[address(t)] += VAULT_SEED;
         }
 
-        v.setRouterAllowlist(address(r), true);
-        v.setRouterAllowlist(address(e), true);
+        v.setRouterAllowlist(address(r), true, true);
+        v.setRouterAllowlist(address(e), true, true);
+        v.setRouterAllowlist(address(c), true, false);
     }
 
     /// fresh by construction: a pair the vault has already burned would revert
@@ -171,6 +181,40 @@ contract VaultHandler is Test {
             ghostOut[leg.tokenIn] += leg.amountIn;
             ghostIn[leg.tokenOut] += leg.amountOut;
             executes++;
+        } catch {
+            executeFailures++;
+        }
+    }
+
+    /// The canister tier under the fuzzer: an honest swap through a router only
+    /// the canister's doors may call. It must always land.
+    function canister_execute_canister_tier(
+        uint256 inSeed,
+        uint256 outSeed,
+        uint256 amountInSeed,
+        uint256 amountOutSeed
+    ) external {
+        (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
+        uint256 pooled = tokenIn.balanceOf(address(vault));
+        if (pooled == 0) return;
+
+        Leg memory leg = Leg(
+            address(tokenIn),
+            address(tokenOut),
+            bound(amountInSeed, 1, pooled > MAX_AMOUNT ? MAX_AMOUNT : pooled),
+            bound(amountOutSeed, 0, MAX_AMOUNT),
+            false
+        );
+        Vault.Delta[] memory deltas = new Vault.Delta[](2);
+        deltas[0] = Vault.Delta(leg.tokenIn, -int256(leg.amountIn));
+        deltas[1] = Vault.Delta(leg.tokenOut, int256(leg.amountOut));
+        Vault.Call[] memory calls = _splitCalls(leg, 1, 0);
+        calls[0].target = address(canisterRouter);
+
+        try vault.execute(_fresh("canister-tier"), calls, deltas) {
+            ghostOut[leg.tokenIn] += leg.amountIn;
+            ghostIn[leg.tokenOut] += leg.amountOut;
+            canisterTierExecutes++;
         } catch {
             executeFailures++;
         }
@@ -323,6 +367,37 @@ contract VaultHandler is Test {
             zeroCallsAccepted++;
         } catch {
             zeroCallsRejected++;
+        }
+        vm.stopPrank();
+    }
+
+    /// A public swap that passes every other rule of the door (a real deposit,
+    /// approved and taken in full, by an honest router) aimed at a router on the
+    /// canister tier alone. The tier is the only thing that can refuse it, and it
+    /// must always refuse it, so the success arm credits nothing on purpose.
+    function user_atomic_canister_tier(
+        uint256 inSeed,
+        uint256 outSeed,
+        uint256 amountSeed,
+        uint256 amountOutSeed,
+        uint256 userSeed
+    ) external {
+        (TestToken tokenIn, TestToken tokenOut) = _pair(inSeed, outSeed);
+        uint256 amount = bound(amountSeed, 1, MAX_AMOUNT);
+        uint256 amountOut = bound(amountOutSeed, 0, MAX_AMOUNT);
+        address user = _user(userSeed);
+
+        Vault.Call[] memory calls =
+            _splitCalls(Leg(address(tokenIn), address(tokenOut), amount, amountOut, false), 1, 0);
+        calls[0].target = address(canisterRouter);
+
+        _fund(tokenIn, user, amount);
+        try vault.depositAndExecute(
+            _fresh("canister-tier"), address(tokenIn), amount, calls, address(tokenOut), amountOut, user
+        ) {
+            canisterTierAccepted++;
+        } catch {
+            canisterTierRejected++;
         }
         vm.stopPrank();
     }

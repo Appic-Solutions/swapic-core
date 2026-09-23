@@ -34,9 +34,9 @@ contract VaultExecuteTest is Test {
         b.transfer(address(router), 95e18);
 
         vm.prank(canister);
-        vault.setRouterAllowlist(address(router), true);
+        vault.setRouterAllowlist(address(router), true, true);
         vm.prank(canister);
-        vault.setRouterAllowlist(address(evilRouter), true);
+        vault.setRouterAllowlist(address(evilRouter), true, true);
     }
 
     function test_execute_happy_path_checks_delta_and_zeroes_approval() public {
@@ -92,7 +92,7 @@ contract VaultExecuteTest is Test {
         // worst case: the canister allowlists the vault itself, letting a call
         // re-enter runItem (self-only, no reentrancy guard) as a nested frame
         vm.prank(canister);
-        vault.setRouterAllowlist(address(vault), true);
+        vault.setRouterAllowlist(address(vault), true, true);
 
         Vault.Item memory nested = Vault.Item("nested", new Vault.Call[](0), new Vault.Delta[](0), 0);
         Vault.Call[] memory calls = new Vault.Call[](1);
@@ -105,7 +105,7 @@ contract VaultExecuteTest is Test {
 
     function test_set_router_allowlist_only_canister() public {
         vm.expectRevert(Vault.OnlyCanister.selector);
-        vault.setRouterAllowlist(address(0xBAD), true);
+        vault.setRouterAllowlist(address(0xBAD), true, true);
     }
 
     function test_execute_blocked_when_executions_paused() public {
