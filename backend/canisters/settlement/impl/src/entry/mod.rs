@@ -323,10 +323,16 @@ fn party(address: EvmAddress) -> Address {
 ///
 /// Money-first, in this order: the halt switch and the caller, the quote itself, the swap
 /// not existing yet, the quote still claimable, nobody it pays to sanctioned, its tokens
-/// the rail's; then the marker (A8), then the one read, which looks for the quote's token
-/// in exactly its amount among the logs under the hash; then the payer is held to the
+/// the rail's; then the marker (A8), then the read, which looks for the quote's token in
+/// exactly its amount among the logs under the hash; then the payer is held to the
 /// sanctions set, and `FundsReceived` is appended, which the fold checks again (A2). A
 /// refusal anywhere stores nothing.
+///
+/// The read starts at the height the quote was registered at, when the store kept one,
+/// and reads one window where it would read a day of them. That height is the watcher's
+/// head, which can run ahead of the chain, so it is where the read starts and never a
+/// floor: when nothing at all matches above it, the plain lookback is read before the
+/// claim is refused, and no height a watcher pushed puts a deposit out of reach.
 pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     require_not_halted().map_err(ClaimError::Guard)?;
     require_quoter_watcher_or_controller().map_err(ClaimError::Guard)?;
@@ -351,15 +357,19 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         return Err(ClaimError::NotRegistered(quote_hash));
     }
     inflight::take(quote_hash, InFlightKind::Claim, now).map_err(ClaimError::InFlight)?;
-    let verified = deposits::verify_evm_deposit(&DepositRead {
+    let read = |not_before| DepositRead {
         chain_id: quote.src_chain,
         quote_hash,
         wanted: wanted(&quote, token),
-        // the deposit that pays a quote is not in a block before the quote was registered
-        not_before: pending.and_then(|entry| entry.registered_at),
-    })
-    .await;
-    // the message chain ends here whatever the read said: the marker was for the outcall
+        not_before,
+    };
+    // the deposit that pays a quote is not in a block before the quote was registered
+    let registered_at = pending.and_then(|entry| entry.registered_at);
+    let mut verified = deposits::verify_evm_deposit(&read(registered_at)).await;
+    if registered_at.is_some() && verified.as_ref().is_err_and(DepositError::found_nothing) {
+        verified = deposits::verify_evm_deposit(&read(None)).await;
+    }
+    // the message chain ends here whatever the reads said: the marker was for the outcalls
     inflight::release(quote_hash);
     let deposit = verified?;
     if is_sanctioned(&party(deposit.from)) {

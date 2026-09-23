@@ -410,14 +410,17 @@ impl<'a> Reader<'a> {
 
 crate::storable_as_cbor!(Quote);
 
-/// A quote the store holds, with what the canister knew when it was registered: the height
-/// the watcher had last reported on the quote's source chain.
+/// A quote the store holds, with the height of the quote's source chain the canister held
+/// a fresh reading of when it was registered, if it held one.
 ///
 /// The deposit a claim looks for cannot be older than the quote it pays, so that height is
 /// where the claim's log read starts. Without it the read walks the whole lookback, which
-/// is a day of blocks on the fastest chain; with it the usual claim reads one window. It is
-/// the canister's own reading and never the caller's, and it lags the true head, so it can
-/// only ever be at or below the block the deposit lands in.
+/// is a day of blocks on the fastest chain; with it the usual claim reads one window. The
+/// reading is the watcher's, stamped by the canister on arrival and taken only while it is
+/// younger than `chain_data_max_age`, so the height is the watcher's word: it may lag the
+/// chain's head, and it may run ahead of it. A claim therefore starts its read there and
+/// does not stop there: when nothing matches at or above the height, it reads the plain
+/// lookback before refusing, so no height a watcher pushed strands a deposit.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, and the height is absent while
 /// unknown, so an entry written before it existed reads back without one.

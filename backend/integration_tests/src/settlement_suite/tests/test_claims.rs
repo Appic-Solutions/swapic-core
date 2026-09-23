@@ -340,6 +340,10 @@ fn a_valid_mocked_deposit_appends_funds_received_and_returns_the_hash() {
 
 /// Money-first, proven by the count: a claim the chain does not back stores nothing. Neither
 /// a vault with no log for the quote, nor one whose log is not deep enough yet.
+///
+/// Rewritten for fix wave 4 (N4): a claim that finds nothing at all above the height the
+/// quote was registered at reads the plain lookback before it refuses, so the refusal
+/// comes after every window of it, where it came after the one.
 #[test]
 fn no_deposit_means_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -348,10 +352,15 @@ fn no_deposit_means_nothing_stored() {
     let before = count(&pic, canister);
 
     let call = submit_claim(&pic, canister, watcher(), &quote);
-    answer(&pic, &the_read(&pic, quote_hash), HEAD, vec![]);
+    let reads = walk_the_reads(&pic, quote_hash, HEAD, &[]);
     assert_eq!(
         await_claim(&pic, call),
         Err(ClaimError::Deposit(DepositError::NotFound { quote_hash }))
+    );
+    assert_eq!(
+        (reads[0], reads[1], reads.len()),
+        (HEAD, HEAD + 1 - 345_600, 36),
+        "the registration height's window, then the plain lookback from its oldest"
     );
     assert_eq!(count(&pic, canister), before, "nothing stored");
     assert_eq!(
@@ -393,6 +402,10 @@ fn no_deposit_means_nothing_stored() {
 /// quoted, whoever made it: the claim finds no deposit it wants, says how many it saw so
 /// an operator can tell stranded funds from none, stores nothing, and the funds stay in
 /// the vault.
+///
+/// Rewritten for fix wave 4 (N4): a claim that finds nothing it wants above the height the
+/// quote was registered at reads the plain lookback before it refuses, and the count is
+/// that read's.
 #[test]
 fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -401,11 +414,11 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     let before = count(&pic, canister);
 
     let call = submit_claim(&pic, canister, watcher(), &quote);
-    answer(
+    walk_the_reads(
         &pic,
-        &the_read(&pic, quote_hash),
+        quote_hash,
         HEAD,
-        vec![deposit_log(quote_hash, HEAD, USER, USER, AMOUNT.into())],
+        &[deposit_log(quote_hash, HEAD, USER, USER, AMOUNT.into())],
     );
     assert_eq!(
         await_claim(&pic, call),
@@ -416,11 +429,11 @@ fn a_deposit_of_another_token_or_amount_is_refused_and_nothing_stored() {
     );
 
     let call = submit_claim(&pic, canister, watcher(), &quote);
-    answer(
+    walk_the_reads(
         &pic,
-        &the_read(&pic, quote_hash),
+        quote_hash,
         HEAD,
-        vec![deposit_log(
+        &[deposit_log(
             quote_hash,
             HEAD,
             USDC,
@@ -678,6 +691,9 @@ fn concurrent_claims_buy_one_outcall() {
 
 /// A quote nobody can pay any more is not claimed: past its expiry plus the permit
 /// window, the claim is refused before any outcall. Inside the window it still is.
+///
+/// Rewritten for fix wave 4 (N4): the claim inside the window finds nothing above the
+/// registration height and reads the plain lookback before it refuses.
 #[test]
 fn an_expired_quote_is_refused_before_any_outcall() {
     let (pic, canister, _admin) = setup();
@@ -695,7 +711,7 @@ fn an_expired_quote_is_refused_before_any_outcall() {
     pic.advance_time(Duration::from_secs(60));
     push_reading(&pic, canister);
     let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
-    answer(&pic, &the_read(&pic, swap_id(&quote)), HEAD, vec![]);
+    walk_the_reads(&pic, swap_id(&quote), HEAD, &[]);
     assert!(matches!(
         await_claim(&pic, call),
         Err(ClaimError::Deposit(DepositError::NotFound { .. }))
@@ -1694,4 +1710,97 @@ fn a_chain_the_config_gives_no_depth_decides_nothing() {
         vec![deposit_log(quote_hash, HEAD, USDC, USER, AMOUNT.into())],
     );
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+}
+
+/// Pushes the watcher's reading of Base at `block`, fresh as of now.
+fn push_head(pic: &PocketIc, canister: Principal, block: u64) {
+    push_chain_data(
+        pic,
+        canister,
+        watcher(),
+        BASE,
+        &ChainData {
+            block,
+            base_fee_wei_per_gas: Nat::from(1_000_000_000_u64),
+            priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+    )
+    .expect("the watcher may push");
+}
+
+/// A lookback of `blocks` on Base, at the depths the config already holds.
+fn lookback_of(pic: &PocketIc, canister: Principal, admin: Principal, blocks: u32) {
+    use crate::client::settlement::{get_config_full, set_config};
+    let config = get_config_full(pic, canister, admin).expect("the controller reads it");
+    set_config(
+        pic,
+        canister,
+        admin,
+        &Config {
+            deposit_lookback_blocks: blocks,
+            ..config
+        },
+    )
+    .expect("the controller sets it");
+}
+
+/// A reading older than `chain_data_max_age` is no height at all, by the rule every money
+/// decision on the cache takes: a quote registered behind it holds none, so its claim reads
+/// the plain lookback from its oldest window, and the deposit is claimed.
+#[test]
+fn a_stale_reading_registers_no_height_and_the_quote_stays_claimable() {
+    let (pic, canister, admin) = setup();
+    lookback_of(&pic, canister, admin, 20_000);
+    // the reading the setup pushed ages past the ten seconds the config allows
+    pic.advance_time(Duration::from_secs(11));
+    let quote = quote(43);
+    let quote_hash = registered(&pic, canister, &quote);
+    // the claim anchors on a fresh reading, as every claim does
+    push_head(&pic, canister, HEAD + 1_000);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let reads = walk_the_reads(
+        &pic,
+        quote_hash,
+        HEAD + 1_000,
+        &[deposit_log(
+            quote_hash,
+            HEAD + 500,
+            USDC,
+            USER,
+            AMOUNT.into(),
+        )],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        reads,
+        vec![HEAD + 1_000 + 1 - 20_000, HEAD + 1_000 + 1 - 10_000],
+        "no height, so the plain lookback from its oldest window, and not the stale head"
+    );
+}
+
+/// The registration height is the watcher's head, and a watcher's head can run ahead of
+/// the chain. A quote registered while such a head is fresh keeps it, and the user's
+/// deposit lands below it; by the claim the chain has caught up past it, so nothing about
+/// the claim's own reading looks wrong. The claim reads from the height, finds nothing at
+/// all above it, and reads the plain lookback before refusing, so it claims the deposit
+/// rather than stranding it.
+#[test]
+fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
+    let (pic, canister, admin) = setup();
+    lookback_of(&pic, canister, admin, 100_000);
+    push_head(&pic, canister, HEAD + 50_000);
+    let quote = quote(44);
+    let quote_hash = registered(&pic, canister, &quote);
+    let deposit = deposit_log(quote_hash, HEAD + 10, USDC, USER, AMOUNT.into());
+    push_head(&pic, canister, HEAD + 60_000);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let reads = walk_the_reads(&pic, quote_hash, HEAD + 60_000, &[deposit]);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        reads[..3],
+        [HEAD + 50_000, HEAD + 50_001, HEAD + 60_000 + 1 - 100_000],
+        "from the height the quote was registered at, then, with nothing above it, the \
+         plain lookback from its oldest window"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }

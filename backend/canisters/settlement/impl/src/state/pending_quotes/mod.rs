@@ -93,12 +93,12 @@ pub fn init() {
     PENDING_EXPIRY.with(|_| ());
 }
 
-/// Records a quote against its hash, with the height the canister last heard of on the
-/// quote's source chain: the deposit that pays this quote cannot be in an earlier block, so
-/// a claim's log read starts there. A quote already in the store keeps the earliest height
-/// it was ever registered at, because a retry must never narrow the window past a deposit
-/// made in the meantime. `now` and `registered_at` are the caller's, so every rule here is
-/// testable without a canister.
+/// Records a quote against its hash, with the height of the quote's source chain the
+/// canister held a fresh reading of, if any: the deposit that pays this quote cannot be in
+/// an earlier block, so a claim's log read starts there. A quote already in the store
+/// keeps the earliest height it was ever registered at, because a retry must never narrow
+/// the window past a deposit made in the meantime. `now` and `registered_at` are the
+/// caller's, so every rule here is testable without a canister.
 pub fn register(
     quote: Quote,
     now: UnixSeconds,

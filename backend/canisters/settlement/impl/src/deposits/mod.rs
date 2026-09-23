@@ -102,6 +102,25 @@ pub enum DepositError {
     },
 }
 
+impl DepositError {
+    /// Whether the read found nothing at all it wants in its range: no deposit for the
+    /// quote, or none of the one wanted. Not a deposit short of the depth, and not a read
+    /// that could not be made, both of which say nothing about a wider range.
+    pub fn found_nothing(&self) -> bool {
+        match self {
+            Self::NotFound { .. } | Self::NoneMatches { .. } => true,
+            Self::Vault(_)
+            | Self::StaleChainData { .. }
+            | Self::RangeTooWide { .. }
+            | Self::NoDepth(_)
+            | Self::Rpc(_)
+            | Self::UnreadableHead
+            | Self::UnreadableLogs
+            | Self::NotConfirmed { .. } => false,
+        }
+    }
+}
+
 /// The amount a read is looking for: exactly the quote's, for the deposit that creates a
 /// swap, or at least the least the user was quoted, for the rail's fill on the
 /// destination.
