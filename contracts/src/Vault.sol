@@ -404,8 +404,11 @@ contract Vault is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, IE
     /// ever issues are the canister's, through `execute` and `executeMany`
     /// (and `multicall` over them), and the law follows from that:
     ///   - every target is called only with calldata the canister chose. No
-    ///     stranger can make the vault issue a call, so no stranger can speak
-    ///     for the vault to anything on this list;
+    ///     stranger can make the vault issue a call with calldata of their
+    ///     choosing. The entry doors do call the one address a depositor names
+    ///     as its token, but only with fixed calls (`balanceOf(vault)`, and a
+    ///     `transferFrom` from the depositor to the vault or the pull's own
+    ///     token call), which is one more reason this list never holds a token;
     ///   - so a target may hold balances the vault can claim. Eco's Portal
     ///     escrows a reward whose creator is the vault, and only the vault may
     ///     name where `refundTo` sends it: listing it is safe because only the

@@ -326,6 +326,8 @@ contract VaultHandler is Test {
         vm.stopPrank();
     }
 
+    /// Every door that makes the vault issue calldata its caller chose. The entry
+    /// doors issue only fixed token calls to the token the depositor names.
     function _attemptEveryDoor(Vault.Call[] memory calls, bytes memory publicDoor) internal {
         Vault.Delta[] memory none = new Vault.Delta[](0);
         Vault.Item[] memory items = new Vault.Item[](1);

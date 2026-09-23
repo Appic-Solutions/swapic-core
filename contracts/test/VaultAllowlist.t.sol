@@ -91,10 +91,12 @@ contract VaultAllowlistTest is Test {
         deltas[0] = Vault.Delta(address(usdc), -int256(amount));
     }
 
-    /// Every door that makes the vault issue a call, tried by `from` with the
-    /// same calls, each expected to refuse for its own reason. The removed
-    /// public door is tried with `publicDoor`, whatever that caller would have
-    /// sent it, and must answer with a bare revert: no function is left there.
+    /// Every door that makes the vault issue calldata its caller chose, tried
+    /// by `from` with the same calls, each expected to refuse for its own
+    /// reason. The entry doors are not in this list: they issue only fixed
+    /// token calls to the token the depositor names. The removed public door
+    /// is tried with `publicDoor`, whatever that caller would have sent it, and
+    /// must answer with a bare revert: no function is left there.
     function _everyDoorRefuses(address from, Vault.Call[] memory calls, bytes memory publicDoor) internal {
         Vault.Delta[] memory none = new Vault.Delta[](0);
         Vault.Item[] memory items = new Vault.Item[](1);
