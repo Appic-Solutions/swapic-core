@@ -18,12 +18,15 @@ use types::{Attestation, Leg as SwapLeg, Outcome, Quote, QuoteHash, Timestamp, T
 /// rail with its burn confirmed, the burn named must be the transaction that burn
 /// confirmed as, and every field of the message that the burn determined must be the
 /// swap's own (the lane, the token, the amount, the destination vault, this canister as
-/// the caller, the rail's threshold and fee ceiling). A message of another burn, ours or
-/// anyone's, is refused by the field, so it can never be minted under this swap's name
-/// and paid out of the destination vault's pooled balance. The inbox is stable memory
-/// and holds one attestation per swap: the same push again changes nothing, and a
-/// different one that binds replaces it. Rail data and not money, so the halt switch
-/// does not gate it.
+/// the caller, the rail's threshold and fee ceiling, and the swap's quote hash as the
+/// hook). The burn named proves only that the swap's burn confirmed, since nothing in a
+/// message says which transaction emitted it; what ties a message to its swap is the hook
+/// the swap's own burn wrote. A message of another burn, ours or anyone's and however
+/// identical its parameters, is refused by the field, so it can never be minted under this
+/// swap's name and paid out of the destination vault's pooled balance. The inbox is stable
+/// memory and holds one attestation per swap: the same push again changes nothing, and a
+/// different one that binds replaces it. Rail data and not money, so the halt switch does
+/// not gate it.
 #[update]
 pub fn push_attestation(
     quote_hash: Hash32,

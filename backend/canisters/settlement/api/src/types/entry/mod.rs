@@ -329,6 +329,12 @@ pub enum MessageMismatch {
     HookData {
         len: u64,
     },
+    /// The message's hook data names another swap: the message is the attested message of
+    /// that swap's burn, however identical the two burns are otherwise.
+    Swap {
+        expected: Hash32,
+        found: Hash32,
+    },
 }
 
 /// Why a rail could not decide on a swap: a knob the deploy left unset, an address of the

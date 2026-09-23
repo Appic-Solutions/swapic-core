@@ -32,7 +32,7 @@ use settlement_api::types::swap::SwapStatus;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use types::abi::{
-    decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute,
+    decode_cctp_deposit_for_burn_with_hook, decode_cctp_receive_message, decode_vault_execute,
     decode_vault_payout, decode_vault_refund, deposited_topic, mint_and_withdraw_topic, CctpMint,
     VaultTransfer,
 };
@@ -254,7 +254,11 @@ impl Chains {
 }
 
 /// The message Circle attests for the fixture's fast burn of `quote`: every field as the
-/// burn emitted it, and the nonce, the fee and the expiration as the service fills them.
+/// burn emitted it, the swap's quote hash in its hook data included, and the nonce, the
+/// fee and the expiration as the service fills them.
+///
+/// Rewritten for fix wave 4 (N1): the burn now writes its swap's quote hash as hook data,
+/// so the message it emits carries it where it carried no hook data before.
 fn attested_message(quote: &types::Quote, mine: EvmAddress) -> BurnMessage {
     let word = |address: &str| address.parse::<EvmAddress>().unwrap().to_word();
     BurnMessage {
@@ -280,9 +284,27 @@ fn attested_message(quote: &types::Quote, mine: EvmAddress) -> BurnMessage {
                 .unwrap(),
             fee_executed: fee_executed(quote.amount_in),
             expiration_block: BlockNumber::new(19_000_500),
-            hook_data: vec![],
+            hook_data: swap_id(quote).to_vec(),
         },
     }
+}
+
+/// The hook data the swap's burn wrote, read out of the burn this canister broadcast for
+/// it: what that burn's `MessageSent` carries, and so what the message Circle attests for
+/// it carries.
+fn burned_hook(chains: &Chains, quote_hash: Hash32) -> Vec<u8> {
+    chains
+        .sent
+        .iter()
+        .find_map(|tx| {
+            let execute = decode_vault_execute(&tx.data)?;
+            if execute.swap_ref.into_bytes() != quote_hash {
+                return None;
+            }
+            let burn = decode_cctp_deposit_for_burn_with_hook(&execute.calls.first()?.data)?;
+            Some(burn.hook_data)
+        })
+        .expect("the swap's burn was broadcast")
 }
 
 /// The transaction the swap's burn confirmed as, once it has.
@@ -542,8 +564,9 @@ fn deep_audit_is_clean(pic: &PocketIc, canister: Principal, admin: Principal) ->
 /// and confirmed, the attestation is handed in, the mint is created, signed and confirmed,
 /// what it delivered is read off its receipt and lands the stable, the payout is created,
 /// signed and confirmed, and the swap is done. The three broadcasts decode to the vault's
-/// `execute` of `depositForBurn`, the transmitter's `receiveMessage` and the vault's
-/// `payout`, and the log holds up under every audit.
+/// `execute` of `depositForBurnWithHook` (hooked with the swap's quote hash), the
+/// transmitter's `receiveMessage` and the vault's `payout`, and the log holds up under
+/// every audit.
 #[test]
 fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     let (pic, canister, admin) = setup();
@@ -614,7 +637,7 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     let calls = execute.calls;
     assert_eq!(execute.swap_ref.into_bytes(), quote_hash);
     assert_eq!(calls[0].target, TOKEN_MESSENGER.parse().unwrap());
-    let inner = decode_cctp_deposit_for_burn(&calls[0].data).expect("a depositForBurn");
+    let inner = decode_cctp_deposit_for_burn_with_hook(&calls[0].data).expect("a hooked burn");
     assert_eq!(inner.amount, quote.amount_in);
     assert_eq!(inner.destination_domain, 3);
     assert_eq!(
@@ -623,6 +646,11 @@ fn base_to_arbitrum_usdc_walks_the_whole_event_trail() {
     );
     assert_eq!(inner.destination_caller, mine.to_word());
     assert_eq!(inner.min_finality_threshold, 1_000);
+    assert_eq!(
+        inner.hook_data,
+        quote_hash.to_vec(),
+        "the burn names its swap in the hook its message carries"
+    );
 
     let mint = &chains.sent[1];
     assert_eq!((mint.chain_id, mint.nonce), (42161, 0));
@@ -907,6 +935,134 @@ fn a_message_of_another_swap_is_refused_and_each_swap_is_paid_its_own_mint() {
         paid, expected,
         "each swap is paid what its own mint delivered"
     );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// Two swaps whose burns are identical in every parameter: one lane, one amount, one
+/// destination vault, one caller, one threshold, one fee ceiling. CCTP v2 numbers a
+/// message in its attestation service and not on the chain (the burn's `MessageSent`
+/// carries a zero nonce), so no field the chain fixes told the two messages apart until
+/// each burn wrote its own swap's quote hash as its hook data. The first swap's message,
+/// pushed under the second swap's hash and naming the second swap's own confirmed burn
+/// before either swap has been handed anything, is refused by that hook; then each swap's
+/// own message is taken in, both walk to done, each is paid what its own mint delivered,
+/// and each message is minted once, by its own swap, so neither swap is left with its
+/// USDC burned and its message spent by the other.
+#[test]
+fn a_message_of_an_identical_burn_is_refused_under_the_other_swap() {
+    use settlement_api::types::entry::{MessageMismatch, PushAttestationError, RailError};
+    let (pic, canister, admin) = setup();
+    let mine: EvmAddress = evm_address(&pic, canister, admin)
+        .expect("derived")
+        .parse()
+        .unwrap();
+    let installed = events(&pic, canister).len();
+    let mut chains = Chains::new(19_000_000);
+    // the two quotes differ only in the quote's own nonce, which no burn carries
+    let first = quote(6);
+    let second = quote(7);
+    let first_hash = claim(&pic, canister, &mut chains, &first);
+    let second_hash = claim(&pic, canister, &mut chains, &second);
+    let first_burn = drive_until_burn_confirmed(&pic, canister, &mut chains, first_hash, installed);
+    let second_burn =
+        drive_until_burn_confirmed(&pic, canister, &mut chains, second_hash, installed);
+    assert_ne!(first_burn, second_burn);
+
+    // each message as its own burn emitted it, then numbered by the service
+    let emitted = |quote: &types::Quote, quote_hash: Hash32, nonce: u8| {
+        let message = attested_message(quote, mine);
+        BurnMessage {
+            nonce: [nonce; 32],
+            body: BurnBody {
+                hook_data: burned_hook(&chains, quote_hash),
+                ..message.body
+            },
+            ..message
+        }
+        .encode()
+    };
+    let first_message = emitted(&first, first_hash, 0xc1);
+    let second_message = emitted(&second, second_hash, 0xc2);
+
+    // misdirected first, while neither swap holds a message: every other field binds,
+    // because the burns are identical, and the hook names the first swap
+    assert_eq!(
+        push_attestation(
+            &pic,
+            canister,
+            watcher(),
+            second_hash,
+            second_burn,
+            &first_message,
+            &ATTESTATION
+        ),
+        Err(PushAttestationError::Rail(RailError::Message(
+            MessageMismatch::Swap {
+                expected: second_hash,
+                found: first_hash,
+            }
+        )))
+    );
+    for (quote_hash, burn, message) in [
+        (first_hash, first_burn, &first_message),
+        (second_hash, second_burn, &second_message),
+    ] {
+        assert_eq!(
+            push_attestation(
+                &pic,
+                canister,
+                watcher(),
+                quote_hash,
+                burn,
+                message,
+                &ATTESTATION
+            ),
+            Ok(()),
+            "each swap's own message is taken in"
+        );
+    }
+    for quote_hash in [first_hash, second_hash] {
+        drive_until(
+            &pic,
+            canister,
+            &mut chains,
+            quote_hash,
+            installed,
+            SwapStatus::Done,
+            None,
+        );
+    }
+
+    let mut paid: Vec<(Hash32, candid::Nat)> = events(&pic, canister)
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventType::PaidInStable {
+                quote_hash, amount, ..
+            } => Some((*quote_hash, amount.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut expected = vec![
+        (first_hash, candid::Nat::from(AMOUNT - FEE_EXECUTED)),
+        (second_hash, candid::Nat::from(AMOUNT - FEE_EXECUTED)),
+    ];
+    paid.sort();
+    expected.sort();
+    assert_eq!(
+        paid, expected,
+        "each swap is paid what its own mint delivered"
+    );
+    let mut minted: Vec<Vec<u8>> = chains
+        .sent
+        .iter()
+        .filter_map(|tx| decode_cctp_receive_message(&tx.data).map(|mint| mint.message))
+        .collect();
+    let mut own = vec![first_message.clone(), second_message.clone()];
+    minted.sort();
+    own.sort();
+    assert_eq!(minted, own, "each message is minted once, by its own swap");
+    assert_eq!(burned_hook(&chains, first_hash), first_hash.to_vec());
+    assert_eq!(burned_hook(&chains, second_hash), second_hash.to_vec());
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 

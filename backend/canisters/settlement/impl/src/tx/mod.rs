@@ -75,14 +75,15 @@ const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 
 /// The most one `eth_getTransactionReceipt` reply may be.
 ///
-/// Sized from the biggest receipt this canister ever asks for, a CCTP v2 `depositForBurn`.
-/// That call emits three logs: the USDC `Transfer`, `DepositForBurn` from the token
-/// messenger, and `MessageSent(bytes)` from the message transmitter, whose payload is the
-/// whole 376-byte burn message (a 148-byte header and a 228-byte burn body), which is 752
-/// hex characters plus its ABI offset and length words. With the receipt's own envelope,
-/// whose `logsBloom` alone is 514 characters of JSON, and the two dozen scalar fields, that
-/// is about four kilobytes. Eight is that with room for a fourth log, and a vault `execute`
-/// receipt is smaller.
+/// Sized from the biggest receipt this canister ever asks for, a CCTP v2 burn
+/// (`depositForBurnWithHook`). That call emits three logs: the USDC `Transfer`,
+/// `DepositForBurn` from the token messenger, and `MessageSent(bytes)` from the message
+/// transmitter, whose payload is the whole 408-byte burn message (a 148-byte header, a
+/// 228-byte burn body and the swap's 32-byte hook), which is 816 hex characters plus its
+/// ABI offset and length words. With the receipt's own envelope, whose `logsBloom` alone
+/// is 514 characters of JSON, and the two dozen scalar fields, that is about four
+/// kilobytes. Eight is that with room for a fourth log, and a vault `execute` receipt is
+/// smaller.
 pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
 
 /// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and

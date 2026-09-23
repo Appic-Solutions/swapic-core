@@ -1,11 +1,14 @@
 //! The attestation inbox: what Circle attested for each swap's burn, handed in by the
 //! watcher and taken out by the engine once the mint it feeds has delivered. The door
-//! binds a pushed message to the swap's own burn field by field before it lands here, and
-//! the rail binds it again before it is minted, because a valid message of another burn
-//! of ours would mint under this swap's name: `receiveMessage` verifies the signatures on
-//! the chain, not whose burn they are. Not a fold of the event log, so it has a map of
-//! its own and the replay audit does not compare it. Stable, so a pushed attestation
-//! survives an upgrade (rule A9).
+//! binds a pushed message to the swap before it lands here, and the rail binds it again
+//! before it is minted, because a valid message of another burn would mint under this
+//! swap's name: `receiveMessage` verifies the signatures on the chain, not whose burn they
+//! are. What binds a message to its swap is the hook data the swap's own burn wrote into
+//! it, the swap's quote hash, beside every other field the burn determined; two burns of
+//! ours with the same parameters still emit two messages that name two swaps (see
+//! `rails::cctp`). Not a fold of the event log, so it has a map of its own and the replay
+//! audit does not compare it. Stable, so a pushed attestation survives an upgrade (rule
+//! A9).
 //!
 //! The Eco intent inbox is this module's twin: both are swap-keyed stable maps outside the
 //! fold, and they are kept apart rather than made one generic map because what a push

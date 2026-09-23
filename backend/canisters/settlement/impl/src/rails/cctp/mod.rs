@@ -3,10 +3,22 @@
 //!
 //! The attestation the watcher hands in is bound to the swap before it is minted: every
 //! field of the message that the burn determined (the lane, the token, the amount, the
-//! recipient, the caller, the threshold, the fee ceiling) must be the swap's own, so a
-//! message of another burn cannot be minted under this swap's name and paid out of the
-//! destination vault's pooled balance. What the mint delivered is then read off the mint's
-//! own receipt and never computed from the burn.
+//! recipient, the caller, the threshold, the fee ceiling, the hook) must be the swap's
+//! own, so a message of another burn cannot be minted under this swap's name and paid out
+//! of the destination vault's pooled balance. What the mint delivered is then read off the
+//! mint's own receipt and never computed from the burn.
+//!
+//! The hook is what tells two burns of ours apart. CCTP v2 numbers a message in its
+//! attestation service, not on the chain: the `MessageSent` a burn emits carries a zero
+//! nonce, so two swaps on one lane for one amount would emit the same bytes, and neither
+//! the message nor the burn's receipt would say which burn an attested message came from.
+//! A message minted under the wrong one of two such swaps spends the other's message for
+//! good and leaves it with its USDC burned. So every burn is a `depositForBurnWithHook`
+//! whose hook data is the swap's quote hash, which CCTP carries into the message as it is
+//! and never runs (the destination reads only the recipient, the token, the amount and
+//! the fee), and a message binds only under the swap its hook names. A stranger can burn
+//! through the vault's public door with one of our quote hashes as the hook, but only with
+//! their own USDC, and the mint of that message pays our vault what the swap is owed.
 
 #[cfg(test)]
 mod tests;
@@ -17,10 +29,10 @@ use super::{
 };
 use crate::deposits::vault_of;
 use thiserror::Error;
-use types::abi::{cctp_deposit_for_burn, cctp_receive_message, Burn};
+use types::abi::{cctp_deposit_for_burn_with_hook, cctp_receive_message, Burn};
 use types::cctp::{BurnMessage, MESSAGE_VERSION};
 use types::events::TxPurpose;
-use types::{BasisPoints, GasAmount, Leg as SwapLeg, Rail, TokenAmount, Wei};
+use types::{BasisPoints, GasAmount, Leg as SwapLeg, QuoteHash, Rail, TokenAmount, Wei};
 
 /// A field of a burn message the burn determined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,8 +103,15 @@ pub enum MessageMismatch {
         fee: TokenAmount,
         max_fee: TokenAmount,
     },
-    #[error("the message carries {len} bytes of hook data, and this canister's burns carry none")]
+    #[error(
+        "the message carries {len} bytes of hook data, and this canister's burns carry their swap's 32-byte quote hash"
+    )]
     HookData { len: usize },
+    #[error("the message names swap {found} in its hook, and this is swap {expected}")]
+    Swap {
+        expected: QuoteHash,
+        found: QuoteHash,
+    },
 }
 
 /// CCTP v2's fast finality threshold: attested at confirmation, minutes on every chain.
@@ -172,8 +191,9 @@ impl Cctp {
     }
 
     /// The burn: the vault approves the token messenger for the amount and calls
-    /// `depositForBurn`, minting to the destination vault, deliverable only by this
-    /// canister's own address, and its USDC balance may fall by exactly the amount.
+    /// `depositForBurnWithHook`, minting to the destination vault, deliverable only by this
+    /// canister's own address, with the swap's quote hash as the hook its message carries,
+    /// and its USDC balance may fall by exactly the amount.
     pub fn burn(&self, at: &Position) -> Result<RailTx, RailError> {
         let quote = at.quote;
         let config = at.config;
@@ -198,12 +218,14 @@ impl Cctp {
             destination_caller: at.mine.to_word(),
             max_fee: self.max_fee(amount)?,
             min_finality_threshold: self.finality_threshold(),
+            // the one field that tells this burn's message from an identical burn's
+            hook_data: at.quote_hash.into_bytes().to_vec(),
         };
         through_the_vault(
             at,
             TxPurpose::Burn(at.quote_hash),
             messenger,
-            cctp_deposit_for_burn(&burn),
+            cctp_deposit_for_burn_with_hook(&burn),
             source_usdc,
             amount,
             BURN_GAS_LIMIT,
@@ -214,10 +236,11 @@ impl Cctp {
     /// burn determined must read as the burn wrote it (the lane's domains, the token
     /// messenger on both ends, this canister as the only caller, the rail's threshold, the
     /// source USDC, the destination vault, the swap's amount, the source vault as the
-    /// sender, the rail's fee ceiling, no hook data), and the fee the attestation service
-    /// executed must be inside that ceiling. The nonce, the finality executed and the
-    /// expiration are the service's to fill in. Refused by the field, so a message of
-    /// another burn, ours or anyone's, is never minted under this swap's name.
+    /// sender, the rail's fee ceiling, and this swap's quote hash as the hook), and the fee
+    /// the attestation service executed must be inside that ceiling. The nonce, the
+    /// finality executed and the expiration are the service's to fill in. Refused by the
+    /// field, so a message of another burn, ours or anyone's and however identical its
+    /// parameters, is never minted under this swap's name.
     pub fn ensure_message_binds(
         &self,
         at: &Position,
@@ -325,9 +348,14 @@ impl Cctp {
             }
             .into());
         }
-        if !message.body.hook_data.is_empty() {
-            return Err(MessageMismatch::HookData {
-                len: message.body.hook_data.len(),
+        let hook = &message.body.hook_data;
+        let named = <[u8; 32]>::try_from(hook.as_slice())
+            .map(QuoteHash::new)
+            .map_err(|_| MessageMismatch::HookData { len: hook.len() })?;
+        if named != at.quote_hash {
+            return Err(MessageMismatch::Swap {
+                expected: at.quote_hash,
+                found: named,
             }
             .into());
         }

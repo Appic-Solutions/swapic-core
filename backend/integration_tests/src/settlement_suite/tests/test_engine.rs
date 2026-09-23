@@ -18,7 +18,7 @@ use settlement_api::types::init::InitArg;
 use settlement_api::types::swap::{Leg, SwapStatus};
 use std::collections::BTreeMap;
 use std::time::Duration;
-use types::abi::{decode_cctp_deposit_for_burn, decode_vault_execute};
+use types::abi::{decode_cctp_deposit_for_burn_with_hook, decode_vault_execute};
 use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
 pub const BASE: u64 = 8453;
@@ -203,9 +203,9 @@ fn created(events: &[Event]) -> Vec<TxPurpose> {
 }
 
 /// The engine, on its timer, sends the rail's first leg for a claimed swap: a burn through
-/// the source vault, decoding to `execute` of `depositForBurn` for the destination vault.
-/// It sends one leg and then waits on it: the next tick allocates nothing more, because
-/// the attempt is open.
+/// the source vault, decoding to `execute` of `depositForBurnWithHook` for the destination
+/// vault, hooked with the swap's quote hash. It sends one leg and then waits on it: the
+/// next tick allocates nothing more, because the attempt is open.
 #[test]
 fn the_engine_sends_the_burn_for_a_funded_swap_and_then_waits_on_it() {
     let (pic, canister, admin) = setup();
@@ -245,8 +245,9 @@ fn the_engine_sends_the_burn_for_a_funded_swap_and_then_waits_on_it() {
     let execute = decode_vault_execute(&data).expect("an execute");
     let calls = execute.calls;
     assert_eq!(execute.swap_ref.into_bytes(), quote_hash);
-    let burn = decode_cctp_deposit_for_burn(&calls[0].data).expect("a depositForBurn");
+    let burn = decode_cctp_deposit_for_burn_with_hook(&calls[0].data).expect("a hooked burn");
     assert_eq!(burn.destination_domain, 3);
+    assert_eq!(burn.hook_data, quote_hash.to_vec());
     assert_eq!(
         burn.mint_recipient,
         VAULT_ARBITRUM

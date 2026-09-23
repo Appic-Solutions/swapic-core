@@ -309,6 +309,10 @@ impl From<MessageMismatch> for settlement_api::types::entry::MessageMismatch {
             MessageMismatch::HookData { len } => Self::HookData {
                 len: u64::try_from(len).expect("BUG: usize is at most 64 bits on every target"),
             },
+            MessageMismatch::Swap { expected, found } => Self::Swap {
+                expected: expected.into_bytes(),
+                found: found.into_bytes(),
+            },
         }
     }
 }

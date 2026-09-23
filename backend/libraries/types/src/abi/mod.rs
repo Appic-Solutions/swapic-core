@@ -72,14 +72,15 @@ sol! {
         PermitTransferFrom permit,
         bytes signature
     );
-    function depositForBurn(
+    function depositForBurnWithHook(
         uint256 amount,
         uint32 destinationDomain,
         bytes32 mintRecipient,
         address burnToken,
         bytes32 destinationCaller,
         uint256 maxFee,
-        uint32 minFinalityThreshold
+        uint32 minFinalityThreshold,
+        bytes hookData
     );
     function receiveMessage(bytes message, bytes attestation);
 }
@@ -157,7 +158,7 @@ pub struct Permit {
 /// A CCTP v2 burn. `mint_recipient` and `destination_caller` are 32-byte words because
 /// CCTP addresses are not all 20 bytes; [`EvmAddress::to_word`] makes one from an EVM
 /// address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Burn {
     pub amount: TokenAmount,
     pub destination_domain: u32,
@@ -169,6 +170,11 @@ pub struct Burn {
     pub max_fee: TokenAmount,
     /// 1000 is CCTP v2's fast threshold, 2000 its standard one.
     pub min_finality_threshold: u32,
+    /// Carried into the attested message as it is and never run by CCTP itself, which
+    /// reads only the recipient, the token, the amount and the fee; the token messenger
+    /// refuses an empty one. This canister writes the swap's quote hash here, which is how
+    /// a message names the swap whose burn emitted it.
+    pub hook_data: Vec<u8>,
 }
 
 /// What Eco's Portal locks for an intent and pays to its filler: the reward, with the
@@ -360,9 +366,9 @@ pub fn vault_pull_with_permit2(
     .abi_encode()
 }
 
-/// `depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)`.
-pub fn cctp_deposit_for_burn(burn: &Burn) -> Vec<u8> {
-    depositForBurnCall {
+/// `depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)`.
+pub fn cctp_deposit_for_burn_with_hook(burn: &Burn) -> Vec<u8> {
+    depositForBurnWithHookCall {
         amount: amount(burn.amount),
         destinationDomain: burn.destination_domain,
         mintRecipient: word(burn.mint_recipient),
@@ -370,6 +376,7 @@ pub fn cctp_deposit_for_burn(burn: &Burn) -> Vec<u8> {
         destinationCaller: word(burn.destination_caller),
         maxFee: amount(burn.max_fee),
         minFinalityThreshold: burn.min_finality_threshold,
+        hookData: burn.hook_data.clone().into(),
     }
     .abi_encode()
 }
@@ -568,8 +575,8 @@ pub fn decode_vault_pull_with_permit(data: &[u8]) -> Option<Eip2612Pull> {
 }
 
 /// The burn `data` encodes, if it is one.
-pub fn decode_cctp_deposit_for_burn(data: &[u8]) -> Option<Burn> {
-    let call = depositForBurnCall::abi_decode(data).ok()?;
+pub fn decode_cctp_deposit_for_burn_with_hook(data: &[u8]) -> Option<Burn> {
+    let call = depositForBurnWithHookCall::abi_decode(data).ok()?;
     Some(Burn {
         amount: checked(call.amount),
         destination_domain: call.destinationDomain,
@@ -578,6 +585,7 @@ pub fn decode_cctp_deposit_for_burn(data: &[u8]) -> Option<Burn> {
         destination_caller: call.destinationCaller.0,
         max_fee: checked(call.maxFee),
         min_finality_threshold: call.minFinalityThreshold,
+        hook_data: call.hookData.to_vec(),
     })
 }
 

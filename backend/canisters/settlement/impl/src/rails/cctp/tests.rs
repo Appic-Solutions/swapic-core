@@ -4,8 +4,8 @@ use crate::rails::tests::{
 };
 use crate::rails::{RailStep, ReclaimStep, WaitingFor};
 use types::abi::{
-    decode_cctp_deposit_for_burn, decode_cctp_receive_message, decode_vault_execute, CctpMint,
-    VaultDelta, VaultExecution,
+    decode_cctp_deposit_for_burn_with_hook, decode_cctp_receive_message, decode_vault_execute,
+    CctpMint, VaultDelta, VaultExecution,
 };
 use types::cctp::{BurnBody, BurnMessage, BURN_BODY_VERSION, MESSAGE_VERSION};
 use types::config::ChainTable;
@@ -19,8 +19,11 @@ fn word(address: &str) -> [u8; 32] {
 }
 
 /// The message Circle attests for the fixture swap's fast burn: every field the burn
-/// determined as the burn emitted it, and the nonce, the fee and the expiration as the
-/// attestation service filled them in.
+/// determined as the burn emitted it, the swap's quote hash in the hook included, and the
+/// nonce, the fee and the expiration as the attestation service filled them in.
+///
+/// Rewritten for fix wave 4 (N1): the burn now writes its swap's quote hash as hook data,
+/// where it wrote none before.
 pub(crate) fn attested_message() -> BurnMessage {
     let config = config();
     BurnMessage {
@@ -42,7 +45,45 @@ pub(crate) fn attested_message() -> BurnMessage {
             max_fee: TokenAmount::from(5_000_u32),
             fee_executed: TokenAmount::from(2_500_u32),
             expiration_block: BlockNumber::new(19_000_100),
-            hook_data: vec![],
+            hook_data: quote().hash().unwrap().into_bytes().to_vec(),
+        },
+    }
+}
+
+/// The message Circle attests for the burn this rail itself builds at `at`: every field
+/// the burn determined, read back out of the burn's own calldata (so the message is the
+/// one this burn emits, whatever the burn writes), and the nonce, the fee and the
+/// expiration as the attestation service fills them in, the nonce numbered `nonce`.
+fn attested_of_burn(rail: Cctp, at: &Position, nonce: u8) -> BurnMessage {
+    let tx = rail.burn(at).expect("the burn builds");
+    let calls = decode_vault_execute(&tx.data).expect("an execute").calls;
+    let burn = decode_cctp_deposit_for_burn_with_hook(&calls[0].data).expect("a burn");
+    let messenger = calls[0].target.to_word();
+    BurnMessage {
+        version: MESSAGE_VERSION,
+        source_domain: at
+            .config
+            .cctp_domains
+            .get(at.quote.src_chain)
+            .unwrap()
+            .get(),
+        destination_domain: burn.destination_domain,
+        nonce: [nonce; 32],
+        sender: messenger,
+        recipient: messenger,
+        destination_caller: burn.destination_caller,
+        min_finality_threshold: burn.min_finality_threshold,
+        finality_threshold_executed: burn.min_finality_threshold,
+        body: BurnBody {
+            version: BURN_BODY_VERSION,
+            burn_token: burn.burn_token.to_word(),
+            mint_recipient: burn.mint_recipient,
+            amount: burn.amount,
+            message_sender: tx.to.to_word(),
+            max_fee: burn.max_fee,
+            fee_executed: TokenAmount::from(2_500_u32),
+            expiration_block: BlockNumber::new(19_000_100),
+            hook_data: burn.hook_data,
         },
     }
 }
@@ -95,10 +136,11 @@ fn fee_and_threshold_follow_the_path() {
 }
 
 /// The burn goes through the source vault's `execute`: one call to the token messenger,
-/// approved for exactly the amount of the source USDC, whose `depositForBurn` names the
-/// destination's domain, mints to the destination vault padded to a word, may be
-/// delivered only by this canister, and asks the path's threshold and fee; and the vault
-/// checks its USDC fell by no more than the amount.
+/// approved for exactly the amount of the source USDC, whose `depositForBurnWithHook`
+/// names the destination's domain, mints to the destination vault padded to a word, may be
+/// delivered only by this canister, asks the path's threshold and fee, and carries the
+/// swap's quote hash as its hook; and the vault checks its USDC fell by no more than the
+/// amount. The hook was added in fix wave 4 (N1), when the burn became the hooked call.
 #[test]
 fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
     let quote = quote();
@@ -123,7 +165,7 @@ fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
     assert_eq!(calls[0].value, Wei::ZERO);
     assert_eq!(calls[0].approve_token, usdc_base);
     assert_eq!(calls[0].approve_amount, swap.amount_in);
-    let inner = decode_cctp_deposit_for_burn(&calls[0].data).expect("a depositForBurn");
+    let inner = decode_cctp_deposit_for_burn_with_hook(&calls[0].data).expect("a hooked burn");
     assert_eq!(inner.amount, swap.amount_in);
     assert_eq!(
         inner.destination_domain, 3,
@@ -143,6 +185,11 @@ fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
     assert_eq!(inner.max_fee, TokenAmount::from(5_000_u32));
     assert_eq!(inner.min_finality_threshold, 1_000);
     assert_eq!(
+        inner.hook_data,
+        at.quote_hash.into_bytes().to_vec(),
+        "the swap's quote hash, which its message carries"
+    );
+    assert_eq!(
         deltas,
         vec![VaultDelta {
             token: usdc_base,
@@ -152,7 +199,7 @@ fn the_burn_is_a_vault_execute_of_deposit_for_burn_to_the_destination_vault() {
 
     let standard = standard().burn(&at).unwrap();
     let calls = decode_vault_execute(&standard.data).unwrap().calls;
-    let inner = decode_cctp_deposit_for_burn(&calls[0].data).unwrap();
+    let inner = decode_cctp_deposit_for_burn_with_hook(&calls[0].data).unwrap();
     assert_eq!(
         (inner.max_fee, inner.min_finality_threshold),
         (TokenAmount::ZERO, 2_000)
@@ -376,10 +423,14 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
 
 /// The message the watcher hands in is bound to the swap before it is minted: every field
 /// the burn determined must be the swap's own, so a message of another burn (another
-/// amount, another lane, another recipient, another caller) is refused by the field, and
-/// only the fields the attestation service fills in (the nonce, the fee executed within
-/// the ceiling, the expiration) are free. A message that is not a burn message at all is
-/// refused by the way it is not.
+/// amount, another lane, another recipient, another caller, another swap's hook) is
+/// refused by the field, and only the fields the attestation service fills in (the nonce,
+/// the fee executed within the ceiling, the expiration) are free. A message that is not a
+/// burn message at all is refused by the way it is not.
+///
+/// Rewritten for fix wave 4 (N1): the hook is no longer required empty but required to be
+/// the swap's quote hash, so a hook of any other length (none at all included) is refused
+/// by its length and a hook naming another swap by the swap it names.
 #[test]
 fn a_message_is_bound_to_its_swap_field_by_field() {
     let quote = quote();
@@ -563,6 +614,31 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
             },
             MessageMismatch::HookData { len: 3 },
         ),
+        (
+            "no hook data",
+            BurnMessage {
+                body: BurnBody {
+                    hook_data: vec![],
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::HookData { len: 0 },
+        ),
+        (
+            "another swap's hook",
+            BurnMessage {
+                body: BurnBody {
+                    hook_data: vec![0x77; 32],
+                    ..good.body.clone()
+                },
+                ..good.clone()
+            },
+            MessageMismatch::Swap {
+                expected: view.quote_hash,
+                found: types::QuoteHash::new([0x77; 32]),
+            },
+        ),
     ];
     for (case, message, mismatch) in cases {
         assert_eq!(
@@ -622,4 +698,59 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
         fast().step(&at(&quote, &burned, &config, Some(&garbage), None)),
         Err(RailError::UnreadableMessage(_))
     ));
+}
+
+/// Two swaps whose burns are identical in every parameter (one lane, one amount, one
+/// destination vault, one caller, one threshold, one fee ceiling) still emit two messages:
+/// each burn writes its own swap's quote hash as its hook data, and the attested message
+/// of one is refused under the other by that hook, at the door's check and again at the
+/// mint. So a message handed to the wrong swap is never minted there, and the swap whose
+/// burn emitted it keeps an unspent message to mint. Each swap's own message binds.
+#[test]
+fn a_message_of_an_identical_burn_is_refused_under_the_other_swap() {
+    let config = config();
+    let first = quote();
+    let second = types::Quote {
+        nonce: 2,
+        ..quote()
+    };
+    let burned = fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed));
+    let first_at = at(&first, &burned, &config, None, None);
+    let second_at = at(&second, &burned, &config, None, None);
+    assert_ne!(first_at.quote_hash, second_at.quote_hash);
+    let first_message = attested_of_burn(fast(), &first_at, 0x9a);
+    let second_message = attested_of_burn(fast(), &second_at, 0x9b);
+
+    assert_eq!(
+        fast().ensure_message_binds(&first_at, &first_message),
+        Ok(())
+    );
+    assert_eq!(
+        fast().ensure_message_binds(&second_at, &second_message),
+        Ok(())
+    );
+    assert_eq!(
+        fast().ensure_message_binds(&second_at, &first_message),
+        Err(RailError::Message(MessageMismatch::Swap {
+            expected: second_at.quote_hash,
+            found: first_at.quote_hash,
+        })),
+        "the first swap's message under the second swap"
+    );
+    assert_eq!(
+        fast()
+            .step(&at(
+                &second,
+                &burned,
+                &config,
+                Some(&attestation_of(&first_message)),
+                None
+            ))
+            .map(drop),
+        Err(RailError::Message(MessageMismatch::Swap {
+            expected: second_at.quote_hash,
+            found: first_at.quote_hash,
+        })),
+        "and the mint refuses it as the door does"
+    );
 }

@@ -76,10 +76,11 @@ fn every_selector_is_the_one_cast_computes() {
                 &[0x04],
             ),
         ),
-        // cast sig "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)"
+        // cast sig "depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)"
+        // (the plain `depositForBurn`, 8e0250ee, until the burn carried its swap's hook)
         (
-            "8e0250ee",
-            cctp_deposit_for_burn(&Burn {
+            "779b432d",
+            cctp_deposit_for_burn_with_hook(&Burn {
                 amount: TokenAmount::from(1_u8),
                 destination_domain: 3,
                 mint_recipient: address(USER).to_word(),
@@ -87,6 +88,7 @@ fn every_selector_is_the_one_cast_computes() {
                 destination_caller: [0; 32],
                 max_fee: TokenAmount::ZERO,
                 min_finality_threshold: 1_000,
+                hook_data: vec![0x11; 32],
             }),
         ),
         // cast sig "receiveMessage(bytes,bytes)"
@@ -222,15 +224,19 @@ fn a_gasless_pull_encodes_as_cast_encodes_it() {
 }
 
 /// ```text
-/// cast calldata "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)" \
+/// cast calldata "depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)" \
 ///   25000000 3 0x0000000000000000000000007551a66653f9a20979ed81835a0b7008ec83401b \
 ///   0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
-///   0x0000000000000000000000000000000000000000000000000000000000000000 3250 1000
+///   0x0000000000000000000000000000000000000000000000000000000000000000 3250 1000 \
+///   0x1111111111111111111111111111111111111111111111111111111111111111
 /// ```
+///
+/// Rewritten when the burn began to carry its swap's quote hash as hook data (fix wave 4,
+/// N1): the same burn, pinned before as the plain `depositForBurn`, now with the hook.
 #[test]
 fn a_cctp_burn_encodes_as_cast_encodes_it() {
     assert_eq!(
-        hex::encode(cctp_deposit_for_burn(&Burn {
+        hex::encode(cctp_deposit_for_burn_with_hook(&Burn {
             amount: TokenAmount::from(25_000_000_u32),
             destination_domain: 3,
             mint_recipient: address(USER).to_word(),
@@ -238,9 +244,10 @@ fn a_cctp_burn_encodes_as_cast_encodes_it() {
             destination_caller: [0; 32],
             max_fee: TokenAmount::from(3_250_u32),
             min_finality_threshold: 1_000,
+            hook_data: swap_ref().into_bytes().to_vec(),
         })),
         concat!(
-            "8e0250ee",
+            "779b432d",
             "00000000000000000000000000000000000000000000000000000000017d7840",
             "0000000000000000000000000000000000000000000000000000000000000003",
             "0000000000000000000000007551a66653f9a20979ed81835a0b7008ec83401b",
@@ -248,6 +255,9 @@ fn a_cctp_burn_encodes_as_cast_encodes_it() {
             "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000cb2",
             "00000000000000000000000000000000000000000000000000000000000003e8",
+            "0000000000000000000000000000000000000000000000000000000000000100",
+            "0000000000000000000000000000000000000000000000000000000000000020",
+            "1111111111111111111111111111111111111111111111111111111111111111",
         )
     );
 }
@@ -429,9 +439,10 @@ fn every_sent_call_decodes_back_to_what_built_it() {
         destination_caller: address(ROUTER).to_word(),
         max_fee: TokenAmount::from(5_000_u32),
         min_finality_threshold: 1_000,
+        hook_data: swap_ref().into_bytes().to_vec(),
     };
     assert_eq!(
-        decode_cctp_deposit_for_burn(&cctp_deposit_for_burn(&burn)),
+        decode_cctp_deposit_for_burn_with_hook(&cctp_deposit_for_burn_with_hook(&burn)),
         Some(burn)
     );
     assert_eq!(
@@ -519,7 +530,7 @@ fn every_sent_call_decodes_back_to_what_built_it() {
     // a decoder answers only its own call
     assert_eq!(decode_vault_payout(&refund), None);
     assert_eq!(decode_vault_execute(&payout), None);
-    assert_eq!(decode_cctp_deposit_for_burn(&execute), None);
+    assert_eq!(decode_cctp_deposit_for_burn_with_hook(&execute), None);
     assert_eq!(decode_eco_refund(&publish), None);
     assert_eq!(decode_vault_pull_with_permit(&pull[4..]), None);
     assert_eq!(decode_vault_execute(&[]), None);
