@@ -881,3 +881,100 @@ fn a_message_binds_to_the_fee_its_own_burn_offered() {
         Err(RailError::NoBurnFeeRecorded)
     );
 }
+
+/// The worst a burn can deliver is its amount less the fee it offers Circle, and the
+/// payout exit refuses anything that, less the platform's fee, falls below the least the
+/// user was quoted: it freezes the swap with the funds on the destination side (review 5,
+/// M4). So a burn whose worst case is below `min_out` is never sent: the rail answers a
+/// refund from the source vault, by name, before anything is signed.
+///
+/// A Standard swap the quoter priced for no fee, with a slack of 1,000 units, on a chain
+/// whose messenger now charges a minimum of one basis point (2,500 units of 25 USDC), is
+/// refunded at the source; with no minimum listed it burns. The platform's fee counts the
+/// same way, and a fee that is the whole amount leaves nothing to pay out at all.
+#[test]
+fn a_burn_that_would_deliver_below_the_quotes_minimum_is_refunded_at_the_source() {
+    use crate::rails::SourceRefund;
+    use types::Quote;
+    let priced_for_no_fee = Quote {
+        rail: Rail::CctpV2Standard,
+        min_out: TokenAmount::from(24_999_000_u32),
+        ..quote()
+    };
+    let fresh = fixture_swap(None, None);
+    let one_bps = with_min_fee(1_000);
+    assert_eq!(
+        standard().step(&at(&priced_for_no_fee, &fresh, &one_bps, None, None)),
+        Ok(RailStep::Refund(SourceRefund::BelowMinOut {
+            max_fee: TokenAmount::from(2_500_u32),
+            worst_payout: TokenAmount::from(24_997_500_u32),
+            min_out: TokenAmount::from(24_999_000_u32),
+        }))
+    );
+    assert!(
+        matches!(
+            standard().step(&at(&priced_for_no_fee, &fresh, &config(), None, None)),
+            Ok(RailStep::Send(RailTx {
+                purpose: TxPurpose::Burn(_),
+                ..
+            }))
+        ),
+        "no minimum listed, nothing charged, and the burn goes"
+    );
+    // exactly the minimum out at worst is enough
+    let exact = Quote {
+        min_out: TokenAmount::from(24_997_500_u32),
+        ..priced_for_no_fee.clone()
+    };
+    assert!(matches!(
+        standard().step(&at(&exact, &fresh, &one_bps, None, None)),
+        Ok(RailStep::Send(_))
+    ));
+    // the platform's fee on what arrives counts: ten basis points of 25 USDC
+    let with_platform_fee = Config {
+        platform_fee: types::BasisPoints::new(10),
+        ..config()
+    };
+    assert_eq!(
+        standard().step(&at(
+            &priced_for_no_fee,
+            &fresh,
+            &with_platform_fee,
+            None,
+            None
+        )),
+        Ok(RailStep::Refund(SourceRefund::BelowMinOut {
+            max_fee: TokenAmount::ZERO,
+            worst_payout: TokenAmount::from(24_975_000_u32),
+            min_out: TokenAmount::from(24_999_000_u32),
+        }))
+    );
+    // the fast path's ceiling on one unit is the unit itself
+    let one_unit = Quote {
+        amount_in: TokenAmount::ONE,
+        min_out: TokenAmount::ZERO,
+        ..quote()
+    };
+    let one_unit_swap = Swap {
+        amount_in: TokenAmount::ONE,
+        ..fresh.clone()
+    };
+    assert_eq!(
+        fast().step(&at(&one_unit, &one_unit_swap, &config(), None, None)),
+        Ok(RailStep::Refund(SourceRefund::FeeTakesAll {
+            amount: TokenAmount::ONE,
+            max_fee: TokenAmount::ONE,
+        }))
+    );
+    // the reason the refund line carries names the numbers
+    assert_eq!(
+        SourceRefund::BelowMinOut {
+            max_fee: TokenAmount::from(2_500_u32),
+            worst_payout: TokenAmount::from(24_997_500_u32),
+            min_out: TokenAmount::from(24_999_000_u32),
+        }
+        .to_string(),
+        "a burn charged the 2500 it offers would pay the user out 24997500, below the \
+         24999000 they were quoted"
+    );
+}

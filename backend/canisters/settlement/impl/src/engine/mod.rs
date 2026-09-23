@@ -147,6 +147,23 @@ pub struct Payout {
     pub fee: TokenAmount,
 }
 
+impl Payout {
+    /// `paid` split into what the user is paid and the platform's `fee` of it, the fee
+    /// rounded down in the platform's disfavour; `None` when the fee does not fit an
+    /// amount. The one pricing rule, for the payout itself and for any leg that has to know
+    /// before it is sent what the payout after it would come to.
+    pub fn of(paid: TokenAmount, fee: BasisPoints) -> Option<Self> {
+        let fee = fee.apply_to(paid)?;
+        let amount = paid.checked_sub(fee)?;
+        Some(Self { amount, fee })
+    }
+
+    /// Whether the user is paid at least `min_out`, the least they were quoted.
+    pub fn covers(&self, min_out: TokenAmount) -> bool {
+        self.amount >= min_out
+    }
+}
+
 /// Why the engine could not act on a swap this tick. Counted, never fatal: the next tick
 /// reads the swap again.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -198,19 +215,14 @@ pub fn payout_of(
     fee: BasisPoints,
     min_out: TokenAmount,
 ) -> Result<Payout, EngineError> {
-    let fee = fee
-        .apply_to(paid)
-        .ok_or(EngineError::FeeOverflow { amount: paid })?;
-    let amount = paid
-        .checked_sub(fee)
-        .ok_or(EngineError::FeeOverflow { amount: paid })?;
-    if amount < min_out {
+    let payout = Payout::of(paid, fee).ok_or(EngineError::FeeOverflow { amount: paid })?;
+    if !payout.covers(min_out) {
         return Err(EngineError::BelowMinOut {
-            payout: amount,
+            payout: payout.amount,
             min_out,
         });
     }
-    Ok(Payout { amount, fee })
+    Ok(payout)
 }
 
 /// What one tick did. Returned rather than logged, like the sweep's.
@@ -595,6 +607,15 @@ async fn rail_step(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineErro
         }
         RailStep::ReadMint { chain_id, tx_hash } => read_mint(quote_hash, chain_id, tx_hash).await,
         RailStep::Stuck(reason) => freeze(quote_hash, reason),
+        // nothing has left the source vault, so the refund is the source vault's one
+        // transaction, where the leg would have frozen the swap on the far side
+        RailStep::Refund(reason) => {
+            append_event(EventType::RefundStarted {
+                quote_hash,
+                reason: reason.to_string(),
+            })?;
+            Ok(Did::Recorded)
+        }
     }
 }
 

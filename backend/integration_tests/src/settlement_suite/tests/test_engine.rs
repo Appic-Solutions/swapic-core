@@ -427,3 +427,78 @@ fn a_refund_address_listed_after_the_claim_is_not_paid_out() {
     );
     assert!(pic.get_canister_http().is_empty(), "nothing was sent");
 }
+
+/// A burn that would deliver below the least the user was quoted is refused at the source,
+/// never sent to freeze the swap at the destination (review 5, M4). A Standard swap the
+/// quoter priced for no fee, with a slack of 1,000 units, on a chain whose messenger now
+/// charges a minimum of one basis point (2,500 units of 25 USDC): the engine's first tick
+/// starts the refund with the reason, before anything is signed, and the next sends the
+/// refund from the source vault. No burn is ever created and the swap is never frozen.
+#[test]
+fn a_standard_swap_priced_for_no_fee_is_refunded_at_the_source_when_the_minimum_exceeds_its_slack()
+{
+    use crate::client::settlement::set_config;
+    let (pic, canister, admin) = setup();
+    set_config(
+        &pic,
+        canister,
+        admin,
+        &Config {
+            cctp_min_fees: BTreeMap::from([(BASE, 1_000)]),
+            ..config()
+        },
+    )
+    .expect("the operator lists Base's minimum fee");
+    let quote = types::Quote {
+        rail: Rail::CctpV2Standard,
+        expected_out: TokenAmount::from(AMOUNT),
+        min_out: TokenAmount::from(AMOUNT - 1_000),
+        ..quote(6)
+    };
+    let quote_hash = funded(&pic, canister, admin, &quote);
+
+    advance(&pic, canister, TICK, 19_000_001);
+    let log = events(&pic, canister);
+    assert_eq!(created(&log), vec![], "no burn was created");
+    assert_eq!(
+        log.last().unwrap().payload,
+        EventType::RefundStarted {
+            quote_hash,
+            reason: "a burn charged the 2500 it offers would pay the user out 24997500, \
+                     below the 24999000 they were quoted"
+                .into(),
+        }
+    );
+    let swap = get_swap(&pic, canister, Principal::anonymous(), quote_hash).unwrap();
+    assert_eq!(swap.status, SwapStatus::Refunding);
+
+    advance(&pic, canister, TICK, 19_000_002);
+    let log = events(&pic, canister);
+    assert_eq!(
+        created(&log),
+        vec![TxPurpose::Refund(quote_hash)],
+        "the refund from the source vault, and never a burn"
+    );
+    let EventType::TxCreated {
+        to, data, chain_id, ..
+    } = log
+        .iter()
+        .find_map(|event| match &event.payload {
+            payload @ EventType::TxCreated { .. } => Some(payload.clone()),
+            _ => None,
+        })
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(chain_id, BASE);
+    assert_eq!(to, VAULT_BASE);
+    let refund = types::abi::decode_vault_refund(&data).expect("a vault refund");
+    assert_eq!(refund.amount, TokenAmount::from(AMOUNT));
+    assert!(
+        log.iter()
+            .all(|event| !matches!(event.payload, EventType::Frozen { .. })),
+        "never frozen"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}

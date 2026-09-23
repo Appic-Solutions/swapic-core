@@ -71,6 +71,35 @@ pub enum RailStep {
     ReadMint { chain_id: ChainId, tx_hash: TxHash },
     /// No leg leads from here: the engine freezes the swap with this reason.
     Stuck(&'static str),
+    /// Nothing has left the source vault, and the rail's first leg could only end with the
+    /// swap frozen on the far side: the engine starts the swap's refund with this reason,
+    /// before anything is signed.
+    Refund(SourceRefund),
+}
+
+/// Why a rail refunds a swap from the source vault instead of sending its first leg. The
+/// payout exit refuses a payout below the least the user was quoted and freezes the swap
+/// with the funds on the destination side (rule C7): a leg whose worst case is known to
+/// end there is refused at the source, where the refund is one transaction.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SourceRefund {
+    #[error(
+        "a burn of {amount} may be charged {max_fee}, which leaves nothing to pay the user \
+         out of"
+    )]
+    FeeTakesAll {
+        amount: TokenAmount,
+        max_fee: TokenAmount,
+    },
+    #[error(
+        "a burn charged the {max_fee} it offers would pay the user out {worst_payout}, \
+         below the {min_out} they were quoted"
+    )]
+    BelowMinOut {
+        max_fee: TokenAmount,
+        worst_payout: TokenAmount,
+        min_out: TokenAmount,
+    },
 }
 
 /// The rail's move for a swap whose funds are on the rail and have to come back. Its own

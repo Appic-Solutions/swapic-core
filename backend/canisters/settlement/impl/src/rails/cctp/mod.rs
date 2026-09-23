@@ -25,9 +25,10 @@ mod tests;
 
 use super::{
     ensure_rail_tokens, through_the_vault, usdc_on, CallRail, Position, RailError, RailStep,
-    RailTx, ReclaimStep, WaitingFor,
+    RailTx, ReclaimStep, SourceRefund, WaitingFor,
 };
 use crate::deposits::vault_of;
+use crate::engine::Payout;
 use thiserror::Error;
 use types::abi::{cctp_deposit_for_burn_with_hook, cctp_receive_message, Burn};
 use types::cctp::{BurnMessage, MESSAGE_VERSION};
@@ -194,8 +195,8 @@ impl Cctp {
     /// larger fee changes no record; the quoter sizes `min_out` against it.
     ///
     /// A fee that is not below the amount is offered as it is: Circle reverts that burn
-    /// too ("Max fee must be less than amount"), and a burn that reverted refunds its swap,
-    /// where a refusal here would hold the swap on every tick.
+    /// too ("Max fee must be less than amount"), and the step never sends it, refunding the
+    /// swap at the source instead (see [`Cctp::source_refund`]).
     pub fn offered_fee(
         &self,
         config: &Config,
@@ -209,6 +210,37 @@ impl Cctp {
             .amount_for(amount)
             .ok_or(RailError::FeeOverflow { amount })?;
         Ok(self.max_fee(amount)?.max(minimum))
+    }
+
+    /// Why the swap's burn must not be sent, if it must not: the worst the burn can deliver
+    /// is its amount less the fee it offers Circle ([`Cctp::offered_fee`], the fee the burn
+    /// writes into its calldata and the fold records as `burn_max_fee`), and the payout
+    /// exit refuses anything that, less the platform's fee, is below the quote's `min_out`,
+    /// freezing the swap with the funds on the destination side. That worst case is known
+    /// before the burn, so a burn it would end that way is refused here, priced by the same
+    /// rule as the payout ([`Payout::of`]), and the swap is refunded at the source instead
+    /// (rule C7, review 5 M4). A fee that is the whole amount leaves nothing to pay out, and
+    /// Circle would revert that burn too.
+    pub fn source_refund(&self, at: &Position) -> Result<Option<SourceRefund>, RailError> {
+        let amount = at.swap.amount_in;
+        let max_fee = self.offered_fee(at.config, at.quote.src_chain, amount)?;
+        let Some(delivered) = amount
+            .checked_sub(max_fee)
+            .filter(|delivered| *delivered > TokenAmount::ZERO)
+        else {
+            return Ok(Some(SourceRefund::FeeTakesAll { amount, max_fee }));
+        };
+        let worst = Payout::of(delivered, at.config.platform_fee)
+            .ok_or(RailError::FeeOverflow { amount: delivered })?;
+        let min_out = at.quote.min_out;
+        if worst.covers(min_out) {
+            return Ok(None);
+        }
+        Ok(Some(SourceRefund::BelowMinOut {
+            max_fee,
+            worst_payout: worst.amount,
+            min_out,
+        }))
     }
 
     /// The burn: the vault approves the token messenger for the amount and calls
@@ -427,7 +459,12 @@ impl CallRail for Cctp {
         // than after the funds have crossed
         ensure_rail_tokens(at)?;
         Ok(match at.swap.last_leg {
-            None => RailStep::Send(self.burn(at)?),
+            // nothing has left the source vault yet, so a burn whose worst case the payout
+            // exit would freeze is refunded here instead, before anything is signed
+            None => match self.source_refund(at)? {
+                Some(reason) => RailStep::Refund(reason),
+                None => RailStep::Send(self.burn(at)?),
+            },
             Some(SwapLeg::Burn) => match at.attestation {
                 Some(attestation) => RailStep::Send(self.mint(at, attestation)?),
                 None => RailStep::Wait(WaitingFor::Attestation),
