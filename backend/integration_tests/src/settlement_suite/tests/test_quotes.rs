@@ -1,12 +1,14 @@
 use crate::client::settlement::{
     self, clear_pending_quotes, events_page, get_pending, register_quote, set_roles,
 };
-use crate::settlement_suite::init::{quoter, setup, upgrade, watcher};
+use crate::settlement_suite::init::{quoter, setup_with_rail_usdc, upgrade, watcher};
 use candid::{Nat, Principal};
 use pocket_ic::{PocketIc, Time};
 use settlement_api::types::errors::{GuardError, RegisterQuoteError, Role, SetRolesError};
 use settlement_api::types::events::{Event, EventType, Hash32};
-use settlement_api::types::quote::{GasMode, Quote, QuoteError};
+use settlement_api::types::quote::{
+    GasMode, Quote, QuoteAddressError, QuoteAddressField, QuoteError, RailTokenError,
+};
 use sha2::{Digest, Sha256};
 use types::address::MAX_TEXT_BYTES;
 use types::quote::MAX_QUOTE_LIFETIME;
@@ -112,7 +114,7 @@ fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
 /// validity window. The fixture's `expires_at_s` is frozen by the cross-repo golden, so the
 /// clock moves to the quote rather than the quote moving to the clock.
 fn with_roles() -> (PocketIc, Principal, Principal) {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     pic.set_time(Time::from_nanos_since_unix_epoch(
         (fixed_quote().expires_at_s - 60) * 1_000_000_000,
     ));
@@ -140,7 +142,7 @@ fn register_quote_refuses_everyone_but_the_quoter_the_install_named() {
 
 #[test]
 fn set_roles_refuses_a_stranger_and_changes_nothing() {
-    let (pic, canister, _) = setup();
+    let (pic, canister, _) = setup_with_rail_usdc();
     assert!(set_roles(&pic, canister, stranger(), stranger(), watcher()).is_err());
     assert!(register_quote(&pic, canister, stranger(), &fixed_quote()).is_err());
 }
@@ -164,7 +166,7 @@ fn set_roles_rotates_the_quoter_and_the_old_one_loses_access() {
 /// would open the endpoint to the world.
 #[test]
 fn set_roles_refuses_the_anonymous_principal() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let err = set_roles(&pic, canister, admin, Principal::anonymous(), watcher())
         .expect_err("anonymous is not a service identity");
     assert_eq!(err, SetRolesError::AnonymousRole(Role::Quoter), "say why");
@@ -220,7 +222,7 @@ fn set_roles_lands_a_roles_changed_event() {
 /// together or not at all.
 #[test]
 fn a_refused_set_roles_writes_no_event() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let before = events(&pic, canister);
     assert!(set_roles(&pic, canister, stranger(), quoter(), watcher()).is_err());
     assert!(set_roles(&pic, canister, admin, Principal::anonymous(), watcher()).is_err());
@@ -289,6 +291,10 @@ fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
 /// Rewritten for fix wave 4 (N6): a destination is held to more than its length, so the
 /// cap itself is shown on the source token, which the store holds to its length alone, and
 /// a destination at the cap is refused as no address.
+/// Rewritten for the hardening pass (H4): the store now holds the tokens to the rails'
+/// USDC too, so no text field is held to its length alone: a source token at the cap
+/// crosses the wire and is then refused as no address, by the field, as the claim refuses
+/// it.
 #[test]
 fn register_quote_refuses_a_string_over_the_byte_cap() {
     let (pic, canister, _) = with_roles();
@@ -319,10 +325,23 @@ fn register_quote_refuses_a_string_over_the_byte_cap() {
         src_token: "a".repeat(MAX_TEXT_BYTES),
         ..fixed_quote()
     };
-    let hash = register_quote(&pic, canister, quoter(), &at_cap).expect("the cap itself registers");
+    assert!(
+        types::Quote::try_from(at_cap.clone()).is_ok(),
+        "the cap itself crosses the wire"
+    );
     assert_eq!(
-        get_pending(&pic, canister, quoter(), hash).unwrap(),
-        Some(at_cap)
+        register_quote(&pic, canister, quoter(), &at_cap),
+        Err(RegisterQuoteError::RailToken(RailTokenError::QuoteAddress(
+            QuoteAddressError::NotAnAddress {
+                field: QuoteAddressField::SrcToken,
+                reason: settlement_api::types::events::EvmAddressError::NoPrefix,
+            }
+        ))),
+        "and a token is the rail's, not any text under the cap"
+    );
+    assert_eq!(
+        get_pending(&pic, canister, quoter(), hash_by_hand(&at_cap)).unwrap(),
+        None
     );
     let destination_at_cap = Quote {
         dst_address: "a".repeat(MAX_TEXT_BYTES),

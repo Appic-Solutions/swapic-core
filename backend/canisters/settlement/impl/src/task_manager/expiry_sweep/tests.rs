@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::pending_quotes::tests::{with_rail_usdc, USDC_ARBITRUM, USDC_BASE};
 use crate::state::MemoryStore;
 use crate::storage::halt::set_halted;
 use crate::storage::on_fresh_memory;
@@ -18,14 +19,16 @@ fn set_caps(refunds: u32, evictions: u32) {
     });
 }
 
+/// A quote the store takes: the rails' USDC on both sides (the hardening pass, H4, moved
+/// them off the text `usdc`, since the store pins a quote's tokens to the rail's).
 fn quote(auto_refund: bool, nonce: u64) -> Quote {
     Quote {
         version: 1,
         src_chain: ChainId::BASE,
-        src_token: "usdc".parse().unwrap(),
+        src_token: USDC_BASE.parse().unwrap(),
         amount_in: TokenAmount::from(25_000_000_u32),
         dst_chain: ChainId::ARBITRUM,
-        dst_token: "usdc".parse().unwrap(),
+        dst_token: USDC_ARBITRUM.parse().unwrap(),
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
         // the store takes only a quote a payout and a refund can be paid on (the
@@ -54,9 +57,15 @@ fn expires_at_s(q: &Quote) -> u64 {
     q.expires_at.get()
 }
 
+/// Registers `q` at `now_s` under the config as it stands, with the rails' USDC named.
 fn registered_at(q: &Quote, now_s: u64) -> QuoteHash {
-    pending_quotes::register(q.clone(), UnixSeconds::new(now_s), None, &config::get())
-        .expect("a live quote registers")
+    pending_quotes::register(
+        q.clone(),
+        UnixSeconds::new(now_s),
+        None,
+        &with_rail_usdc(config::get()),
+    )
+    .expect("a live quote registers")
 }
 
 /// The canister clock at a whole second.

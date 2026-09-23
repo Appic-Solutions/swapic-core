@@ -537,3 +537,85 @@ fn the_swaps_a_disabled_rail_holds_are_counted() {
     };
     assert_eq!(paused_on_disabled_rails(&running, swaps.iter()), 0);
 }
+
+/// The paused count is read a page at a time (review 5, L6): a page reads at most its
+/// limit of swaps, in swap id order, from the swap after the one the last page ended on,
+/// and names the swap the next page starts after while any is left, so the query answers
+/// however long the history grows. The pages together count what one read of every swap
+/// would.
+#[test]
+fn the_paused_count_is_read_a_bounded_page_at_a_time() {
+    use crate::state::transitions::tests::quote;
+    use crate::state::MemoryStore;
+    use types::Rail::{CctpV2Fast, Eco};
+    let on = |rail: types::Rail, nonce: u64| Swap {
+        quote_bytes: Quote {
+            rail,
+            ..quote(nonce)
+        }
+        .canonical_bytes()
+        .unwrap(),
+        ..at(SwapStatus::FundsReceived, None, None)
+    };
+    let id = |n: u8| QuoteHash::new([n; 32]);
+    let mut store = MemoryStore::default();
+    for (n, rail) in [
+        (1, Eco),
+        (2, CctpV2Fast),
+        (3, Eco),
+        (4, CctpV2Fast),
+        (5, Eco),
+    ] {
+        store.put_swap(id(n), on(rail, n.into()));
+    }
+    let off = types::Config::default();
+    assert_eq!(
+        paused_page(&off, &store, None, 2),
+        PausedPage {
+            paused: 1,
+            read: 2,
+            next: Some(id(2)),
+        }
+    );
+    assert_eq!(
+        paused_page(&off, &store, Some(id(2)), 2),
+        PausedPage {
+            paused: 1,
+            read: 2,
+            next: Some(id(4)),
+        }
+    );
+    assert_eq!(
+        paused_page(&off, &store, Some(id(4)), 2),
+        PausedPage {
+            paused: 1,
+            read: 1,
+            next: None,
+        },
+        "the last page names no next one"
+    );
+    assert_eq!(
+        paused_page(&off, &store, Some(id(3)), 2),
+        PausedPage {
+            paused: 1,
+            read: 2,
+            next: None,
+        },
+        "nor does a page that ends on the last swap"
+    );
+    assert_eq!(
+        paused_on_disabled_rails(&off, store.swaps().iter().map(|(_, swap)| swap)),
+        3,
+        "the pages count what one read of every swap does"
+    );
+    assert_eq!(
+        paused_page(&off, &store, None, 0),
+        PausedPage {
+            paused: 1,
+            read: 1,
+            next: Some(id(1)),
+        },
+        "a page reads at least one swap, so a walk always moves"
+    );
+    assert_eq!(MAX_PAUSED_PAGE, 500);
+}

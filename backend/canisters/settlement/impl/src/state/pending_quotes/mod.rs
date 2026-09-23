@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use thiserror::Error;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField, QuoteError, MAX_QUOTE_LIFETIME};
+use types::rail::RailTokenError;
 use types::{
     BlockNumber, Config, ExpiryKey, PendingQuote, Quote, QuoteDeadlines, QuoteHash, Rail,
     UnixSeconds,
@@ -67,6 +68,8 @@ pub enum RegisterError {
     RailUnavailable { rail: Rail },
     #[error(transparent)]
     QuoteAddress(QuoteAddressError),
+    #[error(transparent)]
+    RailToken(RailTokenError),
 }
 
 impl From<RegisterError> for RegisterQuoteError {
@@ -98,6 +101,7 @@ impl From<RegisterError> for RegisterQuoteError {
                 rail: rail.to_string(),
             },
             RegisterError::QuoteAddress(error) => Self::QuoteAddress(error.into()),
+            RegisterError::RailToken(error) => Self::RailToken(error.into()),
         }
     }
 }
@@ -122,7 +126,9 @@ pub fn init() {
 /// it was first registered under, for the same reason, and so keeps its one index key.
 ///
 /// Rule A5: a quote the claim would refuse by what it names is refused here too, before a
-/// user is handed it to pay: a rail the deploy has off, and a payee the vault cannot pay.
+/// user is handed it to pay: a rail the deploy has off, a payee the vault cannot pay, and a
+/// token that is not the one its rail carries on that chain (the claim's
+/// `ensure_rail_tokens`, on the same `usdc_addresses`).
 /// A full store first evicts, up to the sweep's own cap, the quotes whose claim's grace
 /// has ended, and refuses only if that makes no room. `now`, `registered_at` and the
 /// config are the caller's, so every rule here is testable without a canister.
@@ -162,6 +168,11 @@ pub fn register(
             return Err(RegisterError::QuoteAddress(error))
         }
     }
+    // the rails carry the USDC the deploy configured and nothing else, and the claim refuses
+    // a quote naming any other token before an outcall is bought, on the same static
+    // config: such a quote is refused here, before a user pays it (rules A5 and C7)
+    types::rail::ensure_rail_tokens(&config.usdc_addresses, &quote)
+        .map_err(RegisterError::RailToken)?;
     let expires_at = quote.expires_at;
     // the quote is good through the whole of its expiry second
     if now > expires_at {
@@ -329,4 +340,4 @@ pub(crate) fn all_pending() -> Vec<(QuoteHash, PendingQuote)> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

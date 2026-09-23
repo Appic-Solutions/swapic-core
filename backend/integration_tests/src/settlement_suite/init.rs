@@ -3,6 +3,7 @@ use candid::{encode_one, Principal};
 use pocket_ic::{ErrorCode, PocketIc, RejectResponse};
 use settlement_api::types::config::Config;
 use settlement_api::types::init::InitArg;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub fn quoter() -> Principal {
@@ -27,6 +28,41 @@ pub fn init_arg() -> InitArg {
 pub fn setup() -> (PocketIc, Principal, Principal) {
     let (pic, canister, admin) = empty_canister();
     install(&pic, canister, admin, &init_arg()).expect("the default arg installs");
+    (pic, canister, admin)
+}
+
+/// The rails' USDC on the two chains the suite's quotes name, Base's and Arbitrum's: what a
+/// registration pins a quote's tokens to (rule A5), as the claim does. The one helper every
+/// suite that registers a quote names them with.
+pub fn rail_usdc() -> BTreeMap<u64, String> {
+    BTreeMap::from([
+        (
+            8453,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+        ),
+        (
+            42161,
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
+        ),
+    ])
+}
+
+/// The spec defaults with the rails' USDC named: the config a suite registers quotes under.
+pub fn rail_config() -> Config {
+    Config {
+        usdc_addresses: rail_usdc(),
+        ..Config::default()
+    }
+}
+
+/// `setup()` installed with [`rail_config`], for a suite that registers quotes.
+pub fn setup_with_rail_usdc() -> (PocketIc, Principal, Principal) {
+    let (pic, canister, admin) = empty_canister();
+    let arg = InitArg {
+        config: rail_config(),
+        ..init_arg()
+    };
+    install(&pic, canister, admin, &arg).expect("the default arg with the rails' USDC installs");
     (pic, canister, admin)
 }
 

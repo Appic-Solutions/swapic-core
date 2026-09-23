@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 use types::address::MAX_TEXT_BYTES;
-use types::rail::UnknownRail;
+use types::rail::{RailTokenError, UnknownRail};
 use types::{ChainId, GasMode, Rail, TokenAmount};
 
 // A copy of the fixture in the types crate's `quote/tests.rs`: a cfg(test) helper
@@ -49,11 +49,37 @@ fn pending_quote(nonce: u64) -> Quote {
     }
 }
 
+/// The USDC the rails carry on Base, the fixture's source chain.
+pub(crate) const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+/// The USDC the rails carry on Arbitrum, the fixture's destination chain.
+pub(crate) const USDC_ARBITRUM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+
+/// `config` with the rails' USDC configured on the fixture's two chains: what a
+/// registration pins a quote's tokens to (rule A5), so every test that registers a quote
+/// registers it under a config that names them. The one helper for every such test.
+pub(crate) fn with_rail_usdc(config: Config) -> Config {
+    Config {
+        usdc_addresses: types::config::ChainTable(std::collections::BTreeMap::from([
+            (ChainId::BASE, USDC_BASE.parse().unwrap()),
+            (ChainId::ARBITRUM, USDC_ARBITRUM.parse().unwrap()),
+        ])),
+        ..config
+    }
+}
+
+/// The spec defaults with the rails' USDC configured.
+fn rail_config() -> Config {
+    with_rail_usdc(Config::default())
+}
+
 /// The store's `register` for a test with no interest in the height the quote was
 /// registered at: the height is the claim's business, and the test below that cares about
 /// it calls the store's own function.
+///
+/// Rewritten for the hardening pass (H4): the store pins a quote's tokens to the rails'
+/// USDC, so the config it registers under names them.
 fn register(quote: Quote, now: UnixSeconds) -> Result<QuoteHash, RegisterError> {
-    super::register(quote, now, None, &Config::default())
+    super::register(quote, now, None, &rail_config())
 }
 
 fn seconds_after(q: &Quote, secs: u64) -> UnixSeconds {
@@ -172,6 +198,9 @@ fn register_refuses_a_quote_that_does_not_validate() {
 ///
 /// Rewritten for fix wave 4 (N6): a destination at the cap is text, and is now refused as
 /// no address the way a refund address at the cap already was.
+/// Rewritten for the hardening pass (H4): the tokens are held to the rails' USDC, so a
+/// token at the cap crosses the wire and is then refused as no address, by the field, the
+/// way the claim refuses it.
 #[test]
 fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
     use settlement_api::types::quote::Quote as WireQuote;
@@ -202,8 +231,9 @@ fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
         let at_cap = Quote::try_from(at_cap).expect("the cap itself converts");
         let now = just_before_expiry(&at_cap);
         let registered = register(at_cap, now);
-        // text at the cap crosses the wire; the refund and destination addresses are held
-        // to more than a length, because a refund and a payout have to be payable to them
+        // text at the cap crosses the wire; every address the quote names is held to more
+        // than a length: a refund and a payout have to be payable to theirs, and the rails
+        // carry the USDC the deploy configured and nothing else
         match field {
             "refund_address" => assert!(
                 matches!(
@@ -221,7 +251,15 @@ fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
                 "{field} at the cap is text, and a destination must be an address: \
                  {registered:?}"
             ),
-            _ => assert!(registered.is_ok(), "{field} at the cap is allowed"),
+            _ => assert!(
+                matches!(
+                    registered,
+                    Err(RegisterError::RailToken(RailTokenError::QuoteAddress(
+                        QuoteAddressError::NotAnAddress { .. }
+                    )))
+                ),
+                "{field} at the cap is text, and a token must be the rail's: {registered:?}"
+            ),
         }
     }
 
@@ -261,18 +299,15 @@ fn register_stores_the_quote_under_its_hash_and_a_rerun_overwrites() {
 ///
 /// Rewritten for the hardening pass (H2): the entry also records the deadlines the quote
 /// was registered under.
+/// Rewritten for the hardening pass (H4): the config it registers under names the rails'
+/// USDC, which the store pins a quote's tokens to.
 #[test]
 fn register_keeps_the_height_the_quote_was_registered_at() {
     clear();
     let q = pending_quote(9_020);
     let at = types::BlockNumber::new(19_000_123);
-    let h = super::register(
-        q.clone(),
-        just_before_expiry(&q),
-        Some(at),
-        &Config::default(),
-    )
-    .expect("a live quote registers");
+    let h = super::register(q.clone(), just_before_expiry(&q), Some(at), &rail_config())
+        .expect("a live quote registers");
     assert_eq!(
         get_pending(&h),
         Some(types::PendingQuote {
@@ -293,7 +328,7 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
             q.clone(),
             just_before_expiry(&q),
             Some(later),
-            &Config::default()
+            &rail_config()
         ),
         Ok(h)
     );
@@ -308,7 +343,7 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
             blind_first.clone(),
             just_before_expiry(&blind_first),
             Some(later),
-            &Config::default()
+            &rail_config()
         ),
         Ok(h)
     );
@@ -344,7 +379,7 @@ fn register_records_the_deadlines_and_a_repeat_keeps_them() {
     let first = Config {
         permit_deadline: Duration::from_secs(120),
         claim_grace: ClaimGrace::new(Duration::from_secs(3_600)),
-        ..Config::default()
+        ..rail_config()
     };
     let h = super::register(q.clone(), just_before_expiry(&q), None, &first)
         .expect("a live quote registers");
@@ -410,11 +445,11 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
 /// an address, the one text field the store holds to more than its length besides the
 /// refund address (fix wave 4, N6, moved it off the text `c`). The rail is CCTP's fast
 /// path, which every deploy runs (fix wave 5, N8, moved it off Eco, which the store now
-/// refuses while the rail is off).
+/// refuses while the rail is off). The tokens are the fixture's, the rails' USDC, which
+/// the store pins a quote's tokens to (the hardening pass, H4, moved them off the texts
+/// `a` and `b`).
 fn tiny(nonce: u64) -> Quote {
     Quote {
-        src_token: "a".parse().unwrap(),
-        dst_token: "b".parse().unwrap(),
         dst_address: "0x4444444444444444444444444444444444444444"
             .parse()
             .unwrap(),
@@ -692,6 +727,9 @@ fn clear_empties_a_full_store_and_registration_works_again() {
 /// Eco rail while the deploy has it off is a quote a user could pay and nobody could claim,
 /// so the quoter learns at registration, and nothing is stored; with the rail on it
 /// registers.
+///
+/// Rewritten for the hardening pass (H4): the config with the rail on also names the
+/// rails' USDC, which the store pins a quote's tokens to.
 #[test]
 fn register_refuses_a_quote_on_a_rail_the_deploy_has_off() {
     clear();
@@ -706,7 +744,7 @@ fn register_refuses_a_quote_on_a_rail_the_deploy_has_off() {
     assert!(all_pending().is_empty(), "nothing was stored");
     let on = Config {
         eco_enabled: types::config::EcoEnabled::ON,
-        ..Config::default()
+        ..rail_config()
     };
     assert!(super::register(eco.clone(), just_before_expiry(&eco), None, &on).is_ok());
 }
@@ -744,16 +782,85 @@ fn register_refuses_the_zero_address_as_either_payee() {
     assert!(all_pending().is_empty(), "nothing was stored");
 }
 
+/// Rule A5 at the store (review 5, M3): the claim refuses a quote whose tokens are not the
+/// ones its rail carries, the USDC the deploy configured on each chain, before any outcall
+/// and on static config, so the store refuses the same quote before a user is handed it to
+/// pay. Another token on either side is refused by the field, a chain the config names no
+/// USDC for is refused by the chain, and nothing is stored; the rails' own tokens register.
+#[test]
+fn register_refuses_a_quote_whose_tokens_are_not_the_rails() {
+    clear();
+    let worthless = "0x3333333333333333333333333333333333333333";
+    let paid_in_it = Quote {
+        src_token: worthless.parse().unwrap(),
+        ..pending_quote(9_060)
+    };
+    assert_eq!(
+        register(paid_in_it.clone(), just_before_expiry(&paid_in_it)),
+        Err(RegisterError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::SrcToken,
+            quoted: worthless.parse().unwrap(),
+            rail_token: USDC_BASE.parse().unwrap(),
+            rail: Rail::CctpV2Fast,
+        }))
+    );
+    let paid_out_in_it = Quote {
+        dst_token: worthless.parse().unwrap(),
+        ..pending_quote(9_061)
+    };
+    assert_eq!(
+        register(paid_out_in_it.clone(), just_before_expiry(&paid_out_in_it)),
+        Err(RegisterError::RailToken(RailTokenError::NotTheRailToken {
+            field: QuoteAddressField::DstToken,
+            quoted: worthless.parse().unwrap(),
+            rail_token: USDC_ARBITRUM.parse().unwrap(),
+            rail: Rail::CctpV2Fast,
+        }))
+    );
+    let fine = pending_quote(9_062);
+    assert_eq!(
+        super::register(
+            fine.clone(),
+            just_before_expiry(&fine),
+            None,
+            &Config::default()
+        ),
+        Err(RegisterError::RailToken(RailTokenError::NoRailToken {
+            chain_id: ChainId::BASE,
+            rail: Rail::CctpV2Fast,
+        })),
+        "a config that names no USDC for the chain"
+    );
+    assert!(all_pending().is_empty(), "nothing was stored");
+    assert_eq!(
+        RegisterQuoteError::from(RegisterError::RailToken(RailTokenError::NoRailToken {
+            chain_id: ChainId::BASE,
+            rail: Rail::CctpV2Fast,
+        })),
+        RegisterQuoteError::RailToken(settlement_api::types::quote::RailTokenError::NoRailToken {
+            chain_id: ChainId::BASE.get(),
+            rail: "cctp_v2_fast".to_string(),
+        })
+    );
+    assert_eq!(
+        register(fine.clone(), just_before_expiry(&fine)),
+        Ok(fine.hash().unwrap())
+    );
+}
+
 /// A full store is not a refusal while it holds quotes no claim can be asked for any
 /// more: a registration first evicts, up to the sweep's own cap, the quotes whose claim's
 /// grace has ended, and takes the new quote in the room that makes. A flood of
 /// registrations cannot hold the store full against quotes that are only waiting for the
 /// next sweep. A store full of quotes still in their window still refuses.
+///
+/// Rewritten for the hardening pass (H4): the config names the rails' USDC, which the
+/// store pins a quote's tokens to.
 #[test]
 fn a_full_store_evicts_quotes_whose_grace_has_ended_before_it_refuses() {
     clear();
     let now = fill_to_the_cap();
-    let config = Config::default();
+    let config = rail_config();
     let next = tiny(MAX_PENDING);
     assert_eq!(
         super::register(next.clone(), now, None, &config),

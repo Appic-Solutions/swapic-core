@@ -5,7 +5,7 @@ use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
 use crate::types::events::{CanonicalError, EventError, EvmAddressError, Hash32};
 use crate::types::evm::EcdsaError;
-use crate::types::quote::{QuoteAddressError, QuoteError};
+use crate::types::quote::{QuoteAddressError, QuoteError, RailTokenError};
 use crate::types::rpc::RpcError;
 use crate::types::swap::TransitionError;
 use candid::CandidType;
@@ -90,6 +90,10 @@ pub enum RegisterQuoteError {
     /// A payee the quote names is one the vault cannot pay: the zero address as the
     /// destination or the refund address.
     QuoteAddress(QuoteAddressError),
+    /// A token the quote names is not the one its rail carries, the USDC the deploy
+    /// configured for that chain: its claim would be refused on the same check, so the
+    /// quote is not handed to a user to pay.
+    RailToken(RailTokenError),
 }
 
 /// Why `push_chain_data` stored nothing.

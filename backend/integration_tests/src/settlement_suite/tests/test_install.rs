@@ -2,7 +2,9 @@ use crate::client::settlement::{
     event_count, events_page, get_config_full, get_pending, register_quote, verify_chain,
     verify_replay,
 };
-use crate::settlement_suite::init::{empty_canister, init_arg, install, quoter, watcher};
+use crate::settlement_suite::init::{
+    empty_canister, init_arg, install, quoter, rail_usdc, watcher,
+};
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
@@ -114,11 +116,13 @@ fn an_install_with_an_invalid_arg_is_refused() {
 #[test]
 fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
     let (pic, canister, admin) = empty_canister();
+    // the rails' USDC is named, which the store pins a registered quote's tokens to
     let config = Config {
         platform_fee_bps: 10,
         rpc_urls: BTreeMap::from([(1, "https://eth.example/v2/secret-key".to_string())]),
         vault_addresses: BTreeMap::from([(8453, "0xvault".to_string())]),
         ecdsa_key_name: "key_1".to_string(),
+        usdc_addresses: rail_usdc(),
         ..Config::default()
     };
     let arg = InitArg {

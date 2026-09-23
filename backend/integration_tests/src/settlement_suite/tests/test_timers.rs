@@ -1,7 +1,7 @@
 use crate::client::settlement::{
     self, append, events_page, set_config, set_halted, test_skew_state,
 };
-use crate::settlement_suite::init::{quoter, setup, upgrade};
+use crate::settlement_suite::init::{quoter, rail_config, setup_with_rail_usdc, upgrade};
 use candid::{Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
@@ -135,7 +135,7 @@ fn waiting_swap(
 /// and it now keeps it through the grace after it too.
 #[test]
 fn expired_pending_quote_is_swept() {
-    let (pic, canister, _) = setup();
+    let (pic, canister, _) = setup_with_rail_usdc();
     let q = quote_expiring_in(&pic, 10, true, 1);
     let hash = register_quote(&pic, canister, &q).unwrap();
     assert_eq!(get_pending(&pic, canister, hash), Some(q));
@@ -164,7 +164,7 @@ fn expired_pending_quote_is_swept() {
 /// waiting for a human.
 #[test]
 fn decision_timeout_auto_refunds_only_the_quotes_that_asked_for_it() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let auto = waiting_swap(&pic, canister, admin, true, 1);
     let manual = waiting_swap(&pic, canister, admin, false, 2);
     let before = events(&pic, canister).len();
@@ -206,7 +206,7 @@ fn decision_timeout_auto_refunds_only_the_quotes_that_asked_for_it() {
 /// The log it audits is one the sweep itself appended to.
 #[test]
 fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let swap = waiting_swap(&pic, canister, admin, true, 1);
 
     // the default replay_audit_interval_s is 21_600
@@ -228,7 +228,7 @@ fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
 /// its permit window has ended, so the clock runs 63 minutes where it ran 31.
 #[test]
 fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let q = quote_expiring_in(&pic, 10, true, 1);
     let pending = register_quote(&pic, canister, &q).unwrap();
     let swap = waiting_swap(&pic, canister, admin, true, 2);
@@ -262,20 +262,20 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
 /// look comes at 800s, past the 730s any sweep would drop the quote after.
 #[test]
 fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     // init wired an expiry pass every 60s and an audit every 21_600s
     let fast = Config {
         expiry_check_interval_s: 120,
         replay_audit_interval_s: 60,
         claim_grace_s: 600,
-        ..Config::default()
+        ..rail_config()
     };
     set_config(&pic, canister, admin, &fast).unwrap();
     let slow = Config {
         expiry_check_interval_s: 3_600,
         replay_audit_interval_s: 43_200,
         claim_grace_s: 600,
-        ..Config::default()
+        ..rail_config()
     };
     set_config(&pic, canister, admin, &slow).unwrap();
 
@@ -310,7 +310,7 @@ fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
 /// edit would push the next audit a whole interval out.
 #[test]
 fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     // init wired the audit for 21_600s from now
     advance(&pic, 21_000);
     set_config(
@@ -319,7 +319,7 @@ fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
         admin,
         &Config {
             platform_fee_bps: 10,
-            ..Config::default()
+            ..rail_config()
         },
     )
     .unwrap();
@@ -334,7 +334,7 @@ fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
 /// out, or tweaks more frequent than the audit interval would keep it from ever running.
 #[test]
 fn an_expiry_only_change_keeps_the_audit_on_schedule() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     // init wired the audit for 21_600s from now
     advance(&pic, 21_000);
     set_config(
@@ -343,7 +343,7 @@ fn an_expiry_only_change_keeps_the_audit_on_schedule() {
         admin,
         &Config {
             expiry_check_interval_s: 120,
-            ..Config::default()
+            ..rail_config()
         },
     )
     .unwrap();
@@ -363,11 +363,11 @@ fn an_expiry_only_change_keeps_the_audit_on_schedule() {
 /// at 1_100s, before the sweep due at 1_200s.
 #[test]
 fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     let slow_sweep = Config {
         expiry_check_interval_s: 600,
         claim_grace_s: 600,
-        ..Config::default()
+        ..rail_config()
     };
     set_config(&pic, canister, admin, &slow_sweep).unwrap();
     // droppable by any sweep past 730s, and the sweeps are due at 600s and 1_200s
@@ -410,7 +410,7 @@ fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
 /// canister, and a stranger cannot run it at all.
 #[test]
 fn audit_replay_step_is_the_controllers_deep_check_and_halts_on_a_divergence() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     waiting_swap(&pic, canister, admin, true, 1);
     let len = settlement::event_count(&pic, canister, stranger());
 
@@ -446,7 +446,7 @@ fn audit_replay_step_is_the_controllers_deep_check_and_halts_on_a_divergence() {
 
 #[test]
 fn set_halted_refuses_a_stranger() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     assert!(set_halted(&pic, canister, stranger(), true).is_err());
     assert!(set_halted(&pic, canister, quoter(), true).is_err());
     assert!(!halted(&pic, canister));
@@ -458,7 +458,7 @@ fn set_halted_refuses_a_stranger() {
 /// outlives the redeploy and only a deliberate call clears it.
 #[test]
 fn the_halt_flag_survives_an_upgrade() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     set_halted(&pic, canister, admin, true).unwrap();
 
     upgrade(&pic, canister, admin).unwrap();
@@ -471,7 +471,7 @@ fn the_halt_flag_survives_an_upgrade() {
 /// What Plan 3 and the indexer read a swap out of.
 #[test]
 fn get_swap_answers_from_the_folded_state() {
-    let (pic, canister, admin) = setup();
+    let (pic, canister, admin) = setup_with_rail_usdc();
     assert_eq!(get_swap(&pic, canister, [0; 32]), None, "no such swap");
 
     let hash = waiting_swap(&pic, canister, admin, true, 1);

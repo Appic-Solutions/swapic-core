@@ -29,7 +29,7 @@ use settlement_api::types::errors::GuardError;
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::init::InitArg;
 use settlement_api::types::quote::Quote;
-use settlement_api::types::swap::SwapStatus;
+use settlement_api::types::swap::{PausedSwapsPage, SwapStatus};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use types::abi::deposited_topic;
@@ -840,6 +840,9 @@ fn a_dust_deposit_ahead_of_the_real_one_still_claims() {
 /// USDC can never be burned against a deposit of something else. And the fold holds the
 /// line that creates a swap to the quote it carries: a hand-written `FundsReceived`
 /// naming another amount, token or chain than its quote's is refused at the append.
+///
+/// Extended for the hardening pass (H4, review 5 M3): the store refuses the same quotes
+/// on the same check before a user is handed them to pay (rule A5), and stores nothing.
 #[test]
 fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
     use crate::client::settlement::append;
@@ -877,6 +880,29 @@ fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
         pic.get_canister_http().is_empty(),
         "refused before any outcall"
     );
+    use settlement_api::types::errors::RegisterQuoteError;
+    for (quote, field) in [
+        (&worthless, QuoteAddressField::SrcToken),
+        (&wrong_destination, QuoteAddressField::DstToken),
+    ] {
+        assert_eq!(
+            register_quote(&pic, canister, quoter(), &wire(quote)),
+            Err(RegisterQuoteError::RailToken(
+                RailTokenError::NotTheRailToken {
+                    field,
+                    quoted: USER.to_string(),
+                    rail_token: USDC.to_string(),
+                    rail: "cctp_v2_fast".to_string(),
+                }
+            )),
+            "the store refuses what the claim refuses: {field:?}"
+        );
+        assert_eq!(
+            get_pending(&pic, canister, watcher(), swap_id(quote)).unwrap(),
+            None,
+            "and stores nothing"
+        );
+    }
 
     let quote = quote(18);
     let quote_hash = swap_id(&quote);
@@ -2203,38 +2229,45 @@ fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
 /// Rewritten for fix wave 5 (N8): the store no longer takes an Eco quote while the rail is
 /// off, so the Eco quote registers with the rail on and the deploy turns it off before the
 /// pull, which is the pull's own refusal this test is for.
+/// Rewritten for the hardening pass (H4): the store no longer takes a quote naming a token
+/// that is not the rail's either, so the quote registers under the table and the deploy
+/// moves the table before the pull, which is the pull's own refusal this test is for.
 #[test]
 fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
+    use crate::client::settlement::{get_config_full, set_config};
     use settlement_api::types::quote::{QuoteAddressField, RailTokenError};
     let (pic, canister, admin) = setup_with_keys();
     let worthless = "0x2222222222222222222222222222222222222222";
-    let wrong_token = types::Quote {
+    let rail_tokens_quote = types::Quote {
         gas_mode: GasMode::Gasless,
-        src_token: worthless.parse().unwrap(),
         ..live_quote(&pic, 46)
     };
-    let wrong_hash = registered(&pic, canister, &wrong_token);
-    let PullRequest::Permit2(signed) = permit(&wrong_token) else {
-        panic!("the fixture is a Permit2 permit");
+    let quote_hash = registered(&pic, canister, &rail_tokens_quote);
+    let table = get_config_full(&pic, canister, admin).expect("the controller reads it");
+    let moved = Config {
+        usdc_addresses: BTreeMap::from([
+            (BASE, worthless.to_string()),
+            (ARBITRUM, USDC.to_string()),
+        ]),
+        ..table.clone()
     };
+    set_config(&pic, canister, admin, &moved).expect("the controller moves the table");
     assert_eq!(
         start_gasless_pull(
             &pic,
             canister,
             quoter(),
-            wrong_hash,
-            &PullRequest::Permit2(Permit2Sig {
-                token: worthless.to_string(),
-                ..signed
-            })
+            quote_hash,
+            &permit(&rail_tokens_quote)
         ),
         Err(PullError::RailToken(RailTokenError::NotTheRailToken {
             field: QuoteAddressField::SrcToken,
-            quoted: worthless.to_string(),
-            rail_token: USDC.to_string(),
+            quoted: USDC.to_string(),
+            rail_token: worthless.to_string(),
             rail: "cctp_v2_fast".to_string(),
         }))
     );
+    set_config(&pic, canister, admin, &table).expect("and back");
 
     let eco = types::Quote {
         gas_mode: GasMode::Gasless,
@@ -2793,6 +2826,10 @@ fn registration_refuses_what_a_claim_would_refuse() {
 /// deploy has the rail off, stays where it was with no line appended, and is counted by the
 /// world-readable `paused_swaps` query, so the pause is seen (E6). With the rail back on
 /// it is no longer counted.
+///
+/// Rewritten for the hardening pass (H4, review 5 L6): the query answers one bounded page,
+/// with how many swaps it read and the swap the next page starts after, where it answered
+/// a bare count read off every swap ever folded. One swap is one page, with none after it.
 #[test]
 fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
     use crate::client::settlement::{get_config_full, set_config};
@@ -2816,14 +2853,31 @@ fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
         vec![deposit_log(eco_hash, HEAD, USDC, USER, AMOUNT.into())],
     );
     assert_eq!(await_claim(&pic, call), Ok(eco_hash));
-    assert_eq!(paused_swaps(&pic, canister, Principal::anonymous()), 0);
+    let page = |paused: u64| PausedSwapsPage {
+        paused,
+        read: 1,
+        next: None,
+    };
+    assert_eq!(
+        paused_swaps(&pic, canister, Principal::anonymous(), None),
+        page(0)
+    );
 
     set_config(&pic, canister, admin, &off).expect("the controller turns it off");
     let before = count(&pic, canister);
     assert_eq!(
-        paused_swaps(&pic, canister, Principal::anonymous()),
-        1,
+        paused_swaps(&pic, canister, Principal::anonymous(), None),
+        page(1),
         "the swap the rail holds is counted, for anyone to see"
+    );
+    assert_eq!(
+        paused_swaps(&pic, canister, Principal::anonymous(), Some(eco_hash)),
+        PausedSwapsPage {
+            paused: 0,
+            read: 0,
+            next: None,
+        },
+        "and a page after the last swap reads nothing"
     );
     // a few engine ticks: the swap is refused its move and nothing is appended
     for _ in 0..3 {
@@ -2843,7 +2897,10 @@ fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
     );
 
     set_config(&pic, canister, admin, &on).expect("the controller turns it back on");
-    assert_eq!(paused_swaps(&pic, canister, Principal::anonymous()), 0);
+    assert_eq!(
+        paused_swaps(&pic, canister, Principal::anonymous(), None),
+        page(0)
+    );
 }
 
 /// A batch the provider refuses is read again one window at a time, oldest first, and each

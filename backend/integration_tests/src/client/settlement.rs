@@ -215,13 +215,14 @@ pub fn paused_swaps(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
+    after: paused_swaps::Args,
 ) -> paused_swaps::Response {
     query(
         pic,
         canister,
         sender,
         "paused_swaps",
-        encode_one(()).unwrap(),
+        encode_one(after).unwrap(),
     )
 }
 

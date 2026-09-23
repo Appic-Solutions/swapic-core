@@ -10,11 +10,13 @@ use types::Timestamp;
 /// Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
 /// so the funds that arrive later can be matched to it, and returns the hash the deposit
 /// must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
-/// refuse by the quote alone: a rail the deploy has off, and a payee that is no address or
-/// the zero address. Halted, the canister registers nothing: no new swaps during a halt.
-/// A full store first drops quotes whose claim's grace has ended. The quote's deposit and
-/// claim deadlines are fixed here, from the permit window and the grace the config holds
-/// now, and a later config change moves neither.
+/// refuse by the quote alone: a rail the deploy has off, a payee that is no address or the
+/// zero address, and a token on either side that is not the USDC the deploy configured for
+/// that chain (`RailToken`), which the claim refuses on the same config. Halted, the
+/// canister registers nothing: no new swaps during a halt. A full store first drops quotes
+/// whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
+/// from the permit window and the grace the config holds now, and a later config change
+/// moves neither.
 #[update]
 pub fn register_quote(quote: Quote) -> Result<Hash32, RegisterQuoteError> {
     // the halt stops new swaps at their first door, as the claim's own guard does

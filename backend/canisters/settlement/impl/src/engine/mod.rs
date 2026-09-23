@@ -359,6 +359,46 @@ pub fn paused_on_disabled_rails<'a>(
     u64::try_from(paused).expect("BUG: usize is at most 64 bits on every target")
 }
 
+/// The most swaps one page of the `paused_swaps` query reads.
+pub const MAX_PAUSED_PAGE: usize = 500;
+
+/// One page of the count of swaps paused on a rail the deploy has off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PausedPage {
+    /// How many of the swaps the page read are paused (see [`paused_on_disabled_rails`]).
+    pub paused: u64,
+    /// How many swaps the page read.
+    pub read: u64,
+    /// The swap the next page starts after, while any swap is left after this page.
+    pub next: Option<QuoteHash>,
+}
+
+/// How many of the swaps after `after` wait on a rail `config` has off, reading at most
+/// `limit` of them (at least one) in swap id order: the page, and never every swap ever
+/// folded, so the count answers however long the history grows. A caller sums `paused`
+/// over the pages, passing each page's `next` as the next `after`.
+pub fn paused_page(
+    config: &types::Config,
+    store: &impl Store,
+    after: Option<QuoteHash>,
+    limit: usize,
+) -> PausedPage {
+    let limit = limit.max(1);
+    // one swap past the limit is the evidence that another page follows, and is not read
+    // into this page's count
+    let mut page = store.swaps_after(after, limit.saturating_add(1));
+    let more = page.len() > limit;
+    page.truncate(limit);
+    PausedPage {
+        paused: paused_on_disabled_rails(config, page.iter().map(|(_, swap)| swap)),
+        read: u64::try_from(page.len()).expect("BUG: usize is at most 64 bits on every target"),
+        next: page
+            .last()
+            .map(|(quote_hash, _)| *quote_hash)
+            .filter(|_| more),
+    }
+}
+
 /// Decides and acts on one swap.
 async fn drive_one(quote_hash: QuoteHash, swap: &Swap) -> Result<Did, EngineError> {
     match next_action(swap) {

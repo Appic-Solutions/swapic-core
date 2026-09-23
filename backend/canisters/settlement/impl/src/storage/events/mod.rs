@@ -1,5 +1,5 @@
 use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
-use crate::state::{MemoryStore, State, Store};
+use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
     nonces_memory, pockets_memory, swaps_memory, unsigned_nonces_memory, Memory,
@@ -7,6 +7,7 @@ use crate::storage::memory::{
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
 use std::cell::RefCell;
+use std::ops::Bound;
 use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
@@ -71,6 +72,16 @@ impl Store for StableStore {
 
     fn swaps(&self) -> Vec<(QuoteHash, Swap)> {
         SWAPS.with(|swaps| swaps.borrow().iter().collect())
+    }
+
+    fn swaps_after(&self, after: Option<QuoteHash>, limit: usize) -> Vec<(QuoteHash, Swap)> {
+        SWAPS.with(|swaps| {
+            swaps
+                .borrow()
+                .range((after_bound(after), Bound::Unbounded))
+                .take(limit)
+                .collect()
+        })
     }
 
     fn pocket(&self, chain_id: &ChainId) -> Option<Pocket> {

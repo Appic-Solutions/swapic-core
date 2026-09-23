@@ -838,3 +838,60 @@ fn several_stale_entries_for_one_swap_are_repaired_by_one_line() {
         assert!(verify_replay());
     });
 }
+
+/// Both stores read their swaps a page at a time (review 5, L6): at most the limit, in
+/// swap id order, from the first swap after the one named, whether or not a swap holds
+/// that id, and from the first of all when none is named. A page past the last swap is
+/// empty.
+#[test]
+fn the_swaps_are_read_a_page_at_a_time() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = |n: u8| QuoteHash::new([n; 32]);
+        let swap = Swap {
+            quote_bytes: vec![],
+            status: SwapStatus::FundsReceived,
+            last_attempt: None,
+            open_attempt: None,
+            src_chain: ChainId::BASE,
+            src_token: "USDC".parse().unwrap(),
+            amount_in: TokenAmount::from(1_u32),
+            amount_paid: None,
+            waiting_since: None,
+            last_leg: None,
+            last_outcome: None,
+            last_tx_hash: None,
+            paid_out: None,
+            fee_accrued: None,
+            burn_max_fee: None,
+        };
+        let mut heap = MemoryStore::default();
+        for n in [2, 4, 6, 8, 10] {
+            StableStore(()).put_swap(id(n), swap.clone());
+            heap.put_swap(id(n), swap.clone());
+        }
+        let ids = |page: Vec<(QuoteHash, Swap)>| -> Vec<QuoteHash> {
+            page.into_iter().map(|(quote_hash, _)| quote_hash).collect()
+        };
+        let pages = [
+            (None, 2, vec![id(2), id(4)]),
+            (Some(id(4)), 2, vec![id(6), id(8)]),
+            (Some(id(5)), 2, vec![id(6), id(8)]),
+            (Some(id(8)), 2, vec![id(10)]),
+            (Some(id(10)), 2, vec![]),
+            (None, 500, vec![id(2), id(4), id(6), id(8), id(10)]),
+        ];
+        for (after, limit, expected) in pages {
+            assert_eq!(
+                ids(StableStore(()).swaps_after(after, limit)),
+                expected,
+                "stable, after {after:?}"
+            );
+            assert_eq!(
+                ids(heap.swaps_after(after, limit)),
+                expected,
+                "heap, after {after:?}"
+            );
+        }
+    });
+}

@@ -56,6 +56,19 @@ impl From<types::Outcome> for Outcome {
     }
 }
 
+/// One page of `paused_swaps`: the count of swaps paused on a rail the deploy has off,
+/// among the swaps this page read.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PausedSwapsPage {
+    /// How many of the swaps this page read are paused.
+    pub paused: u64,
+    /// How many swaps this page read: at most 500.
+    pub read: u64,
+    /// The swap id the next page starts after, while any swap is left after this page;
+    /// absent on the last page.
+    pub next: Option<Hash32>,
+}
+
 /// The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct Swap {

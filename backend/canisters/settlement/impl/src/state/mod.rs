@@ -1,5 +1,6 @@
 use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use types::events::TxPurpose;
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Leg, Nonce, NonceKey, Outcome,
@@ -17,6 +18,10 @@ pub trait Store {
     fn put_swap(&mut self, quote_hash: QuoteHash, swap: Swap);
     /// Every swap, in quote hash order.
     fn swaps(&self) -> Vec<(QuoteHash, Swap)>;
+    /// At most `limit` swaps in quote hash order, the first of them the first after
+    /// `after`, or the first of all when there is none: the paged read of the swaps, whose
+    /// cost is the page and never every swap ever folded.
+    fn swaps_after(&self, after: Option<QuoteHash>, limit: usize) -> Vec<(QuoteHash, Swap)>;
     fn pocket(&self, chain_id: &ChainId) -> Option<Pocket>;
     fn put_pocket(&mut self, chain_id: ChainId, pocket: Pocket);
     /// Every pocket, in chain id order.
@@ -104,6 +109,14 @@ pub trait Store {
     }
 }
 
+/// Where a page of swaps starts: after `after`, or at the first swap when none is named.
+pub fn after_bound(after: Option<QuoteHash>) -> Bound<QuoteHash> {
+    match after {
+        Some(after) => Bound::Excluded(after),
+        None => Bound::Unbounded,
+    }
+}
+
 /// A [`Store`] on the heap: what unit tests and the replay audit fold into. The deep audit
 /// saves one between its steps, so it is stored as minicbor: `#[n]` indices are
 /// append-only, never renumbered or reused, and a new field is optional.
@@ -135,6 +148,14 @@ impl Store for MemoryStore {
     fn swaps(&self) -> Vec<(QuoteHash, Swap)> {
         self.swaps
             .iter()
+            .map(|(hash, swap)| (*hash, swap.clone()))
+            .collect()
+    }
+
+    fn swaps_after(&self, after: Option<QuoteHash>, limit: usize) -> Vec<(QuoteHash, Swap)> {
+        self.swaps
+            .range((after_bound(after), Bound::Unbounded))
+            .take(limit)
             .map(|(hash, swap)| (*hash, swap.clone()))
             .collect()
     }

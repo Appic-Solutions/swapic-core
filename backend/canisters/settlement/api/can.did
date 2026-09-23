@@ -449,6 +449,17 @@ type MessageMismatch = variant {
 };
 // How a swap's latest attempt ended.
 type Outcome = variant { Failed; Confirmed };
+// One page of `paused_swaps`: the count of swaps paused on a rail the deploy has off,
+// among the swaps this page read.
+type PausedSwapsPage = record {
+  // The swap id the next page starts after, while any swap is left after this page;
+  // absent on the last page.
+  next : opt blob;
+  // How many swaps this page read: at most 500.
+  read : nat64;
+  // How many of the swaps this page read are paused.
+  paused : nat64;
+};
 // A Permit2 `PermitTransferFrom` a gasless user signed for the vault, witnessed by the
 // quote it pays for.
 // 
@@ -706,6 +717,10 @@ type RailTokenError = variant {
 };
 // Why `register_quote` stored nothing.
 type RegisterQuoteError = variant {
+  // A token the quote names is not the one its rail carries, the USDC the deploy
+  // configured for that chain: its claim would be refused on the same check, so the
+  // quote is not handed to a user to pay.
+  RailToken : RailTokenError;
   ExpiresTooFarAhead : record {
     now_s : nat64;
     expires_at_s : nat64;
@@ -1020,12 +1035,16 @@ service : (InitArg) -> {
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
-  // World-readable. How many open swaps wait on a rail the deploy has turned off: each is
-  // paused, not stopped, refused with a retryable `RailDisabled` on every engine tick, and
-  // moves again once the rail is back on. A count and nothing else, so it says nothing about
-  // any one swap that the public event log does not already. It reads every swap the fold
-  // holds, which is what one engine tick reads too.
-  paused_swaps : () -> (nat64) query;
+  // World-readable, and bounded. How many open swaps wait on a rail the deploy has turned
+  // off: each is paused, not stopped, refused with a retryable `RailDisabled` on every
+  // engine tick, and moves again once the rail is back on. Counted a page at a time: one
+  // call reads at most 500 swaps, in swap id order, starting after `after` (or at the first
+  // swap), so it answers however long the history grows. The whole count is the sum of
+  // `paused` over the pages, each asked with the `next` the one before it answered, until a
+  // page answers none. A count and nothing else, so it says nothing about any one swap that
+  // the public event log does not already, and a call costs its page, which is why it
+  // stays open to anyone.
+  paused_swaps : (opt blob) -> (PausedSwapsPage) query;
   // Watcher-only. Hands in what Circle attested for a swap's burn: the message the source
   // chain emitted and the signatures over it, which the mint on the destination takes,
   // named by the burn transaction the watcher fetched it for.
@@ -1064,11 +1083,13 @@ service : (InitArg) -> {
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
-  // refuse by the quote alone: a rail the deploy has off, and a payee that is no address or
-  // the zero address. Halted, the canister registers nothing: no new swaps during a halt.
-  // A full store first drops quotes whose claim's grace has ended. The quote's deposit and
-  // claim deadlines are fixed here, from the permit window and the grace the config holds
-  // now, and a later config change moves neither.
+  // refuse by the quote alone: a rail the deploy has off, a payee that is no address or the
+  // zero address, and a token on either side that is not the USDC the deploy configured for
+  // that chain (`RailToken`), which the claim refuses on the same config. Halted, the
+  // canister registers nothing: no new swaps during a halt. A full store first drops quotes
+  // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
+  // from the permit window and the grace the config holds now, and a later config change
+  // moves neither.
   register_quote : (Quote) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
