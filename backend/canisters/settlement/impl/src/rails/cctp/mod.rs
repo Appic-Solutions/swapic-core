@@ -3,7 +3,7 @@
 //!
 //! The attestation the watcher hands in is bound to the swap before it is minted: every
 //! field of the message that the burn determined (the lane, the token, the amount, the
-//! recipient, the caller, the threshold, the fee ceiling, the hook) must be the swap's
+//! recipient, the caller, the threshold, the fee it offered, the hook) must be the swap's
 //! own, so a message of another burn cannot be minted under this swap's name and paid out
 //! of the destination vault's pooled balance. What the mint delivered is then read off the
 //! mint's own receipt and never computed from the burn.
@@ -32,7 +32,10 @@ use thiserror::Error;
 use types::abi::{cctp_deposit_for_burn_with_hook, cctp_receive_message, Burn};
 use types::cctp::{BurnMessage, MESSAGE_VERSION};
 use types::events::TxPurpose;
-use types::{BasisPoints, GasAmount, Leg as SwapLeg, QuoteHash, Rail, TokenAmount, Wei};
+use types::{
+    BasisPoints, CctpMinFee, ChainId, Config, GasAmount, Leg as SwapLeg, QuoteHash, Rail,
+    TokenAmount, Wei,
+};
 
 /// A field of a burn message the burn determined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,8 +171,9 @@ impl Cctp {
         }
     }
 
-    /// The most Circle may take from `amount`: the fast ceiling rounded up, so no burn is
-    /// refused for a fee that rounds to nothing, and nothing at all on the standard path.
+    /// The most this path lets Circle take from `amount`: the fast ceiling rounded up, so
+    /// no burn is refused for a fee that rounds to nothing, and nothing at all on the
+    /// standard path.
     pub fn max_fee(&self, amount: TokenAmount) -> Result<TokenAmount, RailError> {
         if !self.is_fast() {
             return Ok(TokenAmount::ZERO);
@@ -180,20 +184,38 @@ impl Cctp {
             .ok_or(RailError::FeeOverflow { amount })
     }
 
-    /// The least the destination vault receives: the burn less the most Circle may take.
-    /// What `PaidInStable` records and the payout is paid out of; the fee Circle really
-    /// takes is at most this, and the difference stays in the destination vault as the
-    /// platform's.
-    pub fn least_minted(&self, amount: TokenAmount) -> Result<TokenAmount, RailError> {
-        amount
-            .checked_sub(self.max_fee(amount)?)
-            .ok_or(RailError::FeeOverflow { amount })
+    /// The `maxFee` a burn of `amount` from `chain_id` offers Circle: the path's own
+    /// ceiling, or the minimum fee that chain's `TokenMessengerV2` holds every burn of
+    /// that amount to where it is more, the Standard path included. Circle's
+    /// `_depositForBurn` reverts a burn offering less ("Insufficient max fee",
+    /// `TokenMessengerV2.sol:344-354` at `a92a2b4`), so without it every burn from a chain
+    /// with a minimum would revert and its swap refund. A chain the config lists no
+    /// minimum for is one that charges none. What arrives is read off the mint, so the
+    /// larger fee changes no record; the quoter sizes `min_out` against it.
+    ///
+    /// A fee that is not below the amount is offered as it is: Circle reverts that burn
+    /// too ("Max fee must be less than amount"), and a burn that reverted refunds its swap,
+    /// where a refusal here would hold the swap on every tick.
+    pub fn offered_fee(
+        &self,
+        config: &Config,
+        chain_id: ChainId,
+        amount: TokenAmount,
+    ) -> Result<TokenAmount, RailError> {
+        let minimum = config
+            .cctp_min_fees
+            .get(chain_id)
+            .unwrap_or(CctpMinFee::NONE)
+            .amount_for(amount)
+            .ok_or(RailError::FeeOverflow { amount })?;
+        Ok(self.max_fee(amount)?.max(minimum))
     }
 
     /// The burn: the vault approves the token messenger for the amount and calls
     /// `depositForBurnWithHook`, minting to the destination vault, deliverable only by this
-    /// canister's own address, with the swap's quote hash as the hook its message carries,
-    /// and its USDC balance may fall by exactly the amount.
+    /// canister's own address, offering Circle the fee [`Cctp::offered_fee`] names, with
+    /// the swap's quote hash as the hook its message carries, and its USDC balance may fall
+    /// by exactly the amount.
     pub fn burn(&self, at: &Position) -> Result<RailTx, RailError> {
         let quote = at.quote;
         let config = at.config;
@@ -216,7 +238,7 @@ impl Cctp {
             // only this canister delivers the mint, so nobody can spend the message first
             // and leave the mint transaction to revert
             destination_caller: at.mine.to_word(),
-            max_fee: self.max_fee(amount)?,
+            max_fee: self.offered_fee(config, quote.src_chain, amount)?,
             min_finality_threshold: self.finality_threshold(),
             // the one field that tells this burn's message from an identical burn's
             hook_data: at.quote_hash.into_bytes().to_vec(),
@@ -236,11 +258,13 @@ impl Cctp {
     /// burn determined must read as the burn wrote it (the lane's domains, the token
     /// messenger on both ends, this canister as the only caller, the rail's threshold, the
     /// source USDC, the destination vault, the swap's amount, the source vault as the
-    /// sender, the rail's fee ceiling, and this swap's quote hash as the hook), and the fee
-    /// the attestation service executed must be inside that ceiling. The nonce, the
-    /// finality executed and the expiration are the service's to fill in. Refused by the
-    /// field, so a message of another burn, ours or anyone's and however identical its
-    /// parameters, is never minted under this swap's name.
+    /// sender, the fee the burn offered, and this swap's quote hash as the hook), and the
+    /// fee the attestation service executed must be inside that offer. The fee offered is
+    /// the one the fold read off the burn's own calldata (rule A3), never recomputed from
+    /// a minimum fee the config may have moved to since the burn. The nonce, the finality
+    /// executed and the expiration are the service's to fill in. Refused by the field, so
+    /// a message of another burn, ours or anyone's and however identical its parameters,
+    /// is never minted under this swap's name.
     pub fn ensure_message_binds(
         &self,
         at: &Position,
@@ -260,7 +284,7 @@ impl Cctp {
             .ok_or(RailError::NoTokenMessenger)?
             .to_word();
         let amount = at.swap.amount_in;
-        let max_fee = self.max_fee(amount)?;
+        let max_fee = at.swap.burn_max_fee.ok_or(RailError::NoBurnFeeRecorded)?;
         if message.version != MESSAGE_VERSION {
             return Err(MessageMismatch::Version {
                 found: message.version,

@@ -79,6 +79,8 @@ pub struct Swap {
     pub paid_out: Option<Nat>,
     /// The platform's fee on this swap, once the log has accrued it.
     pub fee_accrued: Option<Nat>,
+    /// The most the swap's CCTP burn offered Circle, once one was created.
+    pub burn_max_fee: Option<Nat>,
 }
 
 impl From<types::SwapStatus> for SwapStatus {
@@ -115,6 +117,7 @@ impl From<types::Swap> for Swap {
             last_tx_hash: swap.last_tx_hash.map(TxHash::into_bytes),
             paid_out: swap.paid_out.map(Nat::from),
             fee_accrued: swap.fee_accrued.map(Nat::from),
+            burn_max_fee: swap.burn_max_fee.map(Nat::from),
         }
     }
 }

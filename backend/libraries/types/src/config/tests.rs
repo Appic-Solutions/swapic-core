@@ -800,3 +800,40 @@ fn the_claim_window_is_the_permit_window_and_the_grace_after_it() {
     };
     assert_eq!(short.claim_window(), Duration::from_secs(630));
 }
+
+/// The chains' CCTP minimum fees are a table like the other rail knobs: nothing of their
+/// own while it is empty, so the golden lines do not move, a round trip when set, and a
+/// minimum at or above the whole amount, which Circle's own setter refuses, is refused by
+/// chain.
+#[test]
+fn the_cctp_minimum_fees_are_a_table_absent_while_empty_and_below_the_whole() {
+    assert!(Config::default().cctp_min_fees.0.is_empty());
+    assert_eq!(Config::default().to_bytes()[0], 0x91, "nothing of its own");
+    let set = Config {
+        cctp_min_fees: ChainTable(BTreeMap::from([(ChainId::BASE, CctpMinFee::new(1_000))])),
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(set.to_bytes()), set);
+    assert_eq!(
+        set.to_bytes()[..2],
+        [0x98, 29],
+        "twenty-nine fields up to the table"
+    );
+    set.validate()
+        .expect("a basis point is a minimum Circle may set");
+    let whole = Config {
+        cctp_min_fees: ChainTable(BTreeMap::from([(
+            ChainId::ARBITRUM,
+            CctpMinFee::new(MIN_FEE_MULTIPLIER),
+        )])),
+        ..Config::default()
+    };
+    assert_eq!(
+        whole.validate(),
+        Err(ConfigError::CctpMinFeeTooHigh {
+            chain: ChainId::ARBITRUM,
+            min_fee: CctpMinFee::new(MIN_FEE_MULTIPLIER),
+            ceiling: MIN_FEE_MULTIPLIER,
+        })
+    );
+}

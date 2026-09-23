@@ -493,6 +493,19 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
                 let paid_out = types::abi::decode_vault_payout(data).map(|payout| payout.amount);
                 state.record_payout_created(quote_hash, paid_out);
             }
+            // the most a CCTP burn offered Circle, off the same calldata: what the message
+            // it emits carries, and so what its attestation is bound to (rule A3). An Eco
+            // publish rides the same leg and is no CCTP burn, so it records none.
+            if let TxPurpose::Burn(quote_hash) = purpose {
+                let offered = types::abi::decode_vault_execute(data)
+                    .and_then(|execute| {
+                        types::abi::decode_cctp_deposit_for_burn_with_hook(
+                            &execute.calls.first()?.data,
+                        )
+                    })
+                    .map(|burn| burn.max_fee);
+                state.record_burn_created(quote_hash, offered);
+            }
         }
         EventType::TxCancelled {
             chain_id, nonce, ..

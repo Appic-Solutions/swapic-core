@@ -9,7 +9,7 @@ use types::config::{
     AuditChunk, ChainTable, ClaimGrace, DepositLookback, EcoEnabled, EvictionsPerSweep,
     RefundsPerSweep,
 };
-use types::rail::CctpDomain;
+use types::rail::{CctpDomain, CctpMinFee};
 use types::{BasisPoints, BlockDepth, ChainId, EvmAddress, UsdAmount};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -60,6 +60,11 @@ pub struct Config {
     /// caller the claim admits, the controller included: 600 to 86,400 seconds, an hour by
     /// default. The pending store keeps the quote until it ends.
     pub claim_grace_s: u64,
+    /// The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
+    /// stores it (`minFee()`, in thousandths of a basis point, below 10,000,000). A chain
+    /// with no entry is one whose messenger charges none. Every burn offers at least this
+    /// much of its amount as its `maxFee`, the Standard path included.
+    pub cctp_min_fees: BTreeMap<u64, u32>,
 }
 
 impl Default for Config {
@@ -102,6 +107,7 @@ impl fmt::Debug for Config {
             eco_portal,
             eco_enabled,
             claim_grace_s,
+            cctp_min_fees,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -134,6 +140,7 @@ impl fmt::Debug for Config {
             .field("eco_portal", eco_portal)
             .field("eco_enabled", eco_enabled)
             .field("claim_grace_s", claim_grace_s)
+            .field("cctp_min_fees", cctp_min_fees)
             .finish()
     }
 }
@@ -191,6 +198,7 @@ impl From<types::Config> for Config {
             eco_portal,
             eco_enabled,
             claim_grace,
+            cctp_min_fees,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -239,6 +247,11 @@ impl From<types::Config> for Config {
             eco_portal: eco_portal.map(|address| address.to_string()),
             eco_enabled: eco_enabled.is_on(),
             claim_grace_s: claim_grace.get().as_secs(),
+            cctp_min_fees: cctp_min_fees
+                .0
+                .into_iter()
+                .map(|(chain, min_fee)| (chain.get(), min_fee.get()))
+                .collect(),
         }
     }
 }
@@ -353,6 +366,13 @@ impl TryFrom<Config> for types::Config {
                 .transpose()?,
             eco_enabled: EcoEnabled::new(config.eco_enabled),
             claim_grace: ClaimGrace::new(Duration::from_secs(config.claim_grace_s)),
+            cctp_min_fees: ChainTable(
+                config
+                    .cctp_min_fees
+                    .into_iter()
+                    .map(|(chain, min_fee)| (ChainId::new(chain), CctpMinFee::new(min_fee)))
+                    .collect(),
+            ),
         })
     }
 }
@@ -405,6 +425,13 @@ pub enum ConfigError {
         chain_id: u64,
         depth: u64,
         floor: u64,
+    },
+    /// The minimum fee listed for `chain_id` is at or above `ceiling`, the whole amount in
+    /// Circle's units, which Circle's own setter refuses.
+    CctpMinFeeTooHigh {
+        chain_id: u64,
+        min_fee: u32,
+        ceiling: u32,
     },
     AmountTooLarge {
         field: String,
@@ -505,6 +532,15 @@ impl From<types::ConfigError> for ConfigError {
                 chain_id: chain.get(),
                 depth: depth.get(),
                 floor: floor.get(),
+            },
+            Domain::CctpMinFeeTooHigh {
+                chain,
+                min_fee,
+                ceiling,
+            } => Self::CctpMinFeeTooHigh {
+                chain_id: chain.get(),
+                min_fee: min_fee.get(),
+                ceiling,
             },
             Domain::AmountTooLarge { field } => Self::AmountTooLarge {
                 field: field.to_string(),

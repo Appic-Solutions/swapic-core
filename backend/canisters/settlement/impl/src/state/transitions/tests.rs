@@ -1802,3 +1802,72 @@ fn the_fold_knows_the_latest_leg_and_how_it_ended() {
     step(&mut reclaimed, signed(swap_id(2), 1));
     assert_eq!(swap(&reclaimed, swap_id(2)).last_leg, Some(Leg::Reclaim));
 }
+
+/// A CCTP burn's `TxCreated` carries the burn's calldata, and the fold reads the most it
+/// offered Circle off it (rule A3): the message the burn emits carries that fee, so the
+/// binding of its attestation reads it from here and never from a minimum fee the config
+/// may have moved to since. A burn-purpose line whose calldata is no CCTP burn (the Eco
+/// publish, which also leaves the source vault as the swap's `Burn` leg) records none.
+#[test]
+fn a_cctp_burn_records_the_fee_it_offered_and_a_publish_records_none() {
+    use types::abi::{cctp_deposit_for_burn_with_hook, vault_execute, Burn, VaultCall};
+    let qh = swap_id(1);
+    let usdc: types::EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let burn = Burn {
+        amount: amount(25_000_000),
+        destination_domain: 3,
+        mint_recipient: [0x22; 32],
+        burn_token: usdc,
+        destination_caller: [0x75; 32],
+        max_fee: amount(12_500),
+        min_finality_threshold: 2_000,
+        hook_data: qh.into_bytes().to_vec(),
+    };
+    let execute = vault_execute(
+        qh,
+        &[VaultCall {
+            target: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+                .parse()
+                .unwrap(),
+            value: Wei::ZERO,
+            data: cctp_deposit_for_burn_with_hook(&burn),
+            approve_token: usdc,
+            approve_amount: amount(25_000_000),
+        }],
+        &[],
+    );
+    let burned = |data: Vec<u8>| match created(TxPurpose::Burn(qh), BASE, 0) {
+        EventType::TxCreated {
+            purpose,
+            chain_id,
+            nonce,
+            to,
+            value,
+            gas_limit,
+            max_fee,
+            max_priority_fee,
+            ..
+        } => EventType::TxCreated {
+            purpose,
+            chain_id,
+            nonce,
+            to,
+            value,
+            data,
+            gas_limit,
+            max_fee,
+            max_priority_fee,
+        },
+        other => panic!("the fixture is a TxCreated, not {other:?}"),
+    };
+    let state = fold(vec![funds(1), burned(execute)]);
+    assert_eq!(swap(&state, qh).burn_max_fee, Some(amount(12_500)));
+    let state = fold(vec![funds(1), burned(vec![0xde, 0xad, 0xbe, 0xef])]);
+    assert_eq!(
+        swap(&state, qh).burn_max_fee,
+        None,
+        "calldata that is no CCTP burn records no fee"
+    );
+}

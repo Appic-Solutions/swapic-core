@@ -119,6 +119,8 @@ pub enum RailError {
     Message(#[from] MessageMismatch),
     #[error("the mint confirmed with no transaction hash recorded for it")]
     NoMintHash,
+    #[error("the swap's burn left the source vault with no fee recorded for it")]
+    NoBurnFeeRecorded,
 }
 
 /// What a rail decides on: the swap as the fold holds it, its quote, the deploy's config,
@@ -249,6 +251,7 @@ impl From<RailError> for settlement_api::types::entry::RailError {
             RailError::UnreadableMessage(error) => Self::UnreadableMessage(error.into()),
             RailError::Message(mismatch) => Self::Message(mismatch.into()),
             RailError::NoMintHash => Self::NoMintHash,
+            RailError::NoBurnFeeRecorded => Self::NoBurnFeeRecorded,
         }
     }
 }

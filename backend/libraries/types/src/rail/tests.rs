@@ -155,3 +155,40 @@ fn the_rail_pins_both_tokens_to_the_configured_usdc() {
         })
     );
 }
+
+/// A burn's `maxFee` must be at least what the messenger's `minFee` asks of its amount,
+/// computed as Circle computes it: thousandths of a basis point of the amount, rounded
+/// down, and one unit when that rounds to nothing, but nothing at all where the messenger
+/// charges no minimum.
+#[test]
+fn the_minimum_fee_is_circles_own_arithmetic() {
+    let usdc = |units: u128| TokenAmount::from(units);
+    // one basis point is a thousand of Circle's units
+    let one_bps = CctpMinFee::new(1_000);
+    assert_eq!(one_bps.amount_for(usdc(25_000_000)), Some(usdc(2_500)));
+    assert_eq!(
+        CctpMinFee::new(5_000).amount_for(usdc(25_000_000)),
+        Some(usdc(12_500)),
+        "five basis points"
+    );
+    assert_eq!(
+        CctpMinFee::new(1).amount_for(usdc(25_000_000)),
+        Some(usdc(2)),
+        "a thousandth of a basis point, rounded down"
+    );
+    assert_eq!(
+        one_bps.amount_for(usdc(9_999)),
+        Some(usdc(1)),
+        "a product that rounds to nothing is one unit"
+    );
+    assert_eq!(
+        CctpMinFee::NONE.amount_for(usdc(25_000_000)),
+        Some(usdc(0)),
+        "no minimum is nothing at all"
+    );
+    assert_eq!(
+        CctpMinFee::new(MIN_FEE_MULTIPLIER - 1).amount_for(usdc(25_000_000)),
+        Some(usdc(24_999_997)),
+        "the highest minimum Circle's setter admits"
+    );
+}

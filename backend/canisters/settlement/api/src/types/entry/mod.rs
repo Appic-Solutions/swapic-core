@@ -392,6 +392,9 @@ pub enum RailError {
     UnreadableMessage(MessageError),
     Message(MessageMismatch),
     NoMintHash,
+    /// The swap's burn left the source vault with no fee recorded for it: a fold no
+    /// line produces, so its message is bound to nothing and not minted.
+    NoBurnFeeRecorded,
 }
 
 /// Why `push_attestation` stored nothing.

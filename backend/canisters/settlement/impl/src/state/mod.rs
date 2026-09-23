@@ -366,6 +366,7 @@ impl<S: Store> State<S> {
                 last_tx_hash: None,
                 paid_out: None,
                 fee_accrued: None,
+                burn_max_fee: None,
             },
         );
     }
@@ -527,6 +528,14 @@ impl<S: Store> State<S> {
     /// is folded from the log like everything else the record says.
     fn record_payout_created(&mut self, quote_hash: &QuoteHash, paid_out: Option<TokenAmount>) {
         self.update_swap(quote_hash, |swap| swap.paid_out = paid_out);
+    }
+
+    /// The most the CCTP burn this canister just created offered Circle, read off the
+    /// calldata the line carries, or nothing for a burn leg that is no CCTP burn: the
+    /// attestation of that burn is bound to it, so it is folded from the log like
+    /// everything else the binding reads.
+    fn record_burn_created(&mut self, quote_hash: &QuoteHash, offered: Option<TokenAmount>) {
+        self.update_swap(quote_hash, |swap| swap.burn_max_fee = offered);
     }
 
     /// The other ways an allocation ends: the nonce was spent by a cancel rather than by the

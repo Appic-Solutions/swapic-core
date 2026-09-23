@@ -12,7 +12,9 @@ use types::config::ChainTable;
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::RailTokenError;
-use types::{Attestation, BlockNumber, ChainId, Config, EvmAddress, Outcome, Timestamp, TxHash};
+use types::{
+    Attestation, BlockNumber, ChainId, Config, EvmAddress, Outcome, Swap, Timestamp, TxHash,
+};
 
 fn word(address: &str) -> [u8; 32] {
     address.parse::<EvmAddress>().unwrap().to_word()
@@ -101,9 +103,13 @@ fn standard() -> Cctp {
 }
 
 /// The fast path is attested at threshold 1000 and pays at most two basis points, rounded
-/// up so a tiny burn still offers Circle its minimum; the standard path is attested at
-/// 2000 and pays nothing. The amount the destination is promised is the burn less that
-/// ceiling.
+/// up so a tiny burn still offers Circle a unit; the standard path is attested at 2000 and
+/// pays nothing of its own. With no minimum listed for the chain, that ceiling is what a
+/// burn offers.
+///
+/// Rewritten for fix wave 5 (N12): `least_minted` is gone (nothing called it since the
+/// mint's own receipt became what `PaidInStable` records), and the offer a burn makes is
+/// asserted in its place.
 #[test]
 fn fee_and_threshold_follow_the_path() {
     assert_eq!(fast().finality_threshold(), 1_000);
@@ -122,10 +128,14 @@ fn fee_and_threshold_follow_the_path() {
     assert_eq!(fast().max_fee(usdc(4_999)), Ok(usdc(1)));
     assert_eq!(fast().max_fee(usdc(5_001)), Ok(usdc(2)));
     assert_eq!(standard().max_fee(usdc(25_000_000)), Ok(usdc(0)));
-    assert_eq!(fast().least_minted(usdc(25_000_000)), Ok(usdc(24_995_000)));
+    let none = config();
     assert_eq!(
-        standard().least_minted(usdc(25_000_000)),
-        Ok(usdc(25_000_000))
+        fast().offered_fee(&none, ChainId::BASE, usdc(25_000_000)),
+        Ok(usdc(5_000))
+    );
+    assert_eq!(
+        standard().offered_fee(&none, ChainId::BASE, usdc(25_000_000)),
+        Ok(usdc(0))
     );
     assert_eq!(
         fast().max_fee(TokenAmount::MAX),
@@ -431,6 +441,10 @@ fn a_swap_naming_another_token_is_refused_before_the_burn() {
 /// Rewritten for fix wave 4 (N1): the hook is no longer required empty but required to be
 /// the swap's quote hash, so a hook of any other length (none at all included) is refused
 /// by its length and a hook naming another swap by the swap it names.
+///
+/// Rewritten for fix wave 5 (N12): the fee a message must carry is the one the fold
+/// recorded off the swap's own burn, so the standard case binds under a swap whose burn
+/// offered no fee.
 #[test]
 fn a_message_is_bound_to_its_swap_field_by_field() {
     let quote = quote();
@@ -659,7 +673,13 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
         ..good.clone()
     };
     assert_eq!(fast().ensure_message_binds(&view, &filled), Ok(()));
-    // the standard rail asks the standard threshold and no fee
+    // the standard rail asks the standard threshold, and a burn from a chain with no
+    // minimum offered no fee (fix wave 5, N12: the offer is the one the fold recorded)
+    let standard_burned = types::Swap {
+        burn_max_fee: Some(TokenAmount::ZERO),
+        ..burned.clone()
+    };
+    let standard_view = at(&quote, &standard_burned, &config, None, None);
     let standard_message = BurnMessage {
         min_finality_threshold: STANDARD_FINALITY_THRESHOLD,
         body: BurnBody {
@@ -670,7 +690,7 @@ fn a_message_is_bound_to_its_swap_field_by_field() {
         ..good.clone()
     };
     assert_eq!(
-        standard().ensure_message_binds(&view, &standard_message),
+        standard().ensure_message_binds(&standard_view, &standard_message),
         Ok(())
     );
 
@@ -752,5 +772,112 @@ fn a_message_of_an_identical_burn_is_refused_under_the_other_swap() {
             found: first_at.quote_hash,
         })),
         "and the mint refuses it as the door does"
+    );
+}
+
+/// The most the burn at `at` offers Circle, read back out of its own calldata.
+fn offered_by_burn(rail: Cctp, at: &Position) -> TokenAmount {
+    let tx = rail.burn(at).expect("the burn builds");
+    let calls = decode_vault_execute(&tx.data).expect("an execute").calls;
+    decode_cctp_deposit_for_burn_with_hook(&calls[0].data)
+        .expect("a burn")
+        .max_fee
+}
+
+/// The fixture config with the source chain's messenger charging `min_fee` of Circle's
+/// thousandths of a basis point.
+fn with_min_fee(min_fee: u32) -> Config {
+    Config {
+        cctp_min_fees: ChainTable(std::collections::BTreeMap::from([(
+            ChainId::BASE,
+            types::CctpMinFee::new(min_fee),
+        )])),
+        ..config()
+    }
+}
+
+/// Circle's `TokenMessengerV2` reverts a burn whose `maxFee` is below the minimum fee it
+/// holds that amount to, the Standard path included (N12). So a Standard burn from a chain
+/// that charges a minimum offers exactly it, where it offered nothing, and a chain the
+/// config lists no minimum for is one that charges none.
+#[test]
+fn a_standard_burn_offers_the_chains_minimum_fee() {
+    let quote = quote();
+    let fresh = fixture_swap(None, None);
+    let one_bps = with_min_fee(1_000);
+    assert_eq!(
+        offered_by_burn(standard(), &at(&quote, &fresh, &one_bps, None, None)),
+        TokenAmount::from(2_500_u32),
+        "one basis point of 25 USDC"
+    );
+    let none = config();
+    assert_eq!(
+        offered_by_burn(standard(), &at(&quote, &fresh, &none, None, None)),
+        TokenAmount::ZERO,
+        "no minimum listed, none charged"
+    );
+}
+
+/// A Fast burn offers its two basis point ceiling, or the chain's minimum where that is
+/// more: a minimum of five basis points is what the burn offers, and one of one basis
+/// point leaves the ceiling, which is already above it.
+#[test]
+fn a_fast_burn_offers_the_minimum_where_its_ceiling_is_below_it() {
+    let quote = quote();
+    let fresh = fixture_swap(None, None);
+    let five_bps = with_min_fee(5_000);
+    assert_eq!(
+        offered_by_burn(fast(), &at(&quote, &fresh, &five_bps, None, None)),
+        TokenAmount::from(12_500_u32),
+        "the minimum, above the 5,000 ceiling"
+    );
+    let one_bps = with_min_fee(1_000);
+    assert_eq!(
+        offered_by_burn(fast(), &at(&quote, &fresh, &one_bps, None, None)),
+        TokenAmount::from(5_000_u32),
+        "the ceiling, above the 2,500 minimum"
+    );
+}
+
+/// The message a burn emits carries the fee that burn offered, and the binding reads that
+/// fee off the fold, where the burn's calldata recorded it (rule A3): a minimum the
+/// operator lowered or raised after the burn, with Circle's, cannot unbind the message
+/// the burn emitted and leave its USDC burned and never minted. A message carrying another
+/// fee is refused by the field, and a swap whose burn the fold holds no fee for is a fold
+/// no line produces, refused by name.
+#[test]
+fn a_message_binds_to_the_fee_its_own_burn_offered() {
+    let quote = quote();
+    // burned when the chain charged five basis points, and the table is empty now
+    let burned = Swap {
+        burn_max_fee: Some(TokenAmount::from(12_500_u32)),
+        ..fixture_swap(Some(SwapLeg::Burn), Some(Outcome::Confirmed))
+    };
+    let now = config();
+    let view = at(&quote, &burned, &now, None, None);
+    let offered = BurnMessage {
+        body: BurnBody {
+            max_fee: TokenAmount::from(12_500_u32),
+            ..attested_message().body
+        },
+        ..attested_message()
+    };
+    assert_eq!(fast().ensure_message_binds(&view, &offered), Ok(()));
+    assert_eq!(
+        fast().ensure_message_binds(&view, &attested_message()),
+        Err(RailError::Message(MessageMismatch::Amount {
+            field: MessageField::MaxFee,
+            expected: TokenAmount::from(12_500_u32),
+            found: TokenAmount::from(5_000_u32),
+        })),
+        "the ceiling the config would give now is not the fee the burn offered"
+    );
+    let unrecorded = Swap {
+        burn_max_fee: None,
+        ..burned
+    };
+    assert_eq!(
+        fast().ensure_message_binds(&at(&quote, &unrecorded, &now, None, None), &offered),
+        Err(RailError::NoBurnFeeRecorded)
     );
 }

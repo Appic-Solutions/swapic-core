@@ -4,7 +4,7 @@ mod tests;
 use crate::chain::ChainId;
 use crate::config::ChainTable;
 use crate::evm::EvmAddress;
-use crate::numeric::UnixSeconds;
+use crate::numeric::{TokenAmount, UnixSeconds};
 use crate::quote::{Quote, QuoteAddressError, QuoteAddressField};
 use minicbor::{Decode, Encode};
 use std::fmt;
@@ -56,6 +56,63 @@ impl CctpDomain {
 }
 
 impl fmt::Display for CctpDomain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Circle's `MIN_FEE_MULTIPLIER`: a minimum fee is counted in thousandths of a basis
+/// point, so this many of them are the whole amount.
+///
+/// Source: circlefin/evm-cctp-contracts at `a92a2b4e7e6ef99bf0b05dca71780f5ec190e729`,
+/// `src/v2/BaseTokenMessenger.sol:111` (`minFee`, "in 1/1000 basis points") and `:114`
+/// (`MIN_FEE_MULTIPLIER = 10_000_000`).
+pub const MIN_FEE_MULTIPLIER: u32 = 10_000_000;
+
+/// The minimum fee a chain's `TokenMessengerV2` holds every burn to, as Circle stores it:
+/// `minFee`, in thousandths of a basis point, below [`MIN_FEE_MULTIPLIER`] (Circle's own
+/// `_setMinFee` refuses anything else, `BaseTokenMessenger.sol:407`). Zero on a chain
+/// whose messenger charges no minimum, which is what a chain the config lists no entry for
+/// reads as.
+///
+/// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[cbor(transparent)]
+pub struct CctpMinFee(#[n(0)] u32);
+
+impl CctpMinFee {
+    /// A messenger that charges no minimum.
+    pub const NONE: Self = Self(0);
+
+    pub const fn new(min_fee: u32) -> Self {
+        Self(min_fee)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The least `maxFee` the messenger admits for a burn of `amount`, as
+    /// `TokenMessengerV2._calcMinFeeAmount` computes it: `amount * minFee / 10_000_000`
+    /// rounded down, and one unit when that rounds to nothing; nothing at all when the
+    /// messenger charges no minimum. `None` for an amount whose product overflows 256 bits.
+    ///
+    /// Source: `src/v2/TokenMessengerV2.sol:314-319` (`_calcMinFeeAmount`), used by
+    /// `_depositForBurn` at `:344-354`, which reverts a burn whose `maxFee` is below it
+    /// ("Insufficient max fee") and one whose `maxFee` is not below the amount; and
+    /// `getMinFeeAmount` at `:299-303`, which answers zero for a zero `minFee`.
+    pub fn amount_for(self, amount: TokenAmount) -> Option<TokenAmount> {
+        if self.0 == 0 {
+            return Some(TokenAmount::ZERO);
+        }
+        let floor = amount
+            .checked_mul(self.0)?
+            .checked_div_floor(MIN_FEE_MULTIPLIER)?;
+        Some(floor.max(TokenAmount::ONE))
+    }
+}
+
+impl fmt::Display for CctpMinFee {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }

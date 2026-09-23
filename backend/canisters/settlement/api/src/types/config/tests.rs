@@ -371,3 +371,34 @@ fn the_claim_grace_crosses_the_wire_and_a_bad_one_names_its_knob() {
         }
     );
 }
+
+/// The chains' CCTP minimum fees cross the wire as a chain-keyed table of Circle's own
+/// units, and one at or above the whole amount is refused by chain.
+#[test]
+fn the_cctp_minimum_fees_cross_the_wire_and_a_bad_one_names_its_chain() {
+    let wire = Config {
+        cctp_min_fees: BTreeMap::from([(8453, 1_000), (42161, 0)]),
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(wire.clone()).unwrap();
+    assert_eq!(
+        domain.cctp_min_fees.get(types::ChainId::BASE),
+        Some(types::CctpMinFee::new(1_000))
+    );
+    assert_eq!(Config::unredacted(domain), wire);
+    assert!(Config::default().cctp_min_fees.is_empty());
+
+    let whole = types::Config::try_from(Config {
+        cctp_min_fees: BTreeMap::from([(8453, 10_000_000)]),
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(whole.validate().unwrap_err()),
+        ConfigError::CctpMinFeeTooHigh {
+            chain_id: 8453,
+            min_fee: 10_000_000,
+            ceiling: 10_000_000
+        }
+    );
+}

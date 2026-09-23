@@ -103,6 +103,7 @@ fn samples() -> Vec<Sample> {
         last_tx_hash: None,
         paid_out: None,
         fee_accrued: None,
+        burn_max_fee: None,
     };
     let unpaid = Swap {
         quote_bytes: vec![],
@@ -119,6 +120,7 @@ fn samples() -> Vec<Sample> {
         last_tx_hash: None,
         paid_out: None,
         fee_accrued: None,
+        burn_max_fee: None,
     };
     // the depths the default held when this line was written. A default that moves changes
     // what every config encodes, and a golden line never changes, so the two lines below
@@ -311,6 +313,7 @@ fn samples() -> Vec<Sample> {
                 last_tx_hash: None,
                 paid_out: None,
                 fee_accrued: None,
+                burn_max_fee: None,
             },
         ),
         sample(
@@ -344,6 +347,7 @@ fn samples() -> Vec<Sample> {
                 // the swap appended below is the one that pins the field
                 paid_out: None,
                 fee_accrued: None,
+                burn_max_fee: None,
             },
         ),
         sample(
@@ -387,6 +391,7 @@ fn samples() -> Vec<Sample> {
                 last_tx_hash: Some(TxHash::new([0x69; 32])),
                 paid_out: Some(TokenAmount::from(6_978_003_u32)),
                 fee_accrued: None,
+                burn_max_fee: None,
             },
         ),
         // the entry the pending store holds now: the quote with the height the watcher had
@@ -427,6 +432,28 @@ fn samples() -> Vec<Sample> {
                 last_tx_hash: Some(TxHash::new([0x6a; 32])),
                 paid_out: Some(TokenAmount::from(7_975_003_u32)),
                 fee_accrued: Some(TokenAmount::from(23_997_u32)),
+                burn_max_fee: None,
+            },
+        ),
+        // the swap samples above leave the burn's fee absent; this one pins it
+        sample(
+            "swap with the fee its burn offered Circle",
+            Swap {
+                quote_bytes: vec![0xca, 0xfe, 0x04],
+                status: SwapStatus::Executing,
+                last_attempt: Some(Attempt::new(1)),
+                open_attempt: None,
+                src_chain: ChainId::BASE,
+                src_token: "0x5".parse().unwrap(),
+                amount_in: TokenAmount::from(25_000_000_u32),
+                amount_paid: None,
+                waiting_since: None,
+                last_leg: Some(crate::Leg::Burn),
+                last_outcome: Some(crate::Outcome::Confirmed),
+                last_tx_hash: Some(TxHash::new([0x6b; 32])),
+                paid_out: None,
+                fee_accrued: None,
+                burn_max_fee: Some(TokenAmount::from(12_500_u32)),
             },
         ),
     ]);

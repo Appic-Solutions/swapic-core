@@ -8,8 +8,8 @@ const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 /// the byte: wire field names in declaration order, maps in ascending chain id order,
 /// `max_swap_usd` as a decimal string, and every rpc url as `***`.
 ///
-/// Rewritten for fix wave 5 (N7): the wire view gained `claim_grace_s`, so the line ends
-/// with it.
+/// Rewritten for fix wave 5 (N7, N12): the wire view gained `claim_grace_s` and then
+/// `cctp_min_fees`, so the line ends with them.
 #[test]
 fn a_config_change_logs_json_of_the_redacted_wire_view() {
     let config = Config {
@@ -34,7 +34,7 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""max_evictions_per_sweep":200,"audit_chunk_events":1000,"#,
             r#""deposit_lookback_blocks":345600,"cctp_domains":{},"usdc_addresses":{},"#,
             r#""token_messenger":null,"message_transmitter":null,"eco_portal":null,"#,
-            r#""eco_enabled":false,"claim_grace_s":3600}"#
+            r#""eco_enabled":false,"claim_grace_s":3600,"cctp_min_fees":{}}"#
         )
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");

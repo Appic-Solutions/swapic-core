@@ -148,6 +148,12 @@ pub struct Swap {
     /// back without one.
     #[n(13)]
     pub fee_accrued: Option<TokenAmount>,
+    /// The most a CCTP burn of this swap offered Circle, read off the calldata this
+    /// canister built for it: what the attested message of that burn must carry, so a
+    /// minimum fee the operator moved between the burn and the attestation cannot unbind
+    /// the message the burn emitted. Absent before a CCTP burn, and for the other rails.
+    #[n(14)]
+    pub burn_max_fee: Option<TokenAmount>,
 }
 
 /// Why an event cannot move the state it was offered to.

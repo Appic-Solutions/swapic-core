@@ -30,6 +30,7 @@ fn swap(status: SwapStatus) -> Swap {
         last_tx_hash: None,
         paid_out: None,
         fee_accrued: None,
+        burn_max_fee: None,
     }
 }
 

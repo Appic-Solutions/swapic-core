@@ -34,7 +34,9 @@ pub fn quote() -> Quote {
     }
 }
 
-/// The swap of `quote()`, at the point its latest leg says.
+/// The swap of `quote()`, at the point its latest leg says. Once a leg has been signed the
+/// burn was, and the fold holds the 5,000 units (two basis points of the 25 USDC) its
+/// calldata offered Circle (fix wave 5, N12).
 pub fn fixture_swap(last_leg: Option<SwapLeg>, last_outcome: Option<Outcome>) -> Swap {
     let quote = quote();
     Swap {
@@ -52,6 +54,7 @@ pub fn fixture_swap(last_leg: Option<SwapLeg>, last_outcome: Option<Outcome>) ->
         last_tx_hash: None,
         paid_out: None,
         fee_accrued: None,
+        burn_max_fee: last_leg.map(|_| TokenAmount::from(5_000_u32)),
     }
 }
 

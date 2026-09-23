@@ -5,7 +5,7 @@ use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
-use crate::rail::CctpDomain;
+use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::collections::BTreeMap;
@@ -452,6 +452,12 @@ pub struct Config {
     /// is still admitted.
     #[n(27)]
     pub claim_grace: ClaimGrace,
+    /// The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
+    /// stores it (`minFee`, thousandths of a basis point). A chain with no entry is one
+    /// whose messenger charges none. The staging canary reads `minFee()` on every chain
+    /// and fills it.
+    #[n(28)]
+    pub cctp_min_fees: ChainTable<CctpMinFee>,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -509,6 +515,15 @@ pub enum ConfigError {
         chain: ChainId,
         depth: BlockDepth,
         floor: BlockDepth,
+    },
+    #[error(
+        "cctp_min_fees[{chain}] is {min_fee}, not below the {ceiling} that is the whole \
+         amount"
+    )]
+    CctpMinFeeTooHigh {
+        chain: ChainId,
+        min_fee: CctpMinFee,
+        ceiling: u32,
     },
     #[error("{field} does not fit in 256 bits")]
     AmountTooLarge { field: &'static str },
@@ -585,6 +600,8 @@ impl Default for Config {
             // the Eco route is a later plan's; until then no Eco quote is claimed
             eco_enabled: EcoEnabled::OFF,
             claim_grace: ClaimGrace::DEFAULT,
+            // the staging canary reads each chain's `minFee()` and fills this
+            cctp_min_fees: ChainTable::default(),
         }
     }
 }
@@ -679,6 +696,20 @@ impl Config {
         self.deposit_lookback_blocks
             .validate("deposit_lookback_blocks")?;
         self.claim_grace.validate()?;
+        // Circle's own setter refuses a minimum at or above the whole amount, so a table
+        // holding one is a typo, and every burn from that chain would revert on it
+        if let Some((chain, min_fee)) = self
+            .cctp_min_fees
+            .0
+            .iter()
+            .find(|(_, min_fee)| min_fee.get() >= MIN_FEE_MULTIPLIER)
+        {
+            return Err(ConfigError::CctpMinFeeTooHigh {
+                chain: *chain,
+                min_fee: *min_fee,
+                ceiling: MIN_FEE_MULTIPLIER,
+            });
+        }
         // the batch size is a cap like the three above, held to the same rule
         if self.max_batch_items == 0 || self.max_batch_items > MAX_BATCH_ITEMS {
             return Err(ConfigError::CapOutOfRange {

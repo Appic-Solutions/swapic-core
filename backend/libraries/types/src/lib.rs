@@ -36,6 +36,6 @@ pub use numeric::{
     Timestamp, TokenAmount, UnixSeconds, UsdAmount, Wei, WeiPerGas,
 };
 pub use quote::{ExpiryKey, GasMode, PendingQuote, Quote, QuoteError};
-pub use rail::{CctpDomain, EcoIntent, Rail};
+pub use rail::{CctpDomain, CctpMinFee, EcoIntent, Rail};
 pub use swap::{Leg, Outcome, Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
 pub use tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};

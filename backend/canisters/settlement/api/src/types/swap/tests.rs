@@ -89,6 +89,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
         last_tx_hash: Some(types::TxHash::new([9; 32])),
         paid_out: Some(TokenAmount::from(24_920_015_u32)),
         fee_accrued: None,
+        burn_max_fee: None,
     };
     assert_eq!(
         Swap::from(swap),
@@ -107,6 +108,7 @@ fn a_swap_reads_on_the_wire_with_its_attempts_and_clock() {
             last_tx_hash: Some([9; 32]),
             paid_out: Some(Nat::from(24_920_015_u32)),
             fee_accrued: None,
+            burn_max_fee: None,
         }
     );
 }

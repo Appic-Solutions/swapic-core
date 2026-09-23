@@ -108,6 +108,11 @@ type Config = record {
   permit_deadline_s : nat64;
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
   cctp_domains : vec record { nat64; nat32 };
+  // The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
+  // stores it (`minFee()`, in thousandths of a basis point, below 10,000,000). A chain
+  // with no entry is one whose messenger charges none. Every burn offers at least this
+  // much of its amount as its `maxFee`, the Standard path included.
+  cctp_min_fees : vec record { nat64; nat32 };
   replay_audit_interval_s : nat64;
   quote_ttl_s : nat64;
   // Eco's `Portal`, the same address on every chain.
@@ -168,6 +173,13 @@ type ConfigError = variant {
     floor_ms : nat64;
   };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
+  // The minimum fee listed for `chain_id` is at or above `ceiling`, the whole amount in
+  // Circle's units, which Circle's own setter refuses.
+  CctpMinFeeTooHigh : record {
+    ceiling : nat32;
+    min_fee : nat32;
+    chain_id : nat64;
+  };
   // In milliseconds, so the one knob set in milliseconds is reported as it was set.
   DurationAboveCap : record {
     field : text;
@@ -633,6 +645,9 @@ type RailError = variant {
   QuoteAddress : QuoteAddressError;
   UnreadableMessage : MessageError;
   Vault : VaultError;
+  // The swap's burn left the source vault with no fee recorded for it: a fold no
+  // line produces, so its message is bound to nothing and not minted.
+  NoBurnFeeRecorded;
   NoEcoPortal;
   NoDomain : record { chain_id : nat64 };
   // An amount above the largest floor a vault execution can carry, which is no amount
@@ -755,6 +770,8 @@ type Swap = record {
   // The platform's fee on this swap, once the log has accrued it.
   fee_accrued : opt nat;
   src_token : text;
+  // The most the swap's CCTP burn offered Circle, once one was created.
+  burn_max_fee : opt nat;
   waiting_since_ns : opt nat64;
   // Absent until the swap is paid in stable.
   amount_paid : opt nat;

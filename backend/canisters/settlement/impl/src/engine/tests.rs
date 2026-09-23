@@ -17,6 +17,7 @@ fn at(status: SwapStatus, last_leg: Option<Leg>, last_outcome: Option<Outcome>) 
         last_tx_hash: None,
         paid_out: None,
         fee_accrued: None,
+        burn_max_fee: None,
     }
 }
 

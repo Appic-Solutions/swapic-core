@@ -34,6 +34,7 @@ fn sample_fold() -> MemoryStore {
             last_tx_hash: None,
             paid_out: None,
             fee_accrued: None,
+            burn_max_fee: None,
         },
     );
     store.put_pocket(
