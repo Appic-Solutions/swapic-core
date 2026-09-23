@@ -634,6 +634,9 @@ type RegisterQuoteError = variant {
   };
   Guard : GuardError;
   StoreFull : record { capacity : nat64 };
+  // The quote's destination address is not an address the destination chain can be
+  // paid at: every chain this canister pays is an EVM chain, so not an EVM address.
+  DstAddressNotAnAddress : record { reason : EvmAddressError };
   // The quote names no refund address, so no refund could ever be paid on it.
   NoRefundAddress;
   InvalidQuote : QuoteError;

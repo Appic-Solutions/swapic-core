@@ -39,6 +39,8 @@ const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const USDC: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const USER: &str = "0x7551A66653f9a20979ed81835a0b7008EC83401b";
 const REFUND: &str = "0x1111111111111111111111111111111111111111";
+/// Where the fixture quote pays its user: an address, as a quote must name one.
+const DST: &str = "0x4444444444444444444444444444444444444444";
 const HEAD: u64 = 19_000_000;
 const AMOUNT: u32 = 25_000_000;
 /// The second the fixture quote expires at. The clock moves to the quote rather than the
@@ -58,8 +60,8 @@ fn quote(nonce: u64) -> types::Quote {
         dst_token: USDC.parse().unwrap(),
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
-        dst_address: "0xuser".parse().unwrap(),
-        // a refund has to be payable, so the quote names an address and not any text
+        // a payout and a refund have to be payable, so the quote names addresses, not text
+        dst_address: DST.parse().unwrap(),
         refund_address: Some(REFUND.parse().unwrap()),
         auto_refund: true,
         gas_mode: GasMode::Legacy,
@@ -586,6 +588,9 @@ fn a_quote_naming_a_worthless_token_is_refused_before_any_outcall() {
 /// The sanctions gate runs before an outcall is bought: a quote paying to a sanctioned
 /// destination or refund address is refused with no request pending. A sanctioned payer is
 /// only known once the log is read, and is refused then, with nothing stored.
+///
+/// Fix wave 4 (N6) moved the fixture's destination from the text `0xuser` to an address,
+/// so the destination this test lists is that address.
 #[test]
 fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
     let (pic, canister, _admin) = setup();
@@ -593,7 +598,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
     let quote_hash = swap_id(&quote);
     let before = count(&pic, canister);
 
-    set_sanctioned(&pic, canister, watcher(), &["0xuser"], &[]).unwrap();
+    set_sanctioned(&pic, canister, watcher(), &[DST], &[]).unwrap();
     assert_eq!(
         claim_swap(&pic, canister, watcher(), &wire(&quote)),
         Err(ClaimError::Sanctioned {
@@ -604,7 +609,7 @@ fn a_sanctioned_party_is_refused_and_the_destination_before_any_outcall() {
         pic.get_canister_http().is_empty(),
         "refused before any outcall"
     );
-    set_sanctioned(&pic, canister, watcher(), &[REFUND], &["0xuser"]).unwrap();
+    set_sanctioned(&pic, canister, watcher(), &[REFUND], &[DST]).unwrap();
     assert_eq!(
         claim_swap(&pic, canister, watcher(), &wire(&quote)),
         Err(ClaimError::Sanctioned {
@@ -1863,4 +1868,68 @@ fn a_pull_for_a_quote_its_claim_would_refuse_moves_nothing() {
         "nothing was allocated"
     );
     assert!(pic.get_canister_http().is_empty(), "and nothing sent");
+}
+
+/// A quote pays its user at `dst_address`, after the burn and the mint, so text no payout
+/// could be sent to is refused at both doors before anything is read or stored (rule C5),
+/// exactly as a refund address that is not one is. Every chain this canister pays is an
+/// EVM chain, so the destination must be an EVM address: plain text, an address missing
+/// its `0x`, and an address whose mixed case breaks its EIP-55 checksum are each refused
+/// with the reason, and an address still registers and claims.
+#[test]
+fn a_quote_naming_no_payable_destination_is_refused_at_both_doors() {
+    use settlement_api::types::errors::RegisterQuoteError;
+    use settlement_api::types::events::EvmAddressError;
+    use settlement_api::types::quote::{QuoteAddressError, QuoteAddressField};
+    let (pic, canister, _admin) = setup();
+    let before = count(&pic, canister);
+    for (nonce, text, reason) in [
+        (50, "hello", EvmAddressError::NoPrefix),
+        (
+            51,
+            "7551A66653f9a20979ed81835a0b7008EC83401b",
+            EvmAddressError::NoPrefix,
+        ),
+        (
+            52,
+            "0x7551a66653f9a20979ed81835a0b7008EC83401b",
+            EvmAddressError::BadChecksum,
+        ),
+    ] {
+        let quote = types::Quote {
+            dst_address: text.parse().unwrap(),
+            ..live_quote(&pic, nonce)
+        };
+        assert_eq!(
+            register_quote(&pic, canister, quoter(), &wire(&quote)),
+            Err(RegisterQuoteError::DstAddressNotAnAddress {
+                reason: reason.clone()
+            }),
+            "registering {text}"
+        );
+        assert_eq!(
+            claim_swap(&pic, canister, watcher(), &wire(&quote)),
+            Err(ClaimError::QuoteAddress(QuoteAddressError::NotAnAddress {
+                field: QuoteAddressField::DstAddress,
+                reason,
+            })),
+            "claiming {text}"
+        );
+    }
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+    assert_eq!(count(&pic, canister), before, "nothing stored");
+
+    let good = live_quote(&pic, 53);
+    let good_hash = registered(&pic, canister, &good);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&good));
+    answer(
+        &pic,
+        &the_read(&pic, good_hash),
+        HEAD,
+        vec![deposit_log(good_hash, HEAD, USDC, USER, AMOUNT.into())],
+    );
+    assert_eq!(await_claim(&pic, call), Ok(good_hash));
 }

@@ -248,6 +248,14 @@ impl Quote {
             .map_err(|reason| QuoteAddressError::NotAnAddress { field, reason })
     }
 
+    /// The quote's destination as an EVM address, the address its payout is sent to. Every
+    /// quote names one, so unlike [`Quote::evm_address`] it is never absent, only possibly
+    /// not an address; and every chain this canister pays is an EVM chain, through its
+    /// vault there, so an EVM address is the one kind a destination can be.
+    pub fn dst_evm_address(&self) -> Result<EvmAddress, EvmAddressError> {
+        self.dst_address.as_str().parse()
+    }
+
     /// The canonical preimage, or the amount it has no bytes for. Over validated quotes
     /// [`Quote::parse`] is its inverse: `parse(canonical_bytes(q)) == q` for every `q` that
     /// passes [`Quote::validate`]. Outside them it is not: an empty refund address writes

@@ -68,6 +68,42 @@ fn just_before_expiry(q: &Quote) -> UnixSeconds {
     seconds_before(q, 1)
 }
 
+/// A quote whose destination is not an address is one no payout could ever be sent on,
+/// and the canister would first find out after the burn and the mint, so the quoter learns
+/// at registration instead: plain text, an address missing its `0x`, and an address whose
+/// mixed case breaks its checksum are each refused with the reason, and nothing is stored.
+#[test]
+fn register_refuses_a_quote_whose_destination_is_no_address() {
+    use types::evm::EvmAddressError;
+    clear();
+    for (nonce, text, reason) in [
+        (9_020, "hello", EvmAddressError::NoPrefix),
+        (
+            9_021,
+            "7551A66653f9a20979ed81835a0b7008EC83401b",
+            EvmAddressError::NoPrefix,
+        ),
+        (
+            9_022,
+            "0x7551a66653f9a20979ed81835a0b7008EC83401b",
+            EvmAddressError::BadChecksum,
+        ),
+    ] {
+        let quote = Quote {
+            dst_address: text.parse().unwrap(),
+            ..pending_quote(nonce)
+        };
+        assert_eq!(
+            register(quote.clone(), just_before_expiry(&quote)),
+            Err(RegisterError::DstAddressNotAnAddress { reason }),
+            "{text}"
+        );
+    }
+    assert!(all_pending().is_empty(), "nothing was stored");
+    let good = pending_quote(9_023);
+    assert!(register(good.clone(), just_before_expiry(&good)).is_ok());
+}
+
 /// A quote nobody could be refunded on is one whose swap could only freeze with the
 /// user's funds in the vault, so the quoter learns at registration and not after the
 /// money has arrived.
@@ -133,6 +169,9 @@ fn register_refuses_a_quote_that_does_not_validate() {
 /// Text reaches the store through the wire conversion, which is where the byte cap is
 /// enforced. A rail is a closed set rather than capped text, so any text that is not a
 /// rail id is refused, at the cap or over it.
+///
+/// Rewritten for fix wave 4 (N6): a destination at the cap is text, and is now refused as
+/// no address the way a refund address at the cap already was.
 #[test]
 fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
     use settlement_api::types::quote::Quote as WireQuote;
@@ -163,19 +202,26 @@ fn register_refuses_an_oversized_string_and_takes_one_at_the_cap() {
         let at_cap = Quote::try_from(at_cap).expect("the cap itself converts");
         let now = just_before_expiry(&at_cap);
         let registered = register(at_cap, now);
-        // text at the cap crosses the wire; the refund address is held to more than a
-        // length, because a refund has to be payable to it
-        if field == "refund_address" {
-            assert!(
+        // text at the cap crosses the wire; the refund and destination addresses are held
+        // to more than a length, because a refund and a payout have to be payable to them
+        match field {
+            "refund_address" => assert!(
                 matches!(
                     registered,
                     Err(RegisterError::RefundAddressNotAnAddress { .. })
                 ),
                 "{field} at the cap is text, and a refund address must be an address: \
                  {registered:?}"
-            );
-        } else {
-            assert!(registered.is_ok(), "{field} at the cap is allowed");
+            ),
+            "dst_address" => assert!(
+                matches!(
+                    registered,
+                    Err(RegisterError::DstAddressNotAnAddress { .. })
+                ),
+                "{field} at the cap is text, and a destination must be an address: \
+                 {registered:?}"
+            ),
+            _ => assert!(registered.is_ok(), "{field} at the cap is allowed"),
         }
     }
 
@@ -291,12 +337,16 @@ fn register_refuses_a_quote_that_expires_too_far_ahead() {
     assert!(register(q.clone(), seconds_before(&q, MAX_QUOTE_LIFETIME.as_secs())).is_ok());
 }
 
-/// Small quotes, distinct only by nonce, so a fill to the cap is cheap.
+/// Small quotes, distinct only by nonce, so a fill to the cap is cheap. The destination is
+/// an address, the one text field the store holds to more than its length besides the
+/// refund address (fix wave 4, N6, moved it off the text `c`).
 fn tiny(nonce: u64) -> Quote {
     Quote {
         src_token: "a".parse().unwrap(),
         dst_token: "b".parse().unwrap(),
-        dst_address: "c".parse().unwrap(),
+        dst_address: "0x4444444444444444444444444444444444444444"
+            .parse()
+            .unwrap(),
         rail: Rail::Eco,
         nonce,
         ..fixed_quote()

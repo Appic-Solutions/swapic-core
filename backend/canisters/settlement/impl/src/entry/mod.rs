@@ -278,6 +278,16 @@ pub fn ensure_refundable(quote: &Quote) -> Result<(), ClaimError> {
     Ok(())
 }
 
+/// A quote has to name a destination a payout can be sent to. The payout is the swap's
+/// last leg, after the burn and the mint, so a destination that is no address would be
+/// found out only once the funds had crossed, and retried on every tick after; it is
+/// refused here instead, before an outcall is bought. Every chain this canister pays is an
+/// EVM chain, through its vault there, so the destination must be an EVM address.
+pub fn ensure_payable(quote: &Quote) -> Result<(), ClaimError> {
+    quote.evm_address(QuoteAddressField::DstAddress)?;
+    Ok(())
+}
+
 /// Which of the addresses the quote pays to is sanctioned, if either is: the destination
 /// first, then the refund address.
 pub fn sanctioned_party(quote: &Quote) -> Option<&'static str> {
@@ -335,11 +345,11 @@ fn party(address: EvmAddress) -> Address {
 /// Claims the deposit a user made for `quote` and creates its swap.
 ///
 /// Money-first, in this order: the halt switch and the caller, the quote itself, the swap
-/// not existing yet, the quote still claimable, nobody it pays to sanctioned, its tokens
-/// the rail's; then the marker (A8), then the read, which looks for the quote's token in
-/// exactly its amount among the logs under the hash; then the payer is held to the
-/// sanctions set, and `FundsReceived` is appended, which the fold checks again (A2). A
-/// refusal anywhere stores nothing.
+/// not existing yet, the quote still claimable, its rail on, its refund and destination
+/// addresses payable, nobody it pays to sanctioned, its tokens the rail's; then the marker
+/// (A8), then the read, which looks for the quote's token in exactly its amount among the
+/// logs under the hash; then the payer is held to the sanctions set, and `FundsReceived`
+/// is appended, which the fold checks again (A2). A refusal anywhere stores nothing.
 ///
 /// The read starts at the height the quote was registered at, when the store kept one,
 /// and reads one window where it would read a day of them. That height is the watcher's
@@ -359,6 +369,7 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     ensure_claimable(&quote, now.as_secs(), config.permit_deadline)?;
     ensure_rail_is_enabled(&config, &quote)?;
     ensure_refundable(&quote)?;
+    ensure_payable(&quote)?;
     if let Some(party) = sanctioned_party(&quote) {
         return Err(ClaimError::Sanctioned { party });
     }

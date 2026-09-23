@@ -58,6 +58,8 @@ pub enum RegisterError {
     NoRefundAddress,
     #[error("the quote's refund address is not an EVM address: {reason}")]
     RefundAddressNotAnAddress { reason: EvmAddressError },
+    #[error("the quote's destination address is not an EVM address: {reason}")]
+    DstAddressNotAnAddress { reason: EvmAddressError },
 }
 
 impl From<RegisterError> for RegisterQuoteError {
@@ -82,6 +84,9 @@ impl From<RegisterError> for RegisterQuoteError {
                     reason: reason.into(),
                 }
             }
+            RegisterError::DstAddressNotAnAddress { reason } => Self::DstAddressNotAnAddress {
+                reason: reason.into(),
+            },
         }
     }
 }
@@ -115,6 +120,11 @@ pub fn register(
             return Err(RegisterError::RefundAddressNotAnAddress { reason })
         }
     }
+    // the destination is where the payout goes, after the burn and the mint: text no
+    // payout could be sent to is refused here, not found out once the funds have crossed
+    quote
+        .dst_evm_address()
+        .map_err(|reason| RegisterError::DstAddressNotAnAddress { reason })?;
     let expires_at = quote.expires_at;
     // the quote is good through the whole of its expiry second
     if now > expires_at {

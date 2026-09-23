@@ -28,8 +28,11 @@ fn quote(auto_refund: bool, nonce: u64) -> Quote {
         dst_token: "usdc".parse().unwrap(),
         expected_out: TokenAmount::from(24_990_000_u32),
         min_out: TokenAmount::from(24_900_000_u32),
-        dst_address: "0xuser".parse().unwrap(),
-        // the store takes only a quote a refund can be paid on
+        // the store takes only a quote a payout and a refund can be paid on (the
+        // destination moved off the text `0xuser` in fix wave 4, N6)
+        dst_address: "0x4444444444444444444444444444444444444444"
+            .parse()
+            .unwrap(),
         refund_address: Some(
             "0x7551A66653f9a20979ed81835a0b7008EC83401b"
                 .parse()

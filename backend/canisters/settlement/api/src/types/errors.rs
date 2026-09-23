@@ -77,6 +77,11 @@ pub enum RegisterQuoteError {
     RefundAddressNotAnAddress {
         reason: EvmAddressError,
     },
+    /// The quote's destination address is not an address the destination chain can be
+    /// paid at: every chain this canister pays is an EVM chain, so not an EVM address.
+    DstAddressNotAnAddress {
+        reason: EvmAddressError,
+    },
 }
 
 /// Why `push_chain_data` stored nothing.

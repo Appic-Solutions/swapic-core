@@ -285,6 +285,10 @@ fn register_quote_refuses_a_quote_that_expires_too_far_ahead() {
 
 /// The byte cap through the endpoint: one byte over is refused naming the field and stores
 /// nothing, and the cap itself registers.
+///
+/// Rewritten for fix wave 4 (N6): a destination is held to more than its length, so the
+/// cap itself is shown on the source token, which the store holds to its length alone, and
+/// a destination at the cap is refused as no address.
 #[test]
 fn register_quote_refuses_a_string_over_the_byte_cap() {
     let (pic, canister, _) = with_roles();
@@ -312,13 +316,24 @@ fn register_quote_refuses_a_string_over_the_byte_cap() {
     );
 
     let at_cap = Quote {
-        dst_address: "a".repeat(MAX_TEXT_BYTES),
+        src_token: "a".repeat(MAX_TEXT_BYTES),
         ..fixed_quote()
     };
     let hash = register_quote(&pic, canister, quoter(), &at_cap).expect("the cap itself registers");
     assert_eq!(
         get_pending(&pic, canister, quoter(), hash).unwrap(),
         Some(at_cap)
+    );
+    let destination_at_cap = Quote {
+        dst_address: "a".repeat(MAX_TEXT_BYTES),
+        ..fixed_quote()
+    };
+    assert_eq!(
+        register_quote(&pic, canister, quoter(), &destination_at_cap),
+        Err(RegisterQuoteError::DstAddressNotAnAddress {
+            reason: settlement_api::types::events::EvmAddressError::NoPrefix
+        }),
+        "a destination is text a payout can be sent to, not any text under the cap"
     );
 }
 
