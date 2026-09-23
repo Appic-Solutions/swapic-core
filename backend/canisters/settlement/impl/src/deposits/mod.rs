@@ -668,9 +668,14 @@ impl Reader {
     /// Reads `windows`, oldest first, [`WINDOWS_PER_BATCH`] to an outcall, and hands each
     /// window's finding to the walk in order: the deposit, as soon as a window holds one
     /// deep enough. A window starting above the head is never sent: it holds nothing the
-    /// provider has, so leaving it out is the same as finding nothing in it. A batch the
-    /// provider refuses, or answers any window of with an error, is read again one window
-    /// at a time, and a window that fails on its own fails the read.
+    /// provider has, so leaving it out is the same as finding nothing in it.
+    ///
+    /// A batch the provider refuses, or answers any window of with an error, is read again
+    /// one window at a time, and each window's finding is taken as it comes back: a deep
+    /// deposit in an older window ends the walk before a newer window is asked for, as the
+    /// window by window walk did, so a window the provider cannot serve (dust logs under
+    /// the quote's public hash can push one past its cap) hides nothing older than itself.
+    /// A window that fails on its own, with nothing older having decided, fails the read.
     async fn walk(
         &self,
         windows: &[Window],
@@ -681,31 +686,38 @@ impl Reader {
             .filter(|window| !above_head(window, self.head))
             .collect();
         for batch in sendable.chunks(WINDOWS_PER_BATCH) {
-            let answers = match self.batch(batch).await {
-                Ok(answers) => answers,
-                Err(_) => {
-                    let mut answers = Vec::with_capacity(batch.len());
-                    for window in batch {
-                        answers.extend(self.batch(&[*window]).await?);
+            match self.batch(batch).await {
+                Ok(answers) => {
+                    for logs in &answers {
+                        if let Some(deposit) = walk.take(self.find(logs)) {
+                            return Ok(Some(deposit));
+                        }
                     }
-                    answers
                 }
-            };
-            for logs in &answers {
-                let finding = find(
-                    logs,
-                    self.vault,
-                    self.quote_hash,
-                    &self.wanted,
-                    self.head,
-                    self.depth,
-                );
-                if let Some(deposit) = walk.take(finding) {
-                    return Ok(Some(deposit));
+                Err(_) => {
+                    for window in batch {
+                        for logs in &self.batch(&[*window]).await? {
+                            if let Some(deposit) = walk.take(self.find(logs)) {
+                                return Ok(Some(deposit));
+                            }
+                        }
+                    }
                 }
             }
         }
         Ok(None)
+    }
+
+    /// What one window's logs hold of the deposit this read wants.
+    fn find(&self, logs: &[Value]) -> Finding {
+        find(
+            logs,
+            self.vault,
+            self.quote_hash,
+            &self.wanted,
+            self.head,
+            self.depth,
+        )
     }
 
     /// The logs of each of `windows`, in order, from one outcall: one `eth_getLogs` per

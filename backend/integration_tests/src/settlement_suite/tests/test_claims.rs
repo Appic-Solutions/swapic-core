@@ -291,6 +291,9 @@ struct Provider {
     max_batch: Option<usize>,
     /// How many batches were refused for their length.
     refused_batches: usize,
+    /// A block whose logs the provider cannot serve: any range covering it is refused, the
+    /// way a provider refuses a range whose answer would be too large.
+    unservable: Option<u64>,
 }
 
 /// A hex quantity as a number.
@@ -314,6 +317,15 @@ impl Provider {
             outcalls: 0,
             max_batch: None,
             refused_batches: 0,
+            unservable: None,
+        }
+    }
+
+    /// A provider that refuses any range covering `block`.
+    fn refusing_block(self, block: u64) -> Self {
+        Self {
+            unservable: Some(block),
+            ..self
         }
     }
 
@@ -370,6 +382,10 @@ impl Provider {
                 let beyond = from > self.head || to.is_some_and(|to| to > self.head);
                 if self.shape == Shape::Geth && beyond {
                     return Err("block range extends beyond current head block".to_string());
+                }
+                let covers = |block: u64| (from..=to.unwrap_or(self.tip)).contains(&block);
+                if self.unservable.is_some_and(covers) {
+                    return Err("query returned more than 10000 results".to_string());
                 }
                 let last = to.unwrap_or(self.tip).min(self.tip);
                 let wanted = &filter["topics"][1];
@@ -2594,4 +2610,37 @@ fn a_rail_turned_off_pauses_its_swaps_and_the_pause_is_counted() {
 
     set_config(&pic, canister, admin, &on).expect("the controller turns it back on");
     assert_eq!(paused_swaps(&pic, canister, Principal::anonymous()), 0);
+}
+
+/// A batch the provider refuses is read again one window at a time, oldest first, and each
+/// window's finding is taken as it comes: a deep deposit in an older window is claimed
+/// although a newer window of the same batch cannot be read, just as the window by window
+/// walk before batching claimed it without ever asking for the newer one. A window that
+/// cannot be read decides nothing it did not reach.
+#[test]
+fn a_window_that_cannot_be_read_does_not_hide_an_older_deposit_in_its_batch() {
+    let (pic, canister, admin) = setup();
+    lookback_of(&pic, canister, admin, 30_000);
+    let by_hand = quote(72);
+    let quote_hash = swap_id(&by_hand);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let mut provider = Provider::at(
+        HEAD,
+        &[deposit_log(
+            quote_hash,
+            HEAD - 25_000,
+            USDC,
+            USER,
+            AMOUNT.into(),
+        )],
+    )
+    .for_quote(quote_hash)
+    .refusing_block(HEAD - 5);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        provider.froms()[3..],
+        [HEAD + 1 - 30_000],
+        "after the refused batch, the oldest window alone, which holds the deposit"
+    );
 }

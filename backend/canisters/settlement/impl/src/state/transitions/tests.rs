@@ -1870,6 +1870,42 @@ fn a_cctp_burn_records_the_fee_it_offered_and_a_publish_records_none() {
         None,
         "calldata that is no CCTP burn records no fee"
     );
+    // an Eco publish is a vault execute like the burn, of the Portal's publishAndFund
+    // rather than the messenger's burn: the execute decodes, the burn inside it does not
+    let publish = vault_execute(
+        qh,
+        &[VaultCall {
+            target: "0xEC000064576f9C95a8623Bc0eff3db6d296ea6df"
+                .parse()
+                .unwrap(),
+            value: Wei::ZERO,
+            data: types::abi::eco_publish_and_fund(
+                ARBITRUM,
+                &[0xde, 0xad],
+                &types::abi::EcoReward {
+                    deadline: UnixSeconds::new(1_800_000_600),
+                    creator: "0x1111111111111111111111111111111111111111"
+                        .parse()
+                        .unwrap(),
+                    prover: "0xeC00008537c1F26E739486BCFCC818d81234d5aD"
+                        .parse()
+                        .unwrap(),
+                    native_amount: Wei::ZERO,
+                    tokens: vec![(usdc, amount(25_000_000))],
+                },
+            ),
+            approve_token: usdc,
+            approve_amount: amount(25_000_000),
+        }],
+        &[],
+    );
+    assert!(types::abi::decode_vault_execute(&publish).is_some());
+    let state = fold(vec![funds(1), burned(publish)]);
+    assert_eq!(
+        swap(&state, qh).burn_max_fee,
+        None,
+        "an Eco publish rides the burn leg and records no fee"
+    );
 }
 
 /// One fee line per swap is a rule of the fold (rule A6), not only a habit of its one
