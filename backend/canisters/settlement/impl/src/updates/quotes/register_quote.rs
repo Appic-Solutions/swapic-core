@@ -19,10 +19,10 @@ pub fn register_quote(quote: Quote) -> Result<Hash32, RegisterQuoteError> {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     // the head of the quote's source chain, from a reading the canister holds as fresh by
     // the rule every money decision on the cache takes, or no height at all: the deposit
-    // that pays this quote lands at or above it, so a claim's log read starts there rather
-    // than a day of blocks back. The reading is the watcher's and can run ahead of the
-    // chain, so the claim takes it as where to start and reads the plain lookback when
-    // nothing is found above it (see `entry::claim_swap`).
+    // that pays this quote lands at or above it, so a claim's log read starts a margin
+    // below it rather than a day of blocks back. The reading is the watcher's and can run
+    // ahead of the chain, so the claim bounds it by the provider's own head and reads the
+    // rest of the lookback when nothing is found above it (see `entry::claim_swap`).
     let registered_at = chain_data::fresh(quote.src_chain, now, config::get().chain_data_max_age)
         .map(|data| data.block);
     let hash = pending_quotes::register(quote, now.as_secs(), registered_at)?;

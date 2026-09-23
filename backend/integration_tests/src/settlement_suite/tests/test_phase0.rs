@@ -456,8 +456,11 @@ fn trail(pic: &PocketIc, canister: Principal, installed: usize) -> Vec<String> {
         .collect()
 }
 
-/// Claims the quote against the fixture's deposit: submits the claim, answers its read,
+/// Claims the quote against the fixture's deposit: submits the claim, answers its reads,
 /// and returns the swap id.
+///
+/// Rewritten for fix wave 5 (M1): the claim asks the provider's head alone before it
+/// reads a window, so it makes several outcalls one after another, where it made one.
 fn claim(pic: &PocketIc, canister: Principal, chains: &mut Chains, quote: &types::Quote) -> Hash32 {
     let quote_hash = swap_id(quote);
     // a swap's economics are the quoter's, so the quote is registered before it is claimed
@@ -478,18 +481,34 @@ fn claim(pic: &PocketIc, canister: Principal, chains: &mut Chains, quote: &types
         .unwrap();
     pic.tick();
     pic.tick();
-    assert_eq!(chains.respond_all(pic), 1, "the claim reads once");
-    for _ in 0..4 {
-        pic.tick();
-    }
+    assert!(chains.respond_all(pic) > 0, "the claim reads the chain");
+    answer_until_quiet(pic, chains);
     let claimed: Result<Hash32, settlement_api::types::entry::ClaimError> =
         candid::decode_one(&pic.await_call(call).expect("the claim returns")).unwrap();
     assert_eq!(claimed, Ok(quote_hash));
     quote_hash
 }
 
+/// Ticks and answers every outcall until the canister asks for nothing more, at most a
+/// hundred rounds: a read asks the provider's head before its windows, so one decision can
+/// be several outcalls one after another.
+fn answer_until_quiet(pic: &PocketIc, chains: &mut Chains) {
+    for _ in 0..100 {
+        for _ in 0..4 {
+            pic.tick();
+        }
+        if chains.respond_all(pic) == 0 {
+            return;
+        }
+    }
+    panic!("the canister kept asking for a hundred rounds");
+}
+
 /// One whole turn of the machine: the clock moves, the readings stay young, the tick and
 /// the outbox pass run, and every outcall they made is answered.
+///
+/// Rewritten for fix wave 5 (M1): a read now asks the provider's head alone before its
+/// windows, so a turn answers until nothing is pending, where it answered twice.
 fn turn(pic: &PocketIc, canister: Principal, chains: &mut Chains) {
     pic.advance_time(STEP);
     push_readings(pic, canister, chains.head);
@@ -501,6 +520,7 @@ fn turn(pic: &PocketIc, canister: Principal, chains: &mut Chains) {
         pic.tick();
     }
     chains.respond_all(pic);
+    answer_until_quiet(pic, chains);
 }
 
 /// Turns the machine until the swap reaches `until`, answering every outcall and handing

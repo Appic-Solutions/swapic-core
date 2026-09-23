@@ -128,7 +128,11 @@ fn waiting_swap(
 }
 
 /// A quote nobody paid must not hold its slot forever. The window is the expiry plus the
-/// `permit_deadline_s` a signed permit stays good for, and the sweep runs on its own.
+/// `permit_deadline_s` a signed permit stays good for, plus the `claim_grace_s` a claim
+/// for a deposit that landed in it may still come in, and the sweep runs on its own.
+///
+/// Rewritten for fix wave 5 (N7): the store kept a quote only through its permit window,
+/// and it now keeps it through the grace after it too.
 #[test]
 fn expired_pending_quote_is_swept() {
     let (pic, canister, _) = setup();
@@ -143,7 +147,15 @@ fn expired_pending_quote_is_swept() {
         "the permit window is still open"
     );
 
+    // past the permit window, inside the hour of grace: a late claim can still come in
     advance(&pic, 300);
+    assert!(
+        get_pending(&pic, canister, hash).is_some(),
+        "the grace is still open"
+    );
+
+    // ten seconds to the expiry, the two minute permit window and the hour of grace
+    advance(&pic, 3_400);
     assert_eq!(get_pending(&pic, canister, hash), None);
 }
 
@@ -211,6 +223,9 @@ fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
 
 /// A halted canister has a log and a state that disagree, so it appends nothing. Dropping
 /// stale quotes is pre-money hygiene and keeps running.
+///
+/// Rewritten for fix wave 5 (N7): a quote is stale once the claim's hour of grace after
+/// its permit window has ended, so the clock runs 63 minutes where it ran 31.
 #[test]
 fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
     let (pic, canister, admin) = setup();
@@ -219,7 +234,7 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
     let swap = waiting_swap(&pic, canister, admin, true, 2);
     set_halted(&pic, canister, admin, true).unwrap();
 
-    advance(&pic, 31 * 60);
+    advance(&pic, 63 * 60);
 
     assert_eq!(
         get_swap(&pic, canister, swap).unwrap().status,
@@ -241,6 +256,10 @@ fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
 /// before it set. Both intervals move on every call and every generation runs at its own
 /// cadence, so a timer a restart missed would show up as a sweep or an audit at a cadence
 /// nobody configured any more.
+///
+/// Rewritten for fix wave 5 (N7): the store keeps a quote through the claim's grace after
+/// its permit window, so the configs set the grace to its ten minute floor and the first
+/// look comes at 800s, past the 730s any sweep would drop the quote after.
 #[test]
 fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     let (pic, canister, admin) = setup();
@@ -248,22 +267,25 @@ fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     let fast = Config {
         expiry_check_interval_s: 120,
         replay_audit_interval_s: 60,
+        claim_grace_s: 600,
         ..Config::default()
     };
     set_config(&pic, canister, admin, &fast).unwrap();
     let slow = Config {
         expiry_check_interval_s: 3_600,
         replay_audit_interval_s: 43_200,
+        claim_grace_s: 600,
         ..Config::default()
     };
     set_config(&pic, canister, admin, &slow).unwrap();
 
-    // a quote any sweep past 130s would drop, and a divergence any audit would halt on
+    // a quote any sweep past 730s would drop (ten seconds to the expiry, the permit window
+    // and the grace), and a divergence any audit would halt on
     let q = quote_expiring_in(&pic, 10, true, 1);
     let pending = register_quote(&pic, canister, &q).unwrap();
     skew_state(&pic, canister, admin).unwrap();
 
-    advance(&pic, 600);
+    advance(&pic, 800);
     assert!(
         get_pending(&pic, canister, pending).is_some(),
         "no expiry timer is left from init (60s) or from the first set_config (120s)"
@@ -274,7 +296,7 @@ fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     );
 
     // the new expiry cadence is live without an upgrade
-    advance(&pic, 3_100);
+    advance(&pic, 2_900);
     assert_eq!(get_pending(&pic, canister, pending), None);
 
     advance(&pic, 18_000);
@@ -334,18 +356,29 @@ fn an_expiry_only_change_keeps_the_audit_on_schedule() {
 
 /// The mirror: an audit-only change takes effect at once and leaves the expiry timer on
 /// the schedule it already had.
+///
+/// Rewritten for fix wave 5 (N7): the store keeps a quote through the claim's grace after
+/// its permit window, so the config sets the grace to its ten minute floor and the quote
+/// is droppable from 730s. The sweep due at 600s runs and keeps it, and the change lands
+/// at 1_100s, before the sweep due at 1_200s.
 #[test]
 fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
     let (pic, canister, admin) = setup();
     let slow_sweep = Config {
         expiry_check_interval_s: 600,
+        claim_grace_s: 600,
         ..Config::default()
     };
     set_config(&pic, canister, admin, &slow_sweep).unwrap();
-    // droppable by any sweep past 130s, and the next one is due at 600s
+    // droppable by any sweep past 730s, and the sweeps are due at 600s and 1_200s
     let q = quote_expiring_in(&pic, 10, true, 1);
     let pending = register_quote(&pic, canister, &q).unwrap();
 
+    advance(&pic, 600);
+    assert!(
+        get_pending(&pic, canister, pending).is_some(),
+        "the 600s sweep ran before the quote was droppable"
+    );
     advance(&pic, 500);
     set_config(
         &pic,
@@ -358,7 +391,7 @@ fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
     )
     .unwrap();
 
-    // a restarted sweep would not be due until about 1_100s
+    // a restarted sweep would not be due until about 1_700s
     advance(&pic, 150);
     assert_eq!(
         get_pending(&pic, canister, pending),

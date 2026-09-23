@@ -717,3 +717,86 @@ fn eco_is_off_by_default_and_absent_from_storage_while_it_is() {
     let off: EcoEnabled = minicbor::decode(&[0xf6]).unwrap();
     assert!(!off.is_on(), "a null where the knob sits is Eco off");
 }
+
+/// The grace a claim is admitted in after a quote's deposit deadline is an hour unless a
+/// deploy sets it, and it writes nothing of its own at that default: a config written
+/// before the knob existed reads back with the hour and the golden lines do not move. Set,
+/// it round-trips, and a null where it sits reads as the default.
+#[test]
+fn the_claim_grace_is_an_hour_by_default_and_absent_from_storage_while_it_is() {
+    let defaults = Config::default();
+    assert_eq!(defaults.claim_grace.get(), Duration::from_secs(3_600));
+    assert_eq!(
+        defaults.to_bytes()[0],
+        0x91,
+        "the knob at its default writes nothing of its own"
+    );
+    let set = Config {
+        claim_grace: ClaimGrace::new(Duration::from_secs(900)),
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(set.to_bytes()), set);
+    assert_eq!(
+        set.to_bytes()[..2],
+        [0x98, 28],
+        "twenty-eight fields up to the knob"
+    );
+    let null: ClaimGrace = minicbor::decode(&[0xf6]).unwrap();
+    assert_eq!(
+        null,
+        ClaimGrace::DEFAULT,
+        "a null where the knob sits is the hour"
+    );
+}
+
+/// A grace shorter than a watcher restart strands the deposits the restart held up, and
+/// one longer than a day keeps a quote in the pending store for longer than any window
+/// inside one swap may be, so both are refused by name. The bounds themselves are allowed.
+#[test]
+fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
+    let with = |secs| Config {
+        claim_grace: ClaimGrace::new(Duration::from_secs(secs)),
+        ..Config::default()
+    };
+    assert_eq!(
+        with(599).validate(),
+        Err(ConfigError::DurationBelowFloor {
+            field: "claim_grace_s",
+            duration: Duration::from_secs(599),
+            floor: MIN_CLAIM_GRACE,
+        })
+    );
+    assert_eq!(
+        with(86_401).validate(),
+        Err(ConfigError::DurationAboveCap {
+            field: "claim_grace_s",
+            duration: Duration::from_secs(86_401),
+            cap: MAX_SHORT_DURATION,
+        })
+    );
+    with(600).validate().expect("the floor itself is allowed");
+    with(86_400)
+        .validate()
+        .expect("the ceiling itself is allowed");
+    assert_eq!(
+        with(599).validate().unwrap_err().to_string(),
+        "claim_grace_s is 599s, below the floor of 600s"
+    );
+}
+
+/// A claim may be asked until the quote's expiry, the permit window after it, and the
+/// grace after that: the one window the claim, the pending store's eviction and a full
+/// store's registration all read, so none of them lets a quote go before the others do.
+#[test]
+fn the_claim_window_is_the_permit_window_and_the_grace_after_it() {
+    assert_eq!(
+        Config::default().claim_window(),
+        Duration::from_secs(120 + 3_600)
+    );
+    let short = Config {
+        permit_deadline: Duration::from_secs(30),
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..Config::default()
+    };
+    assert_eq!(short.claim_window(), Duration::from_secs(630));
+}

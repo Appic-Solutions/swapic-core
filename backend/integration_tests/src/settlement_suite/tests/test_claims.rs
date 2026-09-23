@@ -1,13 +1,14 @@
 //! The entry doors from outside: the claim that creates a swap from a deposit the chain
 //! holds, the gasless pull that makes such a deposit, and the attestation inbox.
 //!
-//! The claim's one outcall is mocked here the way the outbox tests mock theirs: the test
-//! submits the call, reads the pending request, and answers it with a head block and the
-//! vault's logs.
+//! The claim's outcalls are mocked here the way the outbox tests mock theirs: the test
+//! submits the call, reads the pending requests, and answers them from a mocked provider
+//! ([`Provider`]): the provider's head, asked alone first, then the vault's logs window by
+//! window, and the time of the block a deposit landed in when a claim comes late.
 
 use crate::client::settlement::{
-    claim_swap, derive_evm_address, event_count, events_page, get_swap, push_attestation,
-    push_chain_data, push_eco_intent, register_quote, set_halted, set_sanctioned,
+    claim_swap, derive_evm_address, event_count, events_page, get_pending, get_swap,
+    push_attestation, push_chain_data, push_eco_intent, register_quote, set_halted, set_sanctioned,
     start_gasless_pull, verify_replay,
 };
 use crate::settlement_suite::init::{empty_canister, install, quoter, watcher};
@@ -255,42 +256,227 @@ fn logged_deposit(
     })
 }
 
-/// Answers the claim's one outcall: the head at `latest`, and `logs` for the quote.
-fn answer(pic: &PocketIc, request: &CanisterHttpRequest, latest: u64, logs: Vec<Value>) {
-    let body = json!([
-        {"jsonrpc": "2.0", "id": 0, "result": format!("0x{latest:x}")},
-        {"jsonrpc": "2.0", "id": 1, "result": logs},
-    ]);
-    pic.mock_canister_http_response(MockCanisterHttpResponse {
-        subnet_id: request.subnet_id,
-        request_id: request.request_id,
-        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
-            status: 200,
-            headers: vec![],
-            body: body.to_string().into_bytes(),
-        }),
-        additional_responses: vec![],
-    });
-    for _ in 0..4 {
-        pic.tick();
+/// How a provider answers a range of blocks above its own head, as the review of fix wave
+/// 4 measured real ones (M1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Geth, and the providers built on it: a range that starts above the head, or names
+    /// a block above it by number, is refused with an error.
+    Geth,
+    /// A provider that answers any range with the logs it holds, and none above its head.
+    Permissive,
+}
+
+/// A mocked provider for Base: what its `eth_blockNumber` says, the highest block its logs
+/// reach, the vault's logs, the time each block was made, and every read the canister made.
+struct Provider {
+    head: u64,
+    /// The highest block a log is served from: the head for a real node, and past it for
+    /// the fixtures that hand a log over before the head reaches it.
+    tip: u64,
+    shape: Shape,
+    logs: Vec<Value>,
+    /// The block a hash names, and the second it was made at.
+    blocks: BTreeMap<String, (u64, u64)>,
+    /// The quote every log read must be for, when the test names one.
+    quote_hash: Option<Hash32>,
+    /// Every `eth_getLogs` asked: the first block, and the last (`None` for the head).
+    log_reads: Vec<(u64, Option<u64>)>,
+    /// Every block hash asked for.
+    block_reads: Vec<String>,
+    /// How many outcalls were answered.
+    outcalls: usize,
+}
+
+/// A hex quantity as a number.
+fn hex_u64(text: &str) -> u64 {
+    u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex quantity")
+}
+
+impl Provider {
+    /// A node at `head` holding `logs`, which serves nothing above its head and answers
+    /// any range.
+    fn at(head: u64, logs: &[Value]) -> Self {
+        Self {
+            head,
+            tip: head,
+            shape: Shape::Permissive,
+            logs: logs.to_vec(),
+            blocks: BTreeMap::new(),
+            quote_hash: None,
+            log_reads: Vec::new(),
+            block_reads: Vec::new(),
+            outcalls: 0,
+        }
+    }
+
+    fn shaped(self, shape: Shape) -> Self {
+        Self { shape, ..self }
+    }
+
+    fn for_quote(self, quote_hash: Hash32) -> Self {
+        Self {
+            quote_hash: Some(quote_hash),
+            ..self
+        }
+    }
+
+    /// The block `hash` names was made at `timestamp`.
+    fn block(mut self, hash: Hash32, number: u64, timestamp: u64) -> Self {
+        self.blocks
+            .insert(format!("0x{}", hex::encode(hash)), (number, timestamp));
+        self
+    }
+
+    /// The answer to one call, or the message of the error it answers with.
+    fn call(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+        match method {
+            "eth_blockNumber" => Ok(json!(format!("0x{:x}", self.head))),
+            "eth_getLogs" => {
+                let filter = &params[0];
+                assert_eq!(filter["address"], json!(VAULT.to_ascii_lowercase()));
+                assert_eq!(
+                    filter["topics"][0],
+                    json!(format!("0x{}", hex::encode(deposited_topic())))
+                );
+                if let Some(quote_hash) = self.quote_hash {
+                    assert_eq!(
+                        filter["topics"][1],
+                        json!(format!("0x{}", hex::encode(quote_hash))),
+                        "the read is for this quote"
+                    );
+                }
+                let from = hex_u64(filter["fromBlock"].as_str().expect("a fromBlock"));
+                let to = match filter["toBlock"].as_str().expect("a toBlock") {
+                    "latest" => None,
+                    text => Some(hex_u64(text)),
+                };
+                self.log_reads.push((from, to));
+                let beyond = from > self.head || to.is_some_and(|to| to > self.head);
+                if self.shape == Shape::Geth && beyond {
+                    return Err("block range extends beyond current head block".to_string());
+                }
+                let last = to.unwrap_or(self.tip).min(self.tip);
+                let wanted = &filter["topics"][1];
+                Ok(json!(self
+                    .logs
+                    .iter()
+                    .filter(|log| log["topics"][1] == *wanted)
+                    .filter(|log| {
+                        let block = hex_u64(log["blockNumber"].as_str().expect("a block"));
+                        (from..=last).contains(&block)
+                    })
+                    .cloned()
+                    .collect::<Vec<Value>>()))
+            }
+            "eth_getBlockByHash" => {
+                let hash = params[0].as_str().expect("a block hash").to_string();
+                assert_eq!(params[1], json!(false), "the header, not the bodies");
+                self.block_reads.push(hash.clone());
+                Ok(match self.blocks.get(&hash) {
+                    Some((number, timestamp)) => json!({
+                        "hash": hash,
+                        "number": format!("0x{number:x}"),
+                        "timestamp": format!("0x{timestamp:x}"),
+                        "transactions": [],
+                    }),
+                    None => Value::Null,
+                })
+            }
+            other => panic!("the canister asked for {other}, which the provider does not answer"),
+        }
+    }
+
+    /// Answers one pending outcall, each call in its batch for itself.
+    fn reply(&mut self, pic: &PocketIc, request: &CanisterHttpRequest) {
+        let body: Value = serde_json::from_slice(&request.body).expect("the body is json");
+        let replies: Vec<Value> = body
+            .as_array()
+            .expect("a batch is an array")
+            .iter()
+            .map(|call| {
+                let id = call["id"].clone();
+                match self.call(call["method"].as_str().expect("a method"), &call["params"]) {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err(message) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32000, "message": message},
+                    }),
+                }
+            })
+            .collect();
+        pic.mock_canister_http_response(MockCanisterHttpResponse {
+            subnet_id: request.subnet_id,
+            request_id: request.request_id,
+            response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                status: 200,
+                headers: vec![],
+                body: Value::Array(replies).to_string().into_bytes(),
+            }),
+            additional_responses: vec![],
+        });
+        self.outcalls += 1;
+        for _ in 0..4 {
+            pic.tick();
+        }
+    }
+
+    /// Answers every outcall the canister makes until it asks for nothing more.
+    fn drive(&mut self, pic: &PocketIc) {
+        loop {
+            let pending = pic.get_canister_http();
+            if pending.is_empty() {
+                return;
+            }
+            for request in pending {
+                self.reply(pic, &request);
+            }
+        }
+    }
+
+    /// The first block of every log read, in the order they were asked.
+    fn froms(&self) -> Vec<u64> {
+        self.log_reads.iter().map(|(from, _)| *from).collect()
     }
 }
 
-/// The one pending outcall, which must be the claim's read: the head and the vault's logs
-/// for the quote, in one batch.
-fn the_read(pic: &PocketIc, quote_hash: Hash32) -> CanisterHttpRequest {
+/// The claim's first outcall, pending: the provider's head, asked alone, because every
+/// window the claim reads is built from it.
+struct HeadRead {
+    request: CanisterHttpRequest,
+    quote_hash: Hash32,
+}
+
+/// The one pending outcall, which must be the claim's first read: the provider's head,
+/// asked alone before any window is built.
+///
+/// Rewritten for fix wave 5 (M1): the claim's first read was the head and the logs of its
+/// one window in a batch, and it is now the head alone.
+fn the_read(pic: &PocketIc, quote_hash: Hash32) -> HeadRead {
     let pending = pic.get_canister_http();
-    assert_eq!(pending.len(), 1, "a claim buys one outcall");
+    assert_eq!(pending.len(), 1, "a claim has one outcall out at a time");
     let request = pending.into_iter().next().unwrap();
-    assert_eq!(methods(&request), vec!["eth_blockNumber", "eth_getLogs"]);
-    let filter = params(&request, 1);
-    assert_eq!(filter[0]["address"], json!(VAULT.to_ascii_lowercase()));
-    assert_eq!(
-        filter[0]["topics"][1],
-        json!(format!("0x{}", hex::encode(quote_hash))),
-        "the read is for this quote"
-    );
-    request
+    assert_eq!(methods(&request), vec!["eth_blockNumber"]);
+    HeadRead {
+        request,
+        quote_hash,
+    }
+}
+
+/// Answers the claim's reads: the head at `latest`, and `logs` for the quote to every
+/// window that reaches them, including those above `latest`, so a test can hand over a
+/// log the head has not reached.
+///
+/// Rewritten for fix wave 5 (M1): the head is answered first and alone, and the windows
+/// after it each get the logs in their range.
+fn answer(pic: &PocketIc, read: &HeadRead, latest: u64, logs: Vec<Value>) {
+    let mut provider = Provider {
+        tip: u64::MAX,
+        ..Provider::at(latest, &logs).for_quote(read.quote_hash)
+    };
+    provider.reply(pic, &read.request);
+    provider.drive(pic);
 }
 
 /// The whole door, on the path that creates a swap: the claim reads the chain once, for
@@ -346,6 +532,10 @@ fn a_valid_mocked_deposit_appends_funds_received_and_returns_the_hash() {
 /// Rewritten for fix wave 4 (N4): a claim that finds nothing at all above the height the
 /// quote was registered at reads the plain lookback before it refuses, so the refusal
 /// comes after every window of it, where it came after the one.
+///
+/// Rewritten for fix wave 5 (L4, N-d): the read starts twenty thousand blocks below the
+/// height (three windows), and the fallback reads only the rest of the lookback, older than
+/// that, where it read the whole lookback again.
 #[test]
 fn no_deposit_means_nothing_stored() {
     let (pic, canister, _admin) = setup();
@@ -360,9 +550,10 @@ fn no_deposit_means_nothing_stored() {
         Err(ClaimError::Deposit(DepositError::NotFound { quote_hash }))
     );
     assert_eq!(
-        (reads[0], reads[1], reads.len()),
-        (HEAD, HEAD + 1 - 345_600, 36),
-        "the registration height's window, then the plain lookback from its oldest"
+        (reads[0], reads[3], reads.len()),
+        (HEAD - 20_000, HEAD + 1 - 345_600, 36),
+        "the margin below the registration height to the head, then the rest of the \
+         lookback from its oldest"
     );
     assert_eq!(count(&pic, canister), before, "nothing stored");
     assert_eq!(
@@ -694,11 +885,15 @@ fn concurrent_claims_buy_one_outcall() {
     );
 }
 
-/// A quote nobody can pay any more is not claimed: past its expiry plus the permit
-/// window, the claim is refused before any outcall. Inside the window it still is.
+/// A quote no claim is admitted for any more is not claimed: past its expiry, the permit
+/// window and the grace after it, the claim is refused before any outcall. Inside the
+/// window it still is.
 ///
 /// Rewritten for fix wave 4 (N4): the claim inside the window finds nothing above the
 /// registration height and reads the plain lookback before it refuses.
+///
+/// Rewritten for fix wave 5 (N7): the claim is refused once the grace after the permit
+/// window has ended, where it was refused as soon as the permit window closed.
 #[test]
 fn an_expired_quote_is_refused_before_any_outcall() {
     let (pic, canister, _admin) = setup();
@@ -722,7 +917,9 @@ fn an_expired_quote_is_refused_before_any_outcall() {
         Err(ClaimError::Deposit(DepositError::NotFound { .. }))
     ));
 
-    pic.advance_time(Duration::from_secs(121));
+    // the clock is at the expiry: past the two minute permit window and the hour of
+    // grace after it
+    pic.advance_time(Duration::from_secs(120 + 3_600 + 1));
     push_reading(&pic, canister);
     let refused = claim_swap(&pic, canister, watcher(), &wire(&quote));
     assert!(
@@ -1344,13 +1541,6 @@ fn a_claim_whose_read_returns_after_a_halt_records_nothing() {
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
 }
 
-/// The block a read asks the provider to start at.
-fn from_block(request: &CanisterHttpRequest) -> u64 {
-    let filter = params(request, 1);
-    let text = filter[0]["fromBlock"].as_str().expect("a fromBlock");
-    u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex block number")
-}
-
 /// A swap's economics are the quoter's: the rail, the destination, the expiry and the
 /// amounts all come from the quote, so a claim is admitted only for a quote the quoter
 /// registered. The watcher alone cannot author one and claim its own deposit. A controller
@@ -1400,15 +1590,19 @@ fn a_claim_needs_a_quote_the_quoter_registered() {
 }
 
 /// The deposit that pays a quote is in no block before the quote was registered, so the
-/// claim's log read starts at the height the store kept and reads one window. A quote the
-/// store holds no height for is read from the lookback, which is a day of blocks on the
-/// chain whose blocks come fastest: a deposit made while the canister was halted is still
-/// in the range.
+/// claim's log read starts at the height the store kept, less the margin a watcher's
+/// height is trusted to, and reads a few windows. A quote the store holds no height for is
+/// read from the lookback, which is a day of blocks on the chain whose blocks come
+/// fastest: a deposit made while the canister was halted is still in the range.
 ///
 /// Rewritten for fix wave 4 (N2): the lookback is now walked from its oldest window
 /// forward, since the deposit that counts is the oldest deep one in range, so the
 /// controller's claim reads every window up to the one holding the deposit instead of
 /// starting at the newest.
+///
+/// Rewritten for fix wave 5 (L4, M1): the read starts twenty thousand blocks (the
+/// margin) below the height, where it started at the height itself, and the provider's
+/// head is asked first, alone, and is no log read.
 #[test]
 fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     let (pic, canister, admin) = setup();
@@ -1433,20 +1627,19 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     // reads from stays the earliest one, because the user may have deposited in between
     registered(&pic, canister, &quote);
     let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
-    let read = the_read(&pic, quote_hash);
-    assert_eq!(
-        from_block(&read),
-        HEAD,
-        "the height the quote was first registered at, not a day of blocks back and not \
-         the head a retry saw"
-    );
-    answer(
+    let reads = walk_the_reads(
         &pic,
-        &read,
+        quote_hash,
         HEAD + 5_000,
-        vec![deposit_log(quote_hash, HEAD + 1, USDC, USER, AMOUNT.into())],
+        &[deposit_log(quote_hash, HEAD + 1, USDC, USER, AMOUNT.into())],
     );
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        reads.first(),
+        Some(&(HEAD - 20_000)),
+        "the margin below the height the quote was first registered at, not a day of \
+         blocks back and not the head a retry saw"
+    );
 
     // a quote the store holds nothing for: the controller's door, read from the lookback,
     // oldest window first, up to the window that holds the deposit
@@ -1478,41 +1671,16 @@ fn the_read_starts_at_the_block_the_quote_was_registered_at() {
     );
 }
 
-/// The block a read asks the provider to end at: the head for the newest window.
-fn to_block(request: &CanisterHttpRequest, latest: u64) -> u64 {
-    let filter = params(request, 1);
-    match filter[0]["toBlock"].as_str().expect("a toBlock") {
-        "latest" => latest,
-        text => u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("a hex block"),
-    }
-}
-
-/// Answers one read the way a provider does over the range it names: the head at
-/// `latest`, and those of `logs` whose block is inside the range, in the order given.
-fn answer_in_range(pic: &PocketIc, request: &CanisterHttpRequest, latest: u64, logs: &[Value]) {
-    let (from, to) = (from_block(request), to_block(request, latest));
-    let within = logs
-        .iter()
-        .filter(|log| {
-            let text = log["blockNumber"].as_str().expect("a block number");
-            let block = u64::from_str_radix(text.trim_start_matches("0x"), 16).unwrap();
-            (from..=to).contains(&block)
-        })
-        .cloned()
-        .collect();
-    answer(pic, request, latest, within);
-}
-
-/// Answers every window a claim reads, one outcall at a time, until it asks for nothing
-/// more, and gives back the block each read started at, in the order they were asked.
+/// Answers every read a claim makes from a provider at `latest` holding `logs`, until it
+/// asks for nothing more, and gives back the block each log read started at, in the order
+/// they were asked.
+///
+/// Rewritten for fix wave 5 (M1): the provider's head is asked first and alone, and it
+/// is no log read.
 fn walk_the_reads(pic: &PocketIc, quote_hash: Hash32, latest: u64, logs: &[Value]) -> Vec<u64> {
-    let mut froms = Vec::new();
-    while !pic.get_canister_http().is_empty() {
-        let read = the_read(pic, quote_hash);
-        froms.push(from_block(&read));
-        answer_in_range(pic, &read, latest, logs);
-    }
-    froms
+    let mut provider = Provider::at(latest, logs).for_quote(quote_hash);
+    provider.drive(pic);
+    provider.froms()
 }
 
 /// A lookback of two windows and a depth of six on Base, so a test can put a deposit in
@@ -1789,6 +1957,9 @@ fn a_stale_reading_registers_no_height_and_the_quote_stays_claimable() {
 /// the claim's own reading looks wrong. The claim reads from the height, finds nothing at
 /// all above it, and reads the plain lookback before refusing, so it claims the deposit
 /// rather than stranding it.
+///
+/// Rewritten for fix wave 5 (L4, N-d): the read starts the margin below the height, and
+/// the fallback reads only the rest of the lookback, older than that.
 #[test]
 fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
     let (pic, canister, admin) = setup();
@@ -1802,10 +1973,10 @@ fn a_watcher_head_ahead_of_the_chain_cannot_strand_a_quote() {
     let reads = walk_the_reads(&pic, quote_hash, HEAD + 60_000, &[deposit]);
     assert_eq!(await_claim(&pic, call), Ok(quote_hash));
     assert_eq!(
-        reads[..3],
-        [HEAD + 50_000, HEAD + 50_001, HEAD + 60_000 + 1 - 100_000],
-        "from the height the quote was registered at, then, with nothing above it, the \
-         plain lookback from its oldest window"
+        (reads[0], reads[4]),
+        (HEAD + 30_000, HEAD + 60_000 + 1 - 100_000),
+        "from the margin below the height the quote was registered at, then, with nothing \
+         above it, the rest of the lookback from its oldest window"
     );
     assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
@@ -1932,4 +2103,245 @@ fn a_quote_naming_no_payable_destination_is_refused_at_both_doors() {
         vec![deposit_log(good_hash, HEAD, USDC, USER, AMOUNT.into())],
     );
     assert_eq!(await_claim(&pic, call), Ok(good_hash));
+}
+
+/// Walks the clock from where it stands to `until_s`, a minute at a time, the way the
+/// expiry sweep's timer sees it (rule G4): it runs every minute, so a quote it would drop
+/// too early is gone by the end of the walk.
+fn walk_the_clock_to(pic: &PocketIc, until_s: u64) {
+    loop {
+        let now_s = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000;
+        if now_s >= until_s {
+            return;
+        }
+        pic.advance_time(Duration::from_secs((until_s - now_s).min(60)));
+        pic.tick();
+        pic.tick();
+    }
+}
+
+/// The user's deposit for `quote_hash` at `block`, in the block `block_hash` names.
+fn deposit_in_block(quote_hash: Hash32, block: u64, block_hash: Hash32) -> Value {
+    let mut log = deposit_log(quote_hash, block, USDC, USER, AMOUNT.into());
+    log["blockHash"] = json!(format!("0x{}", hex::encode(block_hash)));
+    log
+}
+
+/// The claim is judged by the deposit's own time, not by when it is asked: a deposit whose
+/// block the chain made inside the quote's window is claimed ten minutes after the window
+/// closed, the way a watcher that was down would ask for it. The pending store kept the
+/// quote through the minutes between, and the claim read the time of the block the
+/// deposit's log named, one outcall more, because its read came back past the window.
+#[test]
+fn a_deposit_claimed_after_its_window_closed_is_admitted_when_it_landed_in_time() {
+    let (pic, canister, _admin) = setup();
+    let quote = quote(60);
+    let quote_hash = registered(&pic, canister, &quote);
+    let block_hash = [0x51; 32];
+    // the window closes at the expiry plus the two minute permit window
+    walk_the_clock_to(&pic, EXPIRES_AT + 120 + 600);
+    assert!(
+        get_pending(&pic, canister, watcher(), quote_hash)
+            .unwrap()
+            .is_some(),
+        "the store kept the quote past its permit window, inside the grace"
+    );
+    push_head(&pic, canister, HEAD + 400);
+    let before = count(&pic, canister);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let mut provider = Provider::at(
+        HEAD + 400,
+        &[deposit_in_block(quote_hash, HEAD + 5, block_hash)],
+    )
+    .for_quote(quote_hash)
+    .block(block_hash, HEAD + 5, EXPIRES_AT + 60);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(count(&pic, canister), before + 1, "the swap");
+    assert_eq!(
+        provider.block_reads,
+        vec![format!("0x{}", hex::encode(block_hash))],
+        "the time the deposit's own block was made is what it was judged by"
+    );
+    assert!(verify_replay(&pic, canister, Principal::anonymous()));
+}
+
+/// A deposit whose block the chain made after the quote's window closed is not the swap the
+/// user was quoted, whoever asks: the watcher's claim and the controller's are both refused
+/// with the block, the time it landed and the deadline it missed, and nothing is stored.
+/// Its funds stay in the vault, for the late-arrival policy a later plan builds.
+#[test]
+fn a_deposit_that_landed_late_is_refused_whoever_asks() {
+    let (pic, canister, admin) = setup();
+    let quote = quote(61);
+    let quote_hash = registered(&pic, canister, &quote);
+    let block_hash = [0x52; 32];
+    walk_the_clock_to(&pic, EXPIRES_AT + 300);
+    let before = count(&pic, canister);
+    for who in [watcher(), admin] {
+        push_head(&pic, canister, HEAD + 400);
+        let call = submit_claim_unregistered(&pic, canister, who, &wire(&quote));
+        let mut provider = Provider::at(
+            HEAD + 400,
+            &[deposit_in_block(quote_hash, HEAD + 70, block_hash)],
+        )
+        .for_quote(quote_hash)
+        .block(block_hash, HEAD + 70, EXPIRES_AT + 121);
+        provider.drive(&pic);
+        assert_eq!(
+            await_claim(&pic, call),
+            Err(ClaimError::LandedLate {
+                block: HEAD + 70,
+                landed_at_s: EXPIRES_AT + 121,
+                deposit_until_s: EXPIRES_AT + 120,
+            }),
+            "claimed by {who}"
+        );
+    }
+    assert_eq!(count(&pic, canister), before, "nothing stored");
+    assert_eq!(
+        get_swap(&pic, canister, Principal::anonymous(), quote_hash),
+        None
+    );
+}
+
+/// The controller's claim, the ops path for a deposit the services never claimed, is held
+/// to the same window as theirs: a deposit that landed in time is claimed by hand after
+/// the window closed, and once the grace has ended the controller is refused like anyone
+/// else, before any outcall.
+#[test]
+fn a_controllers_claim_is_held_to_the_same_window() {
+    let (pic, canister, admin) = setup();
+    // never registered: the controller's own door
+    let by_hand = quote(62);
+    let by_hand_hash = swap_id(&by_hand);
+    let block_hash = [0x53; 32];
+    walk_the_clock_to(&pic, EXPIRES_AT + 120 + 600);
+    push_head(&pic, canister, HEAD + 400);
+    let call = submit_claim_unregistered(&pic, canister, admin, &wire(&by_hand));
+    let mut provider = Provider::at(
+        HEAD + 400,
+        &[deposit_in_block(by_hand_hash, HEAD + 5, block_hash)],
+    )
+    .for_quote(by_hand_hash)
+    .block(block_hash, HEAD + 5, EXPIRES_AT + 100);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(by_hand_hash));
+
+    // past the grace nobody is admitted, the controller included
+    walk_the_clock_to(&pic, EXPIRES_AT + 120 + 3_600 + 1);
+    push_head(&pic, canister, HEAD + 400);
+    let refused = claim_swap(&pic, canister, admin, &wire(&quote(63)));
+    assert!(
+        matches!(
+            refused,
+            Err(ClaimError::QuoteExpired { claim_until_s, .. })
+                if claim_until_s == EXPIRES_AT + 120 + 3_600
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        pic.get_canister_http().is_empty(),
+        "refused before any outcall"
+    );
+}
+
+/// A watcher's head ahead of the chain cannot stall a claim on a provider that refuses a
+/// range above its own head, the way geth-family providers do (review 4, M1): the claim
+/// asks the provider's head first and builds every window from the lower of it and the
+/// watcher's, so no range the provider refuses is sent, and the deposit below the false
+/// height is claimed.
+#[test]
+fn a_provider_that_refuses_a_range_above_its_head_does_not_stall_the_claim() {
+    let (pic, canister, _admin) = setup();
+    push_head(&pic, canister, HEAD + 50_000);
+    let quote = quote(64);
+    let quote_hash = registered(&pic, canister, &quote);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let mut provider = Provider::at(
+        HEAD + 20,
+        &[deposit_log(
+            quote_hash,
+            HEAD + 10,
+            USDC,
+            USER,
+            AMOUNT.into(),
+        )],
+    )
+    .shaped(Shape::Geth)
+    .for_quote(quote_hash);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert!(
+        provider
+            .log_reads
+            .iter()
+            .all(|(from, to)| *from <= HEAD + 20 && to.is_none_or(|to| to <= HEAD + 20)),
+        "no range above the provider's head was asked for: {:?}",
+        provider.log_reads
+    );
+}
+
+/// The same lying head against a provider that answers a range above its head with
+/// nothing rather than an error: the claim still never asks for one, and the deposit below
+/// the false height is claimed.
+#[test]
+fn a_permissive_provider_is_never_asked_for_a_range_above_its_head() {
+    let (pic, canister, _admin) = setup();
+    push_head(&pic, canister, HEAD + 50_000);
+    let quote = quote(66);
+    let quote_hash = registered(&pic, canister, &quote);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    let mut provider = Provider::at(
+        HEAD + 20,
+        &[deposit_log(
+            quote_hash,
+            HEAD + 10,
+            USDC,
+            USER,
+            AMOUNT.into(),
+        )],
+    )
+    .for_quote(quote_hash);
+    provider.drive(&pic);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert!(
+        provider
+            .log_reads
+            .iter()
+            .all(|(from, _)| *from <= HEAD + 20),
+        "no range above the provider's head was asked for: {:?}",
+        provider.log_reads
+    );
+}
+
+/// The height a quote was registered at is the watcher's, and a watcher can push one a
+/// little ahead of the chain (review 4, L4). The user's deposit lands below it, and a
+/// later deposit of the same quote and amount lands above it once the chain has passed
+/// it: the user's, the oldest, is the one claimed, because the read starts a margin below
+/// the height rather than at it.
+#[test]
+fn a_deposit_below_a_lying_height_counts_before_a_later_one_above_it() {
+    let (pic, canister, _admin) = setup();
+    push_head(&pic, canister, HEAD + 1_000);
+    let quote = quote(65);
+    let quote_hash = registered(&pic, canister, &quote);
+    let users = logged_deposit(quote_hash, HEAD + 10, USDC, USER, AMOUNT.into(), [0x71; 32]);
+    let later = logged_deposit(
+        quote_hash,
+        HEAD + 2_000,
+        USDC,
+        REFUND,
+        AMOUNT.into(),
+        [0x72; 32],
+    );
+    push_head(&pic, canister, HEAD + 3_000);
+    let call = submit_claim_unregistered(&pic, canister, watcher(), &wire(&quote));
+    walk_the_reads(&pic, quote_hash, HEAD + 3_000, &[users, later]);
+    assert_eq!(await_claim(&pic, call), Ok(quote_hash));
+    assert_eq!(
+        claimed_tx_ref(&pic, canister, quote_hash),
+        format!("0x{}", hex::encode([0x71; 32])),
+        "the user's deposit below the height, the oldest, and not the later one above it"
+    );
 }

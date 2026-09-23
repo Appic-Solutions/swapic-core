@@ -6,7 +6,8 @@ use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
 use types::config::{
-    AuditChunk, ChainTable, DepositLookback, EcoEnabled, EvictionsPerSweep, RefundsPerSweep,
+    AuditChunk, ChainTable, ClaimGrace, DepositLookback, EcoEnabled, EvictionsPerSweep,
+    RefundsPerSweep,
 };
 use types::rail::CctpDomain;
 use types::{BasisPoints, BlockDepth, ChainId, EvmAddress, UsdAmount};
@@ -54,6 +55,11 @@ pub struct Config {
     /// Whether the Eco rail may be used. False until its route is designed: a quote
     /// naming it is refused at the claim.
     pub eco_enabled: bool,
+    /// How long after a quote's deposit deadline (its expiry plus the permit window) a
+    /// claim for a deposit that landed by that deadline is still admitted, from any
+    /// caller the claim admits, the controller included: 600 to 86,400 seconds, an hour by
+    /// default. The pending store keeps the quote until it ends.
+    pub claim_grace_s: u64,
 }
 
 impl Default for Config {
@@ -95,6 +101,7 @@ impl fmt::Debug for Config {
             message_transmitter,
             eco_portal,
             eco_enabled,
+            claim_grace_s,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -126,6 +133,7 @@ impl fmt::Debug for Config {
             .field("message_transmitter", message_transmitter)
             .field("eco_portal", eco_portal)
             .field("eco_enabled", eco_enabled)
+            .field("claim_grace_s", claim_grace_s)
             .finish()
     }
 }
@@ -182,6 +190,7 @@ impl From<types::Config> for Config {
             message_transmitter,
             eco_portal,
             eco_enabled,
+            claim_grace,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -229,6 +238,7 @@ impl From<types::Config> for Config {
             message_transmitter: message_transmitter.map(|address| address.to_string()),
             eco_portal: eco_portal.map(|address| address.to_string()),
             eco_enabled: eco_enabled.is_on(),
+            claim_grace_s: claim_grace.get().as_secs(),
         }
     }
 }
@@ -342,6 +352,7 @@ impl TryFrom<Config> for types::Config {
                 .map(|address| evm_address("eco_portal", None, address))
                 .transpose()?,
             eco_enabled: EcoEnabled::new(config.eco_enabled),
+            claim_grace: ClaimGrace::new(Duration::from_secs(config.claim_grace_s)),
         })
     }
 }
@@ -375,6 +386,12 @@ pub enum ConfigError {
         field: String,
         duration_ms: u64,
         cap_ms: u64,
+    },
+    /// In milliseconds, like the cap: the knob is below the least it may be.
+    DurationBelowFloor {
+        field: String,
+        duration_ms: u64,
+        floor_ms: u64,
     },
     CapOutOfRange {
         field: String,
@@ -461,6 +478,15 @@ impl From<types::ConfigError> for ConfigError {
                 field: field.to_string(),
                 duration_ms: millis(duration),
                 cap_ms: millis(cap),
+            },
+            Domain::DurationBelowFloor {
+                field,
+                duration,
+                floor,
+            } => Self::DurationBelowFloor {
+                field: field.to_string(),
+                duration_ms: millis(duration),
+                floor_ms: millis(floor),
             },
             Domain::CapOutOfRange {
                 field,

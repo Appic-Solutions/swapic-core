@@ -76,14 +76,15 @@ pub const MAX_LOOKBACK_BLOCKS: u32 = {
 
 /// How many blocks back from a chain's head the deposit read looks for a user's deposit.
 ///
-/// A quote is claimable for its lifetime (a day) plus the permit window, so the deposit a
-/// claim looks for can be a day old: a canister halted for an hour, a quoter outage, or a
-/// user who deposits late must not put the funds out of reach. The default is therefore a
-/// day of the chain whose blocks come fastest among the configured ones (Arbitrum, four
-/// blocks a second), which is the widest a day is in blocks and covers a day on every
-/// slower chain many times over. It is read in windows of [`LOGS_WINDOW_BLOCKS`] and a
-/// claim for a quote the store still holds starts at that quote's registration block
-/// instead, so the width costs outcalls only where no registration height is known. The
+/// A quote is claimable for its lifetime (a day) plus the permit window and the grace, so
+/// the deposit a claim looks for can be a day old: a canister halted for an hour, a quoter
+/// outage, or a user who deposits late must not put the funds out of reach. The default is
+/// therefore a day of the chain whose blocks come fastest among the configured ones
+/// (Arbitrum, four blocks a second), which is the widest a day is in blocks and covers a
+/// day on every slower chain many times over. It is read in windows of
+/// [`LOGS_WINDOW_BLOCKS`] and a claim for a quote the store still holds starts a margin
+/// below that quote's registration block instead, so the width costs outcalls only where
+/// no registration height is known or nothing turns up above it. The
 /// ceiling is [`MAX_LOOKBACK_BLOCKS`], the widest range the read walks: a lookback above
 /// it would have every read refused as too wide, every claim and every arrival check with
 /// it.
@@ -159,6 +160,99 @@ impl<'b, C, const DEFAULT: u32, const CEILING: u32> Decode<'b, C> for Cap<DEFAUL
             return Ok(Self::DEFAULT);
         }
         Ok(Self(d.u32()?))
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::DEFAULT)
+    }
+}
+
+/// How long after a quote's deposit deadline a claim for a deposit that landed by it is
+/// still admitted, whoever asks, the controller included.
+///
+/// The deposit deadline is the quote's expiry plus the permit window, and it is judged by
+/// the deposit's own block time. The claim is asked by the services, which can be slow or
+/// down: without a grace a watcher that claims late would find even the controller
+/// refused a few minutes after the quote, with the user's funds in the vault. The pending
+/// store keeps the quote until the grace ends, so the claim still finds it registered.
+///
+/// At least ten minutes, so a watcher restart fits inside it, and at most a day, the
+/// bound every window inside one swap is held to. An hour by default. Absent from the
+/// stored config at its default, so every config written before it existed reads back
+/// with the default and the golden lines do not move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClaimGrace(Duration);
+
+/// The least a claim's grace may be: ten minutes.
+pub const MIN_CLAIM_GRACE: Duration = Duration::from_secs(600);
+
+impl ClaimGrace {
+    /// What a config that never set the knob reads as: an hour.
+    pub const DEFAULT: Self = Self(Duration::from_secs(3_600));
+    /// The shortest grace the knob accepts.
+    pub const FLOOR: Duration = MIN_CLAIM_GRACE;
+    /// The longest grace the knob accepts.
+    pub const CEILING: Duration = MAX_SHORT_DURATION;
+
+    pub const fn new(grace: Duration) -> Self {
+        Self(grace)
+    }
+
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+
+    /// Between [`Self::FLOOR`] and [`Self::CEILING`], both included.
+    pub fn validate(self) -> Result<(), ConfigError> {
+        let field = "claim_grace_s";
+        if self.0 < Self::FLOOR {
+            return Err(ConfigError::DurationBelowFloor {
+                field,
+                duration: self.0,
+                floor: Self::FLOOR,
+            });
+        }
+        if self.0 > Self::CEILING {
+            return Err(ConfigError::DurationAboveCap {
+                field,
+                duration: self.0,
+                cap: Self::CEILING,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for ClaimGrace {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Stored as a duration, and as nothing at all when it holds the default.
+impl<C> Encode<C> for ClaimGrace {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl<'b, C> Decode<'b, C> for ClaimGrace {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the knob absent in the middle
+        // reads back, and it means the same as the knob missing off the end
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::DEFAULT);
+        }
+        Duration::decode(d, ctx).map(Self)
     }
 
     fn nil() -> Option<Self> {
@@ -354,6 +448,10 @@ pub struct Config {
     /// it is refused at the claim, and a swap already on it is stopped for a human.
     #[n(26)]
     pub eco_enabled: EcoEnabled,
+    /// How long after a quote's deposit deadline a claim for a deposit that landed by it
+    /// is still admitted.
+    #[n(27)]
+    pub claim_grace: ClaimGrace,
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -390,6 +488,12 @@ pub enum ConfigError {
         field: &'static str,
         duration: Duration,
         cap: Duration,
+    },
+    #[error("{field} is {duration:?}, below the floor of {floor:?}")]
+    DurationBelowFloor {
+        field: &'static str,
+        duration: Duration,
+        floor: Duration,
     },
     #[error("{field} is {cap}, outside the range 1 to {ceiling}")]
     CapOutOfRange {
@@ -480,6 +584,7 @@ impl Default for Config {
             eco_portal: None,
             // the Eco route is a later plan's; until then no Eco quote is claimed
             eco_enabled: EcoEnabled::OFF,
+            claim_grace: ClaimGrace::DEFAULT,
         }
     }
 }
@@ -573,6 +678,7 @@ impl Config {
         self.audit_chunk_events.validate("audit_chunk_events")?;
         self.deposit_lookback_blocks
             .validate("deposit_lookback_blocks")?;
+        self.claim_grace.validate()?;
         // the batch size is a cap like the three above, held to the same rule
         if self.max_batch_items == 0 || self.max_batch_items > MAX_BATCH_ITEMS {
             return Err(ConfigError::CapOutOfRange {
@@ -597,6 +703,14 @@ impl Config {
             return Err(ConfigError::EmptyRpcUrl { chain });
         }
         Ok(())
+    }
+
+    /// How long after a quote's expiry a claim for it may still be asked: the permit
+    /// window, in which the deposit has to land, and the grace after it.
+    pub fn claim_window(&self) -> Duration {
+        // each is held to a day by `validate`, and a config nobody validated saturates
+        // rather than wraps, which only ever holds a quote longer
+        self.permit_deadline.saturating_add(self.claim_grace.get())
     }
 
     /// Which timer intervals `new` moves, one flag per timer.

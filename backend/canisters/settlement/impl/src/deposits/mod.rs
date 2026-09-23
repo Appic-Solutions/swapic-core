@@ -2,7 +2,7 @@
 //! read from the chain and held to the configured depth. It is the read `claim_swap`
 //! decides money on, so every answer is bound to what this canister asked for: the vault
 //! it configured, the event the vault emits, the quote it is claiming, the token and the
-//! amount it is looking for, and a height from the same answer.
+//! amount it is looking for, and the head the same provider answered first.
 //!
 //! The vault marks a quote per payer, so anyone can log a deposit under a quote's hash
 //! ahead of the user's. The deposit that counts is therefore the one that matches what
@@ -10,6 +10,12 @@
 //! several that match, it is the oldest one in the whole range that is deep enough to
 //! decide on, wherever the read's windows fall; a match not deep enough yet is reported
 //! only when the range holds no deep one.
+//!
+//! Every read starts by asking the provider for its own head, alone, and builds its
+//! windows from it: the anchor is the lower of the watcher's fresh reading and that head,
+//! so a head the watcher pushed ahead of the chain cannot put a window past the one the
+//! provider serves. Geth-family providers refuse a range above their head outright, and a
+//! refused range is a claim that can never be made.
 
 #[cfg(test)]
 mod tests;
@@ -25,6 +31,7 @@ use types::evm::EvmAddressError;
 use types::tx::is_confirmed;
 use types::{
     BlockDepth, BlockNumber, ChainId, EvmAddress, QuoteHash, Timestamp, TokenAmount, TxHash,
+    UnixSeconds,
 };
 
 /// The most one `eth_getLogs` answer may be: enough for a few dozen deposits naming one
@@ -38,6 +45,45 @@ const MAX_LOGS_BYTES: u64 = 32 * 1024;
 /// `types::config`), so the knob's ceiling is what this read can walk.
 pub use types::config::{LOGS_WINDOW_BLOCKS, MAX_LOGS_WINDOWS};
 
+/// How far below the height a quote was registered at a claim's read starts, in blocks of
+/// the quote's source chain. That height is the watcher's reading, so the claim trusts it
+/// only this far:
+///
+/// - two providers disagree on the head by a few blocks, so an honest height can sit a
+///   little above the block the user's deposit landed in;
+/// - a watcher can push a head ahead of the chain. The read starts this far below the
+///   lower of that height and the provider's own head, so every block the chain made
+///   after the registration is inside the read as long as the chain made no more than
+///   this many between the registration and the claim, and the oldest matching deposit
+///   in it is the user's.
+///
+/// Twenty thousand blocks, two windows. On Arbitrum, the fastest chain read at four
+/// blocks a second, a claim's default life (a 45 second quote, the 120 second permit
+/// window and the hour of grace, 3,765 seconds, 15,060 blocks) fits inside it with room,
+/// and on every slower chain it fits many times over. A deploy that raises the grace past
+/// about eighty minutes leaves a claim asked that late on Arbitrum partly outside it: the
+/// rest of the lookback is still read when nothing matches above the floor, so what is
+/// left is a later deposit of the same quote above the floor being taken first.
+pub const FLOOR_MARGIN_BLOCKS: u64 = 2 * LOGS_WINDOW_BLOCKS;
+
+/// How far back a waiting arrival read looks: one window, the newest, so a tick costs the
+/// swap one window. The whole lookback is read only before a refund.
+const ONE_WINDOW: DepositLookback = DepositLookback::new(LOGS_WINDOW_BLOCKS as u32);
+
+/// The most one `eth_getBlockByHash` answer may be, asked without the transactions' bodies:
+/// the header and the hash of every transaction in the block.
+///
+/// - The header is under five kilobytes as a provider prints it, with Ethereum's sixteen
+///   withdrawals, the 514-character logs bloom and BSC's longest extra data.
+/// - Each transaction hash is 69 bytes: 66 characters, two quotes and a comma.
+/// - The most transactions a block holds is its gas limit over the 21,000 gas of a plain
+///   transfer. At 160 million gas, above the per-block limit of every chain this canister
+///   reads, that is 7,619 hashes, 525,711 bytes.
+///
+/// About 531 kilobytes in all, doubled for room: a block this cap refuses is one nobody
+/// has made, and pay-as-you-go pricing refunds what the answer does not use.
+const MAX_BLOCK_BYTES: u64 = 1024 * 1024;
+
 /// A deposit the chain holds for a quote, deep enough to decide on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifiedDeposit {
@@ -48,6 +94,9 @@ pub struct VerifiedDeposit {
     pub amount: TokenAmount,
     pub tx_ref: TxHash,
     pub block: BlockNumber,
+    /// The hash of the block the log is in, as the log named it: what the block's own
+    /// time is read by, so the time is that block's and no other's.
+    pub block_hash: [u8; 32],
 }
 
 /// Why a chain has no vault to read or send to.
@@ -100,6 +149,10 @@ pub enum DepositError {
         latest: BlockNumber,
         depth: BlockDepth,
     },
+    #[error("the provider holds no block {block} under the hash the deposit's log named")]
+    NoBlock { block: BlockNumber },
+    #[error("the block did not come back as the one asked for, with a time")]
+    UnreadableBlock,
 }
 
 impl DepositError {
@@ -116,7 +169,9 @@ impl DepositError {
             | Self::Rpc(_)
             | Self::UnreadableHead
             | Self::UnreadableLogs
-            | Self::NotConfirmed { .. } => false,
+            | Self::NotConfirmed { .. }
+            | Self::NoBlock { .. }
+            | Self::UnreadableBlock => false,
         }
     }
 }
@@ -151,15 +206,30 @@ impl Wanted {
     }
 }
 
-/// One read: the vault of `chain_id` for the deposit `wanted` under `quote_hash`, no
-/// earlier than `not_before` when the caller knows the deposit cannot precede a block (the
-/// quote's registration), and the bounded lookback otherwise.
+/// Where a read starts, fixed once the provider's own head is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// The whole lookback behind the anchor: a claim for a quote with no registration
+    /// height, a controller's claim of one the store never held among them.
+    Lookback,
+    /// A claim for a quote registered at this height: [`FLOOR_MARGIN_BLOCKS`] below the
+    /// lower of it and the provider's head. The height is the watcher's, and a watcher can
+    /// run ahead of the chain, so it narrows the read and never floors it past the chain.
+    Registered(BlockNumber),
+    /// The newest window behind the anchor: the engine's arrival read while it waits.
+    NewestWindow,
+}
+
+/// One read: the vault of `chain_id` for the deposit `wanted` under `quote_hash`, from
+/// `start`, and on through the rest of the bounded lookback when `widen` and nothing it
+/// wants turns up from `start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepositRead {
     pub chain_id: ChainId,
     pub quote_hash: QuoteHash,
     pub wanted: Wanted,
-    pub not_before: Option<BlockNumber>,
+    pub start: Start,
+    pub widen: bool,
 }
 
 /// Where the read starts: `lookback` blocks ending at `anchor`, the anchor's own block
@@ -185,61 +255,129 @@ pub struct Window {
 /// the deposit that counts is the oldest deep one in range, so the first window that
 /// holds one ends the walk. More than [`MAX_LOGS_WINDOWS`] of them is refused by name.
 pub fn windows(from: BlockNumber, anchor: BlockNumber) -> Result<Vec<Window>, DepositError> {
-    let span = anchor.get().saturating_sub(from.get()).saturating_add(1);
+    tile(from, anchor, true)
+}
+
+/// The windows that tile `from` to `to`, oldest first, every one of them closed: the part
+/// of the lookback older than a read's start, which ends where that read began.
+pub fn older_windows(from: BlockNumber, to: BlockNumber) -> Result<Vec<Window>, DepositError> {
+    tile(from, to, false)
+}
+
+/// Tiles `from` to `to` back from `to` in windows of [`LOGS_WINDOW_BLOCKS`], so the newest
+/// is whole, and hands them back oldest first, the newest open at the head when `open`.
+fn tile(from: BlockNumber, to: BlockNumber, open: bool) -> Result<Vec<Window>, DepositError> {
+    let span = to.get().saturating_sub(from.get()).saturating_add(1);
     let count = span.div_ceil(LOGS_WINDOW_BLOCKS);
     if count > MAX_LOGS_WINDOWS {
         return Err(DepositError::RangeTooWide {
             from,
-            anchor,
+            anchor: to,
             windows: count,
             cap: MAX_LOGS_WINDOWS,
         });
     }
     let mut windows = Vec::with_capacity(count as usize);
-    let mut to = anchor.get();
+    let mut end = to.get();
     for newest in [true].into_iter().chain(std::iter::repeat(false)) {
-        let start = to
+        let start = end
             .saturating_add(1)
             .saturating_sub(LOGS_WINDOW_BLOCKS)
             .max(from.get());
         windows.push(Window {
             from: BlockNumber::new(start),
-            to: (!newest).then_some(BlockNumber::new(to)),
+            to: (!(newest && open)).then_some(BlockNumber::new(end)),
         });
         if start == from.get() {
             break;
         }
-        to = start - 1;
+        end = start - 1;
     }
-    // tiled back from the anchor, so the newest is whole; read forward from the oldest
+    // tiled back from the end, so the newest is whole; read forward from the oldest
     windows.reverse();
     Ok(windows)
 }
 
-/// The batch for one window: the head block, then the vault's `Deposited` logs naming
-/// `quote_hash` over the window. One request, so the depth is measured against a height
-/// from the same answer.
-fn read_calls(
-    vault: EvmAddress,
-    quote_hash: QuoteHash,
-    window: &Window,
-) -> Vec<(&'static str, Value)> {
+/// Whether a window asks for blocks the provider does not have yet: a range starting
+/// above its head. Such a range holds nothing, and geth-family providers refuse it rather
+/// than answer empty, so it is never sent and counts as a window that found nothing.
+pub fn above_head(window: &Window, head: BlockNumber) -> bool {
+    window.from > head
+}
+
+/// The ranges one read walks, fixed by the provider's head before any window is built.
+///
+/// The anchor is the lower of the watcher's fresh reading and the provider's head: either
+/// may run ahead of the chain, and a window past what the provider holds is one it
+/// refuses or answers empty. The lookback ends at the anchor. The read's own start is
+/// never before the lookback's, so the narrow read and the rest of the lookback are two
+/// ranges that do not overlap, and the rest is read only when it is not empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub head: BlockNumber,
+    pub anchor: BlockNumber,
+    /// Where the read from its start begins.
+    pub from: BlockNumber,
+    /// Where the lookback begins: the rest of the lookback is `lookback_from` to `from`.
+    pub lookback_from: BlockNumber,
+}
+
+impl Plan {
+    pub fn new(
+        start: Start,
+        watcher: BlockNumber,
+        head: BlockNumber,
+        lookback: DepositLookback,
+    ) -> Self {
+        let anchor = watcher.min(head);
+        let lookback_from = range_from(anchor, lookback);
+        let from = match start {
+            Start::Lookback => lookback_from,
+            Start::Registered(height) => {
+                BlockNumber::new(height.min(head).get().saturating_sub(FLOOR_MARGIN_BLOCKS))
+            }
+            Start::NewestWindow => range_from(anchor, ONE_WINDOW),
+        }
+        .max(lookback_from);
+        Self {
+            head,
+            anchor,
+            from,
+            lookback_from,
+        }
+    }
+
+    /// The windows of the read from its start, the newest open at the head.
+    pub fn narrow(&self) -> Result<Vec<Window>, DepositError> {
+        windows(self.from, self.anchor)
+    }
+
+    /// The windows of the rest of the lookback, older than the start: none when the start
+    /// is the lookback's own.
+    pub fn rest(&self) -> Result<Vec<Window>, DepositError> {
+        if self.from <= self.lookback_from {
+            return Ok(Vec::new());
+        }
+        older_windows(self.lookback_from, BlockNumber::new(self.from.get() - 1))
+    }
+}
+
+/// The call that reads one window: the vault's `Deposited` logs naming `quote_hash` from
+/// the window's first block to its last, or to the head for the newest.
+fn logs_call(vault: EvmAddress, quote_hash: QuoteHash, window: &Window) -> (&'static str, Value) {
     let to_block = match window.to {
         Some(to) => format!("0x{:x}", to.get()),
         None => "latest".to_string(),
     };
-    vec![
-        ("eth_blockNumber", json!([])),
-        (
-            "eth_getLogs",
-            json!([{
-                "address": hex0x(vault.as_bytes()),
-                "topics": [hex0x(&deposited_topic()), hex0x(quote_hash.as_ref())],
-                "fromBlock": format!("0x{:x}", window.from.get()),
-                "toBlock": to_block,
-            }]),
-        ),
-    ]
+    (
+        "eth_getLogs",
+        json!([{
+            "address": hex0x(vault.as_bytes()),
+            "topics": [hex0x(&deposited_topic()), hex0x(quote_hash.as_ref())],
+            "fromBlock": format!("0x{:x}", window.from.get()),
+            "toBlock": to_block,
+        }]),
+    )
 }
 
 /// The twenty low bytes of an indexed address word, when the word is one: the twelve high
@@ -287,7 +425,7 @@ fn parse_deposit(
     let block = parse_block_number(value.get("blockNumber")?.as_str()?)?;
     // a log with no block hash sits in no block: pending, or a provider's half-written
     // record, and neither is a deposit the chain holds
-    parse_hash32(value.get("blockHash"))?;
+    let block_hash = parse_hash32(value.get("blockHash"))?;
     let tx_ref = TxHash::new(parse_hash32(value.get("transactionHash"))?);
     Some(VerifiedDeposit {
         token,
@@ -295,6 +433,7 @@ fn parse_deposit(
         amount,
         tx_ref,
         block,
+        block_hash,
     })
 }
 
@@ -387,6 +526,12 @@ impl Walk {
         None
     }
 
+    /// Whether the windows taken so far hold nothing the read wants at all: no match,
+    /// deep or not. Only then can an older range change the answer.
+    pub fn found_nothing(&self) -> bool {
+        self.shallow.is_none()
+    }
+
     /// Why the range holds no deposit to decide on, once every window was taken.
     pub fn end(self) -> DepositError {
         let quote_hash = self.quote_hash;
@@ -416,15 +561,16 @@ pub fn vault_of(config: &types::Config, chain_id: ChainId) -> Result<EvmAddress,
 
 /// Reads whether the vault holds the deposit `read` wants, deep enough to decide on.
 ///
-/// The range starts a bounded lookback (`deposit_lookback_blocks`) behind the head the
-/// watcher last pushed, or at the block the read says the deposit cannot precede when that
-/// is later, and ends at the provider's head. It is walked in windows, oldest first, one
-/// outcall each, and the depth is measured against the head asked for in the same batch
-/// as the logs it decides on, so no deposit is judged against a moment other than its
-/// own. The deposit that counts is the oldest deep match in the whole range (see
-/// [`Walk`]), so the first window holding a deep match ends the walk, a match not deep
-/// enough yet never hides a deep one in a later window, and a range whose deposit sits in
-/// its newest window is read to the end.
+/// First the provider's head, alone, since every window is built from it (see [`Plan`]).
+/// Then the range from the read's start to the anchor, and, when `widen` and nothing the
+/// read wants is in it, the rest of the lookback before it. Each is walked in windows,
+/// oldest first, one outcall each, and a window starting above the head is never sent.
+/// The depth is measured against the head read first, which the chain has only passed by
+/// the time the logs come back, so a deposit is never taken as deeper than it is. The
+/// deposit that counts is the oldest deep match in the whole range (see [`Walk`]), so the
+/// first window holding a deep match ends the walk, a match not deep enough yet never
+/// hides a deep one in a later window, and a range whose deposit sits in its newest window
+/// is read to the end.
 // todo_harden_reads: single unreplicated read; upgrade to k-of-n later. Until then the
 // answer is bound to the vault this canister configured, the event that vault emits, the
 // quote being claimed and the token and amount wanted, and held to the configured depth.
@@ -437,38 +583,140 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
         chain_id,
         quote_hash,
         wanted,
-        not_before,
+        start,
+        widen,
     } = *read;
     let config = config::get();
     let vault = vault_of(&config, chain_id)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let anchor = chain_data::fresh(chain_id, now, config.chain_data_max_age)
+    let watcher = chain_data::fresh(chain_id, now, config.chain_data_max_age)
         .ok_or(DepositError::StaleChainData { chain_id })?
         .block;
-    let from = not_before
-        .into_iter()
-        .chain([range_from(anchor, config.deposit_lookback_blocks)])
-        .max()
-        .expect("BUG: the lookback is always a start");
     let depth = confirmations(&config, chain_id)?;
+    let head = read_head(chain_id).await?;
+    let plan = Plan::new(start, watcher, head, config.deposit_lookback_blocks);
+    let reader = Reader {
+        chain_id,
+        vault,
+        quote_hash,
+        wanted,
+        head,
+        depth,
+    };
     let mut walk = Walk::new(quote_hash, depth);
-    for window in windows(from, anchor)? {
-        let calls = read_calls(vault, quote_hash, &window);
-        // the whole batch or nothing: a decision needs both reads
-        let answers =
-            rpc::rpc_batch(chain_id, &calls, MAX_BLOCK_NUMBER_BYTES + MAX_LOGS_BYTES).await?;
-        let latest = answers
-            .first()
-            .and_then(Value::as_str)
-            .and_then(parse_block_number)
-            .ok_or(DepositError::UnreadableHead)?;
-        let logs = answers
-            .get(1)
-            .and_then(Value::as_array)
-            .ok_or(DepositError::UnreadableLogs)?;
-        if let Some(deposit) = walk.take(find(logs, vault, quote_hash, &wanted, latest, depth)) {
+    for window in plan.narrow()? {
+        if let Some(deposit) = reader.read(&window, &mut walk).await? {
             return Ok(deposit);
         }
     }
+    if widen && walk.found_nothing() {
+        for window in plan.rest()? {
+            if let Some(deposit) = reader.read(&window, &mut walk).await? {
+                return Ok(deposit);
+            }
+        }
+    }
     Err(walk.end())
+}
+
+/// The provider's own head, asked alone: what every window of the read is built from.
+async fn read_head(chain_id: ChainId) -> Result<BlockNumber, DepositError> {
+    let answers = rpc::rpc_batch(
+        chain_id,
+        &[("eth_blockNumber", json!([]))],
+        MAX_BLOCK_NUMBER_BYTES,
+    )
+    .await?;
+    answers
+        .first()
+        .and_then(Value::as_str)
+        .and_then(parse_block_number)
+        .ok_or(DepositError::UnreadableHead)
+}
+
+/// What every window of one read is read against: the chain and its vault, the quote and
+/// the deposit wanted, and the head and depth the findings are judged by.
+struct Reader {
+    chain_id: ChainId,
+    vault: EvmAddress,
+    quote_hash: QuoteHash,
+    wanted: Wanted,
+    head: BlockNumber,
+    depth: BlockDepth,
+}
+
+impl Reader {
+    /// Reads one window and hands its finding to the walk: the deposit, when the window
+    /// holds one deep enough. A window starting above the head is never sent, and found
+    /// nothing.
+    async fn read(
+        &self,
+        window: &Window,
+        walk: &mut Walk,
+    ) -> Result<Option<VerifiedDeposit>, DepositError> {
+        if above_head(window, self.head) {
+            return Ok(walk.take(Finding::Unmatched { seen: 0 }));
+        }
+        let call = logs_call(self.vault, self.quote_hash, window);
+        let answers = rpc::rpc_batch(self.chain_id, &[call], MAX_LOGS_BYTES).await?;
+        let logs = answers
+            .first()
+            .and_then(Value::as_array)
+            .ok_or(DepositError::UnreadableLogs)?;
+        Ok(walk.take(find(
+            logs,
+            self.vault,
+            self.quote_hash,
+            &self.wanted,
+            self.head,
+            self.depth,
+        )))
+    }
+}
+
+/// When the block `deposit` is in was made, by the chain's own clock: the timestamp of the
+/// block its log named, read by that block's hash, so the time is that block's and no
+/// other's. One outcall.
+// todo_harden_reads: single unreplicated read of the provider's block, bound to the hash
+// and the number the deposit's log named.
+pub async fn landed_at(
+    chain_id: ChainId,
+    deposit: &VerifiedDeposit,
+) -> Result<UnixSeconds, DepositError> {
+    let calls = [(
+        "eth_getBlockByHash",
+        json!([hex0x(&deposit.block_hash), false]),
+    )];
+    let answers = rpc::rpc_batch(chain_id, &calls, MAX_BLOCK_BYTES).await?;
+    block_time(answers.first(), deposit)
+}
+
+/// The time a block answer says `deposit`'s block was made, once the answer is that block:
+/// its hash and its number the ones the log named. A null answer is a block the provider
+/// does not hold, reorged away or not reached yet, and is refused by name.
+pub fn block_time(
+    answer: Option<&Value>,
+    deposit: &VerifiedDeposit,
+) -> Result<UnixSeconds, DepositError> {
+    let block = answer.ok_or(DepositError::UnreadableBlock)?;
+    if block.is_null() {
+        return Err(DepositError::NoBlock {
+            block: deposit.block,
+        });
+    }
+    let hash = parse_hash32(block.get("hash"));
+    let number = block
+        .get("number")
+        .and_then(Value::as_str)
+        .and_then(parse_block_number);
+    if hash != Some(deposit.block_hash) || number != Some(deposit.block) {
+        return Err(DepositError::UnreadableBlock);
+    }
+    block
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|text| text.strip_prefix("0x"))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .map(UnixSeconds::new)
+        .ok_or(DepositError::UnreadableBlock)
 }

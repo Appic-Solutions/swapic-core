@@ -182,6 +182,13 @@ pub enum DepositError {
         latest: u64,
         depth: u64,
     },
+    /// The provider holds no block `block` under the hash the deposit's log named: reorged
+    /// away, or not reached by the provider asked. Asked again, it may answer.
+    NoBlock {
+        block: u64,
+    },
+    /// The block the deposit is in did not come back as that block, with a time.
+    UnreadableBlock,
 }
 
 /// Why `claim_swap` created no swap. Nothing was written.
@@ -190,12 +197,21 @@ pub enum ClaimError {
     Guard(GuardError),
     InvalidQuote(QuoteError),
     SwapExists(Hash32),
-    /// Past the quote's expiry plus the permit window, nobody can pay the quote and no
-    /// deposit is claimed for it.
+    /// Past the quote's expiry, the permit window and the grace after it, no claim is
+    /// admitted for the quote, whoever asks.
     QuoteExpired {
         expires_at_s: u64,
         claim_until_s: u64,
         now_s: u64,
+    },
+    /// The deposit found is in a block the chain made at `landed_at_s`, after the last
+    /// second a deposit for the quote could land (its expiry plus the permit window). It
+    /// is not the swap the user was quoted: the funds stay in the vault, for the
+    /// late-arrival policy a later plan builds.
+    LandedLate {
+        block: u64,
+        landed_at_s: u64,
+        deposit_until_s: u64,
     },
     /// `party` is `"dst_address"`, `"refund_address"` or `"from"` (the payer).
     Sanctioned {

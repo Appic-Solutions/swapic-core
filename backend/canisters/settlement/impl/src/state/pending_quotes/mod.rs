@@ -100,7 +100,7 @@ pub fn init() {
 
 /// Records a quote against its hash, with the height of the quote's source chain the
 /// canister held a fresh reading of, if any: the deposit that pays this quote cannot be in
-/// an earlier block, so a claim's log read starts there. A quote already in the store
+/// an earlier block, so a claim's log read starts a margin below it. A quote already in the store
 /// keeps the earliest height it was ever registered at, because a retry must never narrow
 /// the window past a deposit made in the meantime. `now` and `registered_at` are the
 /// caller's, so every rule here is testable without a canister.
@@ -201,15 +201,15 @@ pub struct Evicted {
     pub more: bool,
 }
 
-/// Drops the quotes nobody can pay any more: past their expiry plus the window a permit
-/// signed against them stays valid for. Keyed on the expiry, never on when the quote was
-/// registered.
+/// Drops the quotes no claim may be asked for any more: past their expiry plus `window`,
+/// which is the permit window and the claim's grace after it (`Config::claim_window`).
+/// Keyed on the expiry, never on when the quote was registered.
 ///
 /// Walks the expiry index rather than the store, in expiry order, so the pass stops at the
 /// first quote still inside its window: everything behind it expires later. At most `cap`
 /// entries are visited and at most `cap` quotes go, so a pass costs what it evicts and not
 /// what the store holds, and no quote is decoded to decide its fate.
-pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration, cap: usize) -> Evicted {
+pub fn sweep_expired(now: UnixSeconds, window: Duration, cap: usize) -> Evicted {
     let mut stale: Vec<ExpiryKey> = Vec::new();
     let mut visited = 0;
     let mut more = false;
@@ -221,7 +221,7 @@ pub fn sweep_expired(now: UnixSeconds, permit_deadline: Duration, cap: usize) ->
             // closes earlier
             let closed = key
                 .expires_at
-                .checked_add(permit_deadline)
+                .checked_add(window)
                 .is_some_and(|deadline| now > deadline);
             if !closed {
                 break;

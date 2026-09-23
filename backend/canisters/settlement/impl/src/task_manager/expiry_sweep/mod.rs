@@ -10,7 +10,7 @@ use types::{QuoteHash, Timestamp, WaitingKey};
 /// without a canister and without reading the event log back.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sweep {
-    /// pending quotes dropped past their permit window
+    /// pending quotes dropped once no claim for them may be asked, the grace included
     pub dropped: usize,
     /// decision timeouts that became a `RefundStarted`
     pub refunds: usize,
@@ -35,9 +35,11 @@ pub struct Sweep {
 /// whole pass is testable without a canister.
 pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
     let config = config::get();
+    // a quote is kept for as long as a claim for it may be asked, the grace included, so
+    // a late claim for a deposit that landed in time still finds it registered
     let evicted = pending_quotes::sweep_expired(
         now.as_secs(),
-        config.permit_deadline,
+        config.claim_window(),
         config.max_evictions_per_sweep.as_usize(),
     );
     let mut swept = Sweep {

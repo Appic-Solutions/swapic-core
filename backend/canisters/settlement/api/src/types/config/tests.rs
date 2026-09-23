@@ -330,3 +330,44 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
         }
     );
 }
+
+/// The claim's grace crosses the wire in seconds, an hour by default, and a grace below
+/// ten minutes or above a day is refused by name, in milliseconds like every duration.
+#[test]
+fn the_claim_grace_crosses_the_wire_and_a_bad_one_names_its_knob() {
+    let wire = Config {
+        claim_grace_s: 1_800,
+        ..Config::default()
+    };
+    let domain = types::Config::try_from(wire.clone()).unwrap();
+    assert_eq!(domain.claim_grace.get(), Duration::from_secs(1_800));
+    assert_eq!(Config::unredacted(domain), wire);
+    assert_eq!(Config::default().claim_grace_s, 3_600);
+
+    let short = types::Config::try_from(Config {
+        claim_grace_s: 60,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(short.validate().unwrap_err()),
+        ConfigError::DurationBelowFloor {
+            field: "claim_grace_s".to_string(),
+            duration_ms: 60_000,
+            floor_ms: 600_000
+        }
+    );
+    let long = types::Config::try_from(Config {
+        claim_grace_s: 86_401,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(long.validate().unwrap_err()),
+        ConfigError::DurationAboveCap {
+            field: "claim_grace_s".to_string(),
+            duration_ms: 86_401_000,
+            cap_ms: 86_400_000
+        }
+    );
+}

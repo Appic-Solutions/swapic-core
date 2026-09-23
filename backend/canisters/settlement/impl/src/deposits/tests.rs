@@ -102,6 +102,8 @@ fn a_valid_log_decodes_to_the_deposit() {
             amount: TokenAmount::from(1_000_000_u32),
             tx_ref: TxHash::new([0x77; 32]),
             block: BlockNumber::new(19_000_000),
+            // the fixture's block hash is its number's low byte, 0xc0 for 19,000,000
+            block_hash: [0xc0; 32],
         }
     );
 }
@@ -230,11 +232,14 @@ fn a_log_that_is_not_this_quotes_deposit_is_ignored() {
     assert_eq!(found.block, BlockNumber::new(19_000_001));
 }
 
-/// The read is one batch per window: the head, then the logs of the vault for this quote
-/// over the window, so the depth is measured against a height from the same answer. A
-/// lookback covers that many blocks ending at the anchor, so the default lookback is
-/// exactly one window, and the newest window is open at the head so a deposit the
-/// watcher's reading has not reached yet is still seen.
+/// The read asks for the provider's head alone, then for the logs of the vault for this
+/// quote one window at a time. A lookback covers that many blocks ending at the anchor, so
+/// a lookback of ten thousand blocks is exactly one window, and the newest window is open
+/// at the head so a deposit the watcher's reading has not reached yet is still seen.
+///
+/// Rewritten for fix wave 5 (M1): the head is asked before any window is built, because
+/// every window is built from it, so a window's call is its logs alone where it was the
+/// head and the logs in one batch.
 #[test]
 fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     let from = range_from(BlockNumber::new(19_000_000), DepositLookback::new(10_000));
@@ -248,14 +253,12 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
     assert_eq!(
         windows,
         vec![Window { from, to: None }],
-        "the default lookback is one window, open at the head"
+        "a lookback of one window is one window, open at the head"
     );
-    let calls = read_calls(vault(), quote_hash(), &windows[0]);
-    assert_eq!(calls[0].0, "eth_blockNumber");
-    assert_eq!(calls[0].1, json!([]));
-    assert_eq!(calls[1].0, "eth_getLogs");
+    let (method, params) = logs_call(vault(), quote_hash(), &windows[0]);
+    assert_eq!(method, "eth_getLogs");
     assert_eq!(
-        calls[1].1,
+        params,
         json!([{
             "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             "topics": [
@@ -266,13 +269,12 @@ fn the_read_asks_for_the_head_and_the_quotes_logs_over_the_lookback() {
             "toBlock": "latest",
         }])
     );
-    assert_eq!(calls.len(), 2);
     let closed = Window {
         from: BlockNumber::new(18_980_001),
         to: Some(BlockNumber::new(18_990_000)),
     };
     assert_eq!(
-        read_calls(vault(), quote_hash(), &closed)[1].1[0]["toBlock"],
+        logs_call(vault(), quote_hash(), &closed).1[0]["toBlock"],
         json!("0x121c3b0"),
         "an older window ends where the newer one starts"
     );
@@ -454,6 +456,7 @@ fn deposit_at(block: u64) -> VerifiedDeposit {
         amount: TokenAmount::from(1_u8),
         tx_ref: TxHash::new([0x77; 32]),
         block: BlockNumber::new(block),
+        block_hash: [block as u8; 32],
     }
 }
 
@@ -544,6 +547,8 @@ fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
                 amount: TokenAmount::from(5_u8),
                 tx_ref: TxHash::new([0x77; 32]),
                 block: BlockNumber::new(18_998_000),
+                // the fixture's block hash is its number's low byte, 0xf0 for 18,998,000
+                block_hash: [0xf0; 32],
             })
         );
     }
@@ -573,4 +578,196 @@ fn within_a_window_the_oldest_deep_match_counts_whatever_the_order() {
         ),
         Finding::Deep(VerifiedDeposit { from, .. }) if from == payer.parse().unwrap()
     ));
+}
+
+/// Every window is built from the provider's own head, read first: the anchor is the
+/// lower of that head and the watcher's fresh reading, so a watcher's head ahead of the
+/// chain cannot move a window past the one the provider serves, and a provider's head
+/// ahead of the watcher's cannot either.
+#[test]
+fn the_anchor_is_the_lower_of_the_watchers_reading_and_the_providers_head() {
+    let lookback = DepositLookback::new(20_000);
+    let ahead = Plan::new(
+        Start::Lookback,
+        BlockNumber::new(19_050_000),
+        BlockNumber::new(19_000_000),
+        lookback,
+    );
+    assert_eq!(ahead.anchor, BlockNumber::new(19_000_000));
+    assert_eq!(ahead.from, BlockNumber::new(18_980_001));
+    assert_eq!(ahead.lookback_from, BlockNumber::new(18_980_001));
+    let behind = Plan::new(
+        Start::Lookback,
+        BlockNumber::new(18_999_000),
+        BlockNumber::new(19_000_000),
+        lookback,
+    );
+    assert_eq!(behind.anchor, BlockNumber::new(18_999_000));
+    assert_eq!(behind.head, BlockNumber::new(19_000_000));
+}
+
+/// A claim for a registered quote reads from a margin below the lower of the height it
+/// was registered at and the provider's head. A height ahead of the chain is bounded by
+/// the head, an honest one a few blocks off still covers the deposit, and a height below
+/// the lookback's start is the lookback's start, so nothing is read twice.
+#[test]
+fn a_claim_reads_from_a_margin_below_the_lower_of_its_height_and_the_head() {
+    let lookback = DepositLookback::new(100_000);
+    let lying = Plan::new(
+        Start::Registered(BlockNumber::new(19_050_000)),
+        BlockNumber::new(19_060_000),
+        BlockNumber::new(19_000_020),
+        lookback,
+    );
+    assert_eq!(
+        lying.from,
+        BlockNumber::new(19_000_020 - FLOOR_MARGIN_BLOCKS),
+        "the head bounds a height the watcher pushed ahead of the chain"
+    );
+    let honest = Plan::new(
+        Start::Registered(BlockNumber::new(19_000_000)),
+        BlockNumber::new(19_000_500),
+        BlockNumber::new(19_000_500),
+        lookback,
+    );
+    assert_eq!(
+        honest.from,
+        BlockNumber::new(19_000_000 - FLOOR_MARGIN_BLOCKS)
+    );
+    let old = Plan::new(
+        Start::Registered(BlockNumber::new(18_000_000)),
+        BlockNumber::new(19_000_000),
+        BlockNumber::new(19_000_000),
+        lookback,
+    );
+    assert_eq!(
+        old.from, old.lookback_from,
+        "never before the lookback's start"
+    );
+    assert_eq!(
+        old.rest(),
+        Ok(vec![]),
+        "so the rest of the lookback is empty"
+    );
+    let waiting = Plan::new(
+        Start::NewestWindow,
+        BlockNumber::new(19_000_000),
+        BlockNumber::new(19_000_000),
+        lookback,
+    );
+    assert_eq!(waiting.from, BlockNumber::new(18_990_001), "one window");
+}
+
+/// The narrow read runs from its start to the anchor, the newest window open at the head,
+/// and the rest of the lookback is the part the start skipped, every window closed and the
+/// newest ending where the narrow read begins, so the two never overlap.
+#[test]
+fn the_rest_of_the_lookback_is_the_part_the_start_skipped() {
+    let plan = Plan::new(
+        Start::Registered(BlockNumber::new(19_000_000)),
+        BlockNumber::new(19_000_000),
+        BlockNumber::new(19_000_000),
+        DepositLookback::new(45_000),
+    );
+    assert_eq!(plan.from, BlockNumber::new(18_980_000));
+    assert_eq!(
+        plan.narrow().unwrap(),
+        vec![
+            Window {
+                from: BlockNumber::new(18_980_000),
+                to: Some(BlockNumber::new(18_980_000)),
+            },
+            Window {
+                from: BlockNumber::new(18_980_001),
+                to: Some(BlockNumber::new(18_990_000)),
+            },
+            Window {
+                from: BlockNumber::new(18_990_001),
+                to: None,
+            },
+        ]
+    );
+    assert_eq!(
+        plan.rest().unwrap(),
+        vec![
+            Window {
+                from: BlockNumber::new(18_955_001),
+                to: Some(BlockNumber::new(18_959_999)),
+            },
+            Window {
+                from: BlockNumber::new(18_960_000),
+                to: Some(BlockNumber::new(18_969_999)),
+            },
+            Window {
+                from: BlockNumber::new(18_970_000),
+                to: Some(BlockNumber::new(18_979_999)),
+            },
+        ]
+    );
+}
+
+/// A range starting above the provider's head holds nothing the provider has, and a
+/// geth-family provider refuses it rather than answering empty: such a window is never
+/// sent, and counts as one that found nothing.
+#[test]
+fn a_window_starting_above_the_head_is_never_sent() {
+    let head = BlockNumber::new(19_000_000);
+    let window = |from| Window {
+        from: BlockNumber::new(from),
+        to: None,
+    };
+    assert!(above_head(&window(19_000_001), head));
+    assert!(
+        !above_head(&window(19_000_000), head),
+        "the head's own block"
+    );
+    assert!(!above_head(&window(18_990_001), head));
+}
+
+/// The block time is the time of the block the deposit's log named: the answer must be
+/// that block, by its hash and its number, and a null answer is a block the provider does
+/// not hold, refused by name so the claim is asked again rather than decided.
+#[test]
+fn a_block_answer_is_the_block_the_log_named_or_nothing() {
+    let deposit = deposit_at(19_000_000);
+    let block = |hash: [u8; 32], number: u64, timestamp: Option<&str>| {
+        let mut value = json!({
+            "hash": format!("0x{}", hex::encode(hash)),
+            "number": format!("0x{number:x}"),
+            "transactions": ["0x77"],
+        });
+        if let Some(timestamp) = timestamp {
+            value["timestamp"] = json!(timestamp);
+        }
+        value
+    };
+    assert_eq!(
+        block_time(
+            Some(&block(deposit.block_hash, 19_000_000, Some("0x6b49d200"))),
+            &deposit
+        ),
+        Ok(UnixSeconds::new(1_800_000_000))
+    );
+    assert_eq!(
+        block_time(Some(&Value::Null), &deposit),
+        Err(DepositError::NoBlock {
+            block: BlockNumber::new(19_000_000)
+        })
+    );
+    for wrong in [
+        block([0x01; 32], 19_000_000, Some("0x6b49d200")),
+        block(deposit.block_hash, 19_000_001, Some("0x6b49d200")),
+        block(deposit.block_hash, 19_000_000, None),
+        block(deposit.block_hash, 19_000_000, Some("1800000000")),
+    ] {
+        assert_eq!(
+            block_time(Some(&wrong), &deposit),
+            Err(DepositError::UnreadableBlock),
+            "{wrong}"
+        );
+    }
+    assert_eq!(
+        block_time(None, &deposit),
+        Err(DepositError::UnreadableBlock)
+    );
 }

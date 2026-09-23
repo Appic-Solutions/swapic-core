@@ -12,7 +12,7 @@
 mod tests;
 
 use crate::deposits::{
-    self, DepositError, DepositRead, VaultError, VerifiedDeposit, Wanted, WantedAmount,
+    self, DepositError, DepositRead, Start, VaultError, VerifiedDeposit, Wanted, WantedAmount,
 };
 use crate::guards::{require_not_halted, require_quoter, require_quoter_watcher_or_controller};
 use crate::state::{pending_quotes, Store};
@@ -23,7 +23,6 @@ use crate::tx::{self, TxError};
 use settlement_api::types::entry::{PermitError, PullRequest, MAX_PERMIT2_SIGNATURE_BYTES};
 use settlement_api::types::errors::GuardError;
 use settlement_api::types::wire_len;
-use std::time::Duration;
 use thiserror::Error;
 use types::abi::{vault_pull_with_permit2, Permit2Permit};
 use types::events::TxPurpose;
@@ -31,8 +30,8 @@ use types::quote::QuoteError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::{ensure_rail_tokens, RailTokenError};
 use types::{
-    Address, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight, InFlightKind, Quote,
-    QuoteHash, Rail, Timestamp, TokenAmount, TxHash, UnixSeconds, Wei,
+    Address, BlockNumber, Config, EventType, EvmAddress, GasAmount, GasMode, InFlight,
+    InFlightKind, Quote, QuoteHash, Rail, Timestamp, TokenAmount, TxHash, UnixSeconds, Wei,
 };
 
 /// The gas a `pullWithPermit2` needs: Permit2's signature and witness check and the
@@ -56,6 +55,15 @@ pub enum ClaimError {
         expires_at: UnixSeconds,
         claim_until: UnixSeconds,
         now: UnixSeconds,
+    },
+    #[error(
+        "the deposit in block {block} landed at {landed_at}, after the last second a deposit \
+         for the quote could land, {deposit_until}"
+    )]
+    LandedLate {
+        block: BlockNumber,
+        landed_at: UnixSeconds,
+        deposit_until: UnixSeconds,
     },
     #[error("the quote's {party} is sanctioned")]
     Sanctioned { party: &'static str },
@@ -218,29 +226,38 @@ pub enum PullError {
     RailToken(#[from] RailTokenError),
 }
 
-/// The last second a quote may still be claimed or paid: its expiry, and the window a
-/// permit signed against it stays valid after that, which is also the window the pending
-/// store keeps it for. `None` past the end of time, which holds every claim.
-pub fn claim_deadline(quote: &Quote, permit_deadline: Duration) -> Option<UnixSeconds> {
-    quote.expires_at.checked_add(permit_deadline)
+/// The last second a deposit for the quote may land, by the chain's own clock: its
+/// expiry, and the window a permit signed against it stays valid after that. What a
+/// deposit is judged by, and what a pull, which makes a deposit, is refused past. `None`
+/// past the end of time, which holds every deposit.
+pub fn deposit_deadline(quote: &Quote, config: &Config) -> Option<UnixSeconds> {
+    quote.expires_at.checked_add(config.permit_deadline)
 }
 
-/// The deadline the quote is past at `now`, if it is past one: what both doors refuse on.
-pub fn missed_deadline(
+/// The last second a claim for the quote may be asked, whoever asks: the deposit deadline
+/// and the grace after it (`claim_grace`), which is also how long the pending store keeps
+/// the quote. The services that ask can be slow or down, and a deposit that landed in time
+/// is still the user's swap when the claim for it comes late. `None` past the end of time.
+pub fn claim_deadline(quote: &Quote, config: &Config) -> Option<UnixSeconds> {
+    quote.expires_at.checked_add(config.claim_window())
+}
+
+/// The deposit deadline the quote is past at `now`, if it is: what a pull refuses on.
+pub fn missed_deposit_deadline(
     quote: &Quote,
     now: UnixSeconds,
-    permit_deadline: Duration,
+    config: &Config,
 ) -> Option<UnixSeconds> {
-    claim_deadline(quote, permit_deadline).filter(|claim_until| now > *claim_until)
+    deposit_deadline(quote, config).filter(|deposit_until| now > *deposit_until)
 }
 
-/// Refuses a quote nobody can pay any more, before an outcall is spent on it.
+/// Refuses a quote no claim is admitted for any more, before an outcall is spent on it.
 pub fn ensure_claimable(
     quote: &Quote,
     now: UnixSeconds,
-    permit_deadline: Duration,
+    config: &Config,
 ) -> Result<(), ClaimError> {
-    match missed_deadline(quote, now, permit_deadline) {
+    match claim_deadline(quote, config).filter(|claim_until| now > *claim_until) {
         Some(claim_until) => Err(ClaimError::QuoteExpired {
             expires_at: quote.expires_at,
             claim_until,
@@ -248,6 +265,49 @@ pub fn ensure_claimable(
         }),
         None => Ok(()),
     }
+}
+
+/// A deposit counts only if its block was made by the deposit deadline, by the chain's
+/// own clock. A deposit that landed later is not the swap the user was quoted, whenever
+/// the claim for it is asked: its funds stay in the vault, and the late-arrival and orphan
+/// policy that decides what becomes of them is a later plan's.
+pub fn ensure_landed_by(
+    deposit: &VerifiedDeposit,
+    landed_at: UnixSeconds,
+    deposit_until: UnixSeconds,
+) -> Result<(), ClaimError> {
+    if landed_at > deposit_until {
+        return Err(ClaimError::LandedLate {
+            block: deposit.block,
+            landed_at,
+            deposit_until,
+        });
+    }
+    Ok(())
+}
+
+/// Holds the deposit a claim found to the deposit deadline, by the deposit's own time.
+///
+/// The clock is read after the logs came back, and every block they named was on the
+/// chain by then: a read back by the deadline found a deposit that landed by it, so only a
+/// claim whose read came back later reads the block's own time, one outcall more. The
+/// shortcut trusts the chain's clock and the canister's to agree to within the seconds
+/// they drift apart by, which a deposit made in the deadline's last seconds sits inside.
+async fn ensure_landed_in_time(
+    quote: &Quote,
+    config: &Config,
+    deposit: VerifiedDeposit,
+) -> Result<VerifiedDeposit, ClaimError> {
+    let Some(deposit_until) = deposit_deadline(quote, config) else {
+        return Ok(deposit);
+    };
+    let read_back_at = Timestamp::from_nanos(ic_cdk::api::time()).as_secs();
+    if read_back_at <= deposit_until {
+        return Ok(deposit);
+    }
+    let landed_at = deposits::landed_at(quote.src_chain, &deposit).await?;
+    ensure_landed_by(&deposit, landed_at, deposit_until)?;
+    Ok(deposit)
 }
 
 /// The rail a quote names, if this deploy does not run it. The Eco rail is off until its
@@ -345,17 +405,25 @@ fn party(address: EvmAddress) -> Address {
 /// Claims the deposit a user made for `quote` and creates its swap.
 ///
 /// Money-first, in this order: the halt switch and the caller, the quote itself, the swap
-/// not existing yet, the quote still claimable, its rail on, its refund and destination
-/// addresses payable, nobody it pays to sanctioned, its tokens the rail's; then the marker
-/// (A8), then the read, which looks for the quote's token in exactly its amount among the
-/// logs under the hash; then the payer is held to the sanctions set, and `FundsReceived`
-/// is appended, which the fold checks again (A2). A refusal anywhere stores nothing.
+/// not existing yet, the claim still asked in time, its rail on, its refund and
+/// destination addresses payable, nobody it pays to sanctioned, its tokens the rail's;
+/// then the marker (A8), then the read, which looks for the quote's token in exactly its
+/// amount among the logs under the hash, then the deposit's own time; then the payer is
+/// held to the sanctions set, and `FundsReceived` is appended, which the fold checks again
+/// (A2). A refusal anywhere stores nothing.
 ///
-/// The read starts at the height the quote was registered at, when the store kept one,
-/// and reads one window where it would read a day of them. That height is the watcher's
-/// head, which can run ahead of the chain, so it is where the read starts and never a
-/// floor: when nothing at all matches above it, the plain lookback is read before the
-/// claim is refused, and no height a watcher pushed puts a deposit out of reach.
+/// The claim is judged by when the deposit landed, not by when the claim is asked: a
+/// deposit whose block was made by the quote's expiry plus the permit window is claimed
+/// whenever the claim comes, from any caller the door admits, the controller included,
+/// until the grace after that deadline ends. A deposit that landed later is refused, and
+/// its funds stay in the vault.
+///
+/// The read starts a margin below the height the quote was registered at, when the store
+/// kept one, or below the provider's own head if that is lower, and reads a few windows
+/// where it would read a day of them. That height is the watcher's head, which can run
+/// ahead of the chain, so it narrows the read and never floors it past the chain: when
+/// nothing at all matches above it, the rest of the lookback is read before the claim is
+/// refused, and no height a watcher pushed puts a deposit out of reach.
 pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     require_not_halted().map_err(ClaimError::Guard)?;
     require_quoter_watcher_or_controller().map_err(ClaimError::Guard)?;
@@ -366,7 +434,7 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
-    ensure_claimable(&quote, now.as_secs(), config.permit_deadline)?;
+    ensure_claimable(&quote, now.as_secs(), &config)?;
     ensure_rail_is_enabled(&config, &quote)?;
     ensure_refundable(&quote)?;
     ensure_payable(&quote)?;
@@ -381,21 +449,25 @@ pub async fn claim_swap(quote: Quote) -> Result<QuoteHash, ClaimError> {
         return Err(ClaimError::NotRegistered(quote_hash));
     }
     inflight::take(quote_hash, InFlightKind::Claim, now).map_err(ClaimError::InFlight)?;
-    let read = |not_before| DepositRead {
+    // the deposit that pays a quote is not in a block before the quote was registered, and
+    // the rest of the lookback is read when nothing turns up above that height
+    let read = DepositRead {
         chain_id: quote.src_chain,
         quote_hash,
         wanted: wanted(&quote, token),
-        not_before,
+        start: match pending.and_then(|entry| entry.registered_at) {
+            Some(height) => Start::Registered(height),
+            None => Start::Lookback,
+        },
+        widen: true,
     };
-    // the deposit that pays a quote is not in a block before the quote was registered
-    let registered_at = pending.and_then(|entry| entry.registered_at);
-    let mut verified = deposits::verify_evm_deposit(&read(registered_at)).await;
-    if registered_at.is_some() && verified.as_ref().is_err_and(DepositError::found_nothing) {
-        verified = deposits::verify_evm_deposit(&read(None)).await;
-    }
+    let judged = match deposits::verify_evm_deposit(&read).await {
+        Ok(deposit) => ensure_landed_in_time(&quote, &config, deposit).await,
+        Err(error) => Err(error.into()),
+    };
     // the message chain ends here whatever the reads said: the marker was for the outcalls
     inflight::release(quote_hash);
-    let deposit = verified?;
+    let deposit = judged?;
     if is_sanctioned(&party(deposit.from)) {
         return Err(ClaimError::Sanctioned { party: "from" });
     }
@@ -486,7 +558,8 @@ pub async fn start_gasless_pull(
     ensure_gasless(&quote)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let config = config::get();
-    if let Some(claim_until) = missed_deadline(&quote, now.as_secs(), config.permit_deadline) {
+    // a pull makes a deposit, so it is refused once no deposit for the quote could count
+    if let Some(claim_until) = missed_deposit_deadline(&quote, now.as_secs(), &config) {
         return Err(PullError::QuoteExpired {
             expires_at: quote.expires_at,
             claim_until,
@@ -541,6 +614,15 @@ impl From<ClaimError> for settlement_api::types::entry::ClaimError {
                 expires_at_s: expires_at.get(),
                 claim_until_s: claim_until.get(),
                 now_s: now.get(),
+            },
+            ClaimError::LandedLate {
+                block,
+                landed_at,
+                deposit_until,
+            } => Self::LandedLate {
+                block: block.get(),
+                landed_at_s: landed_at.get(),
+                deposit_until_s: deposit_until.get(),
             },
             ClaimError::Sanctioned { party } => Self::Sanctioned {
                 party: party.to_string(),
@@ -652,6 +734,8 @@ impl From<DepositError> for settlement_api::types::entry::DepositError {
                 latest: latest.get(),
                 depth: depth.get(),
             },
+            DepositError::NoBlock { block } => Self::NoBlock { block: block.get() },
+            DepositError::UnreadableBlock => Self::UnreadableBlock,
         }
     }
 }

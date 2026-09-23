@@ -201,23 +201,34 @@ fn an_entry_whose_bytes_are_no_quote_is_stale() {
     assert_eq!(head.stale, vec![key(0, qh(1)), key(0, qh(2))]);
 }
 
-/// The permit window is measured from the quote's expiry, and the boundary second is
-/// inside it.
+/// The pending store keeps a quote for as long as a claim for it may be asked: the permit
+/// window and the claim's grace after it, both measured from the quote's expiry, and the
+/// boundary second is inside. A watcher that claims a deposit which landed in time, but
+/// claims it late, still finds the quote registered.
+///
+/// Rewritten for fix wave 5 (N7): the store dropped a quote once its permit window closed,
+/// so a late claim for a deposit that landed in time found it gone.
 #[test]
-fn the_sweep_drops_a_quote_once_its_permit_window_has_closed() {
+fn the_sweep_keeps_a_quote_until_its_claim_grace_has_ended() {
     pending_quotes::clear();
     let q = quote(true, 3_001);
-    let deadline = config::get().permit_deadline.as_secs();
+    // the permit window and the grace at their defaults: two minutes and an hour
+    let window = 120 + 3_600;
     let hash = registered_at(&q, expires_at_s(&q) - 5);
 
-    assert_eq!(run_expiry_sweep(at(expires_at_s(&q) + deadline)).dropped, 0);
+    assert_eq!(run_expiry_sweep(at(expires_at_s(&q) + 121)).dropped, 0);
     assert!(
         pending_quotes::get_pending(&hash).is_some(),
-        "the window is still open"
+        "past the permit window and inside the grace"
+    );
+    assert_eq!(run_expiry_sweep(at(expires_at_s(&q) + window)).dropped, 0);
+    assert!(
+        pending_quotes::get_pending(&hash).is_some(),
+        "the grace's last second"
     );
 
     assert_eq!(
-        run_expiry_sweep(at(expires_at_s(&q) + deadline + 1)).dropped,
+        run_expiry_sweep(at(expires_at_s(&q) + window + 1)).dropped,
         1
     );
     assert_eq!(pending_quotes::get_pending(&hash), None);
@@ -244,6 +255,9 @@ fn the_sweep_keys_eviction_on_the_expiry_and_not_on_the_registration() {
 
 /// A halted canister writes no event, but the pending store is pre-money hygiene and
 /// keeps being swept.
+///
+/// Rewritten for fix wave 5 (N7): a quote is stale once its claim's grace has ended, not
+/// once its permit window has closed.
 #[test]
 fn a_halted_sweep_still_drops_stale_quotes() {
     pending_quotes::clear();
@@ -252,7 +266,7 @@ fn a_halted_sweep_still_drops_stale_quotes() {
     let hash = registered_at(&q, expires_at_s(&q));
 
     let swept = run_expiry_sweep(at(expires_at_s(&q)
-        + config::get().permit_deadline.as_secs()
+        + config::get().claim_window().as_secs()
         + 1));
     assert_eq!(swept.dropped, 1);
     assert_eq!(swept.refunds, 0);
@@ -482,6 +496,10 @@ fn a_swap_that_waits_for_a_human_is_never_refunded_by_the_timer() {
 /// the repeating timer would retry the same batch forever, taking the eviction pass down
 /// with it. So one pass takes at most its cap, oldest first, and the passes after it drain
 /// the rest, while the eviction pass runs in the same tick whatever the refund pass does.
+///
+/// Rewritten for fix wave 5 (N7): the stale pending quote expires two hours before the
+/// clock starts, where it expired at that instant, because the store now keeps a quote
+/// through the claim's grace of an hour after its permit window.
 #[test]
 fn the_sweep_refunds_at_most_the_cap_per_tick_and_drains_the_rest_on_the_next_ticks() {
     on_fresh_memory(|| {
@@ -499,9 +517,10 @@ fn the_sweep_refunds_at_most_the_cap_per_tick_and_drains_the_rest_on_the_next_ti
                 quote_hash
             })
             .collect();
-        // a stale pending quote, to prove the eviction pass ran in the same tick
+        // a stale pending quote, to prove the eviction pass ran in the same tick: its
+        // permit window and its grace both closed before the clock starts
         let stale = Quote {
-            expires_at: UnixSeconds::new(start.as_secs().get()),
+            expires_at: UnixSeconds::new(start.as_secs().get() - 7_200),
             ..quote(true, 9_000)
         };
         let pending = registered_at(&stale, expires_at_s(&stale) - 10);

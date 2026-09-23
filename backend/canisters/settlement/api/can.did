@@ -56,8 +56,8 @@ type ClaimError = variant {
   NotRegistered : blob;
   // The quote's tokens are not its rail's: refused before any outcall.
   RailToken : RailTokenError;
-  // Past the quote's expiry plus the permit window, nobody can pay the quote and no
-  // deposit is claimed for it.
+  // Past the quote's expiry, the permit window and the grace after it, no claim is
+  // admitted for the quote, whoever asks.
   QuoteExpired : record {
     claim_until_s : nat64;
     now_s : nat64;
@@ -75,6 +75,15 @@ type ClaimError = variant {
   RailUnavailable : record { rail : text };
   Append : AppendError;
   InvalidQuote : QuoteError;
+  // The deposit found is in a block the chain made at `landed_at_s`, after the last
+  // second a deposit for the quote could land (its expiry plus the permit window). It
+  // is not the swap the user was quoted: the funds stay in the vault, for the
+  // late-arrival policy a later plan builds.
+  LandedLate : record {
+    landed_at_s : nat64;
+    deposit_until_s : nat64;
+    block : nat64;
+  };
 };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
@@ -109,6 +118,11 @@ type Config = record {
   chain_data_max_age_s : nat64;
   max_swap_usd : nat;
   max_batch_items : nat32;
+  // How long after a quote's deposit deadline (its expiry plus the permit window) a
+  // claim for a deposit that landed by that deadline is still admitted, from any
+  // caller the claim admits, the controller included: 600 to 86,400 seconds, an hour by
+  // default. The pending store keeps the quote until it ends.
+  claim_grace_s : nat64;
   max_evictions_per_sweep : nat32;
   // CCTP v2's `MessageTransmitterV2`, the same address on every chain.
   message_transmitter : opt text;
@@ -147,6 +161,12 @@ type ConfigError = variant {
   // the chain.
   DepthTooShallow : record { floor : nat64; chain_id : nat64; depth : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
+  // In milliseconds, like the cap: the knob is below the least it may be.
+  DurationBelowFloor : record {
+    field : text;
+    duration_ms : nat64;
+    floor_ms : nat64;
+  };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
   // In milliseconds, so the one knob set in milliseconds is reported as it was set.
   DurationAboveCap : record {
@@ -161,6 +181,8 @@ type ConfigError = variant {
 // Why the deposit read verified nothing.
 type DepositError = variant {
   Rpc : RpcError;
+  // The block the deposit is in did not come back as that block, with a time.
+  UnreadableBlock;
   UnreadableHead;
   // The range from `from` to the head at `anchor` would take `windows` calls of ten
   // thousand blocks, above `cap`; refused before any call.
@@ -174,6 +196,9 @@ type DepositError = variant {
   // The vault's log holds `seen` deposits for the quote, and none of them is the token
   // and amount wanted: funds under the hash for an operator, and no swap.
   NoneMatches : record { quote_hash : blob; seen : nat64 };
+  // The provider holds no block `block` under the hash the deposit's log named: reorged
+  // away, or not reached by the provider asked. Asked again, it may answer.
+  NoBlock : record { block : nat64 };
   // The vault's log holds no deposit for the quote in the range read.
   NotFound : record { quote_hash : blob };
   // The deposit is in a block the head has not reached by the configured depth.
@@ -857,14 +882,15 @@ service : (InitArg) -> {
   // so on a large fold the fold's own size is the floor and `max_events` is the rest. A step
   // too large for one message fails that call alone and leaves the saved fold where it was.
   audit_replay_step : (nat64) -> (Result);
-  // Quoter or watcher, and the only creator of swaps. Recomputes the quote's id, reads the
-  // source chain's vault for the deposit made against it, and once that deposit is deep
-  // enough appends `FundsReceived`, which is the swap. Money-first: the swap not existing,
-  // the quote still claimable (through its expiry plus the permit window), and nobody it
-  // pays to being sanctioned are all refused before an outcall is bought; a marker refuses a
-  // second claim for the same quote while the read is out; and a deposit that is not the
-  // quote's token and amount, or a sanctioned payer, is refused after it. A refusal stores
-  // nothing. Halted, the canister claims nothing.
+  // Quoter, watcher or controller, and the only creator of swaps. Recomputes the quote's
+  // id, reads the source chain's vault for the deposit made against it, and once that
+  // deposit is deep enough appends `FundsReceived`, which is the swap. Money-first: the swap
+  // not existing, the claim asked in time (through the quote's expiry, the permit window and
+  // the `claim_grace_s` after it), and nobody it pays to being sanctioned are all refused
+  // before an outcall is bought; a marker refuses a second claim for the same quote while
+  // the reads are out; and a deposit that is not the quote's token and amount, one whose
+  // block was made after the expiry plus the permit window, or a sanctioned payer, is
+  // refused after them. A refusal stores nothing. Halted, the canister claims nothing.
   claim_swap : (Quote) -> (Result_1);
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in

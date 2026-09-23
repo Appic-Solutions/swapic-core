@@ -6,8 +6,9 @@ use candid::Nat;
 use settlement_api::types::entry::{Permit2Sig, PermitSig};
 use settlement_api::types::events::EvmAddressError as WireAddressError;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use types::abi::Permit2Permit;
-use types::config::ChainTable;
+use types::config::{ChainTable, ClaimGrace};
 use types::evm::EvmAddressError;
 use types::quote::{QuoteAddressError, QuoteAddressField};
 use types::rail::RailTokenError;
@@ -46,46 +47,94 @@ fn deposit(token: &str, amount: u128) -> VerifiedDeposit {
         amount: TokenAmount::from(amount),
         tx_ref: TxHash::new([0x77; 32]),
         block: BlockNumber::new(19_000_000),
+        block_hash: [0x42; 32],
     }
 }
 
-/// A quote is claimable through its expiry and the permit window after it, the same
-/// window the pending store evicts on: a deposit made in the quote's last second and
-/// claimed a few blocks later is still the user's swap, and past the window nobody can pay
-/// the quote so nothing is claimed for it.
+/// A deposit may land through the quote's expiry and the permit window after it, and a
+/// claim for one that did may be asked through the grace after that, the same window the
+/// pending store keeps the quote for: a watcher that claims late still finds the swap the
+/// user paid for, and past the grace no claim is admitted, whoever asks.
+///
+/// Rewritten for fix wave 5 (N7): the claim was refused past the permit window, which
+/// judged a deposit by when the claim came rather than by when it landed.
 #[test]
-fn a_quote_is_claimable_through_its_expiry_and_the_permit_window() {
+fn a_quote_is_claimable_through_its_expiry_the_permit_window_and_the_grace() {
     let quote = evm_quote(1);
-    let window = Duration::from_secs(120);
+    let config = Config {
+        permit_deadline: Duration::from_secs(120),
+        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
+        ..Config::default()
+    };
     let expires_at = quote.expires_at.get();
     assert_eq!(
-        claim_deadline(&quote, window),
+        deposit_deadline(&quote, &config),
         Some(UnixSeconds::new(expires_at + 120))
     );
-    for now in [expires_at - 1, expires_at, expires_at + 120] {
+    assert_eq!(
+        claim_deadline(&quote, &config),
+        Some(UnixSeconds::new(expires_at + 720))
+    );
+    for now in [
+        expires_at - 1,
+        expires_at,
+        expires_at + 121,
+        expires_at + 720,
+    ] {
         assert_eq!(
-            ensure_claimable(&quote, UnixSeconds::new(now), window),
+            ensure_claimable(&quote, UnixSeconds::new(now), &config),
             Ok(()),
             "claimable at {now}"
         );
     }
     assert_eq!(
-        ensure_claimable(&quote, UnixSeconds::new(expires_at + 121), window),
+        ensure_claimable(&quote, UnixSeconds::new(expires_at + 721), &config),
         Err(ClaimError::QuoteExpired {
             expires_at: quote.expires_at,
-            claim_until: UnixSeconds::new(expires_at + 120),
-            now: UnixSeconds::new(expires_at + 121),
+            claim_until: UnixSeconds::new(expires_at + 720),
+            now: UnixSeconds::new(expires_at + 721),
         })
+    );
+    // a pull makes a deposit, so it stops at the deposit deadline and not at the grace
+    assert_eq!(
+        missed_deposit_deadline(&quote, UnixSeconds::new(expires_at + 120), &config),
+        None
+    );
+    assert_eq!(
+        missed_deposit_deadline(&quote, UnixSeconds::new(expires_at + 121), &config),
+        Some(UnixSeconds::new(expires_at + 120))
     );
     // a window past the end of time holds every claim
     let forever = Quote {
         expires_at: UnixSeconds::new(u64::MAX - 1),
         ..evm_quote(1)
     };
-    assert_eq!(claim_deadline(&forever, window), None);
+    assert_eq!(claim_deadline(&forever, &config), None);
     assert_eq!(
-        ensure_claimable(&forever, UnixSeconds::new(u64::MAX), window),
+        ensure_claimable(&forever, UnixSeconds::new(u64::MAX), &config),
         Ok(())
+    );
+}
+
+/// A deposit counts by its own block's time: one made by the deposit deadline is the
+/// user's swap whenever the claim for it is asked, and one made a second later is refused
+/// with the block, the time it landed and the deadline it missed.
+#[test]
+fn a_deposit_is_judged_by_the_time_its_block_was_made() {
+    let deposit = deposit(USDC, 25_000_000);
+    let deadline = UnixSeconds::new(1_800_000_120);
+    assert_eq!(ensure_landed_by(&deposit, deadline, deadline), Ok(()));
+    assert_eq!(
+        ensure_landed_by(&deposit, UnixSeconds::new(1_800_000_000), deadline),
+        Ok(())
+    );
+    assert_eq!(
+        ensure_landed_by(&deposit, UnixSeconds::new(1_800_000_121), deadline),
+        Err(ClaimError::LandedLate {
+            block: BlockNumber::new(19_000_000),
+            landed_at: UnixSeconds::new(1_800_000_121),
+            deposit_until: deadline,
+        })
     );
 }
 
