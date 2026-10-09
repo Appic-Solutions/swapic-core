@@ -2,8 +2,13 @@
 //! outbox write.
 //!
 //! One pure decision, [`next_action`], reads a swap as the fold holds it and answers the
-//! one thing to do next; [`drive_all`] runs it over every open swap on a timer, one action
-//! per swap per tick, and does the sending, reading and appending the action asks for.
+//! one thing to do next; [`drive_all`] runs it over every open swap, one action per swap
+//! per drive, and does the sending, reading and appending the action asks for.
+//!
+//! Event-driven: every line that moves a step arms one coalesced one-shot drive
+//! ([`arm`]), so a swap moves the moment its last step completes. The repeating tick is
+//! only the backstop, for what no line announces: a deposit landing on a chain, a balance
+//! arriving on a ledger, a read that failed and is worth trying again.
 //! Every transaction goes through `tx::create_and_send`, so rules A4 to A6 hold here by
 //! construction, and every line goes through `append_event`, whose guard is the authority
 //! (A2). The rail the quote names is the one that runs, and no other.
@@ -241,6 +246,52 @@ pub struct Drive {
 thread_local! {
     // A7: set while a tick is running, cleared when its guard drops, including on a trap.
     static RUNNING: Cell<bool> = const { Cell::new(false) };
+    // The instant the pending one-shot drive was armed at, while one is pending. Heap by
+    // necessity, like every timer: an upgrade clears it and `post_upgrade` arms again.
+    static ARMED_AT: Cell<Option<Timestamp>> = const { Cell::new(None) };
+    // Set when a drive was asked for while another was running: that drive did not see
+    // the line that asked, so one more runs when it ends.
+    static AGAIN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a one-shot drive armed at `armed_at` is still pending at `now`. A zero-delay
+/// timer fires in a later round, so an arming made at this very instant is still ahead and
+/// a second one in the same round coalesces into it. The instant is what decides rather
+/// than a flag, for the reason the outbox gives: a callback that cleared a flag and then
+/// trapped would leave it set forever, and no drive would ever be armed again.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn still_pending(armed_at: Option<Timestamp>, now: Timestamp) -> bool {
+    armed_at.is_some_and(|at| at >= now)
+}
+
+/// Asks for one drive as soon as the current message is done. Coalesced: every line that
+/// moves a step in the same round asks for the same drive. A drive asked for while another
+/// is running runs once that one ends, so no line is ever left to the backstop tick.
+pub fn arm() {
+    // unit tests run off the canister, where there is no timer to set
+    #[cfg(target_arch = "wasm32")]
+    {
+        let now = Timestamp::from_nanos(ic_cdk::api::time());
+        if still_pending(ARMED_AT.get(), now) {
+            return;
+        }
+        ARMED_AT.set(Some(now));
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, || ic_cdk::spawn(drive_now()));
+    }
+}
+
+/// The one-shot drive [`arm`] schedules: the engine over every open swap, and once more if
+/// a line asked for a drive while this one could not run.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+async fn drive_now() {
+    if RUNNING.get() {
+        AGAIN.set(true);
+        return;
+    }
+    drive_all().await;
+    if AGAIN.replace(false) {
+        arm();
+    }
 }
 
 /// Held for the length of one tick, so two ticks can never overlap: a tick awaits

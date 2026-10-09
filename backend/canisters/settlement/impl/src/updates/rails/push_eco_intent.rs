@@ -34,5 +34,7 @@ pub fn push_eco_intent(quote_hash: Hash32, intent: EcoIntent) -> Result<(), Push
     // the wire crosses to the domain in one place, beside the type it crosses from
     let intent = types::EcoIntent::try_from(intent)?;
     eco_intents::put(quote_hash, intent);
+    // the intent is the step the publish was waiting on
+    crate::engine::arm();
     Ok(())
 }

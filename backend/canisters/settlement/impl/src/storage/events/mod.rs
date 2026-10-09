@@ -324,6 +324,12 @@ pub fn append_event_at(
     // the append is the last step that returns an error and applying refuses nothing, so
     // once the message commits the log and the fold agree
     apply_state_transition(&mut state, &event);
+    // the engine acts the moment a step completes: a line that gives a swap its next move
+    // arms one coalesced drive, and the tick is only the backstop. A trap later in this
+    // message rolls the timer back with the line.
+    if event.payload.moves_a_step() {
+        crate::engine::arm();
+    }
     Ok(index)
 }
 

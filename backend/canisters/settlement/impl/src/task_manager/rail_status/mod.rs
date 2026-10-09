@@ -1,9 +1,9 @@
-//! The rail status timer: the engine's tick, on the interval the config names as
-//! `rail_status_max_age`. A repeating timer rather than a one-shot one, because a swap's
-//! next move depends on what the outbox and the watcher did meanwhile, and there is no
-//! event to arm on when a receipt lands or an attestation arrives. Each tick runs the
-//! engine under its own guard (rule A7), so a tick that outlives the interval is followed
-//! by an empty one rather than a second one over the same swaps.
+//! The rail status timer: the engine's slow backstop tick, on the interval the config
+//! names as `rail_status_max_age`. Every line that moves a step already arms a one-shot
+//! drive (`engine::arm`); this tick is for what no line announces, a deposit landing on a
+//! chain or a balance arriving on a ledger, and for a read worth trying again. Each tick
+//! runs the engine under its own guard (rule A7), so a tick that outlives the interval is
+//! followed by an empty one rather than a second one over the same swaps.
 
 use crate::engine;
 use crate::storage::config;

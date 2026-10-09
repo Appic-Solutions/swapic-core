@@ -91,5 +91,7 @@ pub fn push_attestation(
     rail.ensure_message_binds(&at, &parsed)
         .map_err(|error| PushAttestationError::Rail(error.into()))?;
     attestations::put(quote_hash, attestation);
+    // the attestation is the step the mint was waiting on
+    crate::engine::arm();
     Ok(())
 }

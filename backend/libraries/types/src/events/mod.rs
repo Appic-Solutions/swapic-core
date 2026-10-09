@@ -448,6 +448,40 @@ impl EventError {
 }
 
 impl EventType {
+    /// Whether this line can give some swap a next step the engine should act on now. The
+    /// engine drives the moment such a line lands instead of waiting for its tick. The
+    /// lines that only allocate, sign, re-send or cancel a transaction are left out: the
+    /// engine waits on an open attempt whatever it is, so arming on them would only run
+    /// a drive that finds nothing to do. Exhaustive, so a new variant decides.
+    pub fn moves_a_step(&self) -> bool {
+        match self {
+            EventType::FundsReceived { .. }
+            | EventType::TxConfirmed { .. }
+            | EventType::TxFailed { .. }
+            | EventType::PaidInStable { .. }
+            | EventType::DecisionMade { .. }
+            | EventType::RefundStarted { .. } => true,
+            EventType::ConfigChanged { .. }
+            | EventType::TxSigned { .. }
+            | EventType::DecisionRequired { .. }
+            | EventType::Refunded { .. }
+            | EventType::SwapDone { .. }
+            | EventType::Frozen { .. }
+            | EventType::FeeAccrued { .. }
+            | EventType::PocketFunded { .. }
+            | EventType::PocketReserved { .. }
+            | EventType::PocketRebalanced { .. }
+            | EventType::PocketReleased { .. }
+            | EventType::PocketSpent { .. }
+            | EventType::RolesChanged { .. }
+            | EventType::WaitingRepaired { .. }
+            | EventType::TxCreated { .. }
+            | EventType::TxReplaced { .. }
+            | EventType::TxCancelled { .. }
+            | EventType::PullSigned { .. } => false,
+        }
+    }
+
     /// The token amount the event carries, if it carries one. Exhaustive, so a new variant
     /// decides whether it moves value.
     pub fn amount(&self) -> Option<TokenAmount> {
