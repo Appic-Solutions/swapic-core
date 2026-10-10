@@ -14,12 +14,12 @@ Options:
   -it, --integration-test   Build with the inttest feature, into its own target directory
 
 Outputs:
-  production        backend/canisters/<CANISTER>/target/wasm32-unknown-unknown/release/<CANISTER>.wasm
-  integration test  backend/canisters/<CANISTER>/target/inttest/wasm32-unknown-unknown/release/<CANISTER>.wasm
+  production        canister/target/wasm32-unknown-unknown/release/<CANISTER>.wasm
+  integration test  canister/target/inttest/wasm32-unknown-unknown/release/<CANISTER>.wasm
 EOF_HELP
 }
 
-BASE_CANISTER_PATH="backend/canisters"
+BASE_CANISTER_PATH="canister"
 INTTEST=0
 
 while [[ $# -gt 0 && "$1" =~ ^- && "$1" != "--" ]]; do
@@ -47,7 +47,7 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 CANISTER=$1
-TARGET_DIR="$BASE_CANISTER_PATH/$CANISTER/target"
+TARGET_DIR="$BASE_CANISTER_PATH/target"
 
 if [[ $INTTEST == 1 ]]; then
   echo "Building canister $CANISTER for integration testing"

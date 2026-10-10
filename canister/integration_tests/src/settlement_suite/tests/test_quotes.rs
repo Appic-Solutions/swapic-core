@@ -51,7 +51,7 @@ fn fixed_quote() -> Quote {
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../libraries/types/golden/quote_hash_v1.txt"
+    "/../types/golden/quote_hash_v1.txt"
 );
 
 const MAX_QUOTE_LIFETIME_S: u64 = MAX_QUOTE_LIFETIME.as_secs();

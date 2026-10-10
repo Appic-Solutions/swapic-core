@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "backend/canisters/settlement/api",
-    "backend/canisters/settlement/impl",
-    "backend/integration_tests",
-    "backend/libraries/types",
+    "canister/api",
+    "canister/impl",
+    "canister/integration_tests",
+    "canister/types",
 ]
 resolver = "2"
 

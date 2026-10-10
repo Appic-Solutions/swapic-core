@@ -25,7 +25,7 @@ fn fixed_quote() -> Quote {
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../libraries/types/golden/quote_hash_v1.txt"
+    "/../types/golden/quote_hash_v1.txt"
 );
 
 /// Conversion keeps every byte of text as it arrived, so the wire fixture hashes to the

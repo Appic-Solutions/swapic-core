@@ -12,7 +12,7 @@ inttest = []
 
 [dependencies]
 settlement_api = { path = "../api" }
-types = { path = "../../../libraries/types" }
+types = { path = "../types" }
 
 alloy-primitives = { workspace = true }
 

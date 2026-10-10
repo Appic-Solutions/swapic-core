@@ -63,7 +63,7 @@ pub enum GasMode {
 /// | `nonce`          | u64                                       |
 ///
 /// Integers are big-endian and text is a u32 big-endian byte length then utf8. The order
-/// is frozen. `backend/libraries/types/golden/quote_hash_v1.txt` is the vector to check a
+/// is frozen. `canister/types/golden/quote_hash_v1.txt` is the vector to check a
 /// reimplementation against.
 ///
 /// Pending quotes are stored as minicbor, a layout apart from the preimage: `#[n]` indices

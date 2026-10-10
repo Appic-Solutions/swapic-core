@@ -40,8 +40,8 @@ Environment:
   RESEARCH_ENV      Default: ../research/.env
   SWAPIC_CORE_P5    The contracts branch checkout. Default: ../swapic-core-p5
   SWAPIC_BACKEND_P6 The services branch checkout. Default: ../swapic-backend-p6
-  LEDGER_WASM       The ICRC ledger wasm. Default: ../evm-minter/wasm/ledger_canister_u256.wasm.gz
-  LEDGER_DID        Its interface. Default: ../evm-minter/did/ledger.did
+  LEDGER_WASM       The ICRC ledger wasm. Default: ../legacy/evm-minter/wasm/ledger_canister_u256.wasm.gz
+  LEDGER_DID        Its interface. Default: ../legacy/evm-minter/did/ledger.did
   DEMO_LEGS         Which legs to run. Default: icp-evm,evm-icp,evm-icp-swap,relay
 EOF_HELP
 }
@@ -61,8 +61,8 @@ REPO_ROOT=$(pwd)
 RESEARCH_ENV=${RESEARCH_ENV:-../research/.env}
 P5=$(cd "${SWAPIC_CORE_P5:-../swapic-core-p5}" && pwd)
 P6=$(cd "${SWAPIC_BACKEND_P6:-../swapic-backend-p6}" && pwd)
-LEDGER_WASM=${LEDGER_WASM:-../evm-minter/wasm/ledger_canister_u256.wasm.gz}
-LEDGER_DID=${LEDGER_DID:-../evm-minter/did/ledger.did}
+LEDGER_WASM=${LEDGER_WASM:-../legacy/evm-minter/wasm/ledger_canister_u256.wasm.gz}
+LEDGER_DID=${LEDGER_DID:-../legacy/evm-minter/did/ledger.did}
 DEMO_LEGS=${DEMO_LEGS:-icp-evm,evm-icp,evm-icp-swap,relay}
 
 ETH_PORT=28545; BASE_PORT=28546; ARB_PORT=28547; IRIS_PORT=28590; DFX_PORT=4950
@@ -222,8 +222,8 @@ if [[ $BUILD == 1 ]]; then
   scripts/build-canister.sh settlement > "$LOGS/build.log" 2>&1
 fi
 cargo build -q -p integration_tests --example demo_args
-cp backend/canisters/settlement/target/wasm32-unknown-unknown/release/settlement.wasm "$DFXP/settlement.wasm"
-cp backend/canisters/settlement/api/can.did "$DFXP/settlement.did"
+cp canister/target/wasm32-unknown-unknown/release/settlement.wasm "$DFXP/settlement.wasm"
+cp canister/api/can.did "$DFXP/settlement.did"
 cp "$LEDGER_WASM" "$DFXP/ledger.wasm.gz"
 cp "$LEDGER_DID" "$DFXP/ledger.did"
 cp scripts/demo/mock_minter.mo scripts/demo/mock_icpswap.mo "$DFXP/"

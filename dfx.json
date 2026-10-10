@@ -2,8 +2,8 @@
   "canisters": {
     "settlement": {
       "type": "custom",
-      "wasm": "backend/canisters/settlement/target/wasm32-unknown-unknown/release/settlement.wasm",
-      "candid": "backend/canisters/settlement/api/can.did",
+      "wasm": "canister/target/wasm32-unknown-unknown/release/settlement.wasm",
+      "candid": "canister/api/can.did",
       "build": "scripts/build-canister.sh settlement"
     }
   }

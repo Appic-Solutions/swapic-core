@@ -14,5 +14,5 @@ pocket-ic = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 
-settlement_api = { path = "../canisters/settlement/api" }
-types = { path = "../libraries/types" }
+settlement_api = { path = "../api" }
+types = { path = "../types" }

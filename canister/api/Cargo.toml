@@ -5,7 +5,7 @@ description = "Candid types and endpoint signatures of the settlement canister."
 edition = "2021"
 
 [dependencies]
-types = { path = "../../../libraries/types" }
+types = { path = "../types" }
 
 candid = { workspace = true }
 serde = { workspace = true }

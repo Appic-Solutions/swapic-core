@@ -3,7 +3,7 @@ pub fn settlement() -> Vec<u8> {
     // holds an inttest artifact
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../canisters/settlement/target/inttest/wasm32-unknown-unknown/release/settlement.wasm"
+        "/../target/inttest/wasm32-unknown-unknown/release/settlement.wasm"
     );
     std::fs::read(path).expect("run `scripts/run-integration-tests.sh` first")
 }

@@ -23,7 +23,7 @@ pub enum GasMode {
 /// of the two one-byte fields is 0 or 1. Amounts must fit in u128, text in 256 bytes, the
 /// two tokens and `dst_address` must not be empty, and the rail is one of `cctp_v2_fast`,
 /// `cctp_v2_standard`, `eco`. Reproduce those bytes and
-/// you reproduce the hash; `backend/libraries/types/golden/quote_hash_v1.txt` is the vector
+/// you reproduce the hash; `canister/types/golden/quote_hash_v1.txt` is the vector
 /// to check a reimplementation against.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct Quote {

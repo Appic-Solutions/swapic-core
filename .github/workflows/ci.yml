@@ -38,4 +38,4 @@ jobs:
       - run: cargo install candid-extractor --locked --version 0.1.6
       # the committed did must match the production wasm, which also proves the
       # inttest door never reaches the public interface
-      - run: scripts/generate-did.sh settlement && git diff --exit-code backend/canisters/settlement/api/can.did
+      - run: scripts/generate-did.sh settlement && git diff --exit-code canister/api/can.did
