@@ -7,14 +7,14 @@ use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
     event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
-    get_pending, get_swap, halted, paused_swaps, test_outbox_armed, verify_chain, verify_replay,
+    get_pending, get_swap, halted, test_outbox_armed, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, claim_swap, clear_pending_quotes, derive_evm_address, push_attestation,
-    push_chain_data, push_eco_intent, register_quote, set_config, set_halted, set_roles,
-    set_sanctioned, start_gasless_pull, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
+    audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
+    set_config, set_halted, set_roles, set_sanctioned, test_rpc_batch as test_rpc_batch_api,
+    test_send, test_sign,
 };
 
 pub fn event_count(
@@ -211,20 +211,6 @@ pub fn get_chain_data(
     )
 }
 
-pub fn paused_swaps(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    after: paused_swaps::Args,
-) -> paused_swaps::Response {
-    query(
-        pic,
-        canister,
-        sender,
-        "paused_swaps",
-        encode_one(after).unwrap(),
-    )
-}
 
 pub fn halted(pic: &PocketIc, canister: Principal, sender: Principal) -> halted::Response {
     query(pic, canister, sender, "halted", encode_one(()).unwrap())
@@ -411,80 +397,6 @@ pub fn set_sanctioned(
     )
 }
 
-/// Claims the deposit made for `quote` and creates its swap. The claim reads the chain, so
-/// a test that mocks the read submits the call itself; this is for the refusals made before
-/// any outcall.
-pub fn claim_swap(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    quote: &claim_swap::Args,
-) -> claim_swap::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "claim_swap",
-        encode_one(quote).unwrap(),
-    )
-}
 
-/// Positional, as the endpoint takes them: `(quote_hash, request)`.
-pub fn start_gasless_pull(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    quote_hash: settlement_api::types::events::Hash32,
-    permit: &settlement_api::types::entry::PullRequest,
-) -> start_gasless_pull::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "start_gasless_pull",
-        encode_args((quote_hash, permit)).unwrap(),
-    )
-}
 
-/// Positional, as the endpoint takes them: `(quote_hash, burn_tx_hash, message,
-/// attestation)`.
-pub fn push_attestation(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    quote_hash: settlement_api::types::events::Hash32,
-    burn_tx_hash: settlement_api::types::events::Hash32,
-    message: &[u8],
-    attestation: &[u8],
-) -> push_attestation::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "push_attestation",
-        encode_args((
-            quote_hash,
-            burn_tx_hash,
-            message.to_vec(),
-            attestation.to_vec(),
-        ))
-        .unwrap(),
-    )
-}
 
-/// Positional, as the endpoint takes them: `(quote_hash, intent)`.
-pub fn push_eco_intent(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    quote_hash: settlement_api::types::events::Hash32,
-    intent: &settlement_api::types::entry::EcoIntent,
-) -> push_eco_intent::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "push_eco_intent",
-        encode_args((quote_hash, intent)).unwrap(),
-    )
-}

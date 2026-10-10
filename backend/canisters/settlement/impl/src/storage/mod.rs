@@ -1,10 +1,7 @@
-pub mod attestations;
 pub mod audit_cursor;
 pub mod chain_data;
 pub mod config;
 pub mod ecdsa_address;
-pub mod eco_intents;
-pub mod engine_cursor;
 pub mod events;
 pub mod flow_settings;
 pub mod halt;
@@ -31,10 +28,7 @@ pub fn init() {
     outbox::init();
     replay_cursor::init();
     sanctions::init();
-    attestations::init();
     inflight::init();
-    eco_intents::init();
-    engine_cursor::init();
     flow_settings::init();
 }
 

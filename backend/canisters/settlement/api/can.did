@@ -47,44 +47,6 @@ type ChainDataEntry = record { data : ChainData; pushed_at_ns : nat64 };
 // Why a pushed reading is not one this canister prices gas with.
 type ChainDataError = variant { FeeTooLarge : record { field : text } };
 type Choice = variant { Requote; Refund };
-// Why `claim_swap` created no swap. Nothing was written.
-type ClaimError = variant {
-  // `party` is `"dst_address"`, `"refund_address"` or `"from"` (the payer).
-  Sanctioned : record { party : text };
-  // No quote with this id is in the pending store: the quoter never registered it, or
-  // it was evicted. A controller may still claim such a quote by hand.
-  NotRegistered : blob;
-  // The quote's tokens are not its rail's: refused before any outcall.
-  RailToken : RailTokenError;
-  // Past the quote's expiry, the permit window and the grace after it, no claim is
-  // admitted for the quote, whoever asks.
-  QuoteExpired : record {
-    claim_until_s : nat64;
-    now_s : nat64;
-    expires_at_s : nat64;
-  };
-  Guard : GuardError;
-  Deposit : DepositError;
-  SwapExists : blob;
-  // A claim or a pull for this quote is already out, since `since_ns`: `kind` says
-  // which of the two, so a caller told to wait knows what it is waiting on.
-  InFlight : record { kind : InFlightKind; since_ns : nat64 };
-  // A field of the quote that the claim reads as an EVM address is not one.
-  QuoteAddress : QuoteAddressError;
-  // The quote names a rail this deploy does not run, by its id.
-  RailUnavailable : record { rail : text };
-  Append : AppendError;
-  InvalidQuote : QuoteError;
-  // The deposit found is in a block the chain made at `landed_at_s`, after the last
-  // second a deposit for the quote could land (its expiry plus the permit window). It
-  // is not the swap the user was quoted: the funds stay in the vault, for the
-  // late-arrival policy a later plan builds.
-  LandedLate : record {
-    landed_at_s : nat64;
-    deposit_until_s : nat64;
-    block : nat64;
-  };
-};
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
 type Config = record {
@@ -202,47 +164,6 @@ type ConfigError = variant {
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };
 };
-// Why the deposit read verified nothing.
-type DepositError = variant {
-  Rpc : RpcError;
-  // The block the deposit is in did not come back as that block, with a time.
-  UnreadableBlock;
-  UnreadableHead;
-  // The range from `from` to the head at `anchor` would take `windows` calls of ten
-  // thousand blocks, above `cap`; refused before any call.
-  RangeTooWide : record {
-    cap : nat64;
-    from : nat64;
-    anchor : nat64;
-    windows : nat64;
-  };
-  UnreadableLogs;
-  // The vault's log holds `seen` deposits for the quote, and none of them is the token
-  // and amount wanted: funds under the hash for an operator, and no swap.
-  NoneMatches : record { quote_hash : blob; seen : nat64 };
-  // The quote's logs in block `block` alone are more than `cap` bytes, the largest
-  // answer an outcall may be, so no read can see what that block holds. Logs under a
-  // quote's public hash are anyone's to add, so this is dust, and asked again it answers
-  // the same: the funds stay in the vault for an operator.
-  BlockTooLarge : record { cap : nat64; block : nat64 };
-  // The provider holds no block `block` under the hash the deposit's log named: reorged
-  // away, or not reached by the provider asked. Asked again, it may answer.
-  NoBlock : record { block : nat64 };
-  // The vault's log holds no deposit for the quote in the range read.
-  NotFound : record { quote_hash : blob };
-  // The deposit is in a block the head has not reached by the configured depth.
-  NotConfirmed : record { latest : nat64; block : nat64; depth : nat64 };
-  // The config lists no confirmation depth for the chain, so nothing on it is deep
-  // enough to decide money on.
-  NoDepth : record { chain_id : nat64 };
-  // The watcher has pushed nothing young enough to anchor the read on.
-  StaleChainData : record { chain_id : nat64 };
-  // The read spent the `spent` outcalls one read may make before it reached block
-  // `from`, reading around dust too large to answer whole. Asked again, it answers the
-  // same unless the chain has moved.
-  OutOfOutcalls : record { from : nat64; spent : nat64 };
-  Vault : VaultError;
-};
 // Why a key or a signature is not one this canister can use. A refused management call is
 // reported rather than trapped: the interface specification says a rejected signing
 // request may leave the signature in the system anyway, so a caller that retries has to
@@ -253,17 +174,6 @@ type EcdsaError = variant {
   UnreadablePublicKey;
   Signature : record { message : text };
   PublicKey : record { message : text };
-};
-// What Eco's quote response gave a swap on the Eco rail, as the watcher hands it in:
-// `destination_chain` is Eco's `destinationChainID` and never the chain the user is paid
-// on, `route` its `encodedRoute`, `deadline_s` the reward's deadline and `prover` the
-// prover it names. The reward itself is the swap's own amount of the source USDC, with
-// the vault as its creator, which the canister fills in.
-type EcoIntent = record {
-  destination_chain : nat64;
-  deadline_s : nat64;
-  prover : text;
-  route : blob;
 };
 // One entry of the log. `time_ns` is IC time in nanoseconds.
 type Event = record {
@@ -495,8 +405,6 @@ type IcpToEvmQuote = record {
   min_ckusdc : nat;
   route : blob;
 };
-// Which door holds the marker: a claim reading the chain, or a pull being signed.
-type InFlightKind = variant { Pull; Claim };
 // What an install starts from: the whole config and both service roles, so a canister is
 // never live on default knobs or without its quoter and watcher. Each is validated as
 // `set_config` and `set_roles` validate it, and anything invalid fails the install.
@@ -507,203 +415,18 @@ type InitArg = record {
 };
 // The leg of a swap a transaction attempt was signed for.
 type Leg = variant { Payout; Burn; Mint; Refund; Reclaim };
-// Why bytes are not a CCTP v2 burn message.
-type MessageError = variant {
-  UnknownBodyVersion : record { version : nat32 };
-  ExpirationBlockTooLarge;
-  TooShort : record { len : nat64; wanted : nat64 };
-  UnknownVersion : record { version : nat32 };
-};
-// A field of a burn message the swap's burn determined.
-type MessageField = variant {
-  Amount;
-  MessageSender;
-  MintRecipient;
-  DestinationCaller;
-  Sender;
-  BurnToken;
-  DestinationDomain;
-  SourceDomain;
-  MaxFee;
-  Recipient;
-};
-// Why a pushed message is not the swap's own burn: the field that reads otherwise, with
-// what the swap's burn wrote (`expected`) and what the message carries (`found`). Words
-// are the 32-byte words the message carries.
-type MessageMismatch = variant {
-  Amount : record { field : MessageField; found : nat; expected : nat };
-  FeeAboveMaxFee : record { fee : nat; max_fee : nat };
-  // The message's hook data names another swap: the message is the attested message of
-  // that swap's burn, however identical the two burns are otherwise.
-  Swap : record { found : blob; expected : blob };
-  Word : record { field : MessageField; found : blob; expected : blob };
-  HookData : record { len : nat64 };
-  Version : record { found : nat32 };
-  Domain : record { field : MessageField; found : nat32; expected : nat32 };
-  Threshold : record { found : nat32; expected : nat32 };
-};
 // How a swap's latest attempt ended.
 type Outcome = variant { Failed; Confirmed };
-// One page of `paused_swaps`: the count of swaps paused on a rail the deploy has off,
-// among the swaps this page read.
-type PausedSwapsPage = record {
-  // The swap id the next page starts after, while any swap is left after this page;
-  // absent on the last page.
-  next : opt blob;
-  // How many swaps this page read: at most 500.
-  read : nat64;
-  // How many of the swaps this page read are paused.
-  paused : nat64;
-};
-// A Permit2 `PermitTransferFrom` a gasless user signed for the vault, witnessed by the
-// quote it pays for.
-// 
-// `quote_hash` is that witness and `spender` is the address the signature names as the
-// one who may spend: neither travels in the calldata (the vault derives the witness from
-// the quote it is called with, and Permit2 takes the spender from its caller), so both
-// are here to be checked against the quote and the vault before anything is signed.
-type Permit2Sig = record {
-  token : text;
-  // the signature itself, at most [`MAX_PERMIT2_SIGNATURE_BYTES`] bytes
-  signature : blob;
-  deadline_s : nat64;
-  owner : text;
-  // the quote hash the signature's witness names
-  quote_hash : blob;
-  // Permit2's own nonce, a number the signer picks and Permit2 spends once
-  nonce : nat;
-  amount : nat;
-  // the spender the signature names, which has to be the vault
-  spender : text;
-};
-// Why a permit is not one the vault can use, naming the field.
-type PermitError = variant {
-  // The pull carried an EIP-2612 permit, which this canister never sends: the vault's
-  // 2612 door transfers whether or not the permit verified, and a 2612 signature names
-  // no quote.
-  NotAPermit2Permit;
-  NotAnAddress : record { field : text; reason : EvmAddressError };
-  SignatureTooLong : record { cap : nat64; len : nat64 };
-  NonceTooLarge;
-  AmountTooLarge;
-};
-// Why a permit the caller sent is not the one this quote's pull may use, with what it
-// says and what the quote says beside it.
-type PermitMismatch = variant {
-  Amount : record { permitted : nat; wanted : nat };
-  // The signature's witness names another quote, so the funds it frees are not this
-  // swap's.
-  Witness : record { signed_for : blob };
-  Token : record { permitted : text; wanted : text };
-  // The signature names another spender than the vault the pull would call, so Permit2
-  // would refuse it on the chain.
-  Spender : record { vault : text; signed_for : text };
-  // The permit is signed by another wallet than the quote's refund address. On an EVM
-  // source chain the refund address is the paying wallet, and the vault logs the pull's
-  // owner as the deposit's payer, so a pull from any other wallet would land funds no
-  // claim counts as the quote's deposit.
-  Owner : record { refund_address : text; signed_by : text };
-  // The permit's own deadline has passed.
-  Expired : record { deadline_s : nat64; now_s : nat64 };
-  // The permit is good until `deadline_s`, after `deposit_until_s`, the last second a
-  // deposit for the quote may land: a pull sent near that second could land after it,
-  // and the claim would refuse the deposit with the funds in the vault. A permit good
-  // no later than the deposit deadline makes Permit2 revert a late pull instead.
-  OutlastsDeposit : record { deadline_s : nat64; deposit_until_s : nat64 };
-};
-// An EIP-2612 permit a user signed for a token contract, with what it permits: the token
-// and the amount of the quote, from the user's own account, until `deadline_s`. `r` and
-// `s` are the signature words and `v` its recovery byte, 27 or 28.
-// 
-// NOT A SHAPE THIS CANISTER PULLS WITH, and a pull carrying one is refused: the vault's
-// 2612 door runs `safeTransferFrom` whether or not the permit verified, so the signature
-// decides nothing and any standing allowance is enough to move a user's funds, and a 2612
-// permit names `(owner, spender, value, deadline)` and never a quote, so one signed for a
-// quote can be spent under another. It stays on the wire so a caller that sends one is
-// told why, by name.
-type PermitSig = record {
-  r : blob;
-  s : blob;
-  v : nat8;
-  token : text;
-  deadline_s : nat64;
-  owner : text;
-  amount : nat;
-};
 // Why a pocket cannot make a move.
 type PocketError = variant {
   Overflow;
   InsufficientReserved : record { requested : nat; "reserved" : nat };
   InsufficientAvailable : record { requested : nat; available : nat };
 };
-// Why `start_gasless_pull` sent nothing.
-type PullError = variant {
-  Tx : TxError;
-  // `party` is `"owner"`, `"dst_address"` or `"refund_address"`.
-  Sanctioned : record { party : text };
-  // The quote's tokens are not its rail's: its claim would be refused, so its funds are
-  // not pulled into the vault.
-  RailToken : RailTokenError;
-  QuoteExpired : record {
-    claim_until_s : nat64;
-    now_s : nat64;
-    expires_at_s : nat64;
-  };
-  Guard : GuardError;
-  // The permit is not one this quote's pull may use.
-  PermitMismatch : PermitMismatch;
-  // The quote is not in the pending store: never registered, or evicted.
-  UnknownQuote : blob;
-  Permit : PermitError;
-  // A pull for this quote is signed and not yet landed; it is that transaction.
-  AlreadyPulling : record { tx_hash : blob };
-  InFlight : record { kind : InFlightKind; since_ns : nat64 };
-  // A field of the quote that the pull reads as an EVM address is not one.
-  QuoteAddress : QuoteAddressError;
-  // The quote names a rail this deploy does not run, by its id: its claim would be
-  // refused, so its funds are not pulled into the vault.
-  RailUnavailable : record { rail : text };
-  Vault : VaultError;
-  // The quote's user pays their own gas.
-  NotGasless;
-};
-// What a gasless pull may be asked with. Only the Permit2 permit is a door this canister
-// uses; see [`PermitSig`] for why the other one is refused.
-type PullRequest = variant { Permit2 : Permit2Sig; Eip2612 : PermitSig };
-// Why `push_attestation` stored nothing.
-type PushAttestationError = variant {
-  // The burn the push names is not the transaction the swap's burn confirmed as.
-  NotTheSwapsBurn : record { pushed : blob; confirmed : blob };
-  Guard : GuardError;
-  // This canister's address is not derived yet, so the message's caller cannot be
-  // checked.
-  AddressNotDerived;
-  // The message does not bind to the swap's burn, or the rail cannot check it.
-  Rail : RailError;
-  // The swap's burn has not confirmed, so there is no burn for the message to be of.
-  NoBurnConfirmed : blob;
-  UnknownSwap : blob;
-  AttestationTooLong : record { cap : nat64; len : nat64 };
-  // The swap is not on a CCTP rail, so no attestation is its.
-  NotACctpSwap : blob;
-  MessageTooLong : record { cap : nat64; len : nat64 };
-};
 // Why `push_chain_data` stored nothing.
 type PushChainDataError = variant {
   Guard : GuardError;
   InvalidData : ChainDataError;
-};
-// Why `push_eco_intent` stored nothing.
-type PushEcoIntentError = variant {
-  // The swap is not on the Eco rail.
-  NotAnEcoSwap : blob;
-  RouteTooLong : record { cap : nat64; len : nat64 };
-  Guard : GuardError;
-  UnknownSwap : blob;
-  ProverNotAnAddress : record { reason : EvmAddressError };
-  // The swap has already published an intent, and the one it published is the one its
-  // reclaim must name.
-  AlreadyPublished : blob;
 };
 // What the off-chain quoter handed the user, and the only thing the settlement canister
 // ever hashes into a swap id. The hash is sha256 over a canonical preimage whose field
@@ -772,30 +495,6 @@ type QuoteError = variant {
   Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
   AmountTooLarge : record { field : text };
 };
-// Why a rail could not decide on a swap: a knob the deploy left unset, an address of the
-// quote or of the vault that is not one, or an attestation that is not the swap's.
-type RailError = variant {
-  // The rail, by its id, is one this deploy does not run.
-  RailDisabled : record { rail : text };
-  RailToken : RailTokenError;
-  NoMessageTransmitter;
-  NoMintHash;
-  NoUsdc : record { chain_id : nat64 };
-  Message : MessageMismatch;
-  FeeOverflow : record { amount : nat };
-  NoTokenMessenger;
-  QuoteAddress : QuoteAddressError;
-  UnreadableMessage : MessageError;
-  Vault : VaultError;
-  // The swap's burn left the source vault with no fee recorded for it: a fold no
-  // line produces, so its message is bound to nothing and not minted.
-  NoBurnFeeRecorded;
-  NoEcoPortal;
-  NoDomain : record { chain_id : nat64 };
-  // An amount above the largest floor a vault execution can carry, which is no amount
-  // this canister swaps.
-  AmountTooLarge : record { amount : nat };
-};
 // Why a quote is not one its rail can carry: the rails carry the configured USDC on both
 // sides and nothing else, compared as addresses. Addresses are EIP-55, the rail is its
 // id.
@@ -854,53 +553,22 @@ type ReplayError = variant {
   Unlinked : record { head : blob; index : nat64; parent : blob };
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
-type Result_1 = variant { Ok : blob; Err : ClaimError };
-type Result_10 = variant { Ok : blob; Err : FlowCallError };
-type Result_11 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_12 = variant { Ok; Err : SetConfigError };
-type Result_13 = variant { Ok; Err : FlowCallError };
-type Result_14 = variant { Ok; Err : GuardError };
-type Result_15 = variant { Ok; Err : SetRolesError };
-type Result_16 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_17 = variant { Ok : blob; Err : PullError };
-type Result_18 = variant { Ok : nat; Err : FlowCallError };
-type Result_2 = variant { Ok : nat64; Err : GuardError };
-type Result_3 = variant { Ok : text; Err : SignError };
-type Result_4 = variant { Ok : Config; Err : GuardError };
-type Result_5 = variant { Ok : opt Quote; Err : GuardError };
-type Result_6 = variant { Ok; Err : PushAttestationError };
-type Result_7 = variant { Ok; Err : PushChainDataError };
-type Result_8 = variant { Ok; Err : PushEcoIntentError };
-type Result_9 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
+type Result_1 = variant { Ok : nat64; Err : GuardError };
+type Result_10 = variant { Ok; Err : FlowCallError };
+type Result_11 = variant { Ok; Err : GuardError };
+type Result_12 = variant { Ok; Err : SetRolesError };
+type Result_13 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_14 = variant { Ok : nat; Err : FlowCallError };
+type Result_2 = variant { Ok : text; Err : SignError };
+type Result_3 = variant { Ok : Config; Err : GuardError };
+type Result_4 = variant { Ok : opt Quote; Err : GuardError };
+type Result_5 = variant { Ok; Err : PushChainDataError };
+type Result_6 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
+type Result_7 = variant { Ok : blob; Err : FlowCallError };
+type Result_8 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_9 = variant { Ok; Err : SetConfigError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
-// Why a read of a chain answered nothing usable. `NoUrl` is a deploy mistake, `Rpc` is the
-// provider refusing one call of a batch, and the rest are the transport.
-type RpcError = variant {
-  Rpc : record { method : text; message : text };
-  // A reply that is neither a result nor an error is neither an answer nor a refusal.
-  NeitherResultNorError : record { method : text };
-  // The provider answered outside 2xx. The body is summarised the same way, so a
-  // provider cannot answer a caller of this canister with a page of its own.
-  Http : record { status : nat16; body : text };
-  NoUrl : record { chain_id : nat64 };
-  // The body is not the array a batch is answered by.
-  NotAnArray : record { calls : nat64; reason : text };
-  // The provider answered a different number of replies than the batch asked for.
-  WrongReplyCount : record { asked : nat64; answered : nat64 };
-  // The system refused the outcall, summarised: a bounded, control-character-free cut
-  // of the reject message, never the whole of it.
-  Unreachable : record { reason : text };
-  // No reply carries this call's id.
-  Unanswered : record { method : text };
-  // The system refused the answer as larger than the `cap` bytes the outcall reserved.
-  // A read that can ask again with a larger cap, or over less, does so.
-  AnswerTooLarge : record { cap : nat64 };
-  // Two replies carry one id, so one call has two answers and another has none.
-  DuplicateReplyId : record { id : nat64 };
-  // A reply carries an id the batch never used, so nothing says which call it answers.
-  UnknownReplyId : record { id : opt nat64; calls : nat64 };
-};
 // Why `set_config` wrote nothing.
 type SetConfigError = variant {
   InvalidConfig : ConfigError;
@@ -1014,33 +682,6 @@ type TransitionError = variant {
     nonce : nat64;
   };
 };
-// Why no transaction was created.
-type TxError = variant {
-  Guard : GuardError;
-  // The swap has used every attempt number there is.
-  NoAttemptLeft : record { quote_hash : blob };
-  // The nonce the signed bytes carry was cancelled while the signature was on its way,
-  // so the record was refused and nothing was queued.
-  NonceCancelled : record {
-    quote_hash : blob;
-    chain_id : nat64;
-    nonce : nat64;
-  };
-  // A transaction is signed against a swap's attempt, and this purpose names no swap.
-  PurposeNeedsASwap : record { purpose : text };
-  // The watcher has pushed nothing young enough to price a transaction with.
-  StaleChainData : record { chain_id : nat64 };
-  // The text the caller gave as the transaction's destination is not an address.
-  NotAnAddress : record { to : text; reason : EvmAddressError };
-  // The chain reading prices this transaction above the ceiling this canister will pay
-  // per unit of gas, so nothing was signed.
-  FeeOutOfRange : record { ceiling_wei_per_gas : nat; chain_id : nat64 };
-  Append : AppendError;
-  // The price and the gas limit together are above the most this canister will spend on
-  // one transaction.
-  GasCostTooHigh : record { cost_wei : nat; bound_wei : nat; chain_id : nat64 };
-  Ecdsa : EcdsaError;
-};
 // Why an outbound transaction exists. All but the last name the swap they belong to.
 type TxPurpose = variant {
   Continue : blob;
@@ -1052,11 +693,6 @@ type TxPurpose = variant {
   Relay : blob;
   Cancel : nat64;
   Reclaim : blob;
-};
-// Why a chain has no vault to read or send to: a deploy mistake, named by chain.
-type VaultError = variant {
-  NotAnAddress : record { chain_id : nat64; reason : EvmAddressError };
-  NoVault : record { chain_id : nat64 };
 };
 service : (InitArg) -> {
   // Controller-only. One step of the deep check: folds up to `max_events` more of the log
@@ -1074,37 +710,15 @@ service : (InitArg) -> {
   // so on a large fold the fold's own size is the floor and `max_events` is the rest. A step
   // too large for one message fails that call alone and leaves the saved fold where it was.
   audit_replay_step : (nat64) -> (Result);
-  // Quoter, watcher or controller, and the only creator of swaps. Recomputes the quote's
-  // id, reads the source chain's vault for the deposit made against it, and once that
-  // deposit is deep enough appends `FundsReceived`, which is the swap. Money-first: the swap
-  // not existing, the claim asked in time (through the quote's expiry, the permit window and
-  // the `claim_grace_s` after it), and nobody it pays to being sanctioned are all refused
-  // before an outcall is bought; a marker refuses a second claim for the same quote while
-  // the reads are out; and a deposit that is not the quote's token and amount, one whose
-  // block was made after the expiry plus the permit window, or a sanctioned payer, is
-  // refused after them. A refusal stores nothing. Halted, the canister claims nothing.
-  // 
-  // The permit window and the grace are the ones the config held when the quoter
-  // registered the quote, recorded with it: a config changed afterwards moves neither
-  // deadline of a registered quote. A controller's claim of a quote the store does not hold
-  // is held to the config as it reads now.
-  // 
-  // A deposit counts only from the wallet the quote names: on an EVM source chain the
-  // quote's `refund_address` IS the paying wallet. The read asks the provider for the
-  // vault's `Deposited` logs whose indexed payer (`topics[3]`) is that address, and refuses
-  // any other it is handed, so a deposit from any other wallet is not the quote's deposit
-  // (it answers `NotFound`), and nobody else's dust under the quote's public hash reaches
-  // the read.
-  claim_swap : (Quote) -> (Result_1);
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in
   // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.
-  clear_pending_quotes : () -> (Result_2);
+  clear_pending_quotes : () -> (Result_1);
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
   // it, or answers the cached one. Deploy needs this before anything else: the vaults are
   // configured with this address and it has to be funded for gas, and neither can wait for
   // the first swap to derive it.
-  derive_evm_address : () -> (Result_3);
+  derive_evm_address : () -> (Result_2);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
@@ -1127,14 +741,14 @@ service : (InitArg) -> {
   // the real thing.
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
-  get_config_full : () -> (Result_4) query;
+  get_config_full : () -> (Result_3) query;
   // A flow, any kind, as the fold holds it.
   get_flow : (blob) -> (opt FlowView) query;
   // The flows' settings.
   get_flow_settings : () -> (FlowSettings) query;
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
-  get_pending : (blob) -> (Result_5) query;
+  get_pending : (blob) -> (Result_4) query;
   // The folded state of one swap. Public: every field of it is already in the
   // world-readable event log, `quote_bytes` included.
   get_swap : (blob) -> (opt Swap) query;
@@ -1149,34 +763,6 @@ service : (InitArg) -> {
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
-  // World-readable, and bounded. How many open swaps wait on a rail the deploy has turned
-  // off: each is paused, not stopped, refused with a retryable `RailDisabled` on every
-  // engine tick, and moves again once the rail is back on. Counted a page at a time: one
-  // call reads at most 500 swaps, in swap id order, starting after `after` (or at the first
-  // swap), so it answers however long the history grows. The whole count is the sum of
-  // `paused` over the pages, each asked with the `next` the one before it answered, until a
-  // page answers none. A count and nothing else, so it says nothing about any one swap that
-  // the public event log does not already, and a call costs its page, which is why it
-  // stays open to anyone.
-  paused_swaps : (opt blob) -> (PausedSwapsPage) query;
-  // Watcher-only. Hands in what Circle attested for a swap's burn: the message the source
-  // chain emitted and the signatures over it, which the mint on the destination takes,
-  // named by the burn transaction the watcher fetched it for.
-  // 
-  // The message is bound to the swap before it is taken in: the swap must be on a CCTP
-  // rail with its burn confirmed, the burn named must be the transaction that burn
-  // confirmed as, and every field of the message that the burn determined must be the
-  // swap's own (the lane, the token, the amount, the destination vault, this canister as
-  // the caller, the rail's threshold and fee ceiling, and the swap's quote hash as the
-  // hook). The burn named proves only that the swap's burn confirmed, since nothing in a
-  // message says which transaction emitted it; what ties a message to its swap is the hook
-  // the swap's own burn wrote. A message of another burn, ours or anyone's and however
-  // identical its parameters, is refused by the field, so it can never be minted under this
-  // swap's name and paid out of the destination vault's pooled balance. The inbox is stable
-  // memory and holds one attestation per swap: the same push again changes nothing, and a
-  // different one that binds replaces it. Rail data and not money, so the halt switch does
-  // not gate it.
-  push_attestation : (blob, blob, blob, blob) -> (Result_6);
   // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
   // canister would otherwise spend an outcall on before every decision. It moves no money,
   // so the halt switch does not gate it: a halted canister still wants a current view of the
@@ -1185,27 +771,19 @@ service : (InitArg) -> {
   // The record carries no instant. The canister stamps what it stores with its own clock,
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
-  push_chain_data : (nat64, ChainData) -> (Result_7);
-  // Watcher-only. Hands in what Eco's quote response gave a swap on the Eco rail: the
-  // destination Eco named, the route, the reward's deadline and the prover. The inbox holds
-  // one intent per swap, and a push replaces the one before it until the publish is signed,
-  // so a corrected intent is the one the publish carries and never one the Portal never
-  // saw. Rail data and not money: the vault locks only the swap's own
-  // amount whatever the intent says, so the halt switch does not gate it. Only a known swap
-  // on the Eco rail has an inbox slot.
-  push_eco_intent : (blob, EcoIntent) -> (Result_8);
+  push_chain_data : (nat64, ChainData) -> (Result_5);
   // Quoter-only, refused while halted. Registers an EVM to ICP quote durably BEFORE the
   // router quote is built (spec 4b.8): the user's principal is recorded with it, and the
   // answer names where the ckUSDC must be deposited, the canister's subaccount named by the
   // router params' `ref` (`reference`), so the route's helper deposit carries it. The
   // engine finds the ckUSDC there, swaps it on ICPSwap and pays the user. A quote for
   // ckUSDC itself names no pool, and its ckUSDC is forwarded as it is.
-  register_evm_quote : (EvmToIcpQuote) -> (Result_9);
+  register_evm_quote : (EvmToIcpQuote) -> (Result_6);
   // Quoter-only, refused while halted. Registers an ICP to EVM quote durably, with the
   // user's original destination terms (its route), BEFORE the user is told what to
   // approve (spec 4b.1). Answers the quote hash: the user approves the canister with that
   // hash as the spender subaccount, and only that allowance is ever pulled.
-  register_icp_quote : (IcpToEvmQuote) -> (Result_10);
+  register_icp_quote : (IcpToEvmQuote) -> (Result_7);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1216,33 +794,33 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_11);
+  register_quote : (Quote) -> (Result_8);
   // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
   // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
   // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
   // every readable field is checked against them, the authorization must recover to the
   // payer, and `swapFor` must succeed in simulation before the canister signs it once and
   // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
-  relay_gasless : (nat64, blob, blob) -> (Result_10);
+  relay_gasless : (nat64, blob, blob) -> (Result_7);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_12);
+  set_config : (Config) -> (Result_9);
   // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
   // and the windows the flows read.
-  set_flow_settings : (FlowSettings) -> (Result_13);
+  set_flow_settings : (FlowSettings) -> (Result_10);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_14);
+  set_halted : (bool) -> (Result_11);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_15);
+  set_roles : (principal, principal) -> (Result_12);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1252,23 +830,13 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_16);
-  // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the
-  // Permit2 permit they signed, for a quote that is pending, gasless and still payable, and
-  // answers the hash of the transaction that does it. The permit has to be witnessed by
-  // this quote, signed by the quote's `refund_address` (on an EVM source chain the refund
-  // address is the paying wallet, and a deposit counts only from it), and name its token,
-  // its amount and the vault as the spender; an EIP-2612 permit is refused, because the
-  // vault's 2612 door transfers on a standing allowance whether or not the permit verified
-  // and a 2612 signature names no quote. The pull creates no swap: the deposit it makes is
-  // what `claim_swap` then verifies. Halted, the canister pulls nothing.
-  start_gasless_pull : (blob, PullRequest) -> (Result_17);
+  set_sanctioned : (vec text, vec text) -> (Result_13);
   // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
   // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
   // the quote hash (and from no other), and answers what was pulled. The engine then swaps
   // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
   // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_18);
+  start_icp_swap : (blob) -> (Result_14);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

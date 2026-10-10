@@ -27,13 +27,13 @@ const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
 const NONCES_MEMORY_ID: MemoryId = MemoryId::new(15);
 const OUTBOX_MEMORY_ID: MemoryId = MemoryId::new(16);
-const ATTESTATIONS_MEMORY_ID: MemoryId = MemoryId::new(17);
+// 17 held the attestation inbox of the vault-routed CCTP rail: retired, never reused
 const IN_FLIGHT_MEMORY_ID: MemoryId = MemoryId::new(18);
 const SANCTIONS_MEMORY_ID: MemoryId = MemoryId::new(19);
 const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
 const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
-const ECO_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(22);
-const ENGINE_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(23);
+// 22 held the Eco intent inbox of the vault-routed Eco rail: retired, never reused
+// 23 held the swap engine's window cursor: retired, never reused
 const FLOWS_MEMORY_ID: MemoryId = MemoryId::new(24);
 const FLOW_SETTINGS_MEMORY_ID: MemoryId = MemoryId::new(25);
 
@@ -117,21 +117,10 @@ pub fn sanctions_memory() -> Memory {
     memory(SANCTIONS_MEMORY_ID)
 }
 
-pub fn attestations_memory() -> Memory {
-    memory(ATTESTATIONS_MEMORY_ID)
-}
-
 pub fn inflight_memory() -> Memory {
     memory(IN_FLIGHT_MEMORY_ID)
 }
 
-pub fn eco_intents_memory() -> Memory {
-    memory(ECO_INTENTS_MEMORY_ID)
-}
-
-pub fn engine_cursor_memory() -> Memory {
-    memory(ENGINE_CURSOR_MEMORY_ID)
-}
 
 pub fn flows_memory() -> Memory {
     memory(FLOWS_MEMORY_ID)

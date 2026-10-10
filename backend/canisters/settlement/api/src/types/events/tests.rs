@@ -134,6 +134,18 @@ fn samples() -> Vec<EventType> {
             tx_hash: [23; 32],
             raw_tx: vec![0x02, 0xf8, 0x6d],
         },
+        {
+            let step = types::FlowStep::Pulled {
+                amount: types::TokenAmount::from(25_u8),
+                block_index: 26,
+            };
+            EventType::Flow {
+                quote_hash: [24; 32],
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            }
+        },
     ]
 }
 
