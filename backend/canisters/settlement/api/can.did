@@ -462,6 +462,20 @@ type GuardError = variant {
   Halted;
   RoleNotSet : Role;
 };
+// The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router
+// params of the Ethereum continuation as one ABI tuple: its `rail`, `dstChainId`,
+// `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
+// and the canister fills in itself as the payer of what lands.
+type IcpToEvmQuote = record {
+  pool : opt principal;
+  user : principal;
+  src_ledger : principal;
+  nonce : nat64;
+  amount_in : nat;
+  expires_at_s : nat64;
+  min_ckusdc : nat;
+  route : blob;
+};
 // Which door holds the marker: a claim reading the chain, or a pull being signed.
 type InFlightKind = variant { Pull; Claim };
 // What an install starts from: the whole config and both service roles, so a canister is
@@ -822,13 +836,14 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : blob; Err : ClaimError };
-type Result_10 = variant { Ok : blob; Err : FlowCallError };
+type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
 type Result_11 = variant { Ok; Err : SetConfigError };
 type Result_12 = variant { Ok; Err : FlowCallError };
 type Result_13 = variant { Ok; Err : GuardError };
 type Result_14 = variant { Ok; Err : SetRolesError };
 type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
 type Result_16 = variant { Ok : blob; Err : PullError };
+type Result_17 = variant { Ok : nat; Err : FlowCallError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : Config; Err : GuardError };
@@ -836,7 +851,7 @@ type Result_5 = variant { Ok : opt Quote; Err : GuardError };
 type Result_6 = variant { Ok; Err : PushAttestationError };
 type Result_7 = variant { Ok; Err : PushChainDataError };
 type Result_8 = variant { Ok; Err : PushEcoIntentError };
-type Result_9 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_9 = variant { Ok : blob; Err : FlowCallError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why a read of a chain answered nothing usable. `NoUrl` is a deploy mistake, `Rpc` is the
@@ -1159,6 +1174,11 @@ service : (InitArg) -> {
   // amount whatever the intent says, so the halt switch does not gate it. Only a known swap
   // on the Eco rail has an inbox slot.
   push_eco_intent : (blob, EcoIntent) -> (Result_8);
+  // Quoter-only, refused while halted. Registers an ICP to EVM quote durably, with the
+  // user's original destination terms (its route), BEFORE the user is told what to
+  // approve (spec 4b.1). Answers the quote hash: the user approves the canister with that
+  // hash as the spender subaccount, and only that allowance is ever pulled.
+  register_icp_quote : (IcpToEvmQuote) -> (Result_9);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1169,14 +1189,14 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_9);
+  register_quote : (Quote) -> (Result_10);
   // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
   // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
   // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
   // every readable field is checked against them, the authorization must recover to the
   // payer, and `swapFor` must succeed in simulation before the canister signs it once and
   // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
-  relay_gasless : (nat64, blob, blob) -> (Result_10);
+  relay_gasless : (nat64, blob, blob) -> (Result_9);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a
@@ -1216,6 +1236,12 @@ service : (InitArg) -> {
   // and a 2612 signature names no quote. The pull creates no swap: the deposit it makes is
   // what `claim_swap` then verifies. Halted, the canister pulls nothing.
   start_gasless_pull : (blob, PullRequest) -> (Result_16);
+  // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
+  // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
+  // the quote hash (and from no other), and answers what was pulled. The engine then swaps
+  // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
+  // address, and continues on Ethereum once the USDC lands.
+  start_icp_swap : (blob) -> (Result_17);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

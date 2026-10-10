@@ -16,6 +16,9 @@
 #[cfg(test)]
 mod tests;
 
+pub mod evm_to_icp;
+pub mod flows;
+
 use crate::deposits::{
     self, DepositError, DepositRead, Payer, Start, VaultError, Wanted, WantedAmount,
 };
@@ -351,6 +354,11 @@ pub async fn drive_all() -> Drive {
     let Some(_guard) = TickGuard::take() else {
         return drive;
     };
+    if require_not_halted().is_err() {
+        return drive;
+    }
+    // the flows first: each is a few calls, and none waits on another
+    flows::drive_flows().await;
     if require_not_halted().is_err() {
         return drive;
     }
