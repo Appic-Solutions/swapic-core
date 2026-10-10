@@ -80,7 +80,9 @@ pub fn register_icp_quote(quote: IcpToEvmQuote) -> Result<Hash32, FlowCallError>
         .ckusdc_ledger
         .ok_or_else(|| invalid("no ckUSDC ledger is configured"))?;
     if settings.ck_minter.is_none() || settings.ethereum_usdc.is_none() {
-        return Err(invalid("the ck minter and Ethereum USDC must be configured"));
+        return Err(invalid(
+            "the ck minter and Ethereum USDC must be configured",
+        ));
     }
     if settings.router(settings.ethereum).is_none() {
         return Err(invalid("no router is configured on Ethereum"));
@@ -141,7 +143,10 @@ pub async fn start_icp_swap(quote_hash: Hash32) -> Result<Nat, FlowCallError> {
             flow.status
         )));
     }
-    let quote = flow.icp_quote.clone().expect("BUG: an ICP to EVM flow holds its quote");
+    let quote = flow
+        .icp_quote
+        .clone()
+        .expect("BUG: an ICP to EVM flow holds its quote");
     if now_s() > quote.expires_at.get() {
         return Err(FlowCallError::Refused("the quote has expired".into()));
     }
@@ -152,9 +157,9 @@ pub async fn start_icp_swap(quote_hash: Hash32) -> Result<Nat, FlowCallError> {
     let flow = read_state(|state| state.flow(&quote_hash)).expect("BUG: just recorded");
     match flow_engine::pull(quote_hash, &flow, &quote).await {
         Ok(amount) => Ok(Nat::from(amount)),
-        Err(FlowDriveError::Call(crate::ic::CallError::Refused(reason))) => {
-            Err(FlowCallError::Refused(format!("the ledger refused the pull: {reason}")))
-        }
+        Err(FlowDriveError::Call(crate::ic::CallError::Refused(reason))) => Err(
+            FlowCallError::Refused(format!("the ledger refused the pull: {reason}")),
+        ),
         Err(error) => Err(FlowCallError::Unavailable(format!("{error:?}"))),
     }
 }

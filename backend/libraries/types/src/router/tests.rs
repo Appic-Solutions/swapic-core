@@ -96,4 +96,3 @@ fn params_round_trip_through_their_abi_tuple() {
     let params = golden();
     assert_eq!(decode_params(&encode_params(&params)), Some(params));
 }
-

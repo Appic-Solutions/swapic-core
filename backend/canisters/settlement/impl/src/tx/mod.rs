@@ -84,7 +84,12 @@ const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 /// is 514 characters of JSON, and the two dozen scalar fields, that is about four
 /// kilobytes. Eight is that with room for a fourth log, and a vault `execute` receipt is
 /// smaller.
-pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
+///
+/// A router `swapFor` that bridges on CCTP logs more than that: the pull, the fees, the
+/// burn's three logs and the router's own two, which measured above 8 KB on a fork and
+/// left every read of it refused as too large until a replacement doubled the cap. So the
+/// cap is 32 KB, four of those.
+pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 32_768;
 
 /// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and
 /// a batch bigger than one outcall can hold is not an error the canister recovers from: the
@@ -752,8 +757,7 @@ async fn decide(
             } = receipt;
             // a flow's transaction closes with a flow line, whichever of the nonce's
             // transactions landed
-            if let TxPurpose::Relay(quote_hash) | TxPurpose::Continue(quote_hash) = entry.purpose
-            {
+            if let TxPurpose::Relay(quote_hash) | TxPurpose::Continue(quote_hash) = entry.purpose {
                 let appended = append_event(EventType::Flow {
                     quote_hash,
                     step: types::FlowStep::TxClosed {

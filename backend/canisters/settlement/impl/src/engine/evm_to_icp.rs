@@ -83,7 +83,12 @@ async fn consolidate(
         .checked_sub(fee)
         .ok_or(FlowDriveError::Settings("below the fee"))?;
     let flow = if flow.status == FlowStatus::Arrived {
-        record(quote_hash, FlowStep::Begun { stage: Stage::Consolidate })?;
+        record(
+            quote_hash,
+            FlowStep::Begun {
+                stage: Stage::Consolidate,
+            },
+        )?;
         reread(quote_hash)?
     } else {
         flow.clone()
@@ -153,7 +158,10 @@ async fn swap(
             )?;
             Ok(())
         }
-        Err(error) => freeze(quote_hash, &format!("the ICPSwap swap did not answer: {error}")),
+        Err(error) => freeze(
+            quote_hash,
+            &format!("the ICPSwap swap did not answer: {error}"),
+        ),
     }
 }
 
@@ -180,7 +188,12 @@ async fn deliver(
     let flow = if flow.status == FlowStatus::Delivering {
         flow.clone()
     } else {
-        record(quote_hash, FlowStep::Begun { stage: Stage::Deliver })?;
+        record(
+            quote_hash,
+            FlowStep::Begun {
+                stage: Stage::Deliver,
+            },
+        )?;
         reread(quote_hash)?
     };
     let from = flow.held_in_subaccount.then_some(quote_hash.into_bytes());
@@ -203,9 +216,10 @@ async fn deliver(
             )?;
             Ok(())
         }
-        Err(CallError::Refused(reason)) => {
-            freeze(quote_hash, &format!("the ledger refused the payment: {reason}"))
-        }
+        Err(CallError::Refused(reason)) => freeze(
+            quote_hash,
+            &format!("the ledger refused the payment: {reason}"),
+        ),
         Err(error) => Err(error.into()),
     }
 }

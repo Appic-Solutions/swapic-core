@@ -121,7 +121,6 @@ pub fn inflight_memory() -> Memory {
     memory(IN_FLIGHT_MEMORY_ID)
 }
 
-
 pub fn flows_memory() -> Memory {
     memory(FLOWS_MEMORY_ID)
 }

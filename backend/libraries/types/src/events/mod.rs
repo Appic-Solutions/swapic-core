@@ -774,9 +774,9 @@ impl EventType {
             // the step as its minicbor bytes: its indices are append-only like the log's,
             // so the bytes of a recorded step never change
             EventType::Flow { quote_hash, step } => {
-                w.put_u16(24)
-                    .put_hash(quote_hash.as_ref())
-                    .put_bytes(&minicbor::to_vec(step).expect("BUG: encoding into a Vec is infallible"));
+                w.put_u16(24).put_hash(quote_hash.as_ref()).put_bytes(
+                    &minicbor::to_vec(step).expect("BUG: encoding into a Vec is infallible"),
+                );
             }
         }
         w.finish()

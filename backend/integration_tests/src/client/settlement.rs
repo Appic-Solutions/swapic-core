@@ -211,7 +211,6 @@ pub fn get_chain_data(
     )
 }
 
-
 pub fn halted(pic: &PocketIc, canister: Principal, sender: Principal) -> halted::Response {
     query(pic, canister, sender, "halted", encode_one(()).unwrap())
 }
@@ -396,7 +395,3 @@ pub fn set_sanctioned(
         encode_args((add, remove)).unwrap(),
     )
 }
-
-
-
-

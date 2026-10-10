@@ -6,16 +6,16 @@
 
 mod chain;
 mod config;
-mod flows;
 mod events;
+mod flows;
 mod ops;
 mod quotes;
 mod swaps;
 
 pub use chain::*;
 pub use config::*;
-pub use flows::*;
 pub use events::*;
+pub use flows::*;
 pub use ops::*;
 pub use quotes::*;
 pub use swaps::*;

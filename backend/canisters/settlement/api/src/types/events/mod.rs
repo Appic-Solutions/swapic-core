@@ -718,8 +718,11 @@ impl TryFrom<EventType> for types::EventType {
                 ..
             } => Self::Flow {
                 quote_hash: QuoteHash::new(quote_hash),
-                step: types::FlowStep::from_bytes(&step_bytes)
-                    .ok_or(DomainEventError::NotAFlowStep { field: "step_bytes" })?,
+                step: types::FlowStep::from_bytes(&step_bytes).ok_or(
+                    DomainEventError::NotAFlowStep {
+                        field: "step_bytes",
+                    },
+                )?,
             },
         })
     }

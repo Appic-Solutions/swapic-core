@@ -102,16 +102,19 @@ pub fn get_wire() -> Wire {
 
 /// The parsed settings.
 pub fn get() -> FlowSettings {
-    parse(&get_wire()).unwrap_or_else(|_| {
-        parse(&Wire::default()).expect("BUG: the default flow settings parse")
-    })
+    parse(&get_wire())
+        .unwrap_or_else(|_| parse(&Wire::default()).expect("BUG: the default flow settings parse"))
 }
 
 /// Validates and stores `wire`. The caller does the authorization.
 pub fn set(wire: Wire) -> Result<(), String> {
     parse(&wire)?;
     let bytes = Encode!(&wire).map_err(|e| e.to_string())?;
-    SETTINGS.with(|cell| cell.borrow_mut().set(bytes).expect("flow settings cell write"));
+    SETTINGS.with(|cell| {
+        cell.borrow_mut()
+            .set(bytes)
+            .expect("flow settings cell write")
+    });
     Ok(())
 }
 

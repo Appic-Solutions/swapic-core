@@ -2,8 +2,8 @@ use crate::state::{MemoryStore, State, Store};
 use thiserror::Error;
 use types::checked_amount::CheckedAmountOf;
 use types::events::{Event, EventType, TxPurpose};
-use types::FlowStep;
 use types::quote::quote_hash_of;
+use types::FlowStep;
 use types::{
     ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, TransitionError,
 };
@@ -288,18 +288,12 @@ impl<S: Store> State<S> {
                 match step {
                     FlowStep::GaslessRelayed {
                         chain_id, nonce, ..
-                    } => self.ensure_flow_nonce(
-                        TxPurpose::Relay(*quote_hash),
-                        *chain_id,
-                        *nonce,
-                    ),
+                    } => self.ensure_flow_nonce(TxPurpose::Relay(*quote_hash), *chain_id, *nonce),
                     FlowStep::ContinuationSigned {
                         chain_id, nonce, ..
-                    } => self.ensure_flow_nonce(
-                        TxPurpose::Continue(*quote_hash),
-                        *chain_id,
-                        *nonce,
-                    ),
+                    } => {
+                        self.ensure_flow_nonce(TxPurpose::Continue(*quote_hash), *chain_id, *nonce)
+                    }
                     _ => Ok(()),
                 }
             }

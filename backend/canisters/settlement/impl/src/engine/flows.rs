@@ -10,10 +10,10 @@ use crate::ecdsa;
 use crate::evm_reads::{self, Simulated, TransferRead};
 use crate::guards::require_not_halted;
 use crate::ic::{self, Account, CallError, Dedup};
-use crate::storage::events::{append_event, read_state, AppendError};
-use crate::storage::flow_settings::{self, FlowSettings};
 use crate::state::Store;
 use crate::storage::config;
+use crate::storage::events::{append_event, read_state, AppendError};
+use crate::storage::flow_settings::{self, FlowSettings};
 use crate::tx;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use candid::{Nat, Principal};
@@ -124,8 +124,13 @@ pub async fn drive_flows() -> usize {
         let Some(flow) = read_state(|state| state.flow(&quote_hash)) else {
             continue;
         };
-        if drive_flow(quote_hash, &flow).await.is_ok() {
-            acted += 1;
+        match drive_flow(quote_hash, &flow).await {
+            Ok(()) => acted += 1,
+            // retried on the next drive; printed so an operator reading the replica's log
+            // sees why a flow is standing still
+            Err(error) => {
+                ic_cdk::println!("flow {quote_hash} stays at {:?}: {error:?}", flow.status)
+            }
         }
     }
     acted
@@ -178,9 +183,7 @@ async fn icp_to_evm(quote_hash: QuoteHash, flow: &Flow) -> Result<(), FlowDriveE
         FlowStatus::Withdrawing => freeze(quote_hash, "the withdrawal's outcome is unknown"),
         FlowStatus::Withdrawn => check_landing(quote_hash, flow, &settings).await,
         FlowStatus::Landed => continue_on_ethereum(quote_hash, flow, &quote, &settings).await,
-        FlowStatus::RefundDue | FlowStatus::Refunding => {
-            refund(quote_hash, flow, &quote).await
-        }
+        FlowStatus::RefundDue | FlowStatus::Refunding => refund(quote_hash, flow, &quote).await,
         _ => Ok(()),
     }
 }
@@ -217,7 +220,12 @@ pub async fn pull(
             Ok(quote.amount_in)
         }
         Err(CallError::Refused(reason)) => {
-            record(quote_hash, FlowStep::PullRefused { reason: reason.clone() })?;
+            record(
+                quote_hash,
+                FlowStep::PullRefused {
+                    reason: reason.clone(),
+                },
+            )?;
             Err(FlowDriveError::Call(CallError::Refused(reason)))
         }
         Err(error) => Err(FlowDriveError::Call(error)),
@@ -263,8 +271,15 @@ async fn swap_to_ckusdc(
     }
     ic::icrc2_approve(src, pool, nat(swap_in) + fee_in.clone()).await?;
     record(quote_hash, FlowStep::Begun { stage: Stage::Swap })?;
-    match ic::deposit_from_and_swap(pool, &nat(swap_in), zero_for_one, &nat(floor), fee_in, fee_out)
-        .await
+    match ic::deposit_from_and_swap(
+        pool,
+        &nat(swap_in),
+        zero_for_one,
+        &nat(floor),
+        fee_in,
+        fee_out,
+    )
+    .await
     {
         Ok(out) => {
             record(
@@ -276,7 +291,10 @@ async fn swap_to_ckusdc(
             )?;
             Ok(())
         }
-        Err(error) => freeze(quote_hash, &format!("the ICPSwap swap did not answer: {error}")),
+        Err(error) => freeze(
+            quote_hash,
+            &format!("the ICPSwap swap did not answer: {error}"),
+        ),
     }
 }
 
@@ -361,7 +379,12 @@ async fn withdraw(
     if let Some(cketh) = settings.cketh_ledger {
         ic::icrc2_approve(cketh, minter, nat(settings.cketh_fee_allowance)).await?;
     }
-    record(quote_hash, FlowStep::Begun { stage: Stage::Withdraw })?;
+    record(
+        quote_hash,
+        FlowStep::Begun {
+            stage: Stage::Withdraw,
+        },
+    )?;
     match ic::withdraw_erc20(minter, ckusdc, nat(withdraw), mine.to_string()).await {
         Ok(request) => {
             let withdrawal_id = u64::try_from(request.cketh_block_index.0.clone()).unwrap_or(0);
@@ -507,7 +530,11 @@ pub fn plan(
     };
     params.rail = RAIL_CCTP;
     params.maxFee = max_fee;
-    params.minFinality = if max_fee.is_zero() { 2000 } else { route.minFinality };
+    params.minFinality = if max_fee.is_zero() {
+        2000
+    } else {
+        route.minFinality
+    };
     params.eco = EcoTerms {
         salt: FixedBytes::ZERO,
         routeDeadline: 0,
@@ -540,7 +567,10 @@ async fn continue_on_ethereum(
     settings: &FlowSettings,
 ) -> Result<(), FlowDriveError> {
     if flow.failed_continuations >= 2 {
-        return freeze(quote_hash, "the continuation and its fallback both reverted");
+        return freeze(
+            quote_hash,
+            "the continuation and its fallback both reverted",
+        );
     }
     let chain = settings.ethereum;
     let router_address = settings
@@ -549,8 +579,9 @@ async fn continue_on_ethereum(
     let usdc = settings
         .ethereum_usdc
         .ok_or(FlowDriveError::Settings("no Ethereum USDC"))?;
-    let route = router::decode_params(&quote.route)
-        .ok_or(FlowDriveError::Settings("the quote's route does not decode"))?;
+    let route = router::decode_params(&quote.route).ok_or(FlowDriveError::Settings(
+        "the quote's route does not decode",
+    ))?;
     let mine = ecdsa::canister_address()
         .await
         .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
@@ -561,15 +592,20 @@ async fn continue_on_ethereum(
         Simulated::Returned(bytes) => bytes.last().copied().unwrap_or(0) != 0,
         Simulated::Reverted(_) => true,
     };
-    let separator = match evm_reads::eth_call(chain, mine, usdc, &router::domain_separator_calldata())
-        .await
-        .map_err(|e| FlowDriveError::Chain(e.to_string()))?
-    {
-        Simulated::Returned(bytes) if bytes.len() == 32 => {
-            <[u8; 32]>::try_from(bytes).expect("BUG: checked to be 32 bytes")
-        }
-        _ => return Err(FlowDriveError::Chain("USDC answers no domain separator".into())),
-    };
+    let separator =
+        match evm_reads::eth_call(chain, mine, usdc, &router::domain_separator_calldata())
+            .await
+            .map_err(|e| FlowDriveError::Chain(e.to_string()))?
+        {
+            Simulated::Returned(bytes) if bytes.len() == 32 => {
+                <[u8; 32]>::try_from(bytes).expect("BUG: checked to be 32 bytes")
+            }
+            _ => {
+                return Err(FlowDriveError::Chain(
+                    "USDC answers no domain separator".into(),
+                ))
+            }
+        };
     let now_s = now().as_secs().get();
     let deadline_s = settings.continuation_deadline.as_secs();
     let mut failed = flow.failed_continuations;
@@ -666,7 +702,12 @@ async fn refund(
         return freeze(quote_hash, "what is held does not cover the refund's fees");
     };
     let flow = if flow.status == FlowStatus::RefundDue {
-        record(quote_hash, FlowStep::Begun { stage: Stage::Refund })?;
+        record(
+            quote_hash,
+            FlowStep::Begun {
+                stage: Stage::Refund,
+            },
+        )?;
         read_state(|state| state.flow(&quote_hash))
             .ok_or(FlowDriveError::Settings("the flow vanished"))?
     } else {
@@ -688,4 +729,96 @@ async fn refund(
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::router::{Delivery, ACTION_SWAP};
+
+    fn route(rail: u8, route_deadline: u64) -> SwapParams {
+        SwapParams {
+            r#ref: FixedBytes([1; 32]),
+            payer: Address::ZERO,
+            tokenIn: Address::ZERO,
+            amountIn: U256::from(5_000_000),
+            deadline: U256::ZERO,
+            leg: DexCall {
+                target: Address::ZERO,
+                data: Bytes::new(),
+            },
+            legMinOut: U256::ZERO,
+            feeBps: U256::ZERO,
+            maxGasFee: U256::ZERO,
+            rail,
+            dstChainId: 42161,
+            maxFee: U256::from(5_000),
+            minFinality: 1000,
+            eco: EcoTerms {
+                salt: FixedBytes([2; 32]),
+                routeDeadline: route_deadline,
+                rewardDeadline: route_deadline + 600,
+                amount: U256::from(4_000_000),
+                amountOut: U256::from(3_900_000),
+            },
+            dst: Delivery {
+                action: ACTION_SWAP,
+                recipient: router::recipient_word(EvmAddress::new([6; 20])),
+                tokenOut: Address::from([7; 20]),
+                minOut: U256::from(1),
+                principal: FixedBytes::ZERO,
+                subaccount: FixedBytes::ZERO,
+                deadline: 0,
+                swap: DexCall {
+                    target: Address::ZERO,
+                    data: Bytes::new(),
+                },
+            },
+        }
+    }
+
+    fn planned(route: &SwapParams, paused: bool, failed: u32) -> SwapParams {
+        let held = TokenAmount::from(4_990_000_u32);
+        plan(
+            route,
+            EvmAddress::new([9; 20]),
+            EvmAddress::new([8; 20]),
+            held,
+            1_000,
+            1_800,
+            paused,
+            failed,
+        )
+        .expect("an EVM recipient always has a plan")
+    }
+
+    #[test]
+    fn a_route_that_still_holds_is_kept_with_the_canister_as_payer() {
+        let params = planned(&route(RAIL_CCTP, 0), false, 0);
+        assert_eq!(params.dst.action, ACTION_SWAP);
+        assert_eq!(params.payer, Address::from([9; 20]));
+        assert_eq!(params.amountIn, U256::from(4_990_000));
+        assert_eq!(params.maxGasFee, U256::ZERO);
+    }
+
+    #[test]
+    fn a_paused_router_an_expired_eco_route_or_a_revert_falls_back_to_a_deliver() {
+        for params in [
+            planned(&route(RAIL_CCTP, 0), true, 0),
+            planned(&route(RAIL_ECO, 1_100), false, 0),
+            planned(&route(RAIL_CCTP, 0), false, 1),
+        ] {
+            assert_eq!(params.rail, RAIL_CCTP);
+            assert_eq!(params.dst.action, ACTION_DELIVER);
+            assert_eq!(
+                params.dst.recipient,
+                router::recipient_word(EvmAddress::new([6; 20]))
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_eco_route_is_kept() {
+        assert_eq!(planned(&route(RAIL_ECO, 100_000), false, 0).rail, RAIL_ECO);
+    }
 }

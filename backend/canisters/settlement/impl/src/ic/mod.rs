@@ -27,7 +27,10 @@ impl std::fmt::Display for CallError {
     }
 }
 
-async fn call<A: candid::utils::ArgumentEncoder, R: for<'de> candid::utils::ArgumentDecoder<'de>>(
+async fn call<
+    A: candid::utils::ArgumentEncoder,
+    R: for<'de> candid::utils::ArgumentDecoder<'de>,
+>(
     canister: Principal,
     method: &str,
     args: A,
@@ -165,9 +168,9 @@ pub async fn icrc1_transfer(
     match answer {
         Ok(block) => Ok(nat_u64(&block)),
         Err(TransferError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
-        Err(TransferError::TemporarilyUnavailable) => {
-            Err(CallError::Unknown("the ledger is temporarily unavailable".to_string()))
-        }
+        Err(TransferError::TemporarilyUnavailable) => Err(CallError::Unknown(
+            "the ledger is temporarily unavailable".to_string(),
+        )),
         Err(error) => Err(CallError::Refused(format!("{error:?}"))),
     }
 }
@@ -196,9 +199,9 @@ pub async fn icrc2_transfer_from(
     match answer {
         Ok(block) => Ok(nat_u64(&block)),
         Err(TransferFromError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
-        Err(TransferFromError::TemporarilyUnavailable) => {
-            Err(CallError::Unknown("the ledger is temporarily unavailable".to_string()))
-        }
+        Err(TransferFromError::TemporarilyUnavailable) => Err(CallError::Unknown(
+            "the ledger is temporarily unavailable".to_string(),
+        )),
         Err(error) => Err(CallError::Refused(format!("{error:?}"))),
     }
 }
@@ -234,6 +237,25 @@ pub enum PoolError {
     InternalError(String),
     UnsupportedToken(String),
     InsufficientFunds,
+}
+
+/// ICPSwap answers `variant { ok; err }`, in lower case, where candid's `Result` is
+/// `Ok` and `Err`.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum PoolResult<T> {
+    #[serde(rename = "ok")]
+    Ok(T),
+    #[serde(rename = "err")]
+    Err(PoolError),
+}
+
+impl<T> PoolResult<T> {
+    fn into_result(self) -> Result<T, PoolError> {
+        match self {
+            PoolResult::Ok(value) => Ok(value),
+            PoolResult::Err(error) => Err(error),
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -283,8 +305,10 @@ struct DepositAndSwapArgs {
 }
 
 pub async fn pool_metadata(pool: Principal) -> Result<PoolMetadata, CallError> {
-    let (answer,): (Result<PoolMetadata, PoolError>,) = call(pool, "metadata", ()).await?;
-    answer.map_err(|error| CallError::Refused(format!("{error:?}")))
+    let (answer,): (PoolResult<PoolMetadata>,) = call(pool, "metadata", ()).await?;
+    answer
+        .into_result()
+        .map_err(|error| CallError::Refused(format!("{error:?}")))
 }
 
 /// What the pool would pay for `amount_in`, without moving anything.
@@ -298,8 +322,10 @@ pub async fn pool_quote(
         zero_for_one,
         amount_out_minimum: "0".to_string(),
     };
-    let (answer,): (Result<Nat, PoolError>,) = call(pool, "quote", (arg,)).await?;
-    answer.map_err(|error| CallError::Refused(format!("{error:?}")))
+    let (answer,): (PoolResult<Nat>,) = call(pool, "quote", (arg,)).await?;
+    answer
+        .into_result()
+        .map_err(|error| CallError::Refused(format!("{error:?}")))
 }
 
 /// ICPSwap's one-call swap: pulls `amount_in` from the canister's own account (an ICRC-2
@@ -319,8 +345,10 @@ pub async fn deposit_from_and_swap(
         amount_out_minimum: amount_out_minimum.0.to_string(),
         token_out_fee,
     };
-    let (answer,): (Result<Nat, PoolError>,) = call(pool, "depositFromAndSwap", (arg,)).await?;
-    answer.map_err(|error| CallError::Unknown(format!("the pool answered {error:?}")))
+    let (answer,): (PoolResult<Nat>,) = call(pool, "depositFromAndSwap", (arg,)).await?;
+    answer
+        .into_result()
+        .map_err(|error| CallError::Unknown(format!("the pool answered {error:?}")))
 }
 
 // The ckETH minter, the calls made.

@@ -86,7 +86,10 @@ pub enum TransferRead {
     /// Not mined yet, or not deep enough yet.
     NotYet,
     /// Mined at depth, and it moved `amount` of the token to the address asked about.
-    Landed { amount: TokenAmount, block: BlockNumber },
+    Landed {
+        amount: TokenAmount,
+        block: BlockNumber,
+    },
     /// Mined at depth, and it moved none of the token to that address.
     NoTransfer,
 }
@@ -103,7 +106,10 @@ pub async fn transfer_to(
 ) -> Result<TransferRead, RpcError> {
     let calls = [
         ("eth_blockNumber", json!([])),
-        ("eth_getTransactionReceipt", json!([hex0x(tx_hash.as_ref())])),
+        (
+            "eth_getTransactionReceipt",
+            json!([hex0x(tx_hash.as_ref())]),
+        ),
     ];
     let answers = rpc::rpc_batch(chain_id, &calls, 64 * 1024).await?;
     let latest = answers

@@ -1,6 +1,6 @@
 use super::*;
 use alloy_primitives::{Address, Bytes};
-use types::router::{DexCall, Delivery, EcoTerms, ACTION_SWAP};
+use types::router::{Delivery, DexCall, EcoTerms, ACTION_SWAP};
 
 fn params(now: u64) -> SwapParams {
     SwapParams {
@@ -9,7 +9,10 @@ fn params(now: u64) -> SwapParams {
         tokenIn: Address::from([3; 20]),
         amountIn: U256::from(1_000_000),
         deadline: U256::from(now + 600),
-        leg: DexCall { target: Address::ZERO, data: Bytes::new() },
+        leg: DexCall {
+            target: Address::ZERO,
+            data: Bytes::new(),
+        },
         legMinOut: U256::from(1_000_000),
         feeBps: U256::ZERO,
         maxGasFee: U256::from(50_000),
@@ -32,7 +35,10 @@ fn params(now: u64) -> SwapParams {
             principal: FixedBytes::ZERO,
             subaccount: FixedBytes::ZERO,
             deadline: now + 3_600,
-            swap: DexCall { target: Address::ZERO, data: Bytes::new() },
+            swap: DexCall {
+                target: Address::ZERO,
+                data: Bytes::new(),
+            },
         },
     }
 }
