@@ -38,7 +38,7 @@ use crate::guards::{require_not_halted, require_quoter};
 use crate::storage::events::read_state;
 use crate::storage::sanctions::is_sanctioned;
 pub use candid::Nat;
-pub use settlement_api::types::flow::IcpToEvmQuote;
+pub use settlement_api::types::flow::{DexCall, FlowMode, IcpToEvmQuote};
 use types::flow::Stage;
 use types::{FlowKind, FlowStatus, FlowStep, QuoteHash, Timestamp, TokenAmount};
 
@@ -59,6 +59,13 @@ fn now_s() -> u64 {
     Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get()
 }
 
+fn check_mode(mode: FlowMode) -> Result<(), FlowCallError> {
+    match mode {
+        FlowMode::CkMinter => Ok(()),
+        FlowMode::Pool => Err(FlowCallError::Refused("the pool is not open".into())),
+    }
+}
+
 fn check_expiry(expires_at_s: u64) -> Result<(), FlowCallError> {
     let now = now_s();
     if expires_at_s <= now || expires_at_s > now + MAX_QUOTE_LIFE_S {
@@ -75,6 +82,7 @@ fn check_expiry(expires_at_s: u64) -> Result<(), FlowCallError> {
 pub fn register_icp_quote(quote: IcpToEvmQuote) -> Result<Hash32, FlowCallError> {
     require_not_halted().map_err(FlowCallError::Guard)?;
     require_quoter().map_err(FlowCallError::Guard)?;
+    check_mode(quote.mode)?;
     let settings = flow_settings::get();
     let ckusdc = settings
         .ckusdc_ledger
@@ -176,6 +184,7 @@ pub use settlement_api::types::flow::{EvmQuoteRegistered, EvmToIcpQuote};
 pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, FlowCallError> {
     require_not_halted().map_err(FlowCallError::Guard)?;
     require_quoter().map_err(FlowCallError::Guard)?;
+    check_mode(quote.mode)?;
     let settings = flow_settings::get();
     let ckusdc = settings
         .ckusdc_ledger
@@ -209,4 +218,20 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
         owner: ic_cdk::api::id(),
         subaccount: quote_hash.into_bytes(),
     })
+}
+
+/// Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id` from the
+/// message's hook data and the clock: a Deliver is received on the message transmitter;
+/// a Swap or a CkDeposit is completed on Swapic before its deadline and released after
+/// it. Simulated, held to the gas rule, signed once per message and action. Answers the
+/// signed transaction's id in `signed_txs`.
+#[update]
+pub async fn finish_cctp(
+    chain_id: u64,
+    message: Vec<u8>,
+    attestation: Vec<u8>,
+    swap: Option<DexCall>,
+) -> Result<u64, String> {
+    let _ = (chain_id, message, attestation, swap);
+    Err("not yet".to_string())
 }

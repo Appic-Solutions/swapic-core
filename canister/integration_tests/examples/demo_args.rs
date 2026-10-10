@@ -5,7 +5,7 @@
 
 use candid::{encode_args, encode_one, Nat, Principal};
 use settlement_api::types::config::Config;
-use settlement_api::types::flow::{EvmToIcpQuote, FlowSettings, IcpToEvmQuote};
+use settlement_api::types::flow::{EvmToIcpQuote, FlowMode, FlowSettings, IcpToEvmQuote};
 use settlement_api::types::init::InitArg;
 use std::collections::BTreeMap;
 
@@ -90,6 +90,7 @@ fn main() {
             route: bytes(arg(&args, 6)),
             expires_at_s: arg(&args, 7).parse().unwrap(),
             nonce: arg(&args, 8).parse().unwrap(),
+            mode: FlowMode::CkMinter,
         }),
         // evm-quote <user> <target ledger> <pool or -> <min out> <src chain> <expires_at_s> <nonce> <ref hex>
         "evm-quote" => encode_one(EvmToIcpQuote {
@@ -104,6 +105,7 @@ fn main() {
             expires_at_s: arg(&args, 7).parse().unwrap(),
             nonce: arg(&args, 8).parse().unwrap(),
             reference: hash(arg(&args, 9)),
+            mode: FlowMode::CkMinter,
         }),
         // hash <hex>: one blob argument
         "hash" => encode_one(bytes(arg(&args, 2))),

@@ -1,3 +1,4 @@
+pub mod books;
 pub mod chain_data;
 pub mod config;
 pub mod entry;

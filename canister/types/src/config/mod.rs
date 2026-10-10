@@ -4,7 +4,7 @@ mod tests;
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
-use crate::numeric::{BasisPoints, BlockDepth, UsdAmount};
+use crate::numeric::{BasisPoints, BlockDepth, TokenAmount, UsdAmount, Wei};
 use crate::quote::MAX_QUOTE_LIFETIME;
 use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
@@ -469,6 +469,131 @@ pub struct Config {
     /// and fills it.
     #[n(28)]
     pub cctp_min_fees: ChainTable<CctpMinFee>,
+    /// The most gas, in wei, one transaction of each action may cost on each chain
+    /// (`gas_limit * max_fee_per_gas`). A chain or an action with no budget signs nothing.
+    #[n(29)]
+    pub gas_budget: ChainTable<PerAction<Wei>>,
+    /// The least `networkFee`, in micro-USDC, each action needs on each chain.
+    #[n(30)]
+    pub min_network_fee: ChainTable<PerAction<TokenAmount>>,
+    #[n(31)]
+    pub books_check_interval: BooksInterval,
+    /// How far below what the books expect a balance may read before the pool pauses.
+    #[n(32)]
+    pub books_tolerance: BooksTolerance,
+}
+
+/// The three kinds of transaction the canister pays gas for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GasAction {
+    Relay,
+    Completion,
+    Payout,
+}
+
+/// One value per [`GasAction`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct PerAction<T> {
+    #[n(0)]
+    pub relay: T,
+    #[n(1)]
+    pub completion: T,
+    #[n(2)]
+    pub payout: T,
+}
+
+impl<T: Copy> PerAction<T> {
+    pub fn get(&self, action: GasAction) -> T {
+        match action {
+            GasAction::Relay => self.relay,
+            GasAction::Completion => self.completion,
+            GasAction::Payout => self.payout,
+        }
+    }
+}
+
+/// How often the books read the canister's balances: ten minutes unless set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BooksInterval(pub Duration);
+
+impl BooksInterval {
+    pub const DEFAULT: Self = Self(Duration::from_secs(600));
+}
+
+impl Default for BooksInterval {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl<C> Encode<C> for BooksInterval {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl<'b, C> Decode<'b, C> for BooksInterval {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::DEFAULT);
+        }
+        Duration::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::DEFAULT)
+    }
+}
+
+/// A balance shortfall the books overlook: one USDC unless set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BooksTolerance(pub TokenAmount);
+
+impl BooksTolerance {
+    pub const DEFAULT: Self = Self(TokenAmount::new(1_000_000));
+}
+
+impl Default for BooksTolerance {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl<C> Encode<C> for BooksTolerance {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl<'b, C> Decode<'b, C> for BooksTolerance {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::DEFAULT);
+        }
+        TokenAmount::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::DEFAULT)
+    }
 }
 
 /// Why a config was refused, naming the knob as clients know it.
@@ -578,6 +703,7 @@ pub struct IntervalChanges {
     pub audit: bool,
     /// The engine's tick, which runs on `rail_status_max_age`.
     pub rail_status: bool,
+    pub books: bool,
 }
 
 impl Default for Config {
@@ -625,6 +751,10 @@ impl Default for Config {
             claim_grace: ClaimGrace::DEFAULT,
             // the staging canary reads each chain's `minFee()` and fills this
             cctp_min_fees: ChainTable::default(),
+            gas_budget: ChainTable::default(),
+            min_network_fee: ChainTable::default(),
+            books_check_interval: BooksInterval::DEFAULT,
+            books_tolerance: BooksTolerance::DEFAULT,
         }
     }
 }
@@ -662,6 +792,7 @@ impl Config {
         for (field, interval) in [
             ("expiry_check_interval_s", self.expiry_check_interval),
             ("replay_audit_interval_s", self.replay_audit_interval),
+            ("books_check_interval_s", self.books_check_interval.0),
         ] {
             if interval > MAX_TIMER_INTERVAL {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
@@ -796,6 +927,7 @@ impl Config {
             expiry: self.expiry_check_interval != new.expiry_check_interval,
             audit: self.replay_audit_interval != new.replay_audit_interval,
             rail_status: self.rail_status_max_age != new.rail_status_max_age,
+            books: self.books_check_interval != new.books_check_interval,
         }
     }
 }

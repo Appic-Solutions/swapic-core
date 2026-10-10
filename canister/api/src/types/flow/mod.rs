@@ -48,6 +48,21 @@ pub enum FlowCallError {
     Unavailable(String),
 }
 
+/// How an ICP quote crosses: through the ck minter, or through the pool.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlowMode {
+    #[default]
+    CkMinter,
+    Pool,
+}
+
+/// A DEX call: an allowlisted router and its calldata.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DexCall {
+    pub target: String,
+    pub data: Vec<u8>,
+}
+
 /// The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router
 /// params of the Ethereum continuation as one ABI tuple: its `rail`, `dstChainId`,
 /// `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
@@ -62,6 +77,7 @@ pub struct IcpToEvmQuote {
     pub route: Vec<u8>,
     pub expires_at_s: u64,
     pub nonce: u64,
+    pub mode: FlowMode,
 }
 
 /// The EVM to ICP quote the quoter registers before the router quote exists (spec 4b.8).
@@ -77,6 +93,7 @@ pub struct EvmToIcpQuote {
     pub expires_at_s: u64,
     pub nonce: u64,
     pub reference: Hash32,
+    pub mode: FlowMode,
 }
 
 /// Where the ckUSDC of a registered EVM to ICP quote must be deposited.

@@ -6,6 +6,7 @@ use candid::{Nat, Principal};
 use ic_cdk::query;
 pub use settlement_api::types::events::Hash32;
 pub use settlement_api::types::flow::{FlowSettings, FlowView, RelayStatus};
+pub use settlement_api::types::tx::{ChainRef, SignedTx};
 use types::{Flow, FlowStatus, QuoteHash};
 
 fn nat(amount: types::TokenAmount) -> Nat {
@@ -67,4 +68,13 @@ pub fn relay_status(quote_hash: Hash32) -> Option<RelayStatus> {
 #[query]
 pub fn get_flow_settings() -> FlowSettings {
     flow_settings::get_wire()
+}
+
+/// Every transaction the canister signed after `after_id`, oldest first, at most `limit`
+/// of them (capped). The watcher broadcasts them; the canister's own broadcast is the
+/// backup.
+#[query]
+pub fn signed_txs(after_id: u64, limit: u64) -> Vec<SignedTx> {
+    let _ = (after_id, limit);
+    Vec::new()
 }

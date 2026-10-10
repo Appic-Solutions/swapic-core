@@ -4,6 +4,7 @@
 //! every endpoint's types at crate scope, and queries and updates can share group names
 //! without `lib.rs`'s glob imports becoming ambiguous.
 
+mod books;
 mod chain;
 mod config;
 mod flows;
@@ -11,6 +12,7 @@ mod ops;
 mod quotes;
 mod roles;
 
+pub use books::*;
 pub use chain::*;
 pub use config::*;
 pub use flows::*;

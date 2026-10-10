@@ -48,3 +48,21 @@ pub enum TxError {
     Append(AppendError),
     Ecdsa(EcdsaError),
 }
+
+/// The chain a signed transaction is for.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainRef {
+    Evm(u64),
+    Solana,
+}
+
+/// A transaction the canister signed, for the watcher to broadcast. `id` orders them and
+/// is the cursor `signed_txs` pages by.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SignedTx {
+    pub id: u64,
+    pub chain: ChainRef,
+    pub raw: Vec<u8>,
+    pub hash: Vec<u8>,
+    pub signed_at_ns: u64,
+}

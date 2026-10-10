@@ -6,11 +6,13 @@ use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
 use types::config::{
-    AuditChunk, ChainTable, ClaimGrace, DepositLookback, EcoEnabled, EvictionsPerSweep,
-    RefundsPerSweep,
+    AuditChunk, BooksInterval, BooksTolerance, ChainTable, ClaimGrace, DepositLookback, EcoEnabled,
+    EvictionsPerSweep, PerAction, RefundsPerSweep,
 };
 use types::rail::{CctpDomain, CctpMinFee};
-use types::{BasisPoints, BlockDepth, ChainId, EvmAddress, UsdAmount};
+use types::{
+    BasisPoints, BlockDepth, ChainId, CheckedAmountOf, EvmAddress, TokenAmount, UsdAmount,
+};
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 /// address maps and the key name are what a deploy fills in.
@@ -68,6 +70,64 @@ pub struct Config {
     /// with no entry is one whose messenger charges none. Every burn offers at least this
     /// much of its amount as its `maxFee`, the Standard path included.
     pub cctp_min_fees: BTreeMap<u64, u32>,
+    /// The most gas, in wei, one transaction of each action may cost per chain
+    /// (`gas_limit * max_fee_per_gas`). The quoter charges the same budgets as `networkFee`.
+    /// A chain or an action with no budget signs nothing.
+    pub gas_budget_wei: BTreeMap<u64, ActionAmounts>,
+    /// The least `networkFee`, in micro-USDC, each action needs per chain.
+    pub min_network_fee: BTreeMap<u64, ActionAmounts>,
+    pub books_check_interval_s: u64,
+    /// How far below what the books expect a balance may read, in micro-USDC, before the
+    /// pool pauses.
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub books_tolerance: Nat,
+}
+
+/// One amount per action the canister pays gas for.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionAmounts {
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub relay: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub completion: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub payout: Nat,
+}
+
+impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
+    fn from(amounts: PerAction<CheckedAmountOf<Unit>>) -> Self {
+        Self {
+            relay: amounts.relay.into(),
+            completion: amounts.completion.into(),
+            payout: amounts.payout.into(),
+        }
+    }
+}
+
+fn per_action<Unit>(
+    field: &'static str,
+    amounts: ActionAmounts,
+) -> Result<PerAction<CheckedAmountOf<Unit>>, types::ConfigError> {
+    let amount = |nat: Nat| {
+        CheckedAmountOf::<Unit>::try_from(nat)
+            .map_err(|_| types::ConfigError::AmountTooLarge { field })
+    };
+    Ok(PerAction {
+        relay: amount(amounts.relay)?,
+        completion: amount(amounts.completion)?,
+        payout: amount(amounts.payout)?,
+    })
+}
+
+fn chain_table<Unit>(
+    field: &'static str,
+    table: BTreeMap<u64, ActionAmounts>,
+) -> Result<ChainTable<PerAction<CheckedAmountOf<Unit>>>, types::ConfigError> {
+    table
+        .into_iter()
+        .map(|(chain, amounts)| Ok((ChainId::new(chain), per_action(field, amounts)?)))
+        .collect::<Result<_, _>>()
+        .map(ChainTable)
 }
 
 impl Default for Config {
@@ -111,6 +171,10 @@ impl fmt::Debug for Config {
             eco_enabled,
             claim_grace_s,
             cctp_min_fees,
+            gas_budget_wei,
+            min_network_fee,
+            books_check_interval_s,
+            books_tolerance,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -144,6 +208,10 @@ impl fmt::Debug for Config {
             .field("eco_enabled", eco_enabled)
             .field("claim_grace_s", claim_grace_s)
             .field("cctp_min_fees", cctp_min_fees)
+            .field("gas_budget_wei", gas_budget_wei)
+            .field("min_network_fee", min_network_fee)
+            .field("books_check_interval_s", books_check_interval_s)
+            .field("books_tolerance", books_tolerance)
             .finish()
     }
 }
@@ -202,6 +270,10 @@ impl From<types::Config> for Config {
             eco_enabled,
             claim_grace,
             cctp_min_fees,
+            gas_budget,
+            min_network_fee,
+            books_check_interval,
+            books_tolerance,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -255,6 +327,18 @@ impl From<types::Config> for Config {
                 .into_iter()
                 .map(|(chain, min_fee)| (chain.get(), min_fee.get()))
                 .collect(),
+            gas_budget_wei: gas_budget
+                .0
+                .into_iter()
+                .map(|(chain, budget)| (chain.get(), budget.into()))
+                .collect(),
+            min_network_fee: min_network_fee
+                .0
+                .into_iter()
+                .map(|(chain, fees)| (chain.get(), fees.into()))
+                .collect(),
+            books_check_interval_s: books_check_interval.0.as_secs(),
+            books_tolerance: books_tolerance.0.into(),
         }
     }
 }
@@ -375,6 +459,16 @@ impl TryFrom<Config> for types::Config {
                     .into_iter()
                     .map(|(chain, min_fee)| (ChainId::new(chain), CctpMinFee::new(min_fee)))
                     .collect(),
+            ),
+            gas_budget: chain_table("gas_budget_wei", config.gas_budget_wei)?,
+            min_network_fee: chain_table("min_network_fee", config.min_network_fee)?,
+            books_check_interval: BooksInterval(Duration::from_secs(config.books_check_interval_s)),
+            books_tolerance: BooksTolerance(
+                TokenAmount::try_from(config.books_tolerance).map_err(|_| {
+                    types::ConfigError::AmountTooLarge {
+                        field: "books_tolerance",
+                    }
+                })?,
             ),
         })
     }

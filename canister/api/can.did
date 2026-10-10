@@ -1,3 +1,5 @@
+// One amount per action the canister pays gas for.
+type ActionAmounts = record { completion : nat; relay : nat; payout : nat };
 // Why an event was not appended. Nothing was written.
 type AppendError = variant {
   ChainDiverged : record { log_head : blob; state_head : blob };
@@ -27,6 +29,17 @@ type AuditProgress = record {
   // why the fold stopped, if it did
   refused : opt ReplayError;
 };
+// One chain's book lines and its last balance check. `surplus` is `observed` minus what
+// the lines expect at that check; it is never booked by itself.
+type BookLines = record {
+  unattributed : nat;
+  observed : opt nat;
+  checked_at_block : opt nat64;
+  pool : nat;
+  surplus : opt int;
+  fee_income : nat;
+  in_flight : nat;
+};
 // A value the canonical preimage has no bytes for.
 type CanonicalError = variant {
   TooLong : record { len : nat64 };
@@ -46,6 +59,8 @@ type ChainData = record {
 type ChainDataEntry = record { data : ChainData; pushed_at_ns : nat64 };
 // Why a pushed reading is not one this canister prices gas with.
 type ChainDataError = variant { FeeTooLarge : record { field : text } };
+// The chain a signed transaction is for.
+type ChainRef = variant { Evm : nat64; Solana };
 type Choice = variant { Requote; Refund };
 // Every knob the canister reads at runtime. Numbers are the spec defaults; the two
 // address maps and the key name are what a deploy fills in.
@@ -61,6 +76,7 @@ type Config = record {
   // CCTP v2's `TokenMessengerV2`, the same address on every chain.
   token_messenger : opt text;
   rpc_urls : vec record { nat64; text };
+  books_check_interval_s : nat64;
   simulate_before_sign : bool;
   vault_addresses : vec record { nat64; text };
   // Whether the Eco rail may be used. False until its route is designed: a quote
@@ -69,6 +85,8 @@ type Config = record {
   eco_enabled : bool;
   platform_fee_bps : nat16;
   permit_deadline_s : nat64;
+  // The least `networkFee`, in micro-USDC, each action needs per chain.
+  min_network_fee : vec record { nat64; ActionAmounts };
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
   cctp_domains : vec record { nat64; nat32 };
   // The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
@@ -77,6 +95,13 @@ type Config = record {
   // much of its amount as its `maxFee`, the Standard path included.
   cctp_min_fees : vec record { nat64; nat32 };
   replay_audit_interval_s : nat64;
+  // How far below what the books expect a balance may read, in micro-USDC, before the
+  // pool pauses.
+  books_tolerance : nat;
+  // The most gas, in wei, one transaction of each action may cost per chain
+  // (`gas_limit * max_fee_per_gas`). The quoter charges the same budgets as `networkFee`.
+  // A chain or an action with no budget signs nothing.
+  gas_budget_wei : vec record { nat64; ActionAmounts };
   quote_ttl_s : nat64;
   // Eco's `Portal`, the same address on every chain.
   eco_portal : opt text;
@@ -164,6 +189,8 @@ type ConfigError = variant {
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };
 };
+// A DEX call: an allowlisted router and its calldata.
+type DexCall = record { data : blob; target : text };
 // Why a key or a signature is not one this canister can use. A refused management call is
 // reported rather than trapped: the interface specification says a rejected signing
 // request may leave the signature in the system anyway, so a caller that retries has to
@@ -314,6 +341,7 @@ type EvmQuoteRegistered = record {
 // canister the ckUSDC is deposited to.
 type EvmToIcpQuote = record {
   min_out : nat;
+  mode : FlowMode;
   pool : opt principal;
   user : principal;
   reference : blob;
@@ -332,6 +360,8 @@ type FlowCallError = variant {
   // A chain or a canister did not answer usably; the caller may try again.
   Unavailable : text;
 };
+// How an ICP quote crosses: through the ck minter, or through the pool.
+type FlowMode = variant { Pool; CkMinter };
 // What the flows read at runtime. Set by a controller; the canister's `Config` is the
 // chain layer's and stays as it was.
 type FlowSettings = record {
@@ -396,6 +426,7 @@ type GuardError = variant {
 // `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
 // and the canister fills in itself as the payer of what lands.
 type IcpToEvmQuote = record {
+  mode : FlowMode;
   pool : opt principal;
   user : principal;
   src_ledger : principal;
@@ -553,20 +584,22 @@ type ReplayError = variant {
   Unlinked : record { head : blob; index : nat64; parent : blob };
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
-type Result_1 = variant { Ok : nat64; Err : GuardError };
-type Result_10 = variant { Ok; Err : FlowCallError };
-type Result_11 = variant { Ok; Err : GuardError };
-type Result_12 = variant { Ok; Err : SetRolesError };
-type Result_13 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_14 = variant { Ok : nat; Err : FlowCallError };
-type Result_2 = variant { Ok : text; Err : SignError };
-type Result_3 = variant { Ok : Config; Err : GuardError };
-type Result_4 = variant { Ok : opt Quote; Err : GuardError };
-type Result_5 = variant { Ok; Err : PushChainDataError };
-type Result_6 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
-type Result_7 = variant { Ok : blob; Err : FlowCallError };
-type Result_8 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_9 = variant { Ok; Err : SetConfigError };
+type Result_1 = variant { Ok; Err : text };
+type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_11 = variant { Ok; Err : SetConfigError };
+type Result_12 = variant { Ok; Err : FlowCallError };
+type Result_13 = variant { Ok; Err : GuardError };
+type Result_14 = variant { Ok; Err : SetRolesError };
+type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_16 = variant { Ok : nat; Err : FlowCallError };
+type Result_2 = variant { Ok : nat64; Err : GuardError };
+type Result_3 = variant { Ok : text; Err : SignError };
+type Result_4 = variant { Ok : nat64; Err : text };
+type Result_5 = variant { Ok : Config; Err : GuardError };
+type Result_6 = variant { Ok : opt Quote; Err : GuardError };
+type Result_7 = variant { Ok; Err : PushChainDataError };
+type Result_8 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
+type Result_9 = variant { Ok : blob; Err : FlowCallError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -591,6 +624,15 @@ type SetSanctionedError = variant {
 };
 // Why a call that needs the canister's threshold key answered nothing.
 type SignError = variant { Guard : GuardError; Ecdsa : EcdsaError };
+// A transaction the canister signed, for the watcher to broadcast. `id` orders them and
+// is the cursor `signed_txs` pages by.
+type SignedTx = record {
+  id : nat64;
+  raw : blob;
+  hash : blob;
+  chain : ChainRef;
+  signed_at_ns : nat64;
+};
 // The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 type Swap = record {
   status : SwapStatus;
@@ -710,15 +752,20 @@ service : (InitArg) -> {
   // so on a large fold the fold's own size is the floor and `max_events` is the rest. A step
   // too large for one message fails that call alone and leaves the saved fold where it was.
   audit_replay_step : (nat64) -> (Result);
+  // Controller-only. Moves a surplus the last balance check found on `chain_id`, once
+  // someone has looked at it, into the `unattributed` line.
+  book_surplus : (nat64, nat) -> (Result_1);
+  // The book lines of every chain, in micro-USDC, with the last balance check.
+  books : () -> (vec record { nat64; BookLines }) query;
   // Controller-only. Empties the pending store and answers how many quotes it held: the
   // store survives upgrades, so a store a compromised quoter filled is recovered here, in
   // place. Pre-money, so nothing is written to the log; the quoter re-registers what is live.
-  clear_pending_quotes : () -> (Result_1);
+  clear_pending_quotes : () -> (Result_2);
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
   // it, or answers the cached one. Deploy needs this before anything else: the vaults are
   // configured with this address and it has to be funded for gas, and neither can wait for
   // the first swap to derive it.
-  derive_evm_address : () -> (Result_2);
+  derive_evm_address : () -> (Result_3);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
@@ -729,6 +776,12 @@ service : (InitArg) -> {
   // Derived once from the canister's threshold key and then read from stable memory, so it
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
   evm_address : () -> (opt text) query;
+  // Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id` from the
+  // message's hook data and the clock: a Deliver is received on the message transmitter;
+  // a Swap or a CkDeposit is completed on Swapic before its deadline and released after
+  // it. Simulated, held to the gas rule, signed once per message and action. Answers the
+  // signed transaction's id in `signed_txs`.
+  finish_cctp : (nat64, blob, blob, opt DexCall) -> (Result_4);
   // The cached reading for a chain, with the instant the canister stamped it, or nothing for
   // a chain the watcher has never pushed. World-readable: a block height and a gas price are
   // public facts about a public chain, and the stamp is how an operator sees the watcher
@@ -741,14 +794,14 @@ service : (InitArg) -> {
   // the real thing.
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
-  get_config_full : () -> (Result_3) query;
+  get_config_full : () -> (Result_5) query;
   // A flow, any kind, as the fold holds it.
   get_flow : (blob) -> (opt FlowView) query;
   // The flows' settings.
   get_flow_settings : () -> (FlowSettings) query;
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
-  get_pending : (blob) -> (Result_4) query;
+  get_pending : (blob) -> (Result_6) query;
   // The folded state of one swap. Public: every field of it is already in the
   // world-readable event log, `quote_bytes` included.
   get_swap : (blob) -> (opt Swap) query;
@@ -771,19 +824,19 @@ service : (InitArg) -> {
   // The record carries no instant. The canister stamps what it stores with its own clock,
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
-  push_chain_data : (nat64, ChainData) -> (Result_5);
+  push_chain_data : (nat64, ChainData) -> (Result_7);
   // Quoter-only, refused while halted. Registers an EVM to ICP quote durably BEFORE the
   // router quote is built (spec 4b.8): the user's principal is recorded with it, and the
   // answer names where the ckUSDC must be deposited, the canister's subaccount named by the
   // router params' `ref` (`reference`), so the route's helper deposit carries it. The
   // engine finds the ckUSDC there, swaps it on ICPSwap and pays the user. A quote for
   // ckUSDC itself names no pool, and its ckUSDC is forwarded as it is.
-  register_evm_quote : (EvmToIcpQuote) -> (Result_6);
+  register_evm_quote : (EvmToIcpQuote) -> (Result_8);
   // Quoter-only, refused while halted. Registers an ICP to EVM quote durably, with the
   // user's original destination terms (its route), BEFORE the user is told what to
   // approve (spec 4b.1). Answers the quote hash: the user approves the canister with that
   // hash as the spender subaccount, and only that allowance is ever pulled.
-  register_icp_quote : (IcpToEvmQuote) -> (Result_7);
+  register_icp_quote : (IcpToEvmQuote) -> (Result_9);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -794,33 +847,33 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_8);
+  register_quote : (Quote) -> (Result_10);
   // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
   // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
   // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
   // every readable field is checked against them, the authorization must recover to the
   // payer, and `swapFor` must succeed in simulation before the canister signs it once and
   // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
-  relay_gasless : (nat64, blob, blob) -> (Result_7);
+  relay_gasless : (nat64, blob, blob) -> (Result_9);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_9);
+  set_config : (Config) -> (Result_11);
   // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
   // and the windows the flows read.
-  set_flow_settings : (FlowSettings) -> (Result_10);
+  set_flow_settings : (FlowSettings) -> (Result_12);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_11);
+  set_halted : (bool) -> (Result_13);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_12);
+  set_roles : (principal, principal) -> (Result_14);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -830,13 +883,17 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_13);
+  set_sanctioned : (vec text, vec text) -> (Result_15);
+  // Every transaction the canister signed after `after_id`, oldest first, at most `limit`
+  // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
+  // backup.
+  signed_txs : (nat64, nat64) -> (vec SignedTx) query;
   // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
   // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
   // the quote hash (and from no other), and answers what was pulled. The engine then swaps
   // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
   // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_14);
+  start_icp_swap : (blob) -> (Result_16);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
