@@ -154,6 +154,13 @@ pub(crate) fn samples() -> Vec<EventType> {
             tx_hash: TxHash::new([23; 32]),
             raw_tx: vec![0x02, 0xf8, 0x6d],
         },
+        EventType::Flow {
+            quote_hash: quote(24),
+            step: crate::flow::FlowStep::Pulled {
+                amount: TokenAmount::from(25_u8),
+                block_index: 26,
+            },
+        },
     ]
 }
 

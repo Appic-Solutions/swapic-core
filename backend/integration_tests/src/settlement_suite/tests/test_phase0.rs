@@ -445,6 +445,8 @@ fn purpose_name(purpose: TxPurpose) -> &'static str {
         TxPurpose::GaslessPull(_) => "GaslessPull",
         TxPurpose::Cancel(_) => "Cancel",
         TxPurpose::Reclaim(_) => "Reclaim",
+        TxPurpose::Relay(_) => "Relay",
+        TxPurpose::Continue(_) => "Continue",
     }
 }
 

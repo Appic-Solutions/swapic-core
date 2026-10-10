@@ -34,6 +34,8 @@ const ECDSA_ADDRESS_MEMORY_ID: MemoryId = MemoryId::new(20);
 const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
 const ECO_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(22);
 const ENGINE_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(23);
+const FLOWS_MEMORY_ID: MemoryId = MemoryId::new(24);
+const FLOW_SETTINGS_MEMORY_ID: MemoryId = MemoryId::new(25);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -129,4 +131,12 @@ pub fn eco_intents_memory() -> Memory {
 
 pub fn engine_cursor_memory() -> Memory {
     memory(ENGINE_CURSOR_MEMORY_ID)
+}
+
+pub fn flows_memory() -> Memory {
+    memory(FLOWS_MEMORY_ID)
+}
+
+pub fn flow_settings_memory() -> Memory {
+    memory(FLOW_SETTINGS_MEMORY_ID)
 }

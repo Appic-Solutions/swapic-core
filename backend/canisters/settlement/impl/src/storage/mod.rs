@@ -6,6 +6,7 @@ pub mod ecdsa_address;
 pub mod eco_intents;
 pub mod engine_cursor;
 pub mod events;
+pub mod flow_settings;
 pub mod halt;
 pub mod inflight;
 pub mod memory;
@@ -34,6 +35,7 @@ pub fn init() {
     inflight::init();
     eco_intents::init();
     engine_cursor::init();
+    flow_settings::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

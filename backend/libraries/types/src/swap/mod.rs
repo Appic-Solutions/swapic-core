@@ -79,7 +79,10 @@ impl Leg {
             TxPurpose::Payout(_) => Some(Self::Payout),
             TxPurpose::Refund(_) => Some(Self::Refund),
             TxPurpose::Reclaim(_) => Some(Self::Reclaim),
-            TxPurpose::GaslessPull(_) | TxPurpose::Cancel(_) => None,
+            TxPurpose::GaslessPull(_)
+            | TxPurpose::Cancel(_)
+            | TxPurpose::Relay(_)
+            | TxPurpose::Continue(_) => None,
         }
     }
 }
@@ -253,6 +256,8 @@ pub enum TransitionError {
     Pocket(#[from] PocketError),
     #[error("swap {0} already holds the fee the platform accrued on it")]
     FeeAlreadyAccrued(QuoteHash),
+    #[error(transparent)]
+    Flow(#[from] crate::flow::FlowError),
 }
 
 impl Swap {

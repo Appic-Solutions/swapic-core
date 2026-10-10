@@ -210,6 +210,8 @@ pub enum TransitionError {
     },
     /// The swap already holds its platform fee: one fee line per swap.
     FeeAlreadyAccrued(Hash32),
+    /// A flow step refused, with the domain's reason.
+    Flow(String),
 }
 
 /// Why a pocket cannot make a move.
@@ -310,6 +312,7 @@ impl From<types::TransitionError> for TransitionError {
             Domain::FeeAlreadyAccrued(quote_hash) => {
                 Self::FeeAlreadyAccrued(quote_hash.into_bytes())
             }
+            Domain::Flow(error) => Self::Flow(error.to_string()),
         }
     }
 }

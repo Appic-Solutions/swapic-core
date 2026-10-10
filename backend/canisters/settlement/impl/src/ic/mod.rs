@@ -1,0 +1,423 @@
+//! The other canisters a flow calls: ICRC ledgers, an ICPSwap pool, and the ck minter.
+//! The types are the real interfaces' (ICRC-1 and ICRC-2, ICPSwap's `SwapPool`, the ckETH
+//! minter's `withdraw_erc20` and `withdrawal_status`), written out for just the calls made,
+//! so the local mocks implement the same calls and a real canister answers them.
+//!
+//! A call that the system rejects is `Unknown`: it may or may not have run, which is what
+//! the flow's begun markers are for. A reply the callee gave is definite.
+
+use candid::{CandidType, Nat, Principal};
+use serde::Deserialize;
+
+/// How a call ended, when it did not answer what was asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallError {
+    /// The system rejected the call, or its reply did not decode: it may have run.
+    Unknown(String),
+    /// The callee answered a refusal: nothing moved.
+    Refused(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::Unknown(reason) => write!(f, "outcome unknown: {reason}"),
+            CallError::Refused(reason) => write!(f, "refused: {reason}"),
+        }
+    }
+}
+
+async fn call<A: candid::utils::ArgumentEncoder, R: for<'de> candid::utils::ArgumentDecoder<'de>>(
+    canister: Principal,
+    method: &str,
+    args: A,
+) -> Result<R, CallError> {
+    ic_cdk::call(canister, method, args)
+        .await
+        .map_err(|(code, message)| CallError::Unknown(format!("{code:?}: {message}")))
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub owner: Principal,
+    pub subaccount: Option<Vec<u8>>,
+}
+
+impl Account {
+    pub fn of(owner: Principal, subaccount: Option<[u8; 32]>) -> Self {
+        Self {
+            owner,
+            subaccount: subaccount.map(|bytes| bytes.to_vec()),
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct TransferArg {
+    from_subaccount: Option<Vec<u8>>,
+    to: Account,
+    amount: Nat,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum TransferError {
+    BadFee { expected_fee: Nat },
+    BadBurn { min_burn_amount: Nat },
+    InsufficientFunds { balance: Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    TemporarilyUnavailable,
+    Duplicate { duplicate_of: Nat },
+    GenericError { error_code: Nat, message: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct TransferFromArgs {
+    spender_subaccount: Option<Vec<u8>>,
+    from: Account,
+    to: Account,
+    amount: Nat,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum TransferFromError {
+    BadFee { expected_fee: Nat },
+    BadBurn { min_burn_amount: Nat },
+    InsufficientFunds { balance: Nat },
+    InsufficientAllowance { allowance: Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: Nat, message: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ApproveArgs {
+    from_subaccount: Option<Vec<u8>>,
+    spender: Account,
+    amount: Nat,
+    expected_allowance: Option<Nat>,
+    expires_at: Option<u64>,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum ApproveError {
+    BadFee { expected_fee: Nat },
+    InsufficientFunds { balance: Nat },
+    AllowanceChanged { current_allowance: Nat },
+    Expired { ledger_time: u64 },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: Nat, message: String },
+}
+
+/// The deduplication key of one money call: the quote hash as the memo, and the instant
+/// its begun marker was sealed as `created_at_time`, so a retry is the same transfer.
+#[derive(Clone, Copy, Debug)]
+pub struct Dedup {
+    pub memo: [u8; 32],
+    pub created_at_nanos: u64,
+}
+
+fn nat_u64(value: &Nat) -> u64 {
+    u64::try_from(value.0.clone()).unwrap_or(u64::MAX)
+}
+
+pub async fn icrc1_fee(ledger: Principal) -> Result<Nat, CallError> {
+    let (fee,): (Nat,) = call(ledger, "icrc1_fee", ()).await?;
+    Ok(fee)
+}
+
+pub async fn icrc1_balance_of(ledger: Principal, account: Account) -> Result<Nat, CallError> {
+    let (balance,): (Nat,) = call(ledger, "icrc1_balance_of", (account,)).await?;
+    Ok(balance)
+}
+
+/// An ICRC-1 transfer, deduplicated: a `Duplicate` answer is the earlier transfer's block.
+pub async fn icrc1_transfer(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: Nat,
+    dedup: Dedup,
+) -> Result<u64, CallError> {
+    let arg = TransferArg {
+        from_subaccount: from_subaccount.map(|bytes| bytes.to_vec()),
+        to,
+        amount,
+        fee: None,
+        memo: Some(dedup.memo.to_vec()),
+        created_at_time: Some(dedup.created_at_nanos),
+    };
+    let (answer,): (Result<Nat, TransferError>,) = call(ledger, "icrc1_transfer", (arg,)).await?;
+    match answer {
+        Ok(block) => Ok(nat_u64(&block)),
+        Err(TransferError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
+        Err(TransferError::TemporarilyUnavailable) => {
+            Err(CallError::Unknown("the ledger is temporarily unavailable".to_string()))
+        }
+        Err(error) => Err(CallError::Refused(format!("{error:?}"))),
+    }
+}
+
+/// An ICRC-2 pull from `from`, spent from the allowance whose spender subaccount is
+/// `spender_subaccount` (spec 4b.1: the quote hash, and never a standing allowance).
+pub async fn icrc2_transfer_from(
+    ledger: Principal,
+    spender_subaccount: [u8; 32],
+    from: Account,
+    to: Account,
+    amount: Nat,
+    dedup: Dedup,
+) -> Result<u64, CallError> {
+    let arg = TransferFromArgs {
+        spender_subaccount: Some(spender_subaccount.to_vec()),
+        from,
+        to,
+        amount,
+        fee: None,
+        memo: Some(dedup.memo.to_vec()),
+        created_at_time: Some(dedup.created_at_nanos),
+    };
+    let (answer,): (Result<Nat, TransferFromError>,) =
+        call(ledger, "icrc2_transfer_from", (arg,)).await?;
+    match answer {
+        Ok(block) => Ok(nat_u64(&block)),
+        Err(TransferFromError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
+        Err(TransferFromError::TemporarilyUnavailable) => {
+            Err(CallError::Unknown("the ledger is temporarily unavailable".to_string()))
+        }
+        Err(error) => Err(CallError::Refused(format!("{error:?}"))),
+    }
+}
+
+/// An ICRC-2 approval of `spender` for `amount` from the canister's own account.
+pub async fn icrc2_approve(
+    ledger: Principal,
+    spender: Principal,
+    amount: Nat,
+) -> Result<(), CallError> {
+    let arg = ApproveArgs {
+        from_subaccount: None,
+        spender: Account::of(spender, None),
+        amount,
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let (answer,): (Result<Nat, ApproveError>,) = call(ledger, "icrc2_approve", (arg,)).await?;
+    match answer {
+        Ok(_) | Err(ApproveError::Duplicate { .. }) => Ok(()),
+        Err(error) => Err(CallError::Refused(format!("{error:?}"))),
+    }
+}
+
+// ICPSwap's SwapPool, the calls made.
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum PoolError {
+    CommonError,
+    InternalError(String),
+    UnsupportedToken(String),
+    InsufficientFunds,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct PoolToken {
+    pub address: String,
+    pub standard: String,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct PoolMetadata {
+    pub fee: Nat,
+    pub key: String,
+    #[serde(rename = "sqrtPriceX96")]
+    pub sqrt_price_x96: Nat,
+    pub tick: candid::Int,
+    pub liquidity: Nat,
+    pub token0: PoolToken,
+    pub token1: PoolToken,
+    #[serde(rename = "maxLiquidityPerTick")]
+    pub max_liquidity_per_tick: Nat,
+    #[serde(rename = "nextPositionId")]
+    pub next_position_id: Nat,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct SwapArgs {
+    #[serde(rename = "amountIn")]
+    amount_in: String,
+    #[serde(rename = "zeroForOne")]
+    zero_for_one: bool,
+    #[serde(rename = "amountOutMinimum")]
+    amount_out_minimum: String,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct DepositAndSwapArgs {
+    #[serde(rename = "tokenInFee")]
+    token_in_fee: Nat,
+    #[serde(rename = "amountIn")]
+    amount_in: String,
+    #[serde(rename = "zeroForOne")]
+    zero_for_one: bool,
+    #[serde(rename = "amountOutMinimum")]
+    amount_out_minimum: String,
+    #[serde(rename = "tokenOutFee")]
+    token_out_fee: Nat,
+}
+
+pub async fn pool_metadata(pool: Principal) -> Result<PoolMetadata, CallError> {
+    let (answer,): (Result<PoolMetadata, PoolError>,) = call(pool, "metadata", ()).await?;
+    answer.map_err(|error| CallError::Refused(format!("{error:?}")))
+}
+
+/// What the pool would pay for `amount_in`, without moving anything.
+pub async fn pool_quote(
+    pool: Principal,
+    amount_in: &Nat,
+    zero_for_one: bool,
+) -> Result<Nat, CallError> {
+    let arg = SwapArgs {
+        amount_in: amount_in.0.to_string(),
+        zero_for_one,
+        amount_out_minimum: "0".to_string(),
+    };
+    let (answer,): (Result<Nat, PoolError>,) = call(pool, "quote", (arg,)).await?;
+    answer.map_err(|error| CallError::Refused(format!("{error:?}")))
+}
+
+/// ICPSwap's one-call swap: pulls `amount_in` from the canister's own account (an ICRC-2
+/// allowance to the pool), swaps, and pays the output back to the canister's own account.
+pub async fn deposit_from_and_swap(
+    pool: Principal,
+    amount_in: &Nat,
+    zero_for_one: bool,
+    amount_out_minimum: &Nat,
+    token_in_fee: Nat,
+    token_out_fee: Nat,
+) -> Result<Nat, CallError> {
+    let arg = DepositAndSwapArgs {
+        token_in_fee,
+        amount_in: amount_in.0.to_string(),
+        zero_for_one,
+        amount_out_minimum: amount_out_minimum.0.to_string(),
+        token_out_fee,
+    };
+    let (answer,): (Result<Nat, PoolError>,) = call(pool, "depositFromAndSwap", (arg,)).await?;
+    answer.map_err(|error| CallError::Unknown(format!("the pool answered {error:?}")))
+}
+
+// The ckETH minter, the calls made.
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct WithdrawErc20Arg {
+    amount: Nat,
+    ckerc20_ledger_id: Principal,
+    recipient: String,
+    from_cketh_subaccount: Option<Vec<u8>>,
+    from_ckerc20_subaccount: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RetrieveErc20Request {
+    pub cketh_block_index: Nat,
+    pub ckerc20_block_index: Nat,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct EthTransaction {
+    pub transaction_hash: String,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum TxFinalizedStatus {
+    Success {
+        transaction_hash: String,
+        effective_transaction_fee: Option<Nat>,
+    },
+    Reimbursed {
+        transaction_hash: String,
+        reimbursed_amount: Nat,
+        reimbursed_in_block: Nat,
+    },
+    PendingReimbursement(EthTransaction),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum WithdrawalStatus {
+    Pending,
+    TxCreated,
+    TxSent(EthTransaction),
+    TxFinalized(TxFinalizedStatus),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct WithdrawalDetail {
+    pub withdrawal_id: u64,
+    pub recipient_address: String,
+    pub from: Principal,
+    pub from_subaccount: Option<Vec<u8>>,
+    pub token_symbol: String,
+    pub withdrawal_amount: Nat,
+    pub max_transaction_fee: Option<Nat>,
+    pub status: WithdrawalStatus,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum WithdrawalSearchParameter {
+    ByRecipient(String),
+    BySenderAccount(Account),
+    ByWithdrawalId(u64),
+}
+
+/// `withdraw_erc20` to `recipient`. The withdrawal id is the ckETH burn's block index, as
+/// the minter numbers withdrawals. A refusal the minter answers moved nothing.
+pub async fn withdraw_erc20(
+    minter: Principal,
+    ckerc20_ledger: Principal,
+    amount: Nat,
+    recipient: String,
+) -> Result<RetrieveErc20Request, CallError> {
+    let arg = WithdrawErc20Arg {
+        amount,
+        ckerc20_ledger_id: ckerc20_ledger,
+        recipient,
+        from_cketh_subaccount: None,
+        from_ckerc20_subaccount: None,
+    };
+    // the error variant is read as text: the canister acts on its being an error, and the
+    // operator reads which one
+    let (answer,): (Result<RetrieveErc20Request, candid::Reserved>,) =
+        call(minter, "withdraw_erc20", (arg,)).await?;
+    answer.map_err(|_| CallError::Refused("the minter refused the withdrawal".to_string()))
+}
+
+/// The minter's view of one withdrawal.
+pub async fn withdrawal_status(
+    minter: Principal,
+    withdrawal_id: u64,
+) -> Result<Vec<WithdrawalDetail>, CallError> {
+    let (details,): (Vec<WithdrawalDetail>,) = call(
+        minter,
+        "withdrawal_status",
+        (WithdrawalSearchParameter::ByWithdrawalId(withdrawal_id),),
+    )
+    .await?;
+    Ok(details)
+}

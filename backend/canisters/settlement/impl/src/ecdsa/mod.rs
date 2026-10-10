@@ -166,3 +166,27 @@ impl From<EcdsaError> for settlement_api::types::evm::EcdsaError {
         }
     }
 }
+
+/// The address that signed `digest`, from a 65-byte `r ++ s ++ v` signature (`v` 27 or
+/// 28, or 0 or 1): how the relay checks that a user's authorization is the payer's own.
+pub fn recover_signer(digest: [u8; 32], signature: &[u8]) -> Option<EvmAddress> {
+    if signature.len() != 65 {
+        return None;
+    }
+    let raw: [u8; 64] = signature[..64].try_into().ok()?;
+    let parity = match signature[64] {
+        0 | 27 => false,
+        1 | 28 => true,
+        _ => return None,
+    };
+    recover_key(&raw, TxHash::new(digest), parity)
+        .ok()
+        .map(|key| address_of(&key))
+}
+
+/// The 65-byte `r ++ s ++ v` form (`v` 27 or 28) of a threshold signature over `digest`:
+/// what an EIP-3009 authorization the canister signs as a payer carries.
+pub async fn sign_digest(digest: [u8; 32]) -> Result<Vec<u8>, EcdsaError> {
+    let signature = sign(TxHash::new(digest)).await?;
+    Ok(signature.to_rsv())
+}

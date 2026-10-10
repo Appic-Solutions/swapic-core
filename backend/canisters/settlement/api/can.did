@@ -311,6 +311,15 @@ type EventType = variant {
     raw_tx : blob;
     tx_hash : blob;
   };
+  // A step of a flow: a gasless relay, ICP to EVM, or EVM to ICP. `step` names it,
+  // `detail` is a readable rendering, and `step_bytes` is the step exactly as the log
+  // hashes it.
+  Flow : record {
+    quote_hash : blob;
+    step : text;
+    detail : text;
+    step_bytes : blob;
+  };
   // A nonce that was allocated and never signed for was spent by a zero-value
   // self-transfer, so the chain is never left with a gap it cannot mine past.
   TxCancelled : record {
@@ -383,6 +392,59 @@ type EvmAddressError = variant {
   WrongLength : record { len : nat64 };
   NoPrefix;
   NotHex;
+};
+// Why a flow door refused. Nothing moved.
+type FlowCallError = variant {
+  // The request is not one the canister acts on: the field and the reason.
+  Invalid : text;
+  Guard : GuardError;
+  // A rule refused it: the reason.
+  Refused : text;
+  // A chain or a canister did not answer usably; the caller may try again.
+  Unavailable : text;
+};
+// What the flows read at runtime. Set by a controller; the canister's `Config` is the
+// chain layer's and stays as it was.
+type FlowSettings = record {
+  // The ckETH ledger, when the minter charges the withdrawal's gas in ckETH: the
+  // canister approves the minter for `cketh_fee_allowance` of it before a withdrawal.
+  cketh_ledger : opt principal;
+  cketh_fee_allowance : nat;
+  // The most gas a relay or a continuation may be given.
+  max_gas_limit : nat64;
+  // How long the continuation's params stay valid on chain.
+  continuation_deadline_s : nat64;
+  // The ckETH minter, which withdraws ckERC20 tokens too.
+  ck_minter : opt principal;
+  ckusdc_ledger : opt principal;
+  // The furthest ahead a relayed quote's deadline may be.
+  relay_window_s : nat64;
+  // The only ICPSwap pools a quote may name.
+  icpswap_pools : vec principal;
+  // The SwapicRouter on each chain, as an EVM address.
+  routers : vec record { nat64; text };
+  // USDC on that chain, which the withdrawal lands as.
+  ethereum_usdc : opt text;
+  // The chain the ck minter withdraws to and the continuation runs on: Ethereum.
+  ethereum_chain_id : nat64;
+};
+// A flow as the fold holds it.
+type FlowView = record {
+  status : text;
+  tx_block : opt nat64;
+  withdrawal_id : opt nat64;
+  held : nat;
+  kind : text;
+  failed_continuations : nat32;
+  chain_id : opt nat64;
+  held_ledger : opt principal;
+  delivered : opt nat;
+  tx_hash : opt blob;
+  tx_open : bool;
+  continuation_action : opt nat8;
+  landed_tx : opt blob;
+  eth_held : nat;
+  reason : opt text;
 };
 // Who pays the source-side gas. On the wire it is one byte, Gasless 0 and Legacy 1.
 type GasMode = variant { Legacy; Gasless };
@@ -744,6 +806,13 @@ type RegisterQuoteError = variant {
   // The quote's refund address is not an EVM address.
   RefundAddressNotAnAddress : record { reason : EvmAddressError };
 };
+// A relay's status.
+type RelayStatus = variant {
+  Failed : record { chain_id : nat64; block : nat64; tx_hash : blob };
+  Confirmed : record { chain_id : nat64; block : nat64; tx_hash : blob };
+  // Signed and on its way; `tx_hash` is the first broadcast's.
+  Signed : record { chain_id : nat64; tx_hash : blob };
+};
 // Why the log does not fold. The replay stopped at `index` and applied nothing from there.
 type ReplayError = variant {
   OutOfSequence : record { found : nat64; expected : nat64 };
@@ -753,11 +822,13 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : blob; Err : ClaimError };
-type Result_10 = variant { Ok; Err : SetConfigError };
-type Result_11 = variant { Ok; Err : GuardError };
-type Result_12 = variant { Ok; Err : SetRolesError };
-type Result_13 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_14 = variant { Ok : blob; Err : PullError };
+type Result_10 = variant { Ok : blob; Err : FlowCallError };
+type Result_11 = variant { Ok; Err : SetConfigError };
+type Result_12 = variant { Ok; Err : FlowCallError };
+type Result_13 = variant { Ok; Err : GuardError };
+type Result_14 = variant { Ok; Err : SetRolesError };
+type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_16 = variant { Ok : blob; Err : PullError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : Config; Err : GuardError };
@@ -869,6 +940,8 @@ type TransitionError = variant {
   WaitingForUser;
   NotRefunding : SwapStatus;
   Pocket : PocketError;
+  // A flow step refused, with the domain's reason.
+  Flow : text;
   SwapExists : blob;
   AttemptStillOpen : nat32;
   UnknownSwap : blob;
@@ -935,11 +1008,13 @@ type TxError = variant {
 };
 // Why an outbound transaction exists. All but the last name the swap they belong to.
 type TxPurpose = variant {
+  Continue : blob;
   Payout : blob;
   Burn : blob;
   Mint : blob;
   Refund : blob;
   GaslessPull : blob;
+  Relay : blob;
   Cancel : nat64;
   Reclaim : blob;
 };
@@ -1018,6 +1093,10 @@ service : (InitArg) -> {
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
   get_config_full : () -> (Result_4) query;
+  // A flow, any kind, as the fold holds it.
+  get_flow : (blob) -> (opt FlowView) query;
+  // The flows' settings.
+  get_flow_settings : () -> (FlowSettings) query;
   // Quoter or watcher. Not public: a pending quote carries the user's destination and
   // refund addresses.
   get_pending : (blob) -> (Result_5) query;
@@ -1091,20 +1170,32 @@ service : (InitArg) -> {
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
   register_quote : (Quote) -> (Result_9);
+  // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
+  // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
+  // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
+  // every readable field is checked against them, the authorization must recover to the
+  // payer, and `swapFor` must succeed in simulation before the canister signs it once and
+  // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
+  relay_gasless : (nat64, blob, blob) -> (Result_10);
+  // A gasless relay's status: signed, then confirmed or failed at depth.
+  relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_10);
+  set_config : (Config) -> (Result_11);
+  // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
+  // and the windows the flows read.
+  set_flow_settings : (FlowSettings) -> (Result_12);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_11);
+  set_halted : (bool) -> (Result_13);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_12);
+  set_roles : (principal, principal) -> (Result_14);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1114,7 +1205,7 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_13);
+  set_sanctioned : (vec text, vec text) -> (Result_15);
   // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the
   // Permit2 permit they signed, for a quote that is pending, gasless and still payable, and
   // answers the hash of the transaction that does it. The permit has to be witnessed by
@@ -1124,7 +1215,7 @@ service : (InitArg) -> {
   // vault's 2612 door transfers on a standing allowance whether or not the permit verified
   // and a 2612 signature names no quote. The pull creates no swap: the deposit it makes is
   // what `claim_swap` then verifies. Halted, the canister pulls nothing.
-  start_gasless_pull : (blob, PullRequest) -> (Result_14);
+  start_gasless_pull : (blob, PullRequest) -> (Result_16);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
