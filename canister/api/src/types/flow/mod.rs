@@ -13,7 +13,7 @@ use serde::Deserialize;
 /// chain layer's and stays as it was.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct FlowSettings {
-    /// The SwapicRouter on each chain, as an EVM address.
+    /// Swapic on each chain, as an EVM address.
     pub routers: Vec<(u64, String)>,
     /// The chain the ck minter withdraws to and the continuation runs on: Ethereum.
     pub ethereum_chain_id: u64,

@@ -1,5 +1,5 @@
 //! The gasless relay: a user's signed `swapFor`, checked, simulated, signed once and
-//! broadcast from this canister's address, which is the router's only relayer.
+//! broadcast from this canister's address, which is Swapic's operator.
 //!
 //! Money-first: the role and the halt are checked before any outcall, the quote hash is
 //! recomputed from the params exactly as the router does (spec 4b.5), every field the user
@@ -22,7 +22,7 @@ use settlement_api::types::flow::FlowCallError;
 use types::events::TxPurpose;
 use types::router::{
     self, GaslessAuth, ReceiveWithAuthorization, SwapParams, ACTION_DELIVER, DOOR_AUTH_3009,
-    DOOR_PERMIT2, DOOR_PERMIT_2612, RAIL_CCTP,
+    DOOR_PERMIT2, DOOR_PERMIT_2612, RAIL_CCTP, RAIL_ECO, RAIL_LOCAL,
 };
 use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, Wei};
 
@@ -32,11 +32,12 @@ fn invalid(reason: impl Into<String>) -> FlowCallError {
 }
 
 /// Every check on the params and the authorization that needs no chain: the readable
-/// fields, the deadlines inside the window, the gas fee under its cap, the recipient's
-/// shape, and the door's own fields. Pure, so the table is a unit test.
+/// fields, the deadlines inside the window, the rail and the recipient's shape, and the
+/// door's own fields. Pure, so the table is a unit test.
 pub fn check_readable(
     params: &SwapParams,
     auth: &GaslessAuth,
+    chain_id: ChainId,
     now_s: u64,
     window_s: u64,
 ) -> Result<(), String> {
@@ -56,14 +57,26 @@ pub fn check_readable(
     if params.deadline > U256::from(now_s.saturating_add(window_s)) {
         return Err("the quote's deadline is further ahead than a relay accepts".into());
     }
-    if auth.gasFee > params.maxGasFee {
-        return Err("the gas fee is above what the payer capped it at".into());
+    match params.rail {
+        RAIL_CCTP | RAIL_ECO => {}
+        RAIL_LOCAL => {
+            if params.dstChainId != chain_id.get() {
+                return Err("a local swap delivers on the chain it starts on".into());
+            }
+            if params.dst.action != ACTION_DELIVER {
+                return Err("a local swap only delivers".into());
+            }
+            if router::evm_recipient(params.dst.recipient).is_none_or(|to| to == EvmAddress::ZERO) {
+                return Err("a local swap needs a non-zero EVM recipient".into());
+            }
+        }
+        _ => return Err("the rail is not one Swapic has".into()),
     }
     let deliver_on_cctp = params.rail == RAIL_CCTP && params.dst.action == ACTION_DELIVER;
     if !deliver_on_cctp && router::evm_recipient(params.dst.recipient).is_none() {
         return Err("the recipient is not an EVM address".into());
     }
-    if u64::from(params.dst.deadline) < now_s {
+    if params.dst.deadline < now_s {
         return Err("the destination deadline has passed".into());
     }
     match auth.door {
@@ -195,7 +208,14 @@ pub async fn relay_gasless(
         .ok_or_else(|| invalid("auth is not an ABI-encoded GaslessAuth tuple"))?;
     let quote_hash = router::quote_hash(&params, chain_id, router_address);
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
-    check_readable(&params, &auth, now_s, settings.relay_window.as_secs()).map_err(invalid)?;
+    check_readable(
+        &params,
+        &auth,
+        chain_id,
+        now_s,
+        settings.relay_window.as_secs(),
+    )
+    .map_err(invalid)?;
     let payer = router::evm(params.payer);
     if is_sanctioned(&types::Address::from(payer)) {
         return Err(FlowCallError::Refused("the payer is sanctioned".into()));

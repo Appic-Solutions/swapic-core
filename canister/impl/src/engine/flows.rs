@@ -23,7 +23,7 @@ use types::events::TxPurpose;
 use types::flow::{IcpToEvmQuote, Stage};
 use types::router::{
     self, DexCall, EcoTerms, GaslessAuth, ReceiveWithAuthorization, SwapParams, ACTION_DELIVER,
-    DOOR_AUTH_3009, RAIL_CCTP, RAIL_ECO,
+    DOOR_AUTH_3009, RAIL_CCTP, RAIL_ECO, RAIL_LOCAL,
 };
 use types::{
     EventType, EvmAddress, Flow, FlowKind, FlowStatus, FlowStep, GasAmount, QuoteHash, Timestamp,
@@ -504,18 +504,20 @@ pub fn plan(
         data: Bytes::new(),
     };
     params.legMinOut = amount;
-    params.maxGasFee = U256::ZERO;
+    // the quote's network fee is withheld to this canister's own address, the operator
+    params.networkFee = route.networkFee.min(amount);
+    let net = amount.saturating_sub(params.networkFee);
     let route_holds = !paused
         && failed_before == 0
         && match route.rail {
             RAIL_ECO => {
-                u64::from(route.eco.routeDeadline) > now_s.saturating_add(300)
-                    && amount >= route.eco.amount
+                route.eco.routeDeadline > now_s.saturating_add(300) && net >= route.eco.amount
             }
             RAIL_CCTP => {
                 route.dst.action != ACTION_DELIVER
-                    || amount.saturating_sub(route.maxFee) >= route.dst.minOut
+                    || net.saturating_sub(route.maxFee) >= route.dst.minOut
             }
+            RAIL_LOCAL => net >= route.dst.minOut,
             _ => false,
         };
     if route_holds {
@@ -545,7 +547,7 @@ pub fn plan(
     params.dst.action = ACTION_DELIVER;
     params.dst.recipient = router::recipient_word(recipient);
     params.dst.tokenOut = Address::ZERO;
-    params.dst.minOut = amount.saturating_sub(max_fee);
+    params.dst.minOut = net.saturating_sub(max_fee);
     params.dst.principal = FixedBytes::ZERO;
     params.dst.subaccount = FixedBytes::ZERO;
     params.dst.deadline = deadline.saturating_add(86_400);
@@ -638,7 +640,6 @@ async fn continue_on_ethereum(
             .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
         let auth = GaslessAuth {
             door: DOOR_AUTH_3009,
-            gasFee: U256::ZERO,
             validAfter: U256::ZERO,
             validBefore: params.deadline,
             nonce: U256::ZERO,
@@ -749,7 +750,7 @@ mod tests {
             },
             legMinOut: U256::ZERO,
             feeBps: U256::ZERO,
-            maxGasFee: U256::ZERO,
+            networkFee: U256::from(40_000),
             rail,
             dstChainId: 42161,
             maxFee: U256::from(5_000),
@@ -798,15 +799,15 @@ mod tests {
         assert_eq!(params.dst.action, ACTION_SWAP);
         assert_eq!(params.payer, Address::from([9; 20]));
         assert_eq!(params.amountIn, U256::from(4_990_000));
-        assert_eq!(params.maxGasFee, U256::ZERO);
+        assert_eq!(params.networkFee, U256::from(40_000));
     }
 
     #[test]
     fn a_paused_router_an_expired_eco_route_or_a_revert_falls_back_to_a_deliver() {
-        for params in [
-            planned(&route(RAIL_CCTP, 0), true, 0),
-            planned(&route(RAIL_ECO, 1_100), false, 0),
-            planned(&route(RAIL_CCTP, 0), false, 1),
+        for (params, max_fee) in [
+            (planned(&route(RAIL_CCTP, 0), true, 0), 5_000),
+            (planned(&route(RAIL_ECO, 1_100), false, 0), 0),
+            (planned(&route(RAIL_CCTP, 0), false, 1), 5_000),
         ] {
             assert_eq!(params.rail, RAIL_CCTP);
             assert_eq!(params.dst.action, ACTION_DELIVER);
@@ -814,6 +815,7 @@ mod tests {
                 params.dst.recipient,
                 router::recipient_word(EvmAddress::new([6; 20]))
             );
+            assert_eq!(params.dst.minOut, U256::from(4_990_000 - 40_000 - max_fee));
         }
     }
 

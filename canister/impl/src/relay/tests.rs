@@ -15,7 +15,7 @@ fn params(now: u64) -> SwapParams {
         },
         legMinOut: U256::from(1_000_000),
         feeBps: U256::ZERO,
-        maxGasFee: U256::from(50_000),
+        networkFee: U256::from(50_000),
         rail: RAIL_CCTP,
         dstChainId: 42161,
         maxFee: U256::from(100),
@@ -46,7 +46,6 @@ fn params(now: u64) -> SwapParams {
 fn auth(now: u64) -> GaslessAuth {
     GaslessAuth {
         door: DOOR_AUTH_3009,
-        gasFee: U256::from(10_000),
         validAfter: U256::ZERO,
         validBefore: U256::from(now + 600),
         nonce: U256::ZERO,
@@ -59,17 +58,43 @@ fn auth(now: u64) -> GaslessAuth {
 #[test]
 fn a_well_formed_relay_passes_and_each_broken_field_is_refused() {
     let now = 1_800_000_000;
-    assert_eq!(check_readable(&params(now), &auth(now), now, 3_600), Ok(()));
-    let mut over = auth(now);
-    over.gasFee = U256::from(50_001);
-    assert!(check_readable(&params(now), &over, now, 3_600).is_err());
+    let base = ChainId::new(8453);
+    let check = |params: &SwapParams| check_readable(params, &auth(now), base, now, 3_600);
+    assert_eq!(check(&params(now)), Ok(()));
     let mut late = params(now);
     late.deadline = U256::from(now);
-    assert!(check_readable(&late, &auth(now), now, 3_600).is_err());
+    assert!(check(&late).is_err());
     let mut far = params(now);
     far.deadline = U256::from(now + 7_200);
-    assert!(check_readable(&far, &auth(now), now, 3_600).is_err());
+    assert!(check(&far).is_err());
     let mut not_evm = params(now);
     not_evm.dst.recipient = FixedBytes([9; 32]);
-    assert!(check_readable(&not_evm, &auth(now), now, 3_600).is_err());
+    assert!(check(&not_evm).is_err());
+    let mut no_rail = params(now);
+    no_rail.rail = 3;
+    assert!(check(&no_rail).is_err());
+}
+
+#[test]
+fn a_local_swap_delivers_to_an_evm_address_on_its_own_chain() {
+    let now = 1_800_000_000;
+    let base = ChainId::new(8453);
+    let check = |params: &SwapParams| check_readable(params, &auth(now), base, now, 3_600);
+    let mut local = params(now);
+    local.rail = RAIL_LOCAL;
+    local.dstChainId = 8453;
+    local.dst.action = ACTION_DELIVER;
+    assert_eq!(check(&local), Ok(()));
+    let mut elsewhere = local.clone();
+    elsewhere.dstChainId = 42161;
+    assert!(check(&elsewhere).is_err());
+    let mut swaps = local.clone();
+    swaps.dst.action = ACTION_SWAP;
+    assert!(check(&swaps).is_err());
+    let mut to_nobody = local.clone();
+    to_nobody.dst.recipient = FixedBytes::ZERO;
+    assert!(check(&to_nobody).is_err());
+    let mut not_evm = local;
+    not_evm.dst.recipient = FixedBytes([9; 32]);
+    assert!(check(&not_evm).is_err());
 }

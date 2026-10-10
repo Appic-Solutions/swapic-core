@@ -1,11 +1,11 @@
-//! The SwapicRouter as this canister speaks to it: the params struct, the gasless
-//! authorization, the EIP-712 quote hash the router recomputes on chain, and the digests
-//! the three gasless doors bind that hash with.
+//! Swapic (ABI v2) as this canister speaks to it: the params struct, the gasless
+//! authorization, the EIP-712 quote hash the contract recomputes on chain, the digests
+//! the three gasless doors bind that hash with, the destination calls and the hook data.
 //!
-//! The structs are the router's own (`contracts/src/SwapicTypes.sol`), declared once in
+//! The structs are the contract's own (`contracts/src/SwapicTypes.sol`), declared once in
 //! Solidity so `alloy-sol-types` derives the ABI and the EIP-712 encoding from the same
-//! text. Enums are `uint8` on the wire, as the router declares them. The golden test pins
-//! the quote hash against the value the contracts' `AbiGolden.t.sol` pins.
+//! text. Enums are `uint8` on the wire. The golden test pins the quote hash against the
+//! value the contracts' `AbiGolden.t.sol` pins.
 
 #[cfg(test)]
 mod tests;
@@ -50,7 +50,7 @@ sol! {
         DexCall leg;
         uint256 legMinOut;
         uint256 feeBps;
-        uint256 maxGasFee;
+        uint256 networkFee;
         uint8 rail;
         uint64 dstChainId;
         uint256 maxFee;
@@ -61,7 +61,6 @@ sol! {
 
     struct GaslessAuth {
         uint8 door;
-        uint256 gasFee;
         uint256 validAfter;
         uint256 validBefore;
         uint256 nonce;
@@ -81,7 +80,7 @@ sol! {
         bytes32 recipient;
         address tokenOut;
         uint256 minOut;
-        uint256 maxGasFee;
+        uint256 networkFee;
     }
 
     /// USDC's EIP-3009 pull, the 3009 door: the nonce is the quote hash.
@@ -107,16 +106,29 @@ sol! {
     }
 
     function swapFor(SwapParams p, GaslessAuth a);
+    function swap(SwapParams p);
+    function completeCctp(bytes message, bytes attestation, DexCall swap);
+    function release(bytes message, bytes attestation);
+    function receiveMessage(bytes message, bytes attestation) returns (bool);
     function paused() returns (bool);
     function usedQuote(bytes32 quoteHash) returns (bool);
-    function relayer() returns (address);
+    function operator() returns (address);
     function DOMAIN_SEPARATOR() returns (bytes32);
+    function balanceOf(address account) returns (uint256);
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event SwapFees(
+        bytes32 indexed quoteHash,
+        uint256 platformFee,
+        uint256 networkFee,
+        uint256 excessStable,
+        uint256 unspentIn
+    );
 }
 
 /// `Rail` on the wire.
 pub const RAIL_CCTP: u8 = 0;
 pub const RAIL_ECO: u8 = 1;
+pub const RAIL_LOCAL: u8 = 2;
 /// `Action` on the wire.
 pub const ACTION_DELIVER: u8 = 0;
 pub const ACTION_SWAP: u8 = 1;
@@ -132,11 +144,11 @@ pub const PERMIT2: EvmAddress = EvmAddress::new([
     0x3a, 0xc7, 0x8b, 0xa3,
 ]);
 
-/// The router's EIP-712 domain on `chain_id` at `router`.
-pub fn router_domain(chain_id: ChainId, router: EvmAddress) -> Eip712Domain {
+/// Swapic's EIP-712 domain on `chain_id` at `router`.
+pub fn domain(chain_id: ChainId, router: EvmAddress) -> Eip712Domain {
     Eip712Domain {
-        name: Some(Cow::Borrowed("Swapic Router")),
-        version: Some(Cow::Borrowed("1")),
+        name: Some(Cow::Borrowed("Swapic")),
+        version: Some(Cow::Borrowed("2")),
         chain_id: Some(U256::from(chain_id.get())),
         verifying_contract: Some(addr(router)),
         salt: None,
@@ -147,7 +159,7 @@ pub fn router_domain(chain_id: ChainId, router: EvmAddress) -> Eip712Domain {
 /// digest of the params under the router's domain, never a hash the caller supplies.
 pub fn quote_hash(params: &SwapParams, chain_id: ChainId, router: EvmAddress) -> QuoteHash {
     QuoteHash::new(typed_digest(
-        router_domain(chain_id, router).separator().0,
+        domain(chain_id, router).separator().0,
         swap_params_hash_struct(params),
     ))
 }
@@ -155,7 +167,7 @@ pub fn quote_hash(params: &SwapParams, chain_id: ChainId, router: EvmAddress) ->
 /// The router's `SwapParams` type string. Spelled out rather than taken from the macro:
 /// `ref` is a Rust keyword, and the macro writes the field into the type string as
 /// `r#ref`, which is not the router's type and hashes to another quote.
-pub const SWAP_PARAMS_TYPE: &str = "SwapParams(bytes32 ref,address payer,address tokenIn,uint256 amountIn,uint256 deadline,DexCall leg,uint256 legMinOut,uint256 feeBps,uint256 maxGasFee,uint8 rail,uint64 dstChainId,uint256 maxFee,uint32 minFinality,EcoTerms eco,Delivery dst)Delivery(uint8 action,bytes32 recipient,address tokenOut,uint256 minOut,bytes32 principal,bytes32 subaccount,uint64 deadline,DexCall swap)DexCall(address target,bytes data)EcoTerms(bytes32 salt,uint64 routeDeadline,uint64 rewardDeadline,uint256 amount,uint256 amountOut)";
+pub const SWAP_PARAMS_TYPE: &str = "SwapParams(bytes32 ref,address payer,address tokenIn,uint256 amountIn,uint256 deadline,DexCall leg,uint256 legMinOut,uint256 feeBps,uint256 networkFee,uint8 rail,uint64 dstChainId,uint256 maxFee,uint32 minFinality,EcoTerms eco,Delivery dst)Delivery(uint8 action,bytes32 recipient,address tokenOut,uint256 minOut,bytes32 principal,bytes32 subaccount,uint64 deadline,DexCall swap)DexCall(address target,bytes data)EcoTerms(bytes32 salt,uint64 routeDeadline,uint64 rewardDeadline,uint256 amount,uint256 amountOut)";
 
 /// `hashStruct(SwapParams)`: the typehash of [`SWAP_PARAMS_TYPE`] and the members as the
 /// macro encodes them (the nested structs carry no keyword, so their hashes are right).
@@ -182,9 +194,9 @@ pub fn acceptance_digest(
         recipient: params.dst.recipient,
         tokenOut: params.dst.tokenOut,
         minOut: params.dst.minOut,
-        maxGasFee: params.maxGasFee,
+        networkFee: params.networkFee,
     }
-    .eip712_signing_hash(&router_domain(chain_id, router))
+    .eip712_signing_hash(&domain(chain_id, router))
     .0
 }
 
@@ -264,6 +276,47 @@ pub fn swap_for_calldata(params: &SwapParams, auth: &GaslessAuth) -> Vec<u8> {
     .abi_encode()
 }
 
+/// `swap(SwapParams)`: the canister's own swap, as the payer.
+pub fn swap_calldata(params: &SwapParams) -> Vec<u8> {
+    swapCall { p: params.clone() }.abi_encode()
+}
+
+/// `completeCctp(bytes,bytes,DexCall)` on the destination Swapic.
+pub fn complete_cctp_calldata(message: &[u8], attestation: &[u8], swap: DexCall) -> Vec<u8> {
+    completeCctpCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+        swap,
+    }
+    .abi_encode()
+}
+
+/// `release(bytes,bytes)` on the destination Swapic, after the hook deadline.
+pub fn release_calldata(message: &[u8], attestation: &[u8]) -> Vec<u8> {
+    releaseCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+    }
+    .abi_encode()
+}
+
+/// `receiveMessage(bytes,bytes)` on CCTP's `MessageTransmitterV2`.
+pub fn receive_message_calldata(message: &[u8], attestation: &[u8]) -> Vec<u8> {
+    receiveMessageCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+    }
+    .abi_encode()
+}
+
+/// `balanceOf(address)`.
+pub fn balance_of_calldata(account: EvmAddress) -> Vec<u8> {
+    balanceOfCall {
+        account: addr(account),
+    }
+    .abi_encode()
+}
+
 /// `paused()`.
 pub fn paused_calldata() -> Vec<u8> {
     pausedCall {}.abi_encode()
@@ -286,6 +339,92 @@ pub fn domain_separator_calldata() -> Vec<u8> {
 pub fn transfer_topic() -> [u8; 32] {
     use alloy_sol_types::SolEvent;
     Transfer::SIGNATURE_HASH.0
+}
+
+/// The topic Swapic's `SwapFees` log carries first.
+pub fn swap_fees_topic() -> [u8; 32] {
+    use alloy_sol_types::SolEvent;
+    SwapFees::SIGNATURE_HASH.0
+}
+
+/// The destination instruction a Swapic CCTP burn carries (ABI v1 section 5): nine
+/// words, always 288 bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookData {
+    pub version: u8,
+    /// The quote hash, on CCTP.
+    pub reference: [u8; 32],
+    pub action: u8,
+    pub deadline: u64,
+    pub recipient: EvmAddress,
+    pub token_out: EvmAddress,
+    pub min_out: U256,
+    pub principal: [u8; 32],
+    pub subaccount: [u8; 32],
+}
+
+/// The hook data's only version.
+pub const HOOK_DATA_VERSION: u8 = 1;
+pub const HOOK_DATA_BYTES: usize = 288;
+
+impl HookData {
+    /// The hook data `bytes` carry, if they are exactly a version 1 instruction with a
+    /// known action and every word well formed.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != HOOK_DATA_BYTES {
+            return None;
+        }
+        let word = |i: usize| -> [u8; 32] {
+            bytes[32 * i..32 * (i + 1)]
+                .try_into()
+                .expect("BUG: the length was checked")
+        };
+        let small = |i: usize, width: usize| -> Option<U256> {
+            let w = word(i);
+            w[..32 - width]
+                .iter()
+                .all(|byte| *byte == 0)
+                .then(|| U256::from_be_bytes(w))
+        };
+        let address = |i: usize| -> Option<EvmAddress> {
+            let w = word(i);
+            w[..12]
+                .iter()
+                .all(|byte| *byte == 0)
+                .then(|| EvmAddress::new(w[12..].try_into().expect("BUG: twenty bytes")))
+        };
+        let version = u8::try_from(small(0, 1)?).ok()?;
+        let action = u8::try_from(small(2, 1)?).ok()?;
+        if version != HOOK_DATA_VERSION || action > ACTION_CK_DEPOSIT {
+            return None;
+        }
+        Some(Self {
+            version,
+            reference: word(1),
+            action,
+            deadline: u64::try_from(small(3, 8)?).ok()?,
+            recipient: address(4)?,
+            token_out: address(5)?,
+            min_out: U256::from_be_bytes(word(6)),
+            principal: word(7),
+            subaccount: word(8),
+        })
+    }
+
+    /// The nine words, as the contract writes them.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HOOK_DATA_BYTES);
+        out.extend_from_slice(&U256::from(self.version).to_be_bytes::<32>());
+        out.extend_from_slice(&self.reference);
+        out.extend_from_slice(&U256::from(self.action).to_be_bytes::<32>());
+        out.extend_from_slice(&U256::from(self.deadline).to_be_bytes::<32>());
+        out.extend_from_slice(&self.recipient.to_word());
+        out.extend_from_slice(&self.token_out.to_word());
+        out.extend_from_slice(&self.min_out.to_be_bytes::<32>());
+        out.extend_from_slice(&self.principal);
+        out.extend_from_slice(&self.subaccount);
+        out
+    }
 }
 
 /// The router's word for an address.
