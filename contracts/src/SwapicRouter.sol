@@ -58,7 +58,9 @@ contract SwapicRouter is ISwapicRouter {
     address public feeRecipient;
 
     address public ecoProver;
-    uint64 public ecoMaxLockup = 2 hours;
+    /// Eco's own solver quotes a 7 day reward window (Portal 2.12), so the
+    /// default bound on the reward deadline is 8 days from the publish.
+    uint64 public ecoMaxLockup = 8 days;
 
     struct CctpDestination {
         uint32 domain;

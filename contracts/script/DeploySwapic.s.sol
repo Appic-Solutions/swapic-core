@@ -23,8 +23,12 @@ import {SwapicExecutor} from "../src/SwapicExecutor.sol";
 contract DeploySwapic is Script {
     address constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     address constant TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
-    address constant ECO_PORTAL = 0xEC000064576f9C95a8623Bc0eff3db6d296ea6df;
-    address constant HYPER_PROVER = 0xec004Ab4870c4e177c66949329dCdb503CE41022;
+    /// Eco's live registry, as its quotes name it and checked on chain on Base
+    /// and Arbitrum: Portal `version()` "2.12.0", prover `getProofType()` "Hyperlane"
+    address constant ECO_PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
+    address constant HYPER_PROVER = 0xEC08fb4647f3f50d1162a578d481266687C60fc5;
+    /// Eco's solver quotes a 7 day reward window
+    uint64 constant ECO_MAX_LOCKUP = 8 days;
     /// the ck minter's ERC-20 deposit helper with subaccounts (Ethereum only;
     /// `depositErc20` selector 0xdb9751af present in its code, checked with cast)
     address constant CK_HELPER = 0x18901044688D3756C35Ed2b36D93e6a5B8e00E68;
@@ -57,7 +61,7 @@ contract DeploySwapic is Script {
 
         router = new SwapicRouter(usdc, TOKEN_MESSENGER, ECO_PORTAL, me, guardian, relayer);
         executor = new SwapicExecutor(usdc, TRANSMITTER, block.chainid == 1 ? CK_HELPER : address(0), me, guardian);
-        router.setEcoConfig(HYPER_PROVER, 2 hours);
+        router.setEcoConfig(HYPER_PROVER, ECO_MAX_LOCKUP);
         executor.setKeeper(keeper, true);
 
         address[3] memory dexes = [KYBER, ZEROX_ALLOWANCE_HOLDER, VELORA];
