@@ -3,7 +3,11 @@ pragma solidity 0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {SwapParams, GaslessAuth, Permit2Auth, Rail, Action} from "./SwapicTypes.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {SwapParams, GaslessAuth, Permit2Auth, Rail, Action, Door} from "./SwapicTypes.sol";
+import {IERC3009} from "./interfaces/IERC3009.sol";
 import {ISwapicRouter} from "./interfaces/ISwapicRouter.sol";
 import {IEcoPortal} from "./interfaces/IEcoPortal.sol";
 import {ITokenMessengerV2} from "./interfaces/ICctpV2.sol";
@@ -121,9 +125,55 @@ contract SwapicRouter is ISwapicRouter {
         _run(p, q, 0, inBefore, stableBefore);
     }
 
-    /// @inheritdoc ISwapicRouter
-    function swapFor(SwapParams calldata, GaslessAuth calldata) external pure returns (bytes32) {
-        revert NotRelayer();
+    /// The vault's three reviewed doors, moved here. Each binds the quote hash
+    /// recomputed from these very params: the 3009 nonce, the QuoteAcceptance
+    /// (2612), the Permit2 witness. The relayer chooses only `a.gasFee`,
+    /// capped by the signed `maxGasFee` and paid in the stable after the leg.
+    function swapFor(SwapParams calldata p, GaslessAuth calldata a) external nonReentrant returns (bytes32 q) {
+        if (msg.sender != relayer || msg.sender == address(0)) revert NotRelayer();
+        if (a.gasFee > p.maxGasFee) revert GasFeeTooHigh();
+        q = _open(p);
+        (uint256 inBefore, uint256 stableBefore) = _baseline(p.tokenIn);
+        if (a.door == Door.Auth3009) {
+            (uint8 v, bytes32 r, bytes32 s) = _split(a.signature);
+            IERC3009(p.tokenIn).receiveWithAuthorization(
+                p.payer, address(this), p.amountIn, a.validAfter, a.validBefore, q, v, r, s
+            );
+        } else if (a.door == Door.Permit2612) {
+            _pull2612(p, q, a);
+        } else {
+            _pullPermit2(p, q, p.payer, a.nonce, a.deadline, a.signature);
+        }
+        _run(p, q, a.gasFee, inBefore, stableBefore);
+    }
+
+    /// The 2612 door: the permit carries no authority (it is swallowed; a
+    /// front-run of it sets the very allowance we need). What authorizes the
+    /// pull is the payer's QuoteAcceptance, checked before the token is asked
+    /// anything. The deadline, shared with the permit, was checked in _open.
+    function _pull2612(SwapParams calldata p, bytes32 q, GaslessAuth calldata a) internal {
+        if (!_accepted(p, q, a.acceptance)) revert QuoteNotAccepted();
+        if (a.signature.length == 65) {
+            (uint8 v, bytes32 r, bytes32 s) = _split(a.signature);
+            try IERC20Permit(p.tokenIn).permit(p.payer, address(this), p.amountIn, p.deadline, v, r, s) {} catch {}
+        }
+        IERC20(p.tokenIn).safeTransferFrom(p.payer, address(this), p.amountIn);
+    }
+
+    /// The payer's own key first, so an EIP-7702 account's key still speaks
+    /// for it; only then, for a payer with code, its ERC-1271 answer.
+    function _accepted(SwapParams calldata p, bytes32 q, bytes calldata signature) internal view returns (bool) {
+        bytes32 digest = QuoteHash.acceptanceDigest(p, q, block.chainid, address(this));
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (err == ECDSA.RecoverError.NoError && recovered == p.payer) return true;
+        return p.payer.code.length > 0 && SignatureChecker.isValidERC1271SignatureNow(p.payer, digest, signature);
+    }
+
+    function _split(bytes calldata sig) internal pure returns (uint8 v, bytes32 r, bytes32 s) {
+        if (sig.length != 65) revert QuoteNotAccepted();
+        r = bytes32(sig[0:32]);
+        s = bytes32(sig[32:64]);
+        v = uint8(sig[64]);
     }
 
     // ------------------------------------------------------------------
