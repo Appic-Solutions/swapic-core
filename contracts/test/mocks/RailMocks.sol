@@ -80,3 +80,29 @@ contract DexMock {
         IERC20(tokenOut).transfer(to, amountOut);
     }
 }
+
+/// CCTP v2's MessageTransmitterV2 in miniature: no attestation check, but the
+/// destination-caller rule, the nonce, and a mint of `amount - feeExecuted`
+/// to the message's mint recipient from its own float.
+contract TransmitterMock {
+    IERC20 public immutable usdc;
+    mapping(bytes32 => bool) public usedNonces;
+
+    constructor(IERC20 usdc_) {
+        usdc = usdc_;
+    }
+
+    function receiveMessage(bytes calldata message, bytes calldata) external returns (bool) {
+        bytes32 caller = bytes32(message[108:140]);
+        require(caller == bytes32(0) || caller == bytes32(uint256(uint160(msg.sender))), "Invalid caller for message");
+        bytes32 nonce = bytes32(message[12:44]);
+        require(!usedNonces[nonce], "Nonce already used");
+        usedNonces[nonce] = true;
+        bytes calldata body = message[148:];
+        address to = address(uint160(uint256(bytes32(body[36:68]))));
+        uint256 amount = uint256(bytes32(body[68:100]));
+        uint256 fee = uint256(bytes32(body[164:196]));
+        usdc.transfer(to, amount - fee);
+        return true;
+    }
+}
