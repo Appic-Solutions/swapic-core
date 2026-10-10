@@ -34,6 +34,6 @@ pub async fn test_send(
         GasAmount::from(gas_limit),
     )
     .await
-    .map(|hash| hash.into_bytes())
+    .map(|signed| signed.tx_hash.into_bytes())
     .map_err(TxError::from)
 }

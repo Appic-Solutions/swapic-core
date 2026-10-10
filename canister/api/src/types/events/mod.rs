@@ -190,6 +190,7 @@ pub enum TxPurpose {
     Reclaim(Hash32),
     Relay(Hash32),
     Continue(Hash32),
+    Finish(Hash32),
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -205,6 +206,7 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::Reclaim(hash) => Self::Reclaim(hash.into_bytes()),
             Domain::Relay(hash) => Self::Relay(hash.into_bytes()),
             Domain::Continue(hash) => Self::Continue(hash.into_bytes()),
+            Domain::Finish(hash) => Self::Finish(hash.into_bytes()),
         }
     }
 }
@@ -221,6 +223,7 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::Reclaim(hash) => Self::Reclaim(QuoteHash::new(hash)),
             TxPurpose::Relay(hash) => Self::Relay(QuoteHash::new(hash)),
             TxPurpose::Continue(hash) => Self::Continue(QuoteHash::new(hash)),
+            TxPurpose::Finish(hash) => Self::Finish(QuoteHash::new(hash)),
         }
     }
 }

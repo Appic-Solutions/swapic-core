@@ -653,8 +653,14 @@ impl<S: Store> State<S> {
     }
 
     /// A flow step the guard admitted.
-    fn record_flow(&mut self, quote_hash: QuoteHash, step: &types::FlowStep, at: Timestamp) {
-        let flow = types::Flow::apply(self.store.flow(&quote_hash), step, at);
+    fn record_flow(
+        &mut self,
+        quote_hash: QuoteHash,
+        step: &types::FlowStep,
+        index: EventIndex,
+        at: Timestamp,
+    ) {
+        let flow = types::Flow::apply(self.store.flow(&quote_hash), step, index.get(), at);
         self.store.put_flow(quote_hash, flow);
     }
 

@@ -380,7 +380,7 @@ type FlowSettings = record {
   relay_window_s : nat64;
   // The only ICPSwap pools a quote may name.
   icpswap_pools : vec principal;
-  // The SwapicRouter on each chain, as an EVM address.
+  // Swapic on each chain, as an EVM address.
   routers : vec record { nat64; text };
   // USDC on that chain, which the withdrawal lands as.
   ethereum_usdc : opt text;
@@ -733,6 +733,7 @@ type TxPurpose = variant {
   Refund : blob;
   GaslessPull : blob;
   Relay : blob;
+  Finish : blob;
   Cancel : nat64;
   Reclaim : blob;
 };

@@ -232,6 +232,11 @@ pub async fn finish_cctp(
     attestation: Vec<u8>,
     swap: Option<DexCall>,
 ) -> Result<u64, String> {
-    let _ = (chain_id, message, attestation, swap);
-    Err("not yet".to_string())
+    crate::cctp::finish_cctp(
+        ChainId::new(chain_id),
+        &message,
+        &attestation,
+        swap.map(|swap| (swap.target, swap.data)),
+    )
+    .await
 }

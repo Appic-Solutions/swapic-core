@@ -35,6 +35,9 @@ pub enum FlowKind {
     /// The user pays on an EVM chain and is paid an ICP token other than ckUSDC.
     #[n(2)]
     EvmToIcp,
+    /// The canister finishes a CCTP arrival: keyed by the message and the action.
+    #[n(3)]
+    Finish,
 }
 
 /// Where a flow is.
@@ -102,6 +105,13 @@ pub enum FlowStatus {
     /// The transfer to the user is out.
     #[n(21)]
     Delivering,
+    /// The CCTP finish is signed and on its way.
+    #[n(22)]
+    FinishSigned,
+    #[n(23)]
+    FinishConfirmed,
+    #[n(24)]
+    FinishFailed,
 }
 
 impl FlowStatus {
@@ -115,6 +125,8 @@ impl FlowStatus {
                 | Self::Expired
                 | Self::RelayConfirmed
                 | Self::RelayFailed
+                | Self::FinishConfirmed
+                | Self::FinishFailed
         )
     }
 }
@@ -412,6 +424,58 @@ pub enum FlowStep {
     },
     #[n(18)]
     Expired,
+    /// A CCTP finish was signed, with its exact bytes, before it is broadcast: `action` is
+    /// the [`FinishAction`] and `message_hash` the keccak of the message. It spends the
+    /// nonce `TxCreated` handed out for it and creates the flow.
+    #[n(19)]
+    CctpFinishSigned {
+        #[n(0)]
+        chain_id: ChainId,
+        #[n(1)]
+        nonce: Nonce,
+        #[n(2)]
+        tx_hash: TxHash,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+        #[n(4)]
+        action: FinishAction,
+        #[cbor(n(5), with = "minicbor::bytes")]
+        message_hash: [u8; 32],
+    },
+}
+
+/// What the canister does with a CCTP arrival.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum FinishAction {
+    /// A Deliver: `receiveMessage` on the message transmitter mints to the user.
+    #[n(0)]
+    Receive,
+    /// A Swap or a CkDeposit before its deadline: `completeCctp` on Swapic.
+    #[n(1)]
+    Complete,
+    /// A Swap or a CkDeposit after its deadline: `release` on Swapic pays the user the
+    /// stable.
+    #[n(2)]
+    Release,
+}
+
+impl FinishAction {
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::Receive => 0,
+            Self::Complete => 1,
+            Self::Release => 2,
+        }
+    }
+}
+
+/// The key a finish is held once under: one signed transaction per message and action.
+pub fn finish_key(message_hash: [u8; 32], action: FinishAction) -> QuoteHash {
+    let mut preimage = [0_u8; 33];
+    preimage[..32].copy_from_slice(&message_hash);
+    preimage[32] = action.byte();
+    QuoteHash::new(alloy_primitives::keccak256(preimage).0)
 }
 
 impl FlowStep {
@@ -437,6 +501,7 @@ impl FlowStep {
                 | FlowStep::Begun { .. }
                 | FlowStep::GaslessRelayed { .. }
                 | FlowStep::ContinuationSigned { .. }
+                | FlowStep::CctpFinishSigned { .. }
                 | FlowStep::Frozen { .. }
                 | FlowStep::Expired
         )
@@ -464,6 +529,7 @@ impl FlowStep {
             FlowStep::Delivered { .. } => "Delivered",
             FlowStep::Frozen { .. } => "Frozen",
             FlowStep::Expired => "Expired",
+            FlowStep::CctpFinishSigned { .. } => "CctpFinishSigned",
         }
     }
 }
@@ -530,6 +596,10 @@ pub struct Flow {
     /// When the flow was registered.
     #[n(20)]
     pub created_at: Timestamp,
+    /// The log index of the line that recorded the flow's first signed transaction: its id
+    /// in `signed_txs`.
+    #[n(21)]
+    pub signed_id: Option<u64>,
 }
 
 /// Why a flow step was refused.
@@ -587,6 +657,7 @@ impl Flow {
             delivered: None,
             reason: None,
             created_at: at,
+            signed_id: None,
         }
     }
 
@@ -610,6 +681,7 @@ impl Flow {
             FlowStep::IcpQuoteRegistered { .. }
                 | FlowStep::EvmQuoteRegistered { .. }
                 | FlowStep::GaslessRelayed { .. }
+                | FlowStep::CctpFinishSigned { .. }
         );
         if creates {
             if existing.is_some() {
@@ -618,6 +690,11 @@ impl Flow {
             let computed = match step {
                 FlowStep::IcpQuoteRegistered { quote } => Some(quote.hash()),
                 FlowStep::EvmQuoteRegistered { quote } => Some(quote.hash()),
+                FlowStep::CctpFinishSigned {
+                    action,
+                    message_hash,
+                    ..
+                } => Some(finish_key(*message_hash, *action)),
                 // the relay's hash is the router's EIP-712 digest, recomputed by the door
                 _ => None,
             };
@@ -639,7 +716,8 @@ impl Flow {
         let ok = match step {
             FlowStep::IcpQuoteRegistered { .. }
             | FlowStep::EvmQuoteRegistered { .. }
-            | FlowStep::GaslessRelayed { .. } => unreachable!("handled above"),
+            | FlowStep::GaslessRelayed { .. }
+            | FlowStep::CctpFinishSigned { .. } => unreachable!("handled above"),
             FlowStep::Begun { stage } => match (kind, stage, flow.status) {
                 (FlowKind::IcpToEvm, Stage::Pull, Registered) => true,
                 (FlowKind::IcpToEvm, Stage::Swap, Pulled) => true,
@@ -675,7 +753,7 @@ impl Flow {
                 // the outbox closes on whichever of a nonce's transactions landed, a
                 // replacement included, so the hash is recorded rather than matched
                 let _ = tx_hash;
-                flow.tx_open && matches!(flow.status, RelaySigned | Continuing)
+                flow.tx_open && matches!(flow.status, RelaySigned | Continuing | FinishSigned)
             }
             FlowStep::RefundStarted { .. } => {
                 kind == FlowKind::IcpToEvm
@@ -694,9 +772,8 @@ impl Flow {
         Ok(())
     }
 
-    /// Records a step [`Flow::admits`] admitted. `ckusdc` is the ledger a Landed flow's
-    /// withdrawal was made from, recorded so the flow says what it holds.
-    pub fn apply(existing: Option<Flow>, step: &FlowStep, at: Timestamp) -> Flow {
+    /// Records a step [`Flow::admits`] admitted, sealed at `index` and `at`.
+    pub fn apply(existing: Option<Flow>, step: &FlowStep, index: u64, at: Timestamp) -> Flow {
         use FlowStatus::*;
         let mut flow = match (existing, step) {
             (None, FlowStep::IcpQuoteRegistered { quote }) => {
@@ -719,6 +796,20 @@ impl Flow {
                 flow.chain_id = Some(*chain_id);
                 flow.tx_hash = Some(*tx_hash);
                 flow.tx_open = true;
+                flow.signed_id = Some(index);
+                return flow;
+            }
+            (
+                None,
+                FlowStep::CctpFinishSigned {
+                    chain_id, tx_hash, ..
+                },
+            ) => {
+                let mut flow = Flow::new(FlowKind::Finish, FinishSigned, at);
+                flow.chain_id = Some(*chain_id);
+                flow.tx_hash = Some(*tx_hash);
+                flow.tx_open = true;
+                flow.signed_id = Some(index);
                 return flow;
             }
             (Some(flow), _) => flow,
@@ -727,7 +818,8 @@ impl Flow {
         match step {
             FlowStep::IcpQuoteRegistered { .. }
             | FlowStep::EvmQuoteRegistered { .. }
-            | FlowStep::GaslessRelayed { .. } => {}
+            | FlowStep::GaslessRelayed { .. }
+            | FlowStep::CctpFinishSigned { .. } => {}
             FlowStep::Begun { stage } => {
                 flow.status = stage.status();
                 flow.begun_at = Some(at);
@@ -794,6 +886,7 @@ impl Flow {
                 flow.tx_hash = Some(*tx_hash);
                 flow.tx_open = true;
                 flow.continuation = Some((*action, *amount));
+                flow.signed_id = Some(index);
             }
             FlowStep::TxClosed {
                 tx_hash,
@@ -806,6 +899,8 @@ impl Flow {
                 match (flow.kind, success) {
                     (FlowKind::Relay, true) => flow.status = RelayConfirmed,
                     (FlowKind::Relay, false) => flow.status = RelayFailed,
+                    (FlowKind::Finish, true) => flow.status = FinishConfirmed,
+                    (FlowKind::Finish, false) => flow.status = FinishFailed,
                     (_, true) => {
                         let spent = flow.continuation.map(|(_, amount)| amount);
                         flow.eth_held = spent

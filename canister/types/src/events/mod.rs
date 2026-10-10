@@ -356,6 +356,9 @@ pub enum TxPurpose {
     /// The Ethereum continuation of an ICP to EVM flow, from this canister's own address.
     #[n(8)]
     Continue(#[n(0)] QuoteHash),
+    /// A CCTP arrival finished by this canister, keyed by its message and action.
+    #[n(9)]
+    Finish(#[n(0)] QuoteHash),
 }
 
 impl TxPurpose {
@@ -370,7 +373,8 @@ impl TxPurpose {
             | Self::GaslessPull(hash)
             | Self::Reclaim(hash)
             | Self::Relay(hash)
-            | Self::Continue(hash) => Some(*hash),
+            | Self::Continue(hash)
+            | Self::Finish(hash) => Some(*hash),
             Self::Cancel(_) => None,
         }
     }
@@ -384,7 +388,11 @@ impl TxPurpose {
             | Self::Payout(hash)
             | Self::Refund(hash)
             | Self::Reclaim(hash) => Some(*hash),
-            Self::GaslessPull(_) | Self::Cancel(_) | Self::Relay(_) | Self::Continue(_) => None,
+            Self::GaslessPull(_)
+            | Self::Cancel(_)
+            | Self::Relay(_)
+            | Self::Continue(_)
+            | Self::Finish(_) => None,
         }
     }
 
@@ -402,6 +410,7 @@ impl TxPurpose {
             Self::Reclaim(hash) => w.put_u8(6).put_hash(hash.as_ref()),
             Self::Relay(hash) => w.put_u8(7).put_hash(hash.as_ref()),
             Self::Continue(hash) => w.put_u8(8).put_hash(hash.as_ref()),
+            Self::Finish(hash) => w.put_u8(9).put_hash(hash.as_ref()),
         };
     }
 }

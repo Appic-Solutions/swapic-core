@@ -34,8 +34,9 @@ use types::config::GasAction;
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventType, EvmAddress, GasAmount, Nonce,
-    NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
+    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventIndex, EventType, EvmAddress,
+    GasAmount, Nonce, NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei,
+    WeiPerGas,
 };
 
 /// How long the current bytes stay out before they are handed to a provider again. A
@@ -224,7 +225,7 @@ pub fn gas_action(purpose: TxPurpose) -> Option<GasAction> {
         TxPurpose::Relay(_) | TxPurpose::Continue(_) | TxPurpose::GaslessPull(_) => {
             Some(GasAction::Relay)
         }
-        TxPurpose::Mint(_) => Some(GasAction::Completion),
+        TxPurpose::Mint(_) | TxPurpose::Finish(_) => Some(GasAction::Completion),
         TxPurpose::Burn(_)
         | TxPurpose::Payout(_)
         | TxPurpose::Refund(_)
@@ -273,6 +274,29 @@ pub fn within_budget(
     Ok(())
 }
 
+/// What a flow's signed record says beyond the transaction itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    /// The route action a continuation takes and the landed USDC it spends.
+    Continuation {
+        action: u8,
+        amount: types::TokenAmount,
+    },
+    /// What a CCTP finish does, and the keccak of its message.
+    Finish {
+        action: types::flow::FinishAction,
+        message_hash: [u8; 32],
+    },
+}
+
+/// A transaction signed and queued: its hash, and the log index of the line that recorded
+/// its bytes, which is its id in `signed_txs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signed {
+    pub tx_hash: TxHash,
+    pub id: EventIndex,
+}
+
 /// Creates, signs and queues one transaction, and answers the hash it will be looked up
 /// by.
 ///
@@ -286,12 +310,11 @@ pub async fn create_and_send(
     value: Wei,
     data: Vec<u8>,
     gas_limit: GasAmount,
-) -> Result<TxHash, TxError> {
+) -> Result<Signed, TxError> {
     create_and_send_with(purpose, chain_id, to, value, data, gas_limit, None).await
 }
 
-/// [`create_and_send`] for a flow's continuation, whose signed record names the route
-/// action it takes and the landed USDC it spends.
+/// [`create_and_send`] for a flow whose signed record carries a [`Detail`].
 pub async fn create_and_send_with(
     purpose: TxPurpose,
     chain_id: ChainId,
@@ -299,9 +322,12 @@ pub async fn create_and_send_with(
     value: Wei,
     data: Vec<u8>,
     gas_limit: GasAmount,
-    continuation: Option<(u8, types::TokenAmount)>,
-) -> Result<TxHash, TxError> {
+    detail: Option<Detail>,
+) -> Result<Signed, TxError> {
     require_not_halted().map_err(TxError::Guard)?;
+    if matches!(purpose, TxPurpose::Finish(_)) && !matches!(detail, Some(Detail::Finish { .. })) {
+        return Err(TxError::PurposeNeedsASwap("a finish with no detail"));
+    }
     // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
     // pass that ends a stranded allocation, never through here
     let quote_hash = purpose
@@ -402,7 +428,10 @@ pub async fn create_and_send_with(
                 },
             },
             TxPurpose::Continue(_) => {
-                let (action, amount) = continuation.unwrap_or((0, types::TokenAmount::ZERO));
+                let (action, amount) = match detail {
+                    Some(Detail::Continuation { action, amount }) => (action, amount),
+                    _ => (0, types::TokenAmount::ZERO),
+                };
                 EventType::Flow {
                     quote_hash,
                     step: types::FlowStep::ContinuationSigned {
@@ -412,6 +441,26 @@ pub async fn create_and_send_with(
                         raw_tx: raw_tx.clone(),
                         action,
                         amount,
+                    },
+                }
+            }
+            TxPurpose::Finish(_) => {
+                let Some(Detail::Finish {
+                    action,
+                    message_hash,
+                }) = detail
+                else {
+                    unreachable!("BUG: a finish's detail is checked before its nonce");
+                };
+                EventType::Flow {
+                    quote_hash,
+                    step: types::FlowStep::CctpFinishSigned {
+                        chain_id,
+                        nonce,
+                        tx_hash,
+                        raw_tx: raw_tx.clone(),
+                        action,
+                        message_hash,
                     },
                 }
             }
@@ -425,7 +474,7 @@ pub async fn create_and_send_with(
             },
         },
     };
-    append_event(record)?;
+    let id = append_event(record)?;
     outbox::put(OutboxEntry {
         purpose,
         chain_id,
@@ -446,7 +495,7 @@ pub async fn create_and_send_with(
         gas_limit,
         refusal: None,
     });
-    Ok(tx_hash)
+    Ok(Signed { tx_hash, id })
 }
 
 /// The gas a bare transfer of the chain's own currency costs, which is what a cancel is.
@@ -833,7 +882,10 @@ async fn decide(
             } = receipt;
             // a flow's transaction closes with a flow line, whichever of the nonce's
             // transactions landed
-            if let TxPurpose::Relay(quote_hash) | TxPurpose::Continue(quote_hash) = entry.purpose {
+            if let TxPurpose::Relay(quote_hash)
+            | TxPurpose::Continue(quote_hash)
+            | TxPurpose::Finish(quote_hash) = entry.purpose
+            {
                 let appended = append_event(EventType::Flow {
                     quote_hash,
                     step: types::FlowStep::TxClosed {

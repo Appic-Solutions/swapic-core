@@ -82,7 +82,8 @@ impl Leg {
             TxPurpose::GaslessPull(_)
             | TxPurpose::Cancel(_)
             | TxPurpose::Relay(_)
-            | TxPurpose::Continue(_) => None,
+            | TxPurpose::Continue(_)
+            | TxPurpose::Finish(_) => None,
         }
     }
 }

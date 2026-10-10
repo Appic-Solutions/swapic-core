@@ -294,6 +294,9 @@ impl<S: Store> State<S> {
                     } => {
                         self.ensure_flow_nonce(TxPurpose::Continue(*quote_hash), *chain_id, *nonce)
                     }
+                    FlowStep::CctpFinishSigned {
+                        chain_id, nonce, ..
+                    } => self.ensure_flow_nonce(TxPurpose::Finish(*quote_hash), *chain_id, *nonce),
                     _ => Ok(()),
                 }
             }
@@ -333,8 +336,9 @@ impl<S: Store> State<S> {
                 swap.ensure_no_open_attempt()?;
             }
             // a relay creates its flow with its signed record, and one quote is relayed at
-            // most once (rule 4b.4 from this side; the router's `usedQuote` is the other)
-            TxPurpose::Relay(_) => {
+            // most once (rule 4b.4 from this side; the router's `usedQuote` is the other);
+            // a finish is signed once per message and action the same way
+            TxPurpose::Relay(_) | TxPurpose::Finish(_) => {
                 if self.store().flow(&quote_hash).is_some() {
                     return Err(types::FlowError::Exists(quote_hash).into());
                 }
@@ -587,11 +591,14 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             }
             | FlowStep::ContinuationSigned {
                 chain_id, nonce, ..
+            }
+            | FlowStep::CctpFinishSigned {
+                chain_id, nonce, ..
             } = step
             {
                 state.record_nonce_spent(*chain_id, *nonce);
             }
-            state.record_flow(*quote_hash, step, event.timestamp);
+            state.record_flow(*quote_hash, step, event.index, event.timestamp);
         }
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing

@@ -138,7 +138,7 @@ pub async fn drive_flows() -> usize {
 
 async fn drive_flow(quote_hash: QuoteHash, flow: &Flow) -> Result<(), FlowDriveError> {
     match flow.kind {
-        FlowKind::Relay => Ok(()),
+        FlowKind::Relay | FlowKind::Finish => Ok(()),
         FlowKind::IcpToEvm => icp_to_evm(quote_hash, flow).await,
         FlowKind::EvmToIcp => super::evm_to_icp::step(quote_hash, flow).await,
     }
@@ -672,7 +672,10 @@ async fn continue_on_ethereum(
             Wei::ZERO,
             data,
             GasAmount::from(gas),
-            Some((params.dst.action, flow.eth_held)),
+            Some(tx::Detail::Continuation {
+                action: params.dst.action,
+                amount: flow.eth_held,
+            }),
         )
         .await
         .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
