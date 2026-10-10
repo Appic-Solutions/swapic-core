@@ -158,3 +158,50 @@ pub async fn start_icp_swap(quote_hash: Hash32) -> Result<Nat, FlowCallError> {
         Err(error) => Err(FlowCallError::Unavailable(format!("{error:?}"))),
     }
 }
+
+pub use settlement_api::types::flow::{EvmQuoteRegistered, EvmToIcpQuote};
+
+/// Quoter-only, refused while halted. Registers an EVM to ICP quote durably BEFORE the
+/// router quote is built (spec 4b.8): the user's principal is recorded with it, and the
+/// answer names where the ckUSDC must be deposited, the canister's subaccount named by the
+/// router params' `ref` (`reference`), so the route's helper deposit carries it. The
+/// engine finds the ckUSDC there, swaps it on ICPSwap and pays the user. A quote for
+/// ckUSDC itself names no pool, and its ckUSDC is forwarded as it is.
+#[update]
+pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, FlowCallError> {
+    require_not_halted().map_err(FlowCallError::Guard)?;
+    require_quoter().map_err(FlowCallError::Guard)?;
+    let settings = flow_settings::get();
+    let ckusdc = settings
+        .ckusdc_ledger
+        .ok_or_else(|| invalid("no ckUSDC ledger is configured"))?;
+    let min_out = token_amount("min_out", &quote.min_out)?;
+    match quote.pool {
+        None if quote.target_ledger != ckusdc => {
+            return Err(invalid("a token other than ckUSDC needs an ICPSwap pool"))
+        }
+        Some(pool) if !settings.icpswap_pools.contains(&pool) => {
+            return Err(invalid("the pool is not one the canister swaps on"))
+        }
+        _ => {}
+    }
+    check_expiry(quote.expires_at_s)?;
+    let domain = types::flow::EvmToIcpQuote {
+        user: quote.user.as_slice().to_vec(),
+        target_ledger: quote.target_ledger.as_slice().to_vec(),
+        pool: quote.pool.map(|pool| pool.as_slice().to_vec().into()),
+        min_out,
+        src_chain: types::ChainId::new(quote.src_chain),
+        expires_at: types::UnixSeconds::new(quote.expires_at_s),
+        nonce: quote.nonce,
+        reference: QuoteHash::new(quote.reference),
+    };
+    let quote_hash = domain.hash();
+    flow_engine::record(quote_hash, FlowStep::EvmQuoteRegistered { quote: domain })
+        .map_err(|e| FlowCallError::Refused(e.to_string()))?;
+    Ok(EvmQuoteRegistered {
+        quote_hash: quote_hash.into_bytes(),
+        owner: ic_cdk::api::id(),
+        subaccount: quote_hash.into_bytes(),
+    })
+}

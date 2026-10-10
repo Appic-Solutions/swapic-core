@@ -57,19 +57,19 @@ pub fn record(quote_hash: QuoteHash, step: FlowStep) -> Result<(), AppendError> 
     append_event(EventType::Flow { quote_hash, step }).map(drop)
 }
 
-fn now() -> Timestamp {
+pub fn now() -> Timestamp {
     Timestamp::from_nanos(ic_cdk::api::time())
 }
 
-fn principal(bytes: &[u8]) -> Option<Principal> {
+pub fn principal(bytes: &[u8]) -> Option<Principal> {
     Principal::try_from_slice(bytes).ok()
 }
 
-fn amount(nat: &Nat) -> TokenAmount {
+pub fn amount(nat: &Nat) -> TokenAmount {
     TokenAmount::try_from(nat.clone()).unwrap_or(TokenAmount::MAX)
 }
 
-fn nat(amount: TokenAmount) -> Nat {
+pub fn nat(amount: TokenAmount) -> Nat {
     Nat::from(amount)
 }
 
@@ -139,7 +139,7 @@ async fn drive_flow(quote_hash: QuoteHash, flow: &Flow) -> Result<(), FlowDriveE
     }
 }
 
-fn freeze(quote_hash: QuoteHash, reason: &str) -> Result<(), FlowDriveError> {
+pub fn freeze(quote_hash: QuoteHash, reason: &str) -> Result<(), FlowDriveError> {
     record(
         quote_hash,
         FlowStep::Frozen {

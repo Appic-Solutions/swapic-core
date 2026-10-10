@@ -393,6 +393,25 @@ type EvmAddressError = variant {
   NoPrefix;
   NotHex;
 };
+// Where the ckUSDC of a registered EVM to ICP quote must be deposited.
+type EvmQuoteRegistered = record {
+  owner : principal;
+  quote_hash : blob;
+  subaccount : blob;
+};
+// The EVM to ICP quote the quoter registers before the router quote exists (spec 4b.8).
+// `reference` is the router params' `ref`: the flow's key, and the subaccount of this
+// canister the ckUSDC is deposited to.
+type EvmToIcpQuote = record {
+  min_out : nat;
+  pool : opt principal;
+  user : principal;
+  reference : blob;
+  target_ledger : principal;
+  src_chain : nat64;
+  nonce : nat64;
+  expires_at_s : nat64;
+};
 // Why a flow door refused. Nothing moved.
 type FlowCallError = variant {
   // The request is not one the canister acts on: the field and the reason.
@@ -836,14 +855,15 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok : blob; Err : ClaimError };
-type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_11 = variant { Ok; Err : SetConfigError };
-type Result_12 = variant { Ok; Err : FlowCallError };
-type Result_13 = variant { Ok; Err : GuardError };
-type Result_14 = variant { Ok; Err : SetRolesError };
-type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_16 = variant { Ok : blob; Err : PullError };
-type Result_17 = variant { Ok : nat; Err : FlowCallError };
+type Result_10 = variant { Ok : blob; Err : FlowCallError };
+type Result_11 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_12 = variant { Ok; Err : SetConfigError };
+type Result_13 = variant { Ok; Err : FlowCallError };
+type Result_14 = variant { Ok; Err : GuardError };
+type Result_15 = variant { Ok; Err : SetRolesError };
+type Result_16 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_17 = variant { Ok : blob; Err : PullError };
+type Result_18 = variant { Ok : nat; Err : FlowCallError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : Config; Err : GuardError };
@@ -851,7 +871,7 @@ type Result_5 = variant { Ok : opt Quote; Err : GuardError };
 type Result_6 = variant { Ok; Err : PushAttestationError };
 type Result_7 = variant { Ok; Err : PushChainDataError };
 type Result_8 = variant { Ok; Err : PushEcoIntentError };
-type Result_9 = variant { Ok : blob; Err : FlowCallError };
+type Result_9 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why a read of a chain answered nothing usable. `NoUrl` is a deploy mistake, `Rpc` is the
@@ -1174,11 +1194,18 @@ service : (InitArg) -> {
   // amount whatever the intent says, so the halt switch does not gate it. Only a known swap
   // on the Eco rail has an inbox slot.
   push_eco_intent : (blob, EcoIntent) -> (Result_8);
+  // Quoter-only, refused while halted. Registers an EVM to ICP quote durably BEFORE the
+  // router quote is built (spec 4b.8): the user's principal is recorded with it, and the
+  // answer names where the ckUSDC must be deposited, the canister's subaccount named by the
+  // router params' `ref` (`reference`), so the route's helper deposit carries it. The
+  // engine finds the ckUSDC there, swaps it on ICPSwap and pays the user. A quote for
+  // ckUSDC itself names no pool, and its ckUSDC is forwarded as it is.
+  register_evm_quote : (EvmToIcpQuote) -> (Result_9);
   // Quoter-only, refused while halted. Registers an ICP to EVM quote durably, with the
   // user's original destination terms (its route), BEFORE the user is told what to
   // approve (spec 4b.1). Answers the quote hash: the user approves the canister with that
   // hash as the spender subaccount, and only that allowance is ever pulled.
-  register_icp_quote : (IcpToEvmQuote) -> (Result_9);
+  register_icp_quote : (IcpToEvmQuote) -> (Result_10);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1189,33 +1216,33 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_10);
+  register_quote : (Quote) -> (Result_11);
   // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
   // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
   // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
   // every readable field is checked against them, the authorization must recover to the
   // payer, and `swapFor` must succeed in simulation before the canister signs it once and
   // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
-  relay_gasless : (nat64, blob, blob) -> (Result_9);
+  relay_gasless : (nat64, blob, blob) -> (Result_10);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_11);
+  set_config : (Config) -> (Result_12);
   // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
   // and the windows the flows read.
-  set_flow_settings : (FlowSettings) -> (Result_12);
+  set_flow_settings : (FlowSettings) -> (Result_13);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_13);
+  set_halted : (bool) -> (Result_14);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_14);
+  set_roles : (principal, principal) -> (Result_15);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1225,7 +1252,7 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_15);
+  set_sanctioned : (vec text, vec text) -> (Result_16);
   // Quoter-only. Pulls a gasless user's funds into the source chain's vault with the
   // Permit2 permit they signed, for a quote that is pending, gasless and still payable, and
   // answers the hash of the transaction that does it. The permit has to be witnessed by
@@ -1235,13 +1262,13 @@ service : (InitArg) -> {
   // vault's 2612 door transfers on a standing allowance whether or not the permit verified
   // and a 2612 signature names no quote. The pull creates no swap: the deposit it makes is
   // what `claim_swap` then verifies. Halted, the canister pulls nothing.
-  start_gasless_pull : (blob, PullRequest) -> (Result_16);
+  start_gasless_pull : (blob, PullRequest) -> (Result_17);
   // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
   // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
   // the quote hash (and from no other), and answers what was pulled. The engine then swaps
   // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
   // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_17);
+  start_icp_swap : (blob) -> (Result_18);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
