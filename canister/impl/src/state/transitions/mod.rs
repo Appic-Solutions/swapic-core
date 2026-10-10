@@ -488,6 +488,9 @@ impl<S: Store> State<S> {
 /// refuses.
 pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
     state.record_event(event.index, event.hash);
+    if event.payload.signed_tx().is_some() {
+        state.record_signed(event.index);
+    }
     match &event.payload {
         EventType::FundsReceived {
             quote_hash,

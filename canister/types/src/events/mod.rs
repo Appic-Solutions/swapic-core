@@ -479,6 +479,59 @@ impl EventError {
 }
 
 impl EventType {
+    /// The signed transaction this line records the exact bytes of, if it records one:
+    /// its chain, its hash and its bytes. What the watcher broadcasts.
+    pub fn signed_tx(&self) -> Option<(ChainId, TxHash, &[u8])> {
+        match self {
+            EventType::TxSigned {
+                chain_id,
+                tx_hash,
+                raw_tx,
+                ..
+            }
+            | EventType::TxReplaced {
+                chain_id,
+                tx_hash,
+                raw_tx,
+                ..
+            }
+            | EventType::TxCancelled {
+                chain_id,
+                tx_hash,
+                raw_tx,
+                ..
+            }
+            | EventType::PullSigned {
+                chain_id,
+                tx_hash,
+                raw_tx,
+                ..
+            } => Some((*chain_id, *tx_hash, raw_tx)),
+            EventType::Flow { step, .. } => match step {
+                FlowStep::GaslessRelayed {
+                    chain_id,
+                    tx_hash,
+                    raw_tx,
+                    ..
+                }
+                | FlowStep::ContinuationSigned {
+                    chain_id,
+                    tx_hash,
+                    raw_tx,
+                    ..
+                }
+                | FlowStep::CctpFinishSigned {
+                    chain_id,
+                    tx_hash,
+                    raw_tx,
+                    ..
+                } => Some((*chain_id, *tx_hash, raw_tx)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether this line can give some swap a next step the engine should act on now. The
     /// engine drives the moment such a line lands instead of waiting for its tick. The
     /// lines that only allocate, sign, re-send or cancel a transaction are left out: the

@@ -1,6 +1,7 @@
 use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
+use std::ops::RangeFrom;
 use types::events::TxPurpose;
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Flow, LedgerMeta, Leg, Nonce, NonceKey,
@@ -39,6 +40,10 @@ pub trait Store {
     fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce);
     /// Every chain the allocator has handed out a nonce on, in chain id order.
     fn nonces(&self) -> Vec<(ChainId, Nonce)>;
+    /// Indexes a line that records a signed transaction's bytes.
+    fn put_signed(&mut self, index: EventIndex);
+    /// At most `limit` of the indexed lines in `range`, in log order.
+    fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex>;
     /// The nonce `TxCreated` handed out at `key` and no `TxSigned` or `TxCancelled` has
     /// ended, if there is one.
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx>;
@@ -140,6 +145,8 @@ pub struct MemoryStore {
     unsigned: BTreeMap<NonceKey, UnsignedTx>,
     #[n(6)]
     flows: BTreeMap<QuoteHash, Flow>,
+    #[n(7)]
+    signed: BTreeSet<EventIndex>,
 }
 
 impl Store for MemoryStore {
@@ -219,6 +226,14 @@ impl Store for MemoryStore {
             .collect()
     }
 
+    fn put_signed(&mut self, index: EventIndex) {
+        self.signed.insert(index);
+    }
+
+    fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
+        self.signed.range(range).take(limit).copied().collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -281,6 +296,7 @@ impl State<MemoryStore> {
             nonces,
             unsigned,
             flows,
+            signed,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -306,6 +322,9 @@ impl State<MemoryStore> {
             && flows
                 .iter()
                 .eq(other_flows.iter().map(|(hash, flow)| (hash, flow)))
+            && signed
+                .iter()
+                .eq(other.store.signed_in(EventIndex::ZERO.., usize::MAX).iter())
     }
 }
 
@@ -375,6 +394,11 @@ impl<S: Store> State<S> {
                 quote_hash: *quote_hash,
             });
         }
+    }
+
+    /// A line that records a signed transaction's bytes, indexed for `signed_txs`.
+    fn record_signed(&mut self, index: EventIndex) {
+        self.store.put_signed(index);
     }
 
     fn record_event(&mut self, index: EventIndex, hash: EventHash) {

@@ -1,13 +1,14 @@
 //! What the flows' fold holds.
 
-use crate::storage::events::read_state;
+use crate::state::Store;
+use crate::storage::events::{self, read_state};
 use crate::storage::flow_settings;
 use candid::{Nat, Principal};
 use ic_cdk::query;
 pub use settlement_api::types::events::Hash32;
 pub use settlement_api::types::flow::{FlowSettings, FlowView, RelayStatus};
 pub use settlement_api::types::tx::{ChainRef, SignedTx};
-use types::{Flow, FlowStatus, QuoteHash};
+use types::{EventIndex, Flow, FlowStatus, QuoteHash};
 
 fn nat(amount: types::TokenAmount) -> Nat {
     Nat::from(amount)
@@ -75,6 +76,28 @@ pub fn get_flow_settings() -> FlowSettings {
 /// backup.
 #[query]
 pub fn signed_txs(after_id: u64, limit: u64) -> Vec<SignedTx> {
-    let _ = (after_id, limit);
-    Vec::new()
+    let Some(from) = EventIndex::new(after_id).next() else {
+        return Vec::new();
+    };
+    let limit = usize::try_from(limit.min(MAX_SIGNED_PAGE)).unwrap_or(0);
+    read_state(|state| state.store().signed_in(from.., limit))
+        .into_iter()
+        .filter_map(|index| events::event_at(index.get()))
+        .filter_map(|event| {
+            let (chain_id, tx_hash, raw) = event.payload.signed_tx()?;
+            Some(SignedTx {
+                id: event.index.get(),
+                chain: ChainRef::Evm(chain_id.get()),
+                raw: raw.to_vec(),
+                hash: tx_hash.into_bytes().to_vec(),
+                signed_at_ns: event.timestamp.as_nanos(),
+            })
+        })
+        .collect()
 }
+
+/// The most transactions one `signed_txs` page holds.
+const MAX_SIGNED_PAGE: u64 = 100;
+
+#[cfg(test)]
+mod tests;

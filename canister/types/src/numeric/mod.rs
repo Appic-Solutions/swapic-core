@@ -131,6 +131,24 @@ impl EventIndex {
     }
 }
 
+/// Eight big-endian bytes, so a stable set orders indices by their value.
+impl Storable for EventIndex {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.to_be_bytes().to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Self(u64::from_be_bytes(bytes.as_ref().try_into().expect(
+            "BUG: a stored event index is written as exactly 8 bytes",
+        )))
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 8,
+        is_fixed_size: true,
+    };
+}
+
 /// The transaction count of an account on one chain: the number the next transaction from
 /// it must carry. Allocated by the canister and never read from a chain to decide (rule
 /// A4), so two transactions can never share one.

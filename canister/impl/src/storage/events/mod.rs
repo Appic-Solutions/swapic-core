@@ -2,13 +2,13 @@ use crate::state::transitions::{apply_state_transition, replay, replay_into, Rep
 use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, events_data_memory, events_index_memory, flows_memory,
-    ledger_meta_memory, nonces_memory, pockets_memory, swaps_memory, unsigned_nonces_memory,
-    Memory,
+    ledger_meta_memory, nonces_memory, pockets_memory, signed_memory, swaps_memory,
+    unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
 use std::cell::RefCell;
-use std::ops::Bound;
+use std::ops::{Bound, RangeFrom};
 use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
@@ -61,6 +61,11 @@ thread_local! {
     // `Flow` lines write them.
     static FLOWS: RefCell<StableBTreeMap<QuoteHash, Flow, Memory>> =
         RefCell::new(StableBTreeMap::init(flows_memory()));
+
+    // The lines that record a signed transaction's bytes, by log index: what `signed_txs`
+    // pages through. Part of the fold: only those lines write it.
+    static SIGNED: RefCell<StableBTreeSet<EventIndex, Memory>> =
+        RefCell::new(StableBTreeSet::init(signed_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -143,6 +148,14 @@ impl Store for StableStore {
 
     fn nonces(&self) -> Vec<(ChainId, Nonce)> {
         NONCES.with(|nonces| nonces.borrow().iter().collect())
+    }
+
+    fn put_signed(&mut self, index: EventIndex) {
+        SIGNED.with(|signed| signed.borrow_mut().insert(index));
+    }
+
+    fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
+        SIGNED.with(|signed| signed.borrow().range(range).take(limit).collect())
     }
 
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
@@ -264,6 +277,7 @@ pub fn init() {
     NONCES.with(|_| ());
     UNSIGNED_NONCES.with(|_| ());
     FLOWS.with(|_| ());
+    SIGNED.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at
@@ -363,6 +377,11 @@ pub fn read_state<R>(f: impl FnOnce(&State<StableStore>) -> R) -> R {
 #[cfg(feature = "inttest")]
 pub fn test_skew_chain_head() {
     State::new(StableStore(())).skew_chain_head();
+}
+
+/// The event at `index`, if the log holds one.
+pub fn event_at(index: u64) -> Option<Event> {
+    EVENTS.with(|e| e.borrow().get(index))
 }
 
 pub fn event_count() -> u64 {
