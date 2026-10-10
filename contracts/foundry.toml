@@ -18,3 +18,5 @@ fail_on_revert = true
 
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
+arbitrum = "${ARBITRUM_RPC_URL}"
+mainnet = "${ETH_RPC_URL}"
