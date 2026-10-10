@@ -1,5 +1,6 @@
 use super::*;
 use alloy_primitives::{Address, Bytes};
+use types::config::{ChainTable, PerAction};
 use types::router::{Delivery, DexCall, EcoTerms, ACTION_SWAP};
 
 fn params(now: u64) -> SwapParams {
@@ -97,4 +98,48 @@ fn a_local_swap_delivers_to_an_evm_address_on_its_own_chain() {
     let mut not_evm = local;
     not_evm.dst.recipient = FixedBytes([9; 32]);
     assert!(check(&not_evm).is_err());
+}
+
+#[test]
+fn relay_refuses_short_network_fee() {
+    let now = 1_800_000_000;
+    let base = ChainId::new(8453);
+    let minimums = ChainTable(std::collections::BTreeMap::from([
+        (
+            base,
+            PerAction {
+                relay: TokenAmount::from(20_000_u32),
+                completion: TokenAmount::from(5_000_u32),
+                payout: TokenAmount::ZERO,
+            },
+        ),
+        (
+            ChainId::new(42161),
+            PerAction {
+                relay: TokenAmount::from(15_000_u32),
+                completion: TokenAmount::from(30_000_u32),
+                payout: TokenAmount::ZERO,
+            },
+        ),
+    ]));
+    // CCTP: the relay on Base and the completion on Arbitrum
+    let mut cctp = params(now);
+    cctp.networkFee = U256::from(50_000);
+    assert_eq!(check_network_fee(&cctp, base, &minimums), Ok(()));
+    cctp.networkFee = U256::from(49_999);
+    assert!(check_network_fee(&cctp, base, &minimums).is_err());
+    // Eco: the relay alone, the solver fills
+    let mut eco = params(now);
+    eco.rail = RAIL_ECO;
+    eco.networkFee = U256::from(20_000);
+    assert_eq!(check_network_fee(&eco, base, &minimums), Ok(()));
+    eco.networkFee = U256::from(19_999);
+    assert!(check_network_fee(&eco, base, &minimums).is_err());
+    // a chain with no minimums asks for none
+    let mut free = params(now);
+    free.networkFee = U256::ZERO;
+    assert_eq!(
+        check_network_fee(&free, ChainId::new(10), &ChainTable::default()),
+        Ok(())
+    );
 }

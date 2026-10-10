@@ -25,6 +25,18 @@ pub enum TxError {
         cost_wei: Nat,
         bound_wei: Nat,
     },
+    /// The chain has no gas budget for this action, so nothing is signed for it.
+    NoGasBudget {
+        chain_id: u64,
+        action: String,
+    },
+    /// The price and the gas limit together are above the gas budget of this action.
+    OverGasBudget {
+        chain_id: u64,
+        action: String,
+        cost_wei: Nat,
+        budget_wei: Nat,
+    },
     /// A transaction is signed against a swap's attempt, and this purpose names no swap.
     PurposeNeedsASwap {
         purpose: String,

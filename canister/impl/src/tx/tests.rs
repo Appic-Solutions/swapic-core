@@ -228,6 +228,19 @@ fn a_replacement_doubles_its_fee_up_to_a_ceiling_and_then_stops() {
 fn a_large_gas_limit_keeps_bumping_in_smaller_steps_up_to_the_cost_cap() {
     on_fresh_memory(|| {
         crate::storage::init();
+        // a budget far above the bound, so the bound is what stops the bids
+        let roomy = Wei::from(10_000_000_000_000_000_000_u128);
+        config::test_set(types::Config {
+            gas_budget: types::config::ChainTable(std::collections::BTreeMap::from([(
+                ChainId::BASE,
+                types::config::PerAction {
+                    relay: roomy,
+                    completion: roomy,
+                    payout: roomy,
+                },
+            )])),
+            ..types::Config::default()
+        });
         chain_data::put(
             ChainId::BASE,
             ChainReading {
@@ -737,5 +750,76 @@ fn a_chain_with_no_depth_configured_decides_no_money() {
     assert_eq!(
         confirmations(&config, unlisted),
         Err(NoDepth { chain_id: unlisted })
+    );
+}
+
+fn reading(base_fee: u64, priority_fee: u64) -> ChainData {
+    ChainReading {
+        block: BlockNumber::new(1),
+        base_fee: WeiPerGas::from(base_fee),
+        priority_fee: WeiPerGas::from(priority_fee),
+    }
+    .pushed_at(at(100))
+}
+
+/// Review Focus 1: a gas spike between the quote and the signature leaves the
+/// transaction unsigned, and a replacement never bids past the budget either.
+#[test]
+fn gas_rule_refuses_over_budget() {
+    let gas = GasAmount::from(100_000_u64);
+    let budget = Wei::from(1_000_000_000_000_000_u64);
+    // 4 gwei base and a 1 gwei tip: 9 gwei times 100,000 gas is 0.0009 ETH
+    let calm = reading(4_000_000_000, 1_000_000_000).fees().unwrap();
+    assert_eq!(
+        within_budget(ChainId::BASE, GasAction::Relay, budget, calm, gas),
+        Ok(())
+    );
+    // a spike to 10 gwei: 21 gwei is 0.0021 ETH
+    let spike = reading(10_000_000_000, 1_000_000_000).fees().unwrap();
+    assert_eq!(
+        within_budget(ChainId::BASE, GasAction::Relay, budget, spike, gas),
+        Err(TxError::OverGasBudget {
+            chain_id: ChainId::BASE,
+            action: GasAction::Relay,
+            cost: Wei::from(2_100_000_000_000_000_u64),
+            budget,
+        })
+    );
+    // a chain with no budget for the action signs nothing for it
+    let config = types::Config::default();
+    assert_eq!(
+        budget_for(
+            &config,
+            ChainId::BASE,
+            TxPurpose::Relay(QuoteHash::new([1; 32]))
+        ),
+        Err(TxError::NoGasBudget {
+            chain_id: ChainId::BASE,
+            action: GasAction::Relay,
+        })
+    );
+    // a cancel is held to the bound every transaction has, not to a budget
+    assert_eq!(
+        budget_for(&config, ChainId::BASE, TxPurpose::Cancel(ChainId::BASE)),
+        Ok(None)
+    );
+    // the replacement of a 9 gwei bid stops at the 10 gwei the budget buys per gas, and
+    // the one after it is refused
+    let bumped = bump(
+        calm,
+        &reading(4_000_000_000, 1_000_000_000),
+        gas,
+        Some(budget),
+    )
+    .expect("there is room under the budget");
+    assert_eq!(bumped.max_fee(), WeiPerGas::from(10_000_000_000_u64));
+    assert_eq!(
+        bump(
+            bumped,
+            &reading(4_000_000_000, 1_000_000_000),
+            gas,
+            Some(budget)
+        ),
+        None
     );
 }

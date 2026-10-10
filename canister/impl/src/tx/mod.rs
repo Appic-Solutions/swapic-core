@@ -30,6 +30,7 @@ use settlement_api::types::errors::GuardError;
 use std::time::Duration;
 use thiserror::Error;
 use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
+use types::config::GasAction;
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
@@ -127,6 +128,20 @@ pub enum TxError {
     },
     #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the bound of {MAX_TRANSACTION_COST}")]
     GasCostTooHigh { chain_id: ChainId, cost: Wei },
+    #[error("chain {chain_id} has no gas budget for a {action:?}")]
+    NoGasBudget {
+        chain_id: ChainId,
+        action: GasAction,
+    },
+    #[error(
+        "a {action:?} on chain {chain_id} could spend {cost} on gas, above its budget of {budget}"
+    )]
+    OverGasBudget {
+        chain_id: ChainId,
+        action: GasAction,
+        cost: Wei,
+        budget: Wei,
+    },
     #[error("{0} names no quote, and this path signs against the quote a transaction is for")]
     PurposeNeedsASwap(&'static str),
     #[error("swap {quote_hash} has used every attempt number there is")]
@@ -202,6 +217,62 @@ fn affordable(chain_id: ChainId, fees: Fees, gas_limit: GasAmount) -> Result<(),
     Ok(())
 }
 
+/// The action whose budget a transaction for `purpose` is held to. None for a cancel:
+/// it spends a nonce that cannot be left unspent, and [`MAX_TRANSACTION_COST`] bounds it.
+pub fn gas_action(purpose: TxPurpose) -> Option<GasAction> {
+    match purpose {
+        TxPurpose::Relay(_) | TxPurpose::Continue(_) | TxPurpose::GaslessPull(_) => {
+            Some(GasAction::Relay)
+        }
+        TxPurpose::Mint(_) => Some(GasAction::Completion),
+        TxPurpose::Burn(_)
+        | TxPurpose::Payout(_)
+        | TxPurpose::Refund(_)
+        | TxPurpose::Reclaim(_) => Some(GasAction::Payout),
+        TxPurpose::Cancel(_) => None,
+    }
+}
+
+/// The gas budget a transaction for `purpose` on `chain_id` is held to: none for a
+/// cancel, and a refusal when the chain has no budget for the action.
+pub(crate) fn budget_for(
+    config: &types::Config,
+    chain_id: ChainId,
+    purpose: TxPurpose,
+) -> Result<Option<(GasAction, Wei)>, TxError> {
+    let Some(action) = gas_action(purpose) else {
+        return Ok(None);
+    };
+    let budget = config
+        .gas_budget
+        .0
+        .get(&chain_id)
+        .map(|budget| budget.get(action))
+        .ok_or(TxError::NoGasBudget { chain_id, action })?;
+    Ok(Some((action, budget)))
+}
+
+/// The gas rule (spec 3.3): the most a transaction can spend on gas, its limit times its
+/// fee cap, is within the budget of its action on its chain.
+pub fn within_budget(
+    chain_id: ChainId,
+    action: GasAction,
+    budget: Wei,
+    fees: Fees,
+    gas_limit: GasAmount,
+) -> Result<(), TxError> {
+    let cost = fees.worst_cost(gas_limit).unwrap_or(Wei::MAX);
+    if cost > budget {
+        return Err(TxError::OverGasBudget {
+            chain_id,
+            action,
+            cost,
+            budget,
+        });
+    }
+    Ok(())
+}
+
 /// Creates, signs and queues one transaction, and answers the hash it will be looked up
 /// by.
 ///
@@ -239,6 +310,11 @@ pub async fn create_and_send_with(
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let fees = fees(chain_id, now)?;
     affordable(chain_id, fees, gas_limit)?;
+    if let Some((action, budget)) = budget_for(&config::get(), chain_id, purpose)? {
+        within_budget(chain_id, action, budget, fees, gas_limit).inspect_err(|error| {
+            ic_cdk::println!("not signed for {quote_hash}: {error}");
+        })?;
+    }
 
     // the attempt the signed record will carry: the swap's next one, and none for a pull,
     // which is signed against its quote because no swap exists yet. Read before the
@@ -975,29 +1051,48 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
 }
 
 /// The fees a replacement pays: double what the transaction being replaced paid, never
-/// below what the chain is asking now, and never above what the freshest reading allows or
-/// what [`MAX_TRANSACTION_COST`] buys per unit of this transaction's gas, whichever is
-/// lower. Nothing at all once the entry is already at that ceiling, or when the chain
-/// reading is too old to price a bid against.
+/// below what the chain is asking now, and never above what the freshest reading allows,
+/// what [`MAX_TRANSACTION_COST`] buys per unit of this transaction's gas, or what its gas
+/// budget buys, whichever is lowest. Nothing at all once the entry is already at that
+/// ceiling, when its chain has no budget for it, or when the chain reading is too old to
+/// price a bid against.
 fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
     let reading = fresh_reading(chain_id, now).ok()?;
-    let floor = reading.fees()?;
+    let budget = budget_for(&config::get(), chain_id, entry.purpose)
+        .ok()?
+        .map(|(_, budget)| budget);
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
+    bump(current, &reading, entry.gas_limit, budget)
+}
+
+/// [`bumped`] on what it read. Pure, so the gas rule's hold on a replacement is a unit
+/// test.
+pub fn bump(
+    current: Fees,
+    reading: &ChainData,
+    gas_limit: GasAmount,
+    budget: Option<Wei>,
+) -> Option<Fees> {
+    let floor = reading.fees()?;
     // the bill is bounded as well as the price: a large gas limit lowers what can be paid
     // per unit, and the bump clamps to that the way it clamps to the fee ceiling, so the
     // bids keep rising in smaller steps up to the bound instead of stopping one doubling
     // short of it, and a bid is refused only once nothing can be raised
-    let ceiling = reading
-        .fee_ceiling()
-        .capped(affordable_per_gas(entry.gas_limit)?);
+    let mut ceiling = reading.fee_ceiling().capped(affordable_per_gas(gas_limit)?);
+    if let Some(budget) = budget {
+        ceiling = ceiling.capped(per_gas(budget, gas_limit)?);
+    }
     current.bumped(floor, ceiling)
 }
 
 /// The most a transaction burning `gas_limit` may pay per unit of gas and stay inside
 /// [`MAX_TRANSACTION_COST`]. Nothing for a gas limit of zero, which no transaction has.
 fn affordable_per_gas(gas_limit: GasAmount) -> Option<WeiPerGas> {
-    MAX_TRANSACTION_COST
-        .checked_div_floor(gas_limit.into_inner())
+    per_gas(MAX_TRANSACTION_COST, gas_limit)
+}
+
+fn per_gas(cost: Wei, gas_limit: GasAmount) -> Option<WeiPerGas> {
+    cost.checked_div_floor(gas_limit.into_inner())
         .map(|cost| cost.change_units())
 }
 
@@ -1063,6 +1158,21 @@ impl From<TxError> for settlement_api::types::tx::TxError {
                 chain_id: chain_id.get(),
                 cost_wei: cost.into(),
                 bound_wei: MAX_TRANSACTION_COST.into(),
+            },
+            TxError::NoGasBudget { chain_id, action } => Self::NoGasBudget {
+                chain_id: chain_id.get(),
+                action: format!("{action:?}"),
+            },
+            TxError::OverGasBudget {
+                chain_id,
+                action,
+                cost,
+                budget,
+            } => Self::OverGasBudget {
+                chain_id: chain_id.get(),
+                action: format!("{action:?}"),
+                cost_wei: cost.into(),
+                budget_wei: budget.into(),
             },
             TxError::PurposeNeedsASwap(purpose) => Self::PurposeNeedsASwap {
                 purpose: purpose.to_string(),

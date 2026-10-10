@@ -13,18 +13,20 @@ mod tests;
 use crate::ecdsa;
 use crate::evm_reads::{self, Simulated};
 use crate::guards::{require_not_halted, require_quoter};
+use crate::storage::config;
 use crate::storage::events::read_state;
 use crate::storage::flow_settings::{self, FlowSettings};
 use crate::storage::sanctions::is_sanctioned;
 use crate::tx;
 use alloy_primitives::{FixedBytes, U256};
 use settlement_api::types::flow::FlowCallError;
+use types::config::{ChainTable, GasAction, PerAction};
 use types::events::TxPurpose;
 use types::router::{
     self, GaslessAuth, ReceiveWithAuthorization, SwapParams, ACTION_DELIVER, DOOR_AUTH_3009,
     DOOR_PERMIT2, DOOR_PERMIT_2612, RAIL_CCTP, RAIL_ECO, RAIL_LOCAL,
 };
-use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, Wei};
+use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, TokenAmount, Wei};
 
 /// Why a relay was refused before any outcall.
 fn invalid(reason: impl Into<String>) -> FlowCallError {
@@ -105,6 +107,38 @@ pub fn check_readable(
             }
         }
         _ => return Err("the door is not one the router has".into()),
+    }
+    Ok(())
+}
+
+/// The least `networkFee` a relayed route pays: the relay's minimum on its own chain, plus
+/// on CCTP the completion's minimum on the destination chain, since the canister submits
+/// that one too. A chain with no minimums asks for none.
+pub fn check_network_fee(
+    params: &SwapParams,
+    chain_id: ChainId,
+    minimums: &ChainTable<PerAction<TokenAmount>>,
+) -> Result<(), String> {
+    let minimum = |chain: ChainId, action: GasAction| {
+        minimums
+            .get(chain)
+            .map_or(TokenAmount::ZERO, |fees| fees.get(action))
+    };
+    let mut needed = minimum(chain_id, GasAction::Relay);
+    if params.rail == RAIL_CCTP {
+        needed = needed
+            .checked_add(minimum(
+                ChainId::new(params.dstChainId),
+                GasAction::Completion,
+            ))
+            .unwrap_or(TokenAmount::MAX);
+    }
+    let paid = U256::from_be_bytes(needed.to_be_bytes());
+    if params.networkFee < paid {
+        return Err(format!(
+            "networkFee {} is below the {needed} the route needs",
+            params.networkFee
+        ));
     }
     Ok(())
 }
@@ -216,6 +250,7 @@ pub async fn relay_gasless(
         settings.relay_window.as_secs(),
     )
     .map_err(invalid)?;
+    check_network_fee(&params, chain_id, &config::get().min_network_fee).map_err(invalid)?;
     let payer = router::evm(params.payer);
     if is_sanctioned(&types::Address::from(payer)) {
         return Err(FlowCallError::Refused("the payer is sanctioned".into()));
