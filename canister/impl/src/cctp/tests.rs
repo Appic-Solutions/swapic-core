@@ -34,7 +34,19 @@ const TRANSMITTER: EvmAddress = EvmAddress::new([
     0x81, 0xd4, 0x0f, 0x21, 0xf1, 0x2a, 0x8f, 0x0e, 0x32, 0x52, 0xbc, 0xcb, 0x95, 0x4d, 0x72, 0x2d,
     0x4c, 0x46, 0x4b, 0x64,
 ]);
+const MESSENGER: EvmAddress = EvmAddress::new([
+    0x28, 0xb5, 0xa0, 0xe9, 0xc6, 0x21, 0xa5, 0xba, 0xda, 0xa5, 0x36, 0x21, 0x9b, 0x3a, 0x22, 0x8c,
+    0x81, 0x68, 0xcf, 0x5d,
+]);
+const BASE_USDC: EvmAddress = EvmAddress::new([
+    0x83, 0x35, 0x89, 0xfc, 0xd6, 0xed, 0xb6, 0xe0, 0x8f, 0x4c, 0x7c, 0x32, 0xd4, 0xf7, 0x1b, 0x54,
+    0xbd, 0xa0, 0x29, 0x13,
+]);
 const NOW: u64 = 1_790_000_000;
+
+fn usdc() -> ChainTable<EvmAddress> {
+    ChainTable(BTreeMap::from([(BASE, BASE_USDC)]))
+}
 
 fn domains() -> ChainTable<CctpDomain> {
     ChainTable(BTreeMap::from([
@@ -61,11 +73,13 @@ fn settings() -> FlowSettings {
 }
 
 fn decide_on(chain_id: ChainId, message: &BurnMessage, now_s: u64) -> Result<Plan, String> {
-    let (domains, settings) = (domains(), settings());
+    let (domains, usdc, settings) = (domains(), usdc(), settings());
     let setup = Setup {
         chain_id,
         domains: &domains,
+        usdc: &usdc,
         settings: &settings,
+        messenger: Some(MESSENGER),
         transmitter: Some(TRANSMITTER),
     };
     decide(message, &setup, now_s)
@@ -109,6 +123,9 @@ fn the_real_message_reads_as_circle_attested_it() {
         "1280877a8b106ebbfa4049f1d4ebc852d530ca8e243a59a2389847418e9bf597"
     );
     assert_eq!(message.destination_caller, [0; 32]);
+    assert_eq!(message.sender, MESSENGER.to_word());
+    assert_eq!(message.recipient, MESSENGER.to_word());
+    assert_eq!(message.body.burn_token, BASE_USDC.to_word());
     assert_eq!(
         hex::encode(&message.body.mint_recipient[12..]),
         "c5a0d52edf2dc3df76ed5d2848088270fcf6e2a4"
@@ -132,6 +149,34 @@ fn a_burn_swapic_did_not_make_is_refused() {
     assert_eq!(
         decide_on(ARBITRUM, &no_hook, NOW),
         Err("the message carries no Swapic hook data".into())
+    );
+}
+
+/// CCTP's generic messaging is permissionless: anyone can have a body shaped like a
+/// Swapic burn attested, with the outer sender being their own contract.
+#[test]
+fn forged_generic_message_is_refused() {
+    let mut forged = ours(ACTION_DELIVER);
+    forged.sender = [0x0f; 32];
+    assert_eq!(
+        decide_on(ARBITRUM, &forged, NOW),
+        Err("the message is not a token messenger burn".into())
+    );
+}
+
+#[test]
+fn wrong_outer_recipient_is_refused() {
+    let mut forged = ours(ACTION_DELIVER);
+    forged.recipient = [0x0f; 32];
+    assert_eq!(
+        decide_on(ARBITRUM, &forged, NOW),
+        Err("the message is not a token messenger burn".into())
+    );
+    let mut not_usdc = ours(ACTION_DELIVER);
+    not_usdc.body.burn_token = [0x0e; 32];
+    assert_eq!(
+        decide_on(ARBITRUM, &not_usdc, NOW),
+        Err("the burn is not USDC".into())
     );
 }
 

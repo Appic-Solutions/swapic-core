@@ -2,9 +2,11 @@
 //! attested message, the canister decides from the hook data and the clock what to call,
 //! simulates it, holds it to the gas rule and signs it once per message and action.
 //!
-//! Only Swapic's own burns are finished: the message's sender must be Swapic on the
-//! source chain and its hook data Swapic's, so the canister never pays gas for a burn
-//! that collected no `networkFee`.
+//! Only Swapic's own burns are finished: the message must come from CCTP's token
+//! messenger on both ends and burn the source chain's USDC, its burn must be sent by
+//! Swapic on the source chain and carry Swapic's hook data, so the canister never pays gas
+//! for a message that collected no `networkFee`. The outer check comes first: anyone can
+//! have a generic message attested whose body looks like a Swapic burn.
 
 #[cfg(test)]
 mod tests;
@@ -40,11 +42,13 @@ pub struct Plan {
 }
 
 /// What `finish_cctp` reads besides the message: the chain's CCTP domain, every chain's
-/// domain and Swapic, and the message transmitter.
+/// domain, USDC and Swapic, the token messenger and the message transmitter.
 pub struct Setup<'a> {
     pub chain_id: ChainId,
     pub domains: &'a types::config::ChainTable<types::CctpDomain>,
+    pub usdc: &'a types::config::ChainTable<EvmAddress>,
     pub settings: &'a FlowSettings,
+    pub messenger: Option<EvmAddress>,
     pub transmitter: Option<EvmAddress>,
 }
 
@@ -67,6 +71,10 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
             chain_domain.get()
         ));
     }
+    let messenger = setup.messenger.ok_or("no token messenger is configured")?;
+    if message.sender != word(messenger) || message.recipient != word(messenger) {
+        return Err("the message is not a token messenger burn".into());
+    }
     let source = setup
         .domains
         .0
@@ -74,6 +82,13 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
         .find(|(_, domain)| domain.get() == message.source_domain)
         .map(|(chain, _)| *chain)
         .ok_or_else(|| format!("no chain is CCTP domain {}", message.source_domain))?;
+    let usdc = setup
+        .usdc
+        .get(source)
+        .ok_or_else(|| format!("no USDC is configured on chain {source}"))?;
+    if message.body.burn_token != word(usdc) {
+        return Err("the burn is not USDC".into());
+    }
     let source_swapic = setup
         .settings
         .router(source)
@@ -191,7 +206,9 @@ pub async fn finish_cctp(
     let setup = Setup {
         chain_id,
         domains: &config.cctp_domains,
+        usdc: &config.usdc_addresses,
         settings: &settings,
+        messenger: config.token_messenger,
         transmitter: config.message_transmitter,
     };
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
