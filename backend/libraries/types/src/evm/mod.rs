@@ -182,6 +182,15 @@ impl EcdsaSignature {
     pub const fn y_parity(&self) -> bool {
         self.y_parity
     }
+
+    /// `r ++ s ++ v` with `v` 27 or 28: the 65-byte form a signature takes inside calldata.
+    pub fn to_rsv(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(65);
+        bytes.extend_from_slice(&self.r);
+        bytes.extend_from_slice(&self.s);
+        bytes.push(27 + u8::from(self.y_parity));
+        bytes
+    }
 }
 
 /// An unsigned EIP-1559 transaction. There is no access list: this canister sends none, and

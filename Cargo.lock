@@ -3290,6 +3290,7 @@ dependencies = [
 name = "settlement"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "candid",
  "hex",
  "ic-cdk",

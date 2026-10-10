@@ -167,6 +167,15 @@ pub enum EventType {
         tx_hash: Hash32,
         raw_tx: Vec<u8>,
     },
+    /// A step of a flow: a gasless relay, ICP to EVM, or EVM to ICP. `step` names it,
+    /// `detail` is a readable rendering, and `step_bytes` is the step exactly as the log
+    /// hashes it.
+    Flow {
+        quote_hash: Hash32,
+        step: String,
+        detail: String,
+        step_bytes: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. All but the last name the swap they belong to.
@@ -179,6 +188,8 @@ pub enum TxPurpose {
     GaslessPull(Hash32),
     Cancel(u64),
     Reclaim(Hash32),
+    Relay(Hash32),
+    Continue(Hash32),
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -192,6 +203,8 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::GaslessPull(hash) => Self::GaslessPull(hash.into_bytes()),
             Domain::Cancel(chain_id) => Self::Cancel(chain_id.get()),
             Domain::Reclaim(hash) => Self::Reclaim(hash.into_bytes()),
+            Domain::Relay(hash) => Self::Relay(hash.into_bytes()),
+            Domain::Continue(hash) => Self::Continue(hash.into_bytes()),
         }
     }
 }
@@ -206,6 +219,8 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::GaslessPull(hash) => Self::GaslessPull(QuoteHash::new(hash)),
             TxPurpose::Cancel(chain_id) => Self::Cancel(ChainId::new(chain_id)),
             TxPurpose::Reclaim(hash) => Self::Reclaim(QuoteHash::new(hash)),
+            TxPurpose::Relay(hash) => Self::Relay(QuoteHash::new(hash)),
+            TxPurpose::Continue(hash) => Self::Continue(QuoteHash::new(hash)),
         }
     }
 }
@@ -464,6 +479,12 @@ impl From<types::EventType> for EventType {
                 tx_hash: tx_hash.into_bytes(),
                 raw_tx,
             },
+            Domain::Flow { quote_hash, step } => Self::Flow {
+                quote_hash: quote_hash.into_bytes(),
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            },
         }
     }
 }
@@ -691,6 +712,18 @@ impl TryFrom<EventType> for types::EventType {
                 tx_hash: TxHash::new(tx_hash),
                 raw_tx,
             },
+            EventType::Flow {
+                quote_hash,
+                step_bytes,
+                ..
+            } => Self::Flow {
+                quote_hash: QuoteHash::new(quote_hash),
+                step: types::FlowStep::from_bytes(&step_bytes).ok_or(
+                    DomainEventError::NotAFlowStep {
+                        field: "step_bytes",
+                    },
+                )?,
+            },
         })
     }
 }
@@ -772,6 +805,9 @@ pub enum EventError {
         field: String,
         reason: EvmAddressError,
     },
+    NotAFlowStep {
+        field: String,
+    },
 }
 
 /// Why a text is not an EVM address. Mirrors `types::evm::EvmAddressError` so a caller
@@ -813,6 +849,9 @@ impl From<types::events::EventError> for EventError {
             Domain::NotAnAddress { field, reason } => Self::NotAnAddress {
                 field: field.to_string(),
                 reason: reason.into(),
+            },
+            Domain::NotAFlowStep { field } => Self::NotAFlowStep {
+                field: field.to_string(),
             },
         }
     }

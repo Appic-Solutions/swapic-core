@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use types::events::TxPurpose;
 use types::{
-    Attempt, ChainId, Choice, EventHash, EventIndex, LedgerMeta, Leg, Nonce, NonceKey, Outcome,
-    Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, TxHash,
+    Attempt, ChainId, Choice, EventHash, EventIndex, Flow, LedgerMeta, Leg, Nonce, NonceKey,
+    Outcome, Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, TxHash,
     UnsignedTx, WaitingKey,
 };
 
@@ -14,6 +14,10 @@ pub mod transitions;
 /// Where the event log's fold lives. [`State`] reads and writes only through this, so one
 /// copy of the transition rules serves every store.
 pub trait Store {
+    fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow>;
+    fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow);
+    /// Every flow, in quote hash order.
+    fn flows(&self) -> Vec<(QuoteHash, Flow)>;
     fn swap(&self, quote_hash: &QuoteHash) -> Option<Swap>;
     fn put_swap(&mut self, quote_hash: QuoteHash, swap: Swap);
     /// Every swap, in quote hash order.
@@ -134,9 +138,26 @@ pub struct MemoryStore {
     nonces: BTreeMap<ChainId, Nonce>,
     #[n(5)]
     unsigned: BTreeMap<NonceKey, UnsignedTx>,
+    #[n(6)]
+    flows: BTreeMap<QuoteHash, Flow>,
 }
 
 impl Store for MemoryStore {
+    fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
+        self.flows.get(quote_hash).cloned()
+    }
+
+    fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow) {
+        self.flows.insert(quote_hash, flow);
+    }
+
+    fn flows(&self) -> Vec<(QuoteHash, Flow)> {
+        self.flows
+            .iter()
+            .map(|(hash, flow)| (*hash, flow.clone()))
+            .collect()
+    }
+
     fn swap(&self, quote_hash: &QuoteHash) -> Option<Swap> {
         self.swaps.get(quote_hash).cloned()
     }
@@ -259,7 +280,9 @@ impl State<MemoryStore> {
             auto_refund_waiting,
             nonces,
             unsigned,
+            flows,
         } = &self.store;
+        let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
         let other_swaps = other.store.swaps();
         let other_nonces = other.store.nonces();
@@ -280,6 +303,9 @@ impl State<MemoryStore> {
             && swaps
                 .iter()
                 .eq(other_swaps.iter().map(|(hash, swap)| (hash, swap)))
+            && flows
+                .iter()
+                .eq(other_flows.iter().map(|(hash, flow)| (hash, flow)))
     }
 }
 
@@ -624,6 +650,17 @@ impl<S: Store> State<S> {
             "BUG: State::check ran Pocket::fund on the destination pocket after the withdraw",
         );
         self.store.put_pocket(to, destination);
+    }
+
+    /// A flow step the guard admitted.
+    fn record_flow(&mut self, quote_hash: QuoteHash, step: &types::FlowStep, at: Timestamp) {
+        let flow = types::Flow::apply(self.store.flow(&quote_hash), step, at);
+        self.store.put_flow(quote_hash, flow);
+    }
+
+    /// The flow under `quote_hash`, if any.
+    pub fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
+        self.store.flow(quote_hash)
     }
 
     /// Test-only: flips one bit of the chain head, and nothing else.

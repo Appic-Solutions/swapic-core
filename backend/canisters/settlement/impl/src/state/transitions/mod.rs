@@ -3,6 +3,7 @@ use thiserror::Error;
 use types::checked_amount::CheckedAmountOf;
 use types::events::{Event, EventType, TxPurpose};
 use types::quote::quote_hash_of;
+use types::FlowStep;
 use types::{
     ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, TransitionError,
 };
@@ -272,6 +273,30 @@ impl<S: Store> State<S> {
             // wait the swap is really in. Where the index already agrees the repair changes
             // nothing, so it can never strand a wait.
             EventType::WaitingRepaired { .. } => Ok(()),
+            // a flow's own rules, and the nonce its signed records spend
+            EventType::Flow { quote_hash, step } => {
+                let existing = self.store().flow(quote_hash);
+                let flows = self.store().flows();
+                types::Flow::admits(*quote_hash, existing.as_ref(), step, |tx_hash| {
+                    flows
+                        .iter()
+                        .find(|(other, flow)| {
+                            other != quote_hash && flow.landed_tx.as_ref() == Some(tx_hash)
+                        })
+                        .map(|(other, _)| *other)
+                })?;
+                match step {
+                    FlowStep::GaslessRelayed {
+                        chain_id, nonce, ..
+                    } => self.ensure_flow_nonce(TxPurpose::Relay(*quote_hash), *chain_id, *nonce),
+                    FlowStep::ContinuationSigned {
+                        chain_id, nonce, ..
+                    } => {
+                        self.ensure_flow_nonce(TxPurpose::Continue(*quote_hash), *chain_id, *nonce)
+                    }
+                    _ => Ok(()),
+                }
+            }
             // always legal; named rather than matched by `_` so a new variant has to be
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
@@ -306,6 +331,28 @@ impl<S: Store> State<S> {
                 swap.ensure_not_closed()?;
                 swap.ensure_not_waiting()?;
                 swap.ensure_no_open_attempt()?;
+            }
+            // a relay creates its flow with its signed record, and one quote is relayed at
+            // most once (rule 4b.4 from this side; the router's `usedQuote` is the other)
+            TxPurpose::Relay(_) => {
+                if self.store().flow(&quote_hash).is_some() {
+                    return Err(types::FlowError::Exists(quote_hash).into());
+                }
+            }
+            // the continuation is the landed USDC's one transaction
+            TxPurpose::Continue(_) => {
+                let flow = self
+                    .store()
+                    .flow(&quote_hash)
+                    .ok_or(types::FlowError::Unknown(quote_hash))?;
+                if flow.status != types::FlowStatus::Landed {
+                    return Err(types::FlowError::NotFromHere {
+                        quote_hash,
+                        status: flow.status,
+                        step: "continuation",
+                    }
+                    .into());
+                }
             }
             // a cancel names no swap, so `quote_hash()` answered none and this function
             // returned before the match
@@ -395,6 +442,23 @@ impl<S: Store> State<S> {
                 nonce,
                 quote_hash,
             });
+        }
+        Ok(())
+    }
+
+    /// A flow's signed record spends the number handed out for exactly its purpose.
+    fn ensure_flow_nonce(
+        &self,
+        purpose: TxPurpose,
+        chain_id: ChainId,
+        nonce: Nonce,
+    ) -> Result<(), TransitionError> {
+        let held = self
+            .store()
+            .unsigned_nonce(&NonceKey { chain_id, nonce })
+            .map(|unsigned| unsigned.purpose);
+        if held != Some(purpose) {
+            return Err(TransitionError::NonceNotUnsigned { chain_id, nonce });
         }
         Ok(())
     }
@@ -517,6 +581,18 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         | EventType::PullSigned {
             chain_id, nonce, ..
         } => state.record_nonce_spent(*chain_id, *nonce),
+        EventType::Flow { quote_hash, step } => {
+            if let FlowStep::GaslessRelayed {
+                chain_id, nonce, ..
+            }
+            | FlowStep::ContinuationSigned {
+                chain_id, nonce, ..
+            } = step
+            {
+                state.record_nonce_spent(*chain_id, *nonce);
+            }
+            state.record_flow(*quote_hash, step, event.timestamp);
+        }
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

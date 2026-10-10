@@ -84,7 +84,12 @@ const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 /// is 514 characters of JSON, and the two dozen scalar fields, that is about four
 /// kilobytes. Eight is that with room for a fourth log, and a vault `execute` receipt is
 /// smaller.
-pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 8_192;
+///
+/// A router `swapFor` that bridges on CCTP logs more than that: the pull, the fees, the
+/// burn's three logs and the router's own two, which measured above 8 KB on a fork and
+/// left every read of it refused as too large until a replacement doubled the cap. So the
+/// cap is 32 KB, four of those.
+pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 32_768;
 
 /// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and
 /// a batch bigger than one outcall can hold is not an error the canister recovers from: the
@@ -211,6 +216,20 @@ pub async fn create_and_send(
     data: Vec<u8>,
     gas_limit: GasAmount,
 ) -> Result<TxHash, TxError> {
+    create_and_send_with(purpose, chain_id, to, value, data, gas_limit, None).await
+}
+
+/// [`create_and_send`] for a flow's continuation, whose signed record names the route
+/// action it takes and the landed USDC it spends.
+pub async fn create_and_send_with(
+    purpose: TxPurpose,
+    chain_id: ChainId,
+    to: EvmAddress,
+    value: Wei,
+    data: Vec<u8>,
+    gas_limit: GasAmount,
+    continuation: Option<(u8, types::TokenAmount)>,
+) -> Result<TxHash, TxError> {
     require_not_halted().map_err(TxError::Guard)?;
     // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
     // pass that ends a stranded allocation, never through here
@@ -295,13 +314,39 @@ pub async fn create_and_send(
             tx_hash,
             raw_tx: raw_tx.clone(),
         },
-        // a pull names its number: no swap holds it for the record to find
-        None => EventType::PullSigned {
-            quote_hash,
-            chain_id,
-            nonce,
-            tx_hash,
-            raw_tx: raw_tx.clone(),
+        // a relay and a continuation are a flow's, and name their number like a pull
+        None => match purpose {
+            TxPurpose::Relay(_) => EventType::Flow {
+                quote_hash,
+                step: types::FlowStep::GaslessRelayed {
+                    chain_id,
+                    nonce,
+                    tx_hash,
+                    raw_tx: raw_tx.clone(),
+                },
+            },
+            TxPurpose::Continue(_) => {
+                let (action, amount) = continuation.unwrap_or((0, types::TokenAmount::ZERO));
+                EventType::Flow {
+                    quote_hash,
+                    step: types::FlowStep::ContinuationSigned {
+                        chain_id,
+                        nonce,
+                        tx_hash,
+                        raw_tx: raw_tx.clone(),
+                        action,
+                        amount,
+                    },
+                }
+            }
+            // a pull names its number: no swap holds it for the record to find
+            _ => EventType::PullSigned {
+                quote_hash,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx: raw_tx.clone(),
+            },
         },
     };
     append_event(record)?;
@@ -710,6 +755,23 @@ async fn decide(
                 block,
                 success,
             } = receipt;
+            // a flow's transaction closes with a flow line, whichever of the nonce's
+            // transactions landed
+            if let TxPurpose::Relay(quote_hash) | TxPurpose::Continue(quote_hash) = entry.purpose {
+                let appended = append_event(EventType::Flow {
+                    quote_hash,
+                    step: types::FlowStep::TxClosed {
+                        tx_hash,
+                        block,
+                        success,
+                    },
+                })
+                .is_ok();
+                if appended {
+                    outbox::remove(entry.key());
+                }
+                return usize::from(appended);
+            }
             let left = if success {
                 close(entry, |quote_hash, attempt| EventType::TxConfirmed {
                     quote_hash,

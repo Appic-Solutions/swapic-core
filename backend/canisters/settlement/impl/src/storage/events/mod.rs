@@ -1,8 +1,9 @@
 use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
 use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
-    auto_refund_waiting_memory, events_data_memory, events_index_memory, ledger_meta_memory,
-    nonces_memory, pockets_memory, swaps_memory, unsigned_nonces_memory, Memory,
+    auto_refund_waiting_memory, events_data_memory, events_index_memory, flows_memory,
+    ledger_meta_memory, nonces_memory, pockets_memory, swaps_memory, unsigned_nonces_memory,
+    Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -12,7 +13,7 @@ use thiserror::Error;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::{
-    ChainId, EventHash, EventIndex, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
+    ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
     Timestamp, TransitionError, UnsignedTx, WaitingKey,
 };
 
@@ -55,6 +56,11 @@ thread_local! {
     // abandoned allocation is the only reader.
     static UNSIGNED_NONCES: RefCell<StableBTreeMap<NonceKey, UnsignedTx, Memory>> =
         RefCell::new(StableBTreeMap::init(unsigned_nonces_memory()));
+
+    // The canister's flows: relays, ICP to EVM and EVM to ICP. Part of the fold: only
+    // `Flow` lines write them.
+    static FLOWS: RefCell<StableBTreeMap<QuoteHash, Flow, Memory>> =
+        RefCell::new(StableBTreeMap::init(flows_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -62,6 +68,18 @@ thread_local! {
 pub struct StableStore(());
 
 impl Store for StableStore {
+    fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
+        FLOWS.with(|flows| flows.borrow().get(quote_hash))
+    }
+
+    fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow) {
+        FLOWS.with(|flows| flows.borrow_mut().insert(quote_hash, flow));
+    }
+
+    fn flows(&self) -> Vec<(QuoteHash, Flow)> {
+        FLOWS.with(|flows| flows.borrow().iter().collect())
+    }
+
     fn swap(&self, quote_hash: &QuoteHash) -> Option<Swap> {
         SWAPS.with(|swaps| swaps.borrow().get(quote_hash))
     }
@@ -245,6 +263,7 @@ pub fn init() {
     AUTO_REFUND_WAITING.with(|_| ());
     NONCES.with(|_| ());
     UNSIGNED_NONCES.with(|_| ());
+    FLOWS.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at
@@ -324,6 +343,12 @@ pub fn append_event_at(
     // the append is the last step that returns an error and applying refuses nothing, so
     // once the message commits the log and the fold agree
     apply_state_transition(&mut state, &event);
+    // the engine acts the moment a step completes: a line that gives a swap its next move
+    // arms one coalesced drive, and the tick is only the backstop. A trap later in this
+    // message rolls the timer back with the line.
+    if event.payload.moves_a_step() {
+        crate::engine::arm();
+    }
     Ok(index)
 }
 

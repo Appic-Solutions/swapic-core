@@ -5,6 +5,7 @@ use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
 use crate::evm::{EvmAddress, EvmAddressError};
+use crate::flow::FlowStep;
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::numeric::{
     Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei, WeiPerGas,
@@ -17,7 +18,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 24;
+pub const EVENT_VARIANT_COUNT: usize = 25;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -308,6 +309,15 @@ pub enum EventType {
         #[cbor(n(4), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    /// A step of one of the canister's flows: a gasless relay, ICP to EVM, or EVM to ICP
+    /// (`types::flow`).
+    #[n(24)]
+    Flow {
+        #[n(0)]
+        quote_hash: QuoteHash,
+        #[n(1)]
+        step: FlowStep,
+    },
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -340,6 +350,12 @@ pub enum TxPurpose {
     /// refunded to the vault, so the user can be refunded from it.
     #[n(6)]
     Reclaim(#[n(0)] QuoteHash),
+    /// A user's signed `swapFor`, relayed through the router.
+    #[n(7)]
+    Relay(#[n(0)] QuoteHash),
+    /// The Ethereum continuation of an ICP to EVM flow, from this canister's own address.
+    #[n(8)]
+    Continue(#[n(0)] QuoteHash),
 }
 
 impl TxPurpose {
@@ -352,7 +368,9 @@ impl TxPurpose {
             | Self::Payout(hash)
             | Self::Refund(hash)
             | Self::GaslessPull(hash)
-            | Self::Reclaim(hash) => Some(*hash),
+            | Self::Reclaim(hash)
+            | Self::Relay(hash)
+            | Self::Continue(hash) => Some(*hash),
             Self::Cancel(_) => None,
         }
     }
@@ -366,7 +384,7 @@ impl TxPurpose {
             | Self::Payout(hash)
             | Self::Refund(hash)
             | Self::Reclaim(hash) => Some(*hash),
-            Self::GaslessPull(_) | Self::Cancel(_) => None,
+            Self::GaslessPull(_) | Self::Cancel(_) | Self::Relay(_) | Self::Continue(_) => None,
         }
     }
 
@@ -382,6 +400,8 @@ impl TxPurpose {
             Self::GaslessPull(hash) => w.put_u8(4).put_hash(hash.as_ref()),
             Self::Cancel(chain_id) => w.put_u8(5).put_u64(chain_id.get()),
             Self::Reclaim(hash) => w.put_u8(6).put_hash(hash.as_ref()),
+            Self::Relay(hash) => w.put_u8(7).put_hash(hash.as_ref()),
+            Self::Continue(hash) => w.put_u8(8).put_hash(hash.as_ref()),
         };
     }
 }
@@ -428,6 +448,8 @@ pub enum EventError {
         field: &'static str,
         reason: EvmAddressError,
     },
+    #[error("{field} is not a flow step")]
+    NotAFlowStep { field: &'static str },
 }
 
 impl EventError {
@@ -448,6 +470,41 @@ impl EventError {
 }
 
 impl EventType {
+    /// Whether this line can give some swap a next step the engine should act on now. The
+    /// engine drives the moment such a line lands instead of waiting for its tick. The
+    /// lines that only allocate, sign, re-send or cancel a transaction are left out: the
+    /// engine waits on an open attempt whatever it is, so arming on them would only run
+    /// a drive that finds nothing to do. Exhaustive, so a new variant decides.
+    pub fn moves_a_step(&self) -> bool {
+        match self {
+            EventType::FundsReceived { .. }
+            | EventType::TxConfirmed { .. }
+            | EventType::TxFailed { .. }
+            | EventType::PaidInStable { .. }
+            | EventType::DecisionMade { .. }
+            | EventType::RefundStarted { .. } => true,
+            EventType::ConfigChanged { .. }
+            | EventType::TxSigned { .. }
+            | EventType::DecisionRequired { .. }
+            | EventType::Refunded { .. }
+            | EventType::SwapDone { .. }
+            | EventType::Frozen { .. }
+            | EventType::FeeAccrued { .. }
+            | EventType::PocketFunded { .. }
+            | EventType::PocketReserved { .. }
+            | EventType::PocketRebalanced { .. }
+            | EventType::PocketReleased { .. }
+            | EventType::PocketSpent { .. }
+            | EventType::RolesChanged { .. }
+            | EventType::WaitingRepaired { .. }
+            | EventType::TxCreated { .. }
+            | EventType::TxReplaced { .. }
+            | EventType::TxCancelled { .. }
+            | EventType::PullSigned { .. } => false,
+            EventType::Flow { step, .. } => step.moves_a_step(),
+        }
+    }
+
     /// The token amount the event carries, if it carries one. Exhaustive, so a new variant
     /// decides whether it moves value.
     pub fn amount(&self) -> Option<TokenAmount> {
@@ -477,7 +534,9 @@ impl EventType {
             | EventType::TxCreated { .. }
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
-            | EventType::PullSigned { .. } => None,
+            | EventType::PullSigned { .. }
+            // a flow's amounts are checked by its own rules, in `Flow::admits`
+            | EventType::Flow { .. } => None,
         }
     }
 
@@ -711,6 +770,13 @@ impl EventType {
                     .put_u64(nonce.get())
                     .put_hash(tx_hash.as_ref())
                     .put_bytes(raw_tx);
+            }
+            // the step as its minicbor bytes: its indices are append-only like the log's,
+            // so the bytes of a recorded step never change
+            EventType::Flow { quote_hash, step } => {
+                w.put_u16(24).put_hash(quote_hash.as_ref()).put_bytes(
+                    &minicbor::to_vec(step).expect("BUG: encoding into a Vec is infallible"),
+                );
             }
         }
         w.finish()

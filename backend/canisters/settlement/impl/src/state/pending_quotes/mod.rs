@@ -139,7 +139,7 @@ pub fn register(
     config: &Config,
 ) -> Result<QuoteHash, RegisterError> {
     quote.validate()?;
-    if let Some(rail) = crate::entry::unavailable_rail(config, &quote) {
+    if let Some(rail) = unavailable_rail(config, &quote) {
         return Err(RegisterError::RailUnavailable { rail });
     }
     // a quote a refund could never be paid on is a swap that can only freeze with the
@@ -341,3 +341,11 @@ pub(crate) fn all_pending() -> Vec<(QuoteHash, PendingQuote)> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// The rail a quote names, if this deploy does not run it: the Eco rail while it is off.
+pub fn unavailable_rail(config: &Config, quote: &Quote) -> Option<types::Rail> {
+    match quote.rail {
+        types::Rail::Eco if !config.eco_enabled.is_on() => Some(quote.rail),
+        types::Rail::Eco | types::Rail::CctpV2Fast | types::Rail::CctpV2Standard => None,
+    }
+}

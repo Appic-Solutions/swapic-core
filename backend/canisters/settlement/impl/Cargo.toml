@@ -14,6 +14,8 @@ inttest = []
 settlement_api = { path = "../api" }
 types = { path = "../../../libraries/types" }
 
+alloy-primitives = { workspace = true }
+
 candid = { workspace = true }
 hex = { workspace = true }
 ic-cdk = { workspace = true }
