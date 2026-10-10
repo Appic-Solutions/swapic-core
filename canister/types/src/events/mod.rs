@@ -2,6 +2,7 @@
 pub(crate) mod tests;
 
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
+use crate::books::BookStep;
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
 use crate::evm::{EvmAddress, EvmAddressError};
@@ -18,7 +19,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 25;
+pub const EVENT_VARIANT_COUNT: usize = 26;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -318,6 +319,14 @@ pub enum EventType {
         #[n(1)]
         step: FlowStep,
     },
+    /// A step of a chain's USDC books (`types::books`).
+    #[n(25)]
+    Books {
+        #[n(0)]
+        chain_id: ChainId,
+        #[n(1)]
+        step: BookStep,
+    },
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -459,6 +468,8 @@ pub enum EventError {
     },
     #[error("{field} is not a flow step")]
     NotAFlowStep { field: &'static str },
+    #[error("{field} is not a book step")]
+    NotABookStep { field: &'static str },
 }
 
 impl EventError {
@@ -562,7 +573,8 @@ impl EventType {
             | EventType::TxCreated { .. }
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
-            | EventType::PullSigned { .. } => false,
+            | EventType::PullSigned { .. }
+            | EventType::Books { .. } => false,
             EventType::Flow { step, .. } => step.moves_a_step(),
         }
     }
@@ -597,8 +609,9 @@ impl EventType {
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
             | EventType::PullSigned { .. }
-            // a flow's amounts are checked by its own rules, in `Flow::admits`
-            | EventType::Flow { .. } => None,
+            // a flow's and a book's amounts are checked by their own rules
+            | EventType::Flow { .. }
+            | EventType::Books { .. } => None,
         }
     }
 
@@ -839,6 +852,12 @@ impl EventType {
                 w.put_u16(24).put_hash(quote_hash.as_ref()).put_bytes(
                     &minicbor::to_vec(step).expect("BUG: encoding into a Vec is infallible"),
                 );
+            }
+            // the step as its minicbor bytes, as a flow's are
+            EventType::Books { chain_id, step } => {
+                w.put_u16(25)
+                    .put_u64(chain_id.get())
+                    .put_bytes(&step.to_bytes());
             }
         }
         w.finish()

@@ -176,6 +176,13 @@ pub enum EventType {
         detail: String,
         step_bytes: Vec<u8>,
     },
+    /// A step of a chain's USDC books, rendered and exactly as the log hashes it.
+    Books {
+        chain_id: u64,
+        step: String,
+        detail: String,
+        step_bytes: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. All but the last name the swap they belong to.
@@ -488,6 +495,12 @@ impl From<types::EventType> for EventType {
                 detail: format!("{step:?}"),
                 step_bytes: step.to_bytes(),
             },
+            Domain::Books { chain_id, step } => Self::Books {
+                chain_id: chain_id.get(),
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            },
         }
     }
 }
@@ -727,6 +740,18 @@ impl TryFrom<EventType> for types::EventType {
                     },
                 )?,
             },
+            EventType::Books {
+                chain_id,
+                step_bytes,
+                ..
+            } => Self::Books {
+                chain_id: ChainId::new(chain_id),
+                step: types::books::BookStep::from_bytes(&step_bytes).ok_or(
+                    DomainEventError::NotABookStep {
+                        field: "step_bytes",
+                    },
+                )?,
+            },
         })
     }
 }
@@ -811,6 +836,9 @@ pub enum EventError {
     NotAFlowStep {
         field: String,
     },
+    NotABookStep {
+        field: String,
+    },
 }
 
 /// Why a text is not an EVM address. Mirrors `types::evm::EvmAddressError` so a caller
@@ -854,6 +882,9 @@ impl From<types::events::EventError> for EventError {
                 reason: reason.into(),
             },
             Domain::NotAFlowStep { field } => Self::NotAFlowStep {
+                field: field.to_string(),
+            },
+            Domain::NotABookStep { field } => Self::NotABookStep {
                 field: field.to_string(),
             },
         }

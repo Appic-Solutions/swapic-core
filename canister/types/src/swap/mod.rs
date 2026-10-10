@@ -259,6 +259,8 @@ pub enum TransitionError {
     FeeAlreadyAccrued(QuoteHash),
     #[error(transparent)]
     Flow(#[from] crate::flow::FlowError),
+    #[error(transparent)]
+    Books(#[from] crate::books::BooksError),
 }
 
 impl Swap {

@@ -35,7 +35,35 @@ pub async fn eth_call(
     to: EvmAddress,
     data: &[u8],
 ) -> Result<Simulated, RpcError> {
-    let calls = [("eth_call", json!([call_object(from, to, data), "latest"]))];
+    call_at(chain_id, from, to, data, json!("latest")).await
+}
+
+/// `eth_call` of `data` from `from` to `to` at `block`.
+pub async fn eth_call_at(
+    chain_id: ChainId,
+    from: EvmAddress,
+    to: EvmAddress,
+    data: &[u8],
+    block: BlockNumber,
+) -> Result<Simulated, RpcError> {
+    call_at(
+        chain_id,
+        from,
+        to,
+        data,
+        json!(format!("0x{:x}", block.get())),
+    )
+    .await
+}
+
+async fn call_at(
+    chain_id: ChainId,
+    from: EvmAddress,
+    to: EvmAddress,
+    data: &[u8],
+    block: Value,
+) -> Result<Simulated, RpcError> {
+    let calls = [("eth_call", json!([call_object(from, to, data), block]))];
     let mut answers = rpc::rpc_batch_each(chain_id, &calls, MAX_CALL_BYTES).await?;
     match answers.pop() {
         Some(Ok(value)) => Ok(Simulated::Returned(bytes_of(&value).unwrap_or_default())),

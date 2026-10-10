@@ -3,6 +3,7 @@
 
 pub mod abi;
 pub mod address;
+pub mod books;
 pub mod canonical;
 pub mod cctp;
 pub mod chain;

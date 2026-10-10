@@ -48,6 +48,7 @@ fn sample_fold() -> MemoryStore {
         fees_accrued: TokenAmount::from(7_u32),
         next_event_index: EventIndex::new(19),
         last_event_hash: EventHash::new([0xab; 32]),
+        pool_paused_by: None,
     });
     store.put_auto_refund_waiting(WaitingKey { since, quote_hash });
     store.put_unsigned_nonce(
@@ -89,16 +90,17 @@ fn a_fresh_canister_starts_the_deep_audit_at_genesis() {
 /// The array grows by one element every time the fold gains a collection, and by nothing
 /// else: `8184` became `8185` with the nonce allocator, and `8185` became `8186` with the
 /// nonces the fold holds as created but unsigned, and `8186` became `8187` with the flows
-/// (empty here, so the element is `a0`), then `8188` with the signed lines (empty, `80`).
+/// (empty here, so the element is `a0`), then `8188` with the signed lines (empty, `80`)
+/// and `8189` with the books (empty, `a0`).
 /// Nothing before the appended element ever moves, which is what makes an upgrade over a
 /// saved fold safe.
 const PINNED: &str =
-    "8188a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef0403\
+    "8189a158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a8944deadbeef0403\
     f619210564555344431a017d78401a017d51301b17979cfe3d85cd15a119a4b182c24940000000000000000018\
     fa8307135820abababababababababababababababababababababababababababababababab81821b17979cfe\
     3d85cd1558205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aa0a18219210504\
     8282028158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a1b17979cfe7108\
-    68b1a080";
+    68b1a080a0";
 
 #[test]
 fn a_saved_fold_decodes_from_its_pinned_bytes() {

@@ -265,6 +265,13 @@ type EventType = variant {
     raw_tx : blob;
     tx_hash : blob;
   };
+  // A step of a chain's USDC books, rendered and exactly as the log hashes it.
+  Books : record {
+    step : text;
+    detail : text;
+    step_bytes : blob;
+    chain_id : nat64;
+  };
   SwapDone : record { quote_hash : blob };
   TxFailed : record { attempt : nat32; quote_hash : blob; reason : text };
   PocketRebalanced : record {
@@ -689,6 +696,7 @@ type TransitionError = variant {
   Flow : text;
   SwapExists : blob;
   AttemptStillOpen : nat32;
+  Books : text;
   UnknownSwap : blob;
   NonceStillUnsigned : blob;
   NotExecuting : SwapStatus;

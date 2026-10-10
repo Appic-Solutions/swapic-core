@@ -825,7 +825,8 @@ async fn read_receipts(
     let answers = rpc::rpc_batch_each(chain_id, &calls, cap)
         .await
         .map_err(|_| Unread::Rpc)?;
-    landed(entries, &answers).ok_or(Unread::NoHead)
+    let swapic = crate::storage::flow_settings::get().router(chain_id);
+    landed(entries, &answers, swapic).ok_or(Unread::NoHead)
 }
 
 /// The head and the receipt that landed for each entry, sliced out of one chunk's answers
@@ -835,6 +836,7 @@ async fn read_receipts(
 fn landed(
     entries: &[OutboxEntry],
     answers: &[Result<Value, RpcError>],
+    swapic: Option<EvmAddress>,
 ) -> Option<(BlockNumber, Vec<Option<Receipt>>)> {
     let latest = answers
         .first()?
@@ -851,7 +853,15 @@ fn landed(
             receipts
                 .iter()
                 .filter_map(|answer| answer.as_ref().ok())
-                .find_map(|value| parse_receipt(value, &entry.hashes).ok()),
+                .find_map(|value| {
+                    let receipt = parse_receipt(value, &entry.hashes).ok()?;
+                    Some(Receipt {
+                        network_fee: swapic.map_or(types::TokenAmount::ZERO, |swapic| {
+                            crate::books::network_fee_in(value, swapic)
+                        }),
+                        ..receipt
+                    })
+                }),
         );
     }
     Some((latest, landed))
@@ -879,6 +889,7 @@ async fn decide(
                 tx_hash,
                 block,
                 success,
+                network_fee,
             } = receipt;
             // a flow's transaction closes with a flow line, whichever of the nonce's
             // transactions landed
@@ -897,6 +908,10 @@ async fn decide(
                 .is_ok();
                 if appended {
                     outbox::remove(entry.key());
+                    // the closing line is appended once per transaction, so the fee is too
+                    if success {
+                        crate::books::credit_fee(chain_id, tx_hash, network_fee);
+                    }
                 }
                 return usize::from(appended);
             }
@@ -1154,6 +1169,8 @@ struct Receipt {
     tx_hash: TxHash,
     block: BlockNumber,
     success: bool,
+    /// What Swapic withheld to the canister in it.
+    network_fee: types::TokenAmount,
 }
 
 /// Why a provider's answer is not a receipt this entry may be decided on.
@@ -1186,6 +1203,7 @@ fn parse_receipt(value: &Value, ours: &[TxHash]) -> Result<Receipt, NotOurReceip
             tx_hash,
             block,
             success: status == "0x1",
+            network_fee: types::TokenAmount::ZERO,
         })
     };
     let receipt = read().ok_or(NotOurReceipt::Unmined)?;

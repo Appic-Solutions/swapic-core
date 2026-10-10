@@ -2,6 +2,7 @@ use minicbor::{Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::ops::RangeFrom;
+use types::books::{BookStep, Books};
 use types::events::TxPurpose;
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Flow, LedgerMeta, Leg, Nonce, NonceKey,
@@ -40,6 +41,10 @@ pub trait Store {
     fn put_next_nonce(&mut self, chain_id: ChainId, nonce: Nonce);
     /// Every chain the allocator has handed out a nonce on, in chain id order.
     fn nonces(&self) -> Vec<(ChainId, Nonce)>;
+    fn book(&self, chain_id: &ChainId) -> Option<Books>;
+    fn put_book(&mut self, chain_id: ChainId, books: Books);
+    /// Every chain's books, in chain id order.
+    fn books(&self) -> Vec<(ChainId, Books)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -147,6 +152,8 @@ pub struct MemoryStore {
     flows: BTreeMap<QuoteHash, Flow>,
     #[n(7)]
     signed: BTreeSet<EventIndex>,
+    #[n(8)]
+    books: BTreeMap<ChainId, Books>,
 }
 
 impl Store for MemoryStore {
@@ -230,6 +237,21 @@ impl Store for MemoryStore {
         self.signed.insert(index);
     }
 
+    fn book(&self, chain_id: &ChainId) -> Option<Books> {
+        self.books.get(chain_id).copied()
+    }
+
+    fn put_book(&mut self, chain_id: ChainId, books: Books) {
+        self.books.insert(chain_id, books);
+    }
+
+    fn books(&self) -> Vec<(ChainId, Books)> {
+        self.books
+            .iter()
+            .map(|(chain, books)| (*chain, *books))
+            .collect()
+    }
+
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
         self.signed.range(range).take(limit).copied().collect()
     }
@@ -297,6 +319,7 @@ impl State<MemoryStore> {
             unsigned,
             flows,
             signed,
+            books,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -325,6 +348,11 @@ impl State<MemoryStore> {
             && signed
                 .iter()
                 .eq(other.store.signed_in(EventIndex::ZERO.., usize::MAX).iter())
+            && books.iter().eq(other
+                .store
+                .books()
+                .iter()
+                .map(|(chain, books)| (chain, books)))
     }
 }
 
@@ -392,6 +420,27 @@ impl<S: Store> State<S> {
             self.store.remove_auto_refund_waiting(&WaitingKey {
                 since,
                 quote_hash: *quote_hash,
+            });
+        }
+    }
+
+    /// A chain's books, empty where nothing was booked yet.
+    pub fn book(&self, chain_id: &ChainId) -> Books {
+        self.store.book(chain_id).unwrap_or_default()
+    }
+
+    /// A step of a chain's books; a shortfall pauses the pool, and nothing else.
+    fn record_books(&mut self, chain_id: ChainId, step: &BookStep) {
+        let books = self.book(&chain_id).apply(step);
+        self.store.put_book(chain_id, books);
+        if let BookStep::Checked {
+            shortfall: true, ..
+        } = step
+        {
+            let meta = self.store.meta();
+            self.store.put_meta(LedgerMeta {
+                pool_paused_by: Some(chain_id),
+                ..meta
             });
         }
     }

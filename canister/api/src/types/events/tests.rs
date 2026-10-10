@@ -146,6 +146,18 @@ fn samples() -> Vec<EventType> {
                 step_bytes: step.to_bytes(),
             }
         },
+        {
+            let step = types::books::BookStep::FeeEarned {
+                tx_hash: types::TxHash::new([27; 32]),
+                amount: types::TokenAmount::from(28_u8),
+            };
+            EventType::Books {
+                chain_id: 8453,
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            }
+        },
     ]
 }
 

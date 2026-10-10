@@ -161,6 +161,13 @@ pub(crate) fn samples() -> Vec<EventType> {
                 block_index: 26,
             },
         },
+        EventType::Books {
+            chain_id: ChainId::BASE,
+            step: crate::books::BookStep::FeeEarned {
+                tx_hash: TxHash::new([27; 32]),
+                amount: TokenAmount::from(28_u8),
+            },
+        },
     ]
 }
 

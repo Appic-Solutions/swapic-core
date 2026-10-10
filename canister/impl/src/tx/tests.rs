@@ -615,7 +615,7 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         Ok(landed_second.clone()),
     ];
     let (latest, per_entry) =
-        landed(&[first.clone(), replaced.clone()], &answers).expect("a whole answer is read");
+        landed(&[first.clone(), replaced.clone()], &answers, None).expect("a whole answer is read");
     assert_eq!(latest, BlockNumber::new(19_000_010));
     assert_eq!(
         per_entry,
@@ -634,7 +634,7 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         Ok(json!(null)),
     ];
     let (_, per_entry) =
-        landed(&[first.clone(), replaced.clone()], &crossed).expect("a whole answer is read");
+        landed(&[first.clone(), replaced.clone()], &crossed, None).expect("a whole answer is read");
     assert_eq!(
         per_entry,
         vec![None, None],
@@ -644,13 +644,14 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
     assert_eq!(
         landed(
             std::slice::from_ref(&first),
-            &[Ok(json!("not a number")), Ok(json!(null))]
+            &[Ok(json!("not a number")), Ok(json!(null))],
+            None
         ),
         None,
         "no head, no depth, nothing to decide"
     );
     assert_eq!(
-        landed(&[first, replaced], &[head, Ok(json!(null))]),
+        landed(&[first, replaced], &[head, Ok(json!(null))], None),
         None,
         "fewer answers than calls is not an answer to this chunk"
     );

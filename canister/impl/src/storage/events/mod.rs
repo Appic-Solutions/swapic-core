@@ -1,8 +1,8 @@
 use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
 use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
-    auto_refund_waiting_memory, events_data_memory, events_index_memory, flows_memory,
-    ledger_meta_memory, nonces_memory, pockets_memory, signed_memory, swaps_memory,
+    auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
+    flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, signed_memory, swaps_memory,
     unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -10,6 +10,7 @@ use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog
 use std::cell::RefCell;
 use std::ops::{Bound, RangeFrom};
 use thiserror::Error;
+use types::books::Books;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::{
@@ -66,6 +67,10 @@ thread_local! {
     // pages through. Part of the fold: only those lines write it.
     static SIGNED: RefCell<StableBTreeSet<EventIndex, Memory>> =
         RefCell::new(StableBTreeSet::init(signed_memory()));
+
+    // Every chain's USDC books. Part of the fold: only `Books` lines write them.
+    static BOOKS: RefCell<StableBTreeMap<ChainId, Books, Memory>> =
+        RefCell::new(StableBTreeMap::init(books_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -152,6 +157,18 @@ impl Store for StableStore {
 
     fn put_signed(&mut self, index: EventIndex) {
         SIGNED.with(|signed| signed.borrow_mut().insert(index));
+    }
+
+    fn book(&self, chain_id: &ChainId) -> Option<Books> {
+        BOOKS.with(|books| books.borrow().get(chain_id))
+    }
+
+    fn put_book(&mut self, chain_id: ChainId, entry: Books) {
+        BOOKS.with(|books| books.borrow_mut().insert(chain_id, entry));
+    }
+
+    fn books(&self) -> Vec<(ChainId, Books)> {
+        BOOKS.with(|books| books.borrow().iter().collect())
     }
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
@@ -278,6 +295,7 @@ pub fn init() {
     UNSIGNED_NONCES.with(|_| ());
     FLOWS.with(|_| ());
     SIGNED.with(|_| ());
+    BOOKS.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

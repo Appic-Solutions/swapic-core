@@ -19,6 +19,7 @@ thread_local! {
     // One slot per timer, so a restart replaces a timer instead of doubling it.
     static EXPIRY_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
@@ -33,6 +34,7 @@ pub fn start_timers() {
     restart_expiry_timer();
     restart_audit_timer();
     restart_rail_status_timer();
+    restart_books_timer();
 }
 
 /// Puts the expiry timer on the configured interval. `set_config` calls it only when that
@@ -57,6 +59,13 @@ pub fn restart_audit_timer() {
 
 /// Clears the timer in `slot`, if any, and puts the one `start` sets in its place, so a
 /// second restart replaces the timer rather than doubling its rate.
+pub fn restart_books_timer() {
+    let every = interval(config::get().books_check_interval.0);
+    restart(&BOOKS_TIMER, || {
+        ic_cdk_timers::set_timer_interval(every, || ic_cdk::spawn(crate::books::check_balances()))
+    });
+}
+
 fn restart(slot: &'static LocalKey<Cell<Option<TimerId>>>, start: impl FnOnce() -> TimerId) {
     if let Some(old) = slot.take() {
         ic_cdk_timers::clear_timer(old);

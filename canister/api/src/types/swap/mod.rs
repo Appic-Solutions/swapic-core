@@ -212,6 +212,7 @@ pub enum TransitionError {
     FeeAlreadyAccrued(Hash32),
     /// A flow step refused, with the domain's reason.
     Flow(String),
+    Books(String),
 }
 
 /// Why a pocket cannot make a move.
@@ -313,6 +314,7 @@ impl From<types::TransitionError> for TransitionError {
                 Self::FeeAlreadyAccrued(quote_hash.into_bytes())
             }
             Domain::Flow(error) => Self::Flow(error.to_string()),
+            Domain::Books(error) => Self::Books(error.to_string()),
         }
     }
 }

@@ -177,6 +177,7 @@ fn samples() -> Vec<Sample> {
                 fees_accrued: TokenAmount::from(7_u32),
                 next_event_index: EventIndex::new(19),
                 last_event_hash: EventHash::new([0xab; 32]),
+                pool_paused_by: None,
             },
         ),
         sample("pending quote", crate::quote::tests::fixed_quote()),

@@ -1,3 +1,4 @@
+use crate::chain::ChainId;
 use crate::hash::EventHash;
 use crate::numeric::{EventIndex, TokenAmount};
 use minicbor::{Decode, Encode};
@@ -16,6 +17,9 @@ pub struct LedgerMeta {
     /// The chain head the next event links to.
     #[n(2)]
     pub last_event_hash: EventHash,
+    /// The chain whose balance check found a shortfall, which paused the pool.
+    #[n(3)]
+    pub pool_paused_by: Option<ChainId>,
 }
 
 crate::storable_as_cbor!(LedgerMeta);

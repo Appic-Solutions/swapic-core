@@ -27,5 +27,8 @@ pub fn set_config(new: Config) -> Result<(), SetConfigError> {
     if changed.rail_status {
         task_manager::restart_rail_status_timer();
     }
+    if changed.books {
+        task_manager::restart_books_timer();
+    }
     Ok(())
 }

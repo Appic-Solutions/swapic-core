@@ -1,3 +1,4 @@
+pub mod books;
 pub mod cctp;
 pub mod deposits;
 pub mod ecdsa;

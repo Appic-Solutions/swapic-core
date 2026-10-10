@@ -273,6 +273,7 @@ impl<S: Store> State<S> {
             // wait the swap is really in. Where the index already agrees the repair changes
             // nothing, so it can never strand a wait.
             EventType::WaitingRepaired { .. } => Ok(()),
+            EventType::Books { chain_id, step } => Ok(self.book(chain_id).admits(step)?),
             // a flow's own rules, and the nonce its signed records spend
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
@@ -603,6 +604,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             }
             state.record_flow(*quote_hash, step, event.index, event.timestamp);
         }
+        EventType::Books { chain_id, step } => state.record_books(*chain_id, step),
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

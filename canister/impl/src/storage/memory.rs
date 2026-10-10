@@ -37,6 +37,7 @@ const UNSIGNED_NONCES_MEMORY_ID: MemoryId = MemoryId::new(21);
 const FLOWS_MEMORY_ID: MemoryId = MemoryId::new(24);
 const FLOW_SETTINGS_MEMORY_ID: MemoryId = MemoryId::new(25);
 const SIGNED_MEMORY_ID: MemoryId = MemoryId::new(26);
+const BOOKS_MEMORY_ID: MemoryId = MemoryId::new(27);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -132,4 +133,8 @@ pub fn flow_settings_memory() -> Memory {
 
 pub fn signed_memory() -> Memory {
     memory(SIGNED_MEMORY_ID)
+}
+
+pub fn books_memory() -> Memory {
+    memory(BOOKS_MEMORY_ID)
 }
