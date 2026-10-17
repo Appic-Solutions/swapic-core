@@ -47,8 +47,9 @@ const REBROADCAST_AFTER: Duration = Duration::from_secs(30);
 /// How long a transaction stays on the network before it is replaced at a higher fee,
 /// counted from the FIRST time its bytes went out. Long enough that a chain running
 /// normally lands it first, short enough that a swap is not held by an underpriced
-/// transaction. A config knob when the engine lands.
-const STUCK_AFTER: Duration = Duration::from_secs(120);
+/// transaction. 30 s (Jeff, 2026-10-17): a transaction not in a block within 30 s is
+/// replaced at a higher fee; the per-action budgets and the bounds cap the bids.
+const STUCK_AFTER: Duration = Duration::from_secs(30);
 
 /// How long an allocated nonce may wait for its signed record before the pass spends it
 /// with a cancel: five minutes.
@@ -74,6 +75,20 @@ const STRANDED_AFTER: Duration = Duration::from_secs(300);
 /// well as a price. Like the other two it is a constant rather than a config knob, so no
 /// config write can raise it; the knob belongs with the engine's gas policy in a later plan.
 const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
+
+/// Polygon pays gas in POL, worth a few thousandths of ETH, so 1 POL (about $0.09) refused
+/// a CCTP completion once the base fee passed about 400 gwei. 50 POL is about $5.
+const POLYGON_MAX_TRANSACTION_COST: Wei = Wei::new(50_000_000_000_000_000_000);
+
+/// The bound of one transaction's gas bill on `chain_id`, in its native coin. Per chain,
+/// because a native coin's worth differs by orders of magnitude; still a constant.
+fn max_transaction_cost(chain_id: ChainId) -> Wei {
+    if chain_id == ChainId::POLYGON {
+        POLYGON_MAX_TRANSACTION_COST
+    } else {
+        MAX_TRANSACTION_COST
+    }
+}
 
 /// The most one `eth_getTransactionReceipt` reply may be.
 ///
@@ -127,7 +142,7 @@ pub enum TxError {
         chain_id: ChainId,
         ceiling: WeiPerGas,
     },
-    #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the bound of {MAX_TRANSACTION_COST}")]
+    #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the chain's bound")]
     GasCostTooHigh { chain_id: ChainId, cost: Wei },
     #[error("chain {chain_id} has no gas budget for a {action:?}")]
     NoGasBudget {
@@ -212,7 +227,7 @@ fn affordable(chain_id: ChainId, fees: Fees, gas_limit: GasAmount) -> Result<(),
         chain_id,
         cost: Wei::MAX,
     })?;
-    if cost > MAX_TRANSACTION_COST {
+    if cost > max_transaction_cost(chain_id) {
         return Err(TxError::GasCostTooHigh { chain_id, cost });
     }
     Ok(())
@@ -220,7 +235,7 @@ fn affordable(chain_id: ChainId, fees: Fees, gas_limit: GasAmount) -> Result<(),
 
 /// The gas budget of `action` on `chain_id`, or the refusal when the chain is not one the
 /// canister signs on. A cancel has no action and no budget: it spends a nonce that cannot
-/// be left unspent, and [`MAX_TRANSACTION_COST`] bounds it.
+/// be left unspent, and [`max_transaction_cost`] bounds it.
 pub(crate) fn budget_for(
     config: &types::Config,
     chain_id: ChainId,
@@ -1147,7 +1162,7 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
 
 /// The fees a replacement pays: double what the transaction being replaced paid, never
 /// below what the chain is asking now, and never above what the freshest reading allows,
-/// what [`MAX_TRANSACTION_COST`] buys per unit of this transaction's gas, or what its gas
+/// what [`max_transaction_cost`] buys per unit of this transaction's gas, or what its gas
 /// budget buys, whichever is lowest. Nothing at all once the entry is already at that
 /// ceiling, when its chain has no budget for it, or when the chain reading is too old to
 /// price a bid against.
@@ -1170,12 +1185,13 @@ fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees
     };
     let budget = Some(budget);
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
-    bump(current, &reading, entry.gas_limit, budget)
+    bump(chain_id, current, &reading, entry.gas_limit, budget)
 }
 
 /// [`bumped`] on what it read. Pure, so the gas rule's hold on a replacement is a unit
 /// test.
 pub fn bump(
+    chain_id: ChainId,
     current: Fees,
     reading: &ChainData,
     gas_limit: GasAmount,
@@ -1186,7 +1202,7 @@ pub fn bump(
     // per unit, and the bump clamps to that the way it clamps to the fee ceiling, so the
     // bids keep rising in smaller steps up to the bound instead of stopping one doubling
     // short of it, and a bid is refused only once nothing can be raised
-    let mut ceiling = reading.fee_ceiling().capped(affordable_per_gas(gas_limit)?);
+    let mut ceiling = reading.fee_ceiling().capped(affordable_per_gas(chain_id, gas_limit)?);
     if let Some(budget) = budget {
         ceiling = ceiling.capped(per_gas(budget, gas_limit)?);
     }
@@ -1194,9 +1210,10 @@ pub fn bump(
 }
 
 /// The most a transaction burning `gas_limit` may pay per unit of gas and stay inside
-/// [`MAX_TRANSACTION_COST`]. Nothing for a gas limit of zero, which no transaction has.
-fn affordable_per_gas(gas_limit: GasAmount) -> Option<WeiPerGas> {
-    per_gas(MAX_TRANSACTION_COST, gas_limit)
+/// [`max_transaction_cost`] of its chain. Nothing for a gas limit of zero, which no
+/// transaction has.
+fn affordable_per_gas(chain_id: ChainId, gas_limit: GasAmount) -> Option<WeiPerGas> {
+    per_gas(max_transaction_cost(chain_id), gas_limit)
 }
 
 fn per_gas(cost: Wei, gas_limit: GasAmount) -> Option<WeiPerGas> {
@@ -1268,7 +1285,7 @@ impl From<TxError> for settlement_api::types::tx::TxError {
             TxError::GasCostTooHigh { chain_id, cost } => Self::GasCostTooHigh {
                 chain_id: chain_id.get(),
                 cost_wei: cost.into(),
-                bound_wei: MAX_TRANSACTION_COST.into(),
+                bound_wei: max_transaction_cost(chain_id).into(),
             },
             TxError::NoGasBudget { chain_id, action } => Self::NoGasBudget {
                 chain_id: chain_id.get(),

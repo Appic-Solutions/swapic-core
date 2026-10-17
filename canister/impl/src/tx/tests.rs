@@ -82,7 +82,7 @@ fn a_fee_above_the_absolute_ceiling_prices_nothing() {
             ChainReading {
                 block: BlockNumber::new(19_000_000),
                 base_fee: WeiPerGas::from(1_000_000_000_u64),
-                priority_fee: WeiPerGas::from(1_000_000_000_000_u64),
+                priority_fee: MAX_FEE_PER_GAS,
             },
             at(100),
         );
@@ -127,6 +127,39 @@ fn a_transaction_whose_gas_would_cost_more_than_the_bound_is_refused() {
             ),
             "a hundred million gas at a hundred gwei is ten ether"
         );
+    });
+}
+
+/// Polygon's native coin is worth a few thousandths of ether, so its bill has its own bound:
+/// a CCTP completion at a busy base fee is a real cost there, an absurd gas limit still is not.
+#[test]
+fn polygon_has_its_own_bound_for_one_transaction() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        chain_data::put(
+            ChainId::POLYGON,
+            ChainReading {
+                block: BlockNumber::new(70_000_000),
+                // a busy hour: 500 gwei
+                base_fee: WeiPerGas::from(500_000_000_000_u64),
+                priority_fee: WeiPerGas::from(30_000_000_000_u64),
+            },
+            at(100),
+        );
+        let priced = fees(ChainId::POLYGON, at(100)).expect("500 gwei is a real Polygon price");
+        assert_eq!(
+            affordable(ChainId::POLYGON, priced, GasAmount::from(1_185_547_u32)),
+            Ok(()),
+            "a completion at 500 gwei is about 1.2 POL, above the old 1 POL bound"
+        );
+        assert!(
+            matches!(
+                affordable(ChainId::POLYGON, priced, GasAmount::from(100_000_000_u64)),
+                Err(TxError::GasCostTooHigh { .. })
+            ),
+            "a hundred million gas at 500 gwei is over 100 POL"
+        );
+        assert_eq!(max_transaction_cost(ChainId::BASE), MAX_TRANSACTION_COST);
     });
 }
 
@@ -808,6 +841,7 @@ fn gas_rule_refuses_over_budget() {
     // the replacement of a 9 gwei bid stops at the 10 gwei the budget buys per gas, and
     // the one after it is refused
     let bumped = bump(
+        ChainId::BASE,
         calm,
         &reading(4_000_000_000, 1_000_000_000),
         gas,
@@ -817,6 +851,7 @@ fn gas_rule_refuses_over_budget() {
     assert_eq!(bumped.max_fee(), WeiPerGas::from(10_000_000_000_u64));
     assert_eq!(
         bump(
+            ChainId::BASE,
             bumped,
             &reading(4_000_000_000, 1_000_000_000),
             gas,

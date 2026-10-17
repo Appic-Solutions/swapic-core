@@ -106,12 +106,13 @@ impl ChainData {
 /// The absolute ceiling on either fee field of any transaction this canister signs: a
 /// thousand gwei per gas.
 ///
-/// Two orders of magnitude above the worst congestion any chain this canister sends to has
-/// seen, and far below what a compromised or broken watcher could push, so it is a backstop
-/// and never a constraint on a real send. It is a constant and not a config knob on
-/// purpose: the knob belongs with the engine's other gas policy, in a later plan, and until
-/// then the bound cannot be raised by a config write.
-pub const MAX_FEE_PER_GAS: WeiPerGas = WeiPerGas::new(1_000_000_000_000);
+/// 50,000 gwei: above the busiest Polygon hours (POL gas is priced in the hundreds to
+/// thousands of gwei; 1,000 gwei refused real Polygon sends), and still far below what a
+/// compromised or broken watcher could push, so it is a backstop and never a constraint on
+/// a real send. What a transaction can actually cost is bounded per chain by the
+/// per-transaction bound and the per-action gas budgets. It is a constant and not a config
+/// knob on purpose: the bound cannot be raised by a config write.
+pub const MAX_FEE_PER_GAS: WeiPerGas = WeiPerGas::new(50_000_000_000_000);
 
 /// How far above the freshest reading a replacement may bid: eight times the base fee plus
 /// the tip it suggests.
