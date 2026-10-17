@@ -137,6 +137,9 @@ pub enum EventType {
         gas_limit: Nat,
         max_fee_wei_per_gas: Nat,
         max_priority_fee_wei_per_gas: Nat,
+        /// The gas action whose budget the transaction is held to (`relay_cctp`,
+        /// `complete_swap`, ...), on every line that records one.
+        action: Option<String>,
     },
     /// An open transaction was re-sent at the same nonce with a higher fee, with the bytes
     /// that were broadcast.
@@ -437,6 +440,7 @@ impl From<types::EventType> for EventType {
                 gas_limit,
                 max_fee,
                 max_priority_fee,
+                action,
             } => Self::TxCreated {
                 purpose: purpose.into(),
                 chain_id: chain_id.get(),
@@ -447,6 +451,7 @@ impl From<types::EventType> for EventType {
                 gas_limit: gas_limit.into(),
                 max_fee_wei_per_gas: max_fee.into(),
                 max_priority_fee_wei_per_gas: max_priority_fee.into(),
+                action: action.map(|action| action.name().to_string()),
             },
             Domain::TxReplaced {
                 purpose,
@@ -672,6 +677,7 @@ impl TryFrom<EventType> for types::EventType {
                 gas_limit,
                 max_fee_wei_per_gas,
                 max_priority_fee_wei_per_gas,
+                action,
             } => Self::TxCreated {
                 purpose: purpose.into(),
                 chain_id: ChainId::new(chain_id),
@@ -684,6 +690,12 @@ impl TryFrom<EventType> for types::EventType {
                     .map_err(|_| too_large("max_fee_wei_per_gas"))?,
                 max_priority_fee: WeiPerGas::try_from(max_priority_fee_wei_per_gas)
                     .map_err(|_| too_large("max_priority_fee_wei_per_gas"))?,
+                action: action
+                    .map(|name| {
+                        types::config::GasAction::from_name(&name)
+                            .ok_or(DomainEventError::NotAGasAction { field: "action" })
+                    })
+                    .transpose()?,
             },
             EventType::TxReplaced {
                 purpose,
@@ -839,6 +851,9 @@ pub enum EventError {
     NotABookStep {
         field: String,
     },
+    NotAGasAction {
+        field: String,
+    },
 }
 
 /// Why a text is not an EVM address. Mirrors `types::evm::EvmAddressError` so a caller
@@ -885,6 +900,9 @@ impl From<types::events::EventError> for EventError {
                 field: field.to_string(),
             },
             Domain::NotABookStep { field } => Self::NotABookStep {
+                field: field.to_string(),
+            },
+            Domain::NotAGasAction { field } => Self::NotAGasAction {
                 field: field.to_string(),
             },
         }

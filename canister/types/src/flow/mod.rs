@@ -611,6 +611,10 @@ pub struct Flow {
     /// A finish's arrival: the burn's id, whatever Circle wrote into its message.
     #[cbor(n(23), with = "minicbor::bytes")]
     pub arrival: Option<[u8; 32]>,
+    /// The gas action the flow's latest transaction was created under (`TxCreated`): the
+    /// budget a replacement of it is held to.
+    #[n(24)]
+    pub gas_action: Option<crate::config::GasAction>,
 }
 
 /// Why a flow step was refused.
@@ -676,6 +680,7 @@ impl Flow {
             signed_id: None,
             source_tx: None,
             arrival: None,
+            gas_action: None,
         }
     }
 

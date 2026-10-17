@@ -71,6 +71,9 @@ pub struct UnsignedTx {
     pub purpose: TxPurpose,
     #[n(1)]
     pub created_at: Timestamp,
+    /// The action whose gas budget the transaction is held to, as `TxCreated` recorded it.
+    #[n(2)]
+    pub action: Option<crate::config::GasAction>,
 }
 
 impl UnsignedTx {
@@ -202,10 +205,7 @@ pub struct OutboxEntry {
     /// same rules; the text is kept for the receipt pass and for ops.
     #[n(16)]
     pub refusal: Option<Refusal>,
-    /// The action whose gas budget the transaction was signed under, which a replacement's
-    /// bid is held to as well. None for a cancel, which no budget holds.
-    #[n(17)]
-    pub action: Option<crate::config::GasAction>,
+    // #[n(17)] held the entry's gas action before the log did (`TxCreated`): retired
 }
 
 impl OutboxEntry {
@@ -286,7 +286,6 @@ impl OutboxEntry {
             last_sent_at: _,
             first_sent_at: _,
             refusal: _,
-            action,
         } = self;
         Self {
             purpose: *purpose,
@@ -309,7 +308,6 @@ impl OutboxEntry {
             first_sent_at: None,
             // and no provider has answered them yet
             refusal: None,
-            action: *action,
         }
     }
 }

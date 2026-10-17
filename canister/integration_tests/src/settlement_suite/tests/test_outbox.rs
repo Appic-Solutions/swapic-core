@@ -281,6 +281,7 @@ fn created_for(swap: u64, nonce: u64) -> EventType {
         gas_limit: Nat::from(GAS_LIMIT),
         max_fee_wei_per_gas: Nat::from(1_u8),
         max_priority_fee_wei_per_gas: Nat::from(1_u8),
+        action: None,
     }
 }
 

@@ -69,6 +69,7 @@ fn swap_sequence() -> Vec<EventType> {
             gas_limit: Nat::from(120_000_u64),
             max_fee_wei_per_gas: Nat::from(1_u8),
             max_priority_fee_wei_per_gas: Nat::from(1_u8),
+            action: None,
         },
         EventType::TxSigned {
             quote_hash: swap_id,

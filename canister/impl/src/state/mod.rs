@@ -638,6 +638,7 @@ impl<S: Store> State<S> {
         nonce: Nonce,
         purpose: TxPurpose,
         at: Timestamp,
+        action: Option<types::config::GasAction>,
     ) {
         self.store.put_next_nonce(
             chain_id,
@@ -650,6 +651,7 @@ impl<S: Store> State<S> {
             UnsignedTx {
                 purpose,
                 created_at: at,
+                action,
             },
         );
     }
@@ -737,14 +739,20 @@ impl<S: Store> State<S> {
     }
 
     /// A flow step the guard admitted.
+    /// `action` is the gas action the step's signed transaction was created under, for a
+    /// step that records one.
     fn record_flow(
         &mut self,
         quote_hash: QuoteHash,
         step: &types::FlowStep,
         index: EventIndex,
         at: Timestamp,
+        action: Option<types::config::GasAction>,
     ) {
-        let flow = types::Flow::apply(self.store.flow(&quote_hash), step, index.get(), at);
+        let mut flow = types::Flow::apply(self.store.flow(&quote_hash), step, index.get(), at);
+        if action.is_some() {
+            flow.gas_action = action;
+        }
         self.store.put_flow(quote_hash, flow);
     }
 

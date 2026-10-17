@@ -516,6 +516,49 @@ pub enum GasAction {
     Release,
 }
 
+impl GasAction {
+    /// Every action, in code order.
+    pub const ALL: [GasAction; 7] = [
+        GasAction::RelayCctp,
+        GasAction::RelayEco,
+        GasAction::RelayLocal,
+        GasAction::CompleteSwap,
+        GasAction::CompleteCk,
+        GasAction::RelayDeliver,
+        GasAction::Release,
+    ];
+
+    /// The action's one byte in an event's canonical preimage: its index, never reused.
+    pub fn code(self) -> u8 {
+        match self {
+            GasAction::RelayCctp => 0,
+            GasAction::RelayEco => 1,
+            GasAction::RelayLocal => 2,
+            GasAction::CompleteSwap => 3,
+            GasAction::CompleteCk => 4,
+            GasAction::RelayDeliver => 5,
+            GasAction::Release => 6,
+        }
+    }
+
+    /// The action as the wire spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            GasAction::RelayCctp => "relay_cctp",
+            GasAction::RelayEco => "relay_eco",
+            GasAction::RelayLocal => "relay_local",
+            GasAction::CompleteSwap => "complete_swap",
+            GasAction::CompleteCk => "complete_ck",
+            GasAction::RelayDeliver => "relay_deliver",
+            GasAction::Release => "release",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.name() == name)
+    }
+}
+
 /// One value per [`GasAction`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct PerAction<T> {
@@ -559,6 +602,17 @@ impl<T: Copy> PerAction<T> {
             relay_deliver: value,
             release: value,
         }
+    }
+}
+
+impl PerAction<Wei> {
+    /// The least of the seven: what a transaction whose action is not known is held to.
+    pub fn strictest(&self) -> Wei {
+        GasAction::ALL
+            .into_iter()
+            .map(|action| self.get(action))
+            .min()
+            .expect("BUG: there are seven actions")
     }
 }
 

@@ -23,7 +23,6 @@ fn entry() -> OutboxEntry {
         data: vec![0xde, 0xad, 0xbe, 0xef],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
-        action: None,
     }
 }
 
@@ -254,6 +253,7 @@ fn an_unsigned_nonce_round_trips_and_knows_when_it_was_abandoned() {
     let unsigned = UnsignedTx {
         purpose: TxPurpose::Payout(QuoteHash::new([4; 32])),
         created_at: Timestamp::from_nanos(1_000_000_000),
+        action: None,
     };
     assert_eq!(UnsignedTx::from_bytes(unsigned.to_bytes()), unsigned);
 

@@ -18,6 +18,7 @@ fn created(key: QuoteHash, nonce: u64) -> EventType {
         gas_limit: GasAmount::from(200_000_u32),
         max_fee: WeiPerGas::from(20_000_000_u64),
         max_priority_fee: WeiPerGas::from(1_000_000_u64),
+        action: None,
     }
 }
 

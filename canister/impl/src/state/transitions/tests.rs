@@ -1083,6 +1083,7 @@ fn created(purpose: TxPurpose, chain: ChainId, nonce: u64) -> EventType {
         gas_limit: GasAmount::from(120_000_u32),
         max_fee: WeiPerGas::from(2_000_000_000_u64),
         max_priority_fee: WeiPerGas::from(100_000_000_u64),
+        action: None,
     }
 }
 
@@ -1216,6 +1217,7 @@ fn a_created_nonce_is_unsigned_until_a_signed_record_or_a_cancel_ends_it() {
             UnsignedTx {
                 purpose: TxPurpose::Burn(qh),
                 created_at: Timestamp::from_nanos(7),
+                action: None,
             }
         )],
         "the allocation is stamped with the instant the log sealed it, so a replay of the \
@@ -1443,6 +1445,7 @@ fn a_transaction_field_above_the_preimage_range_is_refused() {
             gas_limit,
             max_fee,
             max_priority_fee: tip,
+            action: None,
         }
     };
     let (gas, fee) = (GasAmount::from(120_000_u32), WeiPerGas::from(1_u8));
@@ -1574,7 +1577,8 @@ fn a_pull_is_created_with_no_swap_and_its_record_spends_its_nonce() {
             },
             UnsignedTx {
                 purpose: pull,
-                created_at: Timestamp::from_nanos(1)
+                created_at: Timestamp::from_nanos(1),
+                action: None,
             }
         )]
     );
@@ -1859,6 +1863,7 @@ fn a_cctp_burn_records_the_fee_it_offered_and_a_publish_records_none() {
             gas_limit,
             max_fee,
             max_priority_fee,
+            action: None,
         },
         other => panic!("the fixture is a TxCreated, not {other:?}"),
     };

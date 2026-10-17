@@ -131,6 +131,7 @@ pub(crate) fn samples() -> Vec<EventType> {
             gas_limit: GasAmount::from(120_000_u32),
             max_fee: WeiPerGas::from(2_000_000_000_u64),
             max_priority_fee: WeiPerGas::from(100_000_000_u64),
+            action: None,
         },
         EventType::TxReplaced {
             purpose: TxPurpose::Cancel(ChainId::ARBITRUM),

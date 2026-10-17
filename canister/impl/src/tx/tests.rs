@@ -250,7 +250,6 @@ fn a_large_gas_limit_keeps_bumping_in_smaller_steps_up_to_the_cost_cap() {
         // 2.1 gwei the reading prices at, below the 8.8 gwei the fee ceiling allows
         let gas_limit = GasAmount::from(200_000_000_u64);
         let mut entry = entry_with(0, 1);
-        entry.action = Some(GasAction::RelayLocal);
         entry.gas_limit = gas_limit;
         entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
         entry.max_priority_fee = WeiPerGas::from(100_000_000_u64);
@@ -476,7 +475,6 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         data: vec![],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
-        action: None,
     }
 }
 
@@ -693,6 +691,7 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
         gas_limit: GasAmount::from(21_000_u32),
         max_fee: WeiPerGas::from(2_u32),
         max_priority_fee: WeiPerGas::from(1_u32),
+        action: None,
     };
     let key = |nonce: u64| NonceKey {
         chain_id: ChainId::BASE,
@@ -841,4 +840,118 @@ fn chain_with_budget(budget: Wei) -> types::config::EvmChain {
         gas_budget: types::config::PerAction::all(budget),
         min_network_fee: types::config::PerAction::all(types::TokenAmount::ZERO),
     }
+}
+
+/// Review fix 9: a replacement whose transaction names no gas action in the log (a cancel,
+/// or an entry from before the action was recorded) is held to the strictest budget its
+/// chain has, never only the one-ether bound every transaction has.
+#[test]
+fn a_replacement_with_no_action_is_held_to_the_strictest_budget() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let mut chain = chain_with_budget(Wei::from(10_000_000_000_000_000_000_u128));
+        // 0.0003 ether over 120,000 gas is 2.5 gwei a gas
+        chain.gas_budget.release = Wei::from(300_000_000_000_000_u64);
+        config::test_set(types::Config {
+            evm_chains: types::config::ChainTable(std::collections::BTreeMap::from([(
+                ChainId::BASE,
+                chain,
+            )])),
+            ..types::Config::default()
+        });
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(100_000_000_u64),
+            },
+            at(100),
+        );
+        let mut entry = entry_with(0, 1);
+        entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
+        let bid = bumped(&entry, ChainId::BASE, at(100)).expect("there is room to bid");
+        assert!(
+            bid.max_fee() <= WeiPerGas::from(2_500_000_000_u64),
+            "{:?} is above what the strictest budget buys",
+            bid.max_fee()
+        );
+        // a chain the canister signs nothing on bids nothing
+        let mut elsewhere = entry.clone();
+        elsewhere.chain_id = ChainId::ARBITRUM;
+        assert_eq!(bumped(&elsewhere, ChainId::ARBITRUM, at(100)), None);
+    });
+}
+
+/// Review fix 9: a transaction's gas action is in the log. `TxCreated` records it and its
+/// hash covers it, the flow its signed step creates takes it, so a replay rebuilds it, and
+/// a replacement is held to that action's budget.
+#[test]
+fn the_gas_action_is_folded_from_the_log() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let key = QuoteHash::new([0x0d; 32]);
+        let created = |action| EventType::TxCreated {
+            purpose: TxPurpose::Relay(key),
+            chain_id: ChainId::BASE,
+            nonce: types::Nonce::new(0),
+            to: EvmAddress::new([0xf2; 20]),
+            value: Wei::ZERO,
+            data: vec![0xf7, 0xed, 0xe9, 0x48],
+            gas_limit: GasAmount::from(120_000_u32),
+            max_fee: WeiPerGas::from(2_100_000_000_u64),
+            max_priority_fee: WeiPerGas::from(100_000_000_u64),
+            action,
+        };
+        assert_ne!(
+            created(Some(GasAction::RelayCctp)).canonical_bytes(),
+            created(None).canonical_bytes(),
+            "the hash covers the action"
+        );
+        let at = at(100);
+        crate::storage::events::append_event_at(created(Some(GasAction::RelayCctp)), at).unwrap();
+        crate::storage::events::append_event_at(
+            EventType::Flow {
+                quote_hash: key,
+                step: types::FlowStep::GaslessRelayed {
+                    chain_id: ChainId::BASE,
+                    nonce: types::Nonce::new(0),
+                    tx_hash: TxHash::new([1; 32]),
+                    raw_tx: vec![0x02],
+                },
+            },
+            at,
+        )
+        .unwrap();
+        assert_eq!(
+            read_state(|state| state.flow(&key)).and_then(|flow| flow.gas_action),
+            Some(GasAction::RelayCctp)
+        );
+
+        // the relay's own budget holds its replacement: 2.5 gwei a gas for relay_cctp,
+        // every other action roomy
+        let mut chain = chain_with_budget(Wei::from(10_000_000_000_000_000_000_u128));
+        chain.gas_budget.relay_cctp = Wei::from(300_000_000_000_000_u64);
+        config::test_set(types::Config {
+            evm_chains: types::config::ChainTable(std::collections::BTreeMap::from([(
+                ChainId::BASE,
+                chain,
+            )])),
+            ..types::Config::default()
+        });
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(19_000_000),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(100_000_000_u64),
+            },
+            at,
+        );
+        let mut entry = entry_with(0, 1);
+        entry.purpose = TxPurpose::Relay(key);
+        entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
+        let bid = bumped(&entry, ChainId::BASE, at).expect("there is room to bid");
+        assert!(bid.max_fee() <= WeiPerGas::from(2_500_000_000_u64));
+    });
 }

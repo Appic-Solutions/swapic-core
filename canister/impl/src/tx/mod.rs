@@ -400,6 +400,7 @@ pub async fn create_and_send_with(
         gas_limit,
         max_fee: fees.max_fee(),
         max_priority_fee: fees.max_priority_fee(),
+        action: Some(action),
     })?;
 
     // the one place this call arms the pass: here, after the allocation and before the
@@ -513,7 +514,6 @@ pub async fn create_and_send_with(
         data: tx.data,
         gas_limit,
         refusal: None,
-        action: Some(action),
     });
     Ok(Signed { tx_hash, id })
 }
@@ -634,7 +634,6 @@ async fn cancel(key: NonceKey) {
         data: Vec::new(),
         gas_limit,
         refusal: None,
-        action: None,
     });
     task_manager::outbox::arm();
 }
@@ -1154,11 +1153,22 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
 /// price a bid against.
 fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
     let reading = fresh_reading(chain_id, now).ok()?;
-    // a chain that no longer signs this action bids nothing more
-    let budget = match entry.action {
-        Some(action) => Some(budget_for(&config::get(), chain_id, action).ok()?),
-        None => None,
+    // the budget the log holds the transaction to: its flow's gas action, as `TxCreated`
+    // recorded it; and one with none (a cancel, a line from before the action was
+    // recorded) the strictest budget its chain has. A chain that signs nothing bids
+    // nothing more
+    let config = config::get();
+    let action = match entry.purpose {
+        TxPurpose::Relay(key) | TxPurpose::Continue(key) | TxPurpose::Finish(key) => {
+            read_state(|state| state.flow(&key)).and_then(|flow| flow.gas_action)
+        }
+        _ => None,
     };
+    let budget = match action {
+        Some(action) => budget_for(&config, chain_id, action).ok()?,
+        None => config.evm_chains.get(chain_id)?.gas_budget.strictest(),
+    };
+    let budget = Some(budget);
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
     bump(current, &reading, entry.gas_limit, budget)
 }

@@ -253,6 +253,10 @@ pub enum EventType {
         max_fee: WeiPerGas,
         #[n(8)]
         max_priority_fee: WeiPerGas,
+        /// The action whose gas budget the transaction is held to, it and every
+        /// replacement of it. None on a line from before it was recorded.
+        #[n(9)]
+        action: Option<crate::config::GasAction>,
     },
     /// An open transaction was re-sent at the same nonce with a higher fee, because it was
     /// not landing (rule A5: an allocated nonce is never abandoned). Carries the bytes
@@ -470,6 +474,8 @@ pub enum EventError {
     NotAFlowStep { field: &'static str },
     #[error("{field} is not a book step")]
     NotABookStep { field: &'static str },
+    #[error("{field} is not a gas action")]
+    NotAGasAction { field: &'static str },
 }
 
 impl EventError {
@@ -791,6 +797,7 @@ impl EventType {
                 gas_limit,
                 max_fee,
                 max_priority_fee,
+                action,
             } => {
                 w.put_u16(20);
                 purpose.write_canonical(&mut w);
@@ -802,6 +809,11 @@ impl EventType {
                     .put_amount(*gas_limit)
                     .put_amount(*max_fee)
                     .put_amount(*max_priority_fee);
+                // last, and only when there is one: a line from before the action was
+                // recorded keeps its preimage, and so its hash
+                if let Some(action) = action {
+                    w.put_u8(action.code());
+                }
             }
             EventType::TxReplaced {
                 purpose,

@@ -60,6 +60,7 @@ fn sample_fold() -> MemoryStore {
         UnsignedTx {
             purpose: TxPurpose::Payout(quote_hash),
             created_at: Timestamp::from_nanos(1_700_000_000_987_654_321),
+            action: None,
         },
     );
     store

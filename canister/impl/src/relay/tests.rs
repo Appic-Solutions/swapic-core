@@ -466,6 +466,7 @@ fn idempotent_per_order() {
             gas_limit: GasAmount::from(393_566_u64),
             max_fee: WeiPerGas::from(20_000_000_u64),
             max_priority_fee: WeiPerGas::from(1_000_000_u64),
+            action: None,
         };
         assert_eq!(tx::signed_once(key), Ok(None));
         append_event_at(created(0), at).unwrap();

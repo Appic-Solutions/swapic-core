@@ -323,6 +323,9 @@ type EventType = variant {
   TxCreated : record {
     to : text;
     max_priority_fee_wei_per_gas : nat;
+    // The gas action whose budget the transaction is held to (`relay_cctp`,
+    // `complete_swap`, ...), on every line that records one.
+    action : opt text;
     data : blob;
     max_fee_wei_per_gas : nat;
     chain_id : nat64;

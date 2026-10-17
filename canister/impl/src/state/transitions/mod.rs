@@ -571,9 +571,10 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             chain_id,
             nonce,
             data,
+            action,
             ..
         } => {
-            state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp);
+            state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp, *action);
             // the payout's own amount, off the calldata this canister built: what the
             // record of a delivered swap is made from. Pure, so a replay rebuilds it.
             if let TxPurpose::Payout(quote_hash) = purpose {
@@ -601,6 +602,9 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             chain_id, nonce, ..
         } => state.record_nonce_spent(*chain_id, *nonce),
         EventType::Flow { quote_hash, step } => {
+            // a signed step spends the nonce its `TxCreated` handed out, and takes the gas
+            // action that line recorded, which a replacement is held to
+            let mut action = None;
             if let FlowStep::GaslessRelayed {
                 chain_id, nonce, ..
             }
@@ -611,9 +615,16 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
                 chain_id, nonce, ..
             } = step
             {
+                action = state
+                    .store()
+                    .unsigned_nonce(&NonceKey {
+                        chain_id: *chain_id,
+                        nonce: *nonce,
+                    })
+                    .and_then(|unsigned| unsigned.action);
                 state.record_nonce_spent(*chain_id, *nonce);
             }
-            state.record_flow(*quote_hash, step, event.index, event.timestamp);
+            state.record_flow(*quote_hash, step, event.index, event.timestamp, action);
         }
         EventType::Books { chain_id, step } => state.record_books(*chain_id, step, event.timestamp),
         // audit lines for deploy-time truth that lives in its own stable cell, and for a

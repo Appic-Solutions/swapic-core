@@ -111,6 +111,7 @@ fn samples() -> Vec<EventType> {
             gas_limit: Nat::from(120_000_u32),
             max_fee_wei_per_gas: Nat::from(2_000_000_000_u64),
             max_priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+            action: None,
         },
         EventType::TxReplaced {
             purpose: TxPurpose::Cancel(42161),
@@ -177,6 +178,7 @@ fn a_transaction_to_something_that_is_not_an_address_is_refused() {
             gas_limit: Nat::from(1_u8),
             max_fee_wei_per_gas: Nat::from(1_u8),
             max_priority_fee_wei_per_gas: Nat::from(1_u8),
+            action: None,
         })
     };
     use types::evm::EvmAddressError as Reason;
@@ -217,6 +219,7 @@ fn every_amount_field_of_a_transaction_names_itself() {
         gas_limit,
         max_fee_wei_per_gas: max_fee,
         max_priority_fee_wei_per_gas: tip,
+        action: None,
     };
     let one = || Nat::from(1_u8);
     assert!(types::EventType::try_from(created(one(), one(), one(), one())).is_ok());
