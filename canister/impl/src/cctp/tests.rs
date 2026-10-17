@@ -549,3 +549,42 @@ fn a_re_attested_message_is_the_same_arrival() {
         );
     });
 }
+
+/// Review fix 4: what a finished arrival answers, whatever action a later call would
+/// decide: its delivery, its release, or its completion, unless that reverted.
+#[test]
+fn a_finished_arrival_answers_any_later_call() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let source = TxHash::new([0x5c; 32]);
+        let arrival = types::cctp::arrival_id(&ours(Action::Swap));
+        assert_eq!(answered_arrival(arrival), Ok(None));
+        let complete = finish_key(arrival, FinishAction::Complete);
+        append_event_at(created(complete, 0), at).unwrap();
+        assert!(answered_arrival(arrival).is_err(), "being signed");
+        let id = append_event_at(signed(0, FinishAction::Complete, arrival, source), at)
+            .unwrap()
+            .get();
+        assert_eq!(answered_arrival(arrival), Ok(Some(id)));
+        append_event_at(
+            EventType::Flow {
+                quote_hash: complete,
+                step: FlowStep::TxClosed {
+                    tx_hash: TxHash::new([1; 32]),
+                    block: types::BlockNumber::new(9),
+                    success: false,
+                },
+            },
+            at,
+        )
+        .unwrap();
+        assert_eq!(answered_arrival(arrival), Ok(None), "a reverted completion");
+        let release = finish_key(arrival, FinishAction::Release);
+        append_event_at(created(release, 1), at).unwrap();
+        let release_id = append_event_at(signed(1, FinishAction::Release, arrival, source), at)
+            .unwrap()
+            .get();
+        assert_eq!(answered_arrival(arrival), Ok(Some(release_id)));
+    });
+}

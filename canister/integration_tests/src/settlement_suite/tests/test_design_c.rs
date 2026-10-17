@@ -350,16 +350,11 @@ fn answer_broadcasts(pic: &PocketIc) -> Vec<String> {
     methods
 }
 
-#[test]
-fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
-    let (pic, canister, admin) = setup();
-    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
-    let canister_address = address(&mine);
-    let now = now_s(&pic);
-
-    // the relay, as the submit API asks for it: the order and the 3009 authorization,
-    // each `abi.encode` of one tuple, and the limit the quoter charged for
-    let (order, envelope) = order_for(canister_address, now);
+/// The relay the submit API asks for: the order and its 3009 authorization, signed by the
+/// payer as a wallet signs USDC's ReceiveWithAuthorization, each `abi.encode` of one
+/// tuple, and the limit the quoter charged for.
+fn relay_for(canister: EvmAddress, now: u64) -> (Vec<u8>, Order, GaslessAuth, Envelope) {
+    let (order, envelope) = order_for(canister, now);
     let order_id = swapic::order_id(&order, ChainId::new(ARBITRUM), address(SWAPIC));
     let mut auth = GaslessAuth {
         door: DOOR_AUTH_3009,
@@ -370,7 +365,6 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
         signature: Default::default(),
         acceptance: Default::default(),
     };
-    // the payer signs USDC's ReceiveWithAuthorization, as a wallet does for the 3009 door
     let digest = swapic::receive_with_authorization_digest(
         &order,
         &auth,
@@ -384,13 +378,46 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
     let mut signed = signature.serialize().to_vec();
     signed.push(recovery.serialize() + 27);
     auth.signature = signed.into();
-    let relay_args = encode_args((
+    let args = encode_args((
         ARBITRUM,
         swapic::encode_order(&order),
         swapic::encode_auth(&auth),
         SOURCE_GAS,
     ))
     .unwrap();
+    (args, order, auth, envelope)
+}
+
+/// The finish the watcher asks for: the order's arrival on Base, with the stored recipe,
+/// its source transaction, and the limit the quoter charged for.
+fn finish_for(envelope: &Envelope) -> (Vec<u8>, Vec<u8>, Vec<u8>, swapic::Recipe) {
+    let (message, attestation) = message_for(envelope);
+    let stored = swapic::decode_recipe(&hex_field(&sample_order(), "recipe")).unwrap();
+    let recipe = Recipe {
+        target: swapic::evm(stored.target).to_string(),
+        data: stored.data.to_vec(),
+        scaler: Some(swapic::evm(stored.scaler).to_string()),
+    };
+    let args = encode_args((
+        BASE,
+        message.clone(),
+        attestation.clone(),
+        Some(recipe),
+        vec![0x5c_u8; 32],
+        ARRIVAL_GAS,
+    ))
+    .unwrap();
+    (args, message, attestation, stored)
+}
+
+#[test]
+fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let canister_address = address(&mine);
+    let now = now_s(&pic);
+
+    let (relay_args, order, auth, envelope) = relay_for(canister_address, now);
     let refused: Result<u64, String> = update(
         &pic,
         canister,
@@ -412,23 +439,8 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
     assert_eq!(again, Ok(relay_id), "one relay per order id");
 
     // the arrival on Base, before its deadline: completed with the stored recipe
-    let (message, attestation) = message_for(&envelope);
+    let (finish_args, message, attestation, stored) = finish_for(&envelope);
     assert_eq!(message.len(), 696);
-    let stored = swapic::decode_recipe(&hex_field(&sample_order(), "recipe")).unwrap();
-    let recipe = Recipe {
-        target: swapic::evm(stored.target).to_string(),
-        data: stored.data.to_vec(),
-        scaler: Some(swapic::evm(stored.scaler).to_string()),
-    };
-    let finish_args = encode_args((
-        BASE,
-        message.clone(),
-        attestation.clone(),
-        Some(recipe),
-        vec![0x5c_u8; 32],
-        ARRIVAL_GAS,
-    ))
-    .unwrap();
     push(&pic, canister, BASE);
     let finish_id: u64 = update::<Result<u64, String>>(
         &pic,
@@ -535,4 +547,49 @@ fn a_forged_authorization_is_refused() {
             .is_err_and(|error| error.contains("does not recover to the payer")),
         "{answer:?}"
     );
+}
+
+/// Review fix 4: `finish_cctp` answers an arrival it already finished before anything
+/// else. Asked again inside the deadline's margin, or after its recipient is sanctioned,
+/// it answers the completion it signed, not a refusal the watcher would retry forever.
+#[test]
+fn a_finished_arrival_answers_its_id_whatever_came_after() {
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let (_, _, _, envelope) = relay_for(address(&mine), now_s(&pic));
+    let (finish_args, _, _, _) = finish_for(&envelope);
+    push(&pic, canister, BASE);
+    let finish_id: u64 = update::<Result<u64, String>>(
+        &pic,
+        canister,
+        watcher(),
+        "finish_cctp",
+        finish_args.clone(),
+    )
+    .expect("the arrival is completed");
+
+    // inside the deadline's margin: no new finish is signed, the completion answers
+    pic.advance_time(std::time::Duration::from_secs(1_740));
+    pic.tick();
+    push(&pic, canister, BASE);
+    let late: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher(),
+        "finish_cctp",
+        finish_args.clone(),
+    );
+    assert_eq!(late, Ok(finish_id));
+
+    // the recipient sanctioned after the completion was signed: still its answer
+    let listed: Result<u64, settlement_api::types::errors::SetSanctionedError> = update(
+        &pic,
+        canister,
+        watcher(),
+        "set_sanctioned",
+        encode_args((vec![envelope.recipient.to_string()], Vec::<String>::new())).unwrap(),
+    );
+    listed.expect("the watcher lists");
+    let again: Result<u64, String> = update(&pic, canister, watcher(), "finish_cctp", finish_args);
+    assert_eq!(again, Ok(finish_id));
 }

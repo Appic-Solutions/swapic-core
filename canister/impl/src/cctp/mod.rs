@@ -312,6 +312,28 @@ pub fn answered(action: FinishAction, arrival: [u8; 32]) -> Result<Option<u64>, 
     tx::signed_once(finish_key(arrival, action))
 }
 
+/// The id of any finish of this arrival already signed: its delivery, its release, or a
+/// completion that did not revert (after a reverted one only a release follows). What a
+/// call for an arrival the canister already finished answers, before anything else is
+/// read, so neither the clock, nor the config, nor a later listing turns a finished
+/// arrival into a refusal.
+pub fn answered_arrival(arrival: [u8; 32]) -> Result<Option<u64>, String> {
+    for action in [FinishAction::Receive, FinishAction::Release] {
+        if let Some(id) = tx::signed_once(finish_key(arrival, action))? {
+            return Ok(Some(id));
+        }
+    }
+    let complete = finish_key(arrival, FinishAction::Complete);
+    if let Some(id) = tx::signed_once(complete)? {
+        let reverted = read_state(|state| state.flow(&complete))
+            .is_some_and(|flow| flow.status == FlowStatus::FinishFailed);
+        if !reverted {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 /// Whether `source_tx` already finished an arrival other than this one. One fee pays for
 /// one arrival and the fold refuses a second message too; this is the door's read of the
 /// same rule, before a nonce is spent on it.
@@ -350,6 +372,11 @@ pub async fn finish_cctp(
             .map_err(|_| FinishError::SourceTxLength(src_tx_hash.len()).to_string())?,
     );
     let parsed = BurnMessage::parse(message).map_err(|e| e.to_string())?;
+    // an arrival already finished answers its finish, whatever came after it
+    let arrival = types::cctp::arrival_id(&parsed);
+    if let Some(id) = answered_arrival(arrival)? {
+        return Ok(id);
+    }
     // derived once by the deploy and read from stable memory after that
     let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
     let config = config::get();
@@ -369,7 +396,6 @@ pub async fn finish_cctp(
         .expect("BUG: decide found the chain in this table");
     let gas = signing_gas(chain_id, &destination, plan.gas_action, gas_limit)
         .map_err(|e| e.to_string())?;
-    let arrival = types::cctp::arrival_id(&parsed);
 
     let _busy =
         Busy::take(source_key(source_tx)).ok_or("the source transaction is being finished")?;
