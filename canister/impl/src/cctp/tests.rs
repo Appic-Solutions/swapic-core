@@ -346,21 +346,16 @@ fn created(key: QuoteHash, nonce: u64) -> EventType {
     }
 }
 
-fn signed(
-    nonce: u64,
-    action: FinishAction,
-    message_hash: [u8; 32],
-    source_tx: TxHash,
-) -> EventType {
+fn signed(nonce: u64, action: FinishAction, arrival: [u8; 32], source_tx: TxHash) -> EventType {
     EventType::Flow {
-        quote_hash: finish_key(message_hash, action),
+        quote_hash: finish_key(arrival, action),
         step: FlowStep::CctpFinishSigned {
             chain_id: ARBITRUM,
             nonce: Nonce::new(nonce),
             tx_hash: TxHash::new([nonce as u8 + 1; 32]),
             raw_tx: vec![0x02, 0xf8],
             action,
-            message_hash,
+            arrival,
             source_tx: Some(source_tx),
         },
     }
@@ -373,27 +368,27 @@ fn finish_cctp_is_idempotent() {
     on_fresh_memory(|| {
         crate::storage::init();
         let at = Timestamp::from_nanos(1);
-        let message_hash = alloy_primitives::keccak256(ours(Action::Swap).encode()).0;
+        let arrival = alloy_primitives::keccak256(ours(Action::Swap).encode()).0;
         let source = TxHash::new([0x5c; 32]);
-        let complete = finish_key(message_hash, FinishAction::Complete);
-        assert_eq!(answered(FinishAction::Complete, message_hash), Ok(None));
+        let complete = finish_key(arrival, FinishAction::Complete);
+        assert_eq!(answered(FinishAction::Complete, arrival), Ok(None));
 
         append_event_at(created(complete, 0), at).unwrap();
         assert!(
-            answered(FinishAction::Complete, message_hash).is_err(),
+            answered(FinishAction::Complete, arrival).is_err(),
             "being signed"
         );
         assert!(
             append_event_at(created(complete, 1), at).is_err(),
             "no second nonce while the first is out"
         );
-        let id = append_event_at(signed(0, FinishAction::Complete, message_hash, source), at)
+        let id = append_event_at(signed(0, FinishAction::Complete, arrival, source), at)
             .unwrap()
             .get();
-        assert_eq!(answered(FinishAction::Complete, message_hash), Ok(Some(id)));
+        assert_eq!(answered(FinishAction::Complete, arrival), Ok(Some(id)));
         assert!(append_event_at(created(complete, 1), at).is_err());
         // after the deadline the watcher asks again: the completion is out, so it answers
-        assert_eq!(answered(FinishAction::Release, message_hash), Ok(Some(id)));
+        assert_eq!(answered(FinishAction::Release, arrival), Ok(Some(id)));
 
         // the completion reverted: a release is what follows it, signed once as well
         append_event_at(
@@ -408,15 +403,14 @@ fn finish_cctp_is_idempotent() {
             at,
         )
         .unwrap();
-        assert_eq!(answered(FinishAction::Release, message_hash), Ok(None));
-        let release = finish_key(message_hash, FinishAction::Release);
+        assert_eq!(answered(FinishAction::Release, arrival), Ok(None));
+        let release = finish_key(arrival, FinishAction::Release);
         append_event_at(created(release, 1), at).unwrap();
-        let release_id =
-            append_event_at(signed(1, FinishAction::Release, message_hash, source), at)
-                .unwrap()
-                .get();
+        let release_id = append_event_at(signed(1, FinishAction::Release, arrival, source), at)
+            .unwrap()
+            .get();
         assert_eq!(
-            answered(FinishAction::Release, message_hash),
+            answered(FinishAction::Release, arrival),
             Ok(Some(release_id))
         );
     });
@@ -507,5 +501,51 @@ fn a_sanctioned_ck_principal_is_not_finished() {
         unreadable.body.hook_data = bad.encode();
         let plan = decide_on(ARBITRUM, &unreadable, NOW).unwrap();
         assert!(matches!(screen(&plan), Err(FinishError::Shape(_))));
+    });
+}
+
+/// Review fix 8: a finish is keyed by the burn, not by the message's bytes. Circle
+/// rewrites finality executed, fee executed and expiration when it attests again, and the
+/// re-attested message must be the same arrival: a release after a failed completion of
+/// the first attestation is that arrival's release, and a second completion is none.
+#[test]
+fn a_re_attested_message_is_the_same_arrival() {
+    let first = ours(Action::Swap);
+    let mut again = first.clone();
+    again.finality_threshold_executed = 1_000;
+    again.body.fee_executed = TokenAmount::from(1_234_u32);
+    again.body.expiration_block = types::BlockNumber::new(99_000_000);
+    assert_ne!(first.encode(), again.encode());
+    assert_eq!(
+        types::cctp::arrival_id(&first),
+        types::cctp::arrival_id(&again)
+    );
+    let mut other_burn = first.clone();
+    other_burn.nonce[0] ^= 1;
+    assert_ne!(
+        types::cctp::arrival_id(&first),
+        types::cctp::arrival_id(&other_burn)
+    );
+    let mut other_domain = first.clone();
+    other_domain.source_domain = 0;
+    assert_ne!(
+        types::cctp::arrival_id(&first),
+        types::cctp::arrival_id(&other_domain)
+    );
+
+    on_fresh_memory(move || {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let source = TxHash::new([0x5c; 32]);
+        let arrival = types::cctp::arrival_id(&first);
+        append_event_at(created(finish_key(arrival, FinishAction::Complete), 0), at).unwrap();
+        let id = append_event_at(signed(0, FinishAction::Complete, arrival, source), at)
+            .unwrap()
+            .get();
+        // the re-attested message, asked for after the deadline, answers the completion
+        assert_eq!(
+            answered(FinishAction::Release, types::cctp::arrival_id(&again)),
+            Ok(Some(id))
+        );
     });
 }

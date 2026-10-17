@@ -294,7 +294,7 @@ impl<S: Store> State<S> {
                         flows
                             .iter()
                             .find(|(_, flow)| flow.source_tx.as_ref() == Some(source_tx))
-                            .and_then(|(_, flow)| flow.message_hash)
+                            .and_then(|(_, flow)| flow.arrival)
                     },
                 )?;
                 match step {

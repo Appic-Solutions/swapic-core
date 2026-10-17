@@ -28,8 +28,8 @@ fn signed_txs_pages_every_signed_line_after_the_cursor() {
     on_fresh_memory(|| {
         crate::storage::init();
         let at = Timestamp::from_nanos(7);
-        let message_hash = [3; 32];
-        let key = finish_key(message_hash, FinishAction::Receive);
+        let arrival = [3; 32];
+        let key = finish_key(arrival, FinishAction::Receive);
         append_event_at(created(key, 0), at).unwrap();
         let finish = append_event_at(
             EventType::Flow {
@@ -40,7 +40,7 @@ fn signed_txs_pages_every_signed_line_after_the_cursor() {
                     tx_hash: TxHash::new([1; 32]),
                     raw_tx: vec![0x02, 0x01],
                     action: FinishAction::Receive,
-                    message_hash,
+                    arrival,
                     source_tx: None,
                 },
             },

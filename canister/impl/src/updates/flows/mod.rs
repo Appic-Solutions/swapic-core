@@ -256,8 +256,9 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
 /// message transmitter; a Swap (with `recipe`, required) or a CkDeposit (with none) is
 /// completed on the CctpReceiver before its deadline, and released after it. Signed with
 /// exactly `gas_limit` and refused above the chain's maximum for the action, but a release,
-/// which is signed at that maximum; held to the gas rule; once per message and action, and
-/// one message per source transaction.
+/// which is signed at that maximum; held to the gas rule; once per arrival (the burn, by
+/// its source domain and Circle's nonce, so a re-attested message is the same arrival)
+/// and action, and one arrival per source transaction.
 /// Answers the signed transaction's id in `signed_txs`.
 #[update]
 pub async fn finish_cctp(

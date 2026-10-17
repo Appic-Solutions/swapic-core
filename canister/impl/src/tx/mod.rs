@@ -297,7 +297,7 @@ pub enum Detail {
     /// that burned it.
     Finish {
         action: types::flow::FinishAction,
-        message_hash: [u8; 32],
+        arrival: [u8; 32],
         source_tx: TxHash,
     },
 }
@@ -464,7 +464,7 @@ pub async fn create_and_send_with(
             TxPurpose::Finish(_) => {
                 let Some(Detail::Finish {
                     action,
-                    message_hash,
+                    arrival,
                     source_tx,
                 }) = detail
                 else {
@@ -478,7 +478,7 @@ pub async fn create_and_send_with(
                         tx_hash,
                         raw_tx: raw_tx.clone(),
                         action,
-                        message_hash,
+                        arrival,
                         source_tx: Some(source_tx),
                     },
                 }

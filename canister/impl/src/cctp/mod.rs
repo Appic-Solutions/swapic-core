@@ -2,8 +2,9 @@
 //! in the attested message, the source transaction that burned it (once it has proven that
 //! transaction paid the canister's fee, I-3.4), the stored recipe and the gas limit the
 //! quoter charged for. The canister checks the message is a burn it may finish, decides
-//! from the envelope's action and the clock what to call, and signs it once per message
-//! and action, finishing at most one message per source transaction.
+//! from the envelope's action and the clock what to call, and signs it once per arrival
+//! (the burn, by its source domain and Circle's nonce, whatever Circle rewrites in its
+//! message) and action, finishing at most one arrival per source transaction.
 //!
 //! The message must be a Swapic burn end to end: CCTP's token messenger on both ends (a
 //! generic message whose body only looks like a burn is refused: anyone can have one
@@ -297,9 +298,9 @@ pub fn parse_address(text: &str) -> Option<EvmAddress> {
 /// The id of a finish of this message already signed that answers a call for `action`:
 /// the action's own, and for a release the completion's too, unless that completion
 /// reverted, which is what a release after it is for.
-pub fn answered(action: FinishAction, message_hash: [u8; 32]) -> Result<Option<u64>, String> {
+pub fn answered(action: FinishAction, arrival: [u8; 32]) -> Result<Option<u64>, String> {
     if action == FinishAction::Release {
-        let complete = finish_key(message_hash, FinishAction::Complete);
+        let complete = finish_key(arrival, FinishAction::Complete);
         if let Some(id) = tx::signed_once(complete)? {
             let reverted = read_state(|state| state.flow(&complete))
                 .is_some_and(|flow| flow.status == FlowStatus::FinishFailed);
@@ -308,20 +309,18 @@ pub fn answered(action: FinishAction, message_hash: [u8; 32]) -> Result<Option<u
             }
         }
     }
-    tx::signed_once(finish_key(message_hash, action))
+    tx::signed_once(finish_key(arrival, action))
 }
 
-/// Whether `source_tx` already finished a message other than this one. One fee pays for
+/// Whether `source_tx` already finished an arrival other than this one. One fee pays for
 /// one arrival and the fold refuses a second message too; this is the door's read of the
 /// same rule, before a nonce is spent on it.
-pub fn finished_another<S: Store>(
-    state: &State<S>,
-    source_tx: TxHash,
-    message_hash: [u8; 32],
-) -> bool {
-    state.store().flows().iter().any(|(_, flow)| {
-        flow.source_tx == Some(source_tx) && flow.message_hash != Some(message_hash)
-    })
+pub fn finished_another<S: Store>(state: &State<S>, source_tx: TxHash, arrival: [u8; 32]) -> bool {
+    state
+        .store()
+        .flows()
+        .iter()
+        .any(|(_, flow)| flow.source_tx == Some(source_tx) && flow.arrival != Some(arrival))
 }
 
 /// The key two calls for one source transaction serialize on.
@@ -370,15 +369,15 @@ pub async fn finish_cctp(
         .expect("BUG: decide found the chain in this table");
     let gas = signing_gas(chain_id, &destination, plan.gas_action, gas_limit)
         .map_err(|e| e.to_string())?;
-    let message_hash = alloy_primitives::keccak256(message).0;
+    let arrival = types::cctp::arrival_id(&parsed);
 
     let _busy =
         Busy::take(source_key(source_tx)).ok_or("the source transaction is being finished")?;
     let admit = || -> Result<Option<u64>, String> {
-        if let Some(id) = answered(plan.action, message_hash)? {
+        if let Some(id) = answered(plan.action, arrival)? {
             return Ok(Some(id));
         }
-        if read_state(|state| finished_another(state, source_tx, message_hash)) {
+        if read_state(|state| finished_another(state, source_tx, arrival)) {
             return Err(FinishError::SourceFinished(source_tx).to_string());
         }
         Ok(None)
@@ -402,7 +401,7 @@ pub async fn finish_cctp(
             return Ok(id);
         }
     }
-    let key = finish_key(message_hash, plan.action);
+    let key = finish_key(arrival, plan.action);
     let signed = tx::create_and_send_with(
         TxPurpose::Finish(key),
         chain_id,
@@ -413,7 +412,7 @@ pub async fn finish_cctp(
         plan.gas_action,
         Some(Detail::Finish {
             action: plan.action,
-            message_hash,
+            arrival,
             source_tx,
         }),
     )

@@ -35,7 +35,7 @@ pub enum FlowKind {
     /// The user pays on an EVM chain and is paid an ICP token other than ckUSDC.
     #[n(2)]
     EvmToIcp,
-    /// The canister finishes a CCTP arrival: keyed by the message and the action.
+    /// The canister finishes a CCTP arrival: keyed by the arrival and the action.
     #[n(3)]
     Finish,
 }
@@ -425,7 +425,7 @@ pub enum FlowStep {
     #[n(18)]
     Expired,
     /// A CCTP finish was signed, with its exact bytes, before it is broadcast: `action` is
-    /// the [`FinishAction`] and `message_hash` the keccak of the message. It spends the
+    /// the [`FinishAction`] and `arrival` the burn's id (`arrival_id`). It spends the
     /// nonce `TxCreated` handed out for it and creates the flow.
     #[n(19)]
     CctpFinishSigned {
@@ -440,7 +440,7 @@ pub enum FlowStep {
         #[n(4)]
         action: FinishAction,
         #[cbor(n(5), with = "minicbor::bytes")]
-        message_hash: [u8; 32],
+        arrival: [u8; 32],
         /// The source transaction that burned the message, whose fee pays for this finish:
         /// one message per source transaction is finished, a Complete and its Release
         /// counting as one.
@@ -475,10 +475,10 @@ impl FinishAction {
     }
 }
 
-/// The key a finish is held once under: one signed transaction per message and action.
-pub fn finish_key(message_hash: [u8; 32], action: FinishAction) -> QuoteHash {
+/// The key a finish is held once under: one signed transaction per arrival and action.
+pub fn finish_key(arrival: [u8; 32], action: FinishAction) -> QuoteHash {
     let mut preimage = [0_u8; 33];
-    preimage[..32].copy_from_slice(&message_hash);
+    preimage[..32].copy_from_slice(&arrival);
     preimage[32] = action.byte();
     QuoteHash::new(alloy_primitives::keccak256(preimage).0)
 }
@@ -608,9 +608,9 @@ pub struct Flow {
     /// A finish's source transaction, which no other message may be finished under.
     #[n(22)]
     pub source_tx: Option<TxHash>,
-    /// A finish's message, by its keccak.
+    /// A finish's arrival: the burn's id, whatever Circle wrote into its message.
     #[cbor(n(23), with = "minicbor::bytes")]
-    pub message_hash: Option<[u8; 32]>,
+    pub arrival: Option<[u8; 32]>,
 }
 
 /// Why a flow step was refused.
@@ -675,7 +675,7 @@ impl Flow {
             created_at: at,
             signed_id: None,
             source_tx: None,
-            message_hash: None,
+            arrival: None,
         }
     }
 
@@ -711,10 +711,8 @@ impl Flow {
                 FlowStep::IcpQuoteRegistered { quote } => Some(quote.hash()),
                 FlowStep::EvmQuoteRegistered { quote } => Some(quote.hash()),
                 FlowStep::CctpFinishSigned {
-                    action,
-                    message_hash,
-                    ..
-                } => Some(finish_key(*message_hash, *action)),
+                    action, arrival, ..
+                } => Some(finish_key(*arrival, *action)),
                 // the relay's hash is the router's EIP-712 digest, recomputed by the door
                 _ => None,
             };
@@ -725,12 +723,12 @@ impl Flow {
                 });
             }
             if let FlowStep::CctpFinishSigned {
-                message_hash,
+                arrival,
                 source_tx: Some(source_tx),
                 ..
             } = step
             {
-                if finished_from(source_tx).is_some_and(|other| other != *message_hash) {
+                if finished_from(source_tx).is_some_and(|other| other != *arrival) {
                     return Err(FlowError::SourceFinished {
                         source_tx: *source_tx,
                     });
@@ -836,7 +834,7 @@ impl Flow {
                 FlowStep::CctpFinishSigned {
                     chain_id,
                     tx_hash,
-                    message_hash,
+                    arrival,
                     source_tx,
                     ..
                 },
@@ -847,7 +845,7 @@ impl Flow {
                 flow.tx_open = true;
                 flow.signed_id = Some(index);
                 flow.source_tx = *source_tx;
-                flow.message_hash = Some(*message_hash);
+                flow.arrival = Some(*arrival);
                 return flow;
             }
             (Some(flow), _) => flow,

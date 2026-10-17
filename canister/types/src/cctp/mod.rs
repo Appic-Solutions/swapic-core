@@ -111,6 +111,17 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The id of the burn a message carries: the same for every attestation of that burn.
+/// Circle fills in or rewrites the message's finality executed, fee executed and
+/// expiration on (re)attestation, so the bytes are not the burn; the source domain and
+/// Circle's nonce are.
+pub fn arrival_id(message: &BurnMessage) -> [u8; 32] {
+    let mut preimage = b"swapic-cctp-arrival".to_vec();
+    preimage.extend_from_slice(&message.source_domain.to_be_bytes());
+    preimage.extend_from_slice(&message.nonce);
+    alloy_primitives::keccak256(preimage).0
+}
+
 impl BurnMessage {
     /// The message `bytes` carry, if they are a version 1 message with a version 1 burn
     /// body.
