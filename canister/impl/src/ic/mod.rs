@@ -407,6 +407,8 @@ pub struct WithdrawalDetail {
     pub status: WithdrawalStatus,
 }
 
+// the ck minter's own candid names
+#[allow(clippy::enum_variant_names)]
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum WithdrawalSearchParameter {
     ByRecipient(String),

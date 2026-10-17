@@ -34,6 +34,10 @@ pub struct FlowSettings {
     pub continuation_deadline_s: u64,
     /// The most gas a relay or a continuation may be given.
     pub max_gas_limit: u64,
+    /// Whether the ICP flows run: `register_icp_quote`, `start_icp_swap`,
+    /// `register_evm_quote` and their engine steps. Off unless set: they still speak router
+    /// ABI v2 and move to ABI v3 with the pool (P11).
+    pub icp_enabled: Option<bool>,
 }
 
 /// Why a flow door refused. Nothing moved.

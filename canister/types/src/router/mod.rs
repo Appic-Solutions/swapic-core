@@ -1,3 +1,6 @@
+//! LEGACY: router ABI v2, kept only for the ICP flows, which are off until they move to
+//! ABI v3 with the pool (P11). Everything else speaks ABI v3 (`crate::swapic`).
+//!
 //! Swapic (ABI v2) as this canister speaks to it: the params struct, the gasless
 //! authorization, the EIP-712 quote hash the contract recomputes on chain, the digests
 //! the three gasless doors bind that hash with, the destination calls and the hook data.

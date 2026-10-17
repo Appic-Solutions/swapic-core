@@ -1,0 +1,532 @@
+//! Swapic ABI v3 (design C) as this canister speaks to it: the order a user signs and its
+//! EIP-712 fingerprint, the gasless authorization, the arrival envelope and recipe, the
+//! steps the canister reads (its fee, a CCTP burn), and the calls it signs into Swapic,
+//! the CctpReceiver and CCTP's `MessageTransmitterV2`.
+//!
+//! The byte-level contract is P9c's `abi.md`, and its goldens are the tests. Ported from
+//! the services' own ABI v3 module: this crate is public and the services are not, so the
+//! port is a copy and never a dependency.
+//!
+//! On the wire an order and an authorization are each `abi.encode` of ONE dynamic tuple,
+//! with the leading offset word (`0x20`): what Solidity's `abi.encode(order)` and viem's
+//! `encodeAbiParameters([OrderTuple], [order])` write, and what `runFor` carries after its
+//! selector.
+
+#[cfg(test)]
+mod tests;
+
+use crate::chain::ChainId;
+use crate::evm::EvmAddress;
+use alloy_primitives::{keccak256, Address, FixedBytes, U256};
+use alloy_sol_types::{sol, Eip712Domain, SolCall, SolStruct, SolValue};
+use std::borrow::Cow;
+use std::fmt;
+use thiserror::Error;
+
+sol! {
+    #![sol(all_derives)]
+
+    /// Writes `(delta - minus)` as one word at byte `at` of a step's data.
+    struct Write { uint32 at; uint256 minus; }
+
+    /// One call the Runner makes: `token` ERC-20 is approved exactly its delta, `NATIVE`
+    /// sends it as value, the zero address makes a plain call with no writes.
+    struct Step { address target; bytes data; address token; uint256 min; Write[] writes; }
+
+    /// `token == 0`: no payout (a cross-chain order).
+    struct Payout { address token; address recipient; uint256 minOut; }
+
+    struct Order {
+        bytes32 ref;
+        address payer;
+        address tokenIn;
+        uint256 amountIn;
+        uint256 deadline;
+        Step[] steps;
+        Payout payout;
+    }
+
+    /// `door` is the `Door` enum as the ABI carries it.
+    struct GaslessAuth {
+        uint8 door;
+        uint256 validAfter;
+        uint256 validBefore;
+        uint256 nonce;
+        uint256 deadline;
+        bytes signature;
+        bytes acceptance;
+    }
+
+    /// The arrival swap; `scaler == 0` runs `data` as it is.
+    struct Recipe { address target; bytes data; address scaler; }
+
+    function runFor(Order order, GaslessAuth auth) external returns (bytes32 id);
+    function completeCctp(bytes message, bytes attestation, Recipe recipe) external;
+    function release(bytes message, bytes attestation) external;
+    function receiveMessage(bytes message, bytes attestation) external returns (bool);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function depositForBurnWithHook(
+        uint256 amount,
+        uint32 destinationDomain,
+        bytes32 mintRecipient,
+        address burnToken,
+        bytes32 destinationCaller,
+        uint256 maxFee,
+        uint32 minFinalityThreshold,
+        bytes hookData
+    ) external;
+
+    event OrderStarted(bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+/// Ether wherever a token address is expected.
+pub const NATIVE: EvmAddress = EvmAddress::new([0xee; 20]);
+
+/// Eco Portal's `publishAndFund(uint64,bytes,Reward,bool)`: the step that puts an order on
+/// the Eco rail.
+pub const PUBLISH_AND_FUND: [u8; 4] = [0xdf, 0x00, 0xf8, 0xfa];
+
+/// The EIP-712 domain's name and version.
+pub const NAME: &str = "Swapic";
+pub const VERSION: &str = "3";
+
+/// The encoded types `hashStruct` is over. Spelled out rather than taken from the `sol!`
+/// structs: `ref` is a Rust keyword, and the macro writes it into the type string as
+/// `r#ref`, which hashes another type.
+pub const ORDER_TYPE: &str = "Order(bytes32 ref,address payer,address tokenIn,uint256 amountIn,\
+uint256 deadline,Step[] steps,Payout payout)Payout(address token,address recipient,uint256 minOut)\
+Step(address target,bytes data,address token,uint256 min,Write[] writes)Write(uint32 at,uint256 minus)";
+pub const STEP_TYPE: &str = "Step(address target,bytes data,address token,uint256 min,\
+Write[] writes)Write(uint32 at,uint256 minus)";
+pub const WRITE_TYPE: &str = "Write(uint32 at,uint256 minus)";
+pub const PAYOUT_TYPE: &str = "Payout(address token,address recipient,uint256 minOut)";
+pub const ACCEPTANCE_TYPE: &str =
+    "QuoteAcceptance(bytes32 orderId,address payer,address tokenIn,uint256 amountIn,uint256 deadline)";
+/// Permit2's witness: the order id under this type.
+pub const WITNESS_TYPE: &str = "OrderWitness(bytes32 orderId)";
+
+/// `Door` on the wire.
+pub const DOOR_AUTH_3009: u8 = 0;
+pub const DOOR_PERMIT_2612: u8 = 1;
+pub const DOOR_PERMIT2: u8 = 2;
+
+/// The fingerprint of one order on one chain's Swapic: the 3009 nonce, the Permit2
+/// witness, the QuoteAcceptance's subject, and the key a relay is held once under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderId([u8; 32]);
+
+impl OrderId {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// The id as the 3009 door's nonce, a uint256.
+    pub fn as_nonce(self) -> U256 {
+        U256::from_be_bytes(self.0)
+    }
+}
+
+impl fmt::Display for OrderId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(self.0))
+    }
+}
+
+/// Swapic's EIP-712 domain on `chain_id` at `swapic`.
+pub fn domain(chain_id: ChainId, swapic: EvmAddress) -> Eip712Domain {
+    Eip712Domain {
+        name: Some(Cow::Borrowed(NAME)),
+        version: Some(Cow::Borrowed(VERSION)),
+        chain_id: Some(U256::from(chain_id.get())),
+        verifying_contract: Some(addr(swapic)),
+        salt: None,
+    }
+}
+
+fn word(value: U256) -> [u8; 32] {
+    value.to_be_bytes::<32>()
+}
+
+/// `hashStruct(Write)`.
+pub fn hash_write(w: &Write) -> [u8; 32] {
+    let mut encoded = Vec::with_capacity(32 * 3);
+    encoded.extend_from_slice(keccak256(WRITE_TYPE).as_slice());
+    encoded.extend_from_slice(&word(U256::from(w.at)));
+    encoded.extend_from_slice(&word(w.minus));
+    keccak256(encoded).0
+}
+
+/// `hashStruct(Step)`: `bytes` hashed, the writes as keccak of their hashes concatenated.
+pub fn hash_step(s: &Step) -> [u8; 32] {
+    let writes: Vec<u8> = s.writes.iter().flat_map(hash_write).collect();
+    let mut encoded = Vec::with_capacity(32 * 6);
+    encoded.extend_from_slice(keccak256(STEP_TYPE).as_slice());
+    encoded.extend_from_slice(s.target.into_word().as_slice());
+    encoded.extend_from_slice(keccak256(&s.data).as_slice());
+    encoded.extend_from_slice(s.token.into_word().as_slice());
+    encoded.extend_from_slice(&word(s.min));
+    encoded.extend_from_slice(keccak256(writes).as_slice());
+    keccak256(encoded).0
+}
+
+/// `hashStruct(Order)`, as `OrderHash.hashOrder` computes it.
+pub fn hash_order(o: &Order) -> [u8; 32] {
+    let steps: Vec<u8> = o.steps.iter().flat_map(hash_step).collect();
+    let mut encoded = Vec::with_capacity(32 * 8);
+    encoded.extend_from_slice(keccak256(ORDER_TYPE).as_slice());
+    encoded.extend_from_slice(o.r#ref.as_slice());
+    encoded.extend_from_slice(o.payer.into_word().as_slice());
+    encoded.extend_from_slice(o.tokenIn.into_word().as_slice());
+    encoded.extend_from_slice(&word(o.amountIn));
+    encoded.extend_from_slice(&word(o.deadline));
+    encoded.extend_from_slice(keccak256(steps).as_slice());
+    // `Payout` has no keyword in it, so the macro's own type string is the contract's
+    encoded.extend_from_slice(o.payout.eip712_hash_struct().as_slice());
+    keccak256(encoded).0
+}
+
+/// `keccak256(0x1901 ++ separator ++ structHash)`.
+pub fn digest(separator: [u8; 32], struct_hash: [u8; 32]) -> [u8; 32] {
+    let mut packed = Vec::with_capacity(66);
+    packed.extend_from_slice(&[0x19, 0x01]);
+    packed.extend_from_slice(&separator);
+    packed.extend_from_slice(&struct_hash);
+    keccak256(packed).0
+}
+
+/// THE ORDER ID of `order` for `swapic` on `chain_id`, as every door recomputes it.
+pub fn order_id(order: &Order, chain_id: ChainId, swapic: EvmAddress) -> OrderId {
+    OrderId(digest(
+        domain(chain_id, swapic).separator().0,
+        hash_order(order),
+    ))
+}
+
+/// What the payer signs on the 2612 door: the QuoteAcceptance of the order's id.
+pub fn acceptance_digest(order: &Order, chain_id: ChainId, swapic: EvmAddress) -> [u8; 32] {
+    let id = order_id(order, chain_id, swapic);
+    let mut encoded = Vec::with_capacity(32 * 6);
+    encoded.extend_from_slice(keccak256(ACCEPTANCE_TYPE).as_slice());
+    encoded.extend_from_slice(&id.0);
+    encoded.extend_from_slice(order.payer.into_word().as_slice());
+    encoded.extend_from_slice(order.tokenIn.into_word().as_slice());
+    encoded.extend_from_slice(&word(order.amountIn));
+    encoded.extend_from_slice(&word(order.deadline));
+    digest(domain(chain_id, swapic).separator().0, keccak256(encoded).0)
+}
+
+/// The order an `abi.encode(order)` holds.
+pub fn decode_order(bytes: &[u8]) -> Option<Order> {
+    <Order as SolValue>::abi_decode(bytes).ok()
+}
+
+/// `abi.encode(order)`: the order exactly as signed.
+pub fn encode_order(order: &Order) -> Vec<u8> {
+    SolValue::abi_encode(order)
+}
+
+/// The authorization an `abi.encode(auth)` holds.
+pub fn decode_auth(bytes: &[u8]) -> Option<GaslessAuth> {
+    <GaslessAuth as SolValue>::abi_decode(bytes).ok()
+}
+
+/// `abi.encode(auth)`.
+pub fn encode_auth(auth: &GaslessAuth) -> Vec<u8> {
+    SolValue::abi_encode(auth)
+}
+
+/// The recipe an `abi.encode(recipe)` holds.
+pub fn decode_recipe(bytes: &[u8]) -> Option<Recipe> {
+    <Recipe as SolValue>::abi_decode(bytes).ok()
+}
+
+/// `Swapic.runFor(order, auth)`: the canister's relay of a gasless order.
+pub fn run_for_calldata(order: &Order, auth: &GaslessAuth) -> Vec<u8> {
+    runForCall {
+        order: order.clone(),
+        auth: auth.clone(),
+    }
+    .abi_encode()
+}
+
+/// `CctpReceiver.completeCctp(message, attestation, recipe)`: a Swap or a CkDeposit
+/// arrival, before its envelope's deadline.
+pub fn complete_cctp_calldata(message: &[u8], attestation: &[u8], recipe: Recipe) -> Vec<u8> {
+    completeCctpCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+        recipe,
+    }
+    .abi_encode()
+}
+
+/// `CctpReceiver.release(message, attestation)`: the minted USDC to the envelope's
+/// recipient, after the deadline.
+pub fn release_calldata(message: &[u8], attestation: &[u8]) -> Vec<u8> {
+    releaseCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+    }
+    .abi_encode()
+}
+
+/// `MessageTransmitterV2.receiveMessage(message, attestation)`: a Deliver, minted straight
+/// to the user.
+pub fn receive_message_calldata(message: &[u8], attestation: &[u8]) -> Vec<u8> {
+    receiveMessageCall {
+        message: message.to_vec().into(),
+        attestation: attestation.to_vec().into(),
+    }
+    .abi_encode()
+}
+
+/// No recipe: what a CkDeposit completion carries.
+pub fn no_recipe() -> Recipe {
+    Recipe {
+        target: Address::ZERO,
+        data: Default::default(),
+        scaler: Address::ZERO,
+    }
+}
+
+/// The selectors of the calls this canister signs or reads, as abi.md section 8 lists
+/// them.
+pub mod selectors {
+    use super::*;
+
+    pub const RUN_FOR: [u8; 4] = runForCall::SELECTOR;
+    pub const COMPLETE_CCTP: [u8; 4] = completeCctpCall::SELECTOR;
+    pub const RELEASE: [u8; 4] = releaseCall::SELECTOR;
+    pub const RECEIVE_MESSAGE: [u8; 4] = receiveMessageCall::SELECTOR;
+    pub const TRANSFER: [u8; 4] = transferCall::SELECTOR;
+    pub const DEPOSIT_FOR_BURN_WITH_HOOK: [u8; 4] = depositForBurnWithHookCall::SELECTOR;
+}
+
+/// The step's selector, if its data has one.
+pub fn selector_of(step: &Step) -> Option<[u8; 4]> {
+    step.data.get(..4)?.try_into().ok()
+}
+
+/// abi.md 6.1, read back: `usdc.transfer(to, amount)`, a fixed amount, no token, no
+/// writes. The `(to, amount)` a step pays, if it is exactly that shape on `usdc`.
+pub fn fee_transfer_of(step: &Step, usdc: EvmAddress) -> Option<(EvmAddress, U256)> {
+    if step.target != addr(usdc)
+        || step.token != Address::ZERO
+        || !step.writes.is_empty()
+        || step.data.len() != 4 + 32 * 2
+        || selector_of(step) != Some(selectors::TRANSFER)
+    {
+        return None;
+    }
+    let call = transferCall::abi_decode(&step.data).ok()?;
+    Some((evm(call.to), call.amount))
+}
+
+/// A CCTP v2 burn an order makes (abi.md 6.2), read back from its step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CctpBurn {
+    pub destination_domain: u32,
+    pub mint_recipient: [u8; 32],
+    pub burn_token: EvmAddress,
+    pub destination_caller: [u8; 32],
+    /// The envelope, as the burn carries it to the destination.
+    pub hook_data: Vec<u8>,
+}
+
+impl CctpBurn {
+    /// The burn a step to `messenger` makes: `None` for a step to anything else, and an
+    /// error for a step to the messenger that is not `depositForBurnWithHook`.
+    pub fn of_step(step: &Step, messenger: EvmAddress) -> Option<Result<Self, NotABurn>> {
+        if step.target != addr(messenger) {
+            return None;
+        }
+        if selector_of(step) != Some(selectors::DEPOSIT_FOR_BURN_WITH_HOOK) {
+            return Some(Err(NotABurn));
+        }
+        Some(
+            depositForBurnWithHookCall::abi_decode(&step.data)
+                .map(|call| Self {
+                    destination_domain: call.destinationDomain,
+                    mint_recipient: call.mintRecipient.0,
+                    burn_token: evm(call.burnToken),
+                    destination_caller: call.destinationCaller.0,
+                    hook_data: call.hookData.to_vec(),
+                })
+                .map_err(|_| NotABurn),
+        )
+    }
+}
+
+/// A step to CCTP's token messenger that is not a `depositForBurnWithHook` this canister
+/// reads.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("a step to the token messenger is not a depositForBurnWithHook")]
+pub struct NotABurn;
+
+/// What an arrival does (`Action` in the contracts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Action {
+    /// Minted to the recipient as it is: `receiveMessage`, no Swapic contract.
+    Deliver,
+    /// Swapped by the destination Runner's recipe into `tokenOut`.
+    Swap,
+    /// Deposited into the ck helper for an ICP principal.
+    CkDeposit,
+}
+
+impl Action {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Deliver => 0,
+            Self::Swap => 1,
+            Self::CkDeposit => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Deliver),
+            1 => Some(Self::Swap),
+            2 => Some(Self::CkDeposit),
+            _ => None,
+        }
+    }
+}
+
+/// The sealed arrival instruction (`Envelope.sol`): `abi.encode` of 10 static words, 320
+/// bytes, word i at byte 32 * i. In a CCTP v2 message it starts at byte 376.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Envelope {
+    /// `Order.ref`.
+    pub reference: [u8; 32],
+    pub action: Action,
+    /// The end of the canister-or-recipient window of a CCTP arrival, unix seconds.
+    pub deadline: u64,
+    /// The tokenOut receiver, and the refund receiver.
+    pub recipient: EvmAddress,
+    /// Swap only; `NATIVE` for ether.
+    pub token_out: EvmAddress,
+    /// Swap only, in tokenOut.
+    pub min_out: U256,
+    /// CkDeposit only.
+    pub principal: [u8; 32],
+    pub subaccount: [u8; 32],
+    /// The gas `fill` must have left for the action.
+    pub min_gas: u64,
+}
+
+/// Why bytes are not an envelope the contracts take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum EnvelopeError {
+    #[error("an envelope is {expected} bytes, not {0}", expected = Envelope::LENGTH)]
+    Length(usize),
+    #[error("envelope version {0}, not 3")]
+    Version(U256),
+    #[error("action {0} is not deliver, swap or ckDeposit")]
+    Action(U256),
+    #[error("envelope word {0} is out of its type's range")]
+    Range(usize),
+}
+
+impl Envelope {
+    pub const VERSION: u8 = 3;
+    pub const LENGTH: usize = 320;
+    /// Where the envelope starts in a CCTP v2 message: the body at 148, its hook data at
+    /// 228 inside it.
+    pub const CCTP_OFFSET: usize = 376;
+    /// A Swapic CCTP message: the header, the burn body and the envelope.
+    pub const CCTP_MESSAGE_LENGTH: usize = Self::CCTP_OFFSET + Self::LENGTH;
+
+    /// The 320 bytes, word by word.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LENGTH);
+        out.extend_from_slice(&word(U256::from(Self::VERSION)));
+        out.extend_from_slice(&self.reference);
+        out.extend_from_slice(&word(U256::from(self.action.code())));
+        out.extend_from_slice(&word(U256::from(self.deadline)));
+        out.extend_from_slice(&self.recipient.to_word());
+        out.extend_from_slice(&self.token_out.to_word());
+        out.extend_from_slice(&word(self.min_out));
+        out.extend_from_slice(&self.principal);
+        out.extend_from_slice(&self.subaccount);
+        out.extend_from_slice(&word(U256::from(self.min_gas)));
+        out
+    }
+
+    /// Exactly 320 bytes, version 3, every narrow word clean: what `Envelope.decode`
+    /// accepts, and nothing else.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        if bytes.len() != Self::LENGTH {
+            return Err(EnvelopeError::Length(bytes.len()));
+        }
+        let raw = |i: usize| -> [u8; 32] {
+            bytes[32 * i..32 * (i + 1)]
+                .try_into()
+                .expect("BUG: the length was checked")
+        };
+        let value = |i: usize| U256::from_be_bytes(raw(i));
+        if value(0) != U256::from(Self::VERSION) {
+            return Err(EnvelopeError::Version(value(0)));
+        }
+        let action = u8::try_from(value(2))
+            .ok()
+            .and_then(Action::from_code)
+            .ok_or(EnvelopeError::Action(value(2)))?;
+        let narrow = |i: usize| u64::try_from(value(i)).map_err(|_| EnvelopeError::Range(i));
+        let address = |i: usize| {
+            let w = raw(i);
+            if w[..12].iter().any(|byte| *byte != 0) {
+                return Err(EnvelopeError::Range(i));
+            }
+            Ok(EvmAddress::new(
+                w[12..].try_into().expect("BUG: twenty bytes"),
+            ))
+        };
+        Ok(Self {
+            reference: raw(1),
+            action,
+            deadline: narrow(3)?,
+            recipient: address(4)?,
+            token_out: address(5)?,
+            min_out: value(6),
+            principal: raw(7),
+            subaccount: raw(8),
+            min_gas: narrow(9)?,
+        })
+    }
+
+    /// The envelope a CCTP v2 message carries at its hook data, if it carries one of ours.
+    pub fn of_cctp_message(message: &[u8]) -> Result<Self, EnvelopeError> {
+        Self::decode(message.get(Self::CCTP_OFFSET..).unwrap_or_default())
+    }
+}
+
+/// The ABI's word for an address.
+pub fn addr(address: EvmAddress) -> Address {
+    Address::from(*address.as_bytes())
+}
+
+/// This canister's address type, from the ABI's.
+pub fn evm(address: Address) -> EvmAddress {
+    EvmAddress::new(address.into_array())
+}
+
+/// The low 20 bytes of a bytes32, when its high 12 bytes are zero: an EVM address.
+pub fn evm_of_word(word: [u8; 32]) -> Option<EvmAddress> {
+    if word[..12].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(EvmAddress::new(
+        word[12..].try_into().expect("BUG: twenty bytes"),
+    ))
+}
+
+/// A bytes32 as the ABI holds it.
+pub fn bytes32(word: [u8; 32]) -> FixedBytes<32> {
+    FixedBytes(word)
+}

@@ -31,6 +31,8 @@ pub struct FlowSettings {
     pub relay_window: Duration,
     pub continuation_deadline: Duration,
     pub max_gas_limit: u64,
+    /// Whether the ICP flows run. Off unless a controller turns them on.
+    pub icp_enabled: bool,
 }
 
 impl FlowSettings {
@@ -84,6 +86,7 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
         } else {
             wire.max_gas_limit
         },
+        icp_enabled: wire.icp_enabled.unwrap_or(false),
     })
 }
 

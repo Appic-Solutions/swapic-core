@@ -139,6 +139,8 @@ pub async fn drive_flows() -> usize {
 async fn drive_flow(quote_hash: QuoteHash, flow: &Flow) -> Result<(), FlowDriveError> {
     match flow.kind {
         FlowKind::Relay | FlowKind::Finish => Ok(()),
+        // the ICP flows are off until they move to ABI v3 (P11)
+        FlowKind::IcpToEvm | FlowKind::EvmToIcp if !flow_settings::get().icp_enabled => Ok(()),
         FlowKind::IcpToEvm => icp_to_evm(quote_hash, flow).await,
         FlowKind::EvmToIcp => super::evm_to_icp::step(quote_hash, flow).await,
     }
@@ -482,6 +484,7 @@ fn parse_tx_hash(text: &str) -> Option<TxHash> {
 /// The route the continuation takes, re-planned at landing against the user's ORIGINAL
 /// terms (spec 4b.7): the quote's route when it can still be met, and otherwise a CCTP
 /// Deliver of the USDC to the user's destination address.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     route: &SwapParams,
     mine: EvmAddress,

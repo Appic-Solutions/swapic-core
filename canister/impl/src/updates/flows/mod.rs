@@ -59,6 +59,17 @@ fn now_s() -> u64 {
     Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get()
 }
 
+/// The ICP flows still speak router ABI v2, so they are off until they move to ABI v3
+/// with the pool (P11), unless a controller turns them on.
+fn require_icp_enabled() -> Result<(), FlowCallError> {
+    if !flow_settings::get().icp_enabled {
+        return Err(FlowCallError::Refused(
+            "the ICP flows are off until they move to ABI v3".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn check_mode(mode: FlowMode) -> Result<(), FlowCallError> {
     match mode {
         FlowMode::CkMinter => Ok(()),
@@ -82,6 +93,7 @@ fn check_expiry(expires_at_s: u64) -> Result<(), FlowCallError> {
 pub fn register_icp_quote(quote: IcpToEvmQuote) -> Result<Hash32, FlowCallError> {
     require_not_halted().map_err(FlowCallError::Guard)?;
     require_quoter().map_err(FlowCallError::Guard)?;
+    require_icp_enabled()?;
     check_mode(quote.mode)?;
     let settings = flow_settings::get();
     let ckusdc = settings
@@ -142,6 +154,7 @@ pub fn register_icp_quote(quote: IcpToEvmQuote) -> Result<Hash32, FlowCallError>
 pub async fn start_icp_swap(quote_hash: Hash32) -> Result<Nat, FlowCallError> {
     require_not_halted().map_err(FlowCallError::Guard)?;
     require_quoter().map_err(FlowCallError::Guard)?;
+    require_icp_enabled()?;
     let quote_hash = QuoteHash::new(quote_hash);
     let flow = read_state(|state| state.flow(&quote_hash))
         .ok_or_else(|| invalid("no quote is registered under that hash"))?;
@@ -184,6 +197,7 @@ pub use settlement_api::types::flow::{EvmQuoteRegistered, EvmToIcpQuote};
 pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, FlowCallError> {
     require_not_halted().map_err(FlowCallError::Guard)?;
     require_quoter().map_err(FlowCallError::Guard)?;
+    require_icp_enabled()?;
     check_mode(quote.mode)?;
     let settings = flow_settings::get();
     let ckusdc = settings

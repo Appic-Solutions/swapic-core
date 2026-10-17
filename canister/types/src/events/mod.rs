@@ -518,27 +518,28 @@ impl EventType {
                 raw_tx,
                 ..
             } => Some((*chain_id, *tx_hash, raw_tx)),
-            EventType::Flow { step, .. } => match step {
-                FlowStep::GaslessRelayed {
-                    chain_id,
-                    tx_hash,
-                    raw_tx,
-                    ..
-                }
-                | FlowStep::ContinuationSigned {
-                    chain_id,
-                    tx_hash,
-                    raw_tx,
-                    ..
-                }
-                | FlowStep::CctpFinishSigned {
-                    chain_id,
-                    tx_hash,
-                    raw_tx,
-                    ..
-                } => Some((*chain_id, *tx_hash, raw_tx)),
-                _ => None,
-            },
+            EventType::Flow {
+                step:
+                    FlowStep::GaslessRelayed {
+                        chain_id,
+                        tx_hash,
+                        raw_tx,
+                        ..
+                    }
+                    | FlowStep::ContinuationSigned {
+                        chain_id,
+                        tx_hash,
+                        raw_tx,
+                        ..
+                    }
+                    | FlowStep::CctpFinishSigned {
+                        chain_id,
+                        tx_hash,
+                        raw_tx,
+                        ..
+                    },
+                ..
+            } => Some((*chain_id, *tx_hash, raw_tx)),
             _ => None,
         }
     }

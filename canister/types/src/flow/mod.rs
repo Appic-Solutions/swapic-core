@@ -718,16 +718,16 @@ impl Flow {
             | FlowStep::EvmQuoteRegistered { .. }
             | FlowStep::GaslessRelayed { .. }
             | FlowStep::CctpFinishSigned { .. } => unreachable!("handled above"),
-            FlowStep::Begun { stage } => match (kind, stage, flow.status) {
-                (FlowKind::IcpToEvm, Stage::Pull, Registered) => true,
-                (FlowKind::IcpToEvm, Stage::Swap, Pulled) => true,
-                (FlowKind::IcpToEvm, Stage::Withdraw, Pulled | Swapped) => true,
-                (FlowKind::IcpToEvm, Stage::Refund, RefundDue) => true,
-                (FlowKind::EvmToIcp, Stage::Consolidate, Arrived) => true,
-                (FlowKind::EvmToIcp, Stage::Swap, Consolidated) => true,
-                (FlowKind::EvmToIcp, Stage::Deliver, Arrived | Swapped) => true,
-                _ => false,
-            },
+            FlowStep::Begun { stage } => matches!(
+                (kind, stage, flow.status),
+                (FlowKind::IcpToEvm, Stage::Pull, Registered)
+                    | (FlowKind::IcpToEvm, Stage::Swap, Pulled)
+                    | (FlowKind::IcpToEvm, Stage::Withdraw, Pulled | Swapped)
+                    | (FlowKind::IcpToEvm, Stage::Refund, RefundDue)
+                    | (FlowKind::EvmToIcp, Stage::Consolidate, Arrived)
+                    | (FlowKind::EvmToIcp, Stage::Swap, Consolidated)
+                    | (FlowKind::EvmToIcp, Stage::Deliver, Arrived | Swapped)
+            ),
             FlowStep::Pulled { .. } | FlowStep::PullRefused { .. } => flow.status == Pulling,
             FlowStep::Swapped { .. } => flow.status == Swapping,
             FlowStep::SwapSkipped { .. } => {

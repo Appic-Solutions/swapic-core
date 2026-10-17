@@ -69,6 +69,7 @@ fn settings() -> FlowSettings {
         relay_window: Duration::from_secs(3_600),
         continuation_deadline: Duration::from_secs(1_800),
         max_gas_limit: 2_000_000,
+        icp_enabled: false,
     }
 }
 
