@@ -33,8 +33,8 @@ pub struct FlowSettings {
     /// The most gas a relay or a continuation may be given.
     pub max_gas_limit: u64,
     /// Whether the ICP flows run: `register_icp_quote`, `start_icp_swap`,
-    /// `register_evm_quote` and their engine steps. Off unless set: they still speak router
-    /// ABI v2 and move to ABI v3 with the pool (P11).
+    /// `register_evm_quote` and their engine steps. They still speak router ABI v2, so
+    /// `true` is refused (`IcpFlowsNotOnV3`) until they move to ABI v3 with the pool (P11).
     pub icp_enabled: Option<bool>,
 }
 

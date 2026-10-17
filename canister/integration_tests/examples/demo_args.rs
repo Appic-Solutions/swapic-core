@@ -75,8 +75,8 @@ fn main() {
             relay_window_s: 3_600,
             continuation_deadline_s: 1_800,
             max_gas_limit: 2_000_000,
-            // the local ICP demo runs the ICP flows, which are off unless turned on
-            icp_enabled: Some(true),
+            // the ICP flows cannot be turned on until they move to ABI v3 (P11)
+            icp_enabled: None,
         }),
         // icp-quote <user> <ledger> <amount> <min ckusdc> <route hex> <expires_at_s> <nonce>
         "icp-quote" => encode_one(IcpToEvmQuote {

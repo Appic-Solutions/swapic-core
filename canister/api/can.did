@@ -426,8 +426,8 @@ type FlowSettings = record {
   // How long the continuation's params stay valid on chain.
   continuation_deadline_s : nat64;
   // Whether the ICP flows run: `register_icp_quote`, `start_icp_swap`,
-  // `register_evm_quote` and their engine steps. Off unless set: they still speak router
-  // ABI v2 and move to ABI v3 with the pool (P11).
+  // `register_evm_quote` and their engine steps. They still speak router ABI v2, so
+  // `true` is refused (`IcpFlowsNotOnV3`) until they move to ABI v3 with the pool (P11).
   icp_enabled : opt bool;
   // The ckETH minter, which withdraws ckERC20 tokens too.
   ck_minter : opt principal;

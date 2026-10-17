@@ -2,6 +2,9 @@
 //! and the windows. Stored as their candid bytes in one stable cell, set by a controller,
 //! and read in their parsed form.
 
+#[cfg(test)]
+mod tests;
+
 use crate::storage::memory::{flow_settings_memory, Memory};
 use candid::{Decode, Encode, Nat, Principal};
 use ic_stable_structures::StableCell;
@@ -34,6 +37,14 @@ pub struct FlowSettings {
 }
 
 fn parse(wire: &Wire) -> Result<FlowSettings, String> {
+    // the ICP flows sign router ABI v2's `swapFor`, which a design C Swapic does not
+    // have: on, they would sign it to a v3 Swapic. Refused here, so neither a write nor a
+    // stored setting can turn them on before they move to ABI v3 (P11)
+    if wire.icp_enabled == Some(true) {
+        return Err(
+            "IcpFlowsNotOnV3: the ICP flows stay off until they move to ABI v3".to_string(),
+        );
+    }
     let ethereum_usdc = wire
         .ethereum_usdc
         .as_ref()
@@ -69,7 +80,7 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
         } else {
             wire.max_gas_limit
         },
-        icp_enabled: wire.icp_enabled.unwrap_or(false),
+        icp_enabled: false,
     })
 }
 
