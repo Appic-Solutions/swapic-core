@@ -1889,6 +1889,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-sol-types",
  "candid",
  "hex",
  "libsecp256k1",
