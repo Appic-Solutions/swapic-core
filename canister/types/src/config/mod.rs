@@ -408,6 +408,10 @@ pub struct Config {
     pub decision_timeout: Duration,
     #[n(9)]
     pub rail_status_max_age: Duration,
+    /// Whether the canister simulates a transaction itself before it signs it. Off by
+    /// default: the watcher and the submit API simulate `runFor` and every CCTP finish
+    /// with an `eth_call` from the canister's address before they ask, and the canister's
+    /// own simulation would be one more unreplicated outcall per signature.
     #[n(10)]
     pub simulate_before_sign: bool,
     #[n(11)]
@@ -800,7 +804,7 @@ impl Default for Config {
             max_batch_items: 10,
             decision_timeout: Duration::from_secs(30 * 60),
             rail_status_max_age: Duration::from_secs(30),
-            // the simulation layer is built later
+            // the watcher and the submit API simulate before they ask
             simulate_before_sign: false,
             expiry_check_interval: Duration::from_secs(60),
             replay_audit_interval: Duration::from_secs(21_600),

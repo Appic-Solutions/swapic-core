@@ -654,10 +654,14 @@ async fn continue_on_ethereum(
             acceptance: Bytes::new(),
         };
         let data = router::swap_for_calldata(&params, &auth);
-        let (simulated, estimate) =
+        // the canister's own simulation, behind the one switch every signing path reads
+        let (simulated, estimate) = if config::get().simulate_before_sign {
             evm_reads::simulate_and_estimate(chain, mine, router_address, &data)
                 .await
-                .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
+                .map_err(|e| FlowDriveError::Chain(e.to_string()))?
+        } else {
+            (Simulated::Returned(Vec::new()), None)
+        };
         if let Simulated::Reverted(message) = simulated {
             if params.dst.action == ACTION_DELIVER && params.rail == RAIL_CCTP && failed > 0 {
                 return freeze(

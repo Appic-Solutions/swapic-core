@@ -31,6 +31,8 @@ pub struct Config {
     pub max_batch_items: u32,
     pub decision_timeout_min: u64,
     pub rail_status_max_age_s: u64,
+    /// Whether the canister simulates a transaction itself before it signs it. False by
+    /// default: the watcher and the submit API simulate before they ask.
     pub simulate_before_sign: bool,
     pub expiry_check_interval_s: u64,
     pub replay_audit_interval_s: u64,

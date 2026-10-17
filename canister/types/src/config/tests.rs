@@ -962,3 +962,15 @@ fn the_lookback_reaches_every_deposit_a_claim_may_be_asked_for() {
         "the permit window counts the same"
     );
 }
+
+/// The watcher and the submit API simulate before they ask the canister to sign, so the
+/// canister's own simulation is off unless a deploy turns it on.
+#[test]
+fn simulation_is_off_by_default() {
+    assert!(!Config::default().simulate_before_sign);
+    let on = Config {
+        simulate_before_sign: true,
+        ..Config::default()
+    };
+    assert_eq!(Config::from_bytes(on.to_bytes()), on);
+}

@@ -100,6 +100,8 @@ type Config = record {
   pool_chain : opt nat64;
   rpc_urls : vec record { nat64; text };
   books_check_interval_s : nat64;
+  // Whether the canister simulates a transaction itself before it signs it. False by
+  // default: the watcher and the submit API simulate before they ask.
   simulate_before_sign : bool;
   vault_addresses : vec record { nat64; text };
   // Whether the Eco rail may be used. False until its route is designed: a quote
