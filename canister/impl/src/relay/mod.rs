@@ -740,9 +740,19 @@ pub async fn relay_gasless(
     require_not_halted().map_err(|e| format!("{e:?}"))?;
     let order = swapic::decode_order(order_bytes).ok_or(RelayError::NotAnOrder.to_string())?;
     let auth = swapic::decode_auth(auth_bytes).ok_or(RelayError::NotAnAuth.to_string())?;
+    let config = config::get();
+    // an order already relayed answers its relay, whatever came after it: the clock, the
+    // config, a listing. Its id is the one every door recomputes, on this chain's Swapic
+    let source = config
+        .evm_chains
+        .get(chain_id)
+        .ok_or(RelayError::UnknownChain(chain_id).to_string())?;
+    let key = QuoteHash::new(swapic::order_id(&order, chain_id, source.swapic).into_bytes());
+    if let Some(id) = tx::signed_once(key)? {
+        return Ok(id);
+    }
     // derived once by the deploy and read from stable memory after that
     let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
-    let config = config::get();
     let settings = flow_settings::get();
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
     let chains = Chains {
@@ -761,19 +771,11 @@ pub async fn relay_gasless(
         settings.relay_window.as_secs(),
     )
     .map_err(|e| e.to_string())?;
-    let source = config
-        .evm_chains
-        .get(chain_id)
-        .expect("BUG: check found the chain in this table");
     authorize(&order, &auth, relay.order_id, chain_id, &source).map_err(|e| e.to_string())?;
     if let Some(party) = sanctioned_party(&relay.parties) {
         return Err(RelayError::Sanctioned(party).to_string());
     }
 
-    let key = QuoteHash::new(relay.order_id.into_bytes());
-    if let Some(id) = tx::signed_once(key)? {
-        return Ok(id);
-    }
     let _busy = Busy::take(key).ok_or("the order is being signed")?;
     let swapic_address = config
         .evm_chains

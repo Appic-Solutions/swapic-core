@@ -593,3 +593,51 @@ fn a_finished_arrival_answers_its_id_whatever_came_after() {
     let again: Result<u64, String> = update(&pic, canister, watcher(), "finish_cctp", finish_args);
     assert_eq!(again, Ok(finish_id));
 }
+
+/// Review fix 3: `relay_gasless` answers an order it already relayed before anything
+/// else. Asked again after the order's deadline, or after its payer is sanctioned, it
+/// answers the relay it signed, not a refusal.
+#[test]
+fn a_relayed_order_answers_its_id_whatever_came_after() {
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let (relay_args, order, _, _) = relay_for(address(&mine), now_s(&pic));
+    push(&pic, canister, ARBITRUM);
+    let relay_id: u64 = update::<Result<u64, String>>(
+        &pic,
+        canister,
+        watcher(),
+        "relay_gasless",
+        relay_args.clone(),
+    )
+    .expect("the order is relayed");
+
+    // past the order's deadline: no new relay is signed, the first answers
+    pic.advance_time(std::time::Duration::from_secs(900));
+    pic.tick();
+    push(&pic, canister, ARBITRUM);
+    let late: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher(),
+        "relay_gasless",
+        relay_args.clone(),
+    );
+    assert_eq!(late, Ok(relay_id));
+
+    // the payer sanctioned after the relay was signed: still its answer
+    let listed: Result<u64, settlement_api::types::errors::SetSanctionedError> = update(
+        &pic,
+        canister,
+        watcher(),
+        "set_sanctioned",
+        encode_args((
+            vec![swapic::evm(order.payer).to_string()],
+            Vec::<String>::new(),
+        ))
+        .unwrap(),
+    );
+    listed.expect("the watcher lists");
+    let again: Result<u64, String> = update(&pic, canister, watcher(), "relay_gasless", relay_args);
+    assert_eq!(again, Ok(relay_id));
+}
