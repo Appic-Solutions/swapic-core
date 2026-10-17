@@ -411,3 +411,125 @@ fn the_real_swap_and_principal_read_back() {
     dirty[31] = 1;
     assert_eq!(ck_principal(dirty), None, "bytes past the principal");
 }
+
+const SAMPLES: [&str; 5] = [
+    include_str!("../../../impl/samples/quoter_order_arbitrum_cctp_gasless.json"),
+    include_str!("../../../impl/samples/quoter_order_base_eco_ckdeposit_gasless.json"),
+    include_str!("../../../impl/samples/quoter_order_base_eco_swap_userpays.json"),
+    include_str!("../../../impl/samples/quoter_order_base_local_gasless.json"),
+    include_str!("../../../impl/samples/quoter_order_ethereum_eco_deliver_userpays.json"),
+];
+
+fn messenger() -> EvmAddress {
+    "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+        .parse()
+        .unwrap()
+}
+
+/// Parse, rebuild, compare, on the quoter's five real fork orders: every step of every one
+/// rebuilds to its own bytes and writes, so the quoter's plans are read as they are.
+#[test]
+fn every_real_step_round_trips() {
+    let mut shapes = Vec::new();
+    for text in SAMPLES {
+        let (json, order) = sample_order(text);
+        let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+        for step in &order.steps {
+            let read = read_step(step, usdc, messenger())
+                .unwrap_or_else(|error| panic!("{}: {error}", json["flow"]));
+            shapes.push(match read {
+                KnownStep::Transfer { .. } => "transfer",
+                KnownStep::Burn(_) => "burn",
+                KnownStep::Eco { .. } => "eco",
+                KnownStep::Swap(_) => "swap",
+            });
+        }
+    }
+    assert_eq!(
+        shapes,
+        ["transfer", "burn", "transfer", "eco", "swap", "eco", "transfer", "swap", "swap", "eco"]
+    );
+}
+
+/// One refusal per way a step could read differently from what the Runner runs.
+#[test]
+fn a_step_that_does_not_rebuild_is_refused() {
+    let (json, order) = sample_order(SAMPLES[0]);
+    let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+    let burn = order.steps[1].clone();
+    let read = |step: &Step| read_step(step, usdc, messenger());
+    assert!(matches!(read(&burn), Ok(KnownStep::Burn(_))));
+
+    // a write over the mint recipient
+    let mut over = burn.clone();
+    over.writes.push(Write {
+        at: 4 + 2 * 32,
+        minus: U256::ZERO,
+    });
+    assert_eq!(read(&over), Err(StepError::NotCanonical("writes")));
+    // the amount write moved, or its minus changed
+    let mut moved = burn.clone();
+    moved.writes[0].at = 5;
+    assert_eq!(read(&moved), Err(StepError::NotCanonical("writes")));
+    // trailing bytes
+    let mut trailing = burn.clone();
+    let mut data = trailing.data.to_vec();
+    data.extend_from_slice(&[0; 32]);
+    trailing.data = data.into();
+    assert_eq!(read(&trailing), Err(StepError::Decode));
+    // a non-canonical offset: the hook data moved one word on, a gap before it
+    let mut gapped = burn.clone();
+    let mut data = gapped.data.to_vec();
+    let at = 4 + 7 * 32;
+    let offset = U256::from_be_slice(&data[at..at + 32]);
+    data[at..at + 32].copy_from_slice(&(offset + U256::from(32)).to_be_bytes::<32>());
+    let tail = 4 + offset.to::<usize>();
+    data.splice(tail..tail, [0_u8; 32]);
+    gapped.data = data.into();
+    assert_eq!(read(&gapped), Err(StepError::Decode));
+    // an amount the quoter leaves to the Runner, filled in
+    let mut filled = burn.clone();
+    let mut data = filled.data.to_vec();
+    data[4 + 31] = 1;
+    filled.data = data.into();
+    assert_eq!(read(&filled), Err(StepError::NotCanonical("calldata")));
+    // a step to the messenger that spends another token
+    let mut other_token = burn;
+    other_token.token = Address::from([0x77; 20]);
+    assert_eq!(read(&other_token), Err(StepError::NotCanonical("token")));
+
+    // the Eco step: a write over the route, and the writes' fee not one fee
+    let (json, order) = sample_order(SAMPLES[1]);
+    let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+    let eco = order.steps[1].clone();
+    let read = |step: &Step| read_step(step, usdc, messenger());
+    assert!(matches!(read(&eco), Ok(KnownStep::Eco { .. })));
+    let mut over = eco.clone();
+    over.writes.push(Write {
+        at: 0x200,
+        minus: U256::ZERO,
+    });
+    assert_eq!(read(&over), Err(StepError::NotCanonical("writes")));
+    let mut two_fees = eco.clone();
+    two_fees.writes[3].minus += U256::from(1);
+    assert_eq!(read(&two_fees), Err(StepError::NotCanonical("writes")));
+    // a swap step carries no writes at all
+    let (json, order) = sample_order(SAMPLES[3]);
+    let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+    let mut swap = order.steps[1].clone();
+    swap.writes.push(Write {
+        at: 36,
+        minus: U256::ZERO,
+    });
+    assert_eq!(
+        read_step(&swap, usdc, messenger()),
+        Err(StepError::NotCanonical("writes"))
+    );
+    // and a step of no shape is no step the canister reads
+    let mut unknown = order.steps[1].clone();
+    unknown.data = vec![0xde, 0xad, 0xbe, 0xef].into();
+    assert_eq!(
+        read_step(&unknown, usdc, messenger()),
+        Err(StepError::Unknown)
+    );
+}

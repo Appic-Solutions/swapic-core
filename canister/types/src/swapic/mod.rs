@@ -475,10 +475,14 @@ impl EcoIntent {
     /// The intent a `publishAndFund` step publishes: `None` for any other step, and an
     /// error for one this canister cannot read.
     pub fn of_step(step: &Step) -> Option<Result<Self, NotAnIntent>> {
-        (selector_of(step) == Some(PUBLISH_AND_FUND)).then(|| Self::read(&step.data))
+        (selector_of(step) == Some(PUBLISH_AND_FUND))
+            .then(|| Self::read(&step.data).map(|(intent, _, _)| intent))
     }
 
-    fn read(data: &[u8]) -> Result<Self, NotAnIntent> {
+    /// The intent `data` publishes, the call rebuilt as the quoter builds it (every amount
+    /// zero: the Runner writes them), and the length of the rebuilt route, which places
+    /// the reward's write.
+    fn read(data: &[u8]) -> Result<(Self, Vec<u8>, usize), NotAnIntent> {
         let call = publishAndFundCall::abi_decode_with_config(data, strict())
             .map_err(|_| NotAnIntent::Call)?;
         let route = <EcoRoute as SolValue>::abi_decode_with_config(&call.route, strict())
@@ -500,40 +504,258 @@ impl EcoIntent {
         }
         let token = carried.token;
         let selector = |data: &[u8]| -> Option<[u8; 4]> { data.get(..4)?.try_into().ok() };
-        let arrival = match route.calls.as_slice() {
+        let zero = U256::ZERO;
+        let at_zero = |target: Address, data: Vec<u8>| EcoCall {
+            target,
+            data: data.into(),
+            value: zero,
+        };
+        let (arrival, calls) = match route.calls.as_slice() {
             [send] if send.target == token && selector(&send.data) == Some(selectors::TRANSFER) => {
                 let send = transferCall::abi_decode_with_config(&send.data, strict())
                     .map_err(|_| NotAnIntent::Calls)?;
-                EcoArrival::Deliver {
-                    recipient: evm(send.to),
+                let rebuilt = transferCall {
+                    to: send.to,
+                    amount: zero,
                 }
+                .abi_encode();
+                (
+                    EcoArrival::Deliver {
+                        recipient: evm(send.to),
+                    },
+                    vec![at_zero(token, rebuilt)],
+                )
             }
             [grant, fill]
                 if grant.target == token
                     && selector(&grant.data) == Some(approveCall::SELECTOR)
                     && selector(&fill.data) == Some(fillCall::SELECTOR) =>
             {
-                let grant = approveCall::abi_decode_with_config(&grant.data, strict())
+                let approved = approveCall::abi_decode_with_config(&grant.data, strict())
                     .map_err(|_| NotAnIntent::Calls)?;
-                let call = fillCall::abi_decode_with_config(&fill.data, strict())
+                let filled = fillCall::abi_decode_with_config(&fill.data, strict())
                     .map_err(|_| NotAnIntent::Calls)?;
-                if grant.spender != fill.target || call.token != token {
+                if approved.spender != fill.target || filled.token != token {
                     return Err(NotAnIntent::Calls);
                 }
-                EcoArrival::Fill {
-                    runner: evm(fill.target),
-                    envelope: Envelope::decode(&call.envelope).map_err(NotAnIntent::Envelope)?,
+                let envelope = Envelope::decode(&filled.envelope).map_err(NotAnIntent::Envelope)?;
+                let grant = approveCall {
+                    spender: fill.target,
+                    amount: zero,
                 }
+                .abi_encode();
+                let fill_data = fillCall {
+                    amount: zero,
+                    ..filled
+                }
+                .abi_encode();
+                (
+                    EcoArrival::Fill {
+                        runner: evm(fill.target),
+                        envelope,
+                    },
+                    vec![at_zero(token, grant), at_zero(fill.target, fill_data)],
+                )
             }
             _ => return Err(NotAnIntent::Calls),
         };
-        Ok(Self {
+        let route_bytes = SolValue::abi_encode(&EcoRoute {
+            salt: route.salt,
+            deadline: route.deadline,
+            portal: route.portal,
+            nativeAmount: zero,
+            tokens: vec![EcoTokenAmount {
+                token,
+                amount: zero,
+            }],
+            calls,
+        });
+        let route_len = route_bytes.len();
+        let intent = Self {
             destination: call.destination,
             creator: evm(call.reward.creator),
             token: evm(token),
             reward_token: evm(paid.token),
             arrival,
-        })
+        };
+        let rebuilt = publishAndFundCall {
+            destination: call.destination,
+            route: route_bytes.into(),
+            reward: EcoReward {
+                deadline: call.reward.deadline,
+                creator: call.reward.creator,
+                prover: call.reward.prover,
+                nativeAmount: zero,
+                tokens: vec![EcoTokenAmount {
+                    token: paid.token,
+                    amount: zero,
+                }],
+            },
+            allowPartial: false,
+        }
+        .abi_encode();
+        Ok((intent, rebuilt, route_len))
+    }
+}
+
+/// Where the Runner writes the amounts of the shapes the quoter builds, by byte of the
+/// step's data (abi.md 6.2 and 6.3).
+pub mod offsets {
+    /// The burn amount of `depositForBurnWithHook`: the word after the selector.
+    pub const CCTP_AMOUNT: u32 = 4;
+    /// `publishAndFund(uint64,bytes,Reward,bool)`: the route bytes start after the
+    /// selector, the four head words and the bytes' length word.
+    pub const ECO_ROUTE_AT: u32 = 0xa4;
+    /// Inside the route bytes: the one token's amount.
+    pub const ECO_TOKEN_AMOUNT: u32 = 0x120;
+    /// Inside the route bytes, Swap and CkDeposit: `approve`'s amount, then `fill`'s.
+    pub const ECO_APPROVE_AMOUNT: u32 = 0x244;
+    pub const ECO_FILL_AMOUNT: u32 = 0x324;
+    /// Inside the route bytes, Deliver: `transfer`'s amount.
+    pub const ECO_TRANSFER_AMOUNT: u32 = 0x224;
+
+    /// The reward's one token amount, after the route bytes padded to a word.
+    pub fn eco_reward_amount(route_len: usize) -> u32 {
+        let padded = route_len.div_ceil(32) * 32;
+        ECO_ROUTE_AT + padded as u32 + 0xe0
+    }
+}
+
+/// The writes of an Eco step (abi.md 6.3): the reward is the whole delta, and the route's
+/// token and call amounts are the delta less Eco's `fee`.
+pub fn eco_writes(arrival: &EcoArrival, route_len: usize, fee: U256) -> Vec<Write> {
+    let write = |at: u32, minus: U256| Write { at, minus };
+    let mut writes = vec![
+        write(offsets::eco_reward_amount(route_len), U256::ZERO),
+        write(offsets::ECO_ROUTE_AT + offsets::ECO_TOKEN_AMOUNT, fee),
+    ];
+    match arrival {
+        EcoArrival::Deliver { .. } => writes.push(write(
+            offsets::ECO_ROUTE_AT + offsets::ECO_TRANSFER_AMOUNT,
+            fee,
+        )),
+        EcoArrival::Fill { .. } => writes.extend([
+            write(offsets::ECO_ROUTE_AT + offsets::ECO_APPROVE_AMOUNT, fee),
+            write(offsets::ECO_ROUTE_AT + offsets::ECO_FILL_AMOUNT, fee),
+        ]),
+    }
+    writes
+}
+
+/// A step of a shape this canister reads, read exactly as the Runner will run it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KnownStep {
+    /// `usdc.transfer(to, amount)`, a fixed amount: the fee step's shape (abi.md 6.1).
+    Transfer { to: EvmAddress, amount: U256 },
+    /// A CCTP v2 burn of the Runner's whole USDC delta (abi.md 6.2).
+    Burn(CctpBurn),
+    /// An Eco intent funded with the Runner's whole USDC delta, and the fee Eco keeps of
+    /// what its route carries (abi.md 6.3).
+    Eco { intent: EcoIntent, fee: U256 },
+    /// A KyberSwap `swap` of the Runner's delta, its route opaque.
+    Swap(KyberSwap),
+}
+
+/// Why a step is not one the canister reads.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum StepError {
+    #[error("the step is none of the shapes the canister reads")]
+    Unknown,
+    #[error("the step does not decode as its shape")]
+    Decode,
+    #[error("the step's {0} is not exactly what its shape builds")]
+    NotCanonical(&'static str),
+    #[error(transparent)]
+    Intent(#[from] NotAnIntent),
+}
+
+/// What a step is, read by parse, rebuild, compare: its calldata is decoded strictly into
+/// its shape's parameters, rebuilt from them exactly as the quoter builds the shape (every
+/// amount the Runner writes left at zero), and must be the same bytes; its writes must be
+/// exactly the shape's own, at its offsets and with its `minus`. So a write can land only
+/// on an amount word, and nothing the screen reads (a recipient, a creator, a target) can
+/// be other at run time than it was when it was read. `usdc` and `messenger` are the
+/// source chain's.
+pub fn read_step(
+    step: &Step,
+    usdc: EvmAddress,
+    messenger: EvmAddress,
+) -> Result<KnownStep, StepError> {
+    let same = |rebuilt: &[u8], what: &'static str| {
+        if rebuilt == step.data.as_ref() {
+            Ok(())
+        } else {
+            Err(StepError::NotCanonical(what))
+        }
+    };
+    match selector_of(step) {
+        Some(selectors::TRANSFER) if step.target == addr(usdc) => {
+            let call = transferCall::abi_decode_with_config(&step.data, strict())
+                .map_err(|_| StepError::Decode)?;
+            same(&call.abi_encode(), "calldata")?;
+            if step.token != Address::ZERO || !step.min.is_zero() || !step.writes.is_empty() {
+                return Err(StepError::NotCanonical("token, min or writes"));
+            }
+            Ok(KnownStep::Transfer {
+                to: evm(call.to),
+                amount: call.amount,
+            })
+        }
+        Some(selectors::DEPOSIT_FOR_BURN_WITH_HOOK) if step.target == addr(messenger) => {
+            let call = depositForBurnWithHookCall::abi_decode_with_config(&step.data, strict())
+                .map_err(|_| StepError::Decode)?;
+            let burn = CctpBurn {
+                destination_domain: call.destinationDomain,
+                mint_recipient: call.mintRecipient.0,
+                burn_token: evm(call.burnToken),
+                destination_caller: call.destinationCaller.0,
+                hook_data: call.hookData.to_vec(),
+            };
+            let rebuilt = depositForBurnWithHookCall {
+                amount: U256::ZERO,
+                ..call
+            }
+            .abi_encode();
+            same(&rebuilt, "calldata")?;
+            if step.token != addr(usdc) {
+                return Err(StepError::NotCanonical("token"));
+            }
+            if step.writes
+                != [Write {
+                    at: offsets::CCTP_AMOUNT,
+                    minus: U256::ZERO,
+                }]
+            {
+                return Err(StepError::NotCanonical("writes"));
+            }
+            Ok(KnownStep::Burn(burn))
+        }
+        Some(PUBLISH_AND_FUND) => {
+            let (intent, rebuilt, route_len) = EcoIntent::read(&step.data)?;
+            same(&rebuilt, "calldata")?;
+            if step.token != addr(usdc) {
+                return Err(StepError::NotCanonical("token"));
+            }
+            let fee = step
+                .writes
+                .get(1)
+                .map(|write| write.minus)
+                .ok_or(StepError::NotCanonical("writes"))?;
+            if step.writes != eco_writes(&intent.arrival, route_len, fee) {
+                return Err(StepError::NotCanonical("writes"));
+            }
+            Ok(KnownStep::Eco { intent, fee })
+        }
+        Some(KYBER_SWAP) => {
+            let call = swapCall::abi_decode_with_config(&step.data, strict())
+                .map_err(|_| StepError::Decode)?;
+            same(&call.abi_encode(), "calldata")?;
+            if !step.writes.is_empty() {
+                return Err(StepError::NotCanonical("writes"));
+            }
+            Ok(KnownStep::Swap(KyberSwap::of_call(call)))
+        }
+        _ => Err(StepError::Unknown),
     }
 }
 
@@ -584,18 +806,22 @@ impl KyberSwap {
         (selector_of(step) == Some(KYBER_SWAP)).then(|| {
             let call =
                 swapCall::abi_decode_with_config(&step.data, strict()).map_err(|_| NotASwap)?;
-            let execution = call.execution;
-            let desc = execution.desc;
-            Ok(Self {
-                src_token: evm(desc.srcToken),
-                dst_token: evm(desc.dstToken),
-                call_target: evm(execution.callTarget),
-                src_receivers: desc.srcReceivers.into_iter().map(evm).collect(),
-                fee_receivers: desc.feeReceivers.into_iter().map(evm).collect(),
-                dst_receiver: evm(desc.dstReceiver),
-                permit: !desc.permit.is_empty(),
-            })
+            Ok(Self::of_call(call))
         })
+    }
+
+    fn of_call(call: swapCall) -> Self {
+        let execution = call.execution;
+        let desc = execution.desc;
+        Self {
+            src_token: evm(desc.srcToken),
+            dst_token: evm(desc.dstToken),
+            call_target: evm(execution.callTarget),
+            src_receivers: desc.srcReceivers.into_iter().map(evm).collect(),
+            fee_receivers: desc.feeReceivers.into_iter().map(evm).collect(),
+            dst_receiver: evm(desc.dstReceiver),
+            permit: !desc.permit.is_empty(),
+        }
     }
 }
 

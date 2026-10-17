@@ -29,8 +29,8 @@ use thiserror::Error;
 use types::config::{ChainTable, EvmChain, GasAction};
 use types::events::TxPurpose;
 use types::swapic::{
-    self, Action, CctpBurn, EcoArrival, EcoIntent, Envelope, EnvelopeError, GaslessAuth, KyberSwap,
-    NotAnIntent, Order, OrderId, Step, DOOR_AUTH_3009, DOOR_PERMIT2, DOOR_PERMIT_2612,
+    self, Action, CctpBurn, EcoArrival, EcoIntent, Envelope, EnvelopeError, GaslessAuth, KnownStep,
+    KyberSwap, Order, OrderId, Step, StepError, DOOR_AUTH_3009, DOOR_PERMIT2, DOOR_PERMIT_2612,
     KYBER_EXECUTOR, KYBER_ROUTER, NATIVE,
 };
 use types::{CctpDomain, ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, TokenAmount, Wei};
@@ -110,8 +110,8 @@ pub enum RelayError {
     NoRecipient,
     #[error("the order publishes {0} Eco intents")]
     EcoIntents(usize),
-    #[error("an Eco step the canister cannot read: {0}")]
-    EcoRoute(#[from] NotAnIntent),
+    #[error("step {index} is not read as the Runner will run it: {error}")]
+    Step { index: usize, error: StepError },
     #[error("the Eco intent {0}")]
     Eco(&'static str),
 }
@@ -419,6 +419,89 @@ fn check_swap(swap: &KyberSwap, step: &Step, source: &EvmChain) -> Result<(), Re
     Ok(())
 }
 
+/// What an order does, read in full: the fee steps it pays the canister, its rail and
+/// arrival, and every party it pays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub fees: Vec<U256>,
+    pub action: GasAction,
+    pub arrival: Option<Arrival>,
+    pub parties: Vec<Party>,
+}
+
+/// An order's plan, read as the Runner will run it, or the refusal: every step is one of
+/// the shapes `read_step` reads exactly (a fixed USDC transfer to the canister, a CCTP
+/// burn, an Eco intent on Eco's Portal, a KyberSwap swap paying the Runner), at most one
+/// burn or one intent, and a recipient the canister can read. Pure, and true of an order
+/// in either gas mode.
+pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
+    let chain_id = chains.chain_id;
+    let source = chains
+        .evm_chains
+        .get(chain_id)
+        .ok_or(RelayError::UnknownChain(chain_id))?;
+    // every step is one of the shapes the canister reads, or the order is refused: a
+    // step it cannot read could pay someone the screen never sees
+    let mut fees = Vec::new();
+    let mut burns = Vec::new();
+    let mut intents = Vec::new();
+    for (index, step) in order.steps.iter().enumerate() {
+        let read = match swapic::read_step(step, source.usdc, source.token_messenger) {
+            Ok(read) => read,
+            Err(StepError::Unknown) => return Err(RelayError::UnknownStep(index)),
+            Err(error) => return Err(RelayError::Step { index, error }),
+        };
+        match read {
+            KnownStep::Transfer { to, amount } => {
+                // a fixed transfer to anyone but the canister pays someone the plan does
+                // not need
+                if to != chains.canister {
+                    return Err(RelayError::UnknownStep(index));
+                }
+                fees.push(amount);
+            }
+            KnownStep::Burn(burn) => burns.push(burn),
+            KnownStep::Eco { intent, .. } => {
+                if chains.eco_portal != Some(swapic::evm(step.target)) {
+                    return Err(RelayError::Eco("is not published on Eco's Portal"));
+                }
+                intents.push(intent);
+            }
+            KnownStep::Swap(swap) => check_swap(&swap, step, &source)?,
+        }
+    }
+
+    // every party the order pays, each to be screened: the canister signs only a plan
+    // whose recipient it can read
+    let payer = swapic::evm(order.payer);
+    let mut parties = vec![Party::Evm(payer)];
+    if !order.payout.token.is_zero() {
+        parties.push(Party::Evm(swapic::evm(order.payout.recipient)));
+    }
+    let (action, arrival) = match (burns.as_slice(), intents.as_slice()) {
+        ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
+        ([], []) => (GasAction::RelayLocal, None),
+        ([], [intent]) => {
+            parties.extend(eco_parties(intent, payer, &source, chains)?);
+            (GasAction::RelayEco, None)
+        }
+        ([burn], []) => {
+            let arrival = arrival_of(burn, &source, chains)?;
+            parties.extend(arrival.parties.iter().copied());
+            (GasAction::RelayCctp, Some(arrival))
+        }
+        ([_, ..], [_, ..]) => return Err(RelayError::TwoRails),
+        (more, []) => return Err(RelayError::Burns(more.len())),
+        ([], more) => return Err(RelayError::EcoIntents(more.len())),
+    };
+    Ok(Plan {
+        fees,
+        action,
+        arrival,
+        parties,
+    })
+}
+
 /// Every check on the order and its authorization that needs no chain: pure, so each rule
 /// is a unit test. `requested_gas` is the limit the quoter charged the fee on.
 pub fn check(
@@ -459,67 +542,18 @@ pub fn check(
         });
     }
 
-    // every step is one of the shapes the canister reads, or the order is refused: a
-    // step it cannot read could pay someone the screen never sees
-    let mut fees = Vec::new();
-    let mut burns = Vec::new();
-    let mut intents = Vec::new();
-    for (index, step) in order.steps.iter().enumerate() {
-        if let Some((to, amount)) = swapic::fee_transfer_of(step, source.usdc) {
-            if to != chains.canister {
-                return Err(RelayError::UnknownStep(index));
-            }
-            fees.push(amount);
-        } else if let Some(burn) = CctpBurn::of_step(step, source.token_messenger) {
-            let burn = burn.map_err(|_| RelayError::Burn("is not a depositForBurnWithHook"))?;
-            if swapic::evm(step.token) != source.usdc {
-                return Err(RelayError::Burn("does not spend the chain's USDC"));
-            }
-            burns.push(burn);
-        } else if let Some(intent) = EcoIntent::of_step(step) {
-            let intent = intent?;
-            if chains.eco_portal != Some(swapic::evm(step.target)) {
-                return Err(RelayError::Eco("is not published on Eco's Portal"));
-            }
-            if swapic::evm(step.token) != source.usdc {
-                return Err(RelayError::Eco("does not spend the chain's USDC"));
-            }
-            intents.push(intent);
-        } else if let Some(swap) = KyberSwap::of_step(step) {
-            let swap = swap.map_err(|_| RelayError::Swap("does not decode"))?;
-            check_swap(&swap, step, &source)?;
-        } else {
-            return Err(RelayError::UnknownStep(index));
-        }
-    }
-    let fee = match fees.as_slice() {
+    let plan = read_plan(order, chains)?;
+    let fee = match plan.fees.as_slice() {
         [] => return Err(RelayError::NoFeeStep),
         [fee] => TokenAmount::from_be_bytes(fee.to_be_bytes::<32>()),
         more => return Err(RelayError::FeeSteps(more.len())),
     };
-    // every party the order pays, each to be screened: the canister signs only a plan
-    // whose recipient it can read
-    let payer = swapic::evm(order.payer);
-    let mut parties = vec![Party::Evm(payer)];
-    if !order.payout.token.is_zero() {
-        parties.push(Party::Evm(swapic::evm(order.payout.recipient)));
-    }
-    let (action, arrival) = match (burns.as_slice(), intents.as_slice()) {
-        ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
-        ([], []) => (GasAction::RelayLocal, None),
-        ([], [intent]) => {
-            parties.extend(eco_parties(intent, payer, &source, chains)?);
-            (GasAction::RelayEco, None)
-        }
-        ([burn], []) => {
-            let arrival = arrival_of(burn, &source, chains)?;
-            parties.extend(arrival.parties.iter().copied());
-            (GasAction::RelayCctp, Some(arrival))
-        }
-        ([_, ..], [_, ..]) => return Err(RelayError::TwoRails),
-        (more, []) => return Err(RelayError::Burns(more.len())),
-        ([], more) => return Err(RelayError::EcoIntents(more.len())),
-    };
+    let Plan {
+        action,
+        arrival,
+        parties,
+        ..
+    } = plan;
 
     let mut needed = source.min_network_fee.get(action);
     if let Some(arrival) = &arrival {
