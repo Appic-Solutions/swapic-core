@@ -28,6 +28,7 @@ use crate::state::{State, Store};
 use crate::storage::config;
 use crate::storage::events::read_state;
 use crate::tx::{self, Detail};
+use alloy_primitives::U256;
 use thiserror::Error;
 use types::cctp::{BurnMessage, MessageError};
 use types::config::{ChainTable, EvmChain, GasAction};
@@ -80,6 +81,8 @@ pub enum FinishError {
     NotTheRunner,
     #[error("{0}")]
     Shape(&'static str),
+    #[error("the envelope {0}")]
+    Arrival(&'static str),
     #[error(
         "the envelope's deadline {deadline} is too close to act on at {now_s}: completed \
          before {complete_by}, released after {release_after}"
@@ -215,6 +218,14 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
             release_after,
         });
     };
+    match action {
+        FinishAction::Complete => fillable(&envelope, &destination)?,
+        // a release pays the recipient the minted USDC, whatever else the envelope says
+        _ if envelope.recipient == EvmAddress::ZERO => {
+            return Err(FinishError::Arrival("releases to the zero address"))
+        }
+        _ => {}
+    }
     Ok(Plan {
         action,
         gas_action,
@@ -222,6 +233,39 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
         envelope,
         mint_recipient,
     })
+}
+
+/// Whether the receiver and the Runner will act on `envelope` (abi.md rule 10), checked
+/// on every arrival, user-paid ones included: a completion they refuse reverts at the
+/// canister's cost. The recipient is not zero and none of Swapic's contracts; a Swap's
+/// tokenOut is not zero or the arriving USDC, and its minOut is above zero; minGas is set.
+fn fillable(envelope: &Envelope, destination: &EvmChain) -> Result<(), FinishError> {
+    let recipient = envelope.recipient;
+    if recipient == EvmAddress::ZERO
+        || [
+            destination.swapic,
+            destination.runner,
+            destination.cctp_receiver,
+        ]
+        .contains(&recipient)
+    {
+        return Err(FinishError::Arrival(
+            "pays zero or one of Swapic's own contracts",
+        ));
+    }
+    if envelope.min_gas == 0 {
+        return Err(FinishError::Arrival("sets no minGas"));
+    }
+    if envelope.action == Action::Swap
+        && (envelope.token_out == EvmAddress::ZERO
+            || envelope.token_out == destination.usdc
+            || envelope.min_out == U256::ZERO)
+    {
+        return Err(FinishError::Arrival(
+            "of a Swap names no tokenOut other than USDC, or no minOut",
+        ));
+    }
+    Ok(())
 }
 
 /// The parties a finish pays, screened: the envelope's recipient (a Deliver's mint

@@ -588,3 +588,67 @@ fn a_finished_arrival_answers_any_later_call() {
         assert_eq!(answered_arrival(arrival), Ok(Some(release_id)));
     });
 }
+
+/// `ours(action)` with its envelope edited, as any order's burn could seal it: the
+/// canister reads every arrival, user-paid ones included.
+fn sealed(action: Action, edit: impl Fn(&mut Envelope)) -> BurnMessage {
+    let mut message = ours(action);
+    let mut envelope = envelope(action);
+    edit(&mut envelope);
+    message.body.hook_data = envelope.encode();
+    message
+}
+
+/// Review fix 6: a completion is signed only for an envelope the receiver and the Runner
+/// will act on (abi.md rule 10), whoever paid the source: a recipient that is not zero and
+/// none of Swapic's contracts, a Swap's tokenOut that is not zero or the arriving USDC
+/// and a minOut above zero, and a minGas. A release pays the recipient USDC, so it needs a
+/// recipient that is not zero.
+#[test]
+fn a_completion_needs_an_envelope_the_runner_acts_on() {
+    let arbitrum = evm_chains().get(ARBITRUM).unwrap();
+    let refused = |message: &BurnMessage| {
+        assert!(
+            matches!(
+                decide_on(ARBITRUM, message, NOW),
+                Err(FinishError::Arrival(_))
+            ),
+            "{:?}",
+            decide_on(ARBITRUM, message, NOW)
+        )
+    };
+    for action in [Action::Swap, Action::CkDeposit] {
+        refused(&sealed(action, |e| e.recipient = EvmAddress::ZERO));
+        for ours in [arbitrum.swapic, arbitrum.runner, arbitrum.cctp_receiver] {
+            refused(&sealed(action, |e| e.recipient = ours));
+        }
+        refused(&sealed(action, |e| e.min_gas = 0));
+    }
+    refused(&sealed(Action::Swap, |e| e.token_out = EvmAddress::ZERO));
+    refused(&sealed(Action::Swap, |e| e.token_out = arbitrum.usdc));
+    refused(&sealed(Action::Swap, |e| e.min_out = U256::ZERO));
+    // a CkDeposit names no tokenOut, and needs none
+    assert!(decide_on(
+        ARBITRUM,
+        &sealed(Action::CkDeposit, |e| e.token_out = EvmAddress::ZERO),
+        NOW
+    )
+    .is_ok());
+
+    // after the deadline the release pays the recipient: an envelope fill would refuse is
+    // still released, to a recipient that is not zero
+    let late = DEADLINE + RELEASE_MARGIN_S + 1;
+    let unfillable = sealed(Action::Swap, |e| e.min_out = U256::ZERO);
+    assert_eq!(
+        decide_on(ARBITRUM, &unfillable, late).map(|plan| plan.action),
+        Ok(FinishAction::Release)
+    );
+    assert!(matches!(
+        decide_on(
+            ARBITRUM,
+            &sealed(Action::Swap, |e| e.recipient = EvmAddress::ZERO),
+            late
+        ),
+        Err(FinishError::Arrival(_))
+    ));
+}
