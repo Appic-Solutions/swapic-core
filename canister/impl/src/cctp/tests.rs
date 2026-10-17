@@ -652,3 +652,35 @@ fn a_completion_needs_an_envelope_the_runner_acts_on() {
         Err(FinishError::Arrival(_))
     ));
 }
+
+/// Review fix 7: a release pays the envelope's EVM recipient the minted USDC and credits
+/// no principal, so only that recipient is screened: a CkDeposit whose principal does not
+/// read, or is listed, is still released, and a listed recipient is not.
+#[test]
+fn a_release_screens_only_the_recipient_it_pays() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let late = DEADLINE + RELEASE_MARGIN_S + 1;
+        let unreadable = sealed(Action::CkDeposit, |e| e.principal = [0xff; 32]);
+        let release = decide_on(ARBITRUM, &unreadable, late).unwrap();
+        assert_eq!(release.action, FinishAction::Release);
+        assert_eq!(screen(&release), Ok(()));
+        // completing it is another matter: that credits the principal
+        let complete = decide_on(ARBITRUM, &unreadable, NOW).unwrap();
+        assert!(matches!(screen(&complete), Err(FinishError::Shape(_))));
+
+        let principal = swapic::ck_principal(principal_word()).unwrap();
+        sanctioned(principal.to_text());
+        let listed = decide_on(ARBITRUM, &ours(Action::CkDeposit), late).unwrap();
+        assert_eq!(
+            screen(&listed),
+            Ok(()),
+            "the principal is not paid by a release"
+        );
+        sanctioned(USER.to_string());
+        assert_eq!(
+            screen(&listed),
+            Err(FinishError::Sanctioned(Party::Evm(USER)))
+        );
+    });
+}

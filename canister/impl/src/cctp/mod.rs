@@ -268,14 +268,19 @@ fn fillable(envelope: &Envelope, destination: &EvmChain) -> Result<(), FinishErr
     Ok(())
 }
 
-/// The parties a finish pays, screened: the envelope's recipient (a Deliver's mint
-/// recipient is the same address, and is screened as well), and the principal a
-/// CkDeposit credits, which must read as one. None of them may be sanctioned.
+/// The parties a finish pays, screened: none of them may be sanctioned.
+/// - A delivery pays the envelope's recipient, who is its mint recipient as well.
+/// - A completion pays the recipient, and a CkDeposit's completion credits the principal it
+///   names, which must read as one.
+/// - A release pays the recipient the minted USDC and credits no principal, so only the
+///   recipient is screened, and a principal that does not read stops nothing.
 pub fn screen(plan: &Plan) -> Result<(), FinishError> {
-    let mut parties = envelope_parties(&plan.envelope).map_err(FinishError::Shape)?;
-    if plan.action == FinishAction::Receive {
-        parties.push(Party::Evm(plan.mint_recipient));
-    }
+    let recipient = Party::Evm(plan.envelope.recipient);
+    let parties = match plan.action {
+        FinishAction::Receive => vec![recipient, Party::Evm(plan.mint_recipient)],
+        FinishAction::Complete => envelope_parties(&plan.envelope).map_err(FinishError::Shape)?,
+        FinishAction::Release => vec![recipient],
+    };
     match sanctioned_party(&parties) {
         Some(party) => Err(FinishError::Sanctioned(party)),
         None => Ok(()),
