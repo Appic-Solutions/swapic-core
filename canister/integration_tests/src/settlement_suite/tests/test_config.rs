@@ -146,7 +146,7 @@ fn get_config_full_rejects_a_stranger() {
     assert!(get_config_full(&pic, canister, stranger).is_err());
 }
 
-/// The footgun the redaction created: an operator reads the public view, edits a knob and
+/// The footgun the redaction created: ops read the public view, edit a knob and
 /// writes it back, which would store `"***"` as the rpc url and cut the canister off.
 #[test]
 fn set_config_rejects_a_round_tripped_redacted_config() {

@@ -99,7 +99,7 @@ fn every_duration_keeps_its_unit() {
 }
 
 /// The per-tick caps cross the wire as plain counts, and a cap outside its range comes back
-/// named, so an operator sees which knob was refused.
+/// named, so ops see which knob was refused.
 #[test]
 fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
     let wire = Config {

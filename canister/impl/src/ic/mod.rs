@@ -432,7 +432,7 @@ pub async fn withdraw_erc20(
         from_ckerc20_subaccount: None,
     };
     // the error variant is read as text: the canister acts on its being an error, and the
-    // operator reads which one
+    // ops read which one
     let (answer,): (Result<RetrieveErc20Request, candid::Reserved>,) =
         call(minter, "withdraw_erc20", (arg,)).await?;
     answer.map_err(|_| CallError::Refused("the minter refused the withdrawal".to_string()))

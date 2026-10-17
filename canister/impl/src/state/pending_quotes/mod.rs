@@ -121,7 +121,7 @@ pub fn init() {
 ///
 /// Rule A3: the entry records the deadlines `config` puts on the quote now (its deposit
 /// deadline and its claim deadline), and they are what its claim, its pull and the sweep
-/// read, so an operator who moves the permit window or the grace later moves no deadline
+/// read, so ops moving the permit window or the grace later move no deadline
 /// of a quote already handed to a user. A quote already in the store keeps the deadlines
 /// it was first registered under, for the same reason, and so keeps its one index key.
 ///

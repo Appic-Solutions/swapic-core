@@ -367,7 +367,7 @@ fn register_keeps_the_height_the_quote_was_registered_at() {
 
 /// A quote is held to the deadlines it was registered under (rule A3): the permit window
 /// and the claim's grace are read once, at registration, and recorded in the entry, and a
-/// repeat registration after the operator moved either keeps the ones the quote was first
+/// repeat registration after ops moved either keeps the ones the quote was first
 /// registered under, as the height does, so the expiry index keeps the one key it has.
 #[test]
 fn register_records_the_deadlines_and_a_repeat_keeps_them() {

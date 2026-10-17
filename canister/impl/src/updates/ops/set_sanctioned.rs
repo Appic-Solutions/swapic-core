@@ -7,8 +7,8 @@ use types::Address;
 /// The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
 /// `remove` from it, and answers how many addresses the set holds after. An EVM address is
 /// held by its bytes, so any spelling of it is the same entry; other text is held exactly.
-/// Compliance data, not money, so the halt switch does not gate it: an operator halting on
-/// a divergence still wants the list current.
+/// Compliance data, not money, so the halt switch does not gate it: ops halting on a
+/// divergence still want the list current.
 ///
 /// The set is bounded, and a call that would take it past the bound is refused whole, with
 /// nothing of it written. Every text is held to the 256-byte cap and a longer one is refused

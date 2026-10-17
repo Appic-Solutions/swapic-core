@@ -448,7 +448,7 @@ crate::storable_as_cbor!(Quote);
 /// of the lookback before refusing, so no height a watcher pushed strands a deposit.
 ///
 /// The entry also holds the deadlines the quote was registered under (rule A3), which are
-/// what its claim, its pull and the store's sweep read: a config the operator moves after
+/// what its claim, its pull and the store's sweep read: a config ops move after
 /// the registration moves neither of them.
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, and the height is absent while
@@ -479,7 +479,7 @@ crate::storable_as_cbor!(PendingQuote);
 
 /// The two deadlines a quote is held to, fixed when the quoter registers it (rule A3): the
 /// permit window and the claim's grace are read from the config once, at registration, so
-/// an operator who moves either afterwards moves no deadline of a quote already handed to
+/// ops moving either afterwards move no deadline of a quote already handed to
 /// a user. A deposit that landed in time under the window the quote was registered under
 /// stays claimable, and one that landed late under it stays refused.
 ///

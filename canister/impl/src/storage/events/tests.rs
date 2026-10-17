@@ -97,7 +97,7 @@ fn log_replay() -> Result<State<MemoryStore>, ReplayError> {
     EVENTS.with(|e| replay(e.borrow().iter()))
 }
 
-/// The deep check an operator runs by hand, in one step the size of the log: the comparison
+/// The deep check ops run by hand, in one step the size of the log: the comparison
 /// a bounded timer pass cannot make. Answers whether it halted the canister.
 fn deep_check_halts() -> bool {
     let step = run_audit_replay_step(event_count());
@@ -426,7 +426,7 @@ fn the_waiting_index_matches_a_full_scan_across_every_waiting_transition() {
         let decide = |quote_hash, choice| EventType::DecisionMade { quote_hash, choice };
         let refund = |quote_hash| EventType::RefundStarted {
             quote_hash,
-            reason: "operator".into(),
+            reason: "ops".into(),
         };
         let freeze = |quote_hash| EventType::Frozen {
             quote_hash,

@@ -114,7 +114,7 @@ pub fn upgrade(
 /// `CanisterInstallCodeRateLimited` until it has worked that instruction debt off, a round
 /// at a time. That refusal is about the size of this module and never about the canister
 /// under test, so every install and upgrade in the suite ticks through it here: a suite
-/// that installs, upgrades and reinstalls within one instant is not what any operator does,
+/// that installs, upgrades and reinstalls within one instant is not what ops ever do,
 /// and a test asserting a refusal the canister itself made still reads it from the answer.
 fn through_the_install_rate_limit(
     pic: &PocketIc,

@@ -670,7 +670,7 @@ fn the_flush_pass_is_re_armed_after_an_upgrade_with_a_queued_entry() {
 
 /// A replacement is a new transaction, signed and broadcast, so the halt switch stops it
 /// like every other path that creates one. What is already out there is still watched: the
-/// receipts keep being read, because an operator investigating a divergence needs to see
+/// receipts keep being read, because ops investigating a divergence need to see
 /// what the chains did with what this canister already signed.
 #[test]
 fn a_halted_canister_replaces_nothing_and_still_reads_its_receipts() {
@@ -1239,7 +1239,7 @@ fn the_outcall_caps_follow_the_batch_they_are_for() {
 }
 
 /// The halt switch is the emergency stop of a canister that custodies funds, so nothing new
-/// reaches a chain while it is on. A transaction signed seconds before an operator halts is
+/// reaches a chain while it is on. A transaction signed seconds before ops halt it is
 /// still in the queue, and it waits there: the nonce is not abandoned, and lifting the halt
 /// sends it.
 #[test]

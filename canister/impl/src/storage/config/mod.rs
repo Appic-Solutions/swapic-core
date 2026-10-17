@@ -35,7 +35,7 @@ pub fn get() -> Config {
 }
 
 /// The line a config write leaves in the world-readable log: compact JSON of the redacted
-/// wire view, so it reads in the field names and units operators set.
+/// wire view, so it reads in the field names and units ops set.
 pub fn change_json(config: &Config) -> String {
     serde_json::to_string(&settlement_api::types::config::Config::from(config.clone())).expect(
         "BUG: the wire config is integers, strings, and maps keyed by integers, all of which JSON holds",

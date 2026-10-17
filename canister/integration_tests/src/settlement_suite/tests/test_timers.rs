@@ -454,7 +454,7 @@ fn set_halted_refuses_a_stranger() {
     assert!(halted(&pic, canister));
 }
 
-/// An upgrade is the first thing an operator reaches for, so the flag is stable: a halt
+/// An upgrade is the first thing ops reach for, so the flag is stable: a halt
 /// outlives the redeploy and only a deliberate call clears it.
 #[test]
 fn the_halt_flag_survives_an_upgrade() {

@@ -468,8 +468,8 @@ type GuardError = variant {
   RolesNotSet;
   CallerNotRole : Role;
   CallerNotWatcherOrController;
-  // Neither service principal, and not a controller either: the claim's door, which an
-  // operator may open by hand.
+  // Neither service principal, and not a controller either: the claim's door, which ops
+  // may open by hand.
   CallerNotQuoterWatcherOrController;
   CallerNotQuoterOrWatcher;
   Halted;
@@ -831,7 +831,7 @@ service : (InitArg) -> {
   events_page : (nat64, nat64) -> (vec Event) query;
   // The EVM address this canister signs from, in its EIP-55 checksum, or nothing before it
   // has been derived. World-readable: it is the address every vault on every chain is
-  // configured to obey, and an operator funds it before the first transaction.
+  // configured to obey, and ops fund it before the first transaction.
   // 
   // Derived once from the canister's threshold key and then read from stable memory, so it
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
@@ -851,8 +851,8 @@ service : (InitArg) -> {
   finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64) -> (Result_4);
   // The cached reading for a chain, with the instant the canister stamped it, or nothing for
   // a chain the watcher has never pushed. World-readable: a block height and a gas price are
-  // public facts about a public chain, and the stamp is how an operator sees the watcher
-  // stop pushing.
+  // public facts about a public chain, and the stamp is how ops see the watcher stop
+  // pushing.
   // 
   // Answers the entry however old it is. Freshness is a decision, and the canister makes it
   // against `chain_data_max_age` at the moment it decides.
@@ -886,7 +886,7 @@ service : (InitArg) -> {
   // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
   // canister would otherwise spend an outcall on before every decision. It moves no money,
   // so the halt switch does not gate it: a halted canister still wants a current view of the
-  // chains while an operator investigates.
+  // chains while ops investigate.
   // 
   // The record carries no instant. The canister stamps what it stores with its own clock,
   // because the age of a reading is what every decision on it depends on, and a caller that
@@ -953,8 +953,8 @@ service : (InitArg) -> {
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
-  // Compliance data, not money, so the halt switch does not gate it: an operator halting on
-  // a divergence still wants the list current.
+  // Compliance data, not money, so the halt switch does not gate it: ops halting on a
+  // divergence still want the list current.
   // 
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused

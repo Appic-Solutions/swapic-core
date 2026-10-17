@@ -187,7 +187,7 @@ pub enum DepositError {
         quote_hash: Hash32,
     },
     /// The vault's log holds `seen` deposits for the quote, and none of them is the token
-    /// and amount wanted: funds under the hash for an operator, and no swap.
+    /// and amount wanted: funds under the hash for ops, and no swap.
     NoneMatches {
         quote_hash: Hash32,
         seen: u64,
@@ -208,7 +208,7 @@ pub enum DepositError {
     /// The quote's logs in block `block` alone are more than `cap` bytes, the largest
     /// answer an outcall may be, so no read can see what that block holds. Logs under a
     /// quote's public hash are anyone's to add, so this is dust, and asked again it answers
-    /// the same: the funds stay in the vault for an operator.
+    /// the same: the funds stay in the vault for ops.
     BlockTooLarge {
         block: u64,
         cap: u64,

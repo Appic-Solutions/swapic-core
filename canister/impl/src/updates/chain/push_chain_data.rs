@@ -8,7 +8,7 @@ use types::{ChainId, Timestamp};
 /// Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
 /// canister would otherwise spend an outcall on before every decision. It moves no money,
 /// so the halt switch does not gate it: a halted canister still wants a current view of the
-/// chains while an operator investigates.
+/// chains while ops investigate.
 ///
 /// The record carries no instant. The canister stamps what it stores with its own clock,
 /// because the age of a reading is what every decision on it depends on, and a caller that

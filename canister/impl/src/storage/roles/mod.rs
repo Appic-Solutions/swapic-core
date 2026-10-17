@@ -73,7 +73,7 @@ pub fn set_roles(quoter: Principal, watcher: Principal) -> Result<(), RolesError
         }
     }
     // the log first, because it is the step that can refuse: a rotation changes who may
-    // move money, so it is audited. Principals as text, which is what an operator reads.
+    // move money, so it is audited. Principals as text, which is what ops read.
     events::append_event(EventType::RolesChanged {
         quoter: quoter.to_text(),
         watcher: watcher.to_text(),

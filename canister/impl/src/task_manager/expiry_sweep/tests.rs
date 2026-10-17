@@ -285,7 +285,7 @@ fn a_halted_sweep_still_drops_stale_quotes() {
 }
 
 /// A quote is swept by the claim deadline it was registered under, never by the live
-/// config (rule A3): an operator who lowers the grace after a registration does not drop
+/// config (rule A3): ops lowering the grace after a registration does not drop
 /// the quote before its own deadline, and one who raises it does not keep a quote past the
 /// deadline it was registered under.
 #[test]
@@ -299,7 +299,7 @@ fn a_config_change_after_registration_moves_no_quotes_eviction() {
     let expires_at = expires_at_s(&q);
     let long = registered_at(&q, expires_at);
 
-    // the operator lowers the grace to ten minutes after the registration
+    // ops lower the grace to ten minutes after the registration
     let short_grace = types::Config {
         claim_grace: ClaimGrace::new(Duration::from_secs(600)),
         ..config.clone()
@@ -311,7 +311,7 @@ fn a_config_change_after_registration_moves_no_quotes_eviction() {
         "kept to the claim deadline it was registered under"
     );
 
-    // a quote registered under the short grace, after which the operator raises it again
+    // a quote registered under the short grace, after which ops raise it again
     let q = quote(true, 3_011);
     let short = registered_at(&q, expires_at);
     config::test_set(config.clone());
@@ -399,7 +399,7 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
         append_at(
             EventType::RefundStarted {
                 quote_hash: refunded,
-                reason: "operator".into(),
+                reason: "ops".into(),
             },
             later(1),
         );

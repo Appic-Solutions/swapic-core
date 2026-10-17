@@ -3,7 +3,7 @@ use ic_stable_structures::StableCell;
 use std::cell::RefCell;
 
 thread_local! {
-    // A halted canister must stay halted across the upgrade an operator reaches for first.
+    // A halted canister must stay halted across the upgrade ops reach for first.
     static HALTED: RefCell<StableCell<bool, Memory>> = RefCell::new(
         StableCell::init(halt_memory(), false).expect("halt cell init"),
     );

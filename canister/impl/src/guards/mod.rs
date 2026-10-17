@@ -47,8 +47,8 @@ pub fn require_quoter_or_watcher() -> Result<(), GuardError> {
     check_either(&roles::get(), ic_cdk::api::caller())
 }
 
-/// Either service, or a controller standing in for one: the claim is the door an operator
-/// takes when a deposit has to be claimed by hand, so the controller may open it too. One
+/// Either service, or a controller standing in for one: the claim is the door ops
+/// take when a deposit has to be claimed by hand, so the controller may open it too. One
 /// error for all three, so a refusal says nothing about which of them the caller failed to
 /// be.
 fn check_either_or_controller(
@@ -68,7 +68,7 @@ pub fn require_quoter_watcher_or_controller() -> Result<(), GuardError> {
 }
 
 /// The watcher, or a controller standing in for it: the compliance data the watcher pushes
-/// is also what an operator corrects by hand. One error for both, so a refusal says nothing
+/// is also what ops correct by hand. One error for both, so a refusal says nothing
 /// about which of the two the caller failed to be.
 fn check_watcher_or_controller(
     watcher: Option<Principal>,

@@ -5,8 +5,8 @@ use types::ChainId;
 
 /// The cached reading for a chain, with the instant the canister stamped it, or nothing for
 /// a chain the watcher has never pushed. World-readable: a block height and a gas price are
-/// public facts about a public chain, and the stamp is how an operator sees the watcher
-/// stop pushing.
+/// public facts about a public chain, and the stamp is how ops see the watcher stop
+/// pushing.
 ///
 /// Answers the entry however old it is. Freshness is a decision, and the canister makes it
 /// against `chain_data_max_age` at the moment it decides.

@@ -126,7 +126,7 @@ pub async fn drive_flows() -> usize {
         };
         match drive_flow(quote_hash, &flow).await {
             Ok(()) => acted += 1,
-            // retried on the next drive; printed so an operator reading the replica's log
+            // retried on the next drive; printed so ops reading the replica's log
             // sees why a flow is standing still
             Err(error) => {
                 ic_cdk::println!("flow {quote_hash} stays at {:?}: {error:?}", flow.status)
@@ -507,7 +507,7 @@ pub fn plan(
         data: Bytes::new(),
     };
     params.legMinOut = amount;
-    // the quote's network fee is withheld to this canister's own address, the operator
+    // the quote's network fee is withheld to this canister's own address, the canister
     params.networkFee = route.networkFee.min(amount);
     let net = amount.saturating_sub(params.networkFee);
     let route_holds = !paused

@@ -1073,7 +1073,7 @@ async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
         // a replacement is a new transaction, signed and broadcast, so the halt switch
         // gates it like every other path that creates one, and a halted canister leaves
         // the entry exactly where it is. Reading receipts and closing attempts carries on
-        // while halted: an operator investigating a divergence wants to see what the
+        // while halted: ops investigating a divergence want to see what the
         // chains did with what is already out there.
         if require_not_halted().is_err() {
             return;

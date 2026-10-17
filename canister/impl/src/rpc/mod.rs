@@ -77,7 +77,7 @@ impl std::fmt::Debug for HttpRequest {
 }
 
 /// The most of a text this canister did not write that an error carries out of this
-/// module: enough for an operator to tell one failure from another in a log, and never a
+/// module: enough for ops to tell one failure from another in a log, and never a
 /// provider's whole answer.
 pub const MAX_SUMMARY_BYTES: usize = 200;
 

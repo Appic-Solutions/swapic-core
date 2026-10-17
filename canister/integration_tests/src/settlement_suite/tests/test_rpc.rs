@@ -172,7 +172,7 @@ fn a_chain_with_no_rpc_url_buys_no_outcall() {
 }
 
 /// A provider that answers anything but a 2xx is a transport failure, and the status it
-/// answered is what the operator needs to see.
+/// answered is what ops need to see.
 #[test]
 fn a_provider_answering_an_error_status_is_a_transport_failure() {
     let (pic, canister, admin) = setup();

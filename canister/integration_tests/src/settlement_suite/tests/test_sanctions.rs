@@ -68,7 +68,7 @@ fn a_stranger_and_the_quoter_are_refused_and_write_nothing() {
 }
 
 /// Text above the address cap is refused by its position in its list, and nothing of the
-/// call lands, so the list an operator sends is the list the set holds or none of it.
+/// call lands, so the list ops send is the list the set holds or none of it.
 #[test]
 fn a_text_over_the_cap_is_refused_by_position_and_nothing_lands() {
     let (pic, canister, admin) = setup();

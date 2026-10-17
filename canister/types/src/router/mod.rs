@@ -115,7 +115,6 @@ sol! {
     function receiveMessage(bytes message, bytes attestation) returns (bool);
     function paused() returns (bool);
     function usedQuote(bytes32 quoteHash) returns (bool);
-    function operator() returns (address);
     function DOMAIN_SEPARATOR() returns (bytes32);
     function balanceOf(address account) returns (uint256);
     event Transfer(address indexed from, address indexed to, uint256 value);

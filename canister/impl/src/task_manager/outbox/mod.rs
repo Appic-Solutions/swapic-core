@@ -113,8 +113,8 @@ async fn run() {
     tx::flush().await;
     tx::check_open().await;
     // a halted canister creates nothing (the two passes that would return at once) but
-    // keeps reading what the chains do with the bytes already out, so an operator
-    // investigating a divergence sees attempts close as they mine: while anything is
+    // keeps reading what the chains do with the bytes already out, so ops
+    // investigating a divergence see attempts close as they mine: while anything is
     // sent, the pass re-arms whatever the halt says. What it does not do is spin on work
     // it may not touch: a halt with only queued or unsigned work rests until `set_halted`
     // arms it again. The halt is read after the passes, because it can land during their

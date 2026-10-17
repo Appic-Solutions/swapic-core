@@ -448,7 +448,7 @@ fn the_deposit_that_counts_is_the_one_that_matches_not_the_first() {
     assert_eq!(found.from, USER.parse().unwrap());
 
     // logs about the quote that are none of them the deposit wanted: refused by count, so
-    // an operator can tell stranded funds from no deposit at all
+    // ops can tell stranded funds from no deposit at all
     assert_eq!(
         decide(
             &[dust, other_token],

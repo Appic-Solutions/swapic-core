@@ -142,7 +142,7 @@ pub struct Swap {
     pub last_tx_hash: Option<TxHash>,
     /// What the payout leg was signed to pay the user, read off the calldata this canister
     /// built for it. The record of a delivered swap is made from this and never from the
-    /// live config, so a fee the operator moved between the send and the confirmation
+    /// live config, so a fee ops moved between the send and the confirmation
     /// cannot change what the log says was paid.
     #[n(12)]
     pub paid_out: Option<TokenAmount>,
@@ -154,7 +154,7 @@ pub struct Swap {
     pub fee_accrued: Option<TokenAmount>,
     /// The most a CCTP burn of this swap offered Circle, read off the calldata this
     /// canister built for it: what the attested message of that burn must carry, so a
-    /// minimum fee the operator moved between the burn and the attestation cannot unbind
+    /// minimum fee ops moved between the burn and the attestation cannot unbind
     /// the message the burn emitted. Absent before a CCTP burn, and for the other rails.
     #[n(14)]
     pub burn_max_fee: Option<TokenAmount>,
