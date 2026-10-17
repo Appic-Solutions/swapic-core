@@ -1187,18 +1187,9 @@ fn the_payers_authorization_is_verified_on_every_door() {
         Err(RelayError::ContractPayerUnsupported)
     );
     // the same signature with s mirrored to the curve's high half recovers too, and is
-    // refused as every verifier the doors use refuses it
+    // refused as USDC's ECRecover refuses it
     let mut high = auth.clone();
-    let mut bytes = high.signature.to_vec();
-    let s = U256::from_be_slice(&bytes[32..64]);
-    let order_n = U256::from_str_radix(
-        "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
-        16,
-    )
-    .unwrap();
-    bytes[32..64].copy_from_slice(&(order_n - s).to_be_bytes::<32>());
-    bytes[64] ^= 1;
-    high.signature = bytes.into();
+    high.signature = high_s(&auth.signature).into();
     assert_eq!(
         authorize(&high),
         Err(RelayError::Authorization("signature is not in low-s form"))
@@ -1217,7 +1208,7 @@ fn the_payers_authorization_is_verified_on_every_door() {
     assert_eq!(authorize(&accepted), Ok(()));
     // a contract wallet's ERC-1271 signature is no ECDSA signature of the payer's key
     let contract = GaslessAuth {
-        acceptance: vec![0xab; 97].into(),
+        acceptance: vec![0x1b; 65].into(),
         ..accepted.clone()
     };
     assert_eq!(
@@ -1257,4 +1248,173 @@ fn the_payers_authorization_is_verified_on_every_door() {
 fn authorize_order(order: &Order, auth: &GaslessAuth, chain: &EvmChain) -> Result<(), RelayError> {
     let id = swapic::order_id(order, ARBITRUM, chain.swapic);
     authorize(order, auth, id, ARBITRUM, chain)
+}
+
+/// `r ++ s ++ v` of a signature, its `s` mirrored to the curve's high half and `v`
+/// flipped: the same signer, the malleable twin.
+fn high_s(signature: &[u8]) -> Vec<u8> {
+    let mut bytes = signature.to_vec();
+    let s = U256::from_be_slice(&bytes[32..64]);
+    let n = U256::from_str_radix(
+        "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+        16,
+    )
+    .unwrap();
+    bytes[32..64].copy_from_slice(&(n - s).to_be_bytes::<32>());
+    bytes[64] = if bytes[64] == 27 { 28 } else { 27 };
+    bytes
+}
+
+/// EIP-2098's 64 bytes: `r`, then `s` with `v`'s parity in its top bit.
+fn compact(signature: &[u8]) -> Vec<u8> {
+    let mut bytes = signature[..64].to_vec();
+    if signature[64] == 28 {
+        bytes[32] |= 0x80;
+    }
+    bytes
+}
+
+/// Security round 5: each door accepts exactly the signatures its verifier accepts, no
+/// more (the canister would pay for the revert) and no less:
+/// - 3009, USDC's ECRecover: 65 bytes, `v` 27 or 28, `s` in the low half;
+/// - 2612, the acceptance through OpenZeppelin's `tryRecover`: the same;
+/// - Permit2's SignatureVerification: 65 bytes or EIP-2098's 64, `v` 27 or 28, `s` either
+///   half, since it calls `ecrecover` as it is.
+///
+/// And every field of a digest is the parsed order's: a signature over another value,
+/// chain or verifying contract recovers to someone else.
+#[test]
+fn each_door_accepts_exactly_what_its_verifier_accepts() {
+    let sample = sample();
+    let chain = sample.evm_chains.get(ARBITRUM).unwrap();
+    let key = payer_key();
+    let mut order = sample.order.clone();
+    order.payer = swapic::addr(address_of_key(&key));
+    let id = swapic::order_id(&order, ARBITRUM, chain.swapic);
+    let auth = sample.resigned(&order);
+    let authorize = |auth: &GaslessAuth| authorize(&order, auth, id, ARBITRUM, &chain);
+    let rwa = |order: &Order, chain_id: ChainId, usdc: EvmAddress| {
+        swapic::receive_with_authorization_digest(order, &auth, id, chain_id, usdc, chain.swapic)
+    };
+    let with_signature = |auth: &GaslessAuth, signature: Vec<u8>| GaslessAuth {
+        signature: signature.into(),
+        ..auth.clone()
+    };
+    let v_zero_one = |signature: &[u8]| {
+        let mut bytes = signature.to_vec();
+        bytes[64] -= 27;
+        bytes
+    };
+
+    // 3009
+    let good = sign(rwa(&order, ARBITRUM, chain.usdc), &key);
+    assert_eq!(authorize(&with_signature(&auth, good.clone())), Ok(()));
+    assert_eq!(
+        authorize(&with_signature(&auth, v_zero_one(&good))),
+        Err(RelayError::Authorization("signature's v is not 27 or 28"))
+    );
+    assert_eq!(
+        authorize(&with_signature(&auth, high_s(&good))),
+        Err(RelayError::Authorization("signature is not in low-s form"))
+    );
+    assert_eq!(
+        authorize(&with_signature(&auth, compact(&good))),
+        Err(RelayError::Authorization("signature is not 65 bytes"))
+    );
+    let mut more = order.clone();
+    more.amountIn += U256::from(1);
+    for (what, digest) in [
+        (
+            "a value other than amountIn",
+            rwa(&more, ARBITRUM, chain.usdc),
+        ),
+        ("another chain id", rwa(&order, ChainId::BASE, chain.usdc)),
+        (
+            "another verifying contract",
+            rwa(&order, ARBITRUM, EvmAddress::new([0x83; 20])),
+        ),
+    ] {
+        assert_eq!(
+            authorize(&with_signature(&auth, sign(digest, &key))),
+            Err(RelayError::ContractPayerUnsupported),
+            "{what}"
+        );
+    }
+
+    // 2612: the acceptance, under Swapic's domain on this chain
+    let accepted = sign(
+        swapic::acceptance_digest(&order, ARBITRUM, chain.swapic),
+        &key,
+    );
+    let door_2612 = |acceptance: Vec<u8>| GaslessAuth {
+        door: DOOR_PERMIT_2612,
+        acceptance: acceptance.into(),
+        ..auth.clone()
+    };
+    assert_eq!(authorize(&door_2612(accepted.clone())), Ok(()));
+    assert_eq!(
+        authorize(&door_2612(v_zero_one(&accepted))),
+        Err(RelayError::Authorization("signature's v is not 27 or 28"))
+    );
+    assert_eq!(
+        authorize(&door_2612(high_s(&accepted))),
+        Err(RelayError::Authorization("signature is not in low-s form"))
+    );
+    assert_eq!(
+        authorize(&door_2612(compact(&accepted))),
+        Err(RelayError::Authorization("signature is not 65 bytes"))
+    );
+    for (what, digest) in [
+        (
+            "another chain id",
+            swapic::acceptance_digest(&order, ChainId::BASE, chain.swapic),
+        ),
+        (
+            "another verifying contract",
+            swapic::acceptance_digest(&order, ARBITRUM, EvmAddress::new([0x77; 20])),
+        ),
+    ] {
+        assert_eq!(
+            authorize(&door_2612(sign(digest, &key))),
+            Err(RelayError::ContractPayerUnsupported),
+            "{what}"
+        );
+    }
+
+    // Permit2: either half of s, and the compact form
+    let permit = GaslessAuth {
+        door: DOOR_PERMIT2,
+        nonce: U256::from(7),
+        deadline: order.deadline,
+        ..auth.clone()
+    };
+    let signed = sign(
+        swapic::permit2_digest(&order, &permit, id, ARBITRUM, chain.swapic),
+        &key,
+    );
+    assert_eq!(authorize(&with_signature(&permit, signed.clone())), Ok(()));
+    assert_eq!(authorize(&with_signature(&permit, high_s(&signed))), Ok(()));
+    assert_eq!(
+        authorize(&with_signature(&permit, compact(&signed))),
+        Ok(())
+    );
+    assert_eq!(
+        authorize(&with_signature(&permit, v_zero_one(&signed))),
+        Err(RelayError::Authorization("signature's v is not 27 or 28"))
+    );
+    assert_eq!(
+        authorize(&with_signature(&permit, signed[..63].to_vec())),
+        Err(RelayError::Authorization("signature is not 65 or 64 bytes"))
+    );
+    let mut cheaper = order.clone();
+    cheaper.amountIn -= U256::from(1);
+    let other = sign(
+        swapic::permit2_digest(&cheaper, &permit, id, ARBITRUM, chain.swapic),
+        &key,
+    );
+    assert_eq!(
+        authorize(&with_signature(&permit, other)),
+        Err(RelayError::ContractPayerUnsupported),
+        "an amount other than amountIn"
+    );
 }

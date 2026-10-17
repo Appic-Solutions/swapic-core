@@ -294,22 +294,78 @@ fn check_auth(auth: &GaslessAuth, id: OrderId, now_s: u64) -> Result<(), RelayEr
 }
 
 /// Half the secp256k1 group order: a signature whose `s` is above it is the malleable
-/// twin every verifier the doors use refuses (EIP-2), so the canister refuses it too.
+/// twin that USDC's ECRecover and OpenZeppelin's `tryRecover` refuse (EIP-2).
 const HALF_ORDER: [u8; 32] = [
     0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
 ];
 
+/// The verifier a door's signature meets on chain, whose rules the canister applies
+/// exactly: a signature it accepts and the verifier refuses costs a revert, and one it
+/// refuses and the verifier accepts refuses a payer for nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verifier {
+    /// USDC FiatToken v2.2's `ECRecover` (the 3009 door, through Swapic's 65-byte split)
+    /// and OpenZeppelin 5.1's `ECDSA.tryRecover` (the 2612 door's acceptance): 65 bytes
+    /// `r ++ s ++ v`, `v` 27 or 28, `s` in the low half, a signer that is not zero.
+    LowS,
+    /// Permit2's `SignatureVerification`: 65 bytes, or EIP-2098's 64 (`r`, then `s` with
+    /// `v`'s parity in its top bit), and `ecrecover` as it is: `v` 27 or 28, `s` in either
+    /// half.
+    Permit2,
+}
+
+/// The signer of `signature` over `digest`, read as `verifier` reads it.
+fn recover_as(
+    verifier: Verifier,
+    digest: [u8; 32],
+    signature: &[u8],
+) -> Result<Option<EvmAddress>, RelayError> {
+    let word = |at: usize| -> [u8; 32] {
+        signature[at..at + 32]
+            .try_into()
+            .expect("BUG: the length was checked")
+    };
+    let (r, s, v) = match (verifier, signature.len()) {
+        (_, 65) => (word(0), word(32), signature[64]),
+        (Verifier::Permit2, 64) => {
+            let mut s = word(32);
+            let parity = s[0] >> 7;
+            s[0] &= 0x7f;
+            (word(0), s, 27 + parity)
+        }
+        (Verifier::LowS, _) => return Err(RelayError::Authorization("signature is not 65 bytes")),
+        (Verifier::Permit2, _) => {
+            return Err(RelayError::Authorization("signature is not 65 or 64 bytes"))
+        }
+    };
+    if v != 27 && v != 28 {
+        return Err(RelayError::Authorization("signature's v is not 27 or 28"));
+    }
+    if verifier == Verifier::LowS && s > HALF_ORDER {
+        return Err(RelayError::Authorization("signature is not in low-s form"));
+    }
+    Ok(ecdsa::ecrecover(digest, v, r, s))
+}
+
 /// The payer's own authorization, verified here with no outcall, so the canister signs
 /// nothing a door will refuse on chain at its cost. Each door's signature must recover,
-/// over what the door verifies, to the payer:
-/// - the 3009 door: USDC's `ReceiveWithAuthorization` under the chain's USDC's domain, so
-///   the order must pay in that USDC;
-/// - the 2612 door: the payer's `QuoteAcceptance` of the order id under Swapic's domain;
-/// - the Permit2 door: Permit2's `PermitWitnessTransferFrom` with the order id as witness.
+/// read exactly as the door's verifier reads it ([`Verifier`]), over what the door
+/// verifies, every field taken from the parsed order and the recomputed id, to the payer:
+/// - the 3009 door: USDC's `ReceiveWithAuthorization` from the payer to Swapic of
+///   `amountIn`, nonce the order id, under the chain's USDC's domain, so the order must pay
+///   in that USDC;
+/// - the 2612 door: the payer's `QuoteAcceptance` of the order id under Swapic's domain on
+///   this chain;
+/// - the Permit2 door: Permit2's `PermitWitnessTransferFrom` of `amountIn` of `tokenIn`,
+///   Swapic the spender, the order id the witness.
 ///
 /// A payer whose signature does not recover, a contract wallet signing by ERC-1271
-/// included, is refused for gasless.
+/// included, is refused for gasless. What only the chain knows is not read here: USDC's
+/// authorization state and Permit2's nonce bitmap, the 2612 door's allowance, and whether
+/// the payer has code (an EIP-7702 account, whose 3009 and Permit2 verifiers then ask
+/// ERC-1271 instead); the submit API's simulation from the canister's address (I-3.3), and
+/// `simulate_before_sign` when it is on, meet those.
 pub fn authorize(
     order: &Order,
     auth: &GaslessAuth,
@@ -317,7 +373,7 @@ pub fn authorize(
     chain_id: ChainId,
     source: &EvmChain,
 ) -> Result<(), RelayError> {
-    let (digest, signature) = match auth.door {
+    let (verifier, digest, signature) = match auth.door {
         DOOR_AUTH_3009 => {
             if swapic::evm(order.tokenIn) != source.usdc {
                 return Err(RelayError::Authorization(
@@ -332,22 +388,21 @@ pub fn authorize(
                 source.usdc,
                 source.swapic,
             );
-            (digest, auth.signature.as_ref())
+            (Verifier::LowS, digest, auth.signature.as_ref())
         }
         DOOR_PERMIT_2612 => (
+            Verifier::LowS,
             swapic::acceptance_digest(order, chain_id, source.swapic),
             auth.acceptance.as_ref(),
         ),
         DOOR_PERMIT2 => (
+            Verifier::Permit2,
             swapic::permit2_digest(order, auth, id, chain_id, source.swapic),
             auth.signature.as_ref(),
         ),
         door => return Err(RelayError::UnknownDoor(door)),
     };
-    if signature.len() == 65 && signature[32..64] > HALF_ORDER[..] {
-        return Err(RelayError::Authorization("signature is not in low-s form"));
-    }
-    match ecdsa::recover_signer(digest, signature) {
+    match recover_as(verifier, digest, signature)? {
         Some(signer) if signer == swapic::evm(order.payer) => Ok(()),
         _ => Err(RelayError::ContractPayerUnsupported),
     }

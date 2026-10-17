@@ -167,18 +167,19 @@ impl From<EcdsaError> for settlement_api::types::evm::EcdsaError {
     }
 }
 
-/// The address that signed `digest`, from a 65-byte `r ++ s ++ v` signature (`v` 27 or
-/// 28, or 0 or 1): how the relay checks that a user's authorization is the payer's own.
-pub fn recover_signer(digest: [u8; 32], signature: &[u8]) -> Option<EvmAddress> {
-    if signature.len() != 65 {
-        return None;
-    }
-    let raw: [u8; 64] = signature[..64].try_into().ok()?;
-    let parity = match signature[64] {
-        0 | 27 => false,
-        1 | 28 => true,
+/// What the EVM's `ecrecover` answers for `digest` and `(v, r, s)`: the signer, for `v`
+/// 27 or 28 and an `r` and an `s` the curve takes, in either half of the range; nothing
+/// otherwise, where the precompile answers the zero address. A verifier's own rules (a
+/// signature's length, a low `s`) are its caller's.
+pub fn ecrecover(digest: [u8; 32], v: u8, r: [u8; 32], s: [u8; 32]) -> Option<EvmAddress> {
+    let parity = match v {
+        27 => false,
+        28 => true,
         _ => return None,
     };
+    let mut raw = [0_u8; 64];
+    raw[..32].copy_from_slice(&r);
+    raw[32..].copy_from_slice(&s);
     recover_key(&raw, TxHash::new(digest), parity)
         .ok()
         .map(|key| address_of(&key))
