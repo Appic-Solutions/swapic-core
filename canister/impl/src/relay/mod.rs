@@ -28,8 +28,8 @@ use thiserror::Error;
 use types::config::{ChainTable, EvmChain, GasAction};
 use types::events::TxPurpose;
 use types::swapic::{
-    self, Action, CctpBurn, Envelope, EnvelopeError, GaslessAuth, Order, OrderId, DOOR_AUTH_3009,
-    DOOR_PERMIT2, DOOR_PERMIT_2612, NATIVE, PUBLISH_AND_FUND,
+    self, Action, CctpBurn, EcoArrival, EcoIntent, Envelope, EnvelopeError, GaslessAuth,
+    NotAnIntent, Order, OrderId, DOOR_AUTH_3009, DOOR_PERMIT2, DOOR_PERMIT_2612, NATIVE,
 };
 use types::{CctpDomain, ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, TokenAmount, Wei};
 
@@ -91,6 +91,18 @@ pub enum RelayError {
         chain_id: ChainId,
         action: GasAction,
     },
+    #[error("{0} is sanctioned")]
+    Sanctioned(EvmAddress),
+    #[error(
+        "the order names no recipient the canister can read: no CCTP burn, no Eco intent and no payout"
+    )]
+    NoRecipient,
+    #[error("the order publishes {0} Eco intents")]
+    EcoIntents(usize),
+    #[error("an Eco step the canister cannot read: {0}")]
+    EcoRoute(#[from] NotAnIntent),
+    #[error("the Eco intent {0}")]
+    Eco(&'static str),
 }
 
 /// What the order's checks read besides the order: the chains the canister signs on and
@@ -103,7 +115,7 @@ pub struct Chains<'a> {
 }
 
 /// What the canister signs for an order, read from the order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relay {
     pub order_id: OrderId,
     /// The relay's own action, by the order's rail.
@@ -114,6 +126,17 @@ pub struct Relay {
     pub arrival: Option<Arrival>,
     /// The limit the relay is signed with.
     pub gas_limit: GasAmount,
+    /// Every party the order names that the canister could read: the payer and each
+    /// recipient. None of them may be sanctioned.
+    pub parties: Vec<EvmAddress>,
+}
+
+/// The first of `parties` the sanctions set holds, if any.
+pub fn sanctioned_party(parties: &[EvmAddress]) -> Option<EvmAddress> {
+    parties
+        .iter()
+        .copied()
+        .find(|party| is_sanctioned(&types::Address::from(*party)))
 }
 
 /// The destination side of a CCTP order, as its burn seals it.
@@ -255,6 +278,56 @@ fn arrival_of(burn: &CctpBurn, source: &EvmChain, chains: &Chains) -> Result<Arr
     })
 }
 
+/// The parties an Eco intent names, checked as far as the canister can: the reward's
+/// creator, whom an unfilled intent refunds, is never one of Swapic's own contracts (rule
+/// 19), and the route delivers to a recipient, through the destination's Runner when the
+/// destination is a chain the canister knows.
+fn eco_parties(
+    intent: &EcoIntent,
+    source: &EvmChain,
+    chains: &Chains,
+) -> Result<[EvmAddress; 2], RelayError> {
+    if intent.creator == EvmAddress::ZERO
+        || [source.swapic, source.runner, source.cctp_receiver].contains(&intent.creator)
+    {
+        return Err(RelayError::Eco(
+            "creator is zero or one of Swapic's own contracts",
+        ));
+    }
+    let destination = chains.evm_chains.get(ChainId::new(intent.destination));
+    let recipient = match intent.arrival {
+        EcoArrival::Deliver { recipient } => recipient,
+        EcoArrival::Fill { runner, envelope } => {
+            if let Some(destination) = destination {
+                if runner != destination.runner {
+                    return Err(RelayError::Eco(
+                        "fills another Runner than the destination's",
+                    ));
+                }
+                if [
+                    destination.swapic,
+                    destination.runner,
+                    destination.cctp_receiver,
+                ]
+                .contains(&envelope.recipient)
+                {
+                    return Err(RelayError::Eco("delivers to one of Swapic's own contracts"));
+                }
+            }
+            if envelope.action == Action::Deliver {
+                return Err(RelayError::Eco(
+                    "fills a Deliver envelope, which fill refuses",
+                ));
+            }
+            envelope.recipient
+        }
+    };
+    if recipient == EvmAddress::ZERO {
+        return Err(RelayError::Eco("delivers to the zero address"));
+    }
+    Ok([intent.creator, recipient])
+}
+
 /// Every check on the order and its authorization that needs no chain: pure, so each rule
 /// is a unit test. `requested_gas` is the limit the quoter charged the fee on.
 pub fn check(
@@ -297,7 +370,7 @@ pub fn check(
 
     let mut fees = Vec::new();
     let mut burns = Vec::new();
-    let mut eco = false;
+    let mut intents = Vec::new();
     for step in &order.steps {
         if let Some((to, amount)) = swapic::fee_transfer_of(step, source.usdc) {
             if to == chains.canister {
@@ -307,22 +380,36 @@ pub fn check(
         if let Some(burn) = CctpBurn::of_step(step, source.token_messenger) {
             burns.push(burn.map_err(|_| RelayError::Burn("is not a depositForBurnWithHook"))?);
         }
-        eco |= swapic::selector_of(step) == Some(PUBLISH_AND_FUND);
+        if let Some(intent) = EcoIntent::of_step(step) {
+            intents.push(intent?);
+        }
     }
     let fee = match fees.as_slice() {
         [] => return Err(RelayError::NoFeeStep),
         [fee] => TokenAmount::from_be_bytes(fee.to_be_bytes::<32>()),
         more => return Err(RelayError::FeeSteps(more.len())),
     };
-    let (action, arrival) = match burns.as_slice() {
-        [] if eco => (GasAction::RelayEco, None),
-        [] => (GasAction::RelayLocal, None),
-        [_] if eco => return Err(RelayError::TwoRails),
-        [burn] => (
-            GasAction::RelayCctp,
-            Some(arrival_of(burn, &source, chains)?),
-        ),
-        more => return Err(RelayError::Burns(more.len())),
+    // every party the order names, each to be screened: the canister signs only a plan
+    // whose recipient it can read
+    let mut parties = vec![swapic::evm(order.payer)];
+    if !order.payout.token.is_zero() {
+        parties.push(swapic::evm(order.payout.recipient));
+    }
+    let (action, arrival) = match (burns.as_slice(), intents.as_slice()) {
+        ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
+        ([], []) => (GasAction::RelayLocal, None),
+        ([], [intent]) => {
+            parties.extend(eco_parties(intent, &source, chains)?);
+            (GasAction::RelayEco, None)
+        }
+        ([burn], []) => {
+            let arrival = arrival_of(burn, &source, chains)?;
+            parties.push(arrival.recipient);
+            (GasAction::RelayCctp, Some(arrival))
+        }
+        ([_, ..], [_, ..]) => return Err(RelayError::TwoRails),
+        (more, []) => return Err(RelayError::Burns(more.len())),
+        ([], more) => return Err(RelayError::EcoIntents(more.len())),
     };
 
     let mut needed = source.min_network_fee.get(action);
@@ -345,6 +432,7 @@ pub fn check(
         fee,
         arrival,
         gas_limit,
+        parties,
     })
 }
 
@@ -381,18 +469,8 @@ pub async fn relay_gasless(
         settings.relay_window.as_secs(),
     )
     .map_err(|e| e.to_string())?;
-    let payout_recipient =
-        (!order.payout.token.is_zero()).then(|| swapic::evm(order.payout.recipient));
-    let sanctioned = [
-        Some(swapic::evm(order.payer)),
-        payout_recipient,
-        relay.arrival.map(|a| a.recipient),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|address| is_sanctioned(&types::Address::from(address)));
-    if sanctioned {
-        return Err("the payer or a recipient is sanctioned".into());
+    if let Some(party) = sanctioned_party(&relay.parties) {
+        return Err(RelayError::Sanctioned(party).to_string());
     }
 
     let key = QuoteHash::new(relay.order_id.into_bytes());

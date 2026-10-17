@@ -78,6 +78,28 @@ sol! {
 
     event OrderStarted(bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn);
     event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /// Eco Portal 2.12's intent, as the quoter writes it into a `publishAndFund` step.
+    struct EcoCall { address target; bytes data; uint256 value; }
+    struct EcoTokenAmount { address token; uint256 amount; }
+    struct EcoRoute {
+        bytes32 salt;
+        uint64 deadline;
+        address portal;
+        uint256 nativeAmount;
+        EcoTokenAmount[] tokens;
+        EcoCall[] calls;
+    }
+    struct EcoReward {
+        uint64 deadline;
+        address creator;
+        address prover;
+        uint256 nativeAmount;
+        EcoTokenAmount[] tokens;
+    }
+    function publishAndFund(uint64 destination, bytes route, EcoReward reward, bool allowPartial) external payable returns (bytes32 intentHash, address vault);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function fill(address token, uint256 amount, bytes envelope, Recipe recipe) external;
 }
 
 /// Ether wherever a token address is expected.
@@ -367,6 +389,101 @@ impl CctpBurn {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 #[error("a step to the token messenger is not a depositForBurnWithHook")]
 pub struct NotABurn;
+
+/// An Eco intent an order publishes (abi.md 6.3), read back from its step: who created it,
+/// and where its route delivers on the destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcoIntent {
+    /// The destination chain id.
+    pub destination: u64,
+    /// The reward's creator: the user, whom an unfilled intent refunds (rule 19).
+    pub creator: EvmAddress,
+    /// The one token the route carries.
+    pub token: EvmAddress,
+    pub arrival: EcoArrival,
+}
+
+/// What an Eco route does on the destination: the two shapes the quoter writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcoArrival {
+    /// `[token.transfer(recipient, X - fee)]`.
+    Deliver { recipient: EvmAddress },
+    /// `[token.approve(runner, X - fee), runner.fill(token, X - fee, envelope, recipe)]`:
+    /// a Swap or a CkDeposit.
+    Fill {
+        runner: EvmAddress,
+        envelope: Envelope,
+    },
+}
+
+/// Why a `publishAndFund` step is not an intent this canister can read.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum NotAnIntent {
+    #[error("the step is not a publishAndFund call")]
+    Call,
+    #[error("the route is not abi.encode of an Eco route")]
+    Route,
+    #[error("the route carries other than exactly one token")]
+    Tokens,
+    #[error("the route moves ether")]
+    Value,
+    #[error("the route's calls are neither a transfer nor an approve and a fill")]
+    Calls,
+    #[error("the fill's envelope: {0}")]
+    Envelope(EnvelopeError),
+}
+
+impl EcoIntent {
+    /// The intent a `publishAndFund` step publishes: `None` for any other step, and an
+    /// error for one this canister cannot read.
+    pub fn of_step(step: &Step) -> Option<Result<Self, NotAnIntent>> {
+        (selector_of(step) == Some(PUBLISH_AND_FUND)).then(|| Self::read(&step.data))
+    }
+
+    fn read(data: &[u8]) -> Result<Self, NotAnIntent> {
+        let call = publishAndFundCall::abi_decode(data).map_err(|_| NotAnIntent::Call)?;
+        let route =
+            <EcoRoute as SolValue>::abi_decode(&call.route).map_err(|_| NotAnIntent::Route)?;
+        let [carried] = route.tokens.as_slice() else {
+            return Err(NotAnIntent::Tokens);
+        };
+        if !route.nativeAmount.is_zero() || route.calls.iter().any(|call| !call.value.is_zero()) {
+            return Err(NotAnIntent::Value);
+        }
+        let token = carried.token;
+        let selector = |data: &[u8]| -> Option<[u8; 4]> { data.get(..4)?.try_into().ok() };
+        let arrival = match route.calls.as_slice() {
+            [send] if send.target == token && selector(&send.data) == Some(selectors::TRANSFER) => {
+                let send = transferCall::abi_decode(&send.data).map_err(|_| NotAnIntent::Calls)?;
+                EcoArrival::Deliver {
+                    recipient: evm(send.to),
+                }
+            }
+            [grant, fill]
+                if grant.target == token
+                    && selector(&grant.data) == Some(approveCall::SELECTOR)
+                    && selector(&fill.data) == Some(fillCall::SELECTOR) =>
+            {
+                let grant = approveCall::abi_decode(&grant.data).map_err(|_| NotAnIntent::Calls)?;
+                let call = fillCall::abi_decode(&fill.data).map_err(|_| NotAnIntent::Calls)?;
+                if grant.spender != fill.target || call.token != token {
+                    return Err(NotAnIntent::Calls);
+                }
+                EcoArrival::Fill {
+                    runner: evm(fill.target),
+                    envelope: Envelope::decode(&call.envelope).map_err(NotAnIntent::Envelope)?,
+                }
+            }
+            _ => return Err(NotAnIntent::Calls),
+        };
+        Ok(Self {
+            destination: call.destination,
+            creator: evm(call.reward.creator),
+            token: evm(token),
+            arrival,
+        })
+    }
+}
 
 /// What an arrival does (`Action` in the contracts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

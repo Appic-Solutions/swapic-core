@@ -10,11 +10,11 @@ use types::{BlockNumber, EventType, FlowStep, Nonce, TxHash, WeiPerGas};
 const ARBITRUM: ChainId = ChainId::ARBITRUM;
 const POLYGON: ChainId = ChainId::POLYGON;
 
-/// The quoter's fresh fork order (`samples/quoter_order_arbitrum_cctp_gasless.json`): 100
-/// USDC on Arbitrum to WBTC on Polygon over CCTP, gasless through the 3009 door, with the
-/// gas limit the quoter charged its fee on.
+/// One of the quoter's fresh fork orders in `samples/`, with the gas limit the quoter
+/// charged its fee on, and the chains it names configured as the fork deploy has them.
 struct Sample {
     json: serde_json::Value,
+    chain_id: ChainId,
     order: Order,
     auth: GaslessAuth,
     /// The canister the fee step pays: the fork deploy's.
@@ -29,6 +29,8 @@ fn address(text: &str) -> EvmAddress {
     text.parse().unwrap()
 }
 
+const MESSENGER: &str = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d";
+
 /// A chain the canister signs on, every action given two million gas, a budget of 0.01
 /// ether and no least fee unless a test sets one.
 fn chain(
@@ -42,7 +44,7 @@ fn chain(
         runner,
         cctp_receiver: receiver,
         usdc,
-        token_messenger: address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"),
+        token_messenger: address(MESSENGER),
         message_transmitter: address("0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"),
         gas_limit: PerAction::all(GasAmount::from(2_000_000_u64)),
         gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
@@ -50,12 +52,34 @@ fn chain(
     }
 }
 
+/// `samples/quoter_order_arbitrum_cctp_gasless.json`: 100 USDC on Arbitrum to WBTC on
+/// Polygon over CCTP, gasless through the 3009 door.
 fn sample() -> Sample {
-    let json: serde_json::Value = serde_json::from_str(include_str!(
+    load(include_str!(
         "../../samples/quoter_order_arbitrum_cctp_gasless.json"
     ))
-    .unwrap();
+}
+
+/// `samples/quoter_order_base_eco_ckdeposit_gasless.json`: 50 USDC on Base to ckUSDC
+/// through Eco to Ethereum's ck helper, gasless.
+fn eco_sample() -> Sample {
+    load(include_str!(
+        "../../samples/quoter_order_base_eco_ckdeposit_gasless.json"
+    ))
+}
+
+/// `samples/quoter_order_base_local_gasless.json`: 100 USDC to WETH on Base, gasless,
+/// paid out to the user.
+fn local_sample() -> Sample {
+    load(include_str!(
+        "../../samples/quoter_order_base_local_gasless.json"
+    ))
+}
+
+fn load(text: &str) -> Sample {
+    let json: serde_json::Value = serde_json::from_str(text).unwrap();
     let text = |field: &str| json[field].as_str().unwrap().to_string();
+    let chain_id = ChainId::new(json["chainId"].as_u64().unwrap());
     let order =
         swapic::decode_order(&hex::decode(text("orderAbi").trim_start_matches("0x")).unwrap())
             .unwrap();
@@ -70,42 +94,51 @@ fn sample() -> Sample {
     };
     let usdc = address(&text("usdc"));
     let (canister, _) = swapic::fee_transfer_of(&order.steps[0], usdc).unwrap();
-    let messenger = address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
-    let burn = CctpBurn::of_step(&order.steps[1], messenger)
-        .unwrap()
-        .unwrap();
-    let polygon_receiver = swapic::evm_of_word(burn.mint_recipient).unwrap();
-    let evm_chains = ChainTable(BTreeMap::from([
-        (
-            ARBITRUM,
-            chain(
-                address(&text("swapic")),
-                address(&text("runner")),
-                EvmAddress::new([0xa3; 20]),
-                usdc,
-            ),
+    let mut evm_chains = BTreeMap::from([(
+        chain_id,
+        chain(
+            address(&text("swapic")),
+            address(&text("runner")),
+            EvmAddress::new([0xa3; 20]),
+            usdc,
         ),
-        (
-            POLYGON,
+    )]);
+    let domains = ChainTable(BTreeMap::from([
+        (ChainId::ETHEREUM, CctpDomain::new(0)),
+        (ARBITRUM, CctpDomain::new(3)),
+        (ChainId::BASE, CctpDomain::new(6)),
+        (POLYGON, CctpDomain::new(7)),
+    ]));
+    let burn = order
+        .steps
+        .iter()
+        .find_map(|step| CctpBurn::of_step(step, address(MESSENGER)))
+        .map(Result::unwrap);
+    if let Some(burn) = burn {
+        let destination = domains
+            .0
+            .iter()
+            .find(|(_, domain)| domain.get() == burn.destination_domain)
+            .map(|(chain, _)| *chain)
+            .unwrap();
+        evm_chains.insert(
+            destination,
             chain(
                 EvmAddress::new([0x5a; 20]),
                 EvmAddress::new([0x5b; 20]),
-                polygon_receiver,
+                swapic::evm_of_word(burn.mint_recipient).unwrap(),
                 address(&text("arrivalUsdc")),
             ),
-        ),
-    ]));
-    let domains = ChainTable(BTreeMap::from([
-        (ARBITRUM, CctpDomain::new(3)),
-        (POLYGON, CctpDomain::new(7)),
-    ]));
+        );
+    }
     let gas = json["sourceGasLimit"].as_u64().unwrap();
     Sample {
         json,
+        chain_id,
         order,
         auth,
         canister,
-        evm_chains,
+        evm_chains: ChainTable(evm_chains),
         domains,
         gas,
     }
@@ -127,7 +160,7 @@ impl Sample {
 
     fn check_with(&self, order: &Order, auth: &GaslessAuth) -> Result<Relay, RelayError> {
         let chains = Chains {
-            chain_id: ARBITRUM,
+            chain_id: self.chain_id,
             evm_chains: &self.evm_chains,
             domains: &self.domains,
             canister: self.canister,
@@ -138,11 +171,16 @@ impl Sample {
     /// `order` signed again: the 3009 nonce is its own id, so only the rule under test
     /// can refuse it.
     fn resigned(&self, order: &Order) -> GaslessAuth {
-        let swapic = self.evm_chains.get(ARBITRUM).unwrap().swapic;
+        let swapic = self.evm_chains.get(self.chain_id).unwrap().swapic;
         GaslessAuth {
-            nonce: swapic::order_id(order, ARBITRUM, swapic).as_nonce(),
+            nonce: swapic::order_id(order, self.chain_id, swapic).as_nonce(),
             ..self.auth.clone()
         }
+    }
+
+    /// `order` checked as signed again.
+    fn check_resigned(&self, order: &Order) -> Result<Relay, RelayError> {
+        self.check_with(order, &self.resigned(order))
     }
 
     fn set_min_fee(&mut self, chain_id: ChainId, action: GasAction, fee: u64) {
@@ -463,4 +501,196 @@ fn gas_rule_refuses_over_budget() {
         ),
         Err(tx::TxError::OverGasBudget { .. })
     ));
+}
+
+// The sanctions screen: every party the canister can read in an order is screened, and an
+// order whose recipient it cannot read is not signed at all.
+
+use alloy_sol_types::{SolCall, SolValue};
+use types::swapic::{
+    depositForBurnWithHookCall, fillCall, publishAndFundCall, selectors, transferCall, EcoCall,
+    EcoRoute, Payout,
+};
+
+/// Someone the samples never name.
+const SOMEONE: EvmAddress = EvmAddress::new([0x42; 20]);
+
+fn sanctioned(address: EvmAddress) {
+    crate::storage::sanctions::apply(&[types::Address::from(address)], &[]).unwrap();
+}
+
+/// The party the screen stops `order` at, the order signed again and otherwise admitted.
+fn stopped_at(sample: &Sample, order: &Order) -> Option<EvmAddress> {
+    sanctioned_party(&sample.check_resigned(order).unwrap().parties)
+}
+
+/// `order` with its CCTP burn edited.
+fn with_burn(order: &Order, edit: impl Fn(&mut depositForBurnWithHookCall)) -> Order {
+    let mut order = order.clone();
+    let step = order
+        .steps
+        .iter_mut()
+        .find(|step| swapic::selector_of(step) == Some(selectors::DEPOSIT_FOR_BURN_WITH_HOOK))
+        .unwrap();
+    let mut call = depositForBurnWithHookCall::abi_decode(&step.data).unwrap();
+    edit(&mut call);
+    step.data = call.abi_encode().into();
+    order
+}
+
+/// `order` with its Eco intent edited, the route included.
+fn with_eco(order: &Order, edit: impl Fn(&mut publishAndFundCall, &mut EcoRoute)) -> Order {
+    let mut order = order.clone();
+    let step = order
+        .steps
+        .iter_mut()
+        .find(|step| swapic::selector_of(step) == Some(swapic::PUBLISH_AND_FUND))
+        .unwrap();
+    let mut call = publishAndFundCall::abi_decode(&step.data).unwrap();
+    let mut route = <EcoRoute as SolValue>::abi_decode(&call.route).unwrap();
+    edit(&mut call, &mut route);
+    call.route = SolValue::abi_encode(&route).into();
+    step.data = call.abi_encode().into();
+    order
+}
+
+#[test]
+fn a_sanctioned_payer_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = sample();
+        assert_eq!(stopped_at(&sample, &sample.order), None);
+        let payer = swapic::evm(sample.order.payer);
+        sanctioned(payer);
+        assert_eq!(stopped_at(&sample, &sample.order), Some(payer));
+    });
+}
+
+#[test]
+fn a_sanctioned_cctp_recipient_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = sample();
+        let order = with_burn(&sample.order, |call| {
+            let mut envelope = Envelope::decode(&call.hookData).unwrap();
+            envelope.recipient = SOMEONE;
+            call.hookData = envelope.encode().into();
+        });
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+#[test]
+fn a_sanctioned_cctp_deliver_mint_recipient_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = sample();
+        let order = with_burn(&sample.order, |call| {
+            let mut envelope = Envelope::decode(&call.hookData).unwrap();
+            envelope.action = Action::Deliver;
+            envelope.recipient = SOMEONE;
+            envelope.min_gas = 0;
+            call.hookData = envelope.encode().into();
+            call.mintRecipient = SOMEONE.to_word().into();
+            call.destinationCaller = [0; 32].into();
+        });
+        let relay = sample.check_resigned(&order).unwrap();
+        assert_eq!(relay.arrival.unwrap().action, GasAction::RelayDeliver);
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+#[test]
+fn a_sanctioned_payout_recipient_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = local_sample();
+        let mut order = sample.order.clone();
+        order.payout.recipient = swapic::addr(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+#[test]
+fn a_sanctioned_eco_creator_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = eco_sample();
+        let order = with_eco(&sample.order, |call, _| {
+            call.reward.creator = swapic::addr(SOMEONE);
+        });
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+#[test]
+fn a_sanctioned_eco_fill_recipient_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = eco_sample();
+        let order = with_eco(&sample.order, |_, route| {
+            let mut fill = fillCall::abi_decode(&route.calls[1].data).unwrap();
+            let mut envelope = Envelope::decode(&fill.envelope).unwrap();
+            envelope.recipient = SOMEONE;
+            fill.envelope = envelope.encode().into();
+            route.calls[1].data = fill.abi_encode().into();
+        });
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+#[test]
+fn a_sanctioned_eco_transfer_recipient_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = eco_sample();
+        let order = with_eco(&sample.order, |_, route| {
+            let token = route.tokens[0].token;
+            route.calls = vec![EcoCall {
+                target: token,
+                data: transferCall {
+                    to: swapic::addr(SOMEONE),
+                    amount: U256::ZERO,
+                }
+                .abi_encode()
+                .into(),
+                value: U256::ZERO,
+            }];
+        });
+        assert_eq!(stopped_at(&sample, &order), None);
+        sanctioned(SOMEONE);
+        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+    });
+}
+
+/// The canister signs only plans it fully reads: a recipient it cannot find in a fee step,
+/// a CCTP burn, an Eco intent or a payout is a recipient it cannot screen.
+#[test]
+fn a_plan_whose_recipient_cannot_be_read_is_refused() {
+    let local = local_sample();
+    assert!(local.check().is_ok());
+    let mut nobody = local.order.clone();
+    nobody.payout = Payout::default();
+    assert_eq!(local.check_resigned(&nobody), Err(RelayError::NoRecipient));
+
+    let eco = eco_sample();
+    assert!(eco.check().is_ok());
+    let unread = with_eco(&eco.order, |_, route| {
+        let extra = route.calls[0].clone();
+        route.calls.push(extra);
+    });
+    assert_eq!(
+        eco.check_resigned(&unread),
+        Err(RelayError::EcoRoute(NotAnIntent::Calls))
+    );
 }

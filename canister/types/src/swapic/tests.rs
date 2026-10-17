@@ -286,3 +286,64 @@ fn the_real_fork_order_recomputes_its_id() {
     assert_ne!(recipe.target, Address::ZERO);
     assert_ne!(recipe.scaler, Address::ZERO);
 }
+
+fn sample_order(json: &str) -> (serde_json::Value, Order) {
+    let json: serde_json::Value = serde_json::from_str(json).unwrap();
+    let order = decode_order(
+        &hex::decode(json["orderAbi"].as_str().unwrap().trim_start_matches("0x")).unwrap(),
+    )
+    .unwrap();
+    (json, order)
+}
+
+/// The quoter's fresh fork orders on Eco: a gasless CkDeposit from Base to Ethereum, which
+/// fills the destination Runner with the envelope, and a user-paid Deliver from Ethereum to
+/// Base, which transfers to the user. Both read back to the user as the reward's creator,
+/// and to the recipient their route names.
+#[test]
+fn the_real_eco_steps_read_back_to_their_parties() {
+    let (json, order) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_base_eco_ckdeposit_gasless.json"
+    ));
+    let payer = evm(order.payer);
+    let intent = EcoIntent::of_step(&order.steps[1]).unwrap().unwrap();
+    assert_eq!(intent.destination, 1);
+    assert_eq!(intent.creator, payer);
+    let EcoArrival::Fill { runner, envelope } = intent.arrival else {
+        panic!("a CkDeposit fills the Runner: {:?}", intent.arrival);
+    };
+    assert_eq!(runner, json["runner"].as_str().unwrap().parse().unwrap());
+    assert_eq!(
+        hex::encode(envelope.encode()),
+        &json["envelope"].as_str().unwrap()[2..]
+    );
+    assert_eq!(envelope.action, Action::CkDeposit);
+    assert!(
+        EcoIntent::of_step(&order.steps[0]).is_none(),
+        "the fee is no intent"
+    );
+
+    let (_, order) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_ethereum_eco_deliver_userpays.json"
+    ));
+    let intent = EcoIntent::of_step(&order.steps[1]).unwrap().unwrap();
+    assert_eq!(intent.destination, 8453);
+    assert_eq!(intent.creator, evm(order.payer));
+    assert_eq!(
+        intent.arrival,
+        EcoArrival::Deliver {
+            recipient: evm(order.payer)
+        }
+    );
+    // a route the canister cannot read is refused, not skipped
+    let mut garbled = order.steps[1].clone();
+    let mut data = garbled.data.to_vec();
+    data.truncate(200);
+    garbled.data = data.into();
+    assert_eq!(EcoIntent::of_step(&garbled), Some(Err(NotAnIntent::Call)));
+}
+
+#[test]
+fn publish_and_fund_is_the_selector_abi_md_names() {
+    assert_eq!(publishAndFundCall::SELECTOR, PUBLISH_AND_FUND);
+}
