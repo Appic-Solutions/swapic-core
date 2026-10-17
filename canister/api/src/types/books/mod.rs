@@ -14,4 +14,8 @@ pub struct BookLines {
     pub observed: Option<Nat>,
     pub surplus: Option<Int>,
     pub checked_at_block: Option<u64>,
+    /// When the last check that read a balance was recorded, IC time in nanoseconds.
+    pub checked_at_ns: Option<u64>,
+    /// When the last check that could not read the balance was recorded.
+    pub failed_at_ns: Option<u64>,
 }

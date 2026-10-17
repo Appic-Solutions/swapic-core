@@ -50,6 +50,8 @@ type AuditProgress = record {
 // One chain's book lines and its last balance check. `surplus` is `observed` minus what
 // the lines expect at that check; it is never booked by itself.
 type BookLines = record {
+  // When the last check that read a balance was recorded, IC time in nanoseconds.
+  checked_at_ns : opt nat64;
   unattributed : nat;
   observed : opt nat;
   checked_at_block : opt nat64;
@@ -57,6 +59,8 @@ type BookLines = record {
   surplus : opt int;
   fee_income : nat;
   in_flight : nat;
+  // When the last check that could not read the balance was recorded.
+  failed_at_ns : opt nat64;
 };
 // A value the canonical preimage has no bytes for.
 type CanonicalError = variant {
@@ -91,6 +95,9 @@ type Config = record {
   max_refunds_per_sweep : nat32;
   ecdsa_key_name : text;
   max_fee_bps : nat16;
+  // The chain the pool's EVM pocket is on, whose books the pool's guard reads. None:
+  // the pool is closed.
+  pool_chain : opt nat64;
   rpc_urls : vec record { nat64; text };
   books_check_interval_s : nat64;
   simulate_before_sign : bool;
@@ -929,6 +936,10 @@ service : (InitArg) -> {
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
   set_halted : (bool) -> (Result_13);
+  // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
+  // shortfall the last balance check latched, once someone has looked at it. Recorded in
+  // the log on the pool chain's books; the pool's guard reads it.
+  set_pool_paused : (bool) -> (Result_1);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
   set_roles : (principal, principal) -> (Result_14);

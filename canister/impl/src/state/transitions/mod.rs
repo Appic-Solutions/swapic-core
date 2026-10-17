@@ -615,7 +615,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             }
             state.record_flow(*quote_hash, step, event.index, event.timestamp);
         }
-        EventType::Books { chain_id, step } => state.record_books(*chain_id, step),
+        EventType::Books { chain_id, step } => state.record_books(*chain_id, step, event.timestamp),
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

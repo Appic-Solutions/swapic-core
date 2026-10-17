@@ -178,6 +178,7 @@ fn samples() -> Vec<Sample> {
                 next_event_index: EventIndex::new(19),
                 last_event_hash: EventHash::new([0xab; 32]),
                 pool_paused_by: None,
+                pool_paused_at: None,
             },
         ),
         sample("pending quote", crate::quote::tests::fixed_quote()),

@@ -1,6 +1,6 @@
 use crate::chain::ChainId;
 use crate::hash::EventHash;
-use crate::numeric::{EventIndex, TokenAmount};
+use crate::numeric::{EventIndex, Timestamp, TokenAmount};
 use minicbor::{Decode, Encode};
 
 /// What the fold keeps besides swaps and pockets.
@@ -17,9 +17,13 @@ pub struct LedgerMeta {
     /// The chain head the next event links to.
     #[n(2)]
     pub last_event_hash: EventHash,
-    /// The chain whose balance check found a shortfall, which paused the pool.
+    /// The chain whose balance check found a shortfall, which paused the pool until a
+    /// controller reopens it.
     #[n(3)]
     pub pool_paused_by: Option<ChainId>,
+    /// When a controller paused the pool, while it stays paused.
+    #[n(4)]
+    pub pool_paused_at: Option<Timestamp>,
 }
 
 crate::storable_as_cbor!(LedgerMeta);

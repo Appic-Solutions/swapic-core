@@ -49,6 +49,7 @@ fn sample_fold() -> MemoryStore {
         next_event_index: EventIndex::new(19),
         last_event_hash: EventHash::new([0xab; 32]),
         pool_paused_by: None,
+        pool_paused_at: None,
     });
     store.put_auto_refund_waiting(WaitingKey { since, quote_hash });
     store.put_unsigned_nonce(

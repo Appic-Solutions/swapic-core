@@ -478,6 +478,10 @@ pub struct Config {
     /// no entry signs nothing.
     #[n(33)]
     pub evm_chains: ChainTable<EvmChain>,
+    /// The chain the pool's EVM pocket is on, whose books the pool's guard reads. None:
+    /// the pool is closed.
+    #[n(34)]
+    pub pool_chain: Option<ChainId>,
 }
 
 /// The kinds of transaction the canister signs and pays the gas of: the relay of a
@@ -828,6 +832,7 @@ impl Default for Config {
             books_check_interval: BooksInterval::DEFAULT,
             books_tolerance: BooksTolerance::DEFAULT,
             evm_chains: ChainTable::default(),
+            pool_chain: None,
         }
     }
 }

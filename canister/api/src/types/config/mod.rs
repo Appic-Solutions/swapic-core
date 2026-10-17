@@ -75,6 +75,9 @@ pub struct Config {
     /// Every EVM chain the canister signs on (design C). A chain with no entry signs
     /// nothing.
     pub evm_chains: BTreeMap<u64, EvmChainConfig>,
+    /// The chain the pool's EVM pocket is on, whose books the pool's guard reads. None:
+    /// the pool is closed.
+    pub pool_chain: Option<u64>,
 }
 
 /// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, and per
@@ -276,6 +279,7 @@ impl fmt::Debug for Config {
             books_check_interval_s,
             books_tolerance,
             evm_chains,
+            pool_chain,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -310,6 +314,7 @@ impl fmt::Debug for Config {
             .field("books_check_interval_s", books_check_interval_s)
             .field("books_tolerance", books_tolerance)
             .field("evm_chains", evm_chains)
+            .field("pool_chain", pool_chain)
             .finish()
     }
 }
@@ -369,6 +374,7 @@ impl From<types::Config> for Config {
             books_check_interval,
             books_tolerance,
             evm_chains,
+            pool_chain,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -427,6 +433,7 @@ impl From<types::Config> for Config {
                 .into_iter()
                 .map(|(chain, config)| (chain.get(), config.into()))
                 .collect(),
+            pool_chain: pool_chain.map(ChainId::get),
         }
     }
 }
@@ -556,6 +563,7 @@ impl TryFrom<Config> for types::Config {
                     })
                     .collect::<Result<_, _>>()?,
             ),
+            pool_chain: config.pool_chain.map(ChainId::new),
         })
     }
 }

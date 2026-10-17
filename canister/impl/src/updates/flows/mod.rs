@@ -77,7 +77,13 @@ fn require_icp_enabled() -> Result<(), FlowCallError> {
 fn check_mode(mode: FlowMode) -> Result<(), FlowCallError> {
     match mode {
         FlowMode::CkMinter => Ok(()),
-        FlowMode::Pool => Err(FlowCallError::Refused("the pool is not open".into())),
+        // the pool's guard first, as every pool outflow calls it; the pool itself opens
+        // with P11
+        FlowMode::Pool => {
+            crate::books::require_pool_open()
+                .map_err(|closed| FlowCallError::Refused(closed.to_string()))?;
+            Err(FlowCallError::Refused("the pool is not open".into()))
+        }
     }
 }
 

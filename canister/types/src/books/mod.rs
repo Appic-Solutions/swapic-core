@@ -11,9 +11,12 @@
 #[cfg(test)]
 mod tests;
 
+use crate::chain::ChainId;
 use crate::hash::TxHash;
-use crate::numeric::{BlockNumber, TokenAmount};
+use crate::ledger::LedgerMeta;
+use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
 use minicbor::{Decode, Encode};
+use std::time::Duration;
 use thiserror::Error;
 
 /// One chain's book lines and its last balance check. `in_flight` is not here: it is the
@@ -31,6 +34,13 @@ pub struct Books {
     pub pool: TokenAmount,
     #[n(3)]
     pub last_check: Option<BalanceCheck>,
+    /// When the last balance check that read a balance was recorded. A failed read never
+    /// moves it: the pool's guard measures staleness from here.
+    #[n(4)]
+    pub checked_at: Option<Timestamp>,
+    /// When the last balance read that failed was recorded.
+    #[n(5)]
+    pub failed_at: Option<Timestamp>,
 }
 
 /// A balance read at a confirmed block, and what the lines expected there.
@@ -84,6 +94,20 @@ pub enum BookStep {
         #[n(0)]
         amount: TokenAmount,
     },
+    /// A balance check that could not read the balance, and why: recorded, never skipped,
+    /// and it refreshes nothing.
+    #[n(3)]
+    CheckFailed {
+        #[n(0)]
+        reason: String,
+    },
+    /// A controller paused the pool, or reopened it, which also clears a shortfall it has
+    /// looked at.
+    #[n(4)]
+    PoolPaused {
+        #[n(0)]
+        paused: bool,
+    },
 }
 
 impl BookStep {
@@ -100,6 +124,8 @@ impl BookStep {
             BookStep::FeeEarned { .. } => "FeeEarned",
             BookStep::Checked { .. } => "Checked",
             BookStep::SurplusBooked { .. } => "SurplusBooked",
+            BookStep::CheckFailed { .. } => "CheckFailed",
+            BookStep::PoolPaused { .. } => "PoolPaused",
         }
     }
 }
@@ -127,7 +153,9 @@ impl Books {
                     .checked_add(*amount)
                     .ok_or(BooksError::Overflow)?;
             }
-            BookStep::Checked { .. } => {}
+            BookStep::Checked { .. }
+            | BookStep::CheckFailed { .. }
+            | BookStep::PoolPaused { .. } => {}
             BookStep::SurplusBooked { amount } => {
                 if *amount == TokenAmount::ZERO {
                     return Err(BooksError::Zero);
@@ -151,8 +179,8 @@ impl Books {
         Ok(())
     }
 
-    /// Records a step [`Books::admits`] admitted.
-    pub fn apply(mut self, step: &BookStep) -> Self {
+    /// Records a step [`Books::admits`] admitted, sealed at `at`.
+    pub fn apply(mut self, step: &BookStep, at: Timestamp) -> Self {
         match step {
             BookStep::FeeEarned { amount, .. } => {
                 self.fee_income = self
@@ -160,7 +188,12 @@ impl Books {
                     .checked_add(*amount)
                     .unwrap_or(TokenAmount::MAX);
             }
-            BookStep::Checked { check, .. } => self.last_check = Some(*check),
+            BookStep::Checked { check, .. } => {
+                self.last_check = Some(*check);
+                self.checked_at = Some(at);
+            }
+            BookStep::CheckFailed { .. } => self.failed_at = Some(at),
+            BookStep::PoolPaused { .. } => {}
             BookStep::SurplusBooked { amount } => {
                 self.unattributed = self
                     .unattributed
@@ -204,6 +237,70 @@ pub fn assess(
         .checked_add(tolerance)
         .is_some_and(|ceiling| ceiling < expected);
     (expected, shortfall)
+}
+
+/// How many balance-check intervals the pool chain's books may go without a check that
+/// read a balance before the pool closes.
+pub const STALE_INTERVALS: u32 = 3;
+
+/// Why the pool is closed. Every pool outflow asks [`pool_open`] first and refuses on any
+/// of these: the guard fails closed.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum PoolClosed {
+    #[error("the canister is halted")]
+    Halted,
+    #[error("no pool chain is configured")]
+    NoPoolChain,
+    #[error("a controller paused the pool")]
+    Paused,
+    #[error("the balance check on chain {0} found a shortfall")]
+    Shortfall(ChainId),
+    #[error("the books of chain {0} have never been checked")]
+    NeverChecked(ChainId),
+    #[error(
+        "the books of chain {chain} were last checked {since:?} ago, more than \
+         {STALE_INTERVALS} intervals of {interval:?}"
+    )]
+    Stale {
+        chain: ChainId,
+        since: Duration,
+        interval: Duration,
+    },
+}
+
+/// Whether the pool may move money at `now`: not halted, a pool chain configured, not
+/// paused by a controller, no shortfall latched, and the pool chain's books read within
+/// [`STALE_INTERVALS`] check intervals. `pool_books` is the pool chain's.
+pub fn pool_open(
+    halted: bool,
+    pool_chain: Option<ChainId>,
+    meta: &LedgerMeta,
+    pool_books: Option<Books>,
+    interval: Duration,
+    now: Timestamp,
+) -> Result<(), PoolClosed> {
+    if halted {
+        return Err(PoolClosed::Halted);
+    }
+    let chain = pool_chain.ok_or(PoolClosed::NoPoolChain)?;
+    if meta.pool_paused_at.is_some() {
+        return Err(PoolClosed::Paused);
+    }
+    if let Some(short) = meta.pool_paused_by {
+        return Err(PoolClosed::Shortfall(short));
+    }
+    let checked_at = pool_books
+        .and_then(|books| books.checked_at)
+        .ok_or(PoolClosed::NeverChecked(chain))?;
+    let since = now.saturating_duration_since(checked_at);
+    if since > interval.saturating_mul(STALE_INTERVALS) {
+        return Err(PoolClosed::Stale {
+            chain,
+            since,
+            interval,
+        });
+    }
+    Ok(())
 }
 
 crate::storable_as_cbor!(Books);

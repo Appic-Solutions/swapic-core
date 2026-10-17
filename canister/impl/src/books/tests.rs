@@ -76,3 +76,132 @@ fn the_network_fee_is_the_fee_steps_transfer() {
         TokenAmount::ZERO
     );
 }
+
+const MINUTE: u64 = 60_000_000_000;
+
+fn at_minute(minute: u64) -> Timestamp {
+    Timestamp::from_nanos(minute * MINUTE)
+}
+
+/// The spec defaults (ten-minute checks) with Base as the pool chain.
+fn pool_config() -> types::Config {
+    types::Config {
+        pool_chain: Some(ChainId::BASE),
+        ..types::Config::default()
+    }
+}
+
+fn status(halted: bool, now: Timestamp) -> Result<(), PoolClosed> {
+    read_state(|state| pool_status(state, &pool_config(), halted, now))
+}
+
+fn pool_step(paused: bool) -> EventType {
+    EventType::Books {
+        chain_id: ChainId::BASE,
+        step: BookStep::PoolPaused { paused },
+    }
+}
+
+/// Finding 2: the pause the books write is read. A shortfall closes the pool until a
+/// controller reopens it, a controller's pause closes it, and a halt closes it; nothing
+/// without a pool chain is open.
+#[test]
+fn pool_pause_is_enforced() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        append_event_at(checked(150, 100, false), at_minute(1)).unwrap();
+        assert_eq!(status(false, at_minute(2)), Ok(()));
+        assert_eq!(status(true, at_minute(2)), Err(PoolClosed::Halted));
+        assert_eq!(
+            read_state(|state| pool_status(state, &types::Config::default(), false, at_minute(2))),
+            Err(PoolClosed::NoPoolChain)
+        );
+
+        append_event_at(checked(50, 100, true), at_minute(3)).unwrap();
+        assert_eq!(
+            status(false, at_minute(4)),
+            Err(PoolClosed::Shortfall(ChainId::BASE))
+        );
+        // a clean check does not lift a shortfall: a controller looks first
+        append_event_at(checked(150, 100, false), at_minute(5)).unwrap();
+        assert_eq!(
+            status(false, at_minute(6)),
+            Err(PoolClosed::Shortfall(ChainId::BASE))
+        );
+        append_event_at(pool_step(false), at_minute(7)).unwrap();
+        assert_eq!(status(false, at_minute(8)), Ok(()));
+
+        append_event_at(pool_step(true), at_minute(9)).unwrap();
+        assert_eq!(status(false, at_minute(10)), Err(PoolClosed::Paused));
+        append_event_at(pool_step(false), at_minute(11)).unwrap();
+        assert_eq!(status(false, at_minute(12)), Ok(()));
+    });
+}
+
+/// Finding 2: books nobody has read lately close the pool, and so do books never read.
+#[test]
+fn stale_books_close_the_pool() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        assert_eq!(
+            status(false, at_minute(1)),
+            Err(PoolClosed::NeverChecked(ChainId::BASE))
+        );
+        append_event_at(checked(150, 100, false), at_minute(10)).unwrap();
+        // three ten-minute intervals is the most the books may go unread
+        assert_eq!(status(false, at_minute(40)), Ok(()));
+        assert!(matches!(
+            status(false, at_minute(41)),
+            Err(PoolClosed::Stale { .. })
+        ));
+        // a check on another chain is not the pool chain's
+        append_event_at(
+            EventType::Books {
+                chain_id: ChainId::ARBITRUM,
+                step: BookStep::Checked {
+                    check: BalanceCheck {
+                        block: BlockNumber::new(10),
+                        observed: TokenAmount::from(1_u32),
+                        expected: TokenAmount::ZERO,
+                    },
+                    shortfall: false,
+                },
+            },
+            at_minute(41),
+        )
+        .unwrap();
+        assert!(matches!(
+            status(false, at_minute(42)),
+            Err(PoolClosed::Stale { .. })
+        ));
+    });
+}
+
+/// Finding 2: a failed read is recorded, and it refreshes nothing the guard reads, so a
+/// chain whose balance cannot be read goes stale and closes the pool.
+#[test]
+fn failed_read_does_not_refresh_the_check() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        append_event_at(checked(150, 100, false), at_minute(10)).unwrap();
+        let failed = EventType::Books {
+            chain_id: ChainId::BASE,
+            step: BookStep::CheckFailed {
+                reason: "the read failed: unreachable".into(),
+            },
+        };
+        let index = append_event_at(failed.clone(), at_minute(35)).unwrap();
+        assert_eq!(
+            crate::storage::events::event_at(index.get()).map(|event| event.payload),
+            Some(failed),
+            "the failure is a line in the log"
+        );
+        let books = read_state(|state| state.book(&ChainId::BASE));
+        assert_eq!(books.checked_at, Some(at_minute(10)));
+        assert_eq!(books.failed_at, Some(at_minute(35)));
+        assert!(matches!(
+            status(false, at_minute(41)),
+            Err(PoolClosed::Stale { .. })
+        ));
+    });
+}

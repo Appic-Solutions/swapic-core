@@ -429,19 +429,30 @@ impl<S: Store> State<S> {
         self.store.book(chain_id).unwrap_or_default()
     }
 
-    /// A step of a chain's books; a shortfall pauses the pool, and nothing else.
-    fn record_books(&mut self, chain_id: ChainId, step: &BookStep) {
-        let books = self.book(&chain_id).apply(step);
+    /// A step of a chain's books, sealed at `at`. A shortfall latches the pool's pause,
+    /// and nothing else; a controller pauses the pool or reopens it, which also clears a
+    /// latched shortfall it has looked at.
+    fn record_books(&mut self, chain_id: ChainId, step: &BookStep, at: Timestamp) {
+        let books = self.book(&chain_id).apply(step, at);
         self.store.put_book(chain_id, books);
-        if let BookStep::Checked {
-            shortfall: true, ..
-        } = step
-        {
-            let meta = self.store.meta();
-            self.store.put_meta(LedgerMeta {
+        let meta = self.store.meta();
+        match step {
+            BookStep::Checked {
+                shortfall: true, ..
+            } => self.store.put_meta(LedgerMeta {
                 pool_paused_by: Some(chain_id),
                 ..meta
-            });
+            }),
+            BookStep::PoolPaused { paused: true } => self.store.put_meta(LedgerMeta {
+                pool_paused_at: Some(at),
+                ..meta
+            }),
+            BookStep::PoolPaused { paused: false } => self.store.put_meta(LedgerMeta {
+                pool_paused_at: None,
+                pool_paused_by: None,
+                ..meta
+            }),
+            _ => {}
         }
     }
 

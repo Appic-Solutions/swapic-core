@@ -19,10 +19,13 @@ fn checked(observed: TokenAmount, expected: TokenAmount) -> BookStep {
 /// nothing, and stays out of the lines until a controller books it.
 #[test]
 fn donation_is_surplus_and_halts_nothing() {
-    let books = Books::default().apply(&BookStep::FeeEarned {
-        tx_hash: TxHash::new([1; 32]),
-        amount: usdc(100),
-    });
+    let books = Books::default().apply(
+        &BookStep::FeeEarned {
+            tx_hash: TxHash::new([1; 32]),
+            amount: usdc(100),
+        },
+        Timestamp::from_nanos(1),
+    );
     let (expected, shortfall) = assess(
         books.total(TokenAmount::ZERO),
         TokenAmount::ZERO,
@@ -31,7 +34,7 @@ fn donation_is_surplus_and_halts_nothing() {
     );
     assert_eq!(expected, usdc(100));
     assert!(!shortfall);
-    let books = books.apply(&checked(usdc(150), expected));
+    let books = books.apply(&checked(usdc(150), expected), Timestamp::from_nanos(1));
     assert_eq!(books.last_check.unwrap().surplus(), 50_000_000);
     assert_eq!(books.fee_income, usdc(100), "the check books nothing");
     assert_eq!(books.unattributed, TokenAmount::ZERO);
@@ -63,7 +66,7 @@ fn pending_payout_is_not_a_shortfall() {
 
 #[test]
 fn a_surplus_is_booked_only_up_to_what_the_check_found() {
-    let books = Books::default().apply(&checked(usdc(150), usdc(100)));
+    let books = Books::default().apply(&checked(usdc(150), usdc(100)), Timestamp::from_nanos(1));
     assert_eq!(
         books.admits(&BookStep::SurplusBooked { amount: usdc(51) }),
         Err(BooksError::AboveSurplus {
@@ -73,7 +76,7 @@ fn a_surplus_is_booked_only_up_to_what_the_check_found() {
     );
     let step = BookStep::SurplusBooked { amount: usdc(50) };
     assert_eq!(books.admits(&step), Ok(()));
-    let books = books.apply(&step);
+    let books = books.apply(&step, Timestamp::from_nanos(1));
     assert_eq!(books.unattributed, usdc(50));
     assert_eq!(books.last_check.unwrap().surplus(), 0);
     assert!(books

@@ -37,7 +37,8 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""deposit_lookback_blocks":400000,"cctp_domains":{},"usdc_addresses":{},"#,
             r#""eco_portal":null,"#,
             r#""eco_enabled":false,"claim_grace_s":3600,"cctp_min_fees":{},"#,
-            r#""books_check_interval_s":600,"books_tolerance":"1000000","evm_chains":{}}"#
+            r#""books_check_interval_s":600,"books_tolerance":"1000000","evm_chains":{},"#,
+            r#""pool_chain":null}"#
         )
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");
