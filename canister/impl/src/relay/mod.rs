@@ -632,9 +632,10 @@ pub async fn relay_gasless(
         let (simulated, _) =
             evm_reads::simulate_and_estimate(chain_id, canister, swapic_address, &data)
                 .await
-                .map_err(|e| e.to_string())?;
-        if let Simulated::Reverted(message) = simulated {
-            return Err(format!("runFor reverts in simulation: {message}"));
+                // the kind only: an outcall's text can carry the provider's url and key
+                .map_err(|e| format!("the simulation was not read: {:?}", e.kind()))?;
+        if let Simulated::Reverted(_) = simulated {
+            return Err("runFor reverts in simulation".into());
         }
         // the halt and a concurrent relay can land while the read was out
         require_not_halted().map_err(|e| format!("{e:?}"))?;

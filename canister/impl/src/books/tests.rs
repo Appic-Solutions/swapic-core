@@ -187,7 +187,7 @@ fn failed_read_does_not_refresh_the_check() {
         let failed = EventType::Books {
             chain_id: ChainId::BASE,
             step: BookStep::CheckFailed {
-                reason: "the read failed: unreachable".into(),
+                failure: ReadFailure::Unreachable,
             },
         };
         let index = append_event_at(failed.clone(), at_minute(35)).unwrap();
@@ -203,5 +203,79 @@ fn failed_read_does_not_refresh_the_check() {
             status(false, at_minute(41)),
             Err(PoolClosed::Stale { .. })
         ));
+    });
+}
+
+/// A failed read leaves no trace of its error's text: an outcall's refusal or a provider's
+/// answer can carry the provider's url and its api key, and the log, the books query and
+/// the events page are world-readable. Only the failure's kind is recorded.
+#[test]
+fn a_failed_read_leaves_no_secret_in_the_log() {
+    use crate::rpc::{RpcError, Summary};
+    const SECRET: &str = "https://base-mainnet.g.alchemy.com/v2/sk-live-0123456789";
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let errors = [
+            RpcError::Unreachable {
+                reason: Summary::of(&format!("error trying to connect to {SECRET}: timeout")),
+            },
+            RpcError::Http {
+                status: 401,
+                body: Summary::of(&format!("{{\"error\":\"bad key for {SECRET}\"}}")),
+            },
+            RpcError::Rpc {
+                method: "eth_call".into(),
+                message: format!("upstream {SECRET} failed"),
+            },
+        ];
+        for error in &errors {
+            assert!(
+                error.to_string().contains(SECRET),
+                "the error itself carries it"
+            );
+            // what `record_failure` appends, at a fixed instant
+            append_event_at(
+                EventType::Books {
+                    chain_id: ChainId::BASE,
+                    step: BookStep::CheckFailed {
+                        failure: error.kind(),
+                    },
+                },
+                at_minute(1),
+            )
+            .unwrap();
+        }
+        let count = crate::storage::events::event_count();
+        let page = crate::storage::events::events_page(0, count);
+        assert_eq!(page.len() as u64, count);
+        let failures: Vec<_> = page
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventType::Books {
+                    step: BookStep::CheckFailed { failure },
+                    ..
+                } => Some(*failure),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures,
+            vec![
+                ReadFailure::Unreachable,
+                ReadFailure::Http { status: 401 },
+                ReadFailure::Provider
+            ]
+        );
+        for event in page {
+            let wire = settlement_api::types::events::Event::from(event.clone());
+            let rendered = format!("{event:?} {wire:?}");
+            let bytes = minicbor::to_vec(&event.payload).unwrap();
+            for secret in [SECRET, "sk-live", "alchemy"] {
+                assert!(!rendered.contains(secret), "{rendered}");
+                assert!(!bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()));
+            }
+        }
     });
 }

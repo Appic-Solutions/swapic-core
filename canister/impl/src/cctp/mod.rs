@@ -390,12 +390,10 @@ pub async fn finish_cctp(
     if config.simulate_before_sign {
         let (simulated, _) = evm_reads::simulate_and_estimate(chain_id, canister, plan.to, &data)
             .await
-            .map_err(|e| e.to_string())?;
-        if let Simulated::Reverted(message) = simulated {
-            return Err(format!(
-                "{:?} reverts in simulation: {message}",
-                plan.action
-            ));
+            // the kind only: an outcall's text can carry the provider's url and key
+            .map_err(|e| format!("the simulation was not read: {:?}", e.kind()))?;
+        if let Simulated::Reverted(_) = simulated {
+            return Err(format!("{:?} reverts in simulation", plan.action));
         }
         // the halt and a concurrent finish can land while the read was out; from here to
         // the nonce's allocation there is no await

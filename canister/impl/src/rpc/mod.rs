@@ -141,6 +141,28 @@ pub enum RpcError {
     AnswerTooLarge { cap: u64 },
 }
 
+impl RpcError {
+    /// The kind of this failure, which is all that may be recorded where anyone can read
+    /// it: the text of an outcall's refusal or a provider's answer can carry the url and
+    /// its api key.
+    pub fn kind(&self) -> types::books::ReadFailure {
+        use types::books::ReadFailure;
+        match self {
+            RpcError::NoUrl(_) => ReadFailure::NoRpcUrl,
+            RpcError::Unreachable { .. } => ReadFailure::Unreachable,
+            RpcError::Http { status, .. } => ReadFailure::Http { status: *status },
+            RpcError::Rpc { .. } => ReadFailure::Provider,
+            RpcError::NotAnArray { .. }
+            | RpcError::WrongReplyCount { .. }
+            | RpcError::UnknownReplyId { .. }
+            | RpcError::DuplicateReplyId { .. }
+            | RpcError::Unanswered { .. }
+            | RpcError::NeitherResultNorError { .. }
+            | RpcError::AnswerTooLarge { .. } => ReadFailure::BadAnswer,
+        }
+    }
+}
+
 /// The outcall argument for one POST to `url`. The one place `is_replicated` and
 /// `pricing_version` are set.
 fn post(url: &RpcUrl, body: Vec<u8>, max_response_bytes: u64) -> HttpRequest {

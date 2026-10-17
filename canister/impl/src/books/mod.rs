@@ -13,7 +13,7 @@ use crate::storage::halt::is_halted;
 use crate::storage::{chain_data, config};
 use crate::tx::confirmations;
 use serde_json::Value;
-use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed};
+use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed, ReadFailure};
 use types::{ChainId, EventType, EvmAddress, FlowKind, Timestamp, TokenAmount, TxHash};
 
 /// The USDC the canister's flows hold at its address on `chain_id`: what landed for an
@@ -145,10 +145,11 @@ pub fn require_pool_open() -> Result<(), PoolClosed> {
 }
 
 /// Records a balance check that could not read the balance: a failure is a line in the
-/// log, never a skip, and it refreshes nothing the guard reads.
-fn record_failure(chain_id: ChainId, reason: String) {
-    ic_cdk::println!("the balance check on chain {chain_id} failed: {reason}");
-    if let Err(error) = record(chain_id, BookStep::CheckFailed { reason }) {
+/// log, never a skip, and it refreshes nothing the guard reads. Only its kind is recorded
+/// or printed, never an error's text, which can carry the provider's url and its key.
+pub fn record_failure(chain_id: ChainId, failure: ReadFailure) {
+    ic_cdk::println!("the balance check on chain {chain_id} failed: {failure:?}");
+    if let Err(error) = record(chain_id, BookStep::CheckFailed { failure }) {
         ic_cdk::println!("the failed check on chain {chain_id} was not recorded: {error}");
     }
 }
@@ -169,52 +170,47 @@ pub async fn check_balances() {
         .iter()
         .map(|(chain_id, chain)| (*chain_id, chain.usdc))
         .collect();
-    let mine = match ecdsa::canister_address().await {
-        Ok(mine) => mine,
-        Err(error) => {
-            for (chain_id, _) in chains {
-                record_failure(chain_id, format!("no canister address: {error}"));
-            }
-            return;
+    let Ok(mine) = ecdsa::canister_address().await else {
+        for (chain_id, _) in chains {
+            record_failure(chain_id, ReadFailure::NoCanisterAddress);
         }
+        return;
     };
     for (chain_id, usdc) in chains {
-        if let Err(reason) = check_balance(&config, chain_id, usdc, mine).await {
-            record_failure(chain_id, reason);
+        if let Err(failure) = check_balance(&config, chain_id, usdc, mine).await {
+            record_failure(chain_id, failure);
         }
     }
 }
 
-/// One chain's balance check, or why it read no balance.
+/// One chain's balance check, or the kind of failure that read no balance.
 async fn check_balance(
     config: &types::Config,
     chain_id: ChainId,
     usdc: EvmAddress,
     mine: EvmAddress,
-) -> Result<(), String> {
+) -> Result<(), ReadFailure> {
     if !config.rpc_urls.contains_key(&chain_id) {
-        return Err("no rpc url is configured".into());
+        return Err(ReadFailure::NoRpcUrl);
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let head =
-        chain_data::fresh(chain_id, now, config.chain_data_max_age).ok_or("no fresh chain data")?;
-    let depth = confirmations(config, chain_id).map_err(|e| e.to_string())?;
+    let head = chain_data::fresh(chain_id, now, config.chain_data_max_age)
+        .ok_or(ReadFailure::NoChainData)?;
+    let depth = confirmations(config, chain_id).map_err(|_| ReadFailure::NoDepth)?;
     let block = head
         .block
         .get()
         .checked_sub(depth.get())
-        .ok_or("the head is below the confirmation depth")?;
+        .ok_or(ReadFailure::BelowDepth)?;
     let block = types::BlockNumber::new(block);
     let calldata = types::router::balance_of_calldata(mine);
     let observed = match evm_reads::eth_call_at(chain_id, mine, usdc, &calldata, block).await {
         Ok(Simulated::Returned(bytes)) if bytes.len() == 32 => {
             TokenAmount::from_be_bytes(bytes.try_into().expect("BUG: checked to be 32 bytes"))
         }
-        Ok(Simulated::Returned(bytes)) => {
-            return Err(format!("balanceOf answered {} bytes", bytes.len()))
-        }
-        Ok(Simulated::Reverted(message)) => return Err(format!("balanceOf reverted: {message}")),
-        Err(error) => return Err(format!("the read failed: {error}")),
+        Ok(Simulated::Returned(_)) => return Err(ReadFailure::BadAnswer),
+        Ok(Simulated::Reverted(_)) => return Err(ReadFailure::Provider),
+        Err(error) => return Err(error.kind()),
     };
     // the lines as they stand now, after the read's await
     let (expected, shortfall) = read_state(|state| {
@@ -234,7 +230,12 @@ async fn check_balance(
         },
         shortfall,
     };
-    record(chain_id, step).map_err(|error| format!("the check was not recorded: {error}"))?;
+    if let Err(error) = record(chain_id, step) {
+        // the log refused the line itself: nothing more can be recorded now, and the
+        // guard sees these books go stale
+        ic_cdk::println!("the balance check on chain {chain_id} was not recorded: {error}");
+        return Ok(());
+    }
     if shortfall {
         ic_cdk::println!(
             "shortfall on chain {chain_id}: {observed} at block {block}, {expected} expected; the pool is paused"

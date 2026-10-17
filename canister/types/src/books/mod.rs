@@ -94,12 +94,12 @@ pub enum BookStep {
         #[n(0)]
         amount: TokenAmount,
     },
-    /// A balance check that could not read the balance, and why: recorded, never skipped,
-    /// and it refreshes nothing.
+    /// A balance check that could not read the balance, and the kind of failure:
+    /// recorded, never skipped, and it refreshes nothing.
     #[n(3)]
     CheckFailed {
         #[n(0)]
-        reason: String,
+        failure: ReadFailure,
     },
     /// A controller paused the pool, or reopened it, which also clears a shortfall it has
     /// looked at.
@@ -128,6 +128,43 @@ impl BookStep {
             BookStep::PoolPaused { .. } => "PoolPaused",
         }
     }
+}
+
+/// Why a balance check read no balance: a fixed kind, and an HTTP status at most. Never a
+/// provider's or a subnet's text, which can carry the provider's url and the api key in
+/// it, and this line is in the world-readable log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ReadFailure {
+    /// The chain has no provider configured.
+    #[n(0)]
+    NoRpcUrl,
+    /// The watcher's pushed head is missing or too old.
+    #[n(1)]
+    NoChainData,
+    /// The chain has no confirmation depth configured.
+    #[n(2)]
+    NoDepth,
+    /// The head is below the confirmation depth.
+    #[n(3)]
+    BelowDepth,
+    /// The canister's EVM address could not be derived.
+    #[n(4)]
+    NoCanisterAddress,
+    /// The outcall did not reach the provider.
+    #[n(5)]
+    Unreachable,
+    /// The provider answered with an HTTP error.
+    #[n(6)]
+    Http {
+        #[n(0)]
+        status: u16,
+    },
+    /// The provider answered the call with an error, a revert included.
+    #[n(7)]
+    Provider,
+    /// The answer was not one the canister reads: malformed, too large, or the wrong shape.
+    #[n(8)]
+    BadAnswer,
 }
 
 /// Why a book step was refused.
