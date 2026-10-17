@@ -124,6 +124,103 @@ sol! {
         bytes clientData;
     }
     function swap(KyberExecution execution) external payable returns (uint256 returnAmount, uint256 gasUsed);
+
+    /// USDC's EIP-3009 pull, as the payer signs it for the 3009 door: the nonce is the
+    /// order id.
+    struct ReceiveWithAuthorization {
+        address from;
+        address to;
+        uint256 value;
+        uint256 validAfter;
+        uint256 validBefore;
+        bytes32 nonce;
+    }
+
+    /// Permit2's witness transfer, as the payer signs it for the Permit2 door: the witness
+    /// is the order id, the spender Swapic.
+    struct TokenPermissions { address token; uint256 amount; }
+    struct OrderWitness { bytes32 orderId; }
+    struct PermitWitnessTransferFrom {
+        TokenPermissions permitted;
+        address spender;
+        uint256 nonce;
+        uint256 deadline;
+        OrderWitness witness;
+    }
+}
+
+/// Uniswap's Permit2, one address on every chain: the Permit2 door's verifier.
+pub const PERMIT2: EvmAddress = EvmAddress::new([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0xd4, 0x73, 0x03, 0x0f, 0x11, 0x6d, 0xde, 0xe9, 0xf6, 0xb4,
+    0x3a, 0xc7, 0x8b, 0xa3,
+]);
+
+/// Circle's USDC EIP-712 domain, the same name and version on every chain the quoter
+/// routes on: what the 3009 door's authorization is signed under.
+pub const USDC_NAME: &str = "USD Coin";
+pub const USDC_VERSION: &str = "2";
+
+/// The digest a 3009 door's authorization signs: USDC's `ReceiveWithAuthorization` from
+/// the payer to Swapic of `amountIn`, its nonce the order id, under the chain's USDC's own
+/// domain. What `receiveWithAuthorization` recovers on chain.
+pub fn receive_with_authorization_digest(
+    order: &Order,
+    auth: &GaslessAuth,
+    id: OrderId,
+    chain_id: ChainId,
+    usdc: EvmAddress,
+    swapic: EvmAddress,
+) -> [u8; 32] {
+    let domain = Eip712Domain {
+        name: Some(Cow::Borrowed(USDC_NAME)),
+        version: Some(Cow::Borrowed(USDC_VERSION)),
+        chain_id: Some(U256::from(chain_id.get())),
+        verifying_contract: Some(addr(usdc)),
+        salt: None,
+    };
+    ReceiveWithAuthorization {
+        from: order.payer,
+        to: addr(swapic),
+        value: order.amountIn,
+        validAfter: auth.validAfter,
+        validBefore: auth.validBefore,
+        nonce: FixedBytes(id.into_bytes()),
+    }
+    .eip712_signing_hash(&domain)
+    .0
+}
+
+/// The digest a Permit2 door's authorization signs: Permit2's `PermitWitnessTransferFrom`
+/// of `amountIn` of `tokenIn`, Swapic the spender, the order id the witness, under
+/// Permit2's domain (no version). What `permitWitnessTransferFrom` recovers on chain.
+pub fn permit2_digest(
+    order: &Order,
+    auth: &GaslessAuth,
+    id: OrderId,
+    chain_id: ChainId,
+    swapic: EvmAddress,
+) -> [u8; 32] {
+    let domain = Eip712Domain {
+        name: Some(Cow::Borrowed("Permit2")),
+        version: None,
+        chain_id: Some(U256::from(chain_id.get())),
+        verifying_contract: Some(addr(PERMIT2)),
+        salt: None,
+    };
+    PermitWitnessTransferFrom {
+        permitted: TokenPermissions {
+            token: order.tokenIn,
+            amount: order.amountIn,
+        },
+        spender: addr(swapic),
+        nonce: auth.nonce,
+        deadline: auth.deadline,
+        witness: OrderWitness {
+            orderId: FixedBytes(id.into_bytes()),
+        },
+    }
+    .eip712_signing_hash(&domain)
+    .0
 }
 
 /// How every ABI value this canister reads is decoded: strictly. Canonical offsets, zero

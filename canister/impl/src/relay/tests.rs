@@ -1119,3 +1119,142 @@ fn a_gas_limit_above_the_maximum_is_refused() {
         Ok(GasAmount::from(2_000_000_u64))
     );
 }
+
+/// A payer's key, for tests that sign as one.
+fn payer_key() -> libsecp256k1::SecretKey {
+    libsecp256k1::SecretKey::parse(&[0x11; 32]).unwrap()
+}
+
+fn address_of_key(key: &libsecp256k1::SecretKey) -> EvmAddress {
+    let public = libsecp256k1::PublicKey::from_secret_key(key).serialize();
+    EvmAddress::from_public_key(&public)
+}
+
+/// `r ++ s ++ v`, `v` 27 or 28, as a wallet signs.
+fn sign(digest: [u8; 32], key: &libsecp256k1::SecretKey) -> Vec<u8> {
+    let (signature, recovery) = libsecp256k1::sign(&libsecp256k1::Message::parse(&digest), key);
+    let mut out = signature.serialize().to_vec();
+    out.push(recovery.serialize() + 27);
+    out
+}
+
+/// Review fix 5: each door's signature is recovered over exactly what the door verifies,
+/// and must be the payer's own.
+#[test]
+fn the_payers_authorization_is_verified_on_every_door() {
+    let sample = sample();
+    let chain = sample.evm_chains.get(ARBITRUM).unwrap();
+    let key = payer_key();
+    let mut order = sample.order.clone();
+    order.payer = swapic::addr(address_of_key(&key));
+    let id = swapic::order_id(&order, ARBITRUM, chain.swapic);
+    let mut auth = sample.resigned(&order);
+    let authorize = |auth: &GaslessAuth| authorize(&order, auth, id, ARBITRUM, &chain);
+
+    // 3009: USDC's ReceiveWithAuthorization under the chain's USDC
+    auth.signature = sign(
+        swapic::receive_with_authorization_digest(
+            &order,
+            &auth,
+            id,
+            ARBITRUM,
+            chain.usdc,
+            chain.swapic,
+        ),
+        &key,
+    )
+    .into();
+    assert_eq!(authorize(&auth), Ok(()));
+    let mut later = auth.clone();
+    later.validBefore += U256::from(1);
+    assert_eq!(authorize(&later), Err(RelayError::ContractPayerUnsupported));
+    let stranger = libsecp256k1::SecretKey::parse(&[0x22; 32]).unwrap();
+    let mut theirs = auth.clone();
+    theirs.signature = sign(
+        swapic::receive_with_authorization_digest(
+            &order,
+            &auth,
+            id,
+            ARBITRUM,
+            chain.usdc,
+            chain.swapic,
+        ),
+        &stranger,
+    )
+    .into();
+    assert_eq!(
+        authorize(&theirs),
+        Err(RelayError::ContractPayerUnsupported)
+    );
+    // the same signature with s mirrored to the curve's high half recovers too, and is
+    // refused as every verifier the doors use refuses it
+    let mut high = auth.clone();
+    let mut bytes = high.signature.to_vec();
+    let s = U256::from_be_slice(&bytes[32..64]);
+    let order_n = U256::from_str_radix(
+        "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+        16,
+    )
+    .unwrap();
+    bytes[32..64].copy_from_slice(&(order_n - s).to_be_bytes::<32>());
+    bytes[64] ^= 1;
+    high.signature = bytes.into();
+    assert_eq!(
+        authorize(&high),
+        Err(RelayError::Authorization("signature is not in low-s form"))
+    );
+
+    // 2612: the payer's QuoteAcceptance of the order id
+    let accepted = GaslessAuth {
+        door: DOOR_PERMIT_2612,
+        acceptance: sign(
+            swapic::acceptance_digest(&order, ARBITRUM, chain.swapic),
+            &key,
+        )
+        .into(),
+        ..auth.clone()
+    };
+    assert_eq!(authorize(&accepted), Ok(()));
+    // a contract wallet's ERC-1271 signature is no ECDSA signature of the payer's key
+    let contract = GaslessAuth {
+        acceptance: vec![0xab; 97].into(),
+        ..accepted.clone()
+    };
+    assert_eq!(
+        authorize(&contract),
+        Err(RelayError::ContractPayerUnsupported)
+    );
+
+    // Permit2: the witness transfer with the order id as the witness
+    let mut permit2 = GaslessAuth {
+        door: DOOR_PERMIT2,
+        nonce: U256::from(7),
+        deadline: order.deadline,
+        ..auth.clone()
+    };
+    permit2.signature = sign(
+        swapic::permit2_digest(&order, &permit2, id, ARBITRUM, chain.swapic),
+        &key,
+    )
+    .into();
+    assert_eq!(authorize(&permit2), Ok(()));
+    let mut other_nonce = permit2.clone();
+    other_nonce.nonce = U256::from(8);
+    assert_eq!(
+        authorize(&other_nonce),
+        Err(RelayError::ContractPayerUnsupported)
+    );
+
+    // the 3009 door pulls only the chain's USDC, whose domain it is signed under
+    let mut weth = order.clone();
+    weth.tokenIn = swapic::addr(EvmAddress::new([0x82; 20]));
+    assert!(matches!(
+        authorize_order(&weth, &auth, &chain),
+        Err(RelayError::Authorization(_))
+    ));
+}
+
+fn authorize_order(order: &Order, auth: &GaslessAuth, chain: &EvmChain) -> Result<(), RelayError> {
+    let id = swapic::order_id(order, ARBITRUM, chain.swapic);
+    authorize(order, auth, id, ARBITRUM, chain)
+}

@@ -533,3 +533,42 @@ fn a_step_that_does_not_rebuild_is_refused() {
         Err(StepError::Unknown)
     );
 }
+
+/// The digests each gasless door's payer signs, on the quoter's real CCTP order, against
+/// goldens computed independently with `cast keccak` and `cast abi-encode` from the
+/// EIP-712 definitions: USDC's `ReceiveWithAuthorization` (the fixture's own typed data),
+/// Permit2's `PermitWitnessTransferFrom` (nonce 7, the order's deadline), and Swapic's
+/// `QuoteAcceptance`.
+#[test]
+fn the_door_digests_are_the_cast_goldens() {
+    let (json, order) = sample_order(SAMPLES[0]);
+    let chain = ChainId::ARBITRUM;
+    let swapic: EvmAddress = json["swapic"].as_str().unwrap().parse().unwrap();
+    let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+    let id = order_id(&order, chain, swapic);
+    let auth = GaslessAuth {
+        door: DOOR_AUTH_3009,
+        validAfter: U256::ZERO,
+        validBefore: json["validBefore"].as_str().unwrap().parse().unwrap(),
+        nonce: id.as_nonce(),
+        ..Default::default()
+    };
+    assert_eq!(
+        receive_with_authorization_digest(&order, &auth, id, chain, usdc, swapic),
+        b256!("92c4eb4de81f76629a82f059a1f7c52e081b90bb2c49554cf6d025e47b377025").0
+    );
+    let permit2 = GaslessAuth {
+        door: DOOR_PERMIT2,
+        nonce: U256::from(7),
+        deadline: order.deadline,
+        ..Default::default()
+    };
+    assert_eq!(
+        permit2_digest(&order, &permit2, id, chain, swapic),
+        b256!("e570ff79f40ea82311a91cdc14e30ec7115ab7b7ff920d35e737f772ba112eff").0
+    );
+    assert_eq!(
+        acceptance_digest(&order, chain, swapic),
+        b256!("59b9a23669995f2686ac3b22dc777977b9ae5d61fa04ec545e88fd356018d2a8").0
+    );
+}

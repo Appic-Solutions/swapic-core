@@ -29,3 +29,5 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 alloy-sol-types = { workspace = true }
+# signing, for tests that sign as a payer; the canister itself only recovers
+libsecp256k1 = { workspace = true, features = ["hmac"] }

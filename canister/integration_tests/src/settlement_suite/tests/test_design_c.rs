@@ -150,11 +150,20 @@ fn now_s(pic: &PocketIc) -> u64 {
     pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000
 }
 
-/// The real order, its fee paying this canister, its burn sent to Base, its deadlines
-/// sealed from `now`: the order deadline ten minutes on, the arrival window half an hour.
+/// The payer's key: the canister verifies the payer's own signature, so the test signs as
+/// one.
+fn payer_key() -> libsecp256k1::SecretKey {
+    libsecp256k1::SecretKey::parse(&[0x11; 32]).unwrap()
+}
+
+/// The real order, paid by the test's payer, its fee paying this canister, its burn sent
+/// to Base, its deadlines sealed from `now`: the order deadline ten minutes on, the
+/// arrival window half an hour.
 fn order_for(canister: EvmAddress, now: u64) -> (Order, Envelope) {
     let json = sample_order();
     let mut order = swapic::decode_order(&hex_field(&json, "orderAbi")).unwrap();
+    let public = libsecp256k1::PublicKey::from_secret_key(&payer_key()).serialize();
+    order.payer = swapic::addr(EvmAddress::from_public_key(&public));
     order.deadline = U256::from(now + 600);
     let fee: U256 = json["networkFee"].as_str().unwrap().parse().unwrap();
     order.steps[0].data = swapic::transferCall {
@@ -352,15 +361,29 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
     // each `abi.encode` of one tuple, and the limit the quoter charged for
     let (order, envelope) = order_for(canister_address, now);
     let order_id = swapic::order_id(&order, ChainId::new(ARBITRUM), address(SWAPIC));
-    let auth = GaslessAuth {
+    let mut auth = GaslessAuth {
         door: DOOR_AUTH_3009,
         validAfter: U256::ZERO,
         validBefore: order.deadline,
         nonce: order_id.as_nonce(),
         deadline: U256::ZERO,
-        signature: vec![0x1b; 65].into(),
+        signature: Default::default(),
         acceptance: Default::default(),
     };
+    // the payer signs USDC's ReceiveWithAuthorization, as a wallet does for the 3009 door
+    let digest = swapic::receive_with_authorization_digest(
+        &order,
+        &auth,
+        order_id,
+        ChainId::new(ARBITRUM),
+        address(ARB_USDC),
+        address(SWAPIC),
+    );
+    let (signature, recovery) =
+        libsecp256k1::sign(&libsecp256k1::Message::parse(&digest), &payer_key());
+    let mut signed = signature.serialize().to_vec();
+    signed.push(recovery.serialize() + 27);
+    auth.signature = signed.into();
     let relay_args = encode_args((
         ARBITRUM,
         swapic::encode_order(&order),
@@ -471,5 +494,45 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
             .iter()
             .any(|method| method == "eth_call" || method == "eth_estimateGas"),
         "{methods:?}"
+    );
+}
+
+/// Review fix 5: the canister verifies the payer's authorization itself. A 3009
+/// authorization whose signature does not recover to the payer is refused before
+/// anything is signed, not left to revert on chain at the canister's cost.
+#[test]
+fn a_forged_authorization_is_refused() {
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let (order, _) = order_for(address(&mine), now_s(&pic));
+    let order_id = swapic::order_id(&order, ChainId::new(ARBITRUM), address(SWAPIC));
+    let forged = GaslessAuth {
+        door: DOOR_AUTH_3009,
+        validAfter: U256::ZERO,
+        validBefore: order.deadline,
+        nonce: order_id.as_nonce(),
+        deadline: U256::ZERO,
+        signature: vec![0x1b; 65].into(),
+        acceptance: Default::default(),
+    };
+    push(&pic, canister, ARBITRUM);
+    let answer: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher(),
+        "relay_gasless",
+        encode_args((
+            ARBITRUM,
+            swapic::encode_order(&order),
+            swapic::encode_auth(&forged),
+            SOURCE_GAS,
+        ))
+        .unwrap(),
+    );
+    assert!(
+        answer
+            .as_ref()
+            .is_err_and(|error| error.contains("does not recover to the payer")),
+        "{answer:?}"
     );
 }

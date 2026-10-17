@@ -105,6 +105,11 @@ pub enum RelayError {
     #[error("{0} is sanctioned")]
     Sanctioned(Party),
     #[error(
+        "the authorization does not recover to the payer: a gasless order is signed by the \
+         payer's own key, and a contract wallet's ERC-1271 signature is not supported"
+    )]
+    ContractPayerUnsupported,
+    #[error(
         "step {0} is none of the shapes the canister reads: the fee, a CCTP burn, an Eco \
          intent on Eco's Portal, a KyberSwap swap paying the Runner"
     )]
@@ -286,6 +291,66 @@ fn check_auth(auth: &GaslessAuth, id: OrderId, now_s: u64) -> Result<(), RelayEr
         door => return Err(RelayError::UnknownDoor(door)),
     }
     Ok(())
+}
+
+/// Half the secp256k1 group order: a signature whose `s` is above it is the malleable
+/// twin every verifier the doors use refuses (EIP-2), so the canister refuses it too.
+const HALF_ORDER: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+];
+
+/// The payer's own authorization, verified here with no outcall, so the canister signs
+/// nothing a door will refuse on chain at its cost. Each door's signature must recover,
+/// over what the door verifies, to the payer:
+/// - the 3009 door: USDC's `ReceiveWithAuthorization` under the chain's USDC's domain, so
+///   the order must pay in that USDC;
+/// - the 2612 door: the payer's `QuoteAcceptance` of the order id under Swapic's domain;
+/// - the Permit2 door: Permit2's `PermitWitnessTransferFrom` with the order id as witness.
+///
+/// A payer whose signature does not recover, a contract wallet signing by ERC-1271
+/// included, is refused for gasless.
+pub fn authorize(
+    order: &Order,
+    auth: &GaslessAuth,
+    id: OrderId,
+    chain_id: ChainId,
+    source: &EvmChain,
+) -> Result<(), RelayError> {
+    let (digest, signature) = match auth.door {
+        DOOR_AUTH_3009 => {
+            if swapic::evm(order.tokenIn) != source.usdc {
+                return Err(RelayError::Authorization(
+                    "of the 3009 door pulls only the chain's USDC",
+                ));
+            }
+            let digest = swapic::receive_with_authorization_digest(
+                order,
+                auth,
+                id,
+                chain_id,
+                source.usdc,
+                source.swapic,
+            );
+            (digest, auth.signature.as_ref())
+        }
+        DOOR_PERMIT_2612 => (
+            swapic::acceptance_digest(order, chain_id, source.swapic),
+            auth.acceptance.as_ref(),
+        ),
+        DOOR_PERMIT2 => (
+            swapic::permit2_digest(order, auth, id, chain_id, source.swapic),
+            auth.signature.as_ref(),
+        ),
+        door => return Err(RelayError::UnknownDoor(door)),
+    };
+    if signature.len() == 65 && signature[32..64] > HALF_ORDER[..] {
+        return Err(RelayError::Authorization("signature is not in low-s form"));
+    }
+    match ecdsa::recover_signer(digest, signature) {
+        Some(signer) if signer == swapic::evm(order.payer) => Ok(()),
+        _ => Err(RelayError::ContractPayerUnsupported),
+    }
 }
 
 /// The arrival a CCTP burn seals, checked as the destination contracts will check it
@@ -641,6 +706,11 @@ pub async fn relay_gasless(
         settings.relay_window.as_secs(),
     )
     .map_err(|e| e.to_string())?;
+    let source = config
+        .evm_chains
+        .get(chain_id)
+        .expect("BUG: check found the chain in this table");
+    authorize(&order, &auth, relay.order_id, chain_id, &source).map_err(|e| e.to_string())?;
     if let Some(party) = sanctioned_party(&relay.parties) {
         return Err(RelayError::Sanctioned(party).to_string());
     }
