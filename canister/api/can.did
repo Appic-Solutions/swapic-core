@@ -371,8 +371,8 @@ type EvmChainConfig = record {
   // the gas rule. Above it the canister signs nothing and the caller tries again.
   gas_budget_wei : ActionAmounts;
   // The most gas the canister gives each action's transaction. `relay_gasless` and
-  // `finish_cctp` sign with exactly the limit they are given, or this one when it is
-  // lower.
+  // `finish_cctp` sign with exactly the limit they are given and refuse one above this,
+  // but a release, which is signed at this when it is asked for more.
   gas_limit : ActionGas;
   // The door users approve, and the EIP-712 verifying contract of every order here.
   swapic : text;
@@ -840,8 +840,9 @@ service : (InitArg) -> {
   // the quoter charged for. From the envelope and the clock: a Deliver is received on the
   // message transmitter; a Swap (with `recipe`, required) or a CkDeposit (with none) is
   // completed on the CctpReceiver before its deadline, and released after it. Signed with
-  // exactly `gas_limit`, or the chain's maximum for the action when that is lower, and held
-  // to the gas rule; once per message and action, and one message per source transaction.
+  // exactly `gas_limit` and refused above the chain's maximum for the action, but a release,
+  // which is signed at that maximum; held to the gas rule; once per message and action, and
+  // one message per source transaction.
   // Answers the signed transaction's id in `signed_txs`.
   finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64) -> (Result_4);
   // The cached reading for a chain, with the instant the canister stamped it, or nothing for
@@ -917,8 +918,8 @@ service : (InitArg) -> {
   // order id is recomputed from the order and the chain's Swapic (the 3009 door's nonce
   // must be it); the order must pay this canister exactly one fee step of at least the
   // chain's `min_network_fee` for its rail, plus on CCTP the destination's for the arrival;
-  // it is signed with exactly `gas_limit` (the limit the quoter charged for), or the
-  // chain's maximum for the action when that is lower, and held to the gas rule. Signed
+  // it is signed with exactly `gas_limit` (the limit the quoter charged for), refused when
+  // that is above the chain's maximum for the action, and held to the gas rule. Signed
   // once per order id: a second call answers the first one's id. Answers the signed
   // transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
   relay_gasless : (nat64, blob, blob, nat64) -> (Result_4);

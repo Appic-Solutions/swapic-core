@@ -23,8 +23,8 @@ pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
 /// order id is recomputed from the order and the chain's Swapic (the 3009 door's nonce
 /// must be it); the order must pay this canister exactly one fee step of at least the
 /// chain's `min_network_fee` for its rail, plus on CCTP the destination's for the arrival;
-/// it is signed with exactly `gas_limit` (the limit the quoter charged for), or the
-/// chain's maximum for the action when that is lower, and held to the gas rule. Signed
+/// it is signed with exactly `gas_limit` (the limit the quoter charged for), refused when
+/// that is above the chain's maximum for the action, and held to the gas rule. Signed
 /// once per order id: a second call answers the first one's id. Answers the signed
 /// transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
 #[update]
@@ -255,8 +255,9 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
 /// the quoter charged for. From the envelope and the clock: a Deliver is received on the
 /// message transmitter; a Swap (with `recipe`, required) or a CkDeposit (with none) is
 /// completed on the CctpReceiver before its deadline, and released after it. Signed with
-/// exactly `gas_limit`, or the chain's maximum for the action when that is lower, and held
-/// to the gas rule; once per message and action, and one message per source transaction.
+/// exactly `gas_limit` and refused above the chain's maximum for the action, but a release,
+/// which is signed at that maximum; held to the gas rule; once per message and action, and
+/// one message per source transaction.
 /// Answers the signed transaction's id in `signed_txs`.
 #[update]
 pub async fn finish_cctp(

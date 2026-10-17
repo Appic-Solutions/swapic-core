@@ -88,6 +88,15 @@ pub enum RelayError {
     Arrival(&'static str),
     #[error("a gas limit of {0} is below the {MIN_GAS_LIMIT} any transaction needs")]
     GasLimitTooLow(u64),
+    #[error(
+        "a gas limit of {requested} is above the {max} a {action:?} may have: the canister \
+         never signs below the gas the fee was charged on"
+    )]
+    GasAboveMax {
+        action: GasAction,
+        requested: u64,
+        max: GasAmount,
+    },
     #[error("chain {chain_id} gives a {action:?} no gas")]
     NoGasLimit {
         chain_id: ChainId,
@@ -205,7 +214,10 @@ pub struct Arrival {
 }
 
 /// The limit a transaction for `action` on `chain` is signed with: exactly the one asked
-/// for, or the chain's maximum for the action when that is lower.
+/// for, which is the limit the quoter charged the fee on. A limit above the chain's
+/// maximum for the action is refused, never lowered: a transaction signed below what it
+/// was charged for could run out of gas. A release is the one exception: anyone may send
+/// it, the watcher asks for it with the arrival's limit, and it is signed at the maximum.
 pub fn signing_gas(
     chain_id: ChainId,
     chain: &EvmChain,
@@ -215,7 +227,19 @@ pub fn signing_gas(
     if requested < MIN_GAS_LIMIT {
         return Err(RelayError::GasLimitTooLow(requested));
     }
-    let gas = GasAmount::from(requested).min(chain.gas_limit.get(action));
+    let max = chain.gas_limit.get(action);
+    let requested_gas = GasAmount::from(requested);
+    let gas = if requested_gas <= max {
+        requested_gas
+    } else if action == GasAction::Release {
+        max
+    } else {
+        return Err(RelayError::GasAboveMax {
+            action,
+            requested,
+            max,
+        });
+    };
     if gas < GasAmount::from(MIN_GAS_LIMIT) {
         return Err(RelayError::NoGasLimit { chain_id, action });
     }

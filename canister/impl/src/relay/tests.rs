@@ -500,11 +500,11 @@ fn gas_rule_refuses_over_budget() {
     let sample = sample();
     let relay = sample.check().unwrap();
     let arbitrum = sample.evm_chains.get(ARBITRUM).unwrap();
-    // a larger limit is signed at the maximum, a smaller one exactly
-    assert_eq!(
+    // a larger limit is refused, a smaller one signed exactly
+    assert!(matches!(
         signing_gas(ARBITRUM, &arbitrum, GasAction::RelayCctp, 5_000_000),
-        Ok(GasAmount::from(2_000_000_u64))
-    );
+        Err(RelayError::GasAboveMax { .. })
+    ));
     assert_eq!(
         signing_gas(ARBITRUM, &arbitrum, GasAction::RelayCctp, 20_999),
         Err(RelayError::GasLimitTooLow(20_999))
@@ -1083,4 +1083,39 @@ fn the_authorization_must_outlast_the_landing_margin() {
         ))
     );
     assert!(permit2(now + RELAY_MARGIN_S).is_ok());
+}
+
+/// Review fix 2: a transaction is never signed below the gas its fee was charged on. A
+/// limit above the chain's maximum is refused for every action, but a release, which
+/// anyone may send and which the watcher asks for with the arrival's limit, is signed at
+/// the maximum.
+#[test]
+fn a_gas_limit_above_the_maximum_is_refused() {
+    let sample = sample();
+    let arbitrum = sample.evm_chains.get(ARBITRUM).unwrap();
+    for action in [
+        GasAction::RelayCctp,
+        GasAction::RelayEco,
+        GasAction::RelayLocal,
+        GasAction::CompleteSwap,
+        GasAction::CompleteCk,
+        GasAction::RelayDeliver,
+    ] {
+        assert_eq!(
+            signing_gas(ARBITRUM, &arbitrum, action, 2_000_001),
+            Err(RelayError::GasAboveMax {
+                action,
+                requested: 2_000_001,
+                max: GasAmount::from(2_000_000_u64),
+            })
+        );
+        assert_eq!(
+            signing_gas(ARBITRUM, &arbitrum, action, 2_000_000),
+            Ok(GasAmount::from(2_000_000_u64))
+        );
+    }
+    assert_eq!(
+        signing_gas(ARBITRUM, &arbitrum, GasAction::Release, 5_000_000),
+        Ok(GasAmount::from(2_000_000_u64))
+    );
 }

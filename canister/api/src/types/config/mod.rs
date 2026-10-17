@@ -98,8 +98,8 @@ pub struct EvmChainConfig {
     /// CCTP v2's `MessageTransmitterV2`.
     pub message_transmitter: String,
     /// The most gas the canister gives each action's transaction. `relay_gasless` and
-    /// `finish_cctp` sign with exactly the limit they are given, or this one when it is
-    /// lower.
+    /// `finish_cctp` sign with exactly the limit they are given and refuse one above this,
+    /// but a release, which is signed at this when it is asked for more.
     pub gas_limit: ActionGas,
     /// The most each action's transaction may cost in wei (`gas_limit * max_fee_per_gas`):
     /// the gas rule. Above it the canister signs nothing and the caller tries again.
