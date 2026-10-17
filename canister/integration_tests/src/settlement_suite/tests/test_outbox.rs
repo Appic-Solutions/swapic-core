@@ -17,7 +17,7 @@ use pocket_ic::common::rest::{
 use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde_json::{json, Value};
 use settlement_api::types::chain_data::ChainData;
-use settlement_api::types::config::Config;
+use settlement_api::types::config::{ActionAmounts, ActionGas, Config, EvmChainConfig};
 use settlement_api::types::errors::{AppendError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::init::InitArg;
@@ -30,6 +30,44 @@ use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 const BASE: u64 = 8453;
 const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const GAS_LIMIT: u64 = 120_000;
+
+/// A provider for Base, and Base as a chain the canister signs on, with a gas budget ten
+/// times the one-ether bound every transaction already has: the gas rule holds every send
+/// (`test_send` signs under `RelayLocal`), and the bound, not the budget, is what this
+/// suite's fee bumps run into.
+fn outbox_config() -> Config {
+    let roomy = Nat::from(10_000_000_000_000_000_000_u128);
+    let amounts = ActionAmounts {
+        relay_cctp: roomy.clone(),
+        relay_eco: roomy.clone(),
+        relay_local: roomy.clone(),
+        complete_swap: roomy.clone(),
+        complete_ck: roomy.clone(),
+        relay_deliver: roomy.clone(),
+        release: roomy,
+    };
+    Config {
+        rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
+        evm_chains: BTreeMap::from([(
+            BASE,
+            EvmChainConfig {
+                swapic: VAULT.to_string(),
+                runner: VAULT.to_string(),
+                cctp_receiver: VAULT.to_string(),
+                usdc: VAULT.to_string(),
+                token_messenger: VAULT.to_string(),
+                message_transmitter: VAULT.to_string(),
+                gas_limit: ActionGas {
+                    relay_local: 30_000_000,
+                    ..ActionGas::default()
+                },
+                gas_budget_wei: amounts,
+                min_network_fee: ActionAmounts::default(),
+            },
+        )]),
+        ..Config::default()
+    }
+}
 
 /// The batch window the default config is on, which is how long a queued transaction waits
 /// before the outbox pass takes it.
@@ -94,10 +132,7 @@ fn setup_with_swaps(count: u64) -> (PocketIc, Principal, Principal) {
     let canister = pic.create_canister_on_subnet(Some(admin), None, subnet);
     pic.add_cycles(canister, 1_000_000_000_000_000);
     let arg = InitArg {
-        config: Config {
-            rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
-            ..Config::default()
-        },
+        config: outbox_config(),
         quoter: quoter(),
         watcher: watcher(),
     };
@@ -712,10 +747,7 @@ fn tx_cancelled(events: &[Event]) -> Vec<(u64, u64, Vec<u8>)> {
 fn setup_without_a_signing_key(count: u64) -> (PocketIc, Principal, Principal) {
     let (pic, canister, admin) = crate::settlement_suite::init::empty_canister();
     let arg = InitArg {
-        config: Config {
-            rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
-            ..Config::default()
-        },
+        config: outbox_config(),
         quoter: quoter(),
         watcher: watcher(),
     };
@@ -867,11 +899,18 @@ fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
         "a cancel closes no attempt, so it writes no line"
     );
 
-    // the entry left the outbox, so nothing is read for it again
+    // the entry left the outbox, so nothing is read for it again (the books' own balance
+    // read of the chain may be out by now, and is not the outbox's)
     advance(&pic, canister, Duration::from_secs(300));
+    let outbox_calls: Vec<String> = pic
+        .get_canister_http()
+        .iter()
+        .flat_map(methods)
+        .filter(|method| method != "eth_call")
+        .collect();
     assert!(
-        pic.get_canister_http().is_empty(),
-        "the cancel is done and the outbox is empty"
+        outbox_calls.is_empty(),
+        "the cancel is done and the outbox is empty: {outbox_calls:?}"
     );
 }
 
