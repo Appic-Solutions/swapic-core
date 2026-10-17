@@ -80,6 +80,17 @@ const MAX_TRANSACTION_COST: Wei = Wei::new(1_000_000_000_000_000_000);
 /// a CCTP completion once the base fee passed about 400 gwei. 50 POL is about $5.
 const POLYGON_MAX_TRANSACTION_COST: Wei = Wei::new(50_000_000_000_000_000_000);
 
+/// The most this canister pays per unit of gas on `chain_id`. The ETH-priced chains keep
+/// 1,000 gwei, so a broken or hostile reading there is refused as before; Polygon, priced
+/// in POL, gets the type-level ceiling [`MAX_FEE_PER_GAS`] (50,000 gwei) for its busy hours.
+fn max_fee_per_gas(chain_id: ChainId) -> WeiPerGas {
+    if chain_id == ChainId::POLYGON {
+        MAX_FEE_PER_GAS
+    } else {
+        WeiPerGas::new(1_000_000_000_000)
+    }
+}
+
 /// The bound of one transaction's gas bill on `chain_id`, in its native coin. Per chain,
 /// because a native coin's worth differs by orders of magnitude; still a constant.
 fn max_transaction_cost(chain_id: ChainId) -> Wei {
@@ -211,12 +222,13 @@ fn fresh_reading(chain_id: ChainId, now: Timestamp) -> Result<ChainData, TxError
 /// [`MAX_FEE_PER_GAS`] prices nothing: the bound is what a fee this canister did not compute
 /// is held to.
 fn fees(chain_id: ChainId, now: Timestamp) -> Result<Fees, TxError> {
-    fresh_reading(chain_id, now)?
-        .fees()
-        .ok_or(TxError::FeeOutOfRange {
-            chain_id,
-            ceiling: MAX_FEE_PER_GAS,
-        })
+    let ceiling = max_fee_per_gas(chain_id);
+    let out_of_range = TxError::FeeOutOfRange { chain_id, ceiling };
+    let fees = fresh_reading(chain_id, now)?.fees().ok_or(out_of_range.clone())?;
+    if fees.max_fee() > ceiling || fees.max_priority_fee() > ceiling {
+        return Err(out_of_range);
+    }
+    Ok(fees)
 }
 
 /// Refuses a transaction whose gas could cost more than this canister will ever spend on
@@ -1202,7 +1214,10 @@ pub fn bump(
     // per unit, and the bump clamps to that the way it clamps to the fee ceiling, so the
     // bids keep rising in smaller steps up to the bound instead of stopping one doubling
     // short of it, and a bid is refused only once nothing can be raised
-    let mut ceiling = reading.fee_ceiling().capped(affordable_per_gas(chain_id, gas_limit)?);
+    let mut ceiling = reading
+        .fee_ceiling()
+        .capped(max_fee_per_gas(chain_id))
+        .capped(affordable_per_gas(chain_id, gas_limit)?);
     if let Some(budget) = budget {
         ceiling = ceiling.capped(per_gas(budget, gas_limit)?);
     }

@@ -109,8 +109,9 @@ impl ChainData {
 /// 50,000 gwei: above the busiest Polygon hours (POL gas is priced in the hundreds to
 /// thousands of gwei; 1,000 gwei refused real Polygon sends), and still far below what a
 /// compromised or broken watcher could push, so it is a backstop and never a constraint on
-/// a real send. What a transaction can actually cost is bounded per chain by the
-/// per-transaction bound and the per-action gas budgets. It is a constant and not a config
+/// a real send. This is only the type-level bound: the canister applies a per-chain price
+/// ceiling under it (1,000 gwei on the ETH-priced chains, this value only on Polygon), and
+/// what a transaction can cost is bounded per chain and by the per-action gas budgets. It is a constant and not a config
 /// knob on purpose: the bound cannot be raised by a config write.
 pub const MAX_FEE_PER_GAS: WeiPerGas = WeiPerGas::new(50_000_000_000_000);
 

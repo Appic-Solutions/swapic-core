@@ -63,7 +63,7 @@ fn a_fee_that_cannot_be_doubled_is_refused() {
             fees(ChainId::BASE, at(100)),
             Err(TxError::FeeOutOfRange {
                 chain_id: ChainId::BASE,
-                ceiling: MAX_FEE_PER_GAS,
+                ceiling: max_fee_per_gas(ChainId::BASE),
             })
         );
     });
@@ -90,7 +90,7 @@ fn a_fee_above_the_absolute_ceiling_prices_nothing() {
             fees(ChainId::BASE, at(100)),
             Err(TxError::FeeOutOfRange {
                 chain_id: ChainId::BASE,
-                ceiling: MAX_FEE_PER_GAS,
+                ceiling: max_fee_per_gas(ChainId::BASE),
             }),
             "the ceiling bounds the tip as well as the ceiling it is paid out of"
         );
@@ -127,6 +127,30 @@ fn a_transaction_whose_gas_would_cost_more_than_the_bound_is_refused() {
             ),
             "a hundred million gas at a hundred gwei is ten ether"
         );
+    });
+}
+
+/// The price ceiling is per chain: 2,000 gwei is a broken reading on an ETH-priced chain and
+/// refused there, and a busy hour on Polygon, priced in POL, where it is paid.
+#[test]
+fn the_price_ceiling_is_per_chain() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let busy = ChainReading {
+            block: BlockNumber::new(70_000_000),
+            base_fee: WeiPerGas::from(1_000_000_000_000_u64),
+            priority_fee: WeiPerGas::from(30_000_000_000_u64),
+        };
+        chain_data::put(ChainId::BASE, busy.clone(), at(100));
+        chain_data::put(ChainId::POLYGON, busy, at(100));
+        assert_eq!(
+            fees(ChainId::BASE, at(100)),
+            Err(TxError::FeeOutOfRange {
+                chain_id: ChainId::BASE,
+                ceiling: WeiPerGas::new(1_000_000_000_000),
+            })
+        );
+        assert!(fees(ChainId::POLYGON, at(100)).is_ok());
     });
 }
 
