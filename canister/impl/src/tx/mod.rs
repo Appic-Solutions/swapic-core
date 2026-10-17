@@ -218,39 +218,32 @@ fn affordable(chain_id: ChainId, fees: Fees, gas_limit: GasAmount) -> Result<(),
     Ok(())
 }
 
-/// The action whose budget a transaction for `purpose` is held to. None for a cancel:
-/// it spends a nonce that cannot be left unspent, and [`MAX_TRANSACTION_COST`] bounds it.
-pub fn gas_action(purpose: TxPurpose) -> Option<GasAction> {
-    match purpose {
-        TxPurpose::Relay(_) | TxPurpose::Continue(_) | TxPurpose::GaslessPull(_) => {
-            Some(GasAction::Relay)
-        }
-        TxPurpose::Mint(_) | TxPurpose::Finish(_) => Some(GasAction::Completion),
-        TxPurpose::Burn(_)
-        | TxPurpose::Payout(_)
-        | TxPurpose::Refund(_)
-        | TxPurpose::Reclaim(_) => Some(GasAction::Payout),
-        TxPurpose::Cancel(_) => None,
-    }
-}
-
-/// The gas budget a transaction for `purpose` on `chain_id` is held to: none for a
-/// cancel, and a refusal when the chain has no budget for the action.
+/// The gas budget of `action` on `chain_id`, or the refusal when the chain is not one the
+/// canister signs on. A cancel has no action and no budget: it spends a nonce that cannot
+/// be left unspent, and [`MAX_TRANSACTION_COST`] bounds it.
 pub(crate) fn budget_for(
     config: &types::Config,
     chain_id: ChainId,
-    purpose: TxPurpose,
-) -> Result<Option<(GasAction, Wei)>, TxError> {
-    let Some(action) = gas_action(purpose) else {
-        return Ok(None);
-    };
-    let budget = config
-        .gas_budget
-        .0
-        .get(&chain_id)
-        .map(|budget| budget.get(action))
-        .ok_or(TxError::NoGasBudget { chain_id, action })?;
-    Ok(Some((action, budget)))
+    action: GasAction,
+) -> Result<Wei, TxError> {
+    config
+        .evm_chains
+        .get(chain_id)
+        .map(|chain| chain.gas_budget.get(action))
+        .ok_or(TxError::NoGasBudget { chain_id, action })
+}
+
+/// The gas rule as `create_and_send` holds a transaction to it, read from `config`: the
+/// chain signs this action, and the limit times the fee cap is within its budget.
+pub fn gas_rule(
+    config: &types::Config,
+    chain_id: ChainId,
+    action: GasAction,
+    fees: Fees,
+    gas_limit: GasAmount,
+) -> Result<(), TxError> {
+    let budget = budget_for(config, chain_id, action)?;
+    within_budget(chain_id, action, budget, fees, gas_limit)
 }
 
 /// The gas rule (spec 3.3): the most a transaction can spend on gas, its limit times its
@@ -272,6 +265,24 @@ pub fn within_budget(
         });
     }
     Ok(())
+}
+
+/// Where the one transaction a door signs under `key` stands: signed already (its id in
+/// `signed_txs`), being signed, or not yet. What makes a door that signs once per key
+/// answer the same id to the same call.
+pub fn signed_once(key: QuoteHash) -> Result<Option<u64>, String> {
+    read_state(|state| {
+        if let Some(flow) = state.flow(&key) {
+            return flow
+                .signed_id
+                .map(Some)
+                .ok_or_else(|| format!("{key} has a flow but no signed transaction"));
+        }
+        if state.store().has_unsigned_nonce_for(&key) {
+            return Err(format!("{key} is being signed"));
+        }
+        Ok(None)
+    })
 }
 
 /// What a flow's signed record says beyond the transaction itself.
@@ -303,6 +314,9 @@ pub struct Signed {
 /// The order is the law of this module: halt check, fees, `TxCreated` with no await before
 /// it, signature, `TxSigned`, queue. The broadcast itself is the outbox pass, so the caller
 /// does not wait on a provider to know its nonce is safely allocated.
+///
+/// `action` names the gas budget the transaction is held to (the gas rule), here and in
+/// every replacement of it.
 pub async fn create_and_send(
     purpose: TxPurpose,
     chain_id: ChainId,
@@ -310,11 +324,13 @@ pub async fn create_and_send(
     value: Wei,
     data: Vec<u8>,
     gas_limit: GasAmount,
+    action: GasAction,
 ) -> Result<Signed, TxError> {
-    create_and_send_with(purpose, chain_id, to, value, data, gas_limit, None).await
+    create_and_send_with(purpose, chain_id, to, value, data, gas_limit, action, None).await
 }
 
 /// [`create_and_send`] for a flow whose signed record carries a [`Detail`].
+#[allow(clippy::too_many_arguments)]
 pub async fn create_and_send_with(
     purpose: TxPurpose,
     chain_id: ChainId,
@@ -322,6 +338,7 @@ pub async fn create_and_send_with(
     value: Wei,
     data: Vec<u8>,
     gas_limit: GasAmount,
+    action: GasAction,
     detail: Option<Detail>,
 ) -> Result<Signed, TxError> {
     require_not_halted().map_err(TxError::Guard)?;
@@ -336,11 +353,9 @@ pub async fn create_and_send_with(
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let fees = fees(chain_id, now)?;
     affordable(chain_id, fees, gas_limit)?;
-    if let Some((action, budget)) = budget_for(&config::get(), chain_id, purpose)? {
-        within_budget(chain_id, action, budget, fees, gas_limit).inspect_err(|error| {
-            ic_cdk::println!("not signed for {quote_hash}: {error}");
-        })?;
-    }
+    gas_rule(&config::get(), chain_id, action, fees, gas_limit).inspect_err(|error| {
+        ic_cdk::println!("not signed for {quote_hash}: {error}");
+    })?;
 
     // the attempt the signed record will carry: the swap's next one, and none for a pull,
     // which is signed against its quote because no swap exists yet. Read before the
@@ -494,6 +509,7 @@ pub async fn create_and_send_with(
         data: tx.data,
         gas_limit,
         refusal: None,
+        action: Some(action),
     });
     Ok(Signed { tx_hash, id })
 }
@@ -614,6 +630,7 @@ async fn cancel(key: NonceKey) {
         data: Vec::new(),
         gas_limit,
         refusal: None,
+        action: None,
     });
     task_manager::outbox::arm();
 }
@@ -1125,9 +1142,11 @@ async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool
 /// price a bid against.
 fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
     let reading = fresh_reading(chain_id, now).ok()?;
-    let budget = budget_for(&config::get(), chain_id, entry.purpose)
-        .ok()?
-        .map(|(_, budget)| budget);
+    // a chain that no longer signs this action bids nothing more
+    let budget = match entry.action {
+        Some(action) => Some(budget_for(&config::get(), chain_id, action).ok()?),
+        None => None,
+    };
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
     bump(current, &reading, entry.gas_limit, budget)
 }

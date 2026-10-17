@@ -12,10 +12,10 @@
 mod tests;
 
 use crate::ecdsa;
+use crate::engine::flows::gas_limit_for;
 use crate::engine::flows::Busy;
 use crate::evm_reads::{self, Simulated};
 use crate::guards::{require_not_halted, require_watcher};
-use crate::relay::gas_limit_for;
 use crate::state::Store;
 use crate::storage::config;
 use crate::storage::events::read_state;
@@ -23,6 +23,7 @@ use crate::storage::flow_settings::{self, FlowSettings};
 use crate::tx::{self, Detail};
 use alloy_primitives::{Address, Bytes};
 use types::cctp::BurnMessage;
+use types::config::GasAction;
 use types::flow::{finish_key, FinishAction};
 use types::router::{self, DexCall, HookData, ACTION_CK_DEPOSIT, ACTION_DELIVER};
 use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, Wei};
@@ -263,6 +264,14 @@ pub async fn finish_cctp(
             Wei::ZERO,
             data,
             GasAmount::from(gas),
+            match action {
+                FinishAction::Receive => GasAction::RelayDeliver,
+                FinishAction::Complete if plan.hook.action == ACTION_CK_DEPOSIT => {
+                    GasAction::CompleteCk
+                }
+                FinishAction::Complete => GasAction::CompleteSwap,
+                FinishAction::Release => GasAction::Release,
+            },
             Some(Detail::Finish {
                 action,
                 message_hash,

@@ -667,7 +667,7 @@ async fn continue_on_ethereum(
             continue;
         }
         require_not_halted().map_err(|_| FlowDriveError::Settings("halted"))?;
-        let gas = crate::relay::gas_limit_for(estimate, settings);
+        let gas = gas_limit_for(estimate, settings);
         tx::create_and_send_with(
             TxPurpose::Continue(quote_hash),
             chain,
@@ -675,6 +675,8 @@ async fn continue_on_ethereum(
             Wei::ZERO,
             data,
             GasAmount::from(gas),
+            // off until the ICP flows move to ABI v3 (P11), which gives them their action
+            types::config::GasAction::RelayLocal,
             Some(tx::Detail::Continuation {
                 action: params.dst.action,
                 amount: flow.eth_held,
@@ -683,6 +685,20 @@ async fn continue_on_ethereum(
         .await
         .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
         return Ok(());
+    }
+}
+
+/// The gas a continuation is given: the estimate with a margin, held to the configured
+/// ceiling.
+pub fn gas_limit_for(estimate: Option<u64>, settings: &FlowSettings) -> u64 {
+    let ceiling = settings.max_gas_limit;
+    match estimate {
+        Some(estimate) => estimate
+            .saturating_mul(13)
+            .saturating_div(10)
+            .saturating_add(50_000)
+            .min(ceiling),
+        None => ceiling,
     }
 }
 

@@ -233,6 +233,7 @@ fn samples() -> Vec<Sample> {
                 data: vec![0xde, 0xad, 0xbe, 0xef],
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: None,
+                action: None,
             },
         ),
         sample(
@@ -273,6 +274,7 @@ fn samples() -> Vec<Sample> {
                 // absent, so this sample's bytes stay exactly the ones the golden pins;
                 // the entry appended below is the one that pins the field
                 refusal: None,
+                action: None,
             },
         ),
         sample(
@@ -375,6 +377,7 @@ fn samples() -> Vec<Sample> {
                 data: vec![0x40, 0x10, 0x47, 0x63],
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: Some(crate::tx::Refusal::new("transaction underpriced")),
+                action: None,
             },
         ),
         sample(

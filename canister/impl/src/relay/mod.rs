@@ -1,315 +1,435 @@
-//! The gasless relay: a user's signed `swapFor`, checked, simulated, signed once and
-//! broadcast from this canister's address, which is Swapic's operator.
+//! The gasless relay, design C: a user's signed order, checked, signed once as
+//! `Swapic.runFor` from this canister's address (Swapic's `canister()`, the only caller
+//! `runFor` admits), and handed to the watcher through `signed_txs`.
 //!
-//! Money-first: the role and the halt are checked before any outcall, the quote hash is
-//! recomputed from the params exactly as the router does (spec 4b.5), every field the user
-//! read is checked against the params, and the authorization is recovered to the payer
-//! before the simulation is bought. One relay per quote, ever: the fold refuses a second,
-//! and the router's `usedQuote` refuses one on chain (4b.4).
+//! Money-first: the role and the halt come before anything else; the order id is
+//! recomputed from the order exactly as every door does; the order must pay this canister
+//! exactly one fee step that covers what it signs for the order (the relay, and on CCTP
+//! the arrival too); the gas is the limit the quoter charged for, held to the chain's
+//! maximum for the action and to the gas rule. One relay per order id, ever: the fold
+//! refuses a second, a second call answers the first one's id, and Swapic's `used`
+//! refuses a replay on chain.
+//!
+//! The canister simulates only when `simulate_before_sign` is on: the submit API simulates
+//! `runFor` from the canister's address before it calls here.
 
 #[cfg(test)]
 mod tests;
 
 use crate::ecdsa;
+use crate::engine::flows::Busy;
 use crate::evm_reads::{self, Simulated};
-use crate::guards::{require_not_halted, require_quoter};
-use crate::storage::config;
-use crate::storage::events::read_state;
-use crate::storage::flow_settings::{self, FlowSettings};
+use crate::guards::{require_not_halted, require_watcher};
 use crate::storage::sanctions::is_sanctioned;
+use crate::storage::{config, flow_settings};
 use crate::tx;
-use alloy_primitives::{FixedBytes, U256};
-use settlement_api::types::flow::FlowCallError;
-use types::config::{ChainTable, GasAction, PerAction};
+use alloy_primitives::U256;
+use thiserror::Error;
+use types::config::{ChainTable, EvmChain, GasAction};
 use types::events::TxPurpose;
-use types::router::{
-    self, GaslessAuth, ReceiveWithAuthorization, SwapParams, ACTION_DELIVER, DOOR_AUTH_3009,
-    DOOR_PERMIT2, DOOR_PERMIT_2612, RAIL_CCTP, RAIL_ECO, RAIL_LOCAL,
+use types::swapic::{
+    self, Action, CctpBurn, Envelope, EnvelopeError, GaslessAuth, Order, OrderId, DOOR_AUTH_3009,
+    DOOR_PERMIT2, DOOR_PERMIT_2612, NATIVE, PUBLISH_AND_FUND,
 };
-use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, TokenAmount, Wei};
+use types::{CctpDomain, ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, TokenAmount, Wei};
 
-/// Why a relay was refused before any outcall.
-fn invalid(reason: impl Into<String>) -> FlowCallError {
-    FlowCallError::Invalid(reason.into())
+/// The least time a relayed order's deadline must still be ahead of the canister's clock:
+/// a signature, the watcher's next poll of `signed_txs`, and a block on the slowest chain.
+pub const RELAY_MARGIN_S: u64 = 30;
+
+/// The least gas any transaction has: what a plain transfer costs.
+pub const MIN_GAS_LIMIT: u64 = 21_000;
+
+/// Why a relay was refused. Nothing was signed.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RelayError {
+    #[error("chain {0} is not one the canister signs on")]
+    UnknownChain(ChainId),
+    #[error("order is not abi.encode of an ABI v3 Order")]
+    NotAnOrder,
+    #[error("auth is not abi.encode of a GaslessAuth")]
+    NotAnAuth,
+    #[error("door {0} is not one Swapic has")]
+    UnknownDoor(u8),
+    #[error("the authorization's nonce is not the order id {0}, which Swapic recomputes")]
+    WrongOrderId(OrderId),
+    #[error("the authorization {0}")]
+    Authorization(&'static str),
+    #[error("the order {0}")]
+    Order(&'static str),
+    #[error("the order's deadline {deadline} is not between {earliest} and {latest}")]
+    Deadline {
+        deadline: U256,
+        earliest: u64,
+        latest: u64,
+    },
+    #[error("the order pays the canister no fee step")]
+    NoFeeStep,
+    #[error("the order pays the canister {0} fee steps, and one fee pays for one order")]
+    FeeSteps(usize),
+    #[error("the fee step pays {paid}, below the {needed} the order's transactions need")]
+    FeeBelowMinimum {
+        paid: TokenAmount,
+        needed: TokenAmount,
+    },
+    #[error("the order burns on CCTP {0} times, and one fee pays for one arrival")]
+    Burns(usize),
+    #[error("the order both burns on CCTP and publishes on Eco")]
+    TwoRails,
+    #[error("the burn {0}")]
+    Burn(&'static str),
+    #[error("the burn's destination domain {0} is no chain the canister signs on")]
+    UnknownDestination(u32),
+    #[error("the burn's envelope: {0}")]
+    Envelope(#[from] EnvelopeError),
+    #[error("the envelope {0}")]
+    Arrival(&'static str),
+    #[error("a gas limit of {0} is below the {MIN_GAS_LIMIT} any transaction needs")]
+    GasLimitTooLow(u64),
+    #[error("chain {chain_id} gives a {action:?} no gas")]
+    NoGasLimit {
+        chain_id: ChainId,
+        action: GasAction,
+    },
 }
 
-/// Every check on the params and the authorization that needs no chain: the readable
-/// fields, the deadlines inside the window, the rail and the recipient's shape, and the
-/// door's own fields. Pure, so the table is a unit test.
-pub fn check_readable(
-    params: &SwapParams,
-    auth: &GaslessAuth,
+/// What the order's checks read besides the order: the chains the canister signs on and
+/// their CCTP domains, and the canister's own address, which the fee step pays.
+pub struct Chains<'a> {
+    pub chain_id: ChainId,
+    pub evm_chains: &'a ChainTable<EvmChain>,
+    pub domains: &'a ChainTable<CctpDomain>,
+    pub canister: EvmAddress,
+}
+
+/// What the canister signs for an order, read from the order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Relay {
+    pub order_id: OrderId,
+    /// The relay's own action, by the order's rail.
+    pub action: GasAction,
+    /// What the fee step pays the canister.
+    pub fee: TokenAmount,
+    /// On CCTP, the arrival the fee pays for too: its chain, its action and its recipient.
+    pub arrival: Option<Arrival>,
+    /// The limit the relay is signed with.
+    pub gas_limit: GasAmount,
+}
+
+/// The destination side of a CCTP order, as its burn seals it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arrival {
+    pub chain_id: ChainId,
+    pub action: GasAction,
+    pub recipient: EvmAddress,
+}
+
+/// The limit a transaction for `action` on `chain` is signed with: exactly the one asked
+/// for, or the chain's maximum for the action when that is lower.
+pub fn signing_gas(
     chain_id: ChainId,
-    now_s: u64,
-    window_s: u64,
-) -> Result<(), String> {
-    if params.payer.is_zero() {
-        return Err("payer is the zero address".into());
+    chain: &EvmChain,
+    action: GasAction,
+    requested: u64,
+) -> Result<GasAmount, RelayError> {
+    if requested < MIN_GAS_LIMIT {
+        return Err(RelayError::GasLimitTooLow(requested));
     }
-    if params.tokenIn.is_zero() {
-        return Err("tokenIn is the zero address".into());
+    let gas = GasAmount::from(requested).min(chain.gas_limit.get(action));
+    if gas < GasAmount::from(MIN_GAS_LIMIT) {
+        return Err(RelayError::NoGasLimit { chain_id, action });
     }
-    if params.amountIn.is_zero() {
-        return Err("amountIn is zero".into());
-    }
+    Ok(gas)
+}
+
+/// The door's own fields at `now_s`, and on the 3009 door the nonce, which IS the order
+/// id: a client that signed another order, or this one for another Swapic, is refused
+/// here and not by a revert on chain.
+fn check_auth(auth: &GaslessAuth, id: OrderId, now_s: u64) -> Result<(), RelayError> {
     let now = U256::from(now_s);
-    if params.deadline <= now {
-        return Err("the quote's deadline has passed".into());
-    }
-    if params.deadline > U256::from(now_s.saturating_add(window_s)) {
-        return Err("the quote's deadline is further ahead than a relay accepts".into());
-    }
-    match params.rail {
-        RAIL_CCTP | RAIL_ECO => {}
-        RAIL_LOCAL => {
-            if params.dstChainId != chain_id.get() {
-                return Err("a local swap delivers on the chain it starts on".into());
-            }
-            if params.dst.action != ACTION_DELIVER {
-                return Err("a local swap only delivers".into());
-            }
-            if router::evm_recipient(params.dst.recipient).is_none_or(|to| to == EvmAddress::ZERO) {
-                return Err("a local swap needs a non-zero EVM recipient".into());
-            }
-        }
-        _ => return Err("the rail is not one Swapic has".into()),
-    }
-    let deliver_on_cctp = params.rail == RAIL_CCTP && params.dst.action == ACTION_DELIVER;
-    if !deliver_on_cctp && router::evm_recipient(params.dst.recipient).is_none() {
-        return Err("the recipient is not an EVM address".into());
-    }
-    if params.dst.deadline < now_s {
-        return Err("the destination deadline has passed".into());
-    }
     match auth.door {
         DOOR_AUTH_3009 => {
+            if auth.nonce != id.as_nonce() {
+                return Err(RelayError::WrongOrderId(id));
+            }
             if auth.validAfter >= now {
-                return Err("the authorization is not valid yet".into());
+                return Err(RelayError::Authorization("is not valid yet"));
             }
             if auth.validBefore <= now {
-                return Err("the authorization has expired".into());
+                return Err(RelayError::Authorization("has expired"));
             }
             if auth.signature.len() != 65 {
-                return Err("the authorization's signature is not 65 bytes".into());
+                return Err(RelayError::Authorization("signature is not 65 bytes"));
             }
         }
         DOOR_PERMIT_2612 => {
-            if auth.acceptance.len() != 65 {
-                return Err("the quote acceptance is not a 65-byte signature".into());
+            if auth.acceptance.is_empty() {
+                return Err(RelayError::Authorization("carries no quote acceptance"));
             }
         }
         DOOR_PERMIT2 => {
             if auth.deadline <= now {
-                return Err("the Permit2 permit has expired".into());
+                return Err(RelayError::Authorization("Permit2 permit has expired"));
             }
-            if auth.signature.len() != 65 {
-                return Err("the Permit2 signature is not 65 bytes".into());
+            if auth.signature.is_empty() {
+                return Err(RelayError::Authorization("carries no Permit2 signature"));
             }
         }
-        _ => return Err("the door is not one the router has".into()),
+        door => return Err(RelayError::UnknownDoor(door)),
     }
     Ok(())
 }
 
-/// The least `networkFee` a relayed route pays: the relay's minimum on its own chain, plus
-/// on CCTP the completion's minimum on the destination chain, since the canister submits
-/// that one too. A chain with no minimums asks for none.
-pub fn check_network_fee(
-    params: &SwapParams,
-    chain_id: ChainId,
-    minimums: &ChainTable<PerAction<TokenAmount>>,
-) -> Result<(), String> {
-    let minimum = |chain: ChainId, action: GasAction| {
-        minimums
-            .get(chain)
-            .map_or(TokenAmount::ZERO, |fees| fees.get(action))
-    };
-    let mut needed = minimum(chain_id, GasAction::Relay);
-    if params.rail == RAIL_CCTP {
-        needed = needed
-            .checked_add(minimum(
-                ChainId::new(params.dstChainId),
-                GasAction::Completion,
-            ))
-            .unwrap_or(TokenAmount::MAX);
+/// The arrival a CCTP burn seals, checked as the destination contracts will check it
+/// (abi.md rule 10), so the canister never relays a burn whose arrival cannot be finished.
+fn arrival_of(burn: &CctpBurn, source: &EvmChain, chains: &Chains) -> Result<Arrival, RelayError> {
+    if burn.burn_token != source.usdc {
+        return Err(RelayError::Burn("is not of the chain's USDC"));
     }
-    let paid = U256::from_be_bytes(needed.to_be_bytes());
-    if params.networkFee < paid {
-        return Err(format!(
-            "networkFee {} is below the {needed} the route needs",
-            params.networkFee
+    let chain_id = chains
+        .domains
+        .0
+        .iter()
+        .find(|(_, domain)| domain.get() == burn.destination_domain)
+        .map(|(chain, _)| *chain)
+        .filter(|chain| *chain != chains.chain_id)
+        .ok_or(RelayError::UnknownDestination(burn.destination_domain))?;
+    let destination = chains
+        .evm_chains
+        .get(chain_id)
+        .ok_or(RelayError::UnknownDestination(burn.destination_domain))?;
+    let envelope = Envelope::decode(&burn.hook_data)?;
+    let recipient = envelope.recipient;
+    if recipient == EvmAddress::ZERO
+        || [
+            destination.swapic,
+            destination.runner,
+            destination.cctp_receiver,
+        ]
+        .contains(&recipient)
+    {
+        return Err(RelayError::Arrival(
+            "recipient is zero or one of Swapic's own contracts",
         ));
     }
-    Ok(())
+    let action = match envelope.action {
+        Action::Swap | Action::CkDeposit => {
+            let receiver = destination.cctp_receiver.to_word();
+            if burn.mint_recipient != receiver || burn.destination_caller != receiver {
+                return Err(RelayError::Burn(
+                    "of a Swap or a CkDeposit is not minted to the destination CctpReceiver and called by it",
+                ));
+            }
+            if envelope.min_gas == 0 {
+                return Err(RelayError::Arrival("sets no minGas"));
+            }
+            if envelope.action == Action::Swap {
+                if envelope.min_out == U256::ZERO || envelope.token_out == EvmAddress::ZERO {
+                    return Err(RelayError::Arrival("of a Swap names no tokenOut or minOut"));
+                }
+                GasAction::CompleteSwap
+            } else {
+                GasAction::CompleteCk
+            }
+        }
+        Action::Deliver => {
+            if burn.mint_recipient != recipient.to_word() {
+                return Err(RelayError::Burn(
+                    "of a Deliver is not minted to the envelope's recipient",
+                ));
+            }
+            if burn.destination_caller != [0; 32]
+                && burn.destination_caller != chains.canister.to_word()
+            {
+                return Err(RelayError::Burn(
+                    "of a Deliver may be received by anyone or by the canister only",
+                ));
+            }
+            GasAction::RelayDeliver
+        }
+    };
+    Ok(Arrival {
+        chain_id,
+        action,
+        recipient,
+    })
 }
 
-/// The digest the door's signature must recover to the payer over. The 3009 door's is
-/// under the token's own domain separator, which the caller read off the token.
-pub fn door_digest(
-    params: &SwapParams,
+/// Every check on the order and its authorization that needs no chain: pure, so each rule
+/// is a unit test. `requested_gas` is the limit the quoter charged the fee on.
+pub fn check(
+    order: &Order,
     auth: &GaslessAuth,
-    quote_hash: QuoteHash,
-    chain_id: ChainId,
-    router_address: EvmAddress,
-    token_separator: Option<[u8; 32]>,
-) -> Option<([u8; 32], Vec<u8>)> {
-    match auth.door {
-        DOOR_AUTH_3009 => {
-            let message = ReceiveWithAuthorization {
-                from: params.payer,
-                to: router::addr(router_address),
-                value: params.amountIn,
-                validAfter: auth.validAfter,
-                validBefore: auth.validBefore,
-                nonce: FixedBytes(quote_hash.into_bytes()),
-            };
-            Some((
-                router::receive_with_authorization_digest(token_separator?, &message),
-                auth.signature.to_vec(),
-            ))
+    requested_gas: u64,
+    chains: &Chains,
+    now_s: u64,
+    window_s: u64,
+) -> Result<Relay, RelayError> {
+    let chain_id = chains.chain_id;
+    let source = chains
+        .evm_chains
+        .get(chain_id)
+        .ok_or(RelayError::UnknownChain(chain_id))?;
+    let order_id = swapic::order_id(order, chain_id, source.swapic);
+    check_auth(auth, order_id, now_s)?;
+
+    if order.payer.is_zero() {
+        return Err(RelayError::Order("payer is the zero address"));
+    }
+    let token_in = swapic::evm(order.tokenIn);
+    if token_in == EvmAddress::ZERO || token_in == NATIVE {
+        return Err(RelayError::Order(
+            "pays in ether or the zero address, which no gasless door pulls",
+        ));
+    }
+    if order.amountIn.is_zero() {
+        return Err(RelayError::Order("pays nothing"));
+    }
+    let earliest = now_s.saturating_add(RELAY_MARGIN_S);
+    let latest = now_s.saturating_add(window_s);
+    if order.deadline <= U256::from(earliest) || order.deadline > U256::from(latest) {
+        return Err(RelayError::Deadline {
+            deadline: order.deadline,
+            earliest,
+            latest,
+        });
+    }
+
+    let mut fees = Vec::new();
+    let mut burns = Vec::new();
+    let mut eco = false;
+    for step in &order.steps {
+        if let Some((to, amount)) = swapic::fee_transfer_of(step, source.usdc) {
+            if to == chains.canister {
+                fees.push(amount);
+            }
         }
-        DOOR_PERMIT_2612 => Some((
-            router::acceptance_digest(params, quote_hash, chain_id, router_address),
-            auth.acceptance.to_vec(),
-        )),
-        DOOR_PERMIT2 => Some((
-            router::permit2_digest(
-                chain_id,
-                params,
-                quote_hash,
-                router_address,
-                auth.nonce,
-                auth.deadline,
-            ),
-            auth.signature.to_vec(),
-        )),
-        _ => None,
-    }
-}
-
-/// The token's EIP-712 domain separator, read off the token.
-async fn token_separator(
-    chain_id: ChainId,
-    mine: EvmAddress,
-    token: EvmAddress,
-) -> Result<[u8; 32], FlowCallError> {
-    match evm_reads::eth_call(chain_id, mine, token, &router::domain_separator_calldata())
-        .await
-        .map_err(|e| FlowCallError::Unavailable(e.to_string()))?
-    {
-        Simulated::Returned(bytes) if bytes.len() == 32 => {
-            Ok(bytes.try_into().expect("BUG: checked to be 32 bytes"))
+        if let Some(burn) = CctpBurn::of_step(step, source.token_messenger) {
+            burns.push(burn.map_err(|_| RelayError::Burn("is not a depositForBurnWithHook"))?);
         }
-        Simulated::Returned(_) => Err(FlowCallError::Refused(
-            "the token answers no EIP-712 domain separator".into(),
-        )),
-        Simulated::Reverted(message) => Err(FlowCallError::Refused(format!(
-            "the token has no DOMAIN_SEPARATOR: {message}"
-        ))),
+        eco |= swapic::selector_of(step) == Some(PUBLISH_AND_FUND);
     }
+    let fee = match fees.as_slice() {
+        [] => return Err(RelayError::NoFeeStep),
+        [fee] => TokenAmount::from_be_bytes(fee.to_be_bytes::<32>()),
+        more => return Err(RelayError::FeeSteps(more.len())),
+    };
+    let (action, arrival) = match burns.as_slice() {
+        [] if eco => (GasAction::RelayEco, None),
+        [] => (GasAction::RelayLocal, None),
+        [_] if eco => return Err(RelayError::TwoRails),
+        [burn] => (
+            GasAction::RelayCctp,
+            Some(arrival_of(burn, &source, chains)?),
+        ),
+        more => return Err(RelayError::Burns(more.len())),
+    };
+
+    let mut needed = source.min_network_fee.get(action);
+    if let Some(arrival) = arrival {
+        let destination = chains
+            .evm_chains
+            .get(arrival.chain_id)
+            .expect("BUG: arrival_of found the destination in this table");
+        needed = needed
+            .checked_add(destination.min_network_fee.get(arrival.action))
+            .unwrap_or(TokenAmount::MAX);
+    }
+    if fee < needed {
+        return Err(RelayError::FeeBelowMinimum { paid: fee, needed });
+    }
+    let gas_limit = signing_gas(chain_id, &source, action, requested_gas)?;
+    Ok(Relay {
+        order_id,
+        action,
+        fee,
+        arrival,
+        gas_limit,
+    })
 }
 
-/// The gas a relay is given: the estimate with a margin, held to the configured ceiling.
-pub fn gas_limit_for(estimate: Option<u64>, settings: &FlowSettings) -> u64 {
-    let ceiling = settings.max_gas_limit;
-    match estimate {
-        Some(estimate) => estimate
-            .saturating_mul(13)
-            .saturating_div(10)
-            .saturating_add(50_000)
-            .min(ceiling),
-        None => ceiling,
-    }
-}
-
-/// `relay_gasless`: answers the quote hash the relay is recorded under. Its status is
-/// `relay_status(quote_hash)`.
+/// `relay_gasless`: answers the signed transaction's id in `signed_txs`. Its status is
+/// `relay_status(order_id)`.
 pub async fn relay_gasless(
     chain_id: ChainId,
-    params_bytes: &[u8],
+    order_bytes: &[u8],
     auth_bytes: &[u8],
-) -> Result<QuoteHash, FlowCallError> {
+    gas_limit: u64,
+) -> Result<u64, String> {
     // the role and the halt before anything else, and before any outcall
-    require_quoter().map_err(FlowCallError::Guard)?;
-    require_not_halted().map_err(FlowCallError::Guard)?;
+    require_watcher().map_err(|e| format!("{e:?}"))?;
+    require_not_halted().map_err(|e| format!("{e:?}"))?;
+    let order = swapic::decode_order(order_bytes).ok_or(RelayError::NotAnOrder.to_string())?;
+    let auth = swapic::decode_auth(auth_bytes).ok_or(RelayError::NotAnAuth.to_string())?;
+    // derived once by the deploy and read from stable memory after that
+    let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
+    let config = config::get();
     let settings = flow_settings::get();
-    let router_address = settings
-        .router(chain_id)
-        .ok_or_else(|| invalid(format!("no router is configured on chain {chain_id}")))?;
-    let params = router::decode_params(params_bytes)
-        .ok_or_else(|| invalid("params are not an ABI-encoded SwapParams tuple"))?;
-    let auth = router::decode_auth(auth_bytes)
-        .ok_or_else(|| invalid("auth is not an ABI-encoded GaslessAuth tuple"))?;
-    let quote_hash = router::quote_hash(&params, chain_id, router_address);
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
-    check_readable(
-        &params,
-        &auth,
+    let chains = Chains {
         chain_id,
+        evm_chains: &config.evm_chains,
+        domains: &config.cctp_domains,
+        canister,
+    };
+    let relay = check(
+        &order,
+        &auth,
+        gas_limit,
+        &chains,
         now_s,
         settings.relay_window.as_secs(),
     )
-    .map_err(invalid)?;
-    check_network_fee(&params, chain_id, &config::get().min_network_fee).map_err(invalid)?;
-    let payer = router::evm(params.payer);
-    if is_sanctioned(&types::Address::from(payer)) {
-        return Err(FlowCallError::Refused("the payer is sanctioned".into()));
+    .map_err(|e| e.to_string())?;
+    let payout_recipient =
+        (!order.payout.token.is_zero()).then(|| swapic::evm(order.payout.recipient));
+    let sanctioned = [
+        Some(swapic::evm(order.payer)),
+        payout_recipient,
+        relay.arrival.map(|a| a.recipient),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|address| is_sanctioned(&types::Address::from(address)));
+    if sanctioned {
+        return Err("the payer or a recipient is sanctioned".into());
     }
-    if let Some(recipient) = router::evm_recipient(params.dst.recipient) {
-        if is_sanctioned(&types::Address::from(recipient)) {
-            return Err(FlowCallError::Refused("the recipient is sanctioned".into()));
+
+    let key = QuoteHash::new(relay.order_id.into_bytes());
+    if let Some(id) = tx::signed_once(key)? {
+        return Ok(id);
+    }
+    let _busy = Busy::take(key).ok_or("the order is being signed")?;
+    let swapic_address = config
+        .evm_chains
+        .get(chain_id)
+        .expect("BUG: check found the chain in this table")
+        .swapic;
+    let data = swapic::run_for_calldata(&order, &auth);
+    if config.simulate_before_sign {
+        let (simulated, _) =
+            evm_reads::simulate_and_estimate(chain_id, canister, swapic_address, &data)
+                .await
+                .map_err(|e| e.to_string())?;
+        if let Simulated::Reverted(message) = simulated {
+            return Err(format!("runFor reverts in simulation: {message}"));
+        }
+        // the halt and a concurrent relay can land while the read was out
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+        if let Some(id) = tx::signed_once(key)? {
+            return Ok(id);
         }
     }
-    if read_state(|state| state.flow(&quote_hash).is_some()) {
-        return Err(FlowCallError::Refused(format!(
-            "quote {quote_hash} was already relayed"
-        )));
-    }
-    let mine = ecdsa::canister_address()
-        .await
-        .map_err(|e| FlowCallError::Unavailable(e.to_string()))?;
-    // the authorization recovers to the payer, so the user signed THESE params
-    let separator = if auth.door == DOOR_AUTH_3009 {
-        Some(token_separator(chain_id, mine, router::evm(params.tokenIn)).await?)
-    } else {
-        None
-    };
-    let (digest, signature) = door_digest(
-        &params,
-        &auth,
-        quote_hash,
+    let signed = tx::create_and_send(
+        TxPurpose::Relay(key),
         chain_id,
-        router_address,
-        separator,
-    )
-    .ok_or_else(|| invalid("the door has no digest"))?;
-    if ecdsa::recover_signer(digest, &signature) != Some(payer) {
-        return Err(FlowCallError::Refused(
-            "the authorization was not signed by the payer over these params".into(),
-        ));
-    }
-    // the halt can land while the reads were out
-    require_not_halted().map_err(FlowCallError::Guard)?;
-    let data = router::swap_for_calldata(&params, &auth);
-    let (simulated, estimate) =
-        evm_reads::simulate_and_estimate(chain_id, mine, router_address, &data)
-            .await
-            .map_err(|e| FlowCallError::Unavailable(e.to_string()))?;
-    if let Simulated::Reverted(message) = simulated {
-        return Err(FlowCallError::Refused(format!(
-            "swapFor reverts in simulation: {message}"
-        )));
-    }
-    let gas_limit = gas_limit_for(estimate, &settings);
-    tx::create_and_send(
-        TxPurpose::Relay(quote_hash),
-        chain_id,
-        router_address,
+        swapic_address,
         Wei::ZERO,
         data,
-        GasAmount::from(gas_limit),
+        relay.gas_limit,
+        relay.action,
     )
     .await
-    .map_err(|e| FlowCallError::Refused(e.to_string()))?;
-    Ok(quote_hash)
+    .map_err(|e| e.to_string())?;
+    Ok(signed.id.get())
 }

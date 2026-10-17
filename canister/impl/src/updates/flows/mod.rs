@@ -16,21 +16,25 @@ pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
     flow_settings::set(settings).map_err(FlowCallError::Invalid)
 }
 
-/// Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
-/// on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
-/// `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
-/// every readable field is checked against them, the authorization must recover to the
-/// payer, and `swapFor` must succeed in simulation before the canister signs it once and
-/// records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
+/// Watcher-only (the submit API runs as the watcher), refused while halted. Relays a
+/// user's gasless order through Swapic on `chain_id` as `runFor(order, auth)`: `order` is
+/// `abi.encode(Order)` of ABI v3 and `auth` is `abi.encode(GaslessAuth)`, each one dynamic
+/// tuple with its leading offset word, as viem's `encodeAbiParameters` writes it. The
+/// order id is recomputed from the order and the chain's Swapic (the 3009 door's nonce
+/// must be it); the order must pay this canister exactly one fee step of at least the
+/// chain's `min_network_fee` for its rail, plus on CCTP the destination's for the arrival;
+/// it is signed with exactly `gas_limit` (the limit the quoter charged for), or the
+/// chain's maximum for the action when that is lower, and held to the gas rule. Signed
+/// once per order id: a second call answers the first one's id. Answers the signed
+/// transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
 #[update]
 pub async fn relay_gasless(
     chain_id: u64,
-    params: Vec<u8>,
+    order: Vec<u8>,
     auth: Vec<u8>,
-) -> Result<Hash32, FlowCallError> {
-    relay::relay_gasless(ChainId::new(chain_id), &params, &auth)
-        .await
-        .map(|quote_hash| quote_hash.into_bytes())
+    gas_limit: u64,
+) -> Result<u64, String> {
+    relay::relay_gasless(ChainId::new(chain_id), &order, &auth, gas_limit).await
 }
 
 use crate::engine::flows::{self as flow_engine, Busy, FlowDriveError};

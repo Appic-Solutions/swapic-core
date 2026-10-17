@@ -2,6 +2,7 @@ use crate::guards::require_controller;
 use crate::tx;
 pub use settlement_api::types::events::Hash32;
 pub use settlement_api::types::tx::TxError;
+use types::config::GasAction;
 use types::events::TxPurpose;
 use types::{ChainId, GasAmount, QuoteHash, Wei};
 
@@ -32,6 +33,7 @@ pub async fn test_send(
         Wei::ZERO,
         vec![0xde, 0xad, 0xbe, 0xef],
         GasAmount::from(gas_limit),
+        GasAction::RelayLocal,
     )
     .await
     .map(|signed| signed.tx_hash.into_bytes())

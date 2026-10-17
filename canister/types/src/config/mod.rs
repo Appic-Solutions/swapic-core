@@ -4,7 +4,7 @@ mod tests;
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
-use crate::numeric::{BasisPoints, BlockDepth, TokenAmount, UsdAmount, Wei};
+use crate::numeric::{BasisPoints, BlockDepth, GasAmount, TokenAmount, UsdAmount, Wei};
 use crate::quote::MAX_QUOTE_LIFETIME;
 use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
@@ -469,47 +469,126 @@ pub struct Config {
     /// and fills it.
     #[n(28)]
     pub cctp_min_fees: ChainTable<CctpMinFee>,
-    /// The most gas, in wei, one transaction of each action may cost on each chain
-    /// (`gas_limit * max_fee_per_gas`). A chain or an action with no budget signs nothing.
-    #[n(29)]
-    pub gas_budget: ChainTable<PerAction<Wei>>,
-    /// The least `networkFee`, in micro-USDC, each action needs on each chain.
-    #[n(30)]
-    pub min_network_fee: ChainTable<PerAction<TokenAmount>>,
+    // #[n(29)] and #[n(30)] held the P10 per-action gas budgets and minimum fees, which
+    // `evm_chains` replaced before any deploy: retired, never reused
     #[n(31)]
     pub books_check_interval: BooksInterval,
     /// How far below what the books expect a balance may read before the pool pauses.
     #[n(32)]
     pub books_tolerance: BooksTolerance,
+    /// Every EVM chain the canister signs on, design C: the Swapic deployment, CCTP v2,
+    /// USDC, and per action the gas limit, the gas budget and the least fee. A chain with
+    /// no entry signs nothing.
+    #[n(33)]
+    pub evm_chains: ChainTable<EvmChain>,
 }
 
-/// The three kinds of transaction the canister pays gas for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The kinds of transaction the canister signs and pays the gas of: the relay of a
+/// gasless order, by its rail, and the four ways a CCTP arrival is finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
 pub enum GasAction {
-    Relay,
-    Completion,
-    Payout,
+    /// `Swapic.runFor` of an order that burns on CCTP.
+    #[n(0)]
+    RelayCctp,
+    /// `Swapic.runFor` of an order that publishes an Eco intent.
+    #[n(1)]
+    RelayEco,
+    /// `Swapic.runFor` of an order that stays on its chain.
+    #[n(2)]
+    RelayLocal,
+    /// `CctpReceiver.completeCctp` of a Swap.
+    #[n(3)]
+    CompleteSwap,
+    /// `CctpReceiver.completeCctp` of a CkDeposit.
+    #[n(4)]
+    CompleteCk,
+    /// `MessageTransmitterV2.receiveMessage` of a Deliver.
+    #[n(5)]
+    RelayDeliver,
+    /// `CctpReceiver.release` after the envelope's deadline.
+    #[n(6)]
+    Release,
 }
 
 /// One value per [`GasAction`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct PerAction<T> {
     #[n(0)]
-    pub relay: T,
+    pub relay_cctp: T,
     #[n(1)]
-    pub completion: T,
+    pub relay_eco: T,
     #[n(2)]
-    pub payout: T,
+    pub relay_local: T,
+    #[n(3)]
+    pub complete_swap: T,
+    #[n(4)]
+    pub complete_ck: T,
+    #[n(5)]
+    pub relay_deliver: T,
+    #[n(6)]
+    pub release: T,
 }
 
 impl<T: Copy> PerAction<T> {
     pub fn get(&self, action: GasAction) -> T {
         match action {
-            GasAction::Relay => self.relay,
-            GasAction::Completion => self.completion,
-            GasAction::Payout => self.payout,
+            GasAction::RelayCctp => self.relay_cctp,
+            GasAction::RelayEco => self.relay_eco,
+            GasAction::RelayLocal => self.relay_local,
+            GasAction::CompleteSwap => self.complete_swap,
+            GasAction::CompleteCk => self.complete_ck,
+            GasAction::RelayDeliver => self.relay_deliver,
+            GasAction::Release => self.release,
         }
     }
+
+    /// The same value for every action.
+    pub fn all(value: T) -> Self {
+        Self {
+            relay_cctp: value,
+            relay_eco: value,
+            relay_local: value,
+            complete_swap: value,
+            complete_ck: value,
+            relay_deliver: value,
+            release: value,
+        }
+    }
+}
+
+/// One EVM chain as design C runs on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct EvmChain {
+    /// The door users approve, and the EIP-712 verifying contract of every order here.
+    #[n(0)]
+    pub swapic: EvmAddress,
+    /// The one shared Runner: it makes this chain's burns.
+    #[n(1)]
+    pub runner: EvmAddress,
+    /// The mint recipient and destination caller of every Swap and CkDeposit arriving here.
+    #[n(2)]
+    pub cctp_receiver: EvmAddress,
+    #[n(3)]
+    pub usdc: EvmAddress,
+    /// CCTP v2's `TokenMessengerV2`.
+    #[n(4)]
+    pub token_messenger: EvmAddress,
+    /// CCTP v2's `MessageTransmitterV2`.
+    #[n(5)]
+    pub message_transmitter: EvmAddress,
+    /// The most gas the canister gives each action's transaction: a larger limit asked
+    /// for is signed at this one.
+    #[n(6)]
+    pub gas_limit: PerAction<GasAmount>,
+    /// The most each action's transaction may cost in wei, its gas limit times its fee
+    /// cap: the gas rule.
+    #[n(7)]
+    pub gas_budget: PerAction<Wei>,
+    /// The least fee step, in USDC units, each action needs: what the quoter charges for
+    /// it at the least.
+    #[n(8)]
+    pub min_network_fee: PerAction<TokenAmount>,
 }
 
 /// How often the books read the canister's balances: ten minutes unless set.
@@ -751,10 +830,9 @@ impl Default for Config {
             claim_grace: ClaimGrace::DEFAULT,
             // the staging canary reads each chain's `minFee()` and fills this
             cctp_min_fees: ChainTable::default(),
-            gas_budget: ChainTable::default(),
-            min_network_fee: ChainTable::default(),
             books_check_interval: BooksInterval::DEFAULT,
             books_tolerance: BooksTolerance::DEFAULT,
+            evm_chains: ChainTable::default(),
         }
     }
 }

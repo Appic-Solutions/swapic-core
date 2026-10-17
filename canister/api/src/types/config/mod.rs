@@ -7,11 +7,12 @@ use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
 use types::config::{
     AuditChunk, BooksInterval, BooksTolerance, ChainTable, ClaimGrace, DepositLookback, EcoEnabled,
-    EvictionsPerSweep, PerAction, RefundsPerSweep,
+    EvictionsPerSweep, EvmChain, PerAction, RefundsPerSweep,
 };
 use types::rail::{CctpDomain, CctpMinFee};
 use types::{
-    BasisPoints, BlockDepth, ChainId, CheckedAmountOf, EvmAddress, TokenAmount, UsdAmount,
+    BasisPoints, BlockDepth, ChainId, CheckedAmountOf, EvmAddress, GasAmount, TokenAmount,
+    UsdAmount,
 };
 
 /// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
@@ -70,36 +71,116 @@ pub struct Config {
     /// with no entry is one whose messenger charges none. Every burn offers at least this
     /// much of its amount as its `maxFee`, the Standard path included.
     pub cctp_min_fees: BTreeMap<u64, u32>,
-    /// The most gas, in wei, one transaction of each action may cost per chain
-    /// (`gas_limit * max_fee_per_gas`). The quoter charges the same budgets as `networkFee`.
-    /// A chain or an action with no budget signs nothing.
-    pub gas_budget_wei: BTreeMap<u64, ActionAmounts>,
-    /// The least `networkFee`, in micro-USDC, each action needs per chain.
-    pub min_network_fee: BTreeMap<u64, ActionAmounts>,
     pub books_check_interval_s: u64,
     /// How far below what the books expect a balance may read, in micro-USDC, before the
     /// pool pauses.
     #[serde(serialize_with = "nat_as_decimal")]
     pub books_tolerance: Nat,
+    /// Every EVM chain the canister signs on (design C). A chain with no entry signs
+    /// nothing.
+    pub evm_chains: BTreeMap<u64, EvmChainConfig>,
 }
 
-/// One amount per action the canister pays gas for.
+/// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, and per
+/// action the gas limit, the gas budget and the least fee. Addresses are EVM addresses.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct EvmChainConfig {
+    /// The door users approve, and the EIP-712 verifying contract of every order here.
+    pub swapic: String,
+    /// The one shared Runner: it makes this chain's burns.
+    pub runner: String,
+    /// The mint recipient and destination caller of every Swap and CkDeposit arriving here.
+    pub cctp_receiver: String,
+    pub usdc: String,
+    /// CCTP v2's `TokenMessengerV2`.
+    pub token_messenger: String,
+    /// CCTP v2's `MessageTransmitterV2`.
+    pub message_transmitter: String,
+    /// The most gas the canister gives each action's transaction. `relay_gasless` and
+    /// `finish_cctp` sign with exactly the limit they are given, or this one when it is
+    /// lower.
+    pub gas_limit: ActionGas,
+    /// The most each action's transaction may cost in wei (`gas_limit * max_fee_per_gas`):
+    /// the gas rule. Above it the canister signs nothing and the caller tries again.
+    pub gas_budget_wei: ActionAmounts,
+    /// The least fee step, in USDC units, each action needs.
+    pub min_network_fee: ActionAmounts,
+}
+
+/// One gas limit per action the canister signs.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionGas {
+    pub relay_cctp: u64,
+    pub relay_eco: u64,
+    pub relay_local: u64,
+    pub complete_swap: u64,
+    pub complete_ck: u64,
+    pub relay_deliver: u64,
+    pub release: u64,
+}
+
+/// One amount per action the canister signs.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActionAmounts {
     #[serde(serialize_with = "nat_as_decimal")]
-    pub relay: Nat,
+    pub relay_cctp: Nat,
     #[serde(serialize_with = "nat_as_decimal")]
-    pub completion: Nat,
+    pub relay_eco: Nat,
     #[serde(serialize_with = "nat_as_decimal")]
-    pub payout: Nat,
+    pub relay_local: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub complete_swap: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub complete_ck: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub relay_deliver: Nat,
+    #[serde(serialize_with = "nat_as_decimal")]
+    pub release: Nat,
+}
+
+impl From<PerAction<GasAmount>> for ActionGas {
+    fn from(gas: PerAction<GasAmount>) -> Self {
+        let limit = |gas: GasAmount| {
+            gas.try_into_u128()
+                .and_then(|gas| u64::try_from(gas).ok())
+                .unwrap_or(u64::MAX)
+        };
+        Self {
+            relay_cctp: limit(gas.relay_cctp),
+            relay_eco: limit(gas.relay_eco),
+            relay_local: limit(gas.relay_local),
+            complete_swap: limit(gas.complete_swap),
+            complete_ck: limit(gas.complete_ck),
+            relay_deliver: limit(gas.relay_deliver),
+            release: limit(gas.release),
+        }
+    }
+}
+
+impl From<ActionGas> for PerAction<GasAmount> {
+    fn from(gas: ActionGas) -> Self {
+        Self {
+            relay_cctp: GasAmount::from(gas.relay_cctp),
+            relay_eco: GasAmount::from(gas.relay_eco),
+            relay_local: GasAmount::from(gas.relay_local),
+            complete_swap: GasAmount::from(gas.complete_swap),
+            complete_ck: GasAmount::from(gas.complete_ck),
+            relay_deliver: GasAmount::from(gas.relay_deliver),
+            release: GasAmount::from(gas.release),
+        }
+    }
 }
 
 impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
     fn from(amounts: PerAction<CheckedAmountOf<Unit>>) -> Self {
         Self {
-            relay: amounts.relay.into(),
-            completion: amounts.completion.into(),
-            payout: amounts.payout.into(),
+            relay_cctp: amounts.relay_cctp.into(),
+            relay_eco: amounts.relay_eco.into(),
+            relay_local: amounts.relay_local.into(),
+            complete_swap: amounts.complete_swap.into(),
+            complete_ck: amounts.complete_ck.into(),
+            relay_deliver: amounts.relay_deliver.into(),
+            release: amounts.release.into(),
         }
     }
 }
@@ -113,21 +194,48 @@ fn per_action<Unit>(
             .map_err(|_| types::ConfigError::AmountTooLarge { field })
     };
     Ok(PerAction {
-        relay: amount(amounts.relay)?,
-        completion: amount(amounts.completion)?,
-        payout: amount(amounts.payout)?,
+        relay_cctp: amount(amounts.relay_cctp)?,
+        relay_eco: amount(amounts.relay_eco)?,
+        relay_local: amount(amounts.relay_local)?,
+        complete_swap: amount(amounts.complete_swap)?,
+        complete_ck: amount(amounts.complete_ck)?,
+        relay_deliver: amount(amounts.relay_deliver)?,
+        release: amount(amounts.release)?,
     })
 }
 
-fn chain_table<Unit>(
-    field: &'static str,
-    table: BTreeMap<u64, ActionAmounts>,
-) -> Result<ChainTable<PerAction<CheckedAmountOf<Unit>>>, types::ConfigError> {
-    table
-        .into_iter()
-        .map(|(chain, amounts)| Ok((ChainId::new(chain), per_action(field, amounts)?)))
-        .collect::<Result<_, _>>()
-        .map(ChainTable)
+impl From<EvmChain> for EvmChainConfig {
+    fn from(chain: EvmChain) -> Self {
+        Self {
+            swapic: chain.swapic.to_string(),
+            runner: chain.runner.to_string(),
+            cctp_receiver: chain.cctp_receiver.to_string(),
+            usdc: chain.usdc.to_string(),
+            token_messenger: chain.token_messenger.to_string(),
+            message_transmitter: chain.message_transmitter.to_string(),
+            gas_limit: chain.gas_limit.into(),
+            gas_budget_wei: chain.gas_budget.into(),
+            min_network_fee: chain.min_network_fee.into(),
+        }
+    }
+}
+
+fn evm_chain(chain: ChainId, config: EvmChainConfig) -> Result<EvmChain, types::ConfigError> {
+    let at = |field: &'static str, text: &str| evm_address(field, Some(chain), text);
+    Ok(EvmChain {
+        swapic: at("evm_chains.swapic", &config.swapic)?,
+        runner: at("evm_chains.runner", &config.runner)?,
+        cctp_receiver: at("evm_chains.cctp_receiver", &config.cctp_receiver)?,
+        usdc: at("evm_chains.usdc", &config.usdc)?,
+        token_messenger: at("evm_chains.token_messenger", &config.token_messenger)?,
+        message_transmitter: at(
+            "evm_chains.message_transmitter",
+            &config.message_transmitter,
+        )?,
+        gas_limit: config.gas_limit.into(),
+        gas_budget: per_action("evm_chains.gas_budget_wei", config.gas_budget_wei)?,
+        min_network_fee: per_action("evm_chains.min_network_fee", config.min_network_fee)?,
+    })
 }
 
 impl Default for Config {
@@ -171,10 +279,9 @@ impl fmt::Debug for Config {
             eco_enabled,
             claim_grace_s,
             cctp_min_fees,
-            gas_budget_wei,
-            min_network_fee,
             books_check_interval_s,
             books_tolerance,
+            evm_chains,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -208,10 +315,9 @@ impl fmt::Debug for Config {
             .field("eco_enabled", eco_enabled)
             .field("claim_grace_s", claim_grace_s)
             .field("cctp_min_fees", cctp_min_fees)
-            .field("gas_budget_wei", gas_budget_wei)
-            .field("min_network_fee", min_network_fee)
             .field("books_check_interval_s", books_check_interval_s)
             .field("books_tolerance", books_tolerance)
+            .field("evm_chains", evm_chains)
             .finish()
     }
 }
@@ -270,10 +376,9 @@ impl From<types::Config> for Config {
             eco_enabled,
             claim_grace,
             cctp_min_fees,
-            gas_budget,
-            min_network_fee,
             books_check_interval,
             books_tolerance,
+            evm_chains,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -327,18 +432,13 @@ impl From<types::Config> for Config {
                 .into_iter()
                 .map(|(chain, min_fee)| (chain.get(), min_fee.get()))
                 .collect(),
-            gas_budget_wei: gas_budget
-                .0
-                .into_iter()
-                .map(|(chain, budget)| (chain.get(), budget.into()))
-                .collect(),
-            min_network_fee: min_network_fee
-                .0
-                .into_iter()
-                .map(|(chain, fees)| (chain.get(), fees.into()))
-                .collect(),
             books_check_interval_s: books_check_interval.0.as_secs(),
             books_tolerance: books_tolerance.0.into(),
+            evm_chains: evm_chains
+                .0
+                .into_iter()
+                .map(|(chain, config)| (chain.get(), config.into()))
+                .collect(),
         }
     }
 }
@@ -460,8 +560,6 @@ impl TryFrom<Config> for types::Config {
                     .map(|(chain, min_fee)| (ChainId::new(chain), CctpMinFee::new(min_fee)))
                     .collect(),
             ),
-            gas_budget: chain_table("gas_budget_wei", config.gas_budget_wei)?,
-            min_network_fee: chain_table("min_network_fee", config.min_network_fee)?,
             books_check_interval: BooksInterval(Duration::from_secs(config.books_check_interval_s)),
             books_tolerance: BooksTolerance(
                 TokenAmount::try_from(config.books_tolerance).map_err(|_| {
@@ -469,6 +567,16 @@ impl TryFrom<Config> for types::Config {
                         field: "books_tolerance",
                     }
                 })?,
+            ),
+            evm_chains: ChainTable(
+                config
+                    .evm_chains
+                    .into_iter()
+                    .map(|(chain, entry)| {
+                        let chain = ChainId::new(chain);
+                        evm_chain(chain, entry).map(|entry| (chain, entry))
+                    })
+                    .collect::<Result<_, _>>()?,
             ),
         })
     }

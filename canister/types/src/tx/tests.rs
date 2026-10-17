@@ -23,6 +23,7 @@ fn entry() -> OutboxEntry {
         data: vec![0xde, 0xad, 0xbe, 0xef],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
+        action: None,
     }
 }
 

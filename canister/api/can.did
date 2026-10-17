@@ -1,5 +1,23 @@
-// One amount per action the canister pays gas for.
-type ActionAmounts = record { completion : nat; relay : nat; payout : nat };
+// One amount per action the canister signs.
+type ActionAmounts = record {
+  relay_local : nat;
+  complete_ck : nat;
+  relay_cctp : nat;
+  relay_deliver : nat;
+  complete_swap : nat;
+  release : nat;
+  relay_eco : nat;
+};
+// One gas limit per action the canister signs.
+type ActionGas = record {
+  relay_local : nat64;
+  complete_ck : nat64;
+  relay_cctp : nat64;
+  relay_deliver : nat64;
+  complete_swap : nat64;
+  release : nat64;
+  relay_eco : nat64;
+};
 // Why an event was not appended. Nothing was written.
 type AppendError = variant {
   ChainDiverged : record { log_head : blob; state_head : blob };
@@ -85,8 +103,6 @@ type Config = record {
   eco_enabled : bool;
   platform_fee_bps : nat16;
   permit_deadline_s : nat64;
-  // The least `networkFee`, in micro-USDC, each action needs per chain.
-  min_network_fee : vec record { nat64; ActionAmounts };
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
   cctp_domains : vec record { nat64; nat32 };
   // The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
@@ -94,14 +110,13 @@ type Config = record {
   // with no entry is one whose messenger charges none. Every burn offers at least this
   // much of its amount as its `maxFee`, the Standard path included.
   cctp_min_fees : vec record { nat64; nat32 };
+  // Every EVM chain the canister signs on (design C). A chain with no entry signs
+  // nothing.
+  evm_chains : vec record { nat64; EvmChainConfig };
   replay_audit_interval_s : nat64;
   // How far below what the books expect a balance may read, in micro-USDC, before the
   // pool pauses.
   books_tolerance : nat;
-  // The most gas, in wei, one transaction of each action may cost per chain
-  // (`gas_limit * max_fee_per_gas`). The quoter charges the same budgets as `networkFee`.
-  // A chain or an action with no budget signs nothing.
-  gas_budget_wei : vec record { nat64; ActionAmounts };
   quote_ttl_s : nat64;
   // Eco's `Portal`, the same address on every chain.
   eco_portal : opt text;
@@ -336,6 +351,30 @@ type EvmAddressError = variant {
   WrongLength : record { len : nat64 };
   NoPrefix;
   NotHex;
+};
+// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, and per
+// action the gas limit, the gas budget and the least fee. Addresses are EVM addresses.
+type EvmChainConfig = record {
+  // The mint recipient and destination caller of every Swap and CkDeposit arriving here.
+  cctp_receiver : text;
+  // CCTP v2's `TokenMessengerV2`.
+  token_messenger : text;
+  // The one shared Runner: it makes this chain's burns.
+  runner : text;
+  usdc : text;
+  // The least fee step, in USDC units, each action needs.
+  min_network_fee : ActionAmounts;
+  // The most each action's transaction may cost in wei (`gas_limit * max_fee_per_gas`):
+  // the gas rule. Above it the canister signs nothing and the caller tries again.
+  gas_budget_wei : ActionAmounts;
+  // The most gas the canister gives each action's transaction. `relay_gasless` and
+  // `finish_cctp` sign with exactly the limit they are given, or this one when it is
+  // lower.
+  gas_limit : ActionGas;
+  // The door users approve, and the EIP-712 verifying contract of every order here.
+  swapic : text;
+  // CCTP v2's `MessageTransmitterV2`.
+  message_transmitter : text;
 };
 // Where the ckUSDC of a registered EVM to ICP quote must be deposited.
 type EvmQuoteRegistered = record {
@@ -861,13 +900,18 @@ service : (InitArg) -> {
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
   register_quote : (Quote) -> (Result_10);
-  // Quoter-only, refused while halted. Relays a user's signed `swapFor` through the router
-  // on `chain_id`: `params` and `auth` are the ABI encodings of the `SwapParams` and
-  // `GaslessAuth` tuples. The quote hash is recomputed from the params as the router does,
-  // every readable field is checked against them, the authorization must recover to the
-  // payer, and `swapFor` must succeed in simulation before the canister signs it once and
-  // records `GaslessRelayed`. Answers the quote hash; `relay_status` follows it.
-  relay_gasless : (nat64, blob, blob) -> (Result_9);
+  // Watcher-only (the submit API runs as the watcher), refused while halted. Relays a
+  // user's gasless order through Swapic on `chain_id` as `runFor(order, auth)`: `order` is
+  // `abi.encode(Order)` of ABI v3 and `auth` is `abi.encode(GaslessAuth)`, each one dynamic
+  // tuple with its leading offset word, as viem's `encodeAbiParameters` writes it. The
+  // order id is recomputed from the order and the chain's Swapic (the 3009 door's nonce
+  // must be it); the order must pay this canister exactly one fee step of at least the
+  // chain's `min_network_fee` for its rail, plus on CCTP the destination's for the arrival;
+  // it is signed with exactly `gas_limit` (the limit the quoter charged for), or the
+  // chain's maximum for the action when that is lower, and held to the gas rule. Signed
+  // once per order id: a second call answers the first one's id. Answers the signed
+  // transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
+  relay_gasless : (nat64, blob, blob, nat64) -> (Result_4);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a

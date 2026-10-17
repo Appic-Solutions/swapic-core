@@ -1,145 +1,466 @@
 use super::*;
-use alloy_primitives::{Address, Bytes};
-use types::config::{ChainTable, PerAction};
-use types::router::{Delivery, DexCall, EcoTerms, ACTION_SWAP};
+use crate::storage::events::{append_event_at, read_state};
+use crate::storage::on_fresh_memory;
+use std::collections::BTreeMap;
+use types::chain_data::ChainReading;
+use types::config::PerAction;
+use types::swapic::{Step, Write};
+use types::{BlockNumber, EventType, FlowStep, Nonce, TxHash, WeiPerGas};
 
-fn params(now: u64) -> SwapParams {
-    SwapParams {
-        r#ref: FixedBytes([1; 32]),
-        payer: Address::from([2; 20]),
-        tokenIn: Address::from([3; 20]),
-        amountIn: U256::from(1_000_000),
-        deadline: U256::from(now + 600),
-        leg: DexCall {
-            target: Address::ZERO,
-            data: Bytes::new(),
-        },
-        legMinOut: U256::from(1_000_000),
-        feeBps: U256::ZERO,
-        networkFee: U256::from(50_000),
-        rail: RAIL_CCTP,
-        dstChainId: 42161,
-        maxFee: U256::from(100),
-        minFinality: 1000,
-        eco: EcoTerms {
-            salt: FixedBytes::ZERO,
-            routeDeadline: 0,
-            rewardDeadline: 0,
-            amount: U256::ZERO,
-            amountOut: U256::ZERO,
-        },
-        dst: Delivery {
-            action: ACTION_SWAP,
-            recipient: router::recipient_word(EvmAddress::new([6; 20])),
-            tokenOut: Address::from([7; 20]),
-            minOut: U256::from(1),
-            principal: FixedBytes::ZERO,
-            subaccount: FixedBytes::ZERO,
-            deadline: now + 3_600,
-            swap: DexCall {
-                target: Address::ZERO,
-                data: Bytes::new(),
-            },
-        },
+const ARBITRUM: ChainId = ChainId::ARBITRUM;
+const POLYGON: ChainId = ChainId::POLYGON;
+
+/// The quoter's fresh fork order (`samples/quoter_order_arbitrum_cctp_gasless.json`): 100
+/// USDC on Arbitrum to WBTC on Polygon over CCTP, gasless through the 3009 door, with the
+/// gas limit the quoter charged its fee on.
+struct Sample {
+    json: serde_json::Value,
+    order: Order,
+    auth: GaslessAuth,
+    /// The canister the fee step pays: the fork deploy's.
+    canister: EvmAddress,
+    evm_chains: ChainTable<EvmChain>,
+    domains: ChainTable<CctpDomain>,
+    /// The source limit the quoter charged for.
+    gas: u64,
+}
+
+fn address(text: &str) -> EvmAddress {
+    text.parse().unwrap()
+}
+
+/// A chain the canister signs on, every action given two million gas, a budget of 0.01
+/// ether and no least fee unless a test sets one.
+fn chain(
+    swapic: EvmAddress,
+    runner: EvmAddress,
+    receiver: EvmAddress,
+    usdc: EvmAddress,
+) -> EvmChain {
+    EvmChain {
+        swapic,
+        runner,
+        cctp_receiver: receiver,
+        usdc,
+        token_messenger: address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"),
+        message_transmitter: address("0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"),
+        gas_limit: PerAction::all(GasAmount::from(2_000_000_u64)),
+        gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::ZERO),
     }
 }
 
-fn auth(now: u64) -> GaslessAuth {
-    GaslessAuth {
+fn sample() -> Sample {
+    let json: serde_json::Value = serde_json::from_str(include_str!(
+        "../../samples/quoter_order_arbitrum_cctp_gasless.json"
+    ))
+    .unwrap();
+    let text = |field: &str| json[field].as_str().unwrap().to_string();
+    let order =
+        swapic::decode_order(&hex::decode(text("orderAbi").trim_start_matches("0x")).unwrap())
+            .unwrap();
+    let auth = GaslessAuth {
         door: DOOR_AUTH_3009,
         validAfter: U256::ZERO,
-        validBefore: U256::from(now + 600),
-        nonce: U256::ZERO,
+        validBefore: text("validBefore").parse().unwrap(),
+        nonce: text("nonce").parse().unwrap(),
         deadline: U256::ZERO,
-        signature: Bytes::from(vec![0; 65]),
-        acceptance: Bytes::new(),
+        signature: vec![0x1b; 65].into(),
+        acceptance: Default::default(),
+    };
+    let usdc = address(&text("usdc"));
+    let (canister, _) = swapic::fee_transfer_of(&order.steps[0], usdc).unwrap();
+    let messenger = address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
+    let burn = CctpBurn::of_step(&order.steps[1], messenger)
+        .unwrap()
+        .unwrap();
+    let polygon_receiver = swapic::evm_of_word(burn.mint_recipient).unwrap();
+    let evm_chains = ChainTable(BTreeMap::from([
+        (
+            ARBITRUM,
+            chain(
+                address(&text("swapic")),
+                address(&text("runner")),
+                EvmAddress::new([0xa3; 20]),
+                usdc,
+            ),
+        ),
+        (
+            POLYGON,
+            chain(
+                EvmAddress::new([0x5a; 20]),
+                EvmAddress::new([0x5b; 20]),
+                polygon_receiver,
+                address(&text("arrivalUsdc")),
+            ),
+        ),
+    ]));
+    let domains = ChainTable(BTreeMap::from([
+        (ARBITRUM, CctpDomain::new(3)),
+        (POLYGON, CctpDomain::new(7)),
+    ]));
+    let gas = json["sourceGasLimit"].as_u64().unwrap();
+    Sample {
+        json,
+        order,
+        auth,
+        canister,
+        evm_chains,
+        domains,
+        gas,
+    }
+}
+
+impl Sample {
+    fn deadline(&self) -> u64 {
+        self.json["deadline"].as_str().unwrap().parse().unwrap()
+    }
+
+    /// A clock a few minutes before the order's deadline.
+    fn now(&self) -> u64 {
+        self.deadline() - 120
+    }
+
+    fn check(&self) -> Result<Relay, RelayError> {
+        self.check_with(&self.order, &self.auth)
+    }
+
+    fn check_with(&self, order: &Order, auth: &GaslessAuth) -> Result<Relay, RelayError> {
+        let chains = Chains {
+            chain_id: ARBITRUM,
+            evm_chains: &self.evm_chains,
+            domains: &self.domains,
+            canister: self.canister,
+        };
+        check(order, auth, self.gas, &chains, self.now(), 3_600)
+    }
+
+    /// `order` signed again: the 3009 nonce is its own id, so only the rule under test
+    /// can refuse it.
+    fn resigned(&self, order: &Order) -> GaslessAuth {
+        let swapic = self.evm_chains.get(ARBITRUM).unwrap().swapic;
+        GaslessAuth {
+            nonce: swapic::order_id(order, ARBITRUM, swapic).as_nonce(),
+            ..self.auth.clone()
+        }
+    }
+
+    fn set_min_fee(&mut self, chain_id: ChainId, action: GasAction, fee: u64) {
+        let mut chain = self.evm_chains.get(chain_id).unwrap();
+        let fee = TokenAmount::from(fee);
+        match action {
+            GasAction::RelayCctp => chain.min_network_fee.relay_cctp = fee,
+            GasAction::CompleteSwap => chain.min_network_fee.complete_swap = fee,
+            _ => unreachable!("the sample needs only these two"),
+        }
+        self.evm_chains.0.insert(chain_id, chain);
     }
 }
 
 #[test]
-fn a_well_formed_relay_passes_and_each_broken_field_is_refused() {
-    let now = 1_800_000_000;
-    let base = ChainId::new(8453);
-    let check = |params: &SwapParams| check_readable(params, &auth(now), base, now, 3_600);
-    assert_eq!(check(&params(now)), Ok(()));
-    let mut late = params(now);
-    late.deadline = U256::from(now);
-    assert!(check(&late).is_err());
-    let mut far = params(now);
-    far.deadline = U256::from(now + 7_200);
-    assert!(check(&far).is_err());
-    let mut not_evm = params(now);
-    not_evm.dst.recipient = FixedBytes([9; 32]);
-    assert!(check(&not_evm).is_err());
-    let mut no_rail = params(now);
-    no_rail.rail = 3;
-    assert!(check(&no_rail).is_err());
-}
-
-#[test]
-fn a_local_swap_delivers_to_an_evm_address_on_its_own_chain() {
-    let now = 1_800_000_000;
-    let base = ChainId::new(8453);
-    let check = |params: &SwapParams| check_readable(params, &auth(now), base, now, 3_600);
-    let mut local = params(now);
-    local.rail = RAIL_LOCAL;
-    local.dstChainId = 8453;
-    local.dst.action = ACTION_DELIVER;
-    assert_eq!(check(&local), Ok(()));
-    let mut elsewhere = local.clone();
-    elsewhere.dstChainId = 42161;
-    assert!(check(&elsewhere).is_err());
-    let mut swaps = local.clone();
-    swaps.dst.action = ACTION_SWAP;
-    assert!(check(&swaps).is_err());
-    let mut to_nobody = local.clone();
-    to_nobody.dst.recipient = FixedBytes::ZERO;
-    assert!(check(&to_nobody).is_err());
-    let mut not_evm = local;
-    not_evm.dst.recipient = FixedBytes([9; 32]);
-    assert!(check(&not_evm).is_err());
-}
-
-#[test]
-fn relay_refuses_short_network_fee() {
-    let now = 1_800_000_000;
-    let base = ChainId::new(8453);
-    let minimums = ChainTable(std::collections::BTreeMap::from([
-        (
-            base,
-            PerAction {
-                relay: TokenAmount::from(20_000_u32),
-                completion: TokenAmount::from(5_000_u32),
-                payout: TokenAmount::ZERO,
-            },
-        ),
-        (
-            ChainId::new(42161),
-            PerAction {
-                relay: TokenAmount::from(15_000_u32),
-                completion: TokenAmount::from(30_000_u32),
-                payout: TokenAmount::ZERO,
-            },
-        ),
-    ]));
-    // CCTP: the relay on Base and the completion on Arbitrum
-    let mut cctp = params(now);
-    cctp.networkFee = U256::from(50_000);
-    assert_eq!(check_network_fee(&cctp, base, &minimums), Ok(()));
-    cctp.networkFee = U256::from(49_999);
-    assert!(check_network_fee(&cctp, base, &minimums).is_err());
-    // Eco: the relay alone, the solver fills
-    let mut eco = params(now);
-    eco.rail = RAIL_ECO;
-    eco.networkFee = U256::from(20_000);
-    assert_eq!(check_network_fee(&eco, base, &minimums), Ok(()));
-    eco.networkFee = U256::from(19_999);
-    assert!(check_network_fee(&eco, base, &minimums).is_err());
-    // a chain with no minimums asks for none
-    let mut free = params(now);
-    free.networkFee = U256::ZERO;
+fn the_real_order_is_relayed_as_the_quoter_built_it() {
+    let mut sample = sample();
+    // the relay on Arbitrum and the completion on Polygon, inside the 166,275 charged
+    sample.set_min_fee(ARBITRUM, GasAction::RelayCctp, 100_000);
+    sample.set_min_fee(POLYGON, GasAction::CompleteSwap, 60_000);
+    let relay = sample.check().unwrap();
     assert_eq!(
-        check_network_fee(&free, ChainId::new(10), &ChainTable::default()),
+        relay.order_id.to_string(),
+        sample.json["orderId"].as_str().unwrap()
+    );
+    assert_eq!(relay.action, GasAction::RelayCctp);
+    assert_eq!(relay.fee, TokenAmount::from(166_275_u64));
+    assert_eq!(
+        relay.arrival,
+        Some(Arrival {
+            chain_id: POLYGON,
+            action: GasAction::CompleteSwap,
+            recipient: address(sample.json["recipient"].as_str().unwrap()),
+        })
+    );
+    // exactly the limit the quoter charged for
+    assert_eq!(relay.gas_limit, GasAmount::from(393_566_u64));
+}
+
+/// Plan Review Focus: an order that pays the canister no fee step, two of them, or too
+/// little for what the canister signs for it is refused, whoever asks.
+#[test]
+fn fee_step_required() {
+    let mut sample = sample();
+    let fee = sample.order.steps[0].clone();
+    let burn = sample.order.steps[1].clone();
+
+    let mut no_fee = sample.order.clone();
+    no_fee.steps = vec![burn.clone()];
+    assert_eq!(
+        sample.check_with(&no_fee, &sample.resigned(&no_fee)),
+        Err(RelayError::NoFeeStep)
+    );
+
+    let mut two_fees = sample.order.clone();
+    two_fees.steps = vec![fee.clone(), fee.clone(), burn.clone()];
+    assert_eq!(
+        sample.check_with(&two_fees, &sample.resigned(&two_fees)),
+        Err(RelayError::FeeSteps(2))
+    );
+
+    // the same transfer to anyone else is no fee to the canister
+    let mut elsewhere = sample.order.clone();
+    let mut data = fee.data.to_vec();
+    data[16..36].copy_from_slice(&[0x99; 20]);
+    elsewhere.steps[0].data = data.into();
+    assert_eq!(
+        sample.check_with(&elsewhere, &sample.resigned(&elsewhere)),
+        Err(RelayError::NoFeeStep)
+    );
+
+    // a fee step that spends a delta is a step like any other, not the fixed fee
+    let mut written = sample.order.clone();
+    written.steps[0].writes = vec![Write {
+        at: 36,
+        minus: U256::ZERO,
+    }];
+    assert_eq!(
+        sample.check_with(&written, &sample.resigned(&written)),
+        Err(RelayError::NoFeeStep)
+    );
+
+    // a CCTP order pays the relay AND the completion on the destination
+    sample.set_min_fee(ARBITRUM, GasAction::RelayCctp, 100_000);
+    sample.set_min_fee(POLYGON, GasAction::CompleteSwap, 66_276);
+    assert_eq!(
+        sample.check(),
+        Err(RelayError::FeeBelowMinimum {
+            paid: TokenAmount::from(166_275_u64),
+            needed: TokenAmount::from(166_276_u64),
+        })
+    );
+    sample.set_min_fee(POLYGON, GasAction::CompleteSwap, 66_275);
+    assert!(sample.check().is_ok());
+}
+
+/// Plan Review Focus: the canister recomputes the id as Swapic does, so an authorization
+/// for another order, for this order on another Swapic, or for an order changed after it
+/// was signed, is refused before anything is signed.
+#[test]
+fn wrong_order_id_refused() {
+    let sample = sample();
+    let id = sample.check().unwrap().order_id;
+
+    let mut another = sample.auth.clone();
+    another.nonce += U256::from(1);
+    assert_eq!(
+        sample.check_with(&sample.order, &another),
+        Err(RelayError::WrongOrderId(id))
+    );
+
+    let mut tampered = sample.order.clone();
+    tampered.amountIn += U256::from(1);
+    assert!(matches!(
+        sample.check_with(&tampered, &sample.auth),
+        Err(RelayError::WrongOrderId(other)) if other != id
+    ));
+
+    let mut elsewhere = self::sample();
+    let mut arbitrum = elsewhere.evm_chains.get(ARBITRUM).unwrap();
+    arbitrum.swapic = EvmAddress::new([0x77; 20]);
+    elsewhere.evm_chains.0.insert(ARBITRUM, arbitrum);
+    assert!(matches!(
+        elsewhere.check(),
+        Err(RelayError::WrongOrderId(other)) if other != id
+    ));
+
+    // and a chain the canister does not sign on is refused by name
+    let chains = Chains {
+        chain_id: ChainId::BASE,
+        evm_chains: &sample.evm_chains,
+        domains: &sample.domains,
+        canister: sample.canister,
+    };
+    assert_eq!(
+        check(
+            &sample.order,
+            &sample.auth,
+            sample.gas,
+            &chains,
+            sample.now(),
+            3_600
+        ),
+        Err(RelayError::UnknownChain(ChainId::BASE))
+    );
+}
+
+#[test]
+fn the_deadline_must_leave_time_to_land_and_not_be_far_ahead() {
+    let sample = sample();
+    let chains = Chains {
+        chain_id: ARBITRUM,
+        evm_chains: &sample.evm_chains,
+        domains: &sample.domains,
+        canister: sample.canister,
+    };
+    let at = |now: u64, window: u64| {
+        check(
+            &sample.order,
+            &sample.auth,
+            sample.gas,
+            &chains,
+            now,
+            window,
+        )
+    };
+    let deadline = sample.deadline();
+    assert!(at(deadline - RELAY_MARGIN_S - 1, 3_600).is_ok());
+    assert!(matches!(
+        at(deadline - RELAY_MARGIN_S, 3_600),
+        Err(RelayError::Deadline { .. })
+    ));
+    assert!(matches!(
+        at(deadline - 120, 60),
+        Err(RelayError::Deadline { .. })
+    ));
+}
+
+#[test]
+fn a_burn_whose_arrival_cannot_be_finished_is_refused() {
+    let sample = sample();
+    let messenger = address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
+    let rebuilt = |edit: &dyn Fn(&mut types::swapic::depositForBurnWithHookCall)| {
+        use alloy_sol_types::SolCall;
+        let mut call =
+            types::swapic::depositForBurnWithHookCall::abi_decode(&sample.order.steps[1].data)
+                .unwrap();
+        edit(&mut call);
+        let mut order = sample.order.clone();
+        order.steps[1] = Step {
+            data: call.abi_encode().into(),
+            ..order.steps[1].clone()
+        };
+        sample.check_with(&order, &sample.resigned(&order))
+    };
+    assert!(CctpBurn::of_step(&sample.order.steps[1], messenger).is_some());
+    // minted to anyone but the destination receiver: the receiver refuses the message
+    assert!(matches!(
+        rebuilt(&|call| call.mintRecipient = [0x99; 32].into()),
+        Err(RelayError::Burn(_))
+    ));
+    // a caller-zero burn to the receiver: anyone could strand it there
+    assert!(matches!(
+        rebuilt(&|call| call.destinationCaller = [0; 32].into()),
+        Err(RelayError::Burn(_))
+    ));
+    // a domain the canister finishes nothing on
+    assert_eq!(
+        rebuilt(&|call| call.destinationDomain = 6),
+        Err(RelayError::UnknownDestination(6))
+    );
+    // an envelope the receiver will not decode
+    assert!(matches!(
+        rebuilt(&|call| {
+            let mut hook = call.hookData.to_vec();
+            hook[31] = 2;
+            call.hookData = hook.into();
+        }),
+        Err(RelayError::Envelope(_))
+    ));
+}
+
+/// Plan Review Focus: the same order relayed twice signs once. The fold refuses a second
+/// nonce while the first is out and a second record once it is signed, and the door
+/// answers the first record's id.
+#[test]
+fn idempotent_per_order() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let key = QuoteHash::new(sample().check().unwrap().order_id.into_bytes());
+        let created = |nonce: u64| EventType::TxCreated {
+            purpose: TxPurpose::Relay(key),
+            chain_id: ARBITRUM,
+            nonce: Nonce::new(nonce),
+            to: EvmAddress::new([0xf2; 20]),
+            value: Wei::ZERO,
+            data: types::swapic::selectors::RUN_FOR.to_vec(),
+            gas_limit: GasAmount::from(393_566_u64),
+            max_fee: WeiPerGas::from(20_000_000_u64),
+            max_priority_fee: WeiPerGas::from(1_000_000_u64),
+        };
+        assert_eq!(tx::signed_once(key), Ok(None));
+        append_event_at(created(0), at).unwrap();
+        assert!(tx::signed_once(key).is_err(), "being signed");
+        assert!(append_event_at(created(1), at).is_err(), "no second nonce");
+        let id = append_event_at(
+            EventType::Flow {
+                quote_hash: key,
+                step: FlowStep::GaslessRelayed {
+                    chain_id: ARBITRUM,
+                    nonce: Nonce::new(0),
+                    tx_hash: TxHash::new([1; 32]),
+                    raw_tx: vec![0x02, 0xf8],
+                },
+            },
+            at,
+        )
+        .unwrap()
+        .get();
+        assert_eq!(tx::signed_once(key), Ok(Some(id)));
+        assert!(append_event_at(created(1), at).is_err(), "no second relay");
+        let flow = read_state(|state| state.flow(&key)).unwrap();
+        assert_eq!(flow.signed_id, Some(id));
+    });
+}
+
+/// Plan Review Focus: the relay is signed with exactly the limit the quoter charged for,
+/// held to the chain's maximum, and a fee spike that puts it over the action's budget
+/// leaves it unsigned.
+#[test]
+fn gas_rule_refuses_over_budget() {
+    let sample = sample();
+    let relay = sample.check().unwrap();
+    let arbitrum = sample.evm_chains.get(ARBITRUM).unwrap();
+    // a larger limit is signed at the maximum, a smaller one exactly
+    assert_eq!(
+        signing_gas(ARBITRUM, &arbitrum, GasAction::RelayCctp, 5_000_000),
+        Ok(GasAmount::from(2_000_000_u64))
+    );
+    assert_eq!(
+        signing_gas(ARBITRUM, &arbitrum, GasAction::RelayCctp, 20_999),
+        Err(RelayError::GasLimitTooLow(20_999))
+    );
+    let fees = |base_fee: u64| {
+        ChainReading {
+            block: BlockNumber::new(1),
+            base_fee: WeiPerGas::from(base_fee),
+            priority_fee: WeiPerGas::from(10_000_000_u64),
+        }
+        .pushed_at(Timestamp::from_nanos(1))
+        .fees()
+        .unwrap()
+    };
+    let config = types::Config {
+        evm_chains: sample.evm_chains.clone(),
+        ..types::Config::default()
+    };
+    // 0.02 gwei on Arbitrum: 393,566 gas costs far less than the 0.01 ether budget
+    assert_eq!(
+        tx::gas_rule(
+            &config,
+            ARBITRUM,
+            relay.action,
+            fees(20_000_000),
+            relay.gas_limit
+        ),
         Ok(())
     );
+    // a spike to 20 gwei: 40.01 gwei times 393,566 gas is above it
+    assert!(matches!(
+        tx::gas_rule(
+            &config,
+            ARBITRUM,
+            relay.action,
+            fees(20_000_000_000),
+            relay.gas_limit
+        ),
+        Err(tx::TxError::OverGasBudget { .. })
+    ));
 }

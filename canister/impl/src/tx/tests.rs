@@ -231,13 +231,9 @@ fn a_large_gas_limit_keeps_bumping_in_smaller_steps_up_to_the_cost_cap() {
         // a budget far above the bound, so the bound is what stops the bids
         let roomy = Wei::from(10_000_000_000_000_000_000_u128);
         config::test_set(types::Config {
-            gas_budget: types::config::ChainTable(std::collections::BTreeMap::from([(
+            evm_chains: types::config::ChainTable(std::collections::BTreeMap::from([(
                 ChainId::BASE,
-                types::config::PerAction {
-                    relay: roomy,
-                    completion: roomy,
-                    payout: roomy,
-                },
+                chain_with_budget(roomy),
             )])),
             ..types::Config::default()
         });
@@ -254,6 +250,7 @@ fn a_large_gas_limit_keeps_bumping_in_smaller_steps_up_to_the_cost_cap() {
         // 2.1 gwei the reading prices at, below the 8.8 gwei the fee ceiling allows
         let gas_limit = GasAmount::from(200_000_000_u64);
         let mut entry = entry_with(0, 1);
+        entry.action = Some(GasAction::RelayLocal);
         entry.gas_limit = gas_limit;
         entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
         entry.max_priority_fee = WeiPerGas::from(100_000_000_u64);
@@ -479,6 +476,7 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         data: vec![],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
+        action: None,
     }
 }
 
@@ -772,16 +770,16 @@ fn gas_rule_refuses_over_budget() {
     // 4 gwei base and a 1 gwei tip: 9 gwei times 100,000 gas is 0.0009 ETH
     let calm = reading(4_000_000_000, 1_000_000_000).fees().unwrap();
     assert_eq!(
-        within_budget(ChainId::BASE, GasAction::Relay, budget, calm, gas),
+        within_budget(ChainId::BASE, GasAction::RelayCctp, budget, calm, gas),
         Ok(())
     );
     // a spike to 10 gwei: 21 gwei is 0.0021 ETH
     let spike = reading(10_000_000_000, 1_000_000_000).fees().unwrap();
     assert_eq!(
-        within_budget(ChainId::BASE, GasAction::Relay, budget, spike, gas),
+        within_budget(ChainId::BASE, GasAction::RelayCctp, budget, spike, gas),
         Err(TxError::OverGasBudget {
             chain_id: ChainId::BASE,
-            action: GasAction::Relay,
+            action: GasAction::RelayCctp,
             cost: Wei::from(2_100_000_000_000_000_u64),
             budget,
         })
@@ -789,21 +787,25 @@ fn gas_rule_refuses_over_budget() {
     // a chain with no budget for the action signs nothing for it
     let config = types::Config::default();
     assert_eq!(
-        budget_for(
-            &config,
-            ChainId::BASE,
-            TxPurpose::Relay(QuoteHash::new([1; 32]))
-        ),
+        budget_for(&config, ChainId::BASE, GasAction::RelayCctp),
         Err(TxError::NoGasBudget {
             chain_id: ChainId::BASE,
-            action: GasAction::Relay,
+            action: GasAction::RelayCctp,
         })
     );
-    // a cancel is held to the bound every transaction has, not to a budget
+    // and a chain that signs it is held to that action's budget
+    let config = types::Config {
+        evm_chains: types::config::ChainTable(std::collections::BTreeMap::from([(
+            ChainId::BASE,
+            chain_with_budget(budget),
+        )])),
+        ..types::Config::default()
+    };
     assert_eq!(
-        budget_for(&config, ChainId::BASE, TxPurpose::Cancel(ChainId::BASE)),
-        Ok(None)
+        gas_rule(&config, ChainId::BASE, GasAction::Release, calm, gas),
+        Ok(())
     );
+    assert!(gas_rule(&config, ChainId::BASE, GasAction::Release, spike, gas).is_err());
     // the replacement of a 9 gwei bid stops at the 10 gwei the budget buys per gas, and
     // the one after it is refused
     let bumped = bump(
@@ -823,4 +825,20 @@ fn gas_rule_refuses_over_budget() {
         ),
         None
     );
+}
+
+/// A chain the canister signs on, every action held to `budget`.
+fn chain_with_budget(budget: Wei) -> types::config::EvmChain {
+    let anywhere = EvmAddress::new([0x11; 20]);
+    types::config::EvmChain {
+        swapic: anywhere,
+        runner: anywhere,
+        cctp_receiver: anywhere,
+        usdc: anywhere,
+        token_messenger: anywhere,
+        message_transmitter: anywhere,
+        gas_limit: types::config::PerAction::all(GasAmount::from(1_000_000_u64)),
+        gas_budget: types::config::PerAction::all(budget),
+        min_network_fee: types::config::PerAction::all(types::TokenAmount::ZERO),
+    }
 }
