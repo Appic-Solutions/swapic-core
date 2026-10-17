@@ -227,16 +227,18 @@ pub fn signing_gas(
 /// here and not by a revert on chain.
 fn check_auth(auth: &GaslessAuth, id: OrderId, now_s: u64) -> Result<(), RelayError> {
     let now = U256::from(now_s);
+    // what must still hold when the relay lands, a margin after the canister's clock
+    let landing = U256::from(now_s.saturating_add(RELAY_MARGIN_S));
     match auth.door {
         DOOR_AUTH_3009 => {
             if auth.nonce != id.as_nonce() {
                 return Err(RelayError::WrongOrderId(id));
             }
-            if auth.validAfter >= now {
+            if auth.validAfter > now {
                 return Err(RelayError::Authorization("is not valid yet"));
             }
-            if auth.validBefore <= now {
-                return Err(RelayError::Authorization("has expired"));
+            if auth.validBefore < landing {
+                return Err(RelayError::Authorization("expires before the relay lands"));
             }
             if auth.signature.len() != 65 {
                 return Err(RelayError::Authorization("signature is not 65 bytes"));
@@ -248,8 +250,10 @@ fn check_auth(auth: &GaslessAuth, id: OrderId, now_s: u64) -> Result<(), RelayEr
             }
         }
         DOOR_PERMIT2 => {
-            if auth.deadline <= now {
-                return Err(RelayError::Authorization("Permit2 permit has expired"));
+            if auth.deadline < landing {
+                return Err(RelayError::Authorization(
+                    "Permit2 permit expires before the relay lands",
+                ));
             }
             if auth.signature.is_empty() {
                 return Err(RelayError::Authorization("carries no Permit2 signature"));

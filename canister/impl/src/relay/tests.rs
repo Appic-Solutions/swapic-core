@@ -1046,3 +1046,41 @@ fn every_real_order_reads_as_the_quoter_built_it() {
         }
     }
 }
+
+/// Review fix 1: an authorization must still hold when the relay lands, so `validBefore`
+/// and a Permit2 `deadline` are at least the landing margin ahead, and `validAfter` has
+/// begun.
+#[test]
+fn the_authorization_must_outlast_the_landing_margin() {
+    let sample = sample();
+    let now = sample.now();
+    let with = |edit: &dyn Fn(&mut GaslessAuth)| {
+        let mut auth = sample.auth.clone();
+        edit(&mut auth);
+        sample.check_with(&sample.order, &auth)
+    };
+    assert!(with(&|_| {}).is_ok());
+    let short = with(&|auth| auth.validBefore = U256::from(now + RELAY_MARGIN_S - 1));
+    assert_eq!(
+        short,
+        Err(RelayError::Authorization("expires before the relay lands"))
+    );
+    assert!(with(&|auth| auth.validBefore = U256::from(now + RELAY_MARGIN_S)).is_ok());
+    let early = with(&|auth| auth.validAfter = U256::from(now + 1));
+    assert_eq!(early, Err(RelayError::Authorization("is not valid yet")));
+    assert!(with(&|auth| auth.validAfter = U256::from(now)).is_ok());
+
+    let permit2 = |deadline: u64| {
+        with(&|auth| {
+            auth.door = DOOR_PERMIT2;
+            auth.deadline = U256::from(deadline);
+        })
+    };
+    assert_eq!(
+        permit2(now + RELAY_MARGIN_S - 1),
+        Err(RelayError::Authorization(
+            "Permit2 permit expires before the relay lands"
+        ))
+    );
+    assert!(permit2(now + RELAY_MARGIN_S).is_ok());
+}
