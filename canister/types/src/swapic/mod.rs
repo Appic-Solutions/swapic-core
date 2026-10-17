@@ -18,6 +18,7 @@ mod tests;
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use alloy_primitives::{keccak256, Address, FixedBytes, U256};
+use alloy_sol_types::abi::AbiDecoderConfig;
 use alloy_sol_types::{sol, Eip712Domain, SolCall, SolStruct, SolValue};
 use std::borrow::Cow;
 use std::fmt;
@@ -100,6 +101,37 @@ sol! {
     function publishAndFund(uint64 destination, bytes route, EcoReward reward, bool allowPartial) external payable returns (bytes32 intentHash, address vault);
     function approve(address spender, uint256 amount) external returns (bool);
     function fill(address token, uint256 amount, bytes envelope, Recipe recipe) external;
+
+    /// KyberSwap's MetaAggregationRouterV2 `swap`, the swap step the quoter writes.
+    struct KyberDescription {
+        address srcToken;
+        address dstToken;
+        address[] srcReceivers;
+        uint256[] srcAmounts;
+        address[] feeReceivers;
+        uint256[] feeAmounts;
+        address dstReceiver;
+        uint256 amount;
+        uint256 minReturnAmount;
+        uint256 flags;
+        bytes permit;
+    }
+    struct KyberExecution {
+        address callTarget;
+        address approveTarget;
+        bytes targetData;
+        KyberDescription desc;
+        bytes clientData;
+    }
+    function swap(KyberExecution execution) external payable returns (uint256 returnAmount, uint256 gasUsed);
+}
+
+/// How every ABI value this canister reads is decoded: strictly. Canonical offsets, zero
+/// padding, every narrow word in range and no trailing bytes, so what the canister reads
+/// is what the contract it calls reads, and a lenient encoding is refused rather than read
+/// differently.
+fn strict() -> AbiDecoderConfig {
+    AbiDecoderConfig::new().strict(true)
 }
 
 /// Ether wherever a token address is expected.
@@ -242,9 +274,9 @@ pub fn acceptance_digest(order: &Order, chain_id: ChainId, swapic: EvmAddress) -
     digest(domain(chain_id, swapic).separator().0, keccak256(encoded).0)
 }
 
-/// The order an `abi.encode(order)` holds.
+/// The order an `abi.encode(order)` holds, encoded canonically.
 pub fn decode_order(bytes: &[u8]) -> Option<Order> {
-    <Order as SolValue>::abi_decode(bytes).ok()
+    <Order as SolValue>::abi_decode_with_config(bytes, strict()).ok()
 }
 
 /// `abi.encode(order)`: the order exactly as signed.
@@ -252,9 +284,9 @@ pub fn encode_order(order: &Order) -> Vec<u8> {
     SolValue::abi_encode(order)
 }
 
-/// The authorization an `abi.encode(auth)` holds.
+/// The authorization an `abi.encode(auth)` holds, encoded canonically.
 pub fn decode_auth(bytes: &[u8]) -> Option<GaslessAuth> {
-    <GaslessAuth as SolValue>::abi_decode(bytes).ok()
+    <GaslessAuth as SolValue>::abi_decode_with_config(bytes, strict()).ok()
 }
 
 /// `abi.encode(auth)`.
@@ -345,7 +377,7 @@ pub fn fee_transfer_of(step: &Step, usdc: EvmAddress) -> Option<(EvmAddress, U25
     {
         return None;
     }
-    let call = transferCall::abi_decode(&step.data).ok()?;
+    let call = transferCall::abi_decode_with_config(&step.data, strict()).ok()?;
     Some((evm(call.to), call.amount))
 }
 
@@ -371,7 +403,7 @@ impl CctpBurn {
             return Some(Err(NotABurn));
         }
         Some(
-            depositForBurnWithHookCall::abi_decode(&step.data)
+            depositForBurnWithHookCall::abi_decode_with_config(&step.data, strict())
                 .map(|call| Self {
                     destination_domain: call.destinationDomain,
                     mint_recipient: call.mintRecipient.0,
@@ -398,8 +430,10 @@ pub struct EcoIntent {
     pub destination: u64,
     /// The reward's creator: the user, whom an unfilled intent refunds (rule 19).
     pub creator: EvmAddress,
-    /// The one token the route carries.
+    /// The one token the route carries, on the destination.
     pub token: EvmAddress,
+    /// The one token the reward pays the solver, on the source.
+    pub reward_token: EvmAddress,
     pub arrival: EcoArrival,
 }
 
@@ -425,8 +459,12 @@ pub enum NotAnIntent {
     Route,
     #[error("the route carries other than exactly one token")]
     Tokens,
-    #[error("the route moves ether")]
+    #[error("the route or the reward moves ether")]
     Value,
+    #[error("the reward pays other than exactly one token")]
+    RewardTokens,
+    #[error("the intent may be funded in part")]
+    Partial,
     #[error("the route's calls are neither a transfer nor an approve and a fill")]
     Calls,
     #[error("the fill's envelope: {0}")]
@@ -441,20 +479,31 @@ impl EcoIntent {
     }
 
     fn read(data: &[u8]) -> Result<Self, NotAnIntent> {
-        let call = publishAndFundCall::abi_decode(data).map_err(|_| NotAnIntent::Call)?;
-        let route =
-            <EcoRoute as SolValue>::abi_decode(&call.route).map_err(|_| NotAnIntent::Route)?;
+        let call = publishAndFundCall::abi_decode_with_config(data, strict())
+            .map_err(|_| NotAnIntent::Call)?;
+        let route = <EcoRoute as SolValue>::abi_decode_with_config(&call.route, strict())
+            .map_err(|_| NotAnIntent::Route)?;
+        if call.allowPartial {
+            return Err(NotAnIntent::Partial);
+        }
         let [carried] = route.tokens.as_slice() else {
             return Err(NotAnIntent::Tokens);
         };
-        if !route.nativeAmount.is_zero() || route.calls.iter().any(|call| !call.value.is_zero()) {
+        let [paid] = call.reward.tokens.as_slice() else {
+            return Err(NotAnIntent::RewardTokens);
+        };
+        if !route.nativeAmount.is_zero()
+            || !call.reward.nativeAmount.is_zero()
+            || route.calls.iter().any(|call| !call.value.is_zero())
+        {
             return Err(NotAnIntent::Value);
         }
         let token = carried.token;
         let selector = |data: &[u8]| -> Option<[u8; 4]> { data.get(..4)?.try_into().ok() };
         let arrival = match route.calls.as_slice() {
             [send] if send.target == token && selector(&send.data) == Some(selectors::TRANSFER) => {
-                let send = transferCall::abi_decode(&send.data).map_err(|_| NotAnIntent::Calls)?;
+                let send = transferCall::abi_decode_with_config(&send.data, strict())
+                    .map_err(|_| NotAnIntent::Calls)?;
                 EcoArrival::Deliver {
                     recipient: evm(send.to),
                 }
@@ -464,8 +513,10 @@ impl EcoIntent {
                     && selector(&grant.data) == Some(approveCall::SELECTOR)
                     && selector(&fill.data) == Some(fillCall::SELECTOR) =>
             {
-                let grant = approveCall::abi_decode(&grant.data).map_err(|_| NotAnIntent::Calls)?;
-                let call = fillCall::abi_decode(&fill.data).map_err(|_| NotAnIntent::Calls)?;
+                let grant = approveCall::abi_decode_with_config(&grant.data, strict())
+                    .map_err(|_| NotAnIntent::Calls)?;
+                let call = fillCall::abi_decode_with_config(&fill.data, strict())
+                    .map_err(|_| NotAnIntent::Calls)?;
                 if grant.spender != fill.target || call.token != token {
                     return Err(NotAnIntent::Calls);
                 }
@@ -480,9 +531,82 @@ impl EcoIntent {
             destination: call.destination,
             creator: evm(call.reward.creator),
             token: evm(token),
+            reward_token: evm(paid.token),
             arrival,
         })
     }
+}
+
+/// KyberSwap's `swap` selector.
+pub const KYBER_SWAP: [u8; 4] = swapCall::SELECTOR;
+
+/// KyberSwap's MetaAggregationRouterV2, at one address on every chain the quoter routes
+/// on: the one swap target a gasless order may name.
+pub const KYBER_ROUTER: EvmAddress = EvmAddress::new([
+    0x61, 0x31, 0xb5, 0xfa, 0xe1, 0x9e, 0xa4, 0xf9, 0xd9, 0x64, 0xea, 0xc0, 0x40, 0x8e, 0x44, 0x08,
+    0xb6, 0x63, 0x37, 0xb5,
+]);
+
+/// KyberSwap's executor, at one address on every chain the quoter routes on: the one
+/// `callTarget` a swap may hand its input to. Should KyberSwap move it, gasless swaps are
+/// refused until this follows.
+pub const KYBER_EXECUTOR: EvmAddress = EvmAddress::new([
+    0x8f, 0x10, 0xb4, 0x68, 0xb0, 0x6c, 0x6f, 0xd2, 0x14, 0xb6, 0x5f, 0x87, 0x77, 0x88, 0x27, 0xf7,
+    0xd1, 0x13, 0xf9, 0x96,
+]);
+
+/// A KyberSwap `swap` an order makes, read back: who gets its input, its output and its
+/// fees. The executor's route inside `targetData` is not read: which pools a swap may
+/// cross is the quoter's rule (abi.md rule 5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KyberSwap {
+    pub src_token: EvmAddress,
+    pub dst_token: EvmAddress,
+    /// The executor the router calls with the route.
+    pub call_target: EvmAddress,
+    /// Who the router hands the input to.
+    pub src_receivers: Vec<EvmAddress>,
+    pub fee_receivers: Vec<EvmAddress>,
+    /// Who the router pays the output to.
+    pub dst_receiver: EvmAddress,
+    /// Whether the swap carries a permit of its own.
+    pub permit: bool,
+}
+
+/// A step to KyberSwap's `swap` this canister cannot read.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("a KyberSwap swap step does not decode")]
+pub struct NotASwap;
+
+impl KyberSwap {
+    /// The swap a step makes: `None` for a step that is no KyberSwap `swap`.
+    pub fn of_step(step: &Step) -> Option<Result<Self, NotASwap>> {
+        (selector_of(step) == Some(KYBER_SWAP)).then(|| {
+            let call =
+                swapCall::abi_decode_with_config(&step.data, strict()).map_err(|_| NotASwap)?;
+            let execution = call.execution;
+            let desc = execution.desc;
+            Ok(Self {
+                src_token: evm(desc.srcToken),
+                dst_token: evm(desc.dstToken),
+                call_target: evm(execution.callTarget),
+                src_receivers: desc.srcReceivers.into_iter().map(evm).collect(),
+                fee_receivers: desc.feeReceivers.into_iter().map(evm).collect(),
+                dst_receiver: evm(desc.dstReceiver),
+                permit: !desc.permit.is_empty(),
+            })
+        })
+    }
+}
+
+/// The ICP principal a CkDeposit's envelope names: the ck helper's encoding, its length in
+/// the first byte, its bytes after it, zeros after them. Nothing for a word that is not one.
+pub fn ck_principal(word: [u8; 32]) -> Option<candid::Principal> {
+    let len = usize::from(word[0]);
+    if len == 0 || len > 29 || word[1 + len..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(candid::Principal::from_slice(&word[1..1 + len]))
 }
 
 /// What an arrival does (`Action` in the contracts).

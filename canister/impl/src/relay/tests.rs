@@ -30,6 +30,7 @@ fn address(text: &str) -> EvmAddress {
 }
 
 const MESSENGER: &str = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d";
+const ECO_PORTAL: &str = "0xEC000769A73b70e16f361a442292500b3BCf4A85";
 
 /// A chain the canister signs on, every action given two million gas, a budget of 0.01
 /// ether and no least fee unless a test sets one.
@@ -63,9 +64,18 @@ fn sample() -> Sample {
 /// `samples/quoter_order_base_eco_ckdeposit_gasless.json`: 50 USDC on Base to ckUSDC
 /// through Eco to Ethereum's ck helper, gasless.
 fn eco_sample() -> Sample {
-    load(include_str!(
+    let mut sample = load(include_str!(
         "../../samples/quoter_order_base_eco_ckdeposit_gasless.json"
-    ))
+    ));
+    let text = |field: &str| sample.json[field].as_str().unwrap().to_string();
+    let ethereum = chain(
+        address(&text("swapic")),
+        address(&text("runner")),
+        EvmAddress::new([0xe3; 20]),
+        address(&text("arrivalUsdc")),
+    );
+    sample.evm_chains.0.insert(ChainId::ETHEREUM, ethereum);
+    sample
 }
 
 /// `samples/quoter_order_base_local_gasless.json`: 100 USDC to WETH on Base, gasless,
@@ -164,6 +174,7 @@ impl Sample {
             evm_chains: &self.evm_chains,
             domains: &self.domains,
             canister: self.canister,
+            eco_portal: Some(address(ECO_PORTAL)),
         };
         check(order, auth, self.gas, &chains, self.now(), 3_600)
     }
@@ -214,6 +225,9 @@ fn the_real_order_is_relayed_as_the_quoter_built_it() {
             chain_id: POLYGON,
             action: GasAction::CompleteSwap,
             recipient: address(sample.json["recipient"].as_str().unwrap()),
+            parties: vec![Party::Evm(address(
+                sample.json["recipient"].as_str().unwrap()
+            ))],
         })
     );
     // exactly the limit the quoter charged for
@@ -242,17 +256,18 @@ fn fee_step_required() {
         Err(RelayError::FeeSteps(2))
     );
 
-    // the same transfer to anyone else is no fee to the canister
+    // the same transfer to anyone else is no fee to the canister, and a step the canister
+    // does not read
     let mut elsewhere = sample.order.clone();
     let mut data = fee.data.to_vec();
     data[16..36].copy_from_slice(&[0x99; 20]);
     elsewhere.steps[0].data = data.into();
     assert_eq!(
         sample.check_with(&elsewhere, &sample.resigned(&elsewhere)),
-        Err(RelayError::NoFeeStep)
+        Err(RelayError::UnknownStep(0))
     );
 
-    // a fee step that spends a delta is a step like any other, not the fixed fee
+    // a transfer that spends a delta is not the fixed fee either
     let mut written = sample.order.clone();
     written.steps[0].writes = vec![Write {
         at: 36,
@@ -260,7 +275,7 @@ fn fee_step_required() {
     }];
     assert_eq!(
         sample.check_with(&written, &sample.resigned(&written)),
-        Err(RelayError::NoFeeStep)
+        Err(RelayError::UnknownStep(0))
     );
 
     // a CCTP order pays the relay AND the completion on the destination
@@ -314,6 +329,7 @@ fn wrong_order_id_refused() {
         evm_chains: &sample.evm_chains,
         domains: &sample.domains,
         canister: sample.canister,
+        eco_portal: Some(address(ECO_PORTAL)),
     };
     assert_eq!(
         check(
@@ -336,6 +352,7 @@ fn the_deadline_must_leave_time_to_land_and_not_be_far_ahead() {
         evm_chains: &sample.evm_chains,
         domains: &sample.domains,
         canister: sample.canister,
+        eco_portal: Some(address(ECO_PORTAL)),
     };
     let at = |now: u64, window: u64| {
         check(
@@ -520,7 +537,7 @@ fn sanctioned(address: EvmAddress) {
 }
 
 /// The party the screen stops `order` at, the order signed again and otherwise admitted.
-fn stopped_at(sample: &Sample, order: &Order) -> Option<EvmAddress> {
+fn stopped_at(sample: &Sample, order: &Order) -> Option<Party> {
     sanctioned_party(&sample.check_resigned(order).unwrap().parties)
 }
 
@@ -562,7 +579,7 @@ fn a_sanctioned_payer_is_refused() {
         assert_eq!(stopped_at(&sample, &sample.order), None);
         let payer = swapic::evm(sample.order.payer);
         sanctioned(payer);
-        assert_eq!(stopped_at(&sample, &sample.order), Some(payer));
+        assert_eq!(stopped_at(&sample, &sample.order), Some(Party::Evm(payer)));
     });
 }
 
@@ -578,7 +595,7 @@ fn a_sanctioned_cctp_recipient_is_refused() {
         });
         assert_eq!(stopped_at(&sample, &order), None);
         sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(stopped_at(&sample, &order), Some(Party::Evm(SOMEONE)));
     });
 }
 
@@ -600,7 +617,7 @@ fn a_sanctioned_cctp_deliver_mint_recipient_is_refused() {
         assert_eq!(relay.arrival.unwrap().action, GasAction::RelayDeliver);
         assert_eq!(stopped_at(&sample, &order), None);
         sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(stopped_at(&sample, &order), Some(Party::Evm(SOMEONE)));
     });
 }
 
@@ -613,21 +630,27 @@ fn a_sanctioned_payout_recipient_is_refused() {
         order.payout.recipient = swapic::addr(SOMEONE);
         assert_eq!(stopped_at(&sample, &order), None);
         sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(stopped_at(&sample, &order), Some(Party::Evm(SOMEONE)));
     });
 }
 
+/// The creator of an Eco intent is who an unfilled intent refunds: it is the payer, so
+/// the payer's screen covers it, and any other creator is refused before any screen.
 #[test]
-fn a_sanctioned_eco_creator_is_refused() {
+fn an_eco_creator_other_than_the_payer_is_refused() {
     on_fresh_memory(|| {
         crate::storage::init();
         let sample = eco_sample();
+        let payer = swapic::evm(sample.order.payer);
         let order = with_eco(&sample.order, |call, _| {
             call.reward.creator = swapic::addr(SOMEONE);
         });
-        assert_eq!(stopped_at(&sample, &order), None);
-        sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(
+            sample.check_resigned(&order),
+            Err(RelayError::Eco("refunds to someone other than the payer"))
+        );
+        sanctioned(payer);
+        assert_eq!(stopped_at(&sample, &sample.order), Some(Party::Evm(payer)));
     });
 }
 
@@ -645,7 +668,7 @@ fn a_sanctioned_eco_fill_recipient_is_refused() {
         });
         assert_eq!(stopped_at(&sample, &order), None);
         sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(stopped_at(&sample, &order), Some(Party::Evm(SOMEONE)));
     });
 }
 
@@ -669,7 +692,7 @@ fn a_sanctioned_eco_transfer_recipient_is_refused() {
         });
         assert_eq!(stopped_at(&sample, &order), None);
         sanctioned(SOMEONE);
-        assert_eq!(stopped_at(&sample, &order), Some(SOMEONE));
+        assert_eq!(stopped_at(&sample, &order), Some(Party::Evm(SOMEONE)));
     });
 }
 
@@ -693,4 +716,177 @@ fn a_plan_whose_recipient_cannot_be_read_is_refused() {
         eco.check_resigned(&unread),
         Err(RelayError::EcoRoute(NotAnIntent::Calls))
     );
+}
+
+// Gaps in the screen, each shown on a real order before it was closed.
+
+alloy_sol_types::sol! {
+    /// KyberSwap's MetaAggregationRouterV2, spelled here independently of the canister's
+    /// own reading of it.
+    struct KyberDescription {
+        address srcToken;
+        address dstToken;
+        address[] srcReceivers;
+        uint256[] srcAmounts;
+        address[] feeReceivers;
+        uint256[] feeAmounts;
+        address dstReceiver;
+        uint256 amount;
+        uint256 minReturnAmount;
+        uint256 flags;
+        bytes permit;
+    }
+    struct KyberExecution {
+        address callTarget;
+        address approveTarget;
+        bytes targetData;
+        KyberDescription desc;
+        bytes clientData;
+    }
+    function swap(KyberExecution execution) external payable returns (uint256, uint256);
+}
+
+/// `order` with its KyberSwap step edited.
+fn with_swap(order: &Order, edit: impl Fn(&mut KyberExecution)) -> Order {
+    let mut order = order.clone();
+    let step = order
+        .steps
+        .iter_mut()
+        .find(|step| swapic::selector_of(step) == Some(swapCall::SELECTOR))
+        .unwrap();
+    let mut call = swapCall::abi_decode(&step.data).unwrap();
+    edit(&mut call.execution);
+    step.data = call.abi_encode().into();
+    order
+}
+
+/// A step beside the known shapes (the fee, a CCTP burn, an Eco intent, a KyberSwap swap
+/// paying the Runner) moves money the screen never sees: here a plain USDC transfer to
+/// someone, next to a fee and a burn that read clean.
+#[test]
+fn a_step_the_canister_cannot_read_is_refused() {
+    let sample = sample();
+    let usdc = sample.evm_chains.get(ARBITRUM).unwrap().usdc;
+    let mut order = sample.order.clone();
+    order.steps.insert(
+        1,
+        Step {
+            target: swapic::addr(usdc),
+            data: transferCall {
+                to: swapic::addr(SOMEONE),
+                amount: U256::from(1_000_000),
+            }
+            .abi_encode()
+            .into(),
+            token: alloy_primitives::Address::ZERO,
+            min: U256::ZERO,
+            writes: vec![],
+        },
+    );
+    assert_eq!(
+        sample.check_resigned(&order),
+        Err(RelayError::UnknownStep(1))
+    );
+}
+
+/// A swap's own receivers are parties too: its output must go to the Runner, its input
+/// only to the executor it calls, and nothing to fee receivers.
+#[test]
+fn a_swap_that_pays_anyone_but_the_runner_is_refused() {
+    let sample = local_sample();
+    assert!(sample.check().is_ok());
+    let to_someone = with_swap(&sample.order, |execution| {
+        execution.desc.dstReceiver = swapic::addr(SOMEONE);
+    });
+    assert_eq!(
+        sample.check_resigned(&to_someone),
+        Err(RelayError::Swap("pays its output to other than the Runner"))
+    );
+    let fee_to_someone = with_swap(&sample.order, |execution| {
+        execution.desc.feeReceivers = vec![swapic::addr(SOMEONE)];
+        execution.desc.feeAmounts = vec![U256::from(1)];
+    });
+    assert_eq!(
+        sample.check_resigned(&fee_to_someone),
+        Err(RelayError::Swap("pays fees or carries a permit"))
+    );
+    let input_to_someone = with_swap(&sample.order, |execution| {
+        execution.desc.srcReceivers = vec![swapic::addr(SOMEONE)];
+    });
+    assert_eq!(
+        sample.check_resigned(&input_to_someone),
+        Err(RelayError::Swap(
+            "hands its input to other than KyberSwap's executor"
+        ))
+    );
+}
+
+/// An Eco intent is read as the destination will run it only when the canister knows the
+/// destination: its USDC, and its Runner as the one approved and filled. Its refunds go to
+/// its creator, who is the payer.
+#[test]
+fn an_eco_intent_the_canister_cannot_bind_is_refused() {
+    let sample = eco_sample();
+    assert!(sample.check().is_ok());
+    let mut unknown = eco_sample();
+    unknown.evm_chains.0.remove(&ChainId::ETHEREUM);
+    assert_eq!(unknown.check(), Err(RelayError::EcoUnknownDestination(1)));
+    let other_creator = with_eco(&sample.order, |call, _| {
+        call.reward.creator = swapic::addr(SOMEONE);
+    });
+    assert_eq!(
+        sample.check_resigned(&other_creator),
+        Err(RelayError::Eco("refunds to someone other than the payer"))
+    );
+    // a route whose approve and token agree, on a token that is not the destination's USDC
+    let other_token = with_eco(&sample.order, |_, route| {
+        route.tokens[0].token = swapic::addr(SOMEONE);
+        route.calls[0].target = swapic::addr(SOMEONE);
+        let mut fill = fillCall::abi_decode(&route.calls[1].data).unwrap();
+        fill.token = swapic::addr(SOMEONE);
+        route.calls[1].data = fill.abi_encode().into();
+    });
+    assert_eq!(
+        sample.check_resigned(&other_token),
+        Err(RelayError::Eco("carries other than the destination's USDC"))
+    );
+    let partial = with_eco(&sample.order, |call, _| call.allowPartial = true);
+    assert_eq!(
+        sample.check_resigned(&partial),
+        Err(RelayError::EcoRoute(NotAnIntent::Partial))
+    );
+    let elsewhere = {
+        let mut order = sample.order.clone();
+        order.steps[1].target = swapic::addr(SOMEONE);
+        order
+    };
+    assert_eq!(
+        sample.check_resigned(&elsewhere),
+        Err(RelayError::Eco("is not published on Eco's Portal"))
+    );
+}
+
+/// A CkDeposit pays an ICP principal: it is a party like any address.
+#[test]
+fn a_sanctioned_ck_principal_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let sample = eco_sample();
+        let relay = sample.check().unwrap();
+        assert!(sanctioned_party(&relay.parties).is_none());
+        // the sample's principal, length-prefixed in its envelope
+        let word: [u8; 32] = hex::decode(
+            sample.json["principal"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let principal = candid::Principal::from_slice(&word[1..1 + word[0] as usize]);
+        crate::storage::sanctions::apply(&[principal.to_text().parse().unwrap()], &[]).unwrap();
+        let relay = sample.check().unwrap();
+        assert!(sanctioned_party(&relay.parties).is_some());
+    });
 }

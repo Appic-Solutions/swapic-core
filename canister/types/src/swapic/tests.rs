@@ -347,3 +347,67 @@ fn the_real_eco_steps_read_back_to_their_parties() {
 fn publish_and_fund_is_the_selector_abi_md_names() {
     assert_eq!(publishAndFundCall::SELECTOR, PUBLISH_AND_FUND);
 }
+
+/// The canister reads a step exactly as the contract it calls will: a burn, an intent or a
+/// fee whose encoding is not the canonical one (trailing bytes, dirty padding) is not read
+/// at all, so no lenient reading can name a party the call does not pay.
+#[test]
+fn a_lenient_encoding_is_not_read() {
+    let (_, order) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_arbitrum_cctp_gasless.json"
+    ));
+    let messenger: EvmAddress = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+        .parse()
+        .unwrap();
+    let mut trailing = order.steps[1].clone();
+    let mut data = trailing.data.to_vec();
+    data.extend_from_slice(&[0; 32]);
+    trailing.data = data.into();
+    assert!(
+        matches!(CctpBurn::of_step(&trailing, messenger), Some(Err(_))),
+        "a burn with trailing bytes"
+    );
+    let (_, eco) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_base_eco_ckdeposit_gasless.json"
+    ));
+    let mut dirty = eco.steps[1].clone();
+    let mut data = dirty.data.to_vec();
+    // the high byte of `allowPartial`, a bool: the fourth head word after the selector
+    data[4 + 3 * 32] = 1;
+    dirty.data = data.into();
+    assert!(
+        matches!(EcoIntent::of_step(&dirty), Some(Err(_))),
+        "an intent with a dirty word"
+    );
+}
+
+/// The quoter's real KyberSwap step pays the Runner, hands its input only to the executor
+/// it calls and pays no fees; the real CkDeposit names its principal in the ck helper's
+/// encoding.
+#[test]
+fn the_real_swap_and_principal_read_back() {
+    let (json, order) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_base_local_gasless.json"
+    ));
+    let swap = KyberSwap::of_step(&order.steps[1]).unwrap().unwrap();
+    let runner: EvmAddress = json["runner"].as_str().unwrap().parse().unwrap();
+    assert_eq!(swap.dst_receiver, runner);
+    assert_eq!(swap.src_token, evm(order.steps[1].token));
+    assert_eq!(swap.src_receivers, vec![swap.call_target]);
+    assert!(swap.fee_receivers.is_empty() && !swap.permit);
+    assert!(KyberSwap::of_step(&order.steps[0]).is_none());
+
+    let (json, _) = sample_order(include_str!(
+        "../../../impl/samples/quoter_order_base_eco_ckdeposit_gasless.json"
+    ));
+    let word: [u8; 32] = hex::decode(json["principal"].as_str().unwrap().trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let principal = ck_principal(word).expect("the sample names a principal");
+    assert_eq!(principal.as_slice().len(), 10);
+    assert_eq!(ck_principal([0; 32]), None, "no principal");
+    let mut dirty = word;
+    dirty[31] = 1;
+    assert_eq!(ck_principal(dirty), None, "bytes past the principal");
+}
