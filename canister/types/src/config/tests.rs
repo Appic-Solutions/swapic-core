@@ -663,8 +663,7 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
     let defaults = Config::default();
     assert!(defaults.cctp_domains.0.is_empty());
     assert!(defaults.usdc_addresses.0.is_empty());
-    assert_eq!(defaults.token_messenger, None);
-    assert_eq!(defaults.message_transmitter, None);
+    assert!(defaults.evm_chains.0.is_empty());
     assert_eq!(defaults.eco_portal, None);
     assert_eq!(
         defaults.to_bytes()[0],
@@ -685,7 +684,20 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
             (ChainId::ARBITRUM, CctpDomain::new(3)),
         ])),
         usdc_addresses: ChainTable(BTreeMap::from([(ChainId::BASE, usdc)])),
-        token_messenger: Some(messenger),
+        evm_chains: ChainTable(BTreeMap::from([(
+            ChainId::BASE,
+            EvmChain {
+                swapic: EvmAddress::new([0x5a; 20]),
+                runner: EvmAddress::new([0x5b; 20]),
+                cctp_receiver: EvmAddress::new([0x5c; 20]),
+                usdc,
+                token_messenger: messenger,
+                message_transmitter: EvmAddress::new([0x81; 20]),
+                gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
+                gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
+                min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+            },
+        )])),
         ..Config::default()
     };
     assert_eq!(Config::from_bytes(wired.to_bytes()), wired);
@@ -695,6 +707,13 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
     );
     assert_eq!(wired.cctp_domains.get(ChainId::POLYGON), None);
     assert_eq!(wired.usdc_addresses.get(ChainId::BASE), Some(usdc));
+    assert_eq!(
+        wired
+            .evm_chains
+            .get(ChainId::BASE)
+            .map(|chain| chain.token_messenger),
+        Some(messenger)
+    );
 
     // the last knob set: everything before it is written, the ones after it are not
     let portal_only = Config {

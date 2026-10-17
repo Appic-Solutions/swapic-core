@@ -7,7 +7,6 @@ use candid::{Decode, Encode, Nat, Principal};
 use ic_stable_structures::StableCell;
 use settlement_api::types::flow::FlowSettings as Wire;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::time::Duration;
 use types::{ChainId, EvmAddress, TokenAmount};
 
@@ -20,7 +19,6 @@ thread_local! {
 /// The settings, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowSettings {
-    pub routers: BTreeMap<ChainId, EvmAddress>,
     pub ethereum: ChainId,
     pub ethereum_usdc: Option<EvmAddress>,
     pub ckusdc_ledger: Option<Principal>,
@@ -35,21 +33,7 @@ pub struct FlowSettings {
     pub icp_enabled: bool,
 }
 
-impl FlowSettings {
-    /// The router on `chain_id`, if one is set.
-    pub fn router(&self, chain_id: ChainId) -> Option<EvmAddress> {
-        self.routers.get(&chain_id).copied()
-    }
-}
-
 fn parse(wire: &Wire) -> Result<FlowSettings, String> {
-    let mut routers = BTreeMap::new();
-    for (chain, address) in &wire.routers {
-        let address: EvmAddress = address
-            .parse()
-            .map_err(|e| format!("routers[{chain}] is not an address: {e:?}"))?;
-        routers.insert(ChainId::new(*chain), address);
-    }
     let ethereum_usdc = wire
         .ethereum_usdc
         .as_ref()
@@ -59,7 +43,6 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
     let cketh_fee_allowance = TokenAmount::try_from(wire.cketh_fee_allowance.clone())
         .map_err(|_| "cketh_fee_allowance is too large".to_string())?;
     Ok(FlowSettings {
-        routers,
         ethereum: ChainId::new(if wire.ethereum_chain_id == 0 {
             1
         } else {

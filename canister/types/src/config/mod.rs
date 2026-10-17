@@ -445,12 +445,9 @@ pub struct Config {
     /// The USDC contract on each chain: the token the rails carry.
     #[n(22)]
     pub usdc_addresses: ChainTable<EvmAddress>,
-    /// CCTP v2's `TokenMessengerV2`, one address on every chain Circle deploys to.
-    #[n(23)]
-    pub token_messenger: Option<EvmAddress>,
-    /// CCTP v2's `MessageTransmitterV2`, one address on every chain Circle deploys to.
-    #[n(24)]
-    pub message_transmitter: Option<EvmAddress>,
+    // #[n(23)] and #[n(24)] held one `TokenMessengerV2` and one `MessageTransmitterV2` for
+    // every chain, which `evm_chains` replaced per chain before any deploy: retired, never
+    // reused
     /// Eco's `Portal`, one address on every chain Eco deploys to.
     #[n(25)]
     pub eco_portal: Option<EvmAddress>,
@@ -822,8 +819,6 @@ impl Default for Config {
             deposit_lookback_blocks: DepositLookback::DEFAULT,
             cctp_domains: ChainTable::default(),
             usdc_addresses: ChainTable::default(),
-            token_messenger: None,
-            message_transmitter: None,
             eco_portal: None,
             // the Eco route is a later plan's; until then no Eco quote is claimed
             eco_enabled: EcoEnabled::OFF,

@@ -578,9 +578,12 @@ async fn continue_on_ethereum(
         );
     }
     let chain = settings.ethereum;
-    let router_address = settings
-        .router(chain)
-        .ok_or(FlowDriveError::Settings("no router on Ethereum"))?;
+    // still router ABI v2 against design C's Swapic: the ICP flows are off until P11
+    let router_address = config::get()
+        .evm_chains
+        .get(chain)
+        .map(|chain| chain.swapic)
+        .ok_or(FlowDriveError::Settings("no Swapic on Ethereum"))?;
     let usdc = settings
         .ethereum_usdc
         .ok_or(FlowDriveError::Settings("no Ethereum USDC"))?;

@@ -293,10 +293,12 @@ pub enum Detail {
         action: u8,
         amount: types::TokenAmount,
     },
-    /// What a CCTP finish does, and the keccak of its message.
+    /// What a CCTP finish does, the keccak of its message, and the source transaction
+    /// that burned it.
     Finish {
         action: types::flow::FinishAction,
         message_hash: [u8; 32],
+        source_tx: TxHash,
     },
 }
 
@@ -463,6 +465,7 @@ pub async fn create_and_send_with(
                 let Some(Detail::Finish {
                     action,
                     message_hash,
+                    source_tx,
                 }) = detail
                 else {
                     unreachable!("BUG: a finish's detail is checked before its nonce");
@@ -476,6 +479,7 @@ pub async fn create_and_send_with(
                         raw_tx: raw_tx.clone(),
                         action,
                         message_hash,
+                        source_tx: Some(source_tx),
                     },
                 }
             }
@@ -842,8 +846,16 @@ async fn read_receipts(
     let answers = rpc::rpc_batch_each(chain_id, &calls, cap)
         .await
         .map_err(|_| Unread::Rpc)?;
-    let swapic = crate::storage::flow_settings::get().router(chain_id);
-    landed(entries, &answers, swapic).ok_or(Unread::NoHead)
+    let fee_path = config::get()
+        .evm_chains
+        .get(chain_id)
+        .zip(crate::storage::ecdsa_address::get())
+        .map(|(chain, canister)| crate::books::FeePath {
+            usdc: chain.usdc,
+            runner: chain.runner,
+            canister,
+        });
+    landed(entries, &answers, fee_path).ok_or(Unread::NoHead)
 }
 
 /// The head and the receipt that landed for each entry, sliced out of one chunk's answers
@@ -853,7 +865,7 @@ async fn read_receipts(
 fn landed(
     entries: &[OutboxEntry],
     answers: &[Result<Value, RpcError>],
-    swapic: Option<EvmAddress>,
+    fee_path: Option<crate::books::FeePath>,
 ) -> Option<(BlockNumber, Vec<Option<Receipt>>)> {
     let latest = answers
         .first()?
@@ -873,8 +885,8 @@ fn landed(
                 .find_map(|value| {
                     let receipt = parse_receipt(value, &entry.hashes).ok()?;
                     Some(Receipt {
-                        network_fee: swapic.map_or(types::TokenAmount::ZERO, |swapic| {
-                            crate::books::network_fee_in(value, swapic)
+                        network_fee: fee_path.map_or(types::TokenAmount::ZERO, |path| {
+                            crate::books::network_fee_in(value, path)
                         }),
                         ..receipt
                     })
@@ -1188,7 +1200,7 @@ struct Receipt {
     tx_hash: TxHash,
     block: BlockNumber,
     success: bool,
-    /// What Swapic withheld to the canister in it.
+    /// What the order's fee step paid the canister in it.
     network_fee: types::TokenAmount,
 }
 

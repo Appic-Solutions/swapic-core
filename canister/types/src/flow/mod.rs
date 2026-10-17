@@ -441,6 +441,11 @@ pub enum FlowStep {
         action: FinishAction,
         #[cbor(n(5), with = "minicbor::bytes")]
         message_hash: [u8; 32],
+        /// The source transaction that burned the message, whose fee pays for this finish:
+        /// one message per source transaction is finished, a Complete and its Release
+        /// counting as one.
+        #[n(6)]
+        source_tx: Option<TxHash>,
     },
 }
 
@@ -600,6 +605,12 @@ pub struct Flow {
     /// in `signed_txs`.
     #[n(21)]
     pub signed_id: Option<u64>,
+    /// A finish's source transaction, which no other message may be finished under.
+    #[n(22)]
+    pub source_tx: Option<TxHash>,
+    /// A finish's message, by its keccak.
+    #[cbor(n(23), with = "minicbor::bytes")]
+    pub message_hash: Option<[u8; 32]>,
 }
 
 /// Why a flow step was refused.
@@ -629,6 +640,11 @@ pub enum FlowError {
     },
     #[error("the receipt names {0}, which is not the flow's transaction")]
     NotTheFlowsTx(TxHash),
+    #[error(
+        "source transaction {source_tx} already finished another message: its one fee pays \
+         for one arrival"
+    )]
+    SourceFinished { source_tx: TxHash },
     #[error("a flow amount overflowed")]
     Overflow,
 }
@@ -658,6 +674,8 @@ impl Flow {
             reason: None,
             created_at: at,
             signed_id: None,
+            source_tx: None,
+            message_hash: None,
         }
     }
 
@@ -667,13 +685,15 @@ impl Flow {
     }
 
     /// Every rule a step on an existing flow, or a step that creates one, must meet.
-    /// `existing` is the flow the store holds under `quote_hash`, and `landed_elsewhere`
-    /// answers which other flow a transfer is already credited to.
+    /// `existing` is the flow the store holds under `quote_hash`, `landed_elsewhere`
+    /// answers which other flow a transfer is already credited to, and `finished_from`
+    /// answers which message a source transaction already finished, if any.
     pub fn admits(
         quote_hash: QuoteHash,
         existing: Option<&Flow>,
         step: &FlowStep,
         landed_elsewhere: impl Fn(&TxHash) -> Option<QuoteHash>,
+        finished_from: impl Fn(&TxHash) -> Option<[u8; 32]>,
     ) -> Result<(), FlowError> {
         use FlowStatus::*;
         let creates = matches!(
@@ -703,6 +723,18 @@ impl Flow {
                     declared: quote_hash,
                     computed,
                 });
+            }
+            if let FlowStep::CctpFinishSigned {
+                message_hash,
+                source_tx: Some(source_tx),
+                ..
+            } = step
+            {
+                if finished_from(source_tx).is_some_and(|other| other != *message_hash) {
+                    return Err(FlowError::SourceFinished {
+                        source_tx: *source_tx,
+                    });
+                }
             }
             return Ok(());
         }
@@ -802,7 +834,11 @@ impl Flow {
             (
                 None,
                 FlowStep::CctpFinishSigned {
-                    chain_id, tx_hash, ..
+                    chain_id,
+                    tx_hash,
+                    message_hash,
+                    source_tx,
+                    ..
                 },
             ) => {
                 let mut flow = Flow::new(FlowKind::Finish, FinishSigned, at);
@@ -810,6 +846,8 @@ impl Flow {
                 flow.tx_hash = Some(*tx_hash);
                 flow.tx_open = true;
                 flow.signed_id = Some(index);
+                flow.source_tx = *source_tx;
+                flow.message_hash = Some(*message_hash);
                 return flow;
             }
             (Some(flow), _) => flow,

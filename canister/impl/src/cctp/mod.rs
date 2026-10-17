@@ -1,156 +1,274 @@
-//! The canister finishes CCTP arrivals itself (`finish_cctp`): the watcher hands in the
-//! attested message, the canister decides from the hook data and the clock what to call,
-//! simulates it, holds it to the gas rule and signs it once per message and action.
+//! The canister finishes CCTP arrivals itself, design C (`finish_cctp`). The watcher hands
+//! in the attested message, the source transaction that burned it (once it has proven that
+//! transaction paid the canister's fee, I-3.4), the stored recipe and the gas limit the
+//! quoter charged for. The canister checks the message is a burn it may finish, decides
+//! from the envelope's action and the clock what to call, and signs it once per message
+//! and action, finishing at most one message per source transaction.
 //!
-//! Only Swapic's own burns are finished: the message must come from CCTP's token
-//! messenger on both ends and burn the source chain's USDC, its burn must be sent by
-//! Swapic on the source chain and carry Swapic's hook data, so the canister never pays gas
-//! for a message that collected no `networkFee`. The outer check comes first: anyone can
-//! have a generic message attested whose body looks like a Swapic burn.
+//! The message must be a Swapic burn end to end: CCTP's token messenger on both ends (a
+//! generic message whose body only looks like a burn is refused: anyone can have one
+//! attested), the source chain's USDC, burned by the source chain's Runner, carrying a v3
+//! envelope. A Swap or a CkDeposit is minted to the destination's CctpReceiver and called
+//! only by it; a Deliver is minted to its envelope's recipient and received by anyone or by
+//! the canister.
+//!
+//! The canister simulates only when `simulate_before_sign` is on: the watcher simulates
+//! the call with the stored recipe before it calls here.
 
 #[cfg(test)]
 mod tests;
 
 use crate::ecdsa;
-use crate::engine::flows::gas_limit_for;
 use crate::engine::flows::Busy;
 use crate::evm_reads::{self, Simulated};
 use crate::guards::{require_not_halted, require_watcher};
-use crate::state::Store;
+use crate::relay::{envelope_parties, sanctioned_party, signing_gas, Party};
+use crate::state::{State, Store};
 use crate::storage::config;
 use crate::storage::events::read_state;
-use crate::storage::flow_settings::{self, FlowSettings};
 use crate::tx::{self, Detail};
-use alloy_primitives::{Address, Bytes};
-use types::cctp::BurnMessage;
-use types::config::GasAction;
+use thiserror::Error;
+use types::cctp::{BurnMessage, MessageError};
+use types::config::{ChainTable, EvmChain, GasAction};
+use types::events::TxPurpose;
 use types::flow::{finish_key, FinishAction};
-use types::router::{self, DexCall, HookData, ACTION_CK_DEPOSIT, ACTION_DELIVER};
-use types::{ChainId, EvmAddress, GasAmount, QuoteHash, Timestamp, Wei};
+use types::swapic::{self, Action, Envelope, EnvelopeError, Recipe};
+use types::{CctpDomain, ChainId, EvmAddress, FlowStatus, QuoteHash, Timestamp, TxHash, Wei};
 
-/// How close to its deadline a completion that reverts is tried as a release instead: the
-/// canister's clock and the chain's differ by a few seconds, and a block may land late.
-const DEADLINE_MARGIN_S: u64 = 300;
+/// How long before the envelope's deadline the last completion is signed. A completion
+/// that lands after the deadline reverts (`DeadlinePassed`), and between the signature and
+/// the block there is the watcher's poll, the broadcast, and a fee that may wait for a
+/// cheaper block.
+pub const COMPLETE_MARGIN_S: u64 = 120;
 
-/// One finish, decided: what to call, where.
+/// How long after the envelope's deadline the first release is signed: `release` needs
+/// the block's time past the deadline, and a chain's clock may trail the canister's.
+pub const RELEASE_MARGIN_S: u64 = 60;
+
+/// Why a finish was refused. Nothing was signed.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum FinishError {
+    #[error(
+        "a Swapic CCTP message is {expected} bytes, not {0}",
+        expected = Envelope::CCTP_MESSAGE_LENGTH
+    )]
+    MessageLength(usize),
+    #[error(transparent)]
+    Message(#[from] MessageError),
+    #[error("the message's envelope: {0}")]
+    Envelope(#[from] EnvelopeError),
+    #[error("src_tx_hash is {0} bytes, not 32")]
+    SourceTxLength(usize),
+    #[error("chain {0} is not one the canister signs on")]
+    UnknownChain(ChainId),
+    #[error("chain {0} has no CCTP domain")]
+    NoDomain(ChainId),
+    #[error("the message is for domain {message}, and chain {chain_id} is domain {chain}")]
+    WrongDomain {
+        message: u32,
+        chain_id: ChainId,
+        chain: u32,
+    },
+    #[error("the message is not a token messenger burn")]
+    NotABurn,
+    #[error("no chain the canister signs on is CCTP domain {0}")]
+    UnknownSource(u32),
+    #[error("the burn is not the source chain's USDC")]
+    NotUsdc,
+    #[error("the burn was not made by the source chain's Runner")]
+    NotTheRunner,
+    #[error("{0}")]
+    Shape(&'static str),
+    #[error(
+        "the envelope's deadline {deadline} is too close to act on at {now_s}: completed \
+         before {complete_by}, released after {release_after}"
+    )]
+    NearDeadline {
+        deadline: u64,
+        now_s: u64,
+        complete_by: u64,
+        release_after: u64,
+    },
+    #[error("a Swap completes with a recipe")]
+    NoRecipe,
+    #[error("a CkDeposit completes with no recipe")]
+    RecipeForCk,
+    #[error("the recipe's {0} is not an EVM address")]
+    RecipeAddress(&'static str),
+    #[error(
+        "source transaction {0} already finished another message: its one fee pays for one \
+         arrival"
+    )]
+    SourceFinished(TxHash),
+    #[error("{0} is sanctioned")]
+    Sanctioned(Party),
+}
+
+/// What `finish_cctp` reads besides the message: the chains the canister signs on and
+/// their CCTP domains, and the canister's own address.
+pub struct Setup<'a> {
+    pub chain_id: ChainId,
+    pub evm_chains: &'a ChainTable<EvmChain>,
+    pub domains: &'a ChainTable<CctpDomain>,
+    pub canister: EvmAddress,
+}
+
+/// One finish, decided: what to call, where, under which gas action, and who the message
+/// pays.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub action: FinishAction,
+    pub gas_action: GasAction,
     pub to: EvmAddress,
-    pub hook: HookData,
-    /// The deadline the hook data names, for the release fallback.
-    pub deadline_s: u64,
-}
-
-/// What `finish_cctp` reads besides the message: the chain's CCTP domain, every chain's
-/// domain, USDC and Swapic, the token messenger and the message transmitter.
-pub struct Setup<'a> {
-    pub chain_id: ChainId,
-    pub domains: &'a types::config::ChainTable<types::CctpDomain>,
-    pub usdc: &'a types::config::ChainTable<EvmAddress>,
-    pub settings: &'a FlowSettings,
-    pub messenger: Option<EvmAddress>,
-    pub transmitter: Option<EvmAddress>,
-}
-
-fn word(address: EvmAddress) -> [u8; 32] {
-    address.to_word()
+    pub envelope: Envelope,
+    /// The message's mint recipient: the envelope's recipient for a Deliver, the
+    /// CctpReceiver otherwise.
+    pub mint_recipient: EvmAddress,
 }
 
 /// The finish a message asks for at `now_s`, or why the canister will not finish it.
 /// Pure, so every rule is a unit test.
-pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, String> {
-    let chain_domain = setup
+pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, FinishError> {
+    let chain_id = setup.chain_id;
+    let destination = setup
+        .evm_chains
+        .get(chain_id)
+        .ok_or(FinishError::UnknownChain(chain_id))?;
+    let domain = setup
         .domains
-        .get(setup.chain_id)
-        .ok_or_else(|| format!("chain {} has no CCTP domain", setup.chain_id))?;
-    if message.destination_domain != chain_domain.get() {
-        return Err(format!(
-            "the message is for domain {}, and chain {} is domain {}",
-            message.destination_domain,
-            setup.chain_id,
-            chain_domain.get()
-        ));
+        .get(chain_id)
+        .ok_or(FinishError::NoDomain(chain_id))?;
+    if message.destination_domain != domain.get() {
+        return Err(FinishError::WrongDomain {
+            message: message.destination_domain,
+            chain_id,
+            chain: domain.get(),
+        });
     }
-    let messenger = setup.messenger.ok_or("no token messenger is configured")?;
-    if message.sender != word(messenger) || message.recipient != word(messenger) {
-        return Err("the message is not a token messenger burn".into());
+    if message.recipient != destination.token_messenger.to_word() {
+        return Err(FinishError::NotABurn);
     }
     let source = setup
         .domains
         .0
         .iter()
         .find(|(_, domain)| domain.get() == message.source_domain)
-        .map(|(chain, _)| *chain)
-        .ok_or_else(|| format!("no chain is CCTP domain {}", message.source_domain))?;
-    let usdc = setup
-        .usdc
-        .get(source)
-        .ok_or_else(|| format!("no USDC is configured on chain {source}"))?;
-    if message.body.burn_token != word(usdc) {
-        return Err("the burn is not USDC".into());
+        .and_then(|(chain, _)| setup.evm_chains.get(*chain))
+        .ok_or(FinishError::UnknownSource(message.source_domain))?;
+    if message.sender != source.token_messenger.to_word() {
+        return Err(FinishError::NotABurn);
     }
-    let source_swapic = setup
-        .settings
-        .router(source)
-        .ok_or_else(|| format!("no Swapic is configured on chain {source}"))?;
-    if message.body.message_sender != word(source_swapic) {
-        return Err("the burn was not made by Swapic".into());
+    if message.body.burn_token != source.usdc.to_word() {
+        return Err(FinishError::NotUsdc);
     }
-    let hook = HookData::parse(&message.body.hook_data)
-        .ok_or("the message carries no Swapic hook data")?;
-    if hook.action == ACTION_DELIVER {
-        if message.destination_caller != [0; 32] {
-            return Err("a Deliver must leave its destination caller open".into());
+    if message.body.message_sender != source.runner.to_word() {
+        return Err(FinishError::NotTheRunner);
+    }
+    let envelope = Envelope::decode(&message.body.hook_data)?;
+    let mint_recipient = swapic::evm_of_word(message.body.mint_recipient).ok_or(
+        FinishError::Shape("the mint recipient is not an EVM address"),
+    )?;
+    if envelope.action == Action::Deliver {
+        if mint_recipient != envelope.recipient {
+            return Err(FinishError::Shape(
+                "a Deliver is minted to its envelope's recipient",
+            ));
         }
-        let transmitter = setup
-            .transmitter
-            .ok_or("no message transmitter is configured")?;
+        if message.destination_caller != [0; 32]
+            && message.destination_caller != setup.canister.to_word()
+        {
+            return Err(FinishError::Shape(
+                "a Deliver is received by anyone or by the canister",
+            ));
+        }
+        // minted to the user whenever it is received, before the deadline or after it
         return Ok(Plan {
             action: FinishAction::Receive,
-            to: transmitter,
-            deadline_s: hook.deadline,
-            hook,
+            gas_action: GasAction::RelayDeliver,
+            to: destination.message_transmitter,
+            envelope,
+            mint_recipient,
         });
     }
-    let swapic = setup
-        .settings
-        .router(setup.chain_id)
-        .ok_or_else(|| format!("no Swapic is configured on chain {}", setup.chain_id))?;
-    if message.body.mint_recipient != word(swapic) || message.destination_caller != word(swapic) {
-        return Err("a Swap or a CkDeposit is minted to Swapic and called by it".into());
+    let receiver = destination.cctp_receiver;
+    if mint_recipient != receiver || message.destination_caller != receiver.to_word() {
+        return Err(FinishError::Shape(
+            "a Swap or a CkDeposit is minted to the CctpReceiver and called only by it",
+        ));
     }
-    let action = if now_s < hook.deadline {
-        FinishAction::Complete
+    let complete_by = envelope.deadline.saturating_sub(COMPLETE_MARGIN_S);
+    let release_after = envelope.deadline.saturating_add(RELEASE_MARGIN_S);
+    let (action, gas_action) = if now_s < complete_by {
+        let gas_action = match envelope.action {
+            Action::Swap => GasAction::CompleteSwap,
+            _ => GasAction::CompleteCk,
+        };
+        (FinishAction::Complete, gas_action)
+    } else if now_s > release_after {
+        (FinishAction::Release, GasAction::Release)
     } else {
-        FinishAction::Release
+        return Err(FinishError::NearDeadline {
+            deadline: envelope.deadline,
+            now_s,
+            complete_by,
+            release_after,
+        });
     };
     Ok(Plan {
         action,
-        to: swapic,
-        deadline_s: hook.deadline,
-        hook,
+        gas_action,
+        to: receiver,
+        envelope,
+        mint_recipient,
     })
 }
 
-/// The DEX call a completion carries: the watcher's fresh swap for a Swap, nothing for a
-/// CkDeposit.
-pub fn completion_swap(
-    hook: &HookData,
-    swap: Option<(EvmAddress, Vec<u8>)>,
-) -> Result<DexCall, String> {
-    match (hook.action, swap) {
-        (ACTION_CK_DEPOSIT, Some((target, _))) if target != EvmAddress::ZERO => {
-            Err("a CkDeposit takes no swap".into())
+/// The parties a finish pays, screened: the envelope's recipient (a Deliver's mint
+/// recipient is the same address, and is screened as well), and the principal a
+/// CkDeposit credits, which must read as one. None of them may be sanctioned.
+pub fn screen(plan: &Plan) -> Result<(), FinishError> {
+    let mut parties = envelope_parties(&plan.envelope).map_err(FinishError::Shape)?;
+    if plan.action == FinishAction::Receive {
+        parties.push(Party::Evm(plan.mint_recipient));
+    }
+    match sanctioned_party(&parties) {
+        Some(party) => Err(FinishError::Sanctioned(party)),
+        None => Ok(()),
+    }
+}
+
+/// A recipe as the watcher sends it, its addresses read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GivenRecipe {
+    pub target: EvmAddress,
+    pub data: Vec<u8>,
+    pub scaler: Option<EvmAddress>,
+}
+
+/// The recipe the call carries: the watcher's for a Swap's completion, none for a
+/// CkDeposit's, and none for a call that takes none.
+pub fn recipe_for(plan: &Plan, given: Option<GivenRecipe>) -> Result<Recipe, FinishError> {
+    match (plan.action, plan.envelope.action, given) {
+        (FinishAction::Complete, Action::Swap, Some(recipe))
+            if recipe.target != EvmAddress::ZERO =>
+        {
+            Ok(Recipe {
+                target: swapic::addr(recipe.target),
+                data: recipe.data.into(),
+                scaler: swapic::addr(recipe.scaler.unwrap_or(EvmAddress::ZERO)),
+            })
         }
-        (_, Some((target, data))) => Ok(DexCall {
-            target: router::addr(target),
-            data: Bytes::from(data),
-        }),
-        (_, None) => Ok(DexCall {
-            target: Address::ZERO,
-            data: Bytes::new(),
-        }),
+        (FinishAction::Complete, Action::Swap, _) => Err(FinishError::NoRecipe),
+        (FinishAction::Complete, Action::CkDeposit, Some(recipe))
+            if recipe.target != EvmAddress::ZERO
+                || !recipe.data.is_empty()
+                || recipe
+                    .scaler
+                    .is_some_and(|scaler| scaler != EvmAddress::ZERO) =>
+        {
+            Err(FinishError::RecipeForCk)
+        }
+        _ => Ok(swapic::no_recipe()),
     }
 }
 
@@ -159,12 +277,12 @@ pub fn calldata(
     action: FinishAction,
     message: &[u8],
     attestation: &[u8],
-    swap: DexCall,
+    recipe: Recipe,
 ) -> Vec<u8> {
     match action {
-        FinishAction::Receive => router::receive_message_calldata(message, attestation),
-        FinishAction::Complete => router::complete_cctp_calldata(message, attestation, swap),
-        FinishAction::Release => router::release_calldata(message, attestation),
+        FinishAction::Receive => swapic::receive_message_calldata(message, attestation),
+        FinishAction::Complete => swapic::complete_cctp_calldata(message, attestation, recipe),
+        FinishAction::Release => swapic::release_calldata(message, attestation),
     }
 }
 
@@ -176,20 +294,41 @@ pub fn parse_address(text: &str) -> Option<EvmAddress> {
     })
 }
 
-/// Where a finish stands under its key: signed already (its id), being signed, or not yet.
-pub fn existing(key: QuoteHash) -> Result<Option<u64>, String> {
-    read_state(|state| {
-        if let Some(flow) = state.flow(&key) {
-            return flow
-                .signed_id
-                .map(Some)
-                .ok_or_else(|| "the finish has a flow but no signed transaction".to_string());
+/// The id of a finish of this message already signed that answers a call for `action`:
+/// the action's own, and for a release the completion's too, unless that completion
+/// reverted, which is what a release after it is for.
+pub fn answered(action: FinishAction, message_hash: [u8; 32]) -> Result<Option<u64>, String> {
+    if action == FinishAction::Release {
+        let complete = finish_key(message_hash, FinishAction::Complete);
+        if let Some(id) = tx::signed_once(complete)? {
+            let reverted = read_state(|state| state.flow(&complete))
+                .is_some_and(|flow| flow.status == FlowStatus::FinishFailed);
+            if !reverted {
+                return Ok(Some(id));
+            }
         }
-        if state.store().has_unsigned_nonce_for(&key) {
-            return Err("the finish is being signed".into());
-        }
-        Ok(None)
+    }
+    tx::signed_once(finish_key(message_hash, action))
+}
+
+/// Whether `source_tx` already finished a message other than this one. One fee pays for
+/// one arrival and the fold refuses a second message too; this is the door's read of the
+/// same rule, before a nonce is spent on it.
+pub fn finished_another<S: Store>(
+    state: &State<S>,
+    source_tx: TxHash,
+    message_hash: [u8; 32],
+) -> bool {
+    state.store().flows().iter().any(|(_, flow)| {
+        flow.source_tx == Some(source_tx) && flow.message_hash != Some(message_hash)
     })
+}
+
+/// The key two calls for one source transaction serialize on.
+fn source_key(source_tx: TxHash) -> QuoteHash {
+    let mut preimage = b"swapic-cctp-source".to_vec();
+    preimage.extend_from_slice(source_tx.as_ref());
+    QuoteHash::new(alloy_primitives::keccak256(preimage).0)
 }
 
 /// `finish_cctp`: answers the signed transaction's id in `signed_txs`.
@@ -197,89 +336,90 @@ pub async fn finish_cctp(
     chain_id: ChainId,
     message: &[u8],
     attestation: &[u8],
-    swap: Option<(String, Vec<u8>)>,
+    recipe: Option<GivenRecipe>,
+    src_tx_hash: &[u8],
+    gas_limit: u64,
 ) -> Result<u64, String> {
     require_watcher().map_err(|e| format!("{e:?}"))?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
+    if message.len() != Envelope::CCTP_MESSAGE_LENGTH {
+        return Err(FinishError::MessageLength(message.len()).to_string());
+    }
+    let source_tx = TxHash::new(
+        src_tx_hash
+            .try_into()
+            .map_err(|_| FinishError::SourceTxLength(src_tx_hash.len()).to_string())?,
+    );
     let parsed = BurnMessage::parse(message).map_err(|e| e.to_string())?;
+    // derived once by the deploy and read from stable memory after that
+    let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
     let config = config::get();
-    let settings = flow_settings::get();
+    let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
     let setup = Setup {
         chain_id,
+        evm_chains: &config.evm_chains,
         domains: &config.cctp_domains,
-        usdc: &config.usdc_addresses,
-        settings: &settings,
-        messenger: config.token_messenger,
-        transmitter: config.message_transmitter,
+        canister,
     };
-    let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
-    let plan = decide(&parsed, &setup, now_s)?;
-    let swap = swap
-        .map(|(target, data)| {
-            parse_address(&target)
-                .map(|target| (target, data))
-                .ok_or_else(|| format!("the swap target {target} is not an address"))
-        })
-        .transpose()?;
-    let dex = completion_swap(&plan.hook, swap)?;
+    let plan = decide(&parsed, &setup, now_s).map_err(|e| e.to_string())?;
+    screen(&plan).map_err(|e| e.to_string())?;
+    let recipe = recipe_for(&plan, recipe).map_err(|e| e.to_string())?;
+    let destination = config
+        .evm_chains
+        .get(chain_id)
+        .expect("BUG: decide found the chain in this table");
+    let gas = signing_gas(chain_id, &destination, plan.gas_action, gas_limit)
+        .map_err(|e| e.to_string())?;
     let message_hash = alloy_primitives::keccak256(message).0;
 
-    let mut candidates = vec![plan.action];
-    if plan.action == FinishAction::Complete
-        && now_s.saturating_add(DEADLINE_MARGIN_S) >= plan.deadline_s
-    {
-        candidates.push(FinishAction::Release);
-    }
-    for action in &candidates {
-        if let Some(id) = existing(finish_key(message_hash, *action))? {
-            return Ok(id);
+    let _busy =
+        Busy::take(source_key(source_tx)).ok_or("the source transaction is being finished")?;
+    let admit = || -> Result<Option<u64>, String> {
+        if let Some(id) = answered(plan.action, message_hash)? {
+            return Ok(Some(id));
         }
+        if read_state(|state| finished_another(state, source_tx, message_hash)) {
+            return Err(FinishError::SourceFinished(source_tx).to_string());
+        }
+        Ok(None)
+    };
+    if let Some(id) = admit()? {
+        return Ok(id);
     }
-    let first = finish_key(message_hash, plan.action);
-    let _busy = Busy::take(first).ok_or("the finish is being signed")?;
-    let mine = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
-    let mut refusals = Vec::new();
-    for action in candidates {
-        let data = calldata(action, message, attestation, dex.clone());
-        let (simulated, estimate) =
-            evm_reads::simulate_and_estimate(chain_id, mine, plan.to, &data)
-                .await
-                .map_err(|e| e.to_string())?;
+    let data = calldata(plan.action, message, attestation, recipe);
+    if config.simulate_before_sign {
+        let (simulated, _) = evm_reads::simulate_and_estimate(chain_id, canister, plan.to, &data)
+            .await
+            .map_err(|e| e.to_string())?;
         if let Simulated::Reverted(message) = simulated {
-            refusals.push(format!("{action:?} reverts in simulation: {message}"));
-            continue;
+            return Err(format!(
+                "{:?} reverts in simulation: {message}",
+                plan.action
+            ));
         }
-        // the halt and a concurrent finish can land while the reads were out; from here to
+        // the halt and a concurrent finish can land while the read was out; from here to
         // the nonce's allocation there is no await
         require_not_halted().map_err(|e| format!("{e:?}"))?;
-        let key = finish_key(message_hash, action);
-        if let Some(id) = existing(key)? {
+        if let Some(id) = admit()? {
             return Ok(id);
         }
-        let gas = gas_limit_for(estimate, &settings);
-        let signed = tx::create_and_send_with(
-            types::events::TxPurpose::Finish(key),
-            chain_id,
-            plan.to,
-            Wei::ZERO,
-            data,
-            GasAmount::from(gas),
-            match action {
-                FinishAction::Receive => GasAction::RelayDeliver,
-                FinishAction::Complete if plan.hook.action == ACTION_CK_DEPOSIT => {
-                    GasAction::CompleteCk
-                }
-                FinishAction::Complete => GasAction::CompleteSwap,
-                FinishAction::Release => GasAction::Release,
-            },
-            Some(Detail::Finish {
-                action,
-                message_hash,
-            }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        return Ok(signed.id.get());
     }
-    Err(refusals.join("; "))
+    let key = finish_key(message_hash, plan.action);
+    let signed = tx::create_and_send_with(
+        TxPurpose::Finish(key),
+        chain_id,
+        plan.to,
+        Wei::ZERO,
+        data,
+        gas,
+        plan.gas_action,
+        Some(Detail::Finish {
+            action: plan.action,
+            message_hash,
+            source_tx,
+        }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(signed.id.get())
 }

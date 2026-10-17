@@ -297,8 +297,30 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
             8453,
             "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
         )]),
-        token_messenger: Some("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string()),
-        message_transmitter: Some("0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string()),
+        evm_chains: BTreeMap::from([(
+            42161,
+            EvmChainConfig {
+                swapic: "0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7".to_string(),
+                runner: "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C".to_string(),
+                cctp_receiver: "0x5555555555555555555555555555555555555555".to_string(),
+                usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
+                token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
+                message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
+                gas_limit: ActionGas {
+                    relay_cctp: 400_000,
+                    complete_swap: 1_200_000,
+                    ..ActionGas::default()
+                },
+                gas_budget_wei: ActionAmounts {
+                    relay_cctp: Nat::from(1_000_000_000_000_000_u64),
+                    ..ActionAmounts::default()
+                },
+                min_network_fee: ActionAmounts {
+                    complete_swap: Nat::from(60_000_u64),
+                    ..ActionAmounts::default()
+                },
+            },
+        )]),
         eco_portal: Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string()),
         ..Config::default()
     };
@@ -306,6 +328,13 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
     assert_eq!(
         domain.cctp_domains.get(types::ChainId::BASE),
         Some(types::rail::CctpDomain::new(6))
+    );
+    assert_eq!(
+        domain
+            .evm_chains
+            .get(types::ChainId::ARBITRUM)
+            .map(|chain| chain.gas_limit.complete_swap),
+        Some(types::GasAmount::from(1_200_000_u64))
     );
     assert_eq!(Config::unredacted(domain), wire);
 

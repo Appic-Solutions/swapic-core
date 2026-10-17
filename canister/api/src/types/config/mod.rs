@@ -51,10 +51,6 @@ pub struct Config {
     pub cctp_domains: BTreeMap<u64, u32>,
     /// The USDC contract per chain, as an EVM address.
     pub usdc_addresses: BTreeMap<u64, String>,
-    /// CCTP v2's `TokenMessengerV2`, the same address on every chain.
-    pub token_messenger: Option<String>,
-    /// CCTP v2's `MessageTransmitterV2`, the same address on every chain.
-    pub message_transmitter: Option<String>,
     /// Eco's `Portal`, the same address on every chain.
     pub eco_portal: Option<String>,
     /// Whether the Eco rail may be used. False until its route is designed: a quote
@@ -273,8 +269,6 @@ impl fmt::Debug for Config {
             deposit_lookback_blocks,
             cctp_domains,
             usdc_addresses,
-            token_messenger,
-            message_transmitter,
             eco_portal,
             eco_enabled,
             claim_grace_s,
@@ -309,8 +303,6 @@ impl fmt::Debug for Config {
             .field("deposit_lookback_blocks", deposit_lookback_blocks)
             .field("cctp_domains", cctp_domains)
             .field("usdc_addresses", usdc_addresses)
-            .field("token_messenger", token_messenger)
-            .field("message_transmitter", message_transmitter)
             .field("eco_portal", eco_portal)
             .field("eco_enabled", eco_enabled)
             .field("claim_grace_s", claim_grace_s)
@@ -370,8 +362,6 @@ impl From<types::Config> for Config {
             deposit_lookback_blocks,
             cctp_domains,
             usdc_addresses,
-            token_messenger,
-            message_transmitter,
             eco_portal,
             eco_enabled,
             claim_grace,
@@ -422,8 +412,6 @@ impl From<types::Config> for Config {
                 .into_iter()
                 .map(|(chain, address)| (chain.get(), address.to_string()))
                 .collect(),
-            token_messenger: token_messenger.map(|address| address.to_string()),
-            message_transmitter: message_transmitter.map(|address| address.to_string()),
             eco_portal: eco_portal.map(|address| address.to_string()),
             eco_enabled: eco_enabled.is_on(),
             claim_grace_s: claim_grace.get().as_secs(),
@@ -536,16 +524,6 @@ impl TryFrom<Config> for types::Config {
                     })
                     .collect::<Result<_, _>>()?,
             ),
-            token_messenger: config
-                .token_messenger
-                .as_deref()
-                .map(|address| evm_address("token_messenger", None, address))
-                .transpose()?,
-            message_transmitter: config
-                .message_transmitter
-                .as_deref()
-                .map(|address| evm_address("message_transmitter", None, address))
-                .transpose()?,
             eco_portal: config
                 .eco_portal
                 .as_deref()

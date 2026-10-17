@@ -41,6 +41,7 @@ fn signed_txs_pages_every_signed_line_after_the_cursor() {
                     raw_tx: vec![0x02, 0x01],
                     action: FinishAction::Receive,
                     message_hash,
+                    source_tx: None,
                 },
             },
             at,

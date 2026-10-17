@@ -42,7 +42,7 @@ use crate::guards::{require_not_halted, require_quoter};
 use crate::storage::events::read_state;
 use crate::storage::sanctions::is_sanctioned;
 pub use candid::Nat;
-pub use settlement_api::types::flow::{DexCall, FlowMode, IcpToEvmQuote};
+pub use settlement_api::types::flow::{FlowMode, IcpToEvmQuote, Recipe};
 use types::flow::Stage;
 use types::{FlowKind, FlowStatus, FlowStep, QuoteHash, Timestamp, TokenAmount};
 
@@ -108,8 +108,12 @@ pub fn register_icp_quote(quote: IcpToEvmQuote) -> Result<Hash32, FlowCallError>
             "the ck minter and Ethereum USDC must be configured",
         ));
     }
-    if settings.router(settings.ethereum).is_none() {
-        return Err(invalid("no router is configured on Ethereum"));
+    if crate::storage::config::get()
+        .evm_chains
+        .get(settings.ethereum)
+        .is_none()
+    {
+        return Err(invalid("no Swapic is configured on Ethereum"));
     }
     let amount_in = token_amount("amount_in", &quote.amount_in)?;
     let min_ckusdc = token_amount("min_ckusdc", &quote.min_ckusdc)?;
@@ -238,23 +242,49 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
     })
 }
 
-/// Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id` from the
-/// message's hook data and the clock: a Deliver is received on the message transmitter;
-/// a Swap or a CkDeposit is completed on Swapic before its deadline and released after
-/// it. Simulated, held to the gas rule, signed once per message and action. Answers the
-/// signed transaction's id in `signed_txs`.
+/// Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id`, the
+/// destination. `message` and `attestation` are Circle's, the message 696 bytes with the
+/// v3 envelope as its hook data; `src_tx_hash` is the source transaction that burned it,
+/// which the watcher has proven paid the canister's fee (I-3.4); `gas_limit` is the limit
+/// the quoter charged for. From the envelope and the clock: a Deliver is received on the
+/// message transmitter; a Swap (with `recipe`, required) or a CkDeposit (with none) is
+/// completed on the CctpReceiver before its deadline, and released after it. Signed with
+/// exactly `gas_limit`, or the chain's maximum for the action when that is lower, and held
+/// to the gas rule; once per message and action, and one message per source transaction.
+/// Answers the signed transaction's id in `signed_txs`.
 #[update]
 pub async fn finish_cctp(
     chain_id: u64,
     message: Vec<u8>,
     attestation: Vec<u8>,
-    swap: Option<DexCall>,
+    recipe: Option<Recipe>,
+    src_tx_hash: Vec<u8>,
+    gas_limit: u64,
 ) -> Result<u64, String> {
+    use crate::cctp::{parse_address, FinishError, GivenRecipe};
+    let recipe = recipe
+        .map(|recipe| {
+            Ok::<_, FinishError>(GivenRecipe {
+                target: parse_address(&recipe.target)
+                    .ok_or(FinishError::RecipeAddress("target"))?,
+                data: recipe.data,
+                scaler: recipe
+                    .scaler
+                    .map(|scaler| {
+                        parse_address(&scaler).ok_or(FinishError::RecipeAddress("scaler"))
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
     crate::cctp::finish_cctp(
         ChainId::new(chain_id),
         &message,
         &attestation,
-        swap.map(|swap| (swap.target, swap.data)),
+        recipe,
+        &src_tx_hash,
+        gas_limit,
     )
     .await
 }

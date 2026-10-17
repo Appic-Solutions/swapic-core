@@ -62,13 +62,9 @@ fn main() {
             std::fs::write(arg(&args, 4), hex_text).expect("the out file");
             return;
         }
-        // flow-settings <eth router> <base router> <arb router> <eth usdc> <ckusdc> <minter> <pool>
+        // flow-settings <unused> <unused> <unused> <eth usdc> <ckusdc> <minter> <pool>: the
+        // three router arguments are kept in place and ignored, Swapic is in `evm_chains`
         "flow-settings" => encode_one(FlowSettings {
-            routers: vec![
-                (1, arg(&args, 2).to_string()),
-                (8453, arg(&args, 3).to_string()),
-                (42161, arg(&args, 4).to_string()),
-            ],
             ethereum_chain_id: 1,
             ethereum_usdc: Some(arg(&args, 5).to_string()),
             ckusdc_ledger: Some(principal(arg(&args, 6))),

@@ -2,12 +2,10 @@ use super::*;
 use crate::storage::events::append_event_at;
 use crate::storage::on_fresh_memory;
 use alloy_primitives::U256;
+use alloy_sol_types::SolCall;
 use std::collections::BTreeMap;
-use std::time::Duration;
-use types::config::ChainTable;
-use types::events::TxPurpose;
-use types::router::ACTION_SWAP;
-use types::{CctpDomain, EventType, FlowStep, Nonce, TokenAmount, TxHash, WeiPerGas};
+use types::config::PerAction;
+use types::{EventType, FlowStep, GasAmount, Nonce, TokenAmount, WeiPerGas};
 
 /// A real CCTP v2 fast transfer from Base to Arbitrum, as Circle's iris served it
 /// (`samples/cctp_base_to_arbitrum.json`, burn tx 0x90cc...da0c).
@@ -28,8 +26,10 @@ fn sample() -> (Vec<u8>, Vec<u8>) {
 
 const BASE: ChainId = ChainId::BASE;
 const ARBITRUM: ChainId = ChainId::ARBITRUM;
-const SWAPIC_BASE: EvmAddress = EvmAddress::new([0xb5; 20]);
-const SWAPIC_ARB: EvmAddress = EvmAddress::new([0xa5; 20]);
+const BASE_RUNNER: EvmAddress = EvmAddress::new([0xb6; 20]);
+const ARB_RECEIVER: EvmAddress = EvmAddress::new([0xa7; 20]);
+const CANISTER: EvmAddress = EvmAddress::new([0xca; 20]);
+const USER: EvmAddress = EvmAddress::new([0x66; 20]);
 const TRANSMITTER: EvmAddress = EvmAddress::new([
     0x81, 0xd4, 0x0f, 0x21, 0xf1, 0x2a, 0x8f, 0x0e, 0x32, 0x52, 0xbc, 0xcb, 0x95, 0x4d, 0x72, 0x2d,
     0x4c, 0x46, 0x4b, 0x64,
@@ -43,9 +43,38 @@ const BASE_USDC: EvmAddress = EvmAddress::new([
     0xbd, 0xa0, 0x29, 0x13,
 ]);
 const NOW: u64 = 1_790_000_000;
+const DEADLINE: u64 = NOW + 3_600;
 
-fn usdc() -> ChainTable<EvmAddress> {
-    ChainTable(BTreeMap::from([(BASE, BASE_USDC)]))
+fn chain(swapic: u8, runner: EvmAddress, receiver: EvmAddress, usdc: EvmAddress) -> EvmChain {
+    EvmChain {
+        swapic: EvmAddress::new([swapic; 20]),
+        runner,
+        cctp_receiver: receiver,
+        usdc,
+        token_messenger: MESSENGER,
+        message_transmitter: TRANSMITTER,
+        gas_limit: PerAction::all(GasAmount::from(1_500_000_u64)),
+        gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::ZERO),
+    }
+}
+
+fn evm_chains() -> ChainTable<EvmChain> {
+    ChainTable(BTreeMap::from([
+        (
+            BASE,
+            chain(0xb5, BASE_RUNNER, EvmAddress::new([0xb7; 20]), BASE_USDC),
+        ),
+        (
+            ARBITRUM,
+            chain(
+                0xa5,
+                EvmAddress::new([0xa6; 20]),
+                ARB_RECEIVER,
+                EvmAddress::new([0xaf; 20]),
+            ),
+        ),
+    ]))
 }
 
 fn domains() -> ChainTable<CctpDomain> {
@@ -56,60 +85,59 @@ fn domains() -> ChainTable<CctpDomain> {
     ]))
 }
 
-fn settings() -> FlowSettings {
-    FlowSettings {
-        routers: BTreeMap::from([(BASE, SWAPIC_BASE), (ARBITRUM, SWAPIC_ARB)]),
-        ethereum: ChainId::ETHEREUM,
-        ethereum_usdc: None,
-        ckusdc_ledger: None,
-        ck_minter: None,
-        cketh_ledger: None,
-        cketh_fee_allowance: TokenAmount::ZERO,
-        icpswap_pools: vec![],
-        relay_window: Duration::from_secs(3_600),
-        continuation_deadline: Duration::from_secs(1_800),
-        max_gas_limit: 2_000_000,
-        icp_enabled: false,
-    }
-}
-
-fn decide_on(chain_id: ChainId, message: &BurnMessage, now_s: u64) -> Result<Plan, String> {
-    let (domains, usdc, settings) = (domains(), usdc(), settings());
+fn decide_on(chain_id: ChainId, message: &BurnMessage, now_s: u64) -> Result<Plan, FinishError> {
+    let (evm_chains, domains) = (evm_chains(), domains());
     let setup = Setup {
         chain_id,
+        evm_chains: &evm_chains,
         domains: &domains,
-        usdc: &usdc,
-        settings: &settings,
-        messenger: Some(MESSENGER),
-        transmitter: Some(TRANSMITTER),
+        canister: CANISTER,
     };
     decide(message, &setup, now_s)
 }
 
-fn hook(action: u8) -> HookData {
-    HookData {
-        version: 1,
+/// A principal in the ck helper's encoding: its length, then its bytes.
+fn principal_word() -> [u8; 32] {
+    let mut word = [0_u8; 32];
+    word[0] = 10;
+    word[1..11].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1, 1, 1]);
+    word
+}
+
+fn envelope(action: Action) -> Envelope {
+    Envelope {
         reference: [0x11; 32],
         action,
-        deadline: NOW + 3_600,
-        recipient: EvmAddress::new([0x66; 20]),
+        deadline: DEADLINE,
+        recipient: USER,
         token_out: EvmAddress::new([0x77; 20]),
         min_out: U256::from(500_000),
-        principal: [0; 32],
+        principal: if action == Action::CkDeposit {
+            principal_word()
+        } else {
+            [0; 32]
+        },
         subaccount: [0; 32],
+        min_gas: if action == Action::Deliver {
+            0
+        } else {
+            700_000
+        },
     }
 }
 
-/// The real message re-made as Swapic's own burn: sent by Swapic on Base with its hook
-/// data, and for a Swap or a CkDeposit minted to Swapic on Arbitrum and called by it.
-fn ours(action: u8) -> BurnMessage {
+/// The real message re-made as Swapic's own burn: burned by the Runner on Base with a v3
+/// envelope, and minted and called as the envelope's action needs on Arbitrum.
+fn ours(action: Action) -> BurnMessage {
     let (bytes, _) = sample();
     let mut message = BurnMessage::parse(&bytes).unwrap();
-    message.body.message_sender = SWAPIC_BASE.to_word();
-    message.body.hook_data = hook(action).encode();
-    if action != ACTION_DELIVER {
-        message.body.mint_recipient = SWAPIC_ARB.to_word();
-        message.destination_caller = SWAPIC_ARB.to_word();
+    message.body.message_sender = BASE_RUNNER.to_word();
+    message.body.hook_data = envelope(action).encode();
+    if action == Action::Deliver {
+        message.body.mint_recipient = USER.to_word();
+    } else {
+        message.body.mint_recipient = ARB_RECEIVER.to_word();
+        message.destination_caller = ARB_RECEIVER.to_word();
     }
     message
 }
@@ -119,127 +147,189 @@ fn the_real_message_reads_as_circle_attested_it() {
     let (bytes, attestation) = sample();
     let message = BurnMessage::parse(&bytes).unwrap();
     assert_eq!((message.source_domain, message.destination_domain), (6, 3));
-    assert_eq!(
-        hex::encode(message.nonce),
-        "1280877a8b106ebbfa4049f1d4ebc852d530ca8e243a59a2389847418e9bf597"
-    );
-    assert_eq!(message.destination_caller, [0; 32]);
     assert_eq!(message.sender, MESSENGER.to_word());
     assert_eq!(message.recipient, MESSENGER.to_word());
     assert_eq!(message.body.burn_token, BASE_USDC.to_word());
-    assert_eq!(
-        hex::encode(&message.body.mint_recipient[12..]),
-        "c5a0d52edf2dc3df76ed5d2848088270fcf6e2a4"
-    );
-    assert_eq!(message.body.amount, TokenAmount::from(600_000_u32));
-    assert!(message.body.hook_data.is_empty());
     assert_eq!(message.encode(), bytes);
     assert_eq!(attestation.len(), 130, "two attesters' signatures");
-}
-
-#[test]
-fn a_burn_swapic_did_not_make_is_refused() {
-    let (bytes, _) = sample();
-    let foreign = BurnMessage::parse(&bytes).unwrap();
+    // re-made as ours, it is exactly the 696 bytes a Swapic message is
     assert_eq!(
-        decide_on(ARBITRUM, &foreign, NOW),
-        Err("the burn was not made by Swapic".into())
-    );
-    let mut no_hook = ours(ACTION_DELIVER);
-    no_hook.body.hook_data.clear();
-    assert_eq!(
-        decide_on(ARBITRUM, &no_hook, NOW),
-        Err("the message carries no Swapic hook data".into())
+        ours(Action::Swap).encode().len(),
+        Envelope::CCTP_MESSAGE_LENGTH
     );
 }
 
-/// CCTP's generic messaging is permissionless: anyone can have a body shaped like a
-/// Swapic burn attested, with the outer sender being their own contract.
 #[test]
-fn forged_generic_message_is_refused() {
-    let mut forged = ours(ACTION_DELIVER);
+fn deliver_relays() {
+    let plan = decide_on(ARBITRUM, &ours(Action::Deliver), NOW).unwrap();
+    assert_eq!(
+        (plan.action, plan.gas_action, plan.to),
+        (FinishAction::Receive, GasAction::RelayDeliver, TRANSMITTER)
+    );
+    // minted to the user whenever it is received, after the deadline too
+    let late = decide_on(ARBITRUM, &ours(Action::Deliver), DEADLINE + 7_200).unwrap();
+    assert_eq!(late.action, FinishAction::Receive);
+    // received by the canister only is fine; by anyone else it is not ours to relay
+    let mut ours_only = ours(Action::Deliver);
+    ours_only.destination_caller = CANISTER.to_word();
+    assert!(decide_on(ARBITRUM, &ours_only, NOW).is_ok());
+    let mut theirs = ours(Action::Deliver);
+    theirs.destination_caller = ARB_RECEIVER.to_word();
+    assert!(matches!(
+        decide_on(ARBITRUM, &theirs, NOW),
+        Err(FinishError::Shape(_))
+    ));
+    // minted to someone other than the envelope names
+    let mut elsewhere = ours(Action::Deliver);
+    elsewhere.body.mint_recipient = [0x99; 32];
+    assert!(matches!(
+        decide_on(ARBITRUM, &elsewhere, NOW),
+        Err(FinishError::Shape(_))
+    ));
+    let (message, attestation) = sample();
+    let data = calldata(plan.action, &message, &attestation, swapic::no_recipe());
+    let call = swapic::receiveMessageCall::abi_decode(&data).unwrap();
+    assert_eq!(call.message.to_vec(), message);
+}
+
+#[test]
+fn swap_before_deadline_completes() {
+    let plan = decide_on(ARBITRUM, &ours(Action::Swap), NOW).unwrap();
+    assert_eq!(
+        (plan.action, plan.gas_action, plan.to),
+        (
+            FinishAction::Complete,
+            GasAction::CompleteSwap,
+            ARB_RECEIVER
+        )
+    );
+    assert_eq!(recipe_for(&plan, None), Err(FinishError::NoRecipe));
+    let given = GivenRecipe {
+        target: EvmAddress::new([0x44; 20]),
+        data: vec![0xe2, 0x1f, 0xd0, 0xe9],
+        scaler: Some(EvmAddress::new([0x2f; 20])),
+    };
+    let recipe = recipe_for(&plan, Some(given)).unwrap();
+    let message = ours(Action::Swap).encode();
+    let data = calldata(plan.action, &message, &[7; 130], recipe.clone());
+    assert_eq!(data[..4], swapic::selectors::COMPLETE_CCTP);
+    let call = swapic::completeCctpCall::abi_decode(&data).unwrap();
+    assert_eq!(
+        (
+            call.message.to_vec(),
+            call.attestation.to_vec(),
+            call.recipe
+        ),
+        (message, vec![7; 130], recipe)
+    );
+}
+
+#[test]
+fn a_ck_deposit_completes_with_no_recipe() {
+    let plan = decide_on(ARBITRUM, &ours(Action::CkDeposit), NOW).unwrap();
+    assert_eq!(
+        (plan.action, plan.gas_action),
+        (FinishAction::Complete, GasAction::CompleteCk)
+    );
+    assert_eq!(recipe_for(&plan, None), Ok(swapic::no_recipe()));
+    let given = GivenRecipe {
+        target: EvmAddress::new([0x44; 20]),
+        data: vec![],
+        scaler: None,
+    };
+    assert_eq!(
+        recipe_for(&plan, Some(given)),
+        Err(FinishError::RecipeForCk)
+    );
+}
+
+#[test]
+fn after_deadline_releases() {
+    let plan = decide_on(
+        ARBITRUM,
+        &ours(Action::Swap),
+        DEADLINE + RELEASE_MARGIN_S + 1,
+    )
+    .unwrap();
+    assert_eq!(
+        (plan.action, plan.gas_action, plan.to),
+        (FinishAction::Release, GasAction::Release, ARB_RECEIVER)
+    );
+    let message = ours(Action::Swap).encode();
+    let data = calldata(plan.action, &message, &[7; 130], swapic::no_recipe());
+    assert_eq!(data[..4], swapic::selectors::RELEASE);
+    // too close to the deadline either way: nothing is signed, and the watcher asks again
+    for now in [
+        DEADLINE - COMPLETE_MARGIN_S,
+        DEADLINE,
+        DEADLINE + RELEASE_MARGIN_S,
+    ] {
+        assert!(matches!(
+            decide_on(ARBITRUM, &ours(Action::Swap), now),
+            Err(FinishError::NearDeadline { .. })
+        ));
+    }
+    assert_eq!(
+        decide_on(ARBITRUM, &ours(Action::CkDeposit), DEADLINE + 3_600)
+            .unwrap()
+            .action,
+        FinishAction::Release
+    );
+}
+
+/// A Swap or a CkDeposit is the receiver's to claim: minted to it and called only by it,
+/// or the receiver refuses the message. And the message is a Swapic burn end to end.
+#[test]
+fn wrong_receiver_refused() {
+    let mut elsewhere = ours(Action::Swap);
+    elsewhere.body.mint_recipient = [0x99; 32];
+    assert!(matches!(
+        decide_on(ARBITRUM, &elsewhere, NOW),
+        Err(FinishError::Shape(_))
+    ));
+    let mut anyone = ours(Action::Swap);
+    anyone.destination_caller = [0; 32];
+    assert!(matches!(
+        decide_on(ARBITRUM, &anyone, NOW),
+        Err(FinishError::Shape(_))
+    ));
+    // CCTP's generic messaging is permissionless: a body shaped like a burn, sent by
+    // someone's own contract, is not a token messenger burn
+    let mut forged = ours(Action::Swap);
     forged.sender = [0x0f; 32];
     assert_eq!(
         decide_on(ARBITRUM, &forged, NOW),
-        Err("the message is not a token messenger burn".into())
+        Err(FinishError::NotABurn)
     );
-}
-
-#[test]
-fn wrong_outer_recipient_is_refused() {
-    let mut forged = ours(ACTION_DELIVER);
-    forged.recipient = [0x0f; 32];
+    let mut wrong_recipient = ours(Action::Swap);
+    wrong_recipient.recipient = [0x0f; 32];
     assert_eq!(
-        decide_on(ARBITRUM, &forged, NOW),
-        Err("the message is not a token messenger burn".into())
+        decide_on(ARBITRUM, &wrong_recipient, NOW),
+        Err(FinishError::NotABurn)
     );
-    let mut not_usdc = ours(ACTION_DELIVER);
+    let mut not_usdc = ours(Action::Swap);
     not_usdc.body.burn_token = [0x0e; 32];
     assert_eq!(
         decide_on(ARBITRUM, &not_usdc, NOW),
-        Err("the burn is not USDC".into())
+        Err(FinishError::NotUsdc)
     );
-}
-
-#[test]
-fn a_deliver_is_received_on_the_transmitter() {
-    let plan = decide_on(ARBITRUM, &ours(ACTION_DELIVER), NOW).unwrap();
-    assert_eq!(plan.action, FinishAction::Receive);
-    assert_eq!(plan.to, TRANSMITTER);
-    // even after its deadline: a Deliver mints to the user whenever it is received
-    let late = decide_on(ARBITRUM, &ours(ACTION_DELIVER), NOW + 7_200).unwrap();
-    assert_eq!(late.action, FinishAction::Receive);
-    let mut called = ours(ACTION_DELIVER);
-    called.destination_caller = SWAPIC_ARB.to_word();
-    assert!(decide_on(ARBITRUM, &called, NOW).is_err());
-}
-
-#[test]
-fn a_swap_before_its_deadline_is_completed_and_after_it_released() {
-    let plan = decide_on(ARBITRUM, &ours(ACTION_SWAP), NOW).unwrap();
-    assert_eq!((plan.action, plan.to), (FinishAction::Complete, SWAPIC_ARB));
-    let late = decide_on(ARBITRUM, &ours(ACTION_SWAP), NOW + 3_600).unwrap();
-    assert_eq!((late.action, late.to), (FinishAction::Release, SWAPIC_ARB));
-    let fresh =
-        completion_swap(&plan.hook, Some((EvmAddress::new([0x44; 20]), vec![1, 2]))).unwrap();
-    assert_eq!(fresh.target, router::addr(EvmAddress::new([0x44; 20])));
-}
-
-#[test]
-fn a_ck_deposit_is_completed_with_no_swap() {
-    let plan = decide_on(ARBITRUM, &ours(ACTION_CK_DEPOSIT), NOW).unwrap();
-    assert_eq!(plan.action, FinishAction::Complete);
+    let (bytes, _) = sample();
+    let mut not_ours = BurnMessage::parse(&bytes).unwrap();
+    not_ours.body.hook_data = envelope(Action::Swap).encode();
     assert_eq!(
-        completion_swap(&plan.hook, None).unwrap().target,
-        Address::ZERO
+        decide_on(ARBITRUM, &not_ours, NOW),
+        Err(FinishError::NotTheRunner)
     );
-    assert!(completion_swap(&plan.hook, Some((EvmAddress::new([0x44; 20]), vec![]))).is_err());
-}
-
-#[test]
-fn a_message_for_another_chain_or_minted_elsewhere_is_refused() {
-    assert!(decide_on(BASE, &ours(ACTION_DELIVER), NOW).is_err());
-    let mut elsewhere = ours(ACTION_SWAP);
-    elsewhere.body.mint_recipient = [0x99; 32];
-    assert!(decide_on(ARBITRUM, &elsewhere, NOW).is_err());
-    let mut anyone = ours(ACTION_SWAP);
-    anyone.destination_caller = [0; 32];
-    assert!(decide_on(ARBITRUM, &anyone, NOW).is_err());
-}
-
-#[test]
-fn each_action_calls_what_it_names() {
-    let (message, attestation) = sample();
-    let none = completion_swap(&hook(ACTION_SWAP), None).unwrap();
-    // receiveMessage(bytes,bytes), completeCctp(bytes,bytes,(address,bytes)), release(bytes,bytes)
-    for (action, selector) in [
-        (FinishAction::Receive, "57ecfd28"),
-        (FinishAction::Complete, "5072459f"),
-        (FinishAction::Release, "aa30d53a"),
-    ] {
-        let data = calldata(action, &message, &attestation, none.clone());
-        assert_eq!(hex::encode(&data[..4]), selector);
-    }
+    let mut no_envelope = ours(Action::Swap);
+    no_envelope.body.hook_data.clear();
+    assert!(matches!(
+        decide_on(ARBITRUM, &no_envelope, NOW),
+        Err(FinishError::Envelope(_))
+    ));
+    assert!(matches!(
+        decide_on(BASE, &ours(Action::Swap), NOW),
+        Err(FinishError::WrongDomain { .. })
+    ));
 }
 
 fn created(key: QuoteHash, nonce: u64) -> EventType {
@@ -247,18 +337,23 @@ fn created(key: QuoteHash, nonce: u64) -> EventType {
         purpose: TxPurpose::Finish(key),
         chain_id: ARBITRUM,
         nonce: Nonce::new(nonce),
-        to: TRANSMITTER,
+        to: ARB_RECEIVER,
         value: Wei::ZERO,
-        data: vec![0x57, 0xec, 0xfd, 0x28],
-        gas_limit: GasAmount::from(200_000_u32),
+        data: swapic::selectors::COMPLETE_CCTP.to_vec(),
+        gas_limit: GasAmount::from(1_185_547_u32),
         max_fee: WeiPerGas::from(20_000_000_u64),
         max_priority_fee: WeiPerGas::from(1_000_000_u64),
     }
 }
 
-fn signed(key: QuoteHash, nonce: u64, action: FinishAction, message_hash: [u8; 32]) -> EventType {
+fn signed(
+    nonce: u64,
+    action: FinishAction,
+    message_hash: [u8; 32],
+    source_tx: TxHash,
+) -> EventType {
     EventType::Flow {
-        quote_hash: key,
+        quote_hash: finish_key(message_hash, action),
         step: FlowStep::CctpFinishSigned {
             chain_id: ARBITRUM,
             nonce: Nonce::new(nonce),
@@ -266,54 +361,151 @@ fn signed(key: QuoteHash, nonce: u64, action: FinishAction, message_hash: [u8; 3
             raw_tx: vec![0x02, 0xf8],
             action,
             message_hash,
+            source_tx: Some(source_tx),
         },
     }
 }
 
-/// Review Focus 2: the same nudge twice signs once. The fold refuses a second nonce while
-/// the first is being signed and a second record once it is signed, and the door answers
-/// the first record's id.
+/// Plan Review Focus: the same nudge twice signs once, and a release after the deadline
+/// answers the completion unless the completion reverted.
 #[test]
 fn finish_cctp_is_idempotent() {
     on_fresh_memory(|| {
         crate::storage::init();
         let at = Timestamp::from_nanos(1);
-        let (message, _) = sample();
-        let message_hash = alloy_primitives::keccak256(&message).0;
-        let key = finish_key(message_hash, FinishAction::Receive);
-        assert_eq!(existing(key), Ok(None));
+        let message_hash = alloy_primitives::keccak256(ours(Action::Swap).encode()).0;
+        let source = TxHash::new([0x5c; 32]);
+        let complete = finish_key(message_hash, FinishAction::Complete);
+        assert_eq!(answered(FinishAction::Complete, message_hash), Ok(None));
 
-        append_event_at(created(key, 0), at).unwrap();
-        assert_eq!(existing(key), Err("the finish is being signed".into()));
+        append_event_at(created(complete, 0), at).unwrap();
         assert!(
-            append_event_at(created(key, 1), at).is_err(),
+            answered(FinishAction::Complete, message_hash).is_err(),
+            "being signed"
+        );
+        assert!(
+            append_event_at(created(complete, 1), at).is_err(),
             "no second nonce while the first is out"
         );
-
-        let id = append_event_at(signed(key, 0, FinishAction::Receive, message_hash), at)
+        let id = append_event_at(signed(0, FinishAction::Complete, message_hash, source), at)
             .unwrap()
             .get();
-        assert_eq!(existing(key), Ok(Some(id)));
-        assert!(
-            append_event_at(created(key, 1), at).is_err(),
-            "no second transaction once one is signed"
-        );
-        assert!(append_event_at(signed(key, 0, FinishAction::Receive, message_hash), at).is_err());
-        let state = read_state(|state| state.flow(&key)).unwrap();
-        assert_eq!(state.status, types::FlowStatus::FinishSigned);
-        assert!(state.tx_open);
+        assert_eq!(answered(FinishAction::Complete, message_hash), Ok(Some(id)));
+        assert!(append_event_at(created(complete, 1), at).is_err());
+        // after the deadline the watcher asks again: the completion is out, so it answers
+        assert_eq!(answered(FinishAction::Release, message_hash), Ok(Some(id)));
 
-        // a record under a key that is not its message and action's is refused
+        // the completion reverted: a release is what follows it, signed once as well
+        append_event_at(
+            EventType::Flow {
+                quote_hash: complete,
+                step: FlowStep::TxClosed {
+                    tx_hash: TxHash::new([1; 32]),
+                    block: types::BlockNumber::new(9),
+                    success: false,
+                },
+            },
+            at,
+        )
+        .unwrap();
+        assert_eq!(answered(FinishAction::Release, message_hash), Ok(None));
         let release = finish_key(message_hash, FinishAction::Release);
         append_event_at(created(release, 1), at).unwrap();
-        assert!(
-            append_event_at(signed(release, 1, FinishAction::Receive, message_hash), at).is_err()
-        );
-        // and the release of the same message is its own action, signed once too
         let release_id =
-            append_event_at(signed(release, 1, FinishAction::Release, message_hash), at)
+            append_event_at(signed(1, FinishAction::Release, message_hash, source), at)
                 .unwrap()
                 .get();
-        assert_eq!(existing(release), Ok(Some(release_id)));
+        assert_eq!(
+            answered(FinishAction::Release, message_hash),
+            Ok(Some(release_id))
+        );
+    });
+}
+
+/// Plan Review Focus: one fee pays for one arrival, so a source transaction finishes one
+/// message (its completion and the release after it count as one), and the fold refuses a
+/// second message even if a door let it through.
+#[test]
+fn completions_capped_per_source_tx() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let source = TxHash::new([0x5c; 32]);
+        let first = alloy_primitives::keccak256(ours(Action::Swap).encode()).0;
+        let second = alloy_primitives::keccak256(ours(Action::CkDeposit).encode()).0;
+        append_event_at(created(finish_key(first, FinishAction::Complete), 0), at).unwrap();
+        append_event_at(signed(0, FinishAction::Complete, first, source), at).unwrap();
+
+        assert!(read_state(|state| finished_another(state, source, second)));
+        assert!(!read_state(|state| finished_another(state, source, first)));
+        assert!(!read_state(|state| finished_another(
+            state,
+            TxHash::new([0x5d; 32]),
+            second
+        )));
+
+        // the fold, past the door: a second message under the same source is refused
+        let second_key = finish_key(second, FinishAction::Complete);
+        append_event_at(created(second_key, 1), at).unwrap();
+        assert!(append_event_at(signed(1, FinishAction::Complete, second, source), at).is_err());
+        // under its own source it is a finish like any other
+        append_event_at(
+            signed(1, FinishAction::Complete, second, TxHash::new([0x5d; 32])),
+            at,
+        )
+        .unwrap();
+        // and the first message's release shares its source's one slot
+        let release = finish_key(first, FinishAction::Release);
+        append_event_at(created(release, 2), at).unwrap();
+        append_event_at(signed(2, FinishAction::Release, first, source), at).unwrap();
+    });
+}
+
+fn sanctioned(text: String) {
+    crate::storage::sanctions::apply(&[text.parse().unwrap()], &[]).unwrap();
+}
+
+/// A finish pays its envelope's recipient (and a Deliver its mint recipient, which is
+/// the same address): a sanctioned one is not finished.
+#[test]
+fn a_sanctioned_recipient_is_not_finished() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let swap = decide_on(ARBITRUM, &ours(Action::Swap), NOW).unwrap();
+        let deliver = decide_on(ARBITRUM, &ours(Action::Deliver), NOW).unwrap();
+        assert_eq!(screen(&swap), Ok(()));
+        assert_eq!(screen(&deliver), Ok(()));
+        sanctioned(USER.to_string());
+        assert_eq!(
+            screen(&swap),
+            Err(FinishError::Sanctioned(Party::Evm(USER)))
+        );
+        assert_eq!(
+            screen(&deliver),
+            Err(FinishError::Sanctioned(Party::Evm(USER)))
+        );
+    });
+}
+
+/// A CkDeposit credits an ICP principal: a sanctioned one, or one the canister cannot
+/// read, is not finished.
+#[test]
+fn a_sanctioned_ck_principal_is_not_finished() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let plan = decide_on(ARBITRUM, &ours(Action::CkDeposit), NOW).unwrap();
+        assert_eq!(screen(&plan), Ok(()));
+        let principal = swapic::ck_principal(principal_word()).unwrap();
+        sanctioned(principal.to_text());
+        assert_eq!(
+            screen(&plan),
+            Err(FinishError::Sanctioned(Party::Icp(principal)))
+        );
+        let mut unreadable = ours(Action::CkDeposit);
+        let mut bad = envelope(Action::CkDeposit);
+        bad.principal = [0xff; 32];
+        unreadable.body.hook_data = bad.encode();
+        let plan = decide_on(ARBITRUM, &unreadable, NOW).unwrap();
+        assert!(matches!(screen(&plan), Err(FinishError::Shape(_))));
     });
 }

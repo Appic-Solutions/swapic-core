@@ -13,8 +13,6 @@ use serde::Deserialize;
 /// chain layer's and stays as it was.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct FlowSettings {
-    /// Swapic on each chain, as an EVM address.
-    pub routers: Vec<(u64, String)>,
     /// The chain the ck minter withdraws to and the continuation runs on: Ethereum.
     pub ethereum_chain_id: u64,
     /// USDC on that chain, which the withdrawal lands as.
@@ -60,11 +58,14 @@ pub enum FlowMode {
     Pool,
 }
 
-/// A DEX call: an allowlisted router and its calldata.
+/// The arrival swap a CCTP Swap completes with (ABI v3 `Recipe`): `target` is called with
+/// `data` paying the Runner, rescaled to what arrived by `scaler` when one is named.
+/// Addresses are EVM addresses.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DexCall {
+pub struct Recipe {
     pub target: String,
     pub data: Vec<u8>,
+    pub scaler: Option<String>,
 }
 
 /// The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router

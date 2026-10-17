@@ -40,31 +40,39 @@ fn shortfall_halts_pool_only() {
     });
 }
 
+/// The fee step is a USDC transfer from the Runner to the canister: only those transfers
+/// in a receipt are the fee, whatever else moved in it.
 #[test]
-fn the_network_fee_is_read_off_swapics_own_fee_log() {
-    let swapic = EvmAddress::new([0x5a; 20]);
-    let topic = format!("0x{}", hex::encode(types::router::swap_fees_topic()));
-    let data = |platform: u64, network: u64| {
-        format!(
-            "0x{:064x}{:064x}{:064x}{:064x}",
-            platform, network, 0_u64, 0_u64
-        )
+fn the_network_fee_is_the_fee_steps_transfer() {
+    let path = FeePath {
+        usdc: EvmAddress::new([0x83; 20]),
+        runner: EvmAddress::new([0xd9; 20]),
+        canister: EvmAddress::new([0xca; 20]),
     };
+    let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
+    let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
+    let transfer = |token: [u8; 20], from: EvmAddress, to: EvmAddress, amount: u64| {
+        json!({ "address": format!("0x{}", hex::encode(token)),
+                "topics": [topic, word(from), word(to)],
+                "data": format!("0x{amount:064x}") })
+    };
+    let user = EvmAddress::new([0xe0; 20]);
     let receipt = json!({
         "logs": [
-            { "address": format!("0x{}", hex::encode([0x5a; 20])), "topics": [topic, "0x11"],
-              "data": data(0, 50_000) },
-            // another contract's log of the same shape is not Swapic's
-            { "address": format!("0x{}", hex::encode([0x77; 20])), "topics": [topic],
-              "data": data(0, 9_999) },
+            transfer([0x83; 20], user, path.runner, 100_000_000),
+            transfer([0x83; 20], path.runner, path.canister, 166_275),
+            // the burn's USDC leaves the Runner for someone else
+            transfer([0x83; 20], path.runner, EvmAddress::new([0x28; 20]), 99_833_725),
+            // another token's transfer of the same shape is no fee
+            transfer([0x77; 20], path.runner, path.canister, 9_999),
         ]
     });
     assert_eq!(
-        network_fee_in(&receipt, swapic),
-        TokenAmount::from(50_000_u32)
+        network_fee_in(&receipt, path),
+        TokenAmount::from(166_275_u32)
     );
     assert_eq!(
-        network_fee_in(&json!({ "logs": [] }), swapic),
+        network_fee_in(&json!({ "logs": [] }), path),
         TokenAmount::ZERO
     );
 }
