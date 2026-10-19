@@ -453,9 +453,13 @@ fn a_swap_moves_the_pockets_and_keeps_the_premium() {
         block: BlockNumber::new(10),
     })
     .unwrap();
-    // in the pockets twice (Base arrival, ICP reservation), owed once
-    assert_eq!(pool.ledger.owed, usdc(99));
-    assert_eq!(pool.ledger.total_assets(), usdc(1_001));
+    // in the pockets twice (Base arrival, ICP reservation), owed once with its fee
+    let held = usdc(99).checked_add(TokenAmount::from(FEE)).unwrap();
+    assert_eq!(pool.ledger.owed, held);
+    assert_eq!(
+        pool.ledger.total_assets(),
+        usdc(1_001).checked_sub(TokenAmount::from(FEE)).unwrap()
+    );
     assert!(pool.ledger.paying.contains(&r#ref));
     let attempt = PayoutAttempt {
         created_at: Timestamp::from_nanos(5),
@@ -534,12 +538,37 @@ fn a_stake_mints_at_the_price_before_it() {
     assert!(value < usdc(100));
 }
 
-/// Review Focus 3, through the fold: a withdrawal while a swap's payout is unpaid takes no
-/// more than its shares were worth before the swap arrived and its premium.
+/// Review Focus 3, through the fold (and the coordinator's review): what a pool swap owes is
+/// no stakers' asset. A withdrawal while a swap's payout is unpaid is paid exactly its fair
+/// value (what was staked, and its part of the premium less the payout's fee), never the
+/// arrival counted twice; and the same value after the payout is recorded.
 #[test]
 fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
+    let fee = TokenAmount::from(FEE);
+    // A staked 1000 (funded), B stakes 500 on ICP
     let mut pool = funded(usdc(1_000));
-    let owner = recipient(200);
+    let a = recipient(200);
+    let b = recipient(201);
+    let b_id = PoolOpId::new([0x66; 32]);
+    pool.step(PoolStep::StakeStarted {
+        id: b_id,
+        owner: PoolAccount::Icp(b),
+        from: b,
+        amount: usdc(500),
+        created_at: Timestamp::from_nanos(1),
+    })
+    .unwrap();
+    let b_shares = pool.ledger.mint_now(usdc(500)).unwrap();
+    pool.step(PoolStep::StakedIcp {
+        id: b_id,
+        owner: PoolAccount::Icp(b),
+        amount: usdc(500),
+        rebalance_share: TokenAmount::ZERO,
+        shares: b_shares,
+        block: 2,
+    })
+    .unwrap();
+    // a swap of 100 with a premium of 1 arrives, unpaid
     let r#ref = register(&mut pool, swap(1, usdc(100), usdc(1)));
     pool.step(PoolStep::Arrived {
         r#ref,
@@ -548,86 +577,104 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
         block: BlockNumber::new(10),
     })
     .unwrap();
-    let owned = pool.shares_of(&PoolAccount::Icp(owner).key());
-    let worth = Shares::value_of(owned, pool.ledger.total_assets(), pool.ledger.total_shares);
-    assert_eq!(
-        worth,
-        usdc(1_001),
-        "what was staked and the premium, not the arrival"
-    );
-    // asking for more than that burns more than is owned
-    let too_much = worth.checked_add(TokenAmount::ONE).unwrap();
-    assert_eq!(
-        Shares::burn_for(
-            too_much,
+    // the stakers own 1500 and the premium less the payout's fee, never the arrival
+    let fair = usdc(1_501).checked_sub(fee).unwrap();
+    assert_eq!(pool.ledger.total_assets(), fair);
+    let value = |pool: &Pool, owner: IcpAccount| {
+        Shares::value_of(
+            pool.shares_of(&PoolAccount::Icp(owner).key()),
             pool.ledger.total_assets(),
-            pool.ledger.total_shares
-        ),
-        None
-    );
-    let started = |usdc: TokenAmount, burned: Shares| PoolStep::WithdrawStarted {
-        id: PoolOpId::new([0x77; 32]),
-        owner,
-        burned,
-        usdc,
-        to: owner,
-        token_out: ckusdc(),
-        min_out: 0,
-        attempt: PayoutAttempt {
-            created_at: Timestamp::from_nanos(9),
-            memo: [0x77; 32],
-            path: PayoutPath::Ckusdc,
-        },
+            pool.ledger.total_shares,
+        )
     };
-    // the ICP pocket holds 900.99 free (the swap holds its payout and its fee): a withdrawal is paid from it, not from Base
-    assert!(matches!(
-        pool.step(started(usdc(1_001), owned)),
-        Err(PoolStepError::PocketShort { .. })
-    ));
-    // too few shares burned for what is asked
-    assert!(matches!(
-        pool.step(started(usdc(500), Shares::new(owned.get() / 3))),
-        Err(PoolStepError::BurnTooSmall { .. })
-    ));
-    let burned = Shares::burn_for(
-        usdc(500),
+    // B's third of it, rounded down
+    let b_fair = fair
+        .checked_mul(500_u32)
+        .unwrap()
+        .checked_div_floor(1_500_u32)
+        .unwrap();
+    assert_eq!(value(&pool, b), b_fair);
+    let started = |id: u8, owner: IcpAccount, usdc_out: TokenAmount, burned: Shares| {
+        PoolStep::WithdrawStarted {
+            id: PoolOpId::new([id; 32]),
+            owner,
+            burned,
+            usdc: usdc_out,
+            to: owner,
+            token_out: ckusdc(),
+            min_out: 0,
+            attempt: PayoutAttempt {
+                created_at: Timestamp::from_nanos(9),
+                memo: [id; 32],
+                path: PayoutPath::Ckusdc,
+            },
+        }
+    };
+    // a cent more than B's value burns more than B owns
+    let too_much = b_fair.checked_add(TokenAmount::ONE).unwrap();
+    let burn_too_much = Shares::burn_for(
+        too_much,
         pool.ledger.total_assets(),
         pool.ledger.total_shares,
     )
     .unwrap();
-    pool.step(started(usdc(500), burned)).unwrap();
-    assert_eq!(
-        pool.ledger.pockets.icp.free,
-        usdc(401).checked_sub(TokenAmount::from(FEE)).unwrap()
-    );
-    assert_eq!(
-        pool.ledger.pockets.icp.reserved,
-        usdc(599).checked_add(TokenAmount::from(FEE)).unwrap()
-    );
-    assert_eq!(pool.ledger.owed, usdc(599));
-    // the price did not move for what is left
-    let left = pool.shares_of(&PoolAccount::Icp(owner).key());
-    assert_eq!(
-        Shares::value_of(left, pool.ledger.total_assets(), pool.ledger.total_shares),
-        usdc(501)
-    );
+    assert!(burn_too_much > pool.shares_of(&PoolAccount::Icp(b).key()));
+    assert!(matches!(
+        pool.step(started(0x77, b, too_much, burn_too_much)),
+        Err(PoolStepError::ShortShares { .. })
+    ));
+    // too few shares for what is asked
+    assert!(matches!(
+        pool.step(started(0x77, b, b_fair, Shares::new(b_shares.get() / 3))),
+        Err(PoolStepError::BurnTooSmall { .. })
+    ));
+    // B withdraws exactly its value
+    let burned =
+        Shares::burn_for(b_fair, pool.ledger.total_assets(), pool.ledger.total_shares).unwrap();
+    assert!(burned <= b_shares);
+    pool.step(started(0x77, b, b_fair, burned)).unwrap();
     pool.step(PoolStep::WithdrawnIcp {
         id: PoolOpId::new([0x77; 32]),
-        owner,
+        owner: b,
         burned,
-        usdc: usdc(500),
+        usdc: b_fair,
         token: ckusdc(),
-        paid: usdc(500).checked_sub(TokenAmount::from(FEE)).unwrap(),
+        paid: b_fair.checked_sub(fee).unwrap(),
         block: 3,
-        spent: usdc(500),
+        spent: b_fair,
     })
     .unwrap();
-    assert!(pool.ledger.pending.is_empty());
-    assert_eq!(
-        pool.ledger.pockets.icp.reserved,
-        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
+    // A's value did not move by B's leaving, and is the rest of the fair value
+    let a_before_paid = value(&pool, a);
+    assert!(
+        a_before_paid
+            >= fair
+                .checked_sub(b_fair)
+                .unwrap()
+                .checked_sub(TokenAmount::ONE)
+                .unwrap()
     );
-    assert_eq!(pool.ledger.owed, usdc(99));
+    // the swap's payout recorded: nothing moves for the stakers
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(10),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+        },
+    })
+    .unwrap();
+    pool.step(PoolStep::Paid {
+        r#ref,
+        token: ckusdc(),
+        amount: usdc(99),
+        block: 4,
+        spent: usdc(99).checked_add(fee).unwrap(),
+    })
+    .unwrap();
+    assert_eq!(value(&pool, a), a_before_paid, "the same after Paid");
+    assert_eq!(pool.ledger.owed, TokenAmount::ZERO);
+    assert!(pool.ledger.pending.is_empty());
 }
 
 /// A payout that keeps failing stops for a human at the tenth failure, and the drive's index
@@ -662,7 +709,10 @@ fn a_payout_stops_after_ten_failures() {
         })
         .is_err());
     // the money is still owed and still held
-    assert_eq!(pool.ledger.owed, usdc(99));
+    assert_eq!(
+        pool.ledger.owed,
+        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
+    );
     assert_eq!(
         pool.ledger.pockets.icp.reserved,
         usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()

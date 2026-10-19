@@ -51,7 +51,8 @@ pub struct PoolLedger {
     #[n(2)]
     pub total_shares: Shares,
     /// What arrived or was burned and is not paid or minted yet: in the pockets, and not
-    /// the stakers'. The share price leaves it out.
+    /// the stakers'. The share price leaves it out: a swap's payout and the fees its path
+    /// can spend, a withdrawal's amount, a stake's arrival until its mint.
     #[n(3)]
     pub owed: TokenAmount,
     /// The TVL room held by stakes on their way: an EVM stake's `min_usdc` until it arrives
@@ -668,7 +669,7 @@ impl PoolLedger {
                         amount: *amount,
                         block: *block,
                     });
-                    ledger.owed = sat_add(ledger.owed, deposit.owed());
+                    ledger.owed = sat_add(ledger.owed, owed_line(&deposit));
                     deposit_out = Some((*r#ref, deposit));
                 }
                 ledger.pockets.base.free = sat_add(ledger.pockets.base.free, *amount);
@@ -726,7 +727,7 @@ impl PoolLedger {
                 spent,
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.owed = sat_sub(ledger.owed, deposit.owed());
+                    ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
                     ledger.spend_reserved(deposit.held(), *spent);
                     ledger.paying.remove(r#ref);
                     deposit.status = DepositStatus::Paid;
@@ -755,7 +756,7 @@ impl PoolLedger {
                 shares,
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.owed = sat_sub(ledger.owed, deposit.owed());
+                    ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
                     ledger.paying.remove(r#ref);
                     ledger.total_shares = ledger
                         .total_shares
@@ -971,6 +972,18 @@ impl PoolLedger {
             change(payout);
         }
         None
+    }
+}
+
+/// What an arrived deposit puts on the `owed` line: a swap its whole hold (the payout and
+/// every fee its path can cost), so the share price neither counts the payout nor the fees
+/// it will spend; a stake its whole arrival, so its own mint is priced on the assets before
+/// it.
+fn owed_line(deposit: &Registered) -> TokenAmount {
+    if deposit.terms.kind.is_swap() {
+        deposit.held()
+    } else {
+        deposit.owed()
     }
 }
 
