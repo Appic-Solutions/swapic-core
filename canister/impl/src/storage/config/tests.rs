@@ -12,6 +12,8 @@ const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 /// `cctp_min_fees`, so the line ends with them.
 /// Rewritten for fix wave 6 (M1): the default lookback is the ceiling, 400,000 blocks.
 /// Rewritten for P10: the gas budgets, the minimum network fees and the books knobs.
+/// Rewritten for P10c: Ethereum's swap depth is 1, and the wire view gained
+/// `credit_confirmations`, so the line ends with it.
 #[test]
 fn a_config_change_logs_json_of_the_redacted_wire_view() {
     let config = Config {
@@ -30,7 +32,7 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""max_batch_items":10,"decision_timeout_min":30,"rail_status_max_age_s":30,"#,
             r#""simulate_before_sign":false,"expiry_check_interval_s":60,"#,
             r#""replay_audit_interval_s":21600,"#,
-            r#""confirmations":{"1":12,"56":1,"137":6,"8453":1,"42161":1},"#,
+            r#""confirmations":{"1":1,"56":1,"137":6,"8453":1,"42161":1},"#,
             r#""rpc_urls":{"1":"***"},"vault_addresses":{"8453":"0xvault"},"#,
             r#""ecdsa_key_name":"key_1","max_refunds_per_sweep":50,"#,
             r#""max_evictions_per_sweep":200,"audit_chunk_events":1000,"#,
@@ -38,7 +40,7 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""eco_portal":null,"#,
             r#""eco_enabled":false,"claim_grace_s":3600,"cctp_min_fees":{},"#,
             r#""books_check_interval_s":600,"books_tolerance":"1000000","evm_chains":{},"#,
-            r#""pool_chain":null}"#
+            r#""pool_chain":null,"credit_confirmations":{}}"#
         )
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");

@@ -128,6 +128,12 @@ type Config = record {
   // Eco's `Portal`, the same address on every chain.
   eco_portal : opt text;
   decision_timeout_min : nat64;
+  // The crediting depth per chain: how deep money arriving at the canister (a deposit,
+  // a ck minter withdrawal's USDC, the books' balance read) must be before it is
+  // credited. Absent, or a chain with no entry: the chain's `confirmations`, the swap
+  // depth. Ethereum's is refused below 12 (`DepthTooShallow`), and crediting there never
+  // reads below 12 whatever is set.
+  credit_confirmations : opt vec record { nat64; nat64 };
   // The USDC contract per chain, as an EVM address.
   usdc_addresses : vec record { nat64; text };
   chain_data_max_age_s : nat64;
@@ -180,9 +186,9 @@ type ConfigError = variant {
     chain_id : opt nat64;
     reason : EvmAddressError;
   };
-  // The depth configured for `chain_id` is below the floor a reorg on that chain makes
-  // necessary, so a deposit or a receipt there could be taken as final and then leave
-  // the chain.
+  // The crediting depth configured for `chain_id` (`credit_confirmations`) is below the
+  // floor a reorg on that chain makes necessary, so money arriving there could be
+  // credited and then leave the chain.
   DepthTooShallow : record { floor : nat64; chain_id : nat64; depth : nat64 };
   RedactedRpcUrl : record { chain_id : nat64 };
   // In milliseconds, like the cap: the knob is below the least it may be.

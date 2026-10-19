@@ -30,7 +30,7 @@ use settlement_api::types::errors::GuardError;
 use std::time::Duration;
 use thiserror::Error;
 use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
-use types::config::GasAction;
+use types::config::{GasAction, MIN_ETHEREUM_CONFIRMATIONS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
@@ -1036,8 +1036,9 @@ fn send_cap(sends: usize) -> u64 {
     MAX_SEND_BYTES_PER_ITEM * sends as u64
 }
 
-/// How deep a receipt on `chain_id` must be before it closes an attempt, and how deep a
-/// deposit must be before a swap is claimed on it: the one definition of a chain's depth.
+/// How deep a receipt on `chain_id` must be before it closes an attempt: the swap depth,
+/// 1 block on Ethereum too (Jeff, 2026-10-17). Money arriving at the canister is credited
+/// at [`credit_confirmations`].
 ///
 /// A chain the config lists no depth for decides nothing. The alternative, a default of
 /// one, is a depth nobody chose deciding money on a chain whose reorgs nobody sized, which
@@ -1052,6 +1053,25 @@ pub(crate) fn confirmations(
         .get(&chain_id)
         .copied()
         .ok_or(NoDepth { chain_id })
+}
+
+/// The depth money arriving at the canister is credited at: the chain's crediting depth, or
+/// its swap depth, and on Ethereum never below `MIN_ETHEREUM_CONFIRMATIONS`. A deposit, a
+/// ck minter withdrawal's USDC and the books' balance read credit money a reorg would take
+/// back, so they read this one and never the swap depth alone.
+pub(crate) fn credit_confirmations(
+    config: &types::Config,
+    chain_id: ChainId,
+) -> Result<BlockDepth, NoDepth> {
+    let depth = match config.credit_confirmations.get(chain_id) {
+        Some(depth) => depth,
+        None => confirmations(config, chain_id)?,
+    };
+    Ok(if chain_id == ChainId::ETHEREUM {
+        depth.max(MIN_ETHEREUM_CONFIRMATIONS)
+    } else {
+        depth
+    })
 }
 
 /// Drops the entry, appending the line that closes its attempt when it has one, and

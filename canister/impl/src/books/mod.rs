@@ -11,7 +11,7 @@ use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::halt::is_halted;
 use crate::storage::{chain_data, config};
-use crate::tx::confirmations;
+use crate::tx::credit_confirmations;
 use serde_json::Value;
 use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed, ReadFailure};
 use types::{ChainId, EventType, EvmAddress, FlowKind, Timestamp, TokenAmount, TxHash};
@@ -156,7 +156,7 @@ pub fn record_failure(chain_id: ChainId, failure: ReadFailure) {
 
 /// The balance check, every `books_check_interval`: per chain the canister signs on, the
 /// canister's USDC read at a confirmed block (the freshest pushed head less the chain's
-/// confirmations) beside what the lines expect. It records what it saw and never books it;
+/// crediting depth) beside what the lines expect. It records what it saw and never books it;
 /// only a shortfall beyond the tolerance pauses the pool. A chain whose balance cannot be
 /// read is recorded as a failed check, so the pool's guard sees its books go stale.
 pub async fn check_balances() {
@@ -196,7 +196,7 @@ async fn check_balance(
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let head = chain_data::fresh(chain_id, now, config.chain_data_max_age)
         .ok_or(ReadFailure::NoChainData)?;
-    let depth = confirmations(config, chain_id).map_err(|_| ReadFailure::NoDepth)?;
+    let depth = credit_confirmations(config, chain_id).map_err(|_| ReadFailure::NoDepth)?;
     let block = head
         .block
         .get()

@@ -1,6 +1,8 @@
 use crate::chain::ChainId;
 use crate::chain_data::ChainReading;
-use crate::config::{AuditChunk, Config, EvictionsPerSweep, RefundsPerSweep};
+use crate::config::{
+    AuditChunk, ChainTable, Config, EvictionsPerSweep, RefundsPerSweep, MIN_ETHEREUM_CONFIRMATIONS,
+};
 use crate::events::{Event, TxPurpose, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
@@ -59,8 +61,9 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// swap with the hash its latest attempt confirmed as, an outbox entry the provider
 /// refused, a swap with the amount its payout was signed for, a pending quote entry with
 /// the height it was registered at, a config at the depths a deploy gets, two swaps with
-/// the fees their record holds, and a pending quote entry with the deadlines it was
-/// registered under.
+/// the fees their record holds, a pending quote entry with the deadlines it was registered
+/// under, a config at the depths a deploy gets once a swap on Ethereum is acted on at 1
+/// block, and a config with crediting depths of its own.
 ///
 /// Every field of a sample differs from its neighbours, so a field that moves to another
 /// index decodes to a different value instead of passing unnoticed. The file is append
@@ -412,12 +415,20 @@ fn samples() -> Vec<Sample> {
                 deadlines: None,
             },
         ),
-        // the depths a deploy now gets, mainnet's floor among them: the two config lines
-        // above keep the table this one replaced, so neither of them moves
+        // the depths a deploy got, mainnet's floor among them: the two config lines above
+        // keep the table this one replaced, so neither of them moves. Spelled out since
+        // P10c moved Ethereum's swap depth to 1, so this line does not move either
         sample(
             "config at the depths a deploy gets",
             Config {
                 ecdsa_key_name: "key_1".to_string(),
+                confirmations: BTreeMap::from([
+                    (ChainId::ETHEREUM, MIN_ETHEREUM_CONFIRMATIONS),
+                    (ChainId::BASE, BlockDepth::new(1)),
+                    (ChainId::BSC, BlockDepth::new(1)),
+                    (ChainId::POLYGON, BlockDepth::new(6)),
+                    (ChainId::ARBITRUM, BlockDepth::new(1)),
+                ]),
                 ..Config::default()
             },
         ),
@@ -475,6 +486,27 @@ fn samples() -> Vec<Sample> {
                     deposit_until: UnixSeconds::new(1_800_000_120),
                     claim_until: UnixSeconds::new(1_800_003_720),
                 }),
+            },
+        ),
+        // the depths a deploy gets since P10c: a swap on Ethereum is acted on at 1 block,
+        // and with no crediting depth set the field is absent, as in every line above
+        sample(
+            "config at the depths a deploy gets with ethereum swaps at 1 block",
+            Config {
+                ecdsa_key_name: "key_1".to_string(),
+                ..Config::default()
+            },
+        ),
+        // the config lines above leave the crediting depths absent; this one pins them
+        sample(
+            "config with crediting depths of its own",
+            Config {
+                ecdsa_key_name: "key_1".to_string(),
+                credit_confirmations: ChainTable(BTreeMap::from([
+                    (ChainId::ETHEREUM, BlockDepth::new(14)),
+                    (ChainId::BASE, BlockDepth::new(2)),
+                ])),
+                ..Config::default()
             },
         ),
     ]);

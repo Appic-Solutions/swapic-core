@@ -449,7 +449,7 @@ async fn check_landing(
     let mine = ecdsa::canister_address()
         .await
         .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
-    let depth = tx::confirmations(&config::get(), settings.ethereum)
+    let depth = tx::credit_confirmations(&config::get(), settings.ethereum)
         .map_err(|e| FlowDriveError::Chain(e.to_string()))?;
     let read = evm_reads::transfer_to(settings.ethereum, tx_hash, usdc, mine, depth)
         .await

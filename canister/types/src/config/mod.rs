@@ -100,10 +100,14 @@ pub type DepositLookback = Cap<MAX_LOOKBACK_BLOCKS, MAX_LOOKBACK_BLOCKS>;
 /// chain, so a lookback that covers a span at this rate covers it everywhere.
 pub const FASTEST_BLOCKS_PER_SECOND: u64 = 4;
 
-/// The least deep a receipt or a deposit on Ethereum mainnet may be taken as final. A
-/// one-block reorg there is routine, and a depth below this would claim a deposit that
-/// then leaves the chain, or refund a burn that then mines. The other chains' depths are
-/// the deploy's to size; this one is refused at the door.
+/// The least deep money arriving at the canister on Ethereum mainnet may be credited at: a
+/// deposit, a ck minter withdrawal's USDC, the books' balance read. A one-block reorg
+/// there is routine, and crediting below this would credit money that then leaves the
+/// chain, which no later step takes back. A swap is acted on at its own depth, 1 block on
+/// Ethereum too (Jeff, 2026-10-17): that depth closes the canister's own transactions in
+/// the outbox, and credits no money that arrived. The other chains' depths are the
+/// deploy's to size; this one bounds `credit_confirmations` at the door, and crediting
+/// reads at least this on Ethereum whatever the config holds.
 pub const MIN_ETHEREUM_CONFIRMATIONS: BlockDepth = BlockDepth::new(12);
 
 impl<const DEFAULT: u32, const CEILING: u32> Cap<DEFAULT, CEILING> {
@@ -418,6 +422,9 @@ pub struct Config {
     pub expiry_check_interval: Duration,
     #[n(12)]
     pub replay_audit_interval: Duration,
+    /// The swap depth per chain: how deep the canister's own transactions must be before
+    /// the outbox takes them as final. Crediting reads it too for a chain
+    /// `credit_confirmations` has no entry for.
     #[n(13)]
     pub confirmations: BTreeMap<ChainId, BlockDepth>,
     /// Secrets: each url carries its provider's api key.
@@ -486,6 +493,12 @@ pub struct Config {
     /// the pool is closed.
     #[n(34)]
     pub pool_chain: Option<ChainId>,
+    /// The crediting depth per chain: how deep money arriving at the canister (a deposit,
+    /// a ck minter withdrawal's USDC, the books' balance read) must be before it is
+    /// credited. A chain with no entry credits at its swap depth, and Ethereum never below
+    /// [`MIN_ETHEREUM_CONFIRMATIONS`].
+    #[n(35)]
+    pub credit_confirmations: ChainTable<BlockDepth>,
 }
 
 /// The kinds of transaction the canister signs and pays the gas of: the relay of a
@@ -782,8 +795,8 @@ pub enum ConfigError {
         ceiling: u32,
     },
     #[error(
-        "confirmations[{chain}] is {depth}, below the floor of {floor} a reorg on that \
-         chain makes necessary"
+        "credit_confirmations[{chain}] is {depth}, below the floor of {floor} a reorg on \
+         that chain makes necessary"
     )]
     DepthTooShallow {
         chain: ChainId,
@@ -863,9 +876,9 @@ impl Default for Config {
             expiry_check_interval: Duration::from_secs(60),
             replay_audit_interval: Duration::from_secs(21_600),
             confirmations: BTreeMap::from([
-                // the one depth the canister holds a deploy to, because a shallow one on
-                // mainnet is a reorg away from a burn with no deposit behind it
-                (ChainId::ETHEREUM, MIN_ETHEREUM_CONFIRMATIONS),
+                // a swap on Ethereum is acted on at 1 block (Jeff, 2026-10-17); crediting
+                // there never reads below MIN_ETHEREUM_CONFIRMATIONS
+                (ChainId::ETHEREUM, BlockDepth::new(1)),
                 (ChainId::BASE, BlockDepth::new(1)),
                 (ChainId::BSC, BlockDepth::new(1)),
                 (ChainId::POLYGON, BlockDepth::new(6)),
@@ -891,6 +904,8 @@ impl Default for Config {
             books_tolerance: BooksTolerance::DEFAULT,
             evm_chains: ChainTable::default(),
             pool_chain: None,
+            // crediting reads the swap depths, held to the floor on Ethereum
+            credit_confirmations: ChainTable::default(),
         }
     }
 }
@@ -912,11 +927,12 @@ impl Config {
             return Err(ConfigError::EmptyEcdsaKeyName);
         }
         // a chain listed with no depth at all is refused where money is decided, so the
-        // one depth checked here is the one whose shallow value is a mistake on any deploy
+        // one depth checked here is the one whose shallow value is a mistake on any deploy:
+        // Ethereum's crediting depth (its swap depth may be 1, and crediting never reads
+        // that below the floor)
         if let Some(depth) = self
-            .confirmations
-            .get(&ChainId::ETHEREUM)
-            .copied()
+            .credit_confirmations
+            .get(ChainId::ETHEREUM)
             .filter(|depth| *depth < MIN_ETHEREUM_CONFIRMATIONS)
         {
             return Err(ConfigError::DepthTooShallow {

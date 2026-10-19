@@ -80,6 +80,12 @@ pub struct Config {
     /// The chain the pool's EVM pocket is on, whose books the pool's guard reads. None:
     /// the pool is closed.
     pub pool_chain: Option<u64>,
+    /// The crediting depth per chain: how deep money arriving at the canister (a deposit,
+    /// a ck minter withdrawal's USDC, the books' balance read) must be before it is
+    /// credited. Absent, or a chain with no entry: the chain's `confirmations`, the swap
+    /// depth. Ethereum's is refused below 12 (`DepthTooShallow`), and crediting there never
+    /// reads below 12 whatever is set.
+    pub credit_confirmations: Option<BTreeMap<u64, u64>>,
 }
 
 /// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, and per
@@ -282,6 +288,7 @@ impl fmt::Debug for Config {
             books_tolerance,
             evm_chains,
             pool_chain,
+            credit_confirmations,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -317,6 +324,7 @@ impl fmt::Debug for Config {
             .field("books_tolerance", books_tolerance)
             .field("evm_chains", evm_chains)
             .field("pool_chain", pool_chain)
+            .field("credit_confirmations", credit_confirmations)
             .finish()
     }
 }
@@ -377,6 +385,7 @@ impl From<types::Config> for Config {
             books_tolerance,
             evm_chains,
             pool_chain,
+            credit_confirmations,
         } = config;
         Self {
             platform_fee_bps: platform_fee.get(),
@@ -436,6 +445,13 @@ impl From<types::Config> for Config {
                 .map(|(chain, config)| (chain.get(), config.into()))
                 .collect(),
             pool_chain: pool_chain.map(ChainId::get),
+            credit_confirmations: Some(
+                credit_confirmations
+                    .0
+                    .into_iter()
+                    .map(|(chain, depth)| (chain.get(), depth.get()))
+                    .collect(),
+            ),
         }
     }
 }
@@ -566,6 +582,16 @@ impl TryFrom<Config> for types::Config {
                     .collect::<Result<_, _>>()?,
             ),
             pool_chain: config.pool_chain.map(ChainId::new),
+            // absent is empty: a caller that predates the field credits at the swap depths,
+            // held to the floor on Ethereum
+            credit_confirmations: ChainTable(
+                config
+                    .credit_confirmations
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
+                    .collect(),
+            ),
         })
     }
 }
@@ -611,9 +637,9 @@ pub enum ConfigError {
         cap: u32,
         ceiling: u32,
     },
-    /// The depth configured for `chain_id` is below the floor a reorg on that chain makes
-    /// necessary, so a deposit or a receipt there could be taken as final and then leave
-    /// the chain.
+    /// The crediting depth configured for `chain_id` (`credit_confirmations`) is below the
+    /// floor a reorg on that chain makes necessary, so money arriving there could be
+    /// credited and then leave the chain.
     DepthTooShallow {
         chain_id: u64,
         depth: u64,

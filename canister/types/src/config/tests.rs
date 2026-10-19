@@ -20,14 +20,16 @@ fn defaults_match_spec() {
     assert!(!c.simulate_before_sign);
     assert_eq!(c.expiry_check_interval, Duration::from_secs(60));
     assert_eq!(c.replay_audit_interval, Duration::from_secs(21_600));
-    // Ethereum's depth is the floor a reorg on it makes necessary, not the spec's one
+    // a swap is acted on at 1 block on Ethereum too (Jeff, 2026-10-17); crediting has no
+    // depth of its own, so it reads these, and Ethereum's never below the floor
     assert_eq!(
         c.confirmations,
         BTreeMap::from(
-            [(1, 12), (8453, 1), (56, 1), (137, 6), (42161, 1)]
+            [(1, 1), (8453, 1), (56, 1), (137, 6), (42161, 1)]
                 .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
         )
     );
+    assert_eq!(c.credit_confirmations, ChainTable::default());
     // the widest range the read walks, 100,000 seconds of the chain whose blocks come
     // fastest, so every deposit a claim may be asked for is in the range it reads
     // (rewritten for fix wave 6, M1: it was a day, 345,600, which fell short)
@@ -127,14 +129,19 @@ fn validate_rejects_an_empty_ecdsa_key_name() {
     assert_eq!(config.validate(), Err(ConfigError::EmptyEcdsaKeyName));
 }
 
-/// A depth decides money on both sides, and Ethereum mainnet reorgs routinely: a config
-/// that would claim a deposit or close a burn there at less than the floor is refused,
-/// whatever else it holds. Every other chain is the deploy's own call.
+/// Crediting decides money arriving at the canister, and Ethereum mainnet reorgs
+/// routinely: a config that would credit a deposit there at less than the floor is
+/// refused, whatever else it holds. Every other chain is the deploy's own call.
+/// Rewritten for P10c: the floor moved from `confirmations`, the swap depth, onto
+/// `credit_confirmations`.
 #[test]
-fn validate_rejects_a_mainnet_depth_below_the_floor() {
+fn validate_rejects_a_mainnet_crediting_depth_below_the_floor() {
     for depth in [1, MIN_ETHEREUM_CONFIRMATIONS.get() - 1] {
         let shallow = Config {
-            confirmations: BTreeMap::from([(ChainId::ETHEREUM, BlockDepth::new(depth))]),
+            credit_confirmations: ChainTable(BTreeMap::from([(
+                ChainId::ETHEREUM,
+                BlockDepth::new(depth),
+            )])),
             ..Config::default()
         };
         assert_eq!(
@@ -147,18 +154,40 @@ fn validate_rejects_a_mainnet_depth_below_the_floor() {
         );
     }
     let at_the_floor = Config {
-        confirmations: BTreeMap::from([(ChainId::ETHEREUM, MIN_ETHEREUM_CONFIRMATIONS)]),
+        credit_confirmations: ChainTable(BTreeMap::from([(
+            ChainId::ETHEREUM,
+            MIN_ETHEREUM_CONFIRMATIONS,
+        )])),
         ..Config::default()
     };
     assert_eq!(at_the_floor.validate(), Ok(()));
     // another chain's depth is the deploy's to size, and a chain with no depth at all is
     // refused where money is decided, not here
     let shallow_elsewhere = Config {
-        confirmations: BTreeMap::from([(ChainId::ARBITRUM, BlockDepth::new(1))]),
+        credit_confirmations: ChainTable(BTreeMap::from([(ChainId::ARBITRUM, BlockDepth::new(1))])),
         ..Config::default()
     };
     assert_eq!(shallow_elsewhere.validate(), Ok(()));
     assert_eq!(Config::default().validate(), Ok(()));
+}
+
+/// Jeff (2026-10-17): a swap on Ethereum is acted on at 1 block; crediting money at the
+/// canister keeps Ethereum's floor of 12.
+#[test]
+fn ethereum_swaps_at_one_block_and_credits_at_twelve() {
+    let mut config = Config::default();
+    config
+        .confirmations
+        .insert(ChainId::ETHEREUM, BlockDepth::new(1));
+    assert_eq!(config.validate(), Ok(()));
+    config
+        .credit_confirmations
+        .0
+        .insert(ChainId::ETHEREUM, BlockDepth::new(1));
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::DepthTooShallow { .. })
+    ));
 }
 
 #[test]

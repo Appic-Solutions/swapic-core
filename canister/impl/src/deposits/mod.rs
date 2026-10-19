@@ -22,7 +22,7 @@ mod tests;
 
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BLOCK_NUMBER_BYTES};
 use crate::storage::{chain_data, config};
-use crate::tx::{confirmations, NoDepth};
+use crate::tx::{credit_confirmations, NoDepth};
 use serde_json::{json, Value};
 use std::cell::Cell;
 use thiserror::Error;
@@ -796,7 +796,7 @@ pub async fn verify_evm_deposit(read: &DepositRead) -> Result<VerifiedDeposit, D
     let watcher = chain_data::fresh(chain_id, now, config.chain_data_max_age)
         .ok_or(DepositError::StaleChainData { chain_id })?
         .block;
-    let depth = confirmations(&config, chain_id)?;
+    let depth = credit_confirmations(&config, chain_id)?;
     let head = read_head(chain_id).await?;
     let plan = Plan::new(start, watcher, head, config.deposit_lookback_blocks);
     let reader = Reader {

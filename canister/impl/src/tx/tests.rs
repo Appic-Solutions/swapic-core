@@ -799,12 +799,69 @@ fn a_chain_with_no_depth_configured_decides_no_money() {
     let config = types::Config::default();
     assert_eq!(
         confirmations(&config, ChainId::ETHEREUM),
-        Ok(types::config::MIN_ETHEREUM_CONFIRMATIONS)
+        Ok(BlockDepth::new(1))
     );
     let unlisted = ChainId::new(59_144);
     assert_eq!(
         confirmations(&config, unlisted),
         Err(NoDepth { chain_id: unlisted })
+    );
+    assert_eq!(
+        credit_confirmations(&config, unlisted),
+        Err(NoDepth { chain_id: unlisted })
+    );
+}
+
+/// With no crediting depth set for a chain, crediting reads the swap depth, never below the
+/// Ethereum floor.
+#[test]
+fn crediting_falls_back_to_the_swap_depth_with_the_floor() {
+    let mut config = types::Config::default();
+    config
+        .confirmations
+        .insert(ChainId::ETHEREUM, BlockDepth::new(1));
+    config.credit_confirmations.0.clear();
+    assert_eq!(
+        credit_confirmations(&config, ChainId::ETHEREUM),
+        Ok(BlockDepth::new(12))
+    );
+    config
+        .confirmations
+        .insert(ChainId::new(8453), BlockDepth::new(1));
+    assert_eq!(
+        credit_confirmations(&config, ChainId::new(8453)),
+        Ok(BlockDepth::new(1))
+    );
+    // a crediting depth of its own is the one read, and on Ethereum still never below the
+    // floor, even in a config nobody validated
+    config
+        .credit_confirmations
+        .0
+        .insert(ChainId::BASE, BlockDepth::new(3));
+    assert_eq!(
+        credit_confirmations(&config, ChainId::BASE),
+        Ok(BlockDepth::new(3))
+    );
+    config
+        .credit_confirmations
+        .0
+        .insert(ChainId::ETHEREUM, BlockDepth::new(20));
+    assert_eq!(
+        credit_confirmations(&config, ChainId::ETHEREUM),
+        Ok(BlockDepth::new(20))
+    );
+    config
+        .credit_confirmations
+        .0
+        .insert(ChainId::ETHEREUM, BlockDepth::new(2));
+    assert_eq!(
+        credit_confirmations(&config, ChainId::ETHEREUM),
+        Ok(BlockDepth::new(12))
+    );
+    // the swap depth on Ethereum is what the outbox reads, and it stays at 1
+    assert_eq!(
+        confirmations(&config, ChainId::ETHEREUM),
+        Ok(BlockDepth::new(1))
     );
 }
 
