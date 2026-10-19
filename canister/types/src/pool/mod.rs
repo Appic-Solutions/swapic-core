@@ -770,6 +770,10 @@ pub struct Registered {
     pub minted: Option<Shares>,
     #[n(5)]
     pub payout: PayoutProgress,
+    /// What the deposit holds of the ICP pocket once it arrived: its whole payout and every
+    /// ledger fee its path can cost. None before: the registration's `reserve`.
+    #[n(6)]
+    pub held: Option<TokenAmount>,
 }
 
 impl Registered {
@@ -781,7 +785,14 @@ impl Registered {
             paid: None,
             minted: None,
             payout: PayoutProgress::default(),
+            held: None,
         }
+    }
+
+    /// What the deposit holds of the ICP pocket now: the registration's reserve until it
+    /// arrives, its whole payout and fees after.
+    pub fn held(&self) -> TokenAmount {
+        self.held.unwrap_or_else(|| self.terms.reserve())
     }
 
     /// What the deposit owes its owner once it arrived: a swap's recipient everything less

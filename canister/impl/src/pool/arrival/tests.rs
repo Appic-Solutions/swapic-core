@@ -9,7 +9,7 @@ use super::*;
 use crate::storage::events::event_count;
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, payer, usdc};
-use crate::storage::pool::{deposit, ledger};
+use crate::storage::pool::{deposit, ledger, record_at};
 use alloy_sol_types::SolEvent;
 use types::pool::{DepositKind, PoolRail, Registration};
 
@@ -476,5 +476,36 @@ fn a_receipt_not_deep_enough_is_not_credited() {
             deep_enough(block, BlockNumber::new(block.get() - 1), ChainId::BASE),
             Err(PoolError::NotDeep { needed: 1, have: 0 })
         );
+    });
+}
+
+/// Review fix: an arrival larger than its registration is measured on what arrived. Above
+/// the per-swap cap it is no credit: unattributed with its payer, its hold released.
+#[test]
+fn an_arrival_above_the_cap_is_unattributed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(2);
+        let raw = cctp(r#ref);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        crate::storage::pool::tests::register(terms(
+            2,
+            usdc(4),
+            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
+            PoolRail::Cctp,
+        ));
+        // a per-swap cap below the 4.747709 that arrived
+        let mut settings = ledger().settings.unwrap();
+        settings.per_swap_cap = usdc(4);
+        record_at(PoolStep::SettingsSet { settings }, now).unwrap();
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let outcomes = record(&found, now).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.ends_with("above the per-swap cap")
+        ));
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Unattributed);
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
 }

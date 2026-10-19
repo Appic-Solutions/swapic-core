@@ -765,6 +765,17 @@ fn pool_samples() -> Vec<Sample> {
             fell_back: Some("below the minimum twice".to_string()),
             failed: None,
         },
+        // absent, so this sample's bytes stay the ones the golden pins; the deposit
+        // appended at the end of the pool's samples pins it
+        held: None,
+    };
+    // the deposit above with what it holds of the ICP pocket once it arrived
+    let holding = Registered {
+        status: DepositStatus::Paying,
+        paid: None,
+        minted: None,
+        held: Some(TokenAmount::from(171_030_000_u32)),
+        ..deposit.clone()
     };
     vec![
         sample("pool ledger", ledger),
@@ -783,6 +794,7 @@ fn pool_samples() -> Vec<Sample> {
         sample("pool ref key", PoolRef::new([0xb3; 32])),
         sample("pool owner key", OwnerKey::new([0xb4; 32])),
         sample("credited transfer key", credit),
+        sample("pool deposit with what it holds", holding),
     ]
 }
 

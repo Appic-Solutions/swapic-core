@@ -16,7 +16,8 @@
 //! A transfer whose proof holds names a ref; one whose proof fails for good is recorded
 //! unattributed with its payer when known, so the orphan refund (P11b) returns it. Then
 //! against the fold: registered, still `Registered`, arrived by its expiry and grace (at its
-//! block's time), at least `min_usdc`, paid by the registered payer, never credited. Every
+//! block's time), at least `min_usdc`, within the pool's caps on what arrived, paid by the
+//! registered payer, never credited. Every
 //! step of one call is appended in the message that checks it, after the last read, so the
 //! same transfer reported twice is credited once.
 
@@ -480,6 +481,14 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
                 "{} arrived, below the {} registered",
                 found.amount, terms.min_usdc
             ),
+            Some(r#ref),
+        ));
+    }
+    // the caps, on what arrived rather than what was registered
+    if let Err(why) = state.pool().arrival_fits(&deposit, found.amount) {
+        return Some(orphan(
+            Some(terms.src_payer),
+            format!("{} arrived: {why}", found.amount),
             Some(r#ref),
         ));
     }

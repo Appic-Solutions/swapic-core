@@ -157,6 +157,8 @@ pub enum PoolStepError {
     Mismatch,
     #[error("the cursor at {at} cannot move back to {to}")]
     CursorBack { at: BlockNumber, to: BlockNumber },
+    #[error("the arrival does not fit the pool: {0}")]
+    DoesNotFit(&'static str),
 }
 
 /// Why `register_pool_deposit` refuses terms, before anything is appended. Each is one of
@@ -314,6 +316,46 @@ impl PoolLedger {
         lookup.deposit(r#ref).ok_or(PoolStepError::Unknown(*r#ref))
     }
 
+    /// Whether `amount` arriving for `deposit` fits the pool, measured on what arrived and
+    /// not on what was registered: a swap within the per-swap cap, its whole payout and the
+    /// fees its path can cost held on ICP (the part above its registration's hold out of the
+    /// pocket's free ckUSDC, so no other hold is spent); a stake within the TVL cap. Answers
+    /// what a swap holds after it.
+    pub fn arrival_fits(
+        &self,
+        deposit: &Registered,
+        amount: TokenAmount,
+    ) -> Result<TokenAmount, &'static str> {
+        let settings = self.settings.as_ref().ok_or("the pool has no settings")?;
+        match deposit.terms.kind {
+            DepositKind::Swap { token_out, .. } => {
+                if amount > settings.per_swap_cap {
+                    return Err("above the per-swap cap");
+                }
+                let payout = amount
+                    .checked_sub(deposit.terms.premium)
+                    .ok_or("below the premium")?;
+                let held = path_fees(settings, token_out)
+                    .and_then(|fees| payout.checked_add(fees))
+                    .ok_or("the payout overflows")?;
+                let more = held
+                    .checked_sub(deposit.held())
+                    .unwrap_or(TokenAmount::ZERO);
+                if more > self.pockets.icp.free {
+                    return Err("the ICP pocket cannot hold the payout");
+                }
+                Ok(held)
+            }
+            DepositKind::Stake { .. } => {
+                let would_be = sat_add(sat_sub(self.tvl_measure(), deposit.terms.min_usdc), amount);
+                if would_be > settings.tvl_cap {
+                    return Err("above the TVL cap");
+                }
+                Ok(TokenAmount::ZERO)
+            }
+        }
+    }
+
     /// What a stake of `amount` mints now.
     pub fn mint_now(&self, amount: TokenAmount) -> Option<Shares> {
         Shares::mint_for(amount, self.total_assets(), self.total_shares)
@@ -385,6 +427,8 @@ impl PoolLedger {
                         min_usdc: deposit.terms.min_usdc,
                     });
                 }
+                self.arrival_fits(&deposit, *amount)
+                    .map_err(PoolStepError::DoesNotFit)?;
                 Ok(())
             }
             PoolStep::Unattributed { credit, amount, .. } => {
@@ -591,7 +635,7 @@ impl PoolLedger {
             PoolStep::Expired { r#ref } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     ledger.close_open(r#ref, &deposit.terms);
-                    ledger.release(&deposit.terms);
+                    ledger.release(&deposit);
                     deposit.status = DepositStatus::Expired;
                     deposit_out = Some((*r#ref, deposit));
                 }
@@ -604,7 +648,17 @@ impl PoolLedger {
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     ledger.close_open(r#ref, &deposit.terms);
-                    if !deposit.terms.kind.is_swap() {
+                    if deposit.terms.kind.is_swap() {
+                        // the whole payout and its fees held from now: the part above the
+                        // registration's hold comes out of the pocket's free ckUSDC
+                        if let Ok(held) = ledger.arrival_fits(&deposit, *amount) {
+                            let more = sat_sub(held, deposit.held());
+                            let icp = &mut ledger.pockets.icp;
+                            icp.free = sat_sub(icp.free, more);
+                            icp.reserved = sat_add(icp.reserved, more);
+                            deposit.held = Some(held);
+                        }
+                    } else {
                         ledger.stake_room = sat_sub(ledger.stake_room, deposit.terms.min_usdc);
                     }
                     ledger.paying.insert(*r#ref);
@@ -644,7 +698,7 @@ impl PoolLedger {
                         match deposit.status {
                             DepositStatus::Registered => {
                                 ledger.close_open(r#ref, &deposit.terms);
-                                ledger.release(&deposit.terms);
+                                ledger.release(&deposit);
                                 deposit.status = DepositStatus::Unattributed;
                                 deposit_out = Some((*r#ref, deposit));
                             }
@@ -673,9 +727,10 @@ impl PoolLedger {
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     ledger.owed = sat_sub(ledger.owed, deposit.owed());
-                    ledger.spend_reserved(deposit.terms.reserve(), *spent);
+                    ledger.spend_reserved(deposit.held(), *spent);
                     ledger.paying.remove(r#ref);
                     deposit.status = DepositStatus::Paid;
+                    deposit.held = Some(TokenAmount::ZERO);
                     deposit.paid = Some(super::Paid {
                         token: *token,
                         amount: *amount,
@@ -861,9 +916,10 @@ impl PoolLedger {
     }
 
     /// The hold released, the registration gone with nothing paid.
-    fn release(&mut self, terms: &Registration) {
+    fn release(&mut self, deposit: &Registered) {
+        let terms = &deposit.terms;
         if terms.kind.is_swap() {
-            let reserve = terms.reserve();
+            let reserve = deposit.held();
             let icp = &mut self.pockets.icp;
             icp.reserved = sat_sub(icp.reserved, reserve);
             icp.free = sat_add(icp.free, reserve);
@@ -915,6 +971,17 @@ impl PoolLedger {
             change(payout);
         }
         None
+    }
+}
+
+/// The ledger fees a payout of `token_out` can cost the pool: ckUSDC's transfer, or the
+/// ICPSwap path's (the approval, the pool's pull, and the ckUSDC fall back).
+pub fn path_fees(settings: &PoolSettings, token_out: Principal) -> Option<TokenAmount> {
+    let fee = settings.fee_of(settings.ckusdc_ledger)?;
+    if token_out == settings.ckusdc_ledger {
+        Some(fee)
+    } else {
+        fee.checked_mul(ICPSWAP_PATH_FEES)
     }
 }
 
@@ -1006,13 +1073,7 @@ pub fn least_premium(
     let share = min_usdc
         .checked_mul(settings.premium_bps)?
         .checked_div_ceil(10_000_u32)?;
-    let fee = settings.fee_of(settings.ckusdc_ledger)?;
-    let fees = if token_out == settings.ckusdc_ledger {
-        fee
-    } else {
-        fee.checked_mul(ICPSWAP_PATH_FEES)?
-    };
-    Some(share.max(fees))
+    Some(share.max(path_fees(settings, token_out)?))
 }
 
 /// The pool's limits on a registration, read off the ledger: the token out listed, the open

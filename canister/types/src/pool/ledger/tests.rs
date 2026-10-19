@@ -579,7 +579,7 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
             path: PayoutPath::Ckusdc,
         },
     };
-    // the ICP pocket holds 901 free: a withdrawal is paid from it, not from Base
+    // the ICP pocket holds 900.99 free (the swap holds its payout and its fee): a withdrawal is paid from it, not from Base
     assert!(matches!(
         pool.step(started(usdc(1_001), owned)),
         Err(PoolStepError::PocketShort { .. })
@@ -596,8 +596,14 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
     )
     .unwrap();
     pool.step(started(usdc(500), burned)).unwrap();
-    assert_eq!(pool.ledger.pockets.icp.free, usdc(401));
-    assert_eq!(pool.ledger.pockets.icp.reserved, usdc(599));
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        usdc(401).checked_sub(TokenAmount::from(FEE)).unwrap()
+    );
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        usdc(599).checked_add(TokenAmount::from(FEE)).unwrap()
+    );
     assert_eq!(pool.ledger.owed, usdc(599));
     // the price did not move for what is left
     let left = pool.shares_of(&PoolAccount::Icp(owner).key());
@@ -617,7 +623,10 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
     })
     .unwrap();
     assert!(pool.ledger.pending.is_empty());
-    assert_eq!(pool.ledger.pockets.icp.reserved, usdc(99));
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
+    );
     assert_eq!(pool.ledger.owed, usdc(99));
 }
 
@@ -654,7 +663,10 @@ fn a_payout_stops_after_ten_failures() {
         .is_err());
     // the money is still owed and still held
     assert_eq!(pool.ledger.owed, usdc(99));
-    assert_eq!(pool.ledger.pockets.icp.reserved, usdc(99));
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
+    );
 }
 
 /// The ICPSwap leg: declined once, then it may only fall back; once begun it never falls
@@ -819,4 +831,70 @@ fn a_step_round_trips_through_its_bytes() {
     for step in steps {
         assert_eq!(PoolStep::from_bytes(&step.to_bytes()), Some(step));
     }
+}
+
+/// Review fix: the caps are measured on what arrived, not on what was registered. A swap that
+/// arrives above the per-swap cap, or whose larger payout the ICP pocket's free ckUSDC
+/// cannot hold, and a stake that arrives past the TVL cap, are no credit; a swap that arrives
+/// a little larger holds its whole payout and fee, so no other hold is spent.
+#[test]
+fn an_arrival_is_measured_on_what_arrived() {
+    let arrived = |r#ref, amount| PoolStep::Arrived {
+        r#ref,
+        credit: credit(9),
+        amount,
+        block: BlockNumber::new(10),
+    };
+    let mut pool = funded(usdc(300));
+    let swap_ref = register(&mut pool, swap(1, usdc(100), usdc(1)));
+    assert_eq!(
+        pool.step(arrived(swap_ref, usdc(1_001))),
+        Err(PoolStepError::DoesNotFit("above the per-swap cap"))
+    );
+    // 201 free beside the 99 held: a payout of 399 and its fee needs 300.01 more
+    assert_eq!(
+        pool.step(arrived(swap_ref, usdc(400))),
+        Err(PoolStepError::DoesNotFit(
+            "the ICP pocket cannot hold the payout"
+        ))
+    );
+    pool.step(arrived(swap_ref, usdc(150))).unwrap();
+    let held = usdc(149).checked_add(TokenAmount::from(FEE)).unwrap();
+    assert_eq!(pool.deposits[&swap_ref].held, Some(held));
+    assert_eq!(pool.ledger.pockets.icp.reserved, held);
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        usdc(300).checked_sub(held).unwrap()
+    );
+    pool.step(PoolStep::PayoutStarted {
+        r#ref: swap_ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: swap_ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+        },
+    })
+    .unwrap();
+    pool.step(PoolStep::Paid {
+        r#ref: swap_ref,
+        token: ckusdc(),
+        amount: usdc(149),
+        block: 1,
+        spent: held,
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        usdc(300).checked_sub(held).unwrap()
+    );
+
+    // a stake registered small and arriving large: past the TVL cap is no credit
+    let mut full = funded(usdc(9_990));
+    let stake_ref = register(&mut full, stake(2, usdc(10), TokenAmount::ZERO));
+    assert_eq!(
+        full.step(arrived(stake_ref, usdc(5_000))),
+        Err(PoolStepError::DoesNotFit("above the TVL cap"))
+    );
+    full.step(arrived(stake_ref, usdc(10))).unwrap();
 }
