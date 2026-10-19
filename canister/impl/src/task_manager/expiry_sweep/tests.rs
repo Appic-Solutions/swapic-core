@@ -435,7 +435,8 @@ fn the_sweep_refunds_exactly_the_timed_out_waiting_swaps_among_many_closed_ones(
                 refunds: 2,
                 skipped: 0,
                 stale: 0,
-                more: false
+                more: false,
+                pool_expired: 0,
             }
         );
 
