@@ -25,6 +25,7 @@ fn entry(chain_id: ChainId, nonce: u64, status: OutboxStatus) -> OutboxEntry {
         gas_limit: types::GasAmount::from(21_000_u32),
         refusal: None,
         closed_at: None,
+        closed_success: None,
     }
 }
 

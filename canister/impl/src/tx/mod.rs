@@ -546,6 +546,7 @@ pub async fn create_and_send_with(
         gas_limit,
         refusal: None,
         closed_at: None,
+        closed_success: None,
     });
     Ok(Signed { tx_hash, id })
 }
@@ -667,6 +668,7 @@ async fn cancel(key: NonceKey) {
         gas_limit,
         refusal: None,
         closed_at: None,
+        closed_success: None,
     });
     task_manager::outbox::arm();
 }
@@ -939,8 +941,21 @@ fn landed(
 /// and is re-sent and then replaced.
 ///
 /// An entry whose attempt already closed is kept only for its bytes, until its receipt is
-/// at the crediting depth `credit`: it is dropped there, sent again if its receipt is gone
-/// (a reorg dropped the transaction), and never closed a second time.
+/// at the crediting depth `credit`, and is never decided again: it is dropped at that
+/// depth, and while kept nothing is appended for it. A receipt that is gone (a reorg
+/// dropped the transaction, or a lagging node has not seen it) sends the SAME bytes again
+/// on the rebroadcast cadence, and never a replacement: new bytes would be a new signature
+/// and a `TxReplaced` line for an attempt the log already closed. Nor is it ever cancelled:
+/// a cancel spends only a nonce nothing was signed for. A receipt that comes back with the
+/// other outcome than the one the attempt closed on (a reorg turned it round) is reported
+/// in the canister's log, one line per pass while kept, and changes nothing.
+///
+/// Why a retry signed after a failed close cannot pay twice when a reorg then turns the
+/// failure into a success, today: every retry carries the same order id or the same CCTP
+/// message as the transaction it follows. Swapic refuses an order id it has run
+/// (`used[id]`), and Circle's transmitter refuses a message whose nonce it has received,
+/// so of the two at most one does anything. Any new purpose the canister signs and retries
+/// after a failed close must carry such an id as well.
 async fn decide(
     entry: &OutboxEntry,
     chain_id: ChainId,
@@ -952,11 +967,15 @@ async fn decide(
 ) -> usize {
     if entry.closed_at.is_some() {
         match landed {
-            Some(receipt) if is_confirmed(receipt.block, latest, credit) => {
-                outbox::remove(entry.key())
+            Some(receipt) => {
+                if let Some(line) = divergence(entry, &receipt) {
+                    log(&line);
+                }
+                if is_confirmed(receipt.block, latest, credit) {
+                    outbox::remove(entry.key());
+                }
             }
-            Some(_) => {}
-            None => push_again(entry, chain_id, now).await,
+            None => rebroadcast(entry, now),
         }
         return 0;
     }
@@ -988,7 +1007,7 @@ async fn decide(
                 })
                 .is_ok();
                 if appended {
-                    settle(entry, block, latest, credit);
+                    settle(entry, block, success, latest, credit);
                     // the closing line is appended once per transaction, so the fee is too
                     if success {
                         crate::books::credit_fee(chain_id, tx_hash, block, network_fee);
@@ -1012,7 +1031,7 @@ async fn decide(
                 })
             };
             if closed {
-                settle(entry, block, latest, credit);
+                settle(entry, block, success, latest, credit);
             }
             usize::from(closed)
         }
@@ -1120,26 +1139,63 @@ fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventT
     }
 }
 
-/// What the outbox keeps of an entry whose attempt just closed on a receipt in `block`:
-/// nothing once that receipt is at the crediting depth `credit` against `latest`, which on
-/// a chain that credits at its swap depth is at once, as it always was. Otherwise the entry
-/// itself, marked closed: a reorg that drops the transaction before the crediting depth
-/// finds its bytes to send again, and the nonces behind it are not stranded.
+/// What the outbox keeps of an entry whose attempt just closed on a receipt in `block` that
+/// `success`ed or not: nothing once that receipt is at the crediting depth `credit` against
+/// `latest`, which on a chain that credits at its swap depth is at once, as it always was.
+/// Otherwise the entry itself, marked closed with the block and the outcome: a reorg that
+/// drops the transaction before the crediting depth finds its bytes to send again, and the
+/// nonces behind it are not stranded.
 ///
 /// A3: the mark is written on the entry as it is now, not as the pass read it before the
 /// receipts' await, so a broadcast recorded meanwhile is kept. The removal needs no
 /// re-read: the only writer that could have put another entry at this key is
 /// `create_and_send`, which only ever writes at a number the allocator has just handed out,
 /// and this one is not.
-fn settle(entry: &OutboxEntry, block: BlockNumber, latest: BlockNumber, credit: BlockDepth) {
+fn settle(
+    entry: &OutboxEntry,
+    block: BlockNumber,
+    success: bool,
+    latest: BlockNumber,
+    credit: BlockDepth,
+) {
     if is_confirmed(block, latest, credit) {
         outbox::remove(entry.key());
         return;
     }
     if let Some(mut current) = outbox::get(entry.key()) {
         current.closed_at = Some(block);
+        current.closed_success = Some(success);
         outbox::put(current);
     }
+}
+
+/// The line a kept entry's receipt is reported with when its outcome is not the one the
+/// attempt closed on, or nothing when it is.
+fn divergence(entry: &OutboxEntry, receipt: &Receipt) -> Option<String> {
+    let closed = entry.closed_success?;
+    if closed == receipt.success {
+        return None;
+    }
+    let outcome = |success: bool| if success { "succeeded" } else { "reverted" };
+    Some(format!(
+        "the transaction at chain {} nonce {} closed as {} at block {}, and its receipt now \
+         reads {} at block {}: a reorg turned it round, and it is not decided again",
+        entry.chain_id,
+        entry.nonce,
+        outcome(closed),
+        entry.closed_at.map_or(0, BlockNumber::get),
+        outcome(receipt.success),
+        receipt.block,
+    ))
+}
+
+/// One line in the canister's log. Unit tests run off the canister, where there is no log
+/// to print to.
+fn log(line: &str) {
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk::println!("{line}");
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = line;
 }
 
 /// A transaction that has not landed: the same bytes again while it is young, and a
@@ -1151,7 +1207,7 @@ fn settle(entry: &OutboxEntry, block: BlockNumber, latest: BlockNumber, credit: 
 /// would postpone the fee bump every thirty seconds and the transaction would sit
 /// underpriced forever.
 async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
-    let (Some(since_last), Some(since_first)) = (entry.sent_for(now), entry.out_for(now)) else {
+    let (Some(_), Some(since_first)) = (entry.sent_for(now), entry.out_for(now)) else {
         return;
     };
     if since_first >= STUCK_AFTER {
@@ -1170,8 +1226,17 @@ async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
         // a bid against. The bytes are still the right bytes and the nonce is still this
         // entry's, so they keep going out on the rebroadcast cadence below.
     }
-    if since_last >= REBROADCAST_AFTER {
-        // the same bytes, so no new signature and no new line in the log
+    rebroadcast(entry, now);
+}
+
+/// The entry's current bytes queued to go out again once [`REBROADCAST_AFTER`] has passed
+/// since they last did: the same bytes, so no new signature and no new line in the log.
+/// The one way a closed entry goes out again.
+fn rebroadcast(entry: &OutboxEntry, now: Timestamp) {
+    if entry
+        .sent_for(now)
+        .is_some_and(|since_last| since_last >= REBROADCAST_AFTER)
+    {
         let mut queued = entry.clone();
         queued.status = OutboxStatus::Queued;
         queued.last_sent_at = None;

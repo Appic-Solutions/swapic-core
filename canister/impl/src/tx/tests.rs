@@ -533,6 +533,7 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
         closed_at: None,
+        closed_success: None,
     }
 }
 
@@ -1100,7 +1101,13 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
         let open = entry_with(7, 1);
         outbox::put(open.clone());
         // its line just landed at the swap depth: kept, with the block it closed at
-        settle(&open, BlockNumber::new(100), BlockNumber::new(100), credit);
+        settle(
+            &open,
+            BlockNumber::new(100),
+            true,
+            BlockNumber::new(100),
+            credit,
+        );
         let kept = outbox::get(open.key()).expect("kept until the crediting depth");
         assert_eq!(kept.closed_at, Some(BlockNumber::new(100)));
         // and no longer what the pull door sees as still out
@@ -1136,7 +1143,91 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
 
         // a chain that credits at its swap depth drops the entry at once, as before
         outbox::put(open.clone());
-        settle(&open, BlockNumber::new(100), BlockNumber::new(100), swap);
+        settle(
+            &open,
+            BlockNumber::new(100),
+            true,
+            BlockNumber::new(100),
+            swap,
+        );
         assert_eq!(outbox::get(open.key()), None);
+    });
+}
+
+/// Security review fix: a closed entry is only ever sent again with its own bytes. A
+/// lagging node that answers no receipt must not get it a new signature: its closing line
+/// is in the log, and a replacement would append a line for an attempt already closed and
+/// put new bytes for it on the chain. A receipt that comes back with the other outcome is
+/// reported, appends nothing, and is still not decided again.
+#[test]
+fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let swap = BlockDepth::new(1);
+        let credit = BlockDepth::new(12);
+        let open = entry_with(8, 1);
+        outbox::put(open.clone());
+        settle(
+            &open,
+            BlockNumber::new(100),
+            true,
+            BlockNumber::new(100),
+            credit,
+        );
+        let kept = outbox::get(open.key()).expect("kept until the crediting depth");
+        assert_eq!(kept.closed_success, Some(true));
+        // a fresh reading, so a replacement could be priced if one were tried
+        let now = at(1_000);
+        chain_data::put(
+            ChainId::BASE,
+            ChainReading {
+                block: BlockNumber::new(105),
+                base_fee: WeiPerGas::from(1_000_000_000_u64),
+                priority_fee: WeiPerGas::from(100_000_000_u64),
+            },
+            now,
+        );
+        let log = || read_state(|state| state.meta().next_event_index);
+        let before = log();
+        let decided = |entry: &OutboxEntry, landed: Option<Receipt>, latest: u64| {
+            poll_once(decide(
+                entry,
+                ChainId::BASE,
+                landed,
+                BlockNumber::new(latest),
+                swap,
+                credit,
+                now,
+            ))
+        };
+
+        // no receipt, long past the replacement clock: the same bytes again, and nothing new
+        assert!(kept.out_for(now).is_some_and(|out| out >= STUCK_AFTER));
+        assert_eq!(decided(&kept, None, 105), 0);
+        let again = outbox::get(open.key()).expect("still kept");
+        assert_eq!(again.status, OutboxStatus::Queued);
+        assert_eq!(again.raw_tx, kept.raw_tx);
+        assert_eq!(again.hashes, kept.hashes);
+        assert_eq!(log(), before);
+
+        // its receipt comes back reverted after a closed success: reported, nothing appended
+        let reverted = Receipt {
+            success: false,
+            ..receipt_at(101)
+        };
+        let line = divergence(&kept, &reverted).expect("the other outcome is reported");
+        assert!(
+            line.contains("chain 8453 nonce 8")
+                && line.contains("succeeded at block 100")
+                && line.contains("reverted at block 101"),
+            "{line}"
+        );
+        assert_eq!(divergence(&kept, &receipt_at(101)), None);
+        assert_eq!(decided(&again, Some(reverted), 105), 0);
+        assert_eq!(outbox::get(open.key()), Some(again.clone()));
+        // and it still leaves at the crediting depth, never decided again
+        assert_eq!(decided(&again, Some(reverted), 112), 0);
+        assert_eq!(outbox::get(open.key()), None);
+        assert_eq!(log(), before);
     });
 }

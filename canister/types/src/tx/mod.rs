@@ -213,6 +213,11 @@ pub struct OutboxEntry {
     /// stranded. A closed entry is never decided again.
     #[n(18)]
     pub closed_at: Option<BlockNumber>,
+    /// Whether the receipt the closing line was appended on succeeded: what a receipt read
+    /// while the entry is kept is compared with, so a reorg that turns the outcome round is
+    /// reported. None while the entry is open.
+    #[n(19)]
+    pub closed_success: Option<bool>,
 }
 
 impl OutboxEntry {
@@ -294,6 +299,7 @@ impl OutboxEntry {
             first_sent_at: _,
             refusal: _,
             closed_at,
+            closed_success,
         } = self;
         Self {
             purpose: *purpose,
@@ -318,6 +324,7 @@ impl OutboxEntry {
             refusal: None,
             // a closed attempt stays closed whichever of the nonce's transactions lands
             closed_at: *closed_at,
+            closed_success: *closed_success,
         }
     }
 }

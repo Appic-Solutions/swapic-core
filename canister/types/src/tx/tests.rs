@@ -24,6 +24,7 @@ fn entry() -> OutboxEntry {
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
         closed_at: None,
+        closed_success: None,
     }
 }
 

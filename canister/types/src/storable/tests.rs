@@ -64,8 +64,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// the fees their record holds, a pending quote entry with the deadlines it was registered
 /// under, a config at the depths a deploy gets once a swap on Ethereum is acted on at 1
 /// block, a config with crediting depths of its own, a books line with the block its fee
-/// was read at, a chain's books with a fee no check has read yet, and an outbox entry kept
-/// closed until the crediting depth.
+/// was read at, a chain's books with a fee no check has read yet, an outbox entry kept
+/// closed until the crediting depth, and one with the outcome it closed on.
 ///
 /// Every field of a sample differs from its neighbours, so a field that moves to another
 /// index decodes to a different value instead of passing unnoticed. The file is append
@@ -240,6 +240,7 @@ fn samples() -> Vec<Sample> {
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: None,
                 closed_at: None,
+                closed_success: None,
             },
         ),
         sample(
@@ -282,6 +283,7 @@ fn samples() -> Vec<Sample> {
                 // the entry appended below is the one that pins the field
                 refusal: None,
                 closed_at: None,
+                closed_success: None,
             },
         ),
         sample(
@@ -385,6 +387,7 @@ fn samples() -> Vec<Sample> {
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: Some(crate::tx::Refusal::new("transaction underpriced")),
                 closed_at: None,
+                closed_success: None,
             },
         ),
         sample(
@@ -579,6 +582,34 @@ fn samples() -> Vec<Sample> {
                 gas_limit: GasAmount::from(392_732_u32),
                 refusal: None,
                 closed_at: Some(BlockNumber::new(23_600_002)),
+                closed_success: None,
+            },
+        ),
+        // the kept entry above leaves its outcome absent; this one pins it
+        sample(
+            "outbox entry kept closed with the outcome it closed on",
+            OutboxEntry {
+                purpose: TxPurpose::Finish(QuoteHash::new([0x50; 32])),
+                chain_id: ChainId::ETHEREUM,
+                nonce: Nonce::new(42),
+                attempt: None,
+                hashes: vec![TxHash::new([0x51; 32])],
+                raw_tx: vec![0x02, 0xf8, 0x72],
+                max_fee: WeiPerGas::from(7_000_000_000_u64),
+                max_priority_fee: WeiPerGas::from(600_000_000_u64),
+                status: OutboxStatus::Queued,
+                created_at: Timestamp::from_nanos(1_800_000_000_000_000_006),
+                last_sent_at: None,
+                first_sent_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_007)),
+                to: "0x3333333333333333333333333333333333333333"
+                    .parse()
+                    .unwrap(),
+                value: Wei::ZERO,
+                data: vec![0x6e, 0x5c, 0x37, 0x6a],
+                gas_limit: GasAmount::from(668_092_u32),
+                refusal: None,
+                closed_at: Some(BlockNumber::new(23_600_003)),
+                closed_success: Some(false),
             },
         ),
     ]);
