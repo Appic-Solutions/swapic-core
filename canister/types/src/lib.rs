@@ -17,6 +17,7 @@ pub mod flow;
 pub mod hash;
 pub mod ledger;
 pub mod numeric;
+pub mod pool;
 pub mod quote;
 pub mod rail;
 pub mod router;

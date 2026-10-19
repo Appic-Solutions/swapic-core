@@ -85,6 +85,23 @@ hash_type! {
     EventHash
 }
 
+hash_type! {
+    /// A pool deposit's reference: the commitment an order's `ref` carries to who is paid
+    /// and at what fee (`types::pool::pool_ref`).
+    PoolRef
+}
+
+hash_type! {
+    /// A pool account's key: `types::pool::owner_hash` of the account, so an EVM address in
+    /// any spelling and an ICP account with or without its zero subaccount are one key.
+    OwnerKey
+}
+
+hash_type! {
+    /// The id of a pool operation started on ICP: a stake pulled in, or a withdrawal paid out.
+    PoolOpId
+}
+
 impl EventHash {
     /// The parent of the first event.
     pub const ZERO: Self = Self([0; 32]);

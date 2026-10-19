@@ -1,0 +1,1170 @@
+//! The pool (spec 2026-10-19 sections 2, 3.1, 3.3 and 4; the fixed interface section 2): its
+//! two pockets (USDC at the canister's Base address, ckUSDC on ICP), the stakers' shares,
+//! the deposits registered into it, and the one log step that moves any of them.
+//!
+//! Pure: no canister calls. [`ledger`] holds the fold's rules (`admits` refuses, `apply`
+//! never fails) and the registration's policy, which reads only the fold.
+//!
+//! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a new
+//! field is optional.
+
+#[cfg(test)]
+mod tests;
+
+pub mod ledger;
+
+pub use ledger::{
+    check_ref, check_terms, least_premium, PoolEffects, PoolLedger, PoolLookup, PoolStepError,
+    RegisterRefusal, ICPSWAP_PATH_FEES, MAX_PAYOUT_ATTEMPTS,
+};
+
+use crate::chain::ChainId;
+use crate::evm::EvmAddress;
+use crate::hash::{OwnerKey, PoolOpId, PoolRef, TxHash};
+use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
+use alloy_primitives::keccak256;
+use candid::Principal;
+use ic_stable_structures::storable::{Bound, Storable};
+use minicbor::{Decode, Encode};
+use std::borrow::Cow;
+use std::time::Duration;
+use thiserror::Error;
+
+/// A principal as its raw bytes, at most 29 of them.
+pub mod principal_cbor {
+    use candid::Principal;
+    use minicbor::decode::{Decoder, Error as DecodeError};
+    use minicbor::encode::{Encoder, Error as EncodeError, Write};
+
+    pub fn encode<C, W: Write>(
+        principal: &Principal,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), EncodeError<W::Error>> {
+        e.bytes(principal.as_slice())?.ok()
+    }
+
+    pub fn decode<C>(d: &mut Decoder<'_>, _ctx: &mut C) -> Result<Principal, DecodeError> {
+        Principal::try_from_slice(d.bytes()?)
+            .map_err(|_| DecodeError::message("a principal is at most 29 bytes"))
+    }
+}
+
+/// One ICRC-1 account on ICP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct IcpAccount {
+    #[cbor(n(0), with = "principal_cbor")]
+    pub owner: Principal,
+    /// None is the default subaccount, which ICRC-1 reads as 32 zero bytes.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub subaccount: Option<[u8; 32]>,
+}
+
+impl IcpAccount {
+    /// The 32 bytes ICRC-1 reads the subaccount as.
+    pub fn subaccount_bytes(&self) -> [u8; 32] {
+        self.subaccount.unwrap_or([0; 32])
+    }
+}
+
+/// Whoever owns shares: an EVM address (a stake from EVM) or an ICP account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub enum PoolAccount {
+    #[n(0)]
+    Evm(#[n(0)] EvmAddress),
+    #[n(1)]
+    Icp(#[n(0)] IcpAccount),
+}
+
+impl PoolAccount {
+    /// The account's key in the shares map and in the open-deposit counts.
+    pub fn key(&self) -> OwnerKey {
+        owner_hash(self)
+    }
+}
+
+/// What a registered deposit does when it arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum DepositKind {
+    /// Pay `recipient` on ICP: ckUSDC, or `token_out` through its ICPSwap pool, at least
+    /// `min_out` of it.
+    #[n(0)]
+    Swap {
+        #[n(0)]
+        recipient: IcpAccount,
+        #[cbor(n(1), with = "principal_cbor")]
+        token_out: Principal,
+        #[n(2)]
+        min_out: u128,
+    },
+    /// Mint shares to `owner`.
+    #[n(1)]
+    Stake {
+        #[n(0)]
+        owner: PoolAccount,
+    },
+}
+
+impl DepositKind {
+    /// Who the deposit is for: a swap's recipient, a stake's owner.
+    pub fn owner(&self) -> PoolAccount {
+        match self {
+            DepositKind::Swap { recipient, .. } => PoolAccount::Icp(*recipient),
+            DepositKind::Stake { owner } => *owner,
+        }
+    }
+
+    pub fn is_swap(&self) -> bool {
+        matches!(self, DepositKind::Swap { .. })
+    }
+}
+
+/// How the USDC reaches the canister's Base address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum PoolRail {
+    /// A CCTP Deliver into Base, its mint recipient the canister.
+    #[n(0)]
+    Cctp,
+    /// An Eco intent whose route delivers to the canister.
+    #[n(1)]
+    Eco,
+    /// An order on Base whose payout is the canister.
+    #[n(2)]
+    SameChain,
+}
+
+/// `keccak256("swapic.pool.v1.swap")`.
+pub fn tag_swap() -> [u8; 32] {
+    keccak256(b"swapic.pool.v1.swap").0
+}
+
+/// `keccak256("swapic.pool.v1.stake")`.
+pub fn tag_stake() -> [u8; 32] {
+    keccak256(b"swapic.pool.v1.stake").0
+}
+
+/// A u128 as a 32-byte big-endian word.
+fn word(value: u128) -> [u8; 32] {
+    let mut out = [0; 32];
+    out[16..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+/// The interface's `owner`: `keccak256(0x02 ‖ u8(len) ‖ principal ‖ subaccount32)` for an
+/// ICP account, `keccak256(0x01 ‖ address20)` for an EVM one.
+pub fn owner_hash(account: &PoolAccount) -> OwnerKey {
+    let mut preimage = Vec::with_capacity(64);
+    match account {
+        PoolAccount::Icp(icp) => {
+            let bytes = icp.owner.as_slice();
+            preimage.push(0x02);
+            preimage.push(u8::try_from(bytes.len()).expect("BUG: a principal is 29 bytes at most"));
+            preimage.extend_from_slice(bytes);
+            preimage.extend_from_slice(&icp.subaccount_bytes());
+        }
+        PoolAccount::Evm(address) => {
+            preimage.push(0x01);
+            preimage.extend_from_slice(address.as_bytes());
+        }
+    }
+    OwnerKey::new(keccak256(&preimage).0)
+}
+
+/// The interface's `details`: a swap's token out, its minimum and its premium; a stake's
+/// rebalancing share. `fee` is the premium for a swap and the rebalancing share for a stake,
+/// so the ref commits the fee.
+pub fn details_hash(kind: &DepositKind, fee: u128) -> [u8; 32] {
+    match kind {
+        DepositKind::Swap {
+            token_out, min_out, ..
+        } => {
+            let bytes = token_out.as_slice();
+            let mut preimage = Vec::with_capacity(1 + bytes.len() + 64);
+            preimage.push(u8::try_from(bytes.len()).expect("BUG: a principal is 29 bytes at most"));
+            preimage.extend_from_slice(bytes);
+            preimage.extend_from_slice(&word(*min_out));
+            preimage.extend_from_slice(&word(fee));
+            keccak256(&preimage).0
+        }
+        DepositKind::Stake { .. } => keccak256(word(fee)).0,
+    }
+}
+
+/// The interface's `ref = keccak256(tag ‖ owner ‖ details ‖ salt32)`.
+pub fn pool_ref(kind: &DepositKind, fee: u128, salt: [u8; 32]) -> PoolRef {
+    let tag = match kind {
+        DepositKind::Swap { .. } => tag_swap(),
+        DepositKind::Stake { .. } => tag_stake(),
+    };
+    let mut preimage = Vec::with_capacity(128);
+    preimage.extend_from_slice(&tag);
+    preimage.extend_from_slice(owner_hash(&kind.owner()).as_ref());
+    preimage.extend_from_slice(&details_hash(kind, fee));
+    preimage.extend_from_slice(&salt);
+    PoolRef::new(keccak256(&preimage).0)
+}
+
+/// Share units minted per micro USDC at the first mint: 18 decimals of shares.
+pub const FIRST_MINT_SCALE: u128 = 1_000_000_000_000;
+
+/// The pool's shares, in 18-decimal units.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[cbor(transparent)]
+pub struct Shares(#[n(0)] u128);
+
+impl Shares {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(units: u128) -> Self {
+        Self(units)
+    }
+
+    pub const fn get(self) -> u128 {
+        self.0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
+    /// The shares a stake of `amount` mints into a pool of `assets` and `shares`: at the
+    /// first mint `amount * 10^12`, after it `floor(amount * S / A)`, rounded in the pool's
+    /// favor. None on an overflow, on assets of zero while shares exist, and on a mint of
+    /// nothing.
+    pub fn mint_for(amount: TokenAmount, assets: TokenAmount, shares: Shares) -> Option<Shares> {
+        let minted = if shares.0 == 0 {
+            amount.checked_mul(FIRST_MINT_SCALE)?
+        } else {
+            if assets == TokenAmount::ZERO {
+                return None;
+            }
+            amount
+                .checked_mul(shares.0)?
+                .checked_div_floor(assets.into_inner())?
+        };
+        let minted = minted.try_into_u128()?;
+        (minted > 0).then_some(Shares(minted))
+    }
+
+    /// The shares a withdrawal of `usdc` burns: `ceil(usdc * S / A)`, rounded in the pool's
+    /// favor. None when `usdc` is above the assets, when there are no assets, and on a burn
+    /// of nothing (no usdc, or no shares).
+    pub fn burn_for(usdc: TokenAmount, assets: TokenAmount, shares: Shares) -> Option<Shares> {
+        if assets == TokenAmount::ZERO || usdc > assets {
+            return None;
+        }
+        let burned = usdc
+            .checked_mul(shares.0)?
+            .checked_div_ceil(assets.into_inner())?
+            .try_into_u128()?;
+        (burned > 0).then_some(Shares(burned))
+    }
+
+    /// What `owned` shares are worth: `floor(owned * A / S)`, nothing while no shares exist.
+    pub fn value_of(owned: Shares, assets: TokenAmount, shares: Shares) -> TokenAmount {
+        if shares.0 == 0 {
+            return TokenAmount::ZERO;
+        }
+        assets
+            .checked_mul(owned.0)
+            .and_then(|scaled| scaled.checked_div_floor(shares.0))
+            .unwrap_or(TokenAmount::ZERO)
+    }
+}
+
+impl std::fmt::Display for Shares {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One pocket's lines, in micro USDC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct Pocket {
+    /// Held and promised to nothing.
+    #[n(0)]
+    pub free: TokenAmount,
+    /// Held and promised to a swap or a withdrawal in progress.
+    #[n(1)]
+    pub reserved: TokenAmount,
+    /// Left this pocket and not yet arrived in the other (a rebalance, P11c).
+    #[n(2)]
+    pub in_flight: TokenAmount,
+}
+
+impl Pocket {
+    pub fn total(&self) -> TokenAmount {
+        [self.reserved, self.in_flight]
+            .into_iter()
+            .try_fold(self.free, TokenAmount::checked_add)
+            .unwrap_or(TokenAmount::MAX)
+    }
+}
+
+/// The pool's two pockets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct Pockets {
+    /// USDC at the canister's address on the pool chain (Base).
+    #[n(0)]
+    pub base: Pocket,
+    /// ckUSDC in the canister's own account on ICP.
+    #[n(1)]
+    pub icp: Pocket,
+}
+
+impl Pockets {
+    /// All six lines.
+    pub fn assets(&self) -> TokenAmount {
+        self.base
+            .total()
+            .checked_add(self.icp.total())
+            .unwrap_or(TokenAmount::MAX)
+    }
+}
+
+/// An ICP token a swap may pay out, and the ICPSwap pool it is bought through from ckUSDC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct IcpToken {
+    #[cbor(n(0), with = "principal_cbor")]
+    pub ledger: Principal,
+    #[cbor(n(1), with = "principal_cbor")]
+    pub icpswap_pool: Principal,
+}
+
+/// An ICRC ledger's transfer fee, as read when the settings were set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct LedgerFee {
+    #[cbor(n(0), with = "principal_cbor")]
+    pub ledger: Principal,
+    #[n(1)]
+    pub fee: TokenAmount,
+}
+
+/// The highest premium the settings take: 10%.
+pub const MAX_PREMIUM_BPS: u16 = 1_000;
+
+/// The pool's knobs (interface section 3's `PoolSettings`), and the ledger fees read when
+/// they were set.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PoolSettings {
+    /// The most the pool holds, micro USDC.
+    #[n(0)]
+    pub tvl_cap: TokenAmount,
+    /// The most one swap may move, micro USDC.
+    #[n(1)]
+    pub per_swap_cap: TokenAmount,
+    /// The least premium of a fast swap, of its `min_usdc`.
+    #[n(2)]
+    pub premium_bps: u16,
+    #[cbor(n(3), with = "principal_cbor")]
+    pub ckusdc_ledger: Principal,
+    /// The tokens a swap may pay out besides ckUSDC. A ckUSDC entry names the ckUSDC ledger
+    /// itself as its pool.
+    #[n(4)]
+    pub icp_tokens: Vec<IcpToken>,
+    /// How long past `expires_at` an arrival is still credited.
+    #[n(5)]
+    pub deposit_grace: Duration,
+    /// Open registrations per `src_payer`, and per owner.
+    #[n(6)]
+    pub max_open_per_payer: u32,
+    /// The most of the ICP pocket held for open swaps at once.
+    #[n(7)]
+    pub max_held_bps: u16,
+    /// How often the canister reads Base itself while registrations wait.
+    #[n(8)]
+    pub arrival_backup: Duration,
+    #[n(9)]
+    pub open_for_swaps: bool,
+    /// The ckUSDC ledger's fee and every listed token's, read by `set_pool_settings`.
+    #[n(10)]
+    pub ledger_fees: Vec<LedgerFee>,
+}
+
+/// The mainnet ckUSDC ledger.
+pub const CKUSDC_LEDGER: &str = "xevnm-gaaaa-aaaar-qafnq-cai";
+
+impl Default for PoolSettings {
+    /// The launch values (spec Q3 and the interface's defaults), the pool closed for swaps.
+    fn default() -> Self {
+        Self {
+            tvl_cap: TokenAmount::new(10_000_000_000),
+            per_swap_cap: TokenAmount::new(1_000_000_000),
+            premium_bps: 10,
+            ckusdc_ledger: Principal::from_text(CKUSDC_LEDGER).expect("BUG: a valid principal"),
+            icp_tokens: Vec::new(),
+            deposit_grace: Duration::from_secs(120),
+            max_open_per_payer: 3,
+            max_held_bps: 5_000,
+            arrival_backup: Duration::from_secs(300),
+            open_for_swaps: false,
+            ledger_fees: Vec::new(),
+        }
+    }
+}
+
+/// Why settings are not ones the pool runs on.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum PoolSettingsError {
+    #[error("{0} must be above zero")]
+    Zero(&'static str),
+    #[error("the per-swap cap is above the TVL cap")]
+    SwapCapAboveTvlCap,
+    #[error("a premium of {0} bps is above the ceiling of {MAX_PREMIUM_BPS}")]
+    PremiumTooHigh(u16),
+    #[error("max_held_bps of {0} is above 10000")]
+    HeldAboveAll(u16),
+    #[error("the ckUSDC entry must name the ckUSDC ledger itself as its pool")]
+    CkusdcPool,
+    #[error("{0} is listed twice")]
+    Duplicate(Principal),
+    #[error("{0} names no pool of its own")]
+    BadPool(Principal),
+    #[error("no fee was read for {0}")]
+    MissingFee(Principal),
+}
+
+impl PoolSettings {
+    /// The knobs hold together: caps above zero and the swap cap within the TVL cap, the
+    /// premium at most 10%, the held share at most all of the pocket, the ckUSDC entry (if
+    /// any) with its own ledger as its pool, every other token with a pool that is neither
+    /// its own ledger nor ckUSDC's, no ledger twice.
+    pub fn validate(&self) -> Result<(), PoolSettingsError> {
+        if self.tvl_cap == TokenAmount::ZERO {
+            return Err(PoolSettingsError::Zero("tvl_cap"));
+        }
+        if self.per_swap_cap == TokenAmount::ZERO {
+            return Err(PoolSettingsError::Zero("per_swap_cap"));
+        }
+        if self.per_swap_cap > self.tvl_cap {
+            return Err(PoolSettingsError::SwapCapAboveTvlCap);
+        }
+        if self.premium_bps > MAX_PREMIUM_BPS {
+            return Err(PoolSettingsError::PremiumTooHigh(self.premium_bps));
+        }
+        if self.max_held_bps > 10_000 {
+            return Err(PoolSettingsError::HeldAboveAll(self.max_held_bps));
+        }
+        if self.max_held_bps == 0 {
+            return Err(PoolSettingsError::Zero("max_held_bps"));
+        }
+        if self.max_open_per_payer == 0 {
+            return Err(PoolSettingsError::Zero("max_open_per_payer"));
+        }
+        if self.arrival_backup.is_zero() {
+            return Err(PoolSettingsError::Zero("arrival_backup_s"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for token in &self.icp_tokens {
+            if !seen.insert(token.ledger) {
+                return Err(PoolSettingsError::Duplicate(token.ledger));
+            }
+            if token.ledger == self.ckusdc_ledger {
+                if token.icpswap_pool != self.ckusdc_ledger {
+                    return Err(PoolSettingsError::CkusdcPool);
+                }
+            } else if token.icpswap_pool == token.ledger || token.icpswap_pool == self.ckusdc_ledger
+            {
+                return Err(PoolSettingsError::BadPool(token.ledger));
+            }
+        }
+        Ok(())
+    }
+
+    /// A fee was read for ckUSDC and for every listed token.
+    pub fn fees_complete(&self) -> Result<(), PoolSettingsError> {
+        for ledger in self.ledgers() {
+            if self.fee_of(ledger).is_none() {
+                return Err(PoolSettingsError::MissingFee(ledger));
+            }
+        }
+        Ok(())
+    }
+
+    /// ckUSDC, then every listed token that is not ckUSDC.
+    pub fn ledgers(&self) -> Vec<Principal> {
+        let mut out = vec![self.ckusdc_ledger];
+        out.extend(
+            self.icp_tokens
+                .iter()
+                .map(|token| token.ledger)
+                .filter(|ledger| *ledger != self.ckusdc_ledger),
+        );
+        out
+    }
+
+    /// The fee read for `ledger`.
+    pub fn fee_of(&self, ledger: Principal) -> Option<TokenAmount> {
+        self.ledger_fees
+            .iter()
+            .find(|fee| fee.ledger == ledger)
+            .map(|fee| fee.fee)
+    }
+
+    /// The ICPSwap pool `token_out` is bought through, None for ckUSDC and for a token not
+    /// listed.
+    pub fn pool_of(&self, token_out: Principal) -> Option<Principal> {
+        if token_out == self.ckusdc_ledger {
+            return None;
+        }
+        self.icp_tokens
+            .iter()
+            .find(|token| token.ledger == token_out)
+            .map(|token| token.icpswap_pool)
+    }
+
+    /// Whether a swap may pay out `token_out`: ckUSDC always, another token when listed.
+    pub fn is_listed(&self, token_out: Principal) -> bool {
+        token_out == self.ckusdc_ledger || self.pool_of(token_out).is_some()
+    }
+}
+
+/// A deposit's terms as the quoter registers them, before anything arrived.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Registration {
+    #[n(0)]
+    pub kind: DepositKind,
+    /// The micro USDC that must reach the canister's Base address.
+    #[n(1)]
+    pub min_usdc: TokenAmount,
+    /// A swap's premium; zero for a stake.
+    #[n(2)]
+    pub premium: TokenAmount,
+    /// A stake's rebalancing share; zero for a swap.
+    #[n(3)]
+    pub rebalance_share: TokenAmount,
+    #[n(4)]
+    pub src_chain: ChainId,
+    /// Who pays the order: screened, and where an orphan goes back to.
+    #[n(5)]
+    pub src_payer: EvmAddress,
+    #[n(6)]
+    pub rail: PoolRail,
+    /// After this, plus the grace, an arrival for it is unattributed.
+    #[n(7)]
+    pub expires_at: Timestamp,
+    #[cbor(n(8), with = "minicbor::bytes")]
+    pub salt: [u8; 32],
+}
+
+impl Registration {
+    /// The fee the ref commits: the premium for a swap, the rebalancing share for a stake.
+    pub fn fee(&self) -> TokenAmount {
+        if self.kind.is_swap() {
+            self.premium
+        } else {
+            self.rebalance_share
+        }
+    }
+
+    /// The ref these terms commit to, None for a fee no ref holds.
+    pub fn pool_ref(&self) -> Option<PoolRef> {
+        Some(pool_ref(&self.kind, self.fee().try_into_u128()?, self.salt))
+    }
+
+    /// What a swap holds of the ICP pocket until it is paid: `min_usdc - premium`. A stake
+    /// holds nothing on ICP.
+    pub fn reserve(&self) -> TokenAmount {
+        if self.kind.is_swap() {
+            self.min_usdc
+                .checked_sub(self.premium)
+                .unwrap_or(TokenAmount::ZERO)
+        } else {
+            TokenAmount::ZERO
+        }
+    }
+
+    /// The keys the open-deposit limit counts against: the payer, and the owner when it is
+    /// another account.
+    pub fn parties(&self) -> Vec<OwnerKey> {
+        let payer = PoolAccount::Evm(self.src_payer).key();
+        let owner = self.kind.owner().key();
+        if payer == owner {
+            vec![payer]
+        } else {
+            vec![payer, owner]
+        }
+    }
+
+    /// The last instant an arrival for it is still credited.
+    pub fn credit_until(&self, grace: Duration) -> Timestamp {
+        self.expires_at
+            .checked_add(grace)
+            .unwrap_or(Timestamp::from_nanos(u64::MAX))
+    }
+}
+
+/// Where a deposit stands.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum DepositStatus {
+    #[n(0)]
+    Registered,
+    #[n(1)]
+    Arrived,
+    #[n(2)]
+    Paying,
+    #[n(3)]
+    Paid,
+    #[n(4)]
+    Unattributed,
+    #[n(5)]
+    Expired,
+    #[n(6)]
+    PayoutFailed(#[n(0)] String),
+}
+
+/// One USDC transfer to the canister, as a chain logged it: the key it is credited under,
+/// at most once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct CreditKey {
+    #[n(0)]
+    pub chain: ChainId,
+    #[n(1)]
+    pub tx: TxHash,
+    #[n(2)]
+    pub log_index: u64,
+}
+
+impl CreditKey {
+    const BYTES: usize = 8 + 32 + 8;
+}
+
+/// The chain id, the hash and the log index, big endian, so a stable set orders by them.
+impl Storable for CreditKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        out.extend_from_slice(&self.chain.get().to_be_bytes());
+        out.extend_from_slice(self.tx.as_ref());
+        out.extend_from_slice(&self.log_index.to_be_bytes());
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(
+            bytes.len(),
+            Self::BYTES,
+            "BUG: a stored credit key is 48 bytes"
+        );
+        let chain = u64::from_be_bytes(bytes[..8].try_into().expect("BUG: eight bytes"));
+        let tx: [u8; 32] = bytes[8..40].try_into().expect("BUG: thirty-two bytes");
+        let log_index = u64::from_be_bytes(bytes[40..].try_into().expect("BUG: eight bytes"));
+        Self {
+            chain: ChainId::new(chain),
+            tx: TxHash::new(tx),
+            log_index,
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: Self::BYTES as u32,
+        is_fixed_size: true,
+    };
+}
+
+/// The transfer a deposit was credited for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Arrival {
+    #[n(0)]
+    pub credit: CreditKey,
+    #[n(1)]
+    pub amount: TokenAmount,
+    #[n(2)]
+    pub block: BlockNumber,
+}
+
+/// How a payout was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Paid {
+    /// The token paid.
+    #[cbor(n(0), with = "principal_cbor")]
+    pub token: Principal,
+    /// What the recipient got of it.
+    #[n(1)]
+    pub amount: TokenAmount,
+    /// The ledger block of the transfer.
+    #[n(2)]
+    pub block: u64,
+    /// The ckUSDC that left the ICP pocket for it, every ledger fee included.
+    #[n(3)]
+    pub spent: TokenAmount,
+}
+
+/// How a payout pays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PayoutPath {
+    /// A ckUSDC transfer.
+    #[n(0)]
+    Ckusdc,
+    /// ckUSDC swapped on `pool` into the token out, then the token's transfer.
+    #[n(1)]
+    Icpswap {
+        #[cbor(n(0), with = "principal_cbor")]
+        pool: Principal,
+    },
+}
+
+/// A payout's deduplication pair and its path, recorded before any call: every ICRC
+/// transfer of the payout carries this `created_at_time` and memo, so a retried transfer
+/// whose first answer was lost is the same transfer to the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PayoutAttempt {
+    #[n(0)]
+    pub created_at: Timestamp,
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub memo: [u8; 32],
+    #[n(2)]
+    pub path: PayoutPath,
+}
+
+/// Where an ICPSwap leg stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct SwapLeg {
+    /// The pool's quote read below the minimum: once is a retry, twice falls back.
+    #[n(0)]
+    pub declined: u8,
+    /// `depositFromAndSwap` was called. Its outcome is known only by its answer, so a begun
+    /// swap with no output is never called again (a human looks).
+    #[n(1)]
+    pub begun: bool,
+    /// What the swap answered it paid into the canister's account.
+    #[n(2)]
+    pub out: Option<TokenAmount>,
+}
+
+/// A payout in progress: its dedup pair and path, its ICPSwap leg, and its failures.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct PayoutProgress {
+    #[n(0)]
+    pub attempt: Option<PayoutAttempt>,
+    #[n(1)]
+    pub swap: SwapLeg,
+    /// Failed drives so far; at [`MAX_PAYOUT_ATTEMPTS`] the payout stops for a human.
+    #[n(2)]
+    pub failures: u32,
+    /// Why the ICPSwap leg fell back to ckUSDC.
+    #[n(3)]
+    pub fell_back: Option<String>,
+    /// The last failure, once the payout stopped for a human.
+    #[n(4)]
+    pub failed: Option<String>,
+}
+
+/// A deposit as the fold holds it: its terms and how far it got.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Registered {
+    #[n(0)]
+    pub terms: Registration,
+    #[n(1)]
+    pub status: DepositStatus,
+    #[n(2)]
+    pub arrived: Option<Arrival>,
+    #[n(3)]
+    pub paid: Option<Paid>,
+    #[n(4)]
+    pub minted: Option<Shares>,
+    #[n(5)]
+    pub payout: PayoutProgress,
+}
+
+impl Registered {
+    pub fn new(terms: Registration) -> Self {
+        Self {
+            terms,
+            status: DepositStatus::Registered,
+            arrived: None,
+            paid: None,
+            minted: None,
+            payout: PayoutProgress::default(),
+        }
+    }
+
+    /// What the deposit owes its owner once it arrived: a swap's recipient everything less
+    /// the premium; a stake's owner the whole arrival, which its mint is priced without.
+    pub fn owed(&self) -> TokenAmount {
+        let Some(arrival) = self.arrived else {
+            return TokenAmount::ZERO;
+        };
+        if self.terms.kind.is_swap() {
+            arrival
+                .amount
+                .checked_sub(self.terms.premium)
+                .unwrap_or(TokenAmount::ZERO)
+        } else {
+            arrival.amount
+        }
+    }
+}
+
+crate::storable_as_cbor!(Registered);
+
+/// A share holder's line: the account and its shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ShareLine {
+    #[n(0)]
+    pub account: PoolAccount,
+    #[n(1)]
+    pub shares: Shares,
+}
+
+crate::storable_as_cbor!(ShareLine);
+
+/// An operation started on ICP and not finished: a stake whose pull is out, or a withdrawal
+/// whose payout is. Held by value in the ledger's map, a handful at a time, so the
+/// withdrawal's size is no cost worth a box.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PendingOp {
+    #[n(0)]
+    Stake {
+        #[n(0)]
+        owner: PoolAccount,
+        /// The caller's account the ckUSDC is pulled from.
+        #[n(1)]
+        from: IcpAccount,
+        #[n(2)]
+        amount: TokenAmount,
+        /// The pull's dedup pair: `created_at_time` this, memo the op id.
+        #[n(3)]
+        created_at: Timestamp,
+    },
+    #[n(1)]
+    Withdraw {
+        #[n(0)]
+        owner: IcpAccount,
+        #[n(1)]
+        burned: Shares,
+        /// The ckUSDC the shares were worth, reserved on ICP: the payout's whole budget,
+        /// ledger fees included.
+        #[n(2)]
+        usdc: TokenAmount,
+        #[n(3)]
+        to: IcpAccount,
+        #[cbor(n(4), with = "principal_cbor")]
+        token_out: Principal,
+        #[n(5)]
+        min_out: u128,
+        #[n(6)]
+        payout: PayoutProgress,
+    },
+}
+
+/// A pool arrival (or an unattributed transfer) from a block no balance check has read at
+/// yet: in the lines, and not yet in a balance read below its block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct UnseenArrival {
+    #[n(0)]
+    pub chain: ChainId,
+    #[n(1)]
+    pub block: BlockNumber,
+    #[n(2)]
+    pub amount: TokenAmount,
+}
+
+/// The ICP pocket's last balance check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct IcpCheck {
+    #[n(0)]
+    pub observed: TokenAmount,
+    #[n(1)]
+    pub expected: TokenAmount,
+    #[n(2)]
+    pub shortfall: bool,
+}
+
+/// One step of the pool, as the log records it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PoolStep {
+    /// A controller set the pool's knobs, with the ledger fees read for them.
+    #[n(0)]
+    SettingsSet {
+        #[n(0)]
+        settings: PoolSettings,
+    },
+    /// The quoter registered a deposit at the user's commit.
+    #[n(1)]
+    Registered {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        deposit: Registration,
+    },
+    /// A registration ran out with nothing arrived: its hold is released.
+    #[n(2)]
+    Expired {
+        #[n(0)]
+        r#ref: PoolRef,
+    },
+    /// The canister read a transfer to its Base address proving this deposit.
+    #[n(3)]
+    Arrived {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        credit: CreditKey,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        block: BlockNumber,
+    },
+    /// A transfer to the canister that proves no deposit it can credit: kept for the
+    /// orphan refund (P11b) with its payer when known.
+    #[n(4)]
+    Unattributed {
+        #[n(0)]
+        credit: CreditKey,
+        #[n(1)]
+        amount: TokenAmount,
+        #[n(2)]
+        src_payer: Option<EvmAddress>,
+        #[n(3)]
+        why: String,
+        #[n(4)]
+        block: BlockNumber,
+        /// The registration it named, if any: a late or short arrival closes it.
+        #[n(5)]
+        r#ref: Option<PoolRef>,
+    },
+    /// A swap's payout began: its dedup pair and path, before any call.
+    #[n(5)]
+    PayoutStarted {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        attempt: PayoutAttempt,
+    },
+    /// A swap's recipient was paid.
+    #[n(6)]
+    Paid {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[cbor(n(1), with = "principal_cbor")]
+        token: Principal,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        block: u64,
+        /// The ckUSDC that left the ICP pocket, every ledger fee included.
+        #[n(4)]
+        spent: TokenAmount,
+    },
+    /// The ICPSwap leg could not reach the minimum: all of it is paid as ckUSDC instead.
+    /// `r#ref` names a deposit or a withdrawal.
+    #[n(7)]
+    FellBack {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        why: String,
+    },
+    /// A stake's shares were minted.
+    #[n(8)]
+    Minted {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        owner: PoolAccount,
+        #[n(2)]
+        shares: Shares,
+    },
+    /// An ICP stake's pull landed and its shares were minted.
+    #[n(9)]
+    StakedIcp {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        owner: PoolAccount,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        rebalance_share: TokenAmount,
+        #[n(4)]
+        shares: Shares,
+        #[n(5)]
+        block: u64,
+    },
+    /// An ICP withdrawal was paid.
+    #[n(10)]
+    WithdrawnIcp {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        owner: IcpAccount,
+        #[n(2)]
+        burned: Shares,
+        #[n(3)]
+        usdc: TokenAmount,
+        #[cbor(n(4), with = "principal_cbor")]
+        token: Principal,
+        #[n(5)]
+        paid: TokenAmount,
+        #[n(6)]
+        block: u64,
+        #[n(7)]
+        spent: TokenAmount,
+    },
+    /// A payout's drive failed and will be tried again, until [`MAX_PAYOUT_ATTEMPTS`].
+    /// `r#ref` names a deposit or a withdrawal.
+    #[n(11)]
+    AttemptFailed {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        why: String,
+    },
+    /// The pool's quote was below the minimum: tried once more on the next drive.
+    #[n(12)]
+    SwapDeclined {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        why: String,
+    },
+    /// `depositFromAndSwap` is about to be called.
+    #[n(13)]
+    SwapBegun {
+        #[n(0)]
+        r#ref: PoolRef,
+    },
+    /// `depositFromAndSwap` answered its output.
+    #[n(14)]
+    Swapped {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        out: TokenAmount,
+    },
+    /// An ICP stake's pull is about to be asked: its TVL room is held and its dedup pair set.
+    #[n(15)]
+    StakeStarted {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        owner: PoolAccount,
+        #[n(2)]
+        from: IcpAccount,
+        #[n(3)]
+        amount: TokenAmount,
+        #[n(4)]
+        created_at: Timestamp,
+    },
+    /// The ledger refused an ICP stake's pull: nothing moved, the room is released.
+    #[n(16)]
+    StakeFailed {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        why: String,
+    },
+    /// An ICP withdrawal burned its shares and reserved its ckUSDC, before any call.
+    #[n(17)]
+    WithdrawStarted {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        owner: IcpAccount,
+        #[n(2)]
+        burned: Shares,
+        #[n(3)]
+        usdc: TokenAmount,
+        #[n(4)]
+        to: IcpAccount,
+        #[cbor(n(5), with = "principal_cbor")]
+        token_out: Principal,
+        #[n(6)]
+        min_out: u128,
+        #[n(7)]
+        attempt: PayoutAttempt,
+    },
+    /// The ICP pocket's balance check.
+    #[n(18)]
+    IcpChecked {
+        #[n(0)]
+        check: IcpCheck,
+    },
+    /// The ICP pocket's balance could not be read.
+    #[n(19)]
+    IcpCheckFailed,
+    /// The canister's own read of Base reached this block.
+    #[n(20)]
+    ScanCursor {
+        #[n(0)]
+        block: BlockNumber,
+    },
+}
+
+impl PoolStep {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        minicbor::to_vec(self).expect("BUG: encoding into a Vec is infallible")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        minicbor::decode(bytes).ok()
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            PoolStep::SettingsSet { .. } => "SettingsSet",
+            PoolStep::Registered { .. } => "Registered",
+            PoolStep::Expired { .. } => "Expired",
+            PoolStep::Arrived { .. } => "Arrived",
+            PoolStep::Unattributed { .. } => "Unattributed",
+            PoolStep::PayoutStarted { .. } => "PayoutStarted",
+            PoolStep::Paid { .. } => "Paid",
+            PoolStep::FellBack { .. } => "FellBack",
+            PoolStep::Minted { .. } => "Minted",
+            PoolStep::StakedIcp { .. } => "StakedIcp",
+            PoolStep::WithdrawnIcp { .. } => "WithdrawnIcp",
+            PoolStep::AttemptFailed { .. } => "AttemptFailed",
+            PoolStep::SwapDeclined { .. } => "SwapDeclined",
+            PoolStep::SwapBegun { .. } => "SwapBegun",
+            PoolStep::Swapped { .. } => "Swapped",
+            PoolStep::StakeStarted { .. } => "StakeStarted",
+            PoolStep::StakeFailed { .. } => "StakeFailed",
+            PoolStep::WithdrawStarted { .. } => "WithdrawStarted",
+            PoolStep::IcpChecked { .. } => "IcpChecked",
+            PoolStep::IcpCheckFailed => "IcpCheckFailed",
+            PoolStep::ScanCursor { .. } => "ScanCursor",
+        }
+    }
+
+    /// Whether the step gives a payout something to do now: the engine drives at once.
+    pub fn moves_a_payout(&self) -> bool {
+        matches!(
+            self,
+            PoolStep::Arrived { .. }
+                | PoolStep::PayoutStarted { .. }
+                | PoolStep::FellBack { .. }
+                | PoolStep::Swapped { .. }
+                | PoolStep::StakeStarted { .. }
+                | PoolStep::WithdrawStarted { .. }
+        )
+    }
+}
+
+/// The id of an ICP stake or withdrawal: `keccak256(tag ‖ owner ‖ the log index it starts
+/// at)`, so no two operations share one.
+pub fn op_id(withdraw: bool, owner: &PoolAccount, index: u64) -> PoolOpId {
+    let tag: &[u8] = if withdraw {
+        b"swapic.pool.v1.withdraw"
+    } else {
+        b"swapic.pool.v1.stake_icp"
+    };
+    let mut preimage = Vec::with_capacity(80);
+    preimage.extend_from_slice(&keccak256(tag).0);
+    preimage.extend_from_slice(owner.key().as_ref());
+    preimage.extend_from_slice(&index.to_be_bytes());
+    PoolOpId::new(keccak256(&preimage).0)
+}
+
+/// A payout's id in the steps that name either a deposit or a withdrawal.
+pub fn payout_ref(id: PoolOpId) -> PoolRef {
+    PoolRef::new(id.into_bytes())
+}
+
+crate::storable_as_cbor!(PoolLedger);
