@@ -6,7 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
+    PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs,
+    StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -52,4 +53,27 @@ pub fn register_pool_deposit(deposit: PoolDeposit) -> Result<(), PoolError> {
 #[update]
 pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
     pool::arrival::note(arrival).await
+}
+
+/// Any caller, refused while halted, while the pool is closed, and for a sanctioned party.
+/// Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
+/// `icrc2_transfer_from` on the caller's approval of the canister (its main account; the
+/// approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
+/// its shares at the pool's price before it. A pull whose answer was lost answers
+/// `Unavailable`, and the canister asks again with the same pull.
+#[update]
+pub async fn stake_icp(args: StakeIcpArgs) -> Result<StakeIcpOk, PoolError> {
+    pool::icp::stake(args, is_sanctioned).await
+}
+
+/// The ICP owner of the shares (the caller, at its subaccount `from`), refused while halted,
+/// while the pool is closed, and for a sanctioned party. Burns the shares `usdc` is worth
+/// (rounded up, at most `max_shares`) and pays `to` all of it as `token_out` (ckUSDC, or a
+/// listed token through its ICPSwap pool, at least `min_out`; below it, all of it as ckUSDC),
+/// every ledger fee out of `usdc`. Refused when the ICP pocket's free ckUSDC is short (the
+/// queue is P11b). A payout that does not finish in this call answers `Unavailable` with
+/// the shares burned, and the canister's timer finishes it.
+#[update]
+pub async fn withdraw_icp(args: WithdrawIcpArgs) -> Result<WithdrawIcpOk, PoolError> {
+    pool::icp::withdraw(args, is_sanctioned).await
 }

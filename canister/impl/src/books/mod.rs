@@ -164,7 +164,12 @@ pub fn pool_status<S: Store>(
         config.pool_chain.map(|chain| state.book(&chain)),
         config.books_check_interval.0,
         now,
-    )
+    )?;
+    // the ICP pocket's own latch, cleared with the Base one when a controller reopens
+    if state.pool().icp_shortfall_at.is_some() {
+        return Err(PoolClosed::IcpShortfall);
+    }
+    Ok(())
 }
 
 /// The pool's guard, now: refused on a halt, a missing pool chain, a controller's pause, a
@@ -186,7 +191,8 @@ pub fn record_failure(chain_id: ChainId, failure: ReadFailure) {
     }
 }
 
-/// The balance check, every `books_check_interval`: per chain the canister signs on, the
+/// The balance check, every `books_check_interval`: the pool's ICP pocket
+/// (`pool::icp::check_icp_pocket`), then per chain the canister signs on, the
 /// canister's USDC read at a confirmed block (the freshest pushed head less the chain's
 /// crediting depth) beside what the lines expect. It records what it saw and never books it;
 /// only a shortfall beyond the tolerance pauses the pool. A chain whose balance cannot be
@@ -196,6 +202,8 @@ pub async fn check_balances() {
         return;
     }
     let config = config::get();
+    // the ICP pocket's own check, which needs no EVM address
+    crate::pool::icp::check_icp_pocket(config.books_tolerance.0).await;
     let chains: Vec<(ChainId, EvmAddress)> = config
         .evm_chains
         .0

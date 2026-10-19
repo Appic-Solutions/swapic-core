@@ -367,6 +367,8 @@ pub enum PoolClosed {
     Paused,
     #[error("the balance check on chain {0} found a shortfall")]
     Shortfall(ChainId),
+    #[error("the balance check of the ICP pocket found a shortfall")]
+    IcpShortfall,
     #[error("the books of chain {0} have never been checked")]
     NeverChecked(ChainId),
     #[error(

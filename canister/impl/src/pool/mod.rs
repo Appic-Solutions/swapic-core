@@ -4,6 +4,7 @@
 //! config, the sanctions set and the chains, and appends.
 
 pub mod arrival;
+pub mod icp;
 pub mod payout;
 pub mod register;
 pub mod settings;

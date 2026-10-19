@@ -790,8 +790,10 @@ type Result_14 = variant { Ok; Err : FlowCallError };
 type Result_15 = variant { Ok; Err : GuardError };
 type Result_16 = variant { Ok; Err : SetRolesError };
 type Result_17 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_18 = variant { Ok : nat; Err : FlowCallError };
+type Result_18 = variant { Ok : StakeIcpOk; Err : PoolError };
+type Result_19 = variant { Ok : nat; Err : FlowCallError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
+type Result_20 = variant { Ok : WithdrawIcpOk; Err : PoolError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : nat64; Err : text };
 type Result_5 = variant { Ok : Config; Err : GuardError };
@@ -832,6 +834,12 @@ type SignedTx = record {
   chain : ChainRef;
   signed_at_ns : nat64;
 };
+type StakeIcpArgs = record {
+  owner : PoolAccount;
+  from_subaccount : opt blob;
+  amount : nat;
+};
+type StakeIcpOk = record { shares : nat };
 // The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 type Swap = record {
   status : SwapStatus;
@@ -938,6 +946,16 @@ type TxPurpose = variant {
   Cancel : nat64;
   Reclaim : blob;
 };
+type WithdrawIcpArgs = record {
+  to : IcpAccount;
+  max_shares : nat;
+  // The caller's subaccount owning the shares.
+  from : opt blob;
+  min_out : nat;
+  usdc : nat;
+  token_out : principal;
+};
+type WithdrawIcpOk = record { paid : nat; burned : nat };
 service : (InitArg) -> {
   // Controller-only. One step of the deep check: folds up to `max_events` more of the log
   // onto the fold the step before saved, from genesis when there is none, and once the fold
@@ -1150,13 +1168,28 @@ service : (InitArg) -> {
   // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
   // backup.
   signed_txs : (nat64, nat64) -> (vec SignedTx) query;
+  // Any caller, refused while halted, while the pool is closed, and for a sanctioned party.
+  // Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
+  // `icrc2_transfer_from` on the caller's approval of the canister (its main account; the
+  // approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
+  // its shares at the pool's price before it. A pull whose answer was lost answers
+  // `Unavailable`, and the canister asks again with the same pull.
+  stake_icp : (StakeIcpArgs) -> (Result_18);
   // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
   // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
   // the quote hash (and from no other), and answers what was pulled. The engine then swaps
   // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
   // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_18);
+  start_icp_swap : (blob) -> (Result_19);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
+  // The ICP owner of the shares (the caller, at its subaccount `from`), refused while halted,
+  // while the pool is closed, and for a sanctioned party. Burns the shares `usdc` is worth
+  // (rounded up, at most `max_shares`) and pays `to` all of it as `token_out` (ckUSDC, or a
+  // listed token through its ICPSwap pool, at least `min_out`; below it, all of it as ckUSDC),
+  // every ledger fee out of `usdc`. Refused when the ICP pocket's free ckUSDC is short (the
+  // queue is P11b). A payout that does not finish in this call answers `Unavailable` with
+  // the shares burned, and the canister's timer finishes it.
+  withdraw_icp : (WithdrawIcpArgs) -> (Result_20);
 }

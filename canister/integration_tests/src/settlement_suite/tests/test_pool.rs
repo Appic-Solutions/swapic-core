@@ -441,3 +441,170 @@ fn an_arrived_stake_mints_its_shares() {
     assert_eq!(mine.value_usdc, Nat::from(usdc(100)));
     assert!(world.replay_matches());
 }
+
+#[derive(CandidType)]
+struct ApproveArgs {
+    from_subaccount: Option<Vec<u8>>,
+    spender: Account,
+    amount: Nat,
+    expected_allowance: Option<Nat>,
+    expires_at: Option<u64>,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+impl World {
+    /// `owner` approves the canister's main account for `amount`.
+    fn approve(&self, owner: Principal, amount: u64) {
+        let args = ApproveArgs {
+            from_subaccount: None,
+            spender: account(self.canister),
+            amount: Nat::from(amount),
+            expected_allowance: None,
+            expires_at: None,
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        };
+        let raw = self
+            .pic
+            .update_call(
+                self.ledger,
+                owner,
+                "icrc2_approve",
+                encode_one(args).unwrap(),
+            )
+            .expect("the ledger answers");
+        assert!(!raw.is_empty());
+    }
+}
+
+/// The ICP staker's round trip: stake 100 ckUSDC on its own approval, a swap earns the pool
+/// its premium, then withdraw all of it: the shares pay at most what they are worth, every
+/// ledger fee out of the withdrawal, and the pool's lines match the ledger.
+#[test]
+fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
+    use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk};
+    let world = world(usdc(1_000));
+    world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
+    world.approve(staker(), usdc(100) + FEE);
+    let staked: Result<StakeIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "stake_icp",
+        encode_one(StakeIcpArgs {
+            from_subaccount: None,
+            amount: Nat::from(usdc(100)),
+            owner: PoolAccount::Icp(settlement_api::types::pool::IcpAccount {
+                owner: staker(),
+                subaccount: None,
+            }),
+        })
+        .unwrap(),
+    );
+    let shares = staked.expect("staked").shares;
+    assert_eq!(shares, Nat::from(100_000_000_000_000_000_000_u128));
+    // the approval's fee and the pull's are the staker's
+    assert_eq!(world.balance(staker()), Nat::from(usdc(900) - 2 * FEE));
+    assert_eq!(world.balance(world.canister), Nat::from(usdc(1_100)));
+
+    // a swap of 100 pays 99 and its fee from ICP; its premium stays with the stakers
+    world.arrive(ckusdc_swap(world.ledger), 4);
+    world.settle();
+    let value = world.pool_account(staker()).value_usdc;
+    assert!(
+        value > usdc(100),
+        "the staker earned part of the premium: {value}"
+    );
+
+    let withdrawn: Result<WithdrawIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "withdraw_icp",
+        encode_one(WithdrawIcpArgs {
+            from: None,
+            usdc: value.clone(),
+            max_shares: shares.clone(),
+            token_out: world.ledger,
+            min_out: Nat::from(0_u8),
+            to: settlement_api::types::pool::IcpAccount {
+                owner: staker(),
+                subaccount: None,
+            },
+        })
+        .unwrap(),
+    );
+    let withdrawn = withdrawn.expect("withdrawn");
+    assert!(withdrawn.burned <= shares);
+    assert_eq!(withdrawn.paid, value.clone() - Nat::from(FEE));
+    assert!(withdrawn.paid <= value);
+    assert_eq!(
+        world.balance(staker()),
+        Nat::from(usdc(900) - 2 * FEE) + withdrawn.paid.clone()
+    );
+    // what is left of its shares is dust worth nothing
+    assert!(world.pool_account(staker()).value_usdc <= 1_u8);
+    // the ICP pocket's lines are its balance on the ledger
+    let state = world.state();
+    assert_eq!(
+        state.icp.free.clone() + state.icp.reserved.clone(),
+        world.balance(world.canister)
+    );
+    assert!(world.replay_matches());
+
+    // more than its shares are worth: refused, nothing burned
+    let again: Result<WithdrawIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "withdraw_icp",
+        encode_one(WithdrawIcpArgs {
+            from: None,
+            usdc: Nat::from(usdc(1)),
+            max_shares: shares,
+            token_out: world.ledger,
+            min_out: Nat::from(0_u8),
+            to: settlement_api::types::pool::IcpAccount {
+                owner: staker(),
+                subaccount: None,
+            },
+        })
+        .unwrap(),
+    );
+    assert!(
+        matches!(again, Err(PoolError::ShortShares { .. })),
+        "{again:?}"
+    );
+}
+
+/// The ICP pocket's check: lines the ledger does not hold close the pool, and a controller's
+/// reopening opens it again.
+#[test]
+fn an_icp_shortfall_closes_the_pool_and_reopening_clears_it() {
+    // the pool's lines say 1,000 on ICP, and the ledger holds 500
+    let world = world(usdc(500));
+    world.plant_stake(world.admin, usdc(1_000), 1);
+    assert!(world.state().open);
+    // the books' check, every ten minutes
+    world.pic.advance_time(Duration::from_secs(601));
+    world.settle();
+    let state = world.state();
+    assert!(!state.open);
+    assert_eq!(
+        state.closed_reason.as_deref(),
+        Some("the balance check of the ICP pocket found a shortfall")
+    );
+    let reopened: Result<(), String> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_pool_paused",
+        encode_one(false).unwrap(),
+    );
+    assert_eq!(reopened, Ok(()));
+    assert!(world.state().open, "{:?}", world.state().closed_reason);
+    assert!(world.replay_matches());
+}
