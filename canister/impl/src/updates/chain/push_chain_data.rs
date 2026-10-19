@@ -5,6 +5,21 @@ pub use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::errors::PushChainDataError;
 use types::{ChainId, Timestamp};
 
+/// Validates `data` and stores it as `chain_id`'s reading, stamped `at`: the canister's own
+/// clock, which the caller reads so a unit test runs without a canister. No guard inside:
+/// the callers guard first. They are the watcher's push, and the finish and the relay,
+/// which carry the reading they were priced on so no separate push has to land before them.
+pub fn store_reading(
+    chain_id: ChainId,
+    data: ChainData,
+    at: Timestamp,
+) -> Result<(), PushChainDataError> {
+    let reading = types::ChainReading::try_from(data)
+        .map_err(|e| PushChainDataError::InvalidData(e.into()))?;
+    chain_data::put(chain_id, reading, at);
+    Ok(())
+}
+
 /// Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
 /// canister would otherwise spend an outcall on before every decision. It moves no money,
 /// so the halt switch does not gate it: a halted canister still wants a current view of the
@@ -16,12 +31,9 @@ use types::{ChainId, Timestamp};
 #[update]
 pub fn push_chain_data(chain_id: u64, data: ChainData) -> Result<(), PushChainDataError> {
     guards::require_watcher().map_err(PushChainDataError::Guard)?;
-    let reading = types::ChainReading::try_from(data)
-        .map_err(|e| PushChainDataError::InvalidData(e.into()))?;
-    chain_data::put(
+    store_reading(
         ChainId::new(chain_id),
-        reading,
+        data,
         Timestamp::from_nanos(ic_cdk::api::time()),
-    );
-    Ok(())
+    )
 }

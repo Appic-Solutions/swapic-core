@@ -153,7 +153,9 @@ pub enum TxError {
         chain_id: ChainId,
         ceiling: WeiPerGas,
     },
-    #[error("a transaction on chain {chain_id} would spend {cost} on gas, above the chain's bound")]
+    #[error(
+        "a transaction on chain {chain_id} would spend {cost} on gas, above the chain's bound"
+    )]
     GasCostTooHigh { chain_id: ChainId, cost: Wei },
     #[error("chain {chain_id} has no gas budget for a {action:?}")]
     NoGasBudget {
@@ -224,7 +226,9 @@ fn fresh_reading(chain_id: ChainId, now: Timestamp) -> Result<ChainData, TxError
 fn fees(chain_id: ChainId, now: Timestamp) -> Result<Fees, TxError> {
     let ceiling = max_fee_per_gas(chain_id);
     let out_of_range = TxError::FeeOutOfRange { chain_id, ceiling };
-    let fees = fresh_reading(chain_id, now)?.fees().ok_or(out_of_range.clone())?;
+    let fees = fresh_reading(chain_id, now)?
+        .fees()
+        .ok_or(out_of_range.clone())?;
     if fees.max_fee() > ceiling || fees.max_priority_fee() > ceiling {
         return Err(out_of_range);
     }

@@ -66,3 +66,32 @@ fn the_fresh_read_answers_nothing_once_the_data_ages_out() {
         );
     });
 }
+
+/// The one door every reading takes in, the push's and the one a finish or a relay
+/// carries: a valid reading is stored and fresh at once, and an invalid one is refused and
+/// leaves the stored one as it was.
+#[test]
+fn a_stored_reading_is_fresh_at_once_and_an_invalid_one_is_not_stored() {
+    on_fresh_memory(|| {
+        init();
+        let chain = ChainId::new(42161);
+        let good = settlement_api::types::chain_data::ChainData {
+            base_fee_wei_per_gas: candid::Nat::from(20_000_000u64),
+            block: 516_007_616,
+            priority_fee_wei_per_gas: candid::Nat::from(0u64),
+        };
+        crate::updates::store_reading(chain, good.clone(), at(100)).unwrap();
+        assert_eq!(get(chain).map(|d| d.block.get()), Some(516_007_616));
+        assert!(fresh(chain, at(100), Duration::from_secs(10)).is_some());
+        let mut bad = good;
+        bad.block = 516_007_700;
+        // 2^256, the first fee no 256-bit price holds
+        bad.base_fee_wei_per_gas = candid::Nat::parse(
+            b"115792089237316195423570985008687907853269984665640564039457584007913129639936",
+        )
+        .unwrap();
+        assert!(crate::updates::store_reading(chain, bad, at(101)).is_err());
+        assert_eq!(get(chain).map(|d| d.block.get()), Some(516_007_616));
+        assert_eq!(get(chain).map(|d| d.pushed_at), Some(at(100)));
+    });
+}

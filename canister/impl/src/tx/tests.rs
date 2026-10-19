@@ -141,7 +141,7 @@ fn the_price_ceiling_is_per_chain() {
             base_fee: WeiPerGas::from(1_000_000_000_000_u64),
             priority_fee: WeiPerGas::from(30_000_000_000_u64),
         };
-        chain_data::put(ChainId::BASE, busy.clone(), at(100));
+        chain_data::put(ChainId::BASE, busy, at(100));
         chain_data::put(ChainId::POLYGON, busy, at(100));
         assert_eq!(
             fees(ChainId::BASE, at(100)),
