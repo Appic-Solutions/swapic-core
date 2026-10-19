@@ -3,6 +3,7 @@
 //! stake and withdrawal. The rules are `types::pool`'s; this module reads the clock, the
 //! config, the sanctions set and the chains, and appends.
 
+pub mod arrival;
 pub mod register;
 pub mod settings;
 

@@ -309,6 +309,7 @@ fn a_fee_from_a_block_the_check_has_not_read_is_not_expected_yet() {
                 expected_at(
                     state,
                     chain,
+                    None,
                     BlockNumber::new(block),
                     observed,
                     TokenAmount::ZERO,
@@ -348,6 +349,58 @@ fn a_fee_from_a_block_the_check_has_not_read_is_not_expected_yet() {
         assert_eq!(
             read_state(|state| state.book(&chain)).unseen_fees,
             UnseenFees::default()
+        );
+    });
+}
+
+/// P11a: on the pool chain the check expects the pool's Base pocket too, and leaves out a
+/// pool arrival from a block above the one it read: an arrival at block N is not expected
+/// by a check at N - 1, and is by a check at N.
+#[test]
+fn a_pool_arrival_is_expected_from_its_block_on() {
+    use crate::storage::pool::tests::{
+        at as pool_at, credit, funded_pool, register, swap_terms, usdc,
+    };
+    use types::pool::PoolStep;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = register(swap_terms(1, usdc(100), usdc(1), pool_at(1_000)));
+        crate::storage::pool::record_at(
+            PoolStep::Arrived {
+                r#ref,
+                credit: credit(1),
+                amount: usdc(100),
+                block: BlockNumber::new(500),
+            },
+            pool_at(3),
+        )
+        .unwrap();
+        let check = |chain: ChainId, block: u64, observed: TokenAmount| {
+            read_state(|state| {
+                expected_at(
+                    state,
+                    chain,
+                    Some(ChainId::BASE),
+                    BlockNumber::new(block),
+                    observed,
+                    TokenAmount::ZERO,
+                )
+            })
+        };
+        assert_eq!(
+            check(ChainId::BASE, 499, TokenAmount::ZERO),
+            (TokenAmount::ZERO, false)
+        );
+        assert_eq!(
+            check(ChainId::BASE, 500, TokenAmount::ZERO),
+            (usdc(100), true)
+        );
+        assert_eq!(check(ChainId::BASE, 500, usdc(100)), (usdc(100), false));
+        // another chain's check expects none of the pool's
+        assert_eq!(
+            check(ChainId::ARBITRUM, 500, TokenAmount::ZERO),
+            (TokenAmount::ZERO, false)
         );
     });
 }

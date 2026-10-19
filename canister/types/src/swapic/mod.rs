@@ -79,6 +79,13 @@ sol! {
 
     event OrderStarted(bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn);
     event Transfer(address indexed from, address indexed to, uint256 value);
+    /// The Runner paid a same-chain order's payout.
+    event PaidOut(bytes32 indexed id, address indexed recipient, address token, uint256 amount);
+    /// CCTP v2's `MessageTransmitterV2` received a message.
+    event MessageReceived(address indexed caller, uint32 sourceDomain, bytes32 indexed nonce, bytes32 sender, uint32 indexed finalityThresholdExecuted, bytes messageBody);
+    /// Eco Portal 2.12's intent events (the services' `onchain::eco`, read off its bytecode).
+    event IntentPublished(bytes32 indexed intentHash, uint64 destination, bytes route, address indexed creator, address indexed prover, uint64 rewardDeadline, uint256 rewardNativeAmount, EcoTokenAmount[] rewardTokens);
+    event IntentFulfilled(bytes32 indexed intentHash, bytes32 indexed claimant);
 
     /// Eco Portal 2.12's intent, as the quoter writes it into a `publishAndFund` step.
     struct EcoCall { address target; bytes data; uint256 value; }
@@ -146,6 +153,125 @@ sol! {
         uint256 nonce;
         uint256 deadline;
         OrderWitness witness;
+    }
+}
+
+/// An Eco intent as the source chain's `IntentPublished` log says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedIntent {
+    pub intent_hash: [u8; 32],
+    pub destination: u64,
+    pub creator: EvmAddress,
+    /// `abi.encode` of the route, its amounts as the Runner wrote them.
+    pub route: Vec<u8>,
+}
+
+/// The intent an `IntentPublished` log publishes, None for a log that is not one.
+pub fn read_intent_published(topics: &[[u8; 32]], data: &[u8]) -> Option<PublishedIntent> {
+    use alloy_sol_types::SolEvent;
+    let event = IntentPublished::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()?;
+    Some(PublishedIntent {
+        intent_hash: event.intentHash.0,
+        destination: event.destination,
+        creator: evm(event.creator),
+        route: event.route.to_vec(),
+    })
+}
+
+/// The message body a `MessageReceived` log carries, None for a log that is not one.
+pub fn read_message_received(topics: &[[u8; 32]], data: &[u8]) -> Option<Vec<u8>> {
+    use alloy_sol_types::SolEvent;
+    MessageReceived::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()
+    .map(|event| event.messageBody.to_vec())
+}
+
+/// The one delivery an Eco Deliver route makes, `token.transfer(to, amount)`: the token, the
+/// recipient and the amount. None for every other route (a fill, more than one call or
+/// token, any ether).
+pub fn route_delivery(route: &[u8]) -> Option<(EvmAddress, EvmAddress, U256)> {
+    let route = <EcoRoute as SolValue>::abi_decode_with_config(route, strict()).ok()?;
+    let [carried] = route.tokens.as_slice() else {
+        return None;
+    };
+    let [send] = route.calls.as_slice() else {
+        return None;
+    };
+    if send.target != carried.token || !send.value.is_zero() || !route.nativeAmount.is_zero() {
+        return None;
+    }
+    let call = transferCall::abi_decode_with_config(&send.data, strict()).ok()?;
+    Some((evm(carried.token), evm(call.to), call.amount))
+}
+
+/// A Deliver route's bytes: `token.transfer(to, amount)` and nothing else, as the quoter
+/// writes a pool deposit's Eco route.
+pub fn deliver_route(
+    salt: [u8; 32],
+    deadline: u64,
+    portal: EvmAddress,
+    token: EvmAddress,
+    to: EvmAddress,
+    amount: U256,
+) -> Vec<u8> {
+    SolValue::abi_encode(&EcoRoute {
+        salt: FixedBytes(salt),
+        deadline,
+        portal: addr(portal),
+        nativeAmount: U256::ZERO,
+        tokens: vec![EcoTokenAmount {
+            token: addr(token),
+            amount,
+        }],
+        calls: vec![EcoCall {
+            target: addr(token),
+            data: transferCall {
+                to: addr(to),
+                amount,
+            }
+            .abi_encode()
+            .into(),
+            value: U256::ZERO,
+        }],
+    })
+}
+
+/// The topic0 of the events a pool arrival is proven by.
+pub mod topics {
+    use super::*;
+    use alloy_sol_types::SolEvent;
+
+    pub fn order_started() -> [u8; 32] {
+        OrderStarted::SIGNATURE_HASH.0
+    }
+
+    pub fn transfer() -> [u8; 32] {
+        Transfer::SIGNATURE_HASH.0
+    }
+
+    pub fn paid_out() -> [u8; 32] {
+        PaidOut::SIGNATURE_HASH.0
+    }
+
+    pub fn message_received() -> [u8; 32] {
+        MessageReceived::SIGNATURE_HASH.0
+    }
+
+    pub fn intent_published() -> [u8; 32] {
+        IntentPublished::SIGNATURE_HASH.0
+    }
+
+    pub fn intent_fulfilled() -> [u8; 32] {
+        IntentFulfilled::SIGNATURE_HASH.0
     }
 }
 

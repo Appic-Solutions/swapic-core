@@ -60,33 +60,59 @@ pub struct FeePath {
 
 /// The network fee an order paid the canister in a receipt (design C, abi.md 6.1): every
 /// USDC `Transfer` from the chain's Runner to the canister, which is what the fee step
-/// makes. Nothing for a receipt with none.
+/// makes, but the ones a `PaidOut(id, canister, USDC, value)` of the Runner in the same
+/// receipt explains: a same-chain order whose payout is the canister (a pool deposit) makes
+/// that transfer too, and it is the pool's arrival, never a fee. Each payout explains one
+/// transfer of its value. Nothing for a receipt with none.
 pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
     let topic = types::router::transfer_topic();
-    let mut total = TokenAmount::ZERO;
-    for log in receipt
+    let logs: Vec<&Value> = receipt
         .get("logs")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        let from_usdc = log
-            .get("address")
+        .collect();
+    let emitted_by = |log: &Value, address: EvmAddress| {
+        log.get("address")
             .and_then(Value::as_str)
             .and_then(crate::cctp::parse_address)
-            == Some(path.usdc);
-        let topics: Vec<[u8; 32]> = log
-            .get("topics")
+            == Some(address)
+    };
+    let topics_of = |log: &Value| -> Vec<[u8; 32]> {
+        log.get("topics")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|topic| crate::rpc::parse_hash32(Some(topic)))
-            .collect();
+            .collect()
+    };
+    let data_of = |log: &Value| -> Option<Vec<u8>> {
+        hex::decode(log.get("data")?.as_str()?.strip_prefix("0x")?).ok()
+    };
+    // the payouts to the canister in USDC, each explaining one transfer of its value
+    let mut payouts: Vec<TokenAmount> = logs
+        .iter()
+        .filter(|log| emitted_by(log, path.runner))
+        .filter_map(|log| {
+            let topics = topics_of(log);
+            let data = data_of(log)?;
+            let paid_out = topics.len() == 3
+                && topics[0] == types::swapic::topics::paid_out()
+                && topics[2] == path.canister.to_word()
+                && data.len() == 64
+                && data[..32] == path.usdc.to_word();
+            paid_out
+                .then(|| TokenAmount::from_be_bytes(data[32..].try_into().expect("BUG: 64 bytes")))
+        })
+        .collect();
+    let mut total = TokenAmount::ZERO;
+    for log in logs {
+        let topics = topics_of(log);
         let runner_to_canister = topics.len() == 3
             && topics[0] == topic
             && topics[1] == path.runner.to_word()
             && topics[2] == path.canister.to_word();
-        if !from_usdc || !runner_to_canister {
+        if !emitted_by(log, path.usdc) || !runner_to_canister {
             continue;
         }
         let Some(value) = log
@@ -95,9 +121,12 @@ pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
         else {
             continue;
         };
-        total = total
-            .checked_add(TokenAmount::from_be_bytes(value))
-            .unwrap_or(TokenAmount::MAX);
+        let value = TokenAmount::from_be_bytes(value);
+        if let Some(at) = payouts.iter().position(|paid| *paid == value) {
+            payouts.remove(at);
+            continue;
+        }
+        total = total.checked_add(value).unwrap_or(TokenAmount::MAX);
     }
     total
 }
@@ -190,19 +219,30 @@ pub async fn check_balances() {
 /// falls short of it beyond `tolerance`: the lines as they stand, less the fees booked from
 /// blocks above `block`, which a balance read there cannot hold yet (a fee is booked at the
 /// swap depth, the read is at the crediting depth behind the head), and less what is
-/// signed away and not yet confirmed.
+/// signed away and not yet confirmed. On the pool chain the pool's own lines are the
+/// pool's part (its Base pocket's free and reserved USDC and its unattributed transfers),
+/// less every pool arrival from a block above `block`, the same way.
 pub fn expected_at<S: Store>(
     state: &State<S>,
     chain_id: ChainId,
+    pool_chain: Option<ChainId>,
     block: BlockNumber,
     observed: TokenAmount,
     tolerance: TokenAmount,
 ) -> (TokenAmount, bool) {
     let books = state.book(&chain_id);
-    let lines = books
+    let mut lines = books
         .total(in_flight(state, chain_id))
         .checked_sub(books.fees_above(block))
         .unwrap_or(TokenAmount::ZERO);
+    if pool_chain == Some(chain_id) {
+        let pool = state.pool();
+        let held = pool
+            .base_held()
+            .checked_sub(pool.arrivals_above(chain_id, block))
+            .unwrap_or(TokenAmount::ZERO);
+        lines = lines.checked_add(held).unwrap_or(TokenAmount::MAX);
+    }
     assess(
         lines,
         pending_outflows(state, chain_id),
@@ -241,8 +281,16 @@ async fn check_balance(
         Err(error) => return Err(error.kind()),
     };
     // the lines as they stand now, after the read's await
-    let (expected, shortfall) =
-        read_state(|state| expected_at(state, chain_id, block, observed, config.books_tolerance.0));
+    let (expected, shortfall) = read_state(|state| {
+        expected_at(
+            state,
+            chain_id,
+            config.pool_chain,
+            block,
+            observed,
+            config.books_tolerance.0,
+        )
+    });
     let step = BookStep::Checked {
         check: BalanceCheck {
             block,

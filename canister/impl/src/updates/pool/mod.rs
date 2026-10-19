@@ -5,7 +5,9 @@ use crate::pool;
 use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
-pub use settlement_api::types::pool::{PoolDeposit, PoolError, PoolSettings};
+pub use settlement_api::types::pool::{
+    PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
+};
 use types::pool::PoolStep;
 
 /// Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
@@ -19,8 +21,9 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
     let settings = pool::settings::with_fees(settings).await?;
     pool::require_running()?;
     crate::storage::pool::record(PoolStep::SettingsSet { settings })
-        .map(drop)
-        .map_err(|error| PoolError::BadSettings(error.to_string()))
+        .map_err(|error| PoolError::BadSettings(error.to_string()))?;
+    crate::task_manager::restart_pool_arrivals_timer();
+    Ok(())
 }
 
 /// Quoter-only, refused while halted and while the pool is closed. Registers a deposit at
@@ -38,4 +41,15 @@ pub fn register_pool_deposit(deposit: PoolDeposit) -> Result<(), PoolError> {
     pool::require_pool_open()?;
     let (r#ref, terms) = deposit.into_domain()?;
     pool::register::register(r#ref, terms, pool::now(), is_sanctioned)
+}
+
+/// Watcher-only, refused while halted. The watcher saw a USDC transfer to the canister's
+/// Base address in `base_tx` (and, for an Eco arrival, the order's `src_tx` on `src_chain`;
+/// an empty `src_tx` names none). The canister reads the receipt itself (one batched
+/// outcall, and one more on the source chain for Eco) at the crediting depth, proves every
+/// transfer to it against its rail, and credits each at most once: `Credited` (the payout
+/// follows on the canister's timer), or `Unattributed` with why, kept for the refund.
+#[update]
+pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
+    pool::arrival::note(arrival).await
 }

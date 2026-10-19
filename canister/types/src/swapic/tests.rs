@@ -572,3 +572,37 @@ fn the_door_digests_are_the_cast_goldens() {
         b256!("59b9a23669995f2686ac3b22dc777977b9ae5d61fa04ec545e88fd356018d2a8").0
     );
 }
+
+/// The topic0 of every event a pool arrival is proven by, as the real mainnet receipts in
+/// `impl/src/pool/arrival/samples` carry them (2026-10-19 staging canaries): OrderStarted
+/// and PaidOut on Base, MessageReceived of Base's MessageTransmitterV2, IntentPublished
+/// on Arbitrum's Eco Portal, and IntentFulfilled on Base's (the fill's log 0x5c; its other
+/// Portal log, 0x6c with topic 0xe6d8040a, is not one the canister reads).
+#[test]
+fn the_arrival_topics_are_the_chains_own() {
+    let hex = |topic: [u8; 32]| hex::encode(topic);
+    assert_eq!(
+        hex(topics::order_started()),
+        "8e97ed8d4d8c9c453242f7e97e8fceb3b04813c3257d5d5a11d74b4cf89b5e82"
+    );
+    assert_eq!(
+        hex(topics::paid_out()),
+        "fe625474f74d7d56170a110187c9c1821d944870487a41d606d217e47871eb89"
+    );
+    assert_eq!(
+        hex(topics::transfer()),
+        "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    );
+    assert_eq!(
+        hex(topics::message_received()),
+        "ff48c13eda96b1cceacc6b9edeedc9e9db9d6226afbc30146b720c19d3addb1c"
+    );
+    assert_eq!(
+        hex(topics::intent_published()),
+        "43974895be1bcec7344337863fa7de24a0d1c315c0a994f663fe0ee220ddc8e4"
+    );
+    assert_eq!(
+        hex(topics::intent_fulfilled()),
+        "c471de166a60c0b81727dfa2f57d4fc3ad1b45b057c1f034b7058365613bde8d"
+    );
+}

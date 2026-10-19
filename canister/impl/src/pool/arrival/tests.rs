@@ -1,0 +1,480 @@
+//! Built on real mainnet receipts of the staging canaries' own transactions (2026-10-19,
+//! `samples/`, captured read-only by the controller). A pool deposit pays the canister, and
+//! these paid users, so each test rewrites only what makes them a pool deposit, and says
+//! which: the recipient of the transfer that delivers (and of the Runner's `PaidOut`, of the
+//! CCTP burn body, of the Eco route), and the `ref`. Emitters, topic0s, blocks, log indices
+//! and every other field stay as the chains wrote them.
+
+use super::*;
+use crate::storage::events::event_count;
+use crate::storage::on_fresh_memory;
+use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, payer, usdc};
+use crate::storage::pool::{deposit, ledger};
+use alloy_sol_types::SolEvent;
+use types::pool::{DepositKind, PoolRail, Registration};
+
+/// The staging canister's address on every chain.
+fn canister() -> EvmAddress {
+    "0x36D34038F04990a58c068e08eD9754e2E3D9bA53"
+        .parse()
+        .unwrap()
+}
+
+fn address(text: &str) -> EvmAddress {
+    parse_address(text).unwrap()
+}
+
+fn base() -> PoolChain {
+    PoolChain {
+        chain: ChainId::BASE,
+        usdc: address("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+        runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
+        swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
+        transmitter: address("0x81d40f21f12a8f0e3252bccb954d722d4c464b64"),
+        eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
+        canister: canister(),
+    }
+}
+
+fn arbitrum() -> SourceChain {
+    SourceChain {
+        chain: ChainId::ARBITRUM,
+        swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
+        eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
+    }
+}
+
+fn sample(name: &str) -> Value {
+    let text = match name {
+        "cctp" => include_str!("samples/cctp_deliver_base.json"),
+        "same_chain" => include_str!("samples/same_chain_base.json"),
+        "eco_source" => include_str!("samples/eco_source_arbitrum.json"),
+        "eco_fill" => include_str!("samples/eco_fill_base.json"),
+        _ => unreachable!(),
+    };
+    serde_json::from_str::<Value>(text).unwrap()["receipt"].clone()
+}
+
+fn log_at<'a>(receipt: &'a mut Value, index: &str) -> &'a mut Value {
+    receipt["logs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|log| log["logIndex"] == index)
+        .unwrap()
+}
+
+fn set_topic(log: &mut Value, at: usize, word: [u8; 32]) {
+    log["topics"][at] = Value::String(hex0x(&word));
+}
+
+fn data_of(log: &Value) -> Vec<u8> {
+    hex::decode(log["data"].as_str().unwrap().strip_prefix("0x").unwrap()).unwrap()
+}
+
+fn set_data(log: &mut Value, data: &[u8]) {
+    log["data"] = Value::String(hex0x(data));
+}
+
+fn word(amount: u64) -> [u8; 32] {
+    TokenAmount::from(amount).to_be_bytes()
+}
+
+/// The block time of every sample's logs is about this, in seconds.
+fn block_time(receipt: &Value) -> u64 {
+    hex_u64(receipt["logs"][0].get("blockTimestamp")).unwrap()
+}
+
+fn terms(byte: u8, min_usdc: TokenAmount, expires_at: Timestamp, rail: PoolRail) -> Registration {
+    Registration {
+        kind: DepositKind::Swap {
+            recipient: account(byte),
+            token_out: ckusdc(),
+            min_out: 1,
+        },
+        min_usdc,
+        premium: TokenAmount::from(10_000_u32),
+        rebalance_share: TokenAmount::ZERO,
+        src_chain: ChainId::BASE,
+        src_payer: payer(),
+        rail,
+        expires_at,
+        salt: [byte; 32],
+    }
+}
+
+/// The same-chain sample (USDC to ether on Base, user-paid) as a pool deposit: the Runner's
+/// USDC transfer at 0x3c8 goes to the canister instead of KyberSwap's executor, `PaidOut` at
+/// 0x3d2 pays the canister that USDC (its recipient topic and its token and amount words),
+/// and `OrderStarted` at 0x3c6 carries `r#ref`.
+fn same_chain(r#ref: PoolRef) -> Value {
+    let mut receipt = sample("same_chain");
+    set_topic(log_at(&mut receipt, "0x3c8"), 2, canister().to_word());
+    let paid = log_at(&mut receipt, "0x3d2");
+    set_topic(paid, 2, canister().to_word());
+    let mut data = base().usdc.to_word().to_vec();
+    data.extend_from_slice(&word(1_000_000));
+    set_data(paid, &data);
+    set_topic(log_at(&mut receipt, "0x3c6"), 2, r#ref.into_bytes());
+    receipt
+}
+
+/// The CCTP sample (the canister's `receiveMessage` of a Deliver into Base) as a pool
+/// deposit: the mint at 0x4a goes to the canister, and in `MessageReceived` at 0x4e the
+/// burn body's mint recipient is the canister and its envelope's ref is `r#ref`.
+fn cctp(r#ref: PoolRef) -> Value {
+    let mut receipt = sample("cctp");
+    set_topic(log_at(&mut receipt, "0x4a"), 2, canister().to_word());
+    let received = log_at(&mut receipt, "0x4e");
+    let mut data = data_of(received);
+    // the body starts after three head words and its length word
+    data[128 + 36..128 + 68].copy_from_slice(&canister().to_word());
+    data[128 + 228 + 32..128 + 228 + 64].copy_from_slice(&r#ref.into_bytes());
+    set_data(received, &data);
+    receipt
+}
+
+/// The Eco samples (a gasless order on Arbitrum filled on Base) as a pool deposit: on Base
+/// the route's final transfer at 0x5f goes to the canister, not the Runner; on Arbitrum
+/// `OrderStarted` at 0xe carries `r#ref`, and the route `IntentPublished` at 0x11 carries is
+/// the Deliver shape a pool deposit's is, `USDC.transfer(canister, value)` (the sample's
+/// was a swap fill), every other field of the event as published.
+fn eco(r#ref: PoolRef) -> (Value, Value) {
+    let mut fill = sample("eco_fill");
+    let transfer = log_at(&mut fill, "0x5f");
+    set_topic(transfer, 2, canister().to_word());
+    let value = U256Word::of(&data_of(transfer));
+    let mut source = sample("eco_source");
+    set_topic(log_at(&mut source, "0xe"), 2, r#ref.into_bytes());
+    let published = log_at(&mut source, "0x11");
+    let topics: Vec<alloy_primitives::FixedBytes<32>> = published["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|topic| alloy_primitives::FixedBytes(parse_hash32(Some(topic)).unwrap()))
+        .collect();
+    let mut event =
+        types::swapic::IntentPublished::decode_raw_log(topics, &data_of(published)).unwrap();
+    let route = types::swapic::route_delivery(&event.route);
+    assert_eq!(route, None, "the sample's route is a fill, not a delivery");
+    event.route = types::swapic::deliver_route(
+        [0x5a; 32],
+        1_800_000_000,
+        base().eco_portal.unwrap(),
+        base().usdc,
+        canister(),
+        value.0,
+    )
+    .into();
+    set_data(published, &event.encode_data());
+    (fill, source)
+}
+
+struct U256Word(alloy_primitives::U256);
+
+impl U256Word {
+    fn of(data: &[u8]) -> Self {
+        Self(alloy_primitives::U256::from_be_slice(data))
+    }
+}
+
+fn parse(value: &Value) -> Receipt {
+    Receipt::parse(value).unwrap()
+}
+
+fn the_ref(byte: u8) -> PoolRef {
+    terms(byte, usdc(1), at(0), PoolRail::Cctp)
+        .pool_ref()
+        .unwrap()
+}
+
+#[test]
+fn a_same_chain_deposit_is_proven() {
+    let r#ref = the_ref(1);
+    let receipt = parse(&same_chain(r#ref));
+    let found = find(&receipt, None, &base()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].amount, TokenAmount::from(1_000_000_u32));
+    assert_eq!(found[0].credit.log_index, 0x3c8);
+    assert_eq!(found[0].credit.tx, receipt.tx);
+    assert_eq!(
+        found[0].proof,
+        Proof::Deposit {
+            r#ref,
+            payer: Some(payer())
+        }
+    );
+    assert!(found[0].at.is_some(), "the provider gives the block's time");
+}
+
+#[test]
+fn a_cctp_deposit_is_proven() {
+    let r#ref = the_ref(2);
+    let receipt = parse(&cctp(r#ref));
+    let found = find(&receipt, None, &base()).unwrap();
+    assert_eq!(found.len(), 1);
+    // the burn less Circle's fee: 4748183 - 474
+    assert_eq!(found[0].amount, TokenAmount::from(4_747_709_u32));
+    assert_eq!(found[0].credit.log_index, 0x4a);
+    assert_eq!(found[0].proof, Proof::Deposit { r#ref, payer: None });
+}
+
+#[test]
+fn an_eco_deposit_is_proven_on_its_source() {
+    let r#ref = the_ref(3);
+    let (fill, source) = eco(r#ref);
+    let (fill, source) = (parse(&fill), parse(&source));
+    assert!(needs_source(&fill, &base()));
+    assert_eq!(find(&fill, None, &base()), Err(NoArrival::NeedsSource));
+    let found = find(&fill, Some((&source, &arbitrum())), &base()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].amount, TokenAmount::from(4_705_087_u32));
+    assert_eq!(found[0].credit.log_index, 0x5f);
+    assert_eq!(
+        found[0].proof,
+        Proof::Deposit {
+            r#ref,
+            payer: Some(payer())
+        }
+    );
+    // a source whose intent does not deliver this transfer to the canister proves nothing
+    let untouched = parse(&sample("eco_source"));
+    let found = find(&fill, Some((&untouched, &arbitrum())), &base()).unwrap();
+    assert!(matches!(found[0].proof, Proof::Orphan { .. }));
+}
+
+/// A transfer to someone else, or of another token, is no arrival at all: nothing is
+/// recorded.
+#[test]
+fn a_transfer_to_someone_else_or_of_another_token_is_no_arrival() {
+    for name in ["cctp", "same_chain", "eco_fill"] {
+        let receipt = parse(&sample(name));
+        assert_eq!(
+            find(&receipt, None, &base()),
+            Err(NoArrival::NoTransfer),
+            "{name}"
+        );
+    }
+    let weth = PoolChain {
+        usdc: address("0x4200000000000000000000000000000000000006"),
+        ..base()
+    };
+    let receipt = parse(&same_chain(the_ref(1)));
+    assert_eq!(find(&receipt, None, &weth), Err(NoArrival::NoTransfer));
+    // a reverted transaction proves nothing
+    let mut reverted = same_chain(the_ref(1));
+    reverted["status"] = Value::String("0x0".into());
+    assert_eq!(
+        find(&parse(&reverted), None, &base()),
+        Err(NoArrival::Reverted)
+    );
+}
+
+/// A wrong ref: proven, and registered nowhere, so unattributed with its payer.
+#[test]
+fn a_wrong_ref_is_unattributed_with_its_payer() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let raw = same_chain(the_ref(9));
+        let receipt = parse(&raw);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        crate::storage::pool::tests::register(terms(
+            1,
+            usdc(1),
+            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
+            PoolRail::SameChain,
+        ));
+        let found = find(&receipt, None, &base()).unwrap();
+        let outcomes = record(&found, now).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "no deposit is registered under the ref"
+        ));
+        assert_eq!(ledger().unattributed, TokenAmount::from(1_000_000_u32));
+        assert!(matches!(
+            deposit(&the_ref(1)).unwrap().status,
+            DepositStatus::Registered
+        ));
+    });
+}
+
+/// Review Focus 1: the same transfer reported twice (two calls, or a call and the backup
+/// timer) is credited once.
+#[test]
+fn the_same_transfer_reported_twice_is_credited_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(2);
+        let raw = cctp(r#ref);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        crate::storage::pool::tests::register(terms(
+            2,
+            usdc(4),
+            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
+            PoolRail::Cctp,
+        ));
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let first = record(&found, now).unwrap();
+        assert_eq!(
+            first,
+            vec![PoolArrivalOutcome::Credited {
+                r#ref: r#ref.into_bytes().to_vec(),
+                amount: candid::Nat::from(4_747_709_u32)
+            }]
+        );
+        let count = event_count();
+        assert_eq!(record(&found, now).unwrap(), vec![]);
+        assert_eq!(event_count(), count, "nothing more was written");
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Arrived);
+        assert_eq!(ledger().pockets.base.free, TokenAmount::from(4_747_709_u32));
+        assert!(crate::storage::pool::credited(&found[0].credit));
+    });
+}
+
+/// Review Focus 4: an arrival past its registration's expiry and grace (at its block's
+/// time) is unattributed with the registered payer, never credited, and its hold goes back.
+#[test]
+fn a_late_arrival_is_unattributed_with_its_payer() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(3);
+        let (fill, source) = eco(r#ref);
+        let time = block_time(&fill);
+        let grace = types::pool::PoolSettings::default().deposit_grace.as_secs();
+        // expired, and the grace ran out one second before the fill's block
+        crate::storage::pool::tests::register(terms(
+            3,
+            usdc(4),
+            Timestamp::from_secs(time - grace - 1).unwrap(),
+            PoolRail::Eco,
+        ));
+        let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
+        // read late by the canister: judged at the block's time, not the read's
+        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "arrived past its expiry and grace"
+        ));
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Unattributed);
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        let orphan = crate::storage::events::event_at(event_count() - 1).unwrap();
+        assert!(matches!(
+            orphan.payload,
+            types::EventType::Pool {
+                step: PoolStep::Unattributed { src_payer: Some(p), .. }
+            } if p == payer()
+        ));
+    });
+}
+
+/// An arrival on time at its block, read after its grace by the backup, is credited.
+#[test]
+fn an_arrival_on_time_read_late_is_credited() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(3);
+        let (fill, source) = eco(r#ref);
+        let time = block_time(&fill);
+        crate::storage::pool::tests::register(terms(
+            3,
+            usdc(4),
+            Timestamp::from_secs(time).unwrap(),
+            PoolRail::Eco,
+        ));
+        let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
+        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+    });
+}
+
+/// Below its registered minimum, or paid by another than the registered payer: kept
+/// unattributed; another payer's money leaves the user's registration open.
+#[test]
+fn a_short_arrival_or_another_payers_is_unattributed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let raw = same_chain(the_ref(1));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let expires = Timestamp::from_secs(block_time(&raw) + 600).unwrap();
+        crate::storage::pool::tests::register(terms(1, usdc(2), expires, PoolRail::SameChain));
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let outcomes = record(&found, now).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
+        ));
+        assert_eq!(
+            deposit(&the_ref(1)).unwrap().status,
+            DepositStatus::Unattributed
+        );
+
+        // another payer
+        let mut other = terms(2, usdc(1), expires, PoolRail::SameChain);
+        other.src_payer = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let r#ref = other.pool_ref().unwrap();
+        crate::storage::pool::tests::register(other);
+        let mut raw = same_chain(r#ref);
+        // another log index, so it is another transfer
+        log_at(&mut raw, "0x3c8")["logIndex"] = Value::String("0x3c9".into());
+        let found: Vec<Found> = find(&parse(&raw), None, &base()).unwrap();
+        let outcomes = record(&found, now).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "paid by another than the registered payer"
+        ));
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
+    });
+}
+
+/// A same-chain gasless order pays the canister its fee step and, as a pool deposit, its
+/// payout, both as Runner transfers: the fee step is no arrival, and the books book only
+/// the fee step. The fee step here is the Arbitrum sample's real one (log 0xf, the Runner to
+/// the canister), its emitter rewritten to Base's USDC.
+#[test]
+fn the_fee_step_is_the_books_and_the_payout_is_the_pools() {
+    let r#ref = the_ref(1);
+    let mut receipt = same_chain(r#ref);
+    let mut fee = log_at(&mut sample("eco_source"), "0xf").clone();
+    fee["address"] = Value::String(base().usdc.to_string());
+    fee["logIndex"] = Value::String("0x3d3".into());
+    let fee_value = TokenAmount::from_be_bytes(data_of(&fee).try_into().unwrap());
+    receipt["logs"].as_array_mut().unwrap().push(fee);
+    let found = find(&parse(&receipt), None, &base()).unwrap();
+    assert_eq!(found.len(), 1, "the fee step is no arrival");
+    assert_eq!(found[0].amount, TokenAmount::from(1_000_000_u32));
+    let path = crate::books::FeePath {
+        usdc: base().usdc,
+        runner: base().runner,
+        canister: canister(),
+    };
+    assert_eq!(crate::books::network_fee_in(&receipt, path), fee_value);
+    // a receipt of the fee step alone is the books', and no arrival
+    let mut only_fee = sample("eco_source");
+    log_at(&mut only_fee, "0xf")["address"] = Value::String(base().usdc.to_string());
+    let only_fee = parse(&only_fee);
+    assert_eq!(find(&only_fee, None, &base()), Err(NoArrival::OnlyFees));
+}
+
+/// The crediting depth: 1 block on Base, read off the config.
+#[test]
+fn a_receipt_not_deep_enough_is_not_credited() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let block = BlockNumber::new(52_823_000);
+        assert_eq!(deep_enough(block, block, ChainId::BASE), Ok(()));
+        assert_eq!(
+            deep_enough(block, BlockNumber::new(block.get() - 1), ChainId::BASE),
+            Err(PoolError::NotDeep { needed: 1, have: 0 })
+        );
+    });
+}

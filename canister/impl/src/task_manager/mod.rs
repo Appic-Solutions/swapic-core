@@ -9,6 +9,7 @@ use types::Timestamp;
 
 pub mod expiry_sweep;
 pub mod outbox;
+pub mod pool_arrivals;
 pub mod rail_status;
 pub mod replay_audit;
 
@@ -20,6 +21,7 @@ thread_local! {
     static EXPIRY_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
@@ -35,6 +37,7 @@ pub fn start_timers() {
     restart_audit_timer();
     restart_rail_status_timer();
     restart_books_timer();
+    restart_pool_arrivals_timer();
 }
 
 /// Puts the expiry timer on the configured interval. `set_config` calls it only when that
@@ -63,6 +66,20 @@ pub fn restart_books_timer() {
     let every = interval(config::get().books_check_interval.0);
     restart(&BOOKS_TIMER, || {
         ic_cdk_timers::set_timer_interval(every, || ic_cdk::spawn(crate::books::check_balances()))
+    });
+}
+
+/// Puts the pool's own read of Base on its settings' interval (`arrival_backup_s`, the
+/// default while none are set). `set_pool_settings` calls it.
+pub fn restart_pool_arrivals_timer() {
+    let every = interval(
+        crate::storage::pool::ledger()
+            .settings
+            .unwrap_or_default()
+            .arrival_backup,
+    );
+    restart(&POOL_ARRIVALS_TIMER, || {
+        ic_cdk_timers::set_timer_interval(every, || ic_cdk::spawn(pool_arrivals::run_backup()))
     });
 }
 
