@@ -121,8 +121,15 @@ pub struct Live;
 #[cfg(feature = "inttest")]
 thread_local! {
     // Test-only: the next transfer's answer is lost on its way back, after the ledger
-    // executed it.
+    // executed it; and how many answers were lost so.
     static LOSE_NEXT_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ANSWERS_LOST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: how many transfer answers were lost on purpose.
+#[cfg(feature = "inttest")]
+pub fn answers_lost() -> u64 {
+    ANSWERS_LOST.with(|lost| lost.get())
 }
 
 /// Test-only: loses the next transfer's answer, as a subnet that lost it would.
@@ -149,6 +156,7 @@ impl Ledgers for Live {
         .await;
         #[cfg(feature = "inttest")]
         if answer.is_ok() && LOSE_NEXT_ANSWER.with(|lose| lose.replace(false)) {
+            ANSWERS_LOST.with(|lost| lost.set(lost.get() + 1));
             return Err(CallError::Unknown("the answer was lost (test)".to_string()));
         }
         answer

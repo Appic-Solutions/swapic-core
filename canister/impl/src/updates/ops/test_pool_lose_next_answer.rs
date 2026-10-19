@@ -10,3 +10,9 @@ pub fn test_pool_lose_next_answer() -> Result<(), GuardError> {
     crate::pool::payout::lose_next_answer();
     Ok(())
 }
+
+/// Test-only: how many of the pool's transfer answers were lost on purpose.
+#[ic_cdk::query]
+pub fn test_pool_answers_lost() -> u64 {
+    crate::pool::payout::answers_lost()
+}

@@ -421,6 +421,15 @@ fn a_lost_answer_asked_again_pays_once() {
     assert!(!steps
         .iter()
         .any(|step| matches!(step, PoolStep::AttemptFailed { .. })));
+    // and the knob fired: the ledger executed the first transfer and its answer was lost
+    let lost: u64 = query(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "test_pool_answers_lost",
+        encode_one(()).unwrap(),
+    );
+    assert_eq!(lost, 1);
     let view = world.deposit(r#ref);
     assert_eq!(view.status, PoolDepositStatus::Paid);
     assert_eq!(world.balance(recipient()), Nat::from(usdc(99)), "paid once");
