@@ -745,22 +745,23 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok; Err : text };
-type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_11 = variant { Ok; Err : SetConfigError };
-type Result_12 = variant { Ok; Err : FlowCallError };
-type Result_13 = variant { Ok; Err : GuardError };
-type Result_14 = variant { Ok; Err : SetRolesError };
-type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_16 = variant { Ok : StakeIcpOk; Err : PoolError };
-type Result_17 = variant { Ok : WithdrawIcpOk; Err : PoolError };
+type Result_10 = variant { Ok; Err : PoolError };
+type Result_11 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_12 = variant { Ok; Err : SetConfigError };
+type Result_13 = variant { Ok; Err : FlowCallError };
+type Result_14 = variant { Ok; Err : GuardError };
+type Result_15 = variant { Ok; Err : SetRolesError };
+type Result_16 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_17 = variant { Ok : StakeIcpOk; Err : PoolError };
+type Result_18 = variant { Ok : WithdrawIcpOk; Err : PoolError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : nat64; Err : text };
 type Result_5 = variant { Ok : Config; Err : GuardError };
 type Result_6 = variant { Ok : opt Quote; Err : GuardError };
 type Result_7 = variant { Ok : PoolArrivalOutcome; Err : PoolError };
-type Result_8 = variant { Ok; Err : PushChainDataError };
-type Result_9 = variant { Ok; Err : PoolError };
+type Result_8 = variant { Ok : bool; Err : PoolError };
+type Result_9 = variant { Ok; Err : PushChainDataError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -1023,6 +1024,11 @@ service : (InitArg) -> {
   pool_account : (PoolAccount) -> (PoolAccountView) query;
   // A deposit by its ref, if one is registered under it.
   pool_deposit : (blob) -> (opt PoolDepositView) query;
+  // Quoter-only, refused while halted. After a commit that met `Known`, whether the
+  // registration stored under `deposit.ref` is this one: the same kind, fees, `min_usdc`,
+  // `src_payer`, rail, expiry and salt. `Unknown` when none is stored. Reads only, and writes
+  // no line.
+  pool_deposit_agreed : (PoolDeposit) -> (Result_8);
   // The pool's knobs; the launch defaults while none are set.
   pool_settings : () -> (PoolSettings) query;
   // Whether the pool is open and why not, both pockets' lines, the stakers' assets and the
@@ -1036,7 +1042,7 @@ service : (InitArg) -> {
   // The record carries no instant. The canister stamps what it stores with its own clock,
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
-  push_chain_data : (nat64, ChainData) -> (Result_8);
+  push_chain_data : (nat64, ChainData) -> (Result_9);
   // Quoter-only, refused while halted and while the pool is closed. Registers a deposit at
   // the user's commit (interface section 4): the ref must be the one its terms commit to,
   // the fee included; it expires within 15 minutes; its token is listed; its payer and owner
@@ -1045,7 +1051,7 @@ service : (InitArg) -> {
   // and, on a ckUSDC payout, pays at least its own minimum, and reserves `min_usdc - premium`
   // of the ICP pocket within `max_held_bps` of it; a stake holds its TVL room. The hold is
   // released when it expires.
-  register_pool_deposit : (PoolDeposit) -> (Result_9);
+  register_pool_deposit : (PoolDeposit) -> (Result_10);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1056,7 +1062,7 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_10);
+  register_quote : (Quote) -> (Result_11);
   // Watcher-only (the submit API runs as the watcher), refused while halted. Relays a
   // user's gasless order through Swapic on `chain_id` as `runFor(order, auth)`: `order` is
   // `abi.encode(Order)` of ABI v3 and `auth` is `abi.encode(GaslessAuth)`, each one dynamic
@@ -1080,17 +1086,17 @@ service : (InitArg) -> {
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_11);
+  set_config : (Config) -> (Result_12);
   // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
   // and the windows the flows read.
-  set_flow_settings : (FlowSettings) -> (Result_12);
+  set_flow_settings : (FlowSettings) -> (Result_13);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_13);
+  set_halted : (bool) -> (Result_14);
   // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
   // shortfall the last balance check latched, once someone has looked at it. Recorded in
   // the log on the pool chain's books; the pool's guard reads it.
@@ -1098,10 +1104,10 @@ service : (InitArg) -> {
   // Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
   // ledger's fee and every listed token's (`icrc1_fee`), which the registrations' premium
   // floor reads.
-  set_pool_settings : (PoolSettings) -> (Result_9);
+  set_pool_settings : (PoolSettings) -> (Result_10);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_14);
+  set_roles : (principal, principal) -> (Result_15);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1111,7 +1117,7 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_15);
+  set_sanctioned : (vec text, vec text) -> (Result_16);
   // Every transaction the canister signed after `after_id`, oldest first, at most `limit`
   // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
   // backup.
@@ -1122,7 +1128,7 @@ service : (InitArg) -> {
   // approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
   // its shares at the pool's price before it. A pull whose answer was lost answers
   // `Unavailable`, and the canister asks again with the same pull.
-  stake_icp : (StakeIcpArgs) -> (Result_16);
+  stake_icp : (StakeIcpArgs) -> (Result_17);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
@@ -1133,5 +1139,5 @@ service : (InitArg) -> {
   // every ledger fee out of `usdc`. Refused when the ICP pocket's free ckUSDC is short (the
   // queue is P11b). A payout that does not finish in this call answers `Unavailable` with
   // the shares burned, and the canister's timer finishes it.
-  withdraw_icp : (WithdrawIcpArgs) -> (Result_17);
+  withdraw_icp : (WithdrawIcpArgs) -> (Result_18);
 }
