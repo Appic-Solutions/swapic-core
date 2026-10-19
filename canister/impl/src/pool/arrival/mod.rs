@@ -489,18 +489,21 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
     };
     let terms = &deposit.terms;
     // a payer the chain does not show (a CCTP arrival's is on its source chain) is not bound:
-    // such an arrival may take the ref only as a clean credit. Anything else is kept with no
-    // ref and no payer, so a stranger's burn under someone's ref never closes their
-    // registration, nor is refunded to them.
-    let (refund_to, closes) = if payer.is_some() {
-        (Some(terms.src_payer), Some(r#ref))
+    // such an arrival takes its ref only as a clean credit. Anything else is kept with no ref,
+    // so a stranger's burn under someone's ref never closes their registration, and with the
+    // registration's payer as its refund target, so a user's own short or late arrival is
+    // never lost (a stranger's burn under the ref only goes back to that payer).
+    let refund_to = Some(terms.src_payer);
+    let closes = payer.is_some().then_some(r#ref);
+    let presumed = if payer.is_some() {
+        ""
     } else {
-        (None, None)
+        " (payer presumed: the registration's)"
     };
     if deposit.status != DepositStatus::Registered {
         return Some(orphan(
             payer.or(refund_to),
-            format!("the deposit is {:?}", deposit.status),
+            format!("the deposit is {:?}{presumed}", deposit.status),
             closes,
         ));
     }
@@ -521,7 +524,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
     if at > terms.credit_until(grace) {
         return Some(orphan(
             refund_to,
-            "arrived past its expiry and grace".to_string(),
+            format!("arrived past its expiry and grace{presumed}"),
             closes,
         ));
     }
@@ -529,7 +532,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
         return Some(orphan(
             refund_to,
             format!(
-                "{} arrived, below the {} registered",
+                "{} arrived, below the {} registered{presumed}",
                 found.amount, terms.min_usdc
             ),
             closes,
@@ -539,7 +542,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
     if let Err(why) = state.pool().arrival_fits(&deposit, found.amount) {
         return Some(orphan(
             refund_to,
-            format!("{} arrived: {why}", found.amount),
+            format!("{} arrived: {why}{presumed}", found.amount),
             closes,
         ));
     }

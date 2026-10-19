@@ -511,20 +511,22 @@ fn an_arrival_above_the_cap_is_unattributed() {
         let outcomes = record(&found, now).unwrap();
         assert!(matches!(
             &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why.ends_with("above the per-swap cap")
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("above the per-swap cap")
         ));
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
         assert_eq!(
             ledger().pockets.icp.reserved,
             usdc(4).checked_sub(TokenAmount::from(10_000_u32)).unwrap()
         );
+        // kept with no ref, the registration's payer its refund target
         assert!(matches!(
             last_step(),
             PoolStep::Unattributed {
-                src_payer: None,
+                src_payer: Some(p),
                 r#ref: None,
+                ref why,
                 ..
-            }
+            } if p == payer() && why.ends_with("(payer presumed: the registration's)")
         ));
     });
 }
@@ -579,9 +581,11 @@ fn a_cctp_burn_is_swapics_runners_or_proves_nothing() {
     assert!(orphaned(&cctp(r#ref), &other_messenger));
 }
 
-/// Review fix (CCTP binding): a CCTP arrival's payer is not bound, so one short of its
-/// registration (a stranger's burn under someone's ref) is kept with no ref and no payer:
-/// it never closes the registration, nor releases its hold, nor is refunded to its payer.
+/// Review fix (CCTP binding, and the loss of user funds): a CCTP arrival's payer is not
+/// bound, so one short of its registration is kept with no ref: it never closes the
+/// registration nor releases its hold (a stranger's burn under someone's ref). It is kept
+/// with the registration's payer as its refund target, so a user's own short arrival is
+/// never lost, and a stranger's only goes back to that payer.
 #[test]
 fn a_short_cctp_arrival_never_closes_a_registration() {
     on_fresh_memory(|| {
@@ -603,13 +607,15 @@ fn a_short_cctp_arrival_never_closes_a_registration() {
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
         ));
+        // kept with no ref, the registration's payer its refund target
         assert!(matches!(
             last_step(),
             PoolStep::Unattributed {
-                src_payer: None,
+                src_payer: Some(p),
                 r#ref: None,
+                ref why,
                 ..
-            }
+            } if p == payer() && why.ends_with("(payer presumed: the registration's)")
         ));
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
         assert_eq!(ledger().pockets.icp.reserved, held);
