@@ -1077,8 +1077,9 @@ pub fn check_ref(
     admits_terms(terms).map_err(|error| RegisterRefusal::NotAllowed(error.to_string()))
 }
 
-/// The least premium a swap of `min_usdc` paying `token_out` carries: the settings' share of
-/// it, rounded up, and never below the ledger fees its path costs the pool.
+/// The least premium a swap of `min_usdc` paying `token_out` carries, the floor the quoter
+/// (P13a) quotes exactly: the settings' share of it, rounded up, and never below the ckUSDC
+/// fee for a ckUSDC payout, or the ckUSDC fee and twice the token's for another token.
 pub fn least_premium(
     settings: &PoolSettings,
     min_usdc: TokenAmount,
@@ -1087,7 +1088,13 @@ pub fn least_premium(
     let share = min_usdc
         .checked_mul(settings.premium_bps)?
         .checked_div_ceil(10_000_u32)?;
-    Some(share.max(path_fees(settings, token_out)?))
+    let ckusdc_fee = settings.fee_of(settings.ckusdc_ledger)?;
+    let fees = if token_out == settings.ckusdc_ledger {
+        ckusdc_fee
+    } else {
+        ckusdc_fee.checked_add(settings.fee_of(token_out)?.checked_mul(2_u8)?)?
+    };
+    Some(share.max(fees))
 }
 
 /// The pool's limits on a registration, read off the ledger: the token out listed, the open
@@ -1120,8 +1127,11 @@ pub fn check_terms(ledger: &PoolLedger, terms: &Registration) -> Result<(), Regi
                     cap: settings.per_swap_cap,
                 });
             }
-            let least = least_premium(settings, terms.min_usdc, token_out)
-                .ok_or_else(|| RegisterRefusal::NotAllowed("no ckUSDC fee was read".to_string()))?;
+            let least = least_premium(settings, terms.min_usdc, token_out).ok_or_else(|| {
+                RegisterRefusal::NotAllowed(
+                    "no ledger fee was read for the payout's path".to_string(),
+                )
+            })?;
             if terms.premium < least {
                 return Err(RegisterRefusal::PremiumTooLow { least });
             }

@@ -948,3 +948,48 @@ fn an_arrival_is_measured_on_what_arrived() {
     );
     full.step(arrived(stake_ref, usdc(10))).unwrap();
 }
+
+/// The premium floor both sides use (aligned with P13a): the settings' share rounded up, and
+/// never below the ckUSDC fee for a ckUSDC payout, or the ckUSDC fee and twice the token's
+/// fee for another token.
+#[test]
+fn the_premium_floor_is_the_quoters() {
+    let token = Principal::from_slice(&[0x70; 10]);
+    let settings = PoolSettings {
+        icp_tokens: vec![crate::pool::IcpToken {
+            ledger: token,
+            icpswap_pool: Principal::from_slice(&[0x71; 10]),
+        }],
+        ledger_fees: vec![
+            LedgerFee {
+                ledger: ckusdc(),
+                fee: TokenAmount::from(FEE),
+            },
+            LedgerFee {
+                ledger: token,
+                fee: TokenAmount::from(7_000_u32),
+            },
+        ],
+        ..settings()
+    };
+    // a small swap: the fees decide
+    assert_eq!(
+        least_premium(&settings, usdc(2), ckusdc()),
+        Some(TokenAmount::from(FEE))
+    );
+    assert_eq!(
+        least_premium(&settings, usdc(2), token),
+        Some(TokenAmount::from(FEE + 2 * 7_000))
+    );
+    // a large one: 10 bps of it, rounded up
+    let large = usdc(1_000).checked_add(TokenAmount::ONE).unwrap();
+    assert_eq!(
+        least_premium(&settings, large, token),
+        Some(TokenAmount::from(1_000_001_u32))
+    );
+    // a token with no fee read has no floor, and is refused
+    assert_eq!(
+        least_premium(&settings, usdc(2), Principal::from_slice(&[0x72; 10])),
+        None
+    );
+}
