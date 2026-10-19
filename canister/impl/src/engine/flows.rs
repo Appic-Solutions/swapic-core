@@ -203,7 +203,7 @@ pub async fn pull(
     let me = ic_cdk::api::id();
     let answer = ic::icrc2_transfer_from(
         ledger,
-        quote_hash.into_bytes(),
+        Some(quote_hash.into_bytes()),
         Account::of(user, None),
         Account::of(me, None),
         nat(quote.amount_in),

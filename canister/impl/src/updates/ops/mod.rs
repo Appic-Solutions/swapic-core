@@ -5,6 +5,8 @@ pub mod set_sanctioned;
 #[cfg(feature = "inttest")]
 pub mod test_append;
 #[cfg(feature = "inttest")]
+pub mod test_pool_lose_next_answer;
+#[cfg(feature = "inttest")]
 pub mod test_rpc_batch;
 #[cfg(feature = "inttest")]
 pub mod test_send;
@@ -19,6 +21,8 @@ pub use set_halted::*;
 pub use set_sanctioned::*;
 #[cfg(feature = "inttest")]
 pub use test_append::*;
+#[cfg(feature = "inttest")]
+pub use test_pool_lose_next_answer::*;
 #[cfg(feature = "inttest")]
 pub use test_rpc_batch::*;
 #[cfg(feature = "inttest")]

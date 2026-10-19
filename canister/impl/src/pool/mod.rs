@@ -4,6 +4,7 @@
 //! config, the sanctions set and the chains, and appends.
 
 pub mod arrival;
+pub mod payout;
 pub mod register;
 pub mod settings;
 
@@ -17,6 +18,15 @@ use settlement_api::types::pool::{PocketView, PoolError, PoolStateView};
 use types::books::PoolClosed;
 use types::pool::{PoolLedger, Shares};
 use types::Timestamp;
+
+/// A line for ops reading the replica's log; nothing off the canister, where a unit test
+/// runs.
+pub fn log(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk::api::print(message);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = message;
+}
 
 pub fn now() -> Timestamp {
     Timestamp::from_nanos(ic_cdk::api::time())

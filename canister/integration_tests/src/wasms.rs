@@ -7,3 +7,24 @@ pub fn settlement() -> Vec<u8> {
     );
     std::fs::read(path).expect("run `scripts/run-integration-tests.sh` first")
 }
+
+/// The ICRC-1/ICRC-2 ledger wasm the pool's suite runs ckUSDC on: `LEDGER_WASM`, or the
+/// legacy evm-minter's `ledger_canister_u256.wasm.gz` beside the repository (the one
+/// `scripts/demo-icp.sh` runs), which is not committed here.
+pub fn icrc1_ledger() -> Vec<u8> {
+    let candidates: Vec<std::path::PathBuf> = match std::env::var("LEDGER_WASM") {
+        Ok(path) => vec![path.into()],
+        Err(_) => ["../../../legacy", "../../../../legacy"]
+            .iter()
+            .map(|up| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(up)
+                    .join("evm-minter/wasm/ledger_canister_u256.wasm.gz")
+            })
+            .collect(),
+    };
+    candidates
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .expect("set LEDGER_WASM to an ICRC-1 ledger wasm (ledger_canister_u256.wasm.gz)")
+}

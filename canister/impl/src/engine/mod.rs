@@ -101,8 +101,8 @@ impl Drop for DriveGuard {
     }
 }
 
-/// One drive over the open flows. Nothing while halted, and nothing while another drive is
-/// still running.
+/// One drive over the open flows and the pool's payouts. Nothing while halted, and nothing
+/// while another drive is still running.
 pub async fn drive_all() -> Drive {
     let mut drive = Drive::default();
     let Some(_guard) = DriveGuard::take() else {
@@ -112,6 +112,8 @@ pub async fn drive_all() -> Drive {
         return drive;
     }
     drive.acted = flows::drive_flows().await;
+    // the pool's payouts, under the same guard: a drive never overlaps another
+    drive.acted += crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
     drive
 }
 

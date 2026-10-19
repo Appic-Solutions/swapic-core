@@ -165,6 +165,13 @@ pub async fn icrc1_transfer(
         created_at_time: Some(dedup.created_at_nanos),
     };
     let (answer,): (Result<Nat, TransferError>,) = call(ledger, "icrc1_transfer", (arg,)).await?;
+    transfer_outcome(answer)
+}
+
+/// What a transfer's answer means: its block, or the earlier identical transfer's block for
+/// a `Duplicate` (the same `created_at_time` and memo: the transfer a lost answer hid), a
+/// moment's unavailability as an outcome unknown, and any other error as a refusal.
+fn transfer_outcome(answer: Result<Nat, TransferError>) -> Result<u64, CallError> {
     match answer {
         Ok(block) => Ok(nat_u64(&block)),
         Err(TransferError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
@@ -176,17 +183,18 @@ pub async fn icrc1_transfer(
 }
 
 /// An ICRC-2 pull from `from`, spent from the allowance whose spender subaccount is
-/// `spender_subaccount` (spec 4b.1: the quote hash, and never a standing allowance).
+/// `spender_subaccount` (spec 4b.1: the quote hash, and never a standing allowance), or
+/// the canister's main account's when there is none (an ICP staker's own approval).
 pub async fn icrc2_transfer_from(
     ledger: Principal,
-    spender_subaccount: [u8; 32],
+    spender_subaccount: Option<[u8; 32]>,
     from: Account,
     to: Account,
     amount: Nat,
     dedup: Dedup,
 ) -> Result<u64, CallError> {
     let arg = TransferFromArgs {
-        spender_subaccount: Some(spender_subaccount.to_vec()),
+        spender_subaccount: spender_subaccount.map(|bytes| bytes.to_vec()),
         from,
         to,
         amount,
@@ -450,4 +458,31 @@ pub async fn withdrawal_status(
     )
     .await?;
     Ok(details)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review Focus 2: a retried transfer the ledger has seen answers `Duplicate`, which is
+    /// the earlier transfer's block: paid, once.
+    #[test]
+    fn a_duplicate_answer_is_the_earlier_transfer() {
+        assert_eq!(transfer_outcome(Ok(Nat::from(7_u8))), Ok(7));
+        assert_eq!(
+            transfer_outcome(Err(TransferError::Duplicate {
+                duplicate_of: Nat::from(7_u8)
+            })),
+            Ok(7)
+        );
+        assert!(matches!(
+            transfer_outcome(Err(TransferError::TemporarilyUnavailable)),
+            Err(CallError::Unknown(_))
+        ));
+        // too old to deduplicate: refused, and never sent again under a new instant
+        assert!(matches!(
+            transfer_outcome(Err(TransferError::TooOld)),
+            Err(CallError::Refused(_))
+        ));
+    }
 }
