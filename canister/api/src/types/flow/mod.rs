@@ -50,14 +50,6 @@ pub enum FlowCallError {
     Unavailable(String),
 }
 
-/// How an ICP quote crosses: through the ck minter, or through the pool.
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FlowMode {
-    #[default]
-    CkMinter,
-    Pool,
-}
-
 /// The arrival swap a CCTP Swap completes with (ABI v3 `Recipe`): `target` is called with
 /// `data` paying the Runner, rescaled to what arrived by `scaler` when one is named.
 /// Addresses are EVM addresses.
@@ -66,47 +58,6 @@ pub struct Recipe {
     pub target: String,
     pub data: Vec<u8>,
     pub scaler: Option<String>,
-}
-
-/// The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router
-/// params of the Ethereum continuation as one ABI tuple: its `rail`, `dstChainId`,
-/// `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
-/// and the canister fills in itself as the payer of what lands.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct IcpToEvmQuote {
-    pub user: Principal,
-    pub src_ledger: Principal,
-    pub amount_in: Nat,
-    pub pool: Option<Principal>,
-    pub min_ckusdc: Nat,
-    pub route: Vec<u8>,
-    pub expires_at_s: u64,
-    pub nonce: u64,
-    pub mode: FlowMode,
-}
-
-/// The EVM to ICP quote the quoter registers before the router quote exists (spec 4b.8).
-/// `reference` is the router params' `ref`: the flow's key, and the subaccount of this
-/// canister the ckUSDC is deposited to.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct EvmToIcpQuote {
-    pub user: Principal,
-    pub target_ledger: Principal,
-    pub pool: Option<Principal>,
-    pub min_out: Nat,
-    pub src_chain: u64,
-    pub expires_at_s: u64,
-    pub nonce: u64,
-    pub reference: Hash32,
-    pub mode: FlowMode,
-}
-
-/// Where the ckUSDC of a registered EVM to ICP quote must be deposited.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct EvmQuoteRegistered {
-    pub quote_hash: Hash32,
-    pub owner: Principal,
-    pub subaccount: Hash32,
 }
 
 /// A flow as the fold holds it.

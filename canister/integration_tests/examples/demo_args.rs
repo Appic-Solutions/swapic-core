@@ -5,7 +5,7 @@
 
 use candid::{encode_args, encode_one, Nat, Principal};
 use settlement_api::types::config::Config;
-use settlement_api::types::flow::{EvmToIcpQuote, FlowMode, FlowSettings, IcpToEvmQuote};
+use settlement_api::types::flow::FlowSettings;
 use settlement_api::types::init::InitArg;
 use std::collections::BTreeMap;
 
@@ -20,16 +20,8 @@ fn principal(text: &str) -> Principal {
     Principal::from_text(text).expect("a principal")
 }
 
-fn nat(text: &str) -> Nat {
-    Nat::from(text.parse::<u128>().expect("a number"))
-}
-
 fn bytes(hex_text: &str) -> Vec<u8> {
     hex::decode(hex_text.trim().trim_start_matches("0x")).expect("hex")
-}
-
-fn hash(hex_text: &str) -> [u8; 32] {
-    bytes(hex_text).try_into().expect("32 bytes")
 }
 
 fn main() {
@@ -78,33 +70,7 @@ fn main() {
             // the ICP flows cannot be turned on until they move to ABI v3 (P11)
             icp_enabled: None,
         }),
-        // icp-quote <user> <ledger> <amount> <min ckusdc> <route hex> <expires_at_s> <nonce>
-        "icp-quote" => encode_one(IcpToEvmQuote {
-            user: principal(arg(&args, 2)),
-            src_ledger: principal(arg(&args, 3)),
-            amount_in: nat(arg(&args, 4)),
-            pool: None,
-            min_ckusdc: nat(arg(&args, 5)),
-            route: bytes(arg(&args, 6)),
-            expires_at_s: arg(&args, 7).parse().unwrap(),
-            nonce: arg(&args, 8).parse().unwrap(),
-            mode: FlowMode::CkMinter,
-        }),
-        // evm-quote <user> <target ledger> <pool or -> <min out> <src chain> <expires_at_s> <nonce> <ref hex>
-        "evm-quote" => encode_one(EvmToIcpQuote {
-            user: principal(arg(&args, 2)),
-            target_ledger: principal(arg(&args, 3)),
-            pool: match arg(&args, 4) {
-                "-" => None,
-                pool => Some(principal(pool)),
-            },
-            min_out: nat(arg(&args, 5)),
-            src_chain: arg(&args, 6).parse().unwrap(),
-            expires_at_s: arg(&args, 7).parse().unwrap(),
-            nonce: arg(&args, 8).parse().unwrap(),
-            reference: hash(arg(&args, 9)),
-            mode: FlowMode::CkMinter,
-        }),
+        // the icp-quote and evm-quote doors went with the ABI v2 ICP flows (P11a)
         // hash <hex>: one blob argument
         "hash" => encode_one(bytes(arg(&args, 2))),
         // relay <chain> <params hex> <auth hex>

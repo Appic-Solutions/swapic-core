@@ -1,20 +1,17 @@
-//! The engine: what happens to a flow between the lines its doors and the outbox write.
+//! The engine: what happens between the lines the doors and the outbox write.
 //!
-//! [`drive_all`] runs every open flow's next step (`flows`), and does the calls, reads,
-//! sends and appends the step asks for. Every transaction goes through
-//! `tx::create_and_send`, so rules A4 to A6 hold here by construction, and every line goes
-//! through `append_event`, whose guard is the authority (A2).
+//! [`drive_all`] runs the pool's payouts (`pool::payout`): every arrived deposit, every ICP
+//! withdrawal, every ICP stake whose pull's answer was lost, and does the calls and appends
+//! each asks for. Every line goes through `append_event`, whose guard is the authority (A2).
 //!
 //! Event-driven: every line that moves a step arms one coalesced one-shot drive
-//! ([`arm`]), so a flow moves the moment its last step completes. The repeating tick is
-//! only the backstop, for what no line announces: a withdrawal landing on Ethereum, a
-//! balance arriving on a ledger, a read that failed and is worth trying again.
+//! ([`arm`]), so a payout moves the moment its last step completes. The repeating tick is
+//! only the backstop, for what no line announces: a call that failed and is worth trying
+//! again.
 //!
-//! The vault-routed swaps (claim, burn, mint and payout through the vaults) are gone: the
-//! router and the executor move the money on EVM, and the canister relays, bridges ICP,
-//! and refunds what it holds.
+//! The vault-routed swaps and the ABI v2 ICP flows are gone: the Runner moves the money on
+//! EVM, the outbox moves the relays and the CCTP finishes, and the pool bridges ICP.
 
-pub mod evm_to_icp;
 pub mod flows;
 
 use crate::guards::require_not_halted;
@@ -24,7 +21,7 @@ use types::Timestamp;
 /// What one drive did. Returned rather than logged, like the sweep's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Drive {
-    /// flows the drive acted on
+    /// payouts the drive acted on
     pub acted: usize,
 }
 
@@ -80,7 +77,7 @@ async fn drive_now() {
 }
 
 /// Held for the length of one drive, so two drives can never overlap: a drive awaits
-/// calls and signatures, and a second one reading the same flows would act twice.
+/// calls, and a second one reading the same payouts would act twice.
 struct DriveGuard;
 
 impl DriveGuard {
@@ -101,8 +98,8 @@ impl Drop for DriveGuard {
     }
 }
 
-/// One drive over the open flows and the pool's payouts. Nothing while halted, and nothing
-/// while another drive is still running.
+/// One drive over the pool's payouts. Nothing while halted, and nothing while another drive
+/// is still running.
 pub async fn drive_all() -> Drive {
     let mut drive = Drive::default();
     let Some(_guard) = DriveGuard::take() else {
@@ -111,9 +108,7 @@ pub async fn drive_all() -> Drive {
     if require_not_halted().is_err() {
         return drive;
     }
-    drive.acted = flows::drive_flows().await;
-    // the pool's payouts, under the same guard: a drive never overlaps another
-    drive.acted += crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
+    drive.acted = crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
     drive
 }
 

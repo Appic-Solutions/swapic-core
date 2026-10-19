@@ -1,7 +1,7 @@
 //! Writes to the canister's USDC books.
 
 use crate::guards::require_controller;
-use candid::Nat;
+pub use candid::Nat;
 use ic_cdk::update;
 use types::books::BookStep;
 use types::{ChainId, TokenAmount};

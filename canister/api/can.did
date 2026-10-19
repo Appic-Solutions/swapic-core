@@ -390,26 +390,6 @@ type EvmChainConfig = record {
   // CCTP v2's `MessageTransmitterV2`.
   message_transmitter : text;
 };
-// Where the ckUSDC of a registered EVM to ICP quote must be deposited.
-type EvmQuoteRegistered = record {
-  owner : principal;
-  quote_hash : blob;
-  subaccount : blob;
-};
-// The EVM to ICP quote the quoter registers before the router quote exists (spec 4b.8).
-// `reference` is the router params' `ref`: the flow's key, and the subaccount of this
-// canister the ckUSDC is deposited to.
-type EvmToIcpQuote = record {
-  min_out : nat;
-  mode : FlowMode;
-  pool : opt principal;
-  user : principal;
-  reference : blob;
-  target_ledger : principal;
-  src_chain : nat64;
-  nonce : nat64;
-  expires_at_s : nat64;
-};
 // Why a flow door refused. Nothing moved.
 type FlowCallError = variant {
   // The request is not one the canister acts on: the field and the reason.
@@ -420,8 +400,6 @@ type FlowCallError = variant {
   // A chain or a canister did not answer usably; the caller may try again.
   Unavailable : text;
 };
-// How an ICP quote crosses: through the ck minter, or through the pool.
-type FlowMode = variant { Pool; CkMinter };
 // What the flows read at runtime. Set by a controller; the canister's `Config` is the
 // chain layer's and stays as it was.
 type FlowSettings = record {
@@ -484,21 +462,6 @@ type GuardError = variant {
   RoleNotSet : Role;
 };
 type IcpAccount = record { owner : principal; subaccount : opt blob };
-// The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router
-// params of the Ethereum continuation as one ABI tuple: its `rail`, `dstChainId`,
-// `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
-// and the canister fills in itself as the payer of what lands.
-type IcpToEvmQuote = record {
-  mode : FlowMode;
-  pool : opt principal;
-  user : principal;
-  src_ledger : principal;
-  nonce : nat64;
-  amount_in : nat;
-  expires_at_s : nat64;
-  min_ckusdc : nat;
-  route : blob;
-};
 type IcpTokenEntry = record { ledger : principal; icpswap_pool : principal };
 // What an install starts from: the whole config and both service roles, so a canister is
 // never live on default knobs or without its quoter and watcher. Each is validated as
@@ -782,25 +745,22 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok; Err : text };
-type Result_10 = variant { Ok : blob; Err : FlowCallError };
-type Result_11 = variant { Ok; Err : PoolError };
-type Result_12 = variant { Ok : blob; Err : RegisterQuoteError };
-type Result_13 = variant { Ok; Err : SetConfigError };
-type Result_14 = variant { Ok; Err : FlowCallError };
-type Result_15 = variant { Ok; Err : GuardError };
-type Result_16 = variant { Ok; Err : SetRolesError };
-type Result_17 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_18 = variant { Ok : StakeIcpOk; Err : PoolError };
-type Result_19 = variant { Ok : nat; Err : FlowCallError };
+type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
+type Result_11 = variant { Ok; Err : SetConfigError };
+type Result_12 = variant { Ok; Err : FlowCallError };
+type Result_13 = variant { Ok; Err : GuardError };
+type Result_14 = variant { Ok; Err : SetRolesError };
+type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_16 = variant { Ok : StakeIcpOk; Err : PoolError };
+type Result_17 = variant { Ok : WithdrawIcpOk; Err : PoolError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
-type Result_20 = variant { Ok : WithdrawIcpOk; Err : PoolError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : nat64; Err : text };
 type Result_5 = variant { Ok : Config; Err : GuardError };
 type Result_6 = variant { Ok : opt Quote; Err : GuardError };
 type Result_7 = variant { Ok : PoolArrivalOutcome; Err : PoolError };
 type Result_8 = variant { Ok; Err : PushChainDataError };
-type Result_9 = variant { Ok : EvmQuoteRegistered; Err : FlowCallError };
+type Result_9 = variant { Ok; Err : PoolError };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -1077,18 +1037,6 @@ service : (InitArg) -> {
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
   push_chain_data : (nat64, ChainData) -> (Result_8);
-  // Quoter-only, refused while halted. Registers an EVM to ICP quote durably BEFORE the
-  // router quote is built (spec 4b.8): the user's principal is recorded with it, and the
-  // answer names where the ckUSDC must be deposited, the canister's subaccount named by the
-  // router params' `ref` (`reference`), so the route's helper deposit carries it. The
-  // engine finds the ckUSDC there, swaps it on ICPSwap and pays the user. A quote for
-  // ckUSDC itself names no pool, and its ckUSDC is forwarded as it is.
-  register_evm_quote : (EvmToIcpQuote) -> (Result_9);
-  // Quoter-only, refused while halted. Registers an ICP to EVM quote durably, with the
-  // user's original destination terms (its route), BEFORE the user is told what to
-  // approve (spec 4b.1). Answers the quote hash: the user approves the canister with that
-  // hash as the spender subaccount, and only that allowance is ever pulled.
-  register_icp_quote : (IcpToEvmQuote) -> (Result_10);
   // Quoter-only, refused while halted and while the pool is closed. Registers a deposit at
   // the user's commit (interface section 4): the ref must be the one its terms commit to,
   // the fee included; it expires within 15 minutes; its token is listed; its payer and owner
@@ -1097,7 +1045,7 @@ service : (InitArg) -> {
   // and, on a ckUSDC payout, pays at least its own minimum, and reserves `min_usdc - premium`
   // of the ICP pocket within `max_held_bps` of it; a stake holds its TVL room. The hold is
   // released when it expires.
-  register_pool_deposit : (PoolDeposit) -> (Result_11);
+  register_pool_deposit : (PoolDeposit) -> (Result_9);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1108,7 +1056,7 @@ service : (InitArg) -> {
   // whose claim's grace has ended. The quote's deposit and claim deadlines are fixed here,
   // from the permit window and the grace the config holds now, and a later config change
   // moves neither.
-  register_quote : (Quote) -> (Result_12);
+  register_quote : (Quote) -> (Result_10);
   // Watcher-only (the submit API runs as the watcher), refused while halted. Relays a
   // user's gasless order through Swapic on `chain_id` as `runFor(order, auth)`: `order` is
   // `abi.encode(Order)` of ABI v3 and `auth` is `abi.encode(GaslessAuth)`, each one dynamic
@@ -1132,17 +1080,17 @@ service : (InitArg) -> {
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_13);
+  set_config : (Config) -> (Result_11);
   // Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
   // and the windows the flows read.
-  set_flow_settings : (FlowSettings) -> (Result_14);
+  set_flow_settings : (FlowSettings) -> (Result_12);
   // Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
   // the divergence has been investigated. The audit never clears it on its own.
   // 
   // Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
   // so this is what puts it back on the window when a queued transaction or an allocation
   // waiting for its cancel was held back by the halt.
-  set_halted : (bool) -> (Result_15);
+  set_halted : (bool) -> (Result_13);
   // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
   // shortfall the last balance check latched, once someone has looked at it. Recorded in
   // the log on the pool chain's books; the pool's guard reads it.
@@ -1150,10 +1098,10 @@ service : (InitArg) -> {
   // Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
   // ledger's fee and every listed token's (`icrc1_fee`), which the registrations' premium
   // floor reads.
-  set_pool_settings : (PoolSettings) -> (Result_11);
+  set_pool_settings : (PoolSettings) -> (Result_9);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_16);
+  set_roles : (principal, principal) -> (Result_14);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1163,7 +1111,7 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_17);
+  set_sanctioned : (vec text, vec text) -> (Result_15);
   // Every transaction the canister signed after `after_id`, oldest first, at most `limit`
   // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
   // backup.
@@ -1174,13 +1122,7 @@ service : (InitArg) -> {
   // approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
   // its shares at the pool's price before it. A pull whose answer was lost answers
   // `Unavailable`, and the canister asks again with the same pull.
-  stake_icp : (StakeIcpArgs) -> (Result_18);
-  // Quoter-only, refused while halted. Starts a registered ICP to EVM quote: pulls the
-  // user's token with `icrc2_transfer_from` from the allowance whose spender subaccount is
-  // the quote hash (and from no other), and answers what was pulled. The engine then swaps
-  // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
-  // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_19);
+  stake_icp : (StakeIcpArgs) -> (Result_16);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;
@@ -1191,5 +1133,5 @@ service : (InitArg) -> {
   // every ledger fee out of `usdc`. Refused when the ICP pocket's free ckUSDC is short (the
   // queue is P11b). A payout that does not finish in this call answers `Unavailable` with
   // the shares burned, and the canister's timer finishes it.
-  withdraw_icp : (WithdrawIcpArgs) -> (Result_20);
+  withdraw_icp : (WithdrawIcpArgs) -> (Result_17);
 }
