@@ -489,11 +489,13 @@ fn samples() -> Vec<Sample> {
             },
         ),
         // the depths a deploy gets since P10c: a swap on Ethereum is acted on at 1 block,
-        // and with no crediting depth set the field is absent, as in every line above
+        // and with no crediting depth set the field is absent, as in every line above. The
+        // table is spelled out, so a later default cannot move this line
         sample(
             "config at the depths a deploy gets with ethereum swaps at 1 block",
             Config {
                 ecdsa_key_name: "key_1".to_string(),
+                confirmations: depths_with_ethereum_swaps_at_one_block(),
                 ..Config::default()
             },
         ),
@@ -502,6 +504,7 @@ fn samples() -> Vec<Sample> {
             "config with crediting depths of its own",
             Config {
                 ecdsa_key_name: "key_1".to_string(),
+                confirmations: depths_with_ethereum_swaps_at_one_block(),
                 credit_confirmations: ChainTable(BTreeMap::from([
                     (ChainId::ETHEREUM, BlockDepth::new(14)),
                     (ChainId::BASE, BlockDepth::new(2)),
@@ -511,6 +514,17 @@ fn samples() -> Vec<Sample> {
         ),
     ]);
     all
+}
+
+/// The swap depths the P10c default holds, spelled out for the golden lines that pin them.
+fn depths_with_ethereum_swaps_at_one_block() -> BTreeMap<ChainId, BlockDepth> {
+    BTreeMap::from([
+        (ChainId::ETHEREUM, BlockDepth::new(1)),
+        (ChainId::BASE, BlockDepth::new(1)),
+        (ChainId::BSC, BlockDepth::new(1)),
+        (ChainId::POLYGON, BlockDepth::new(6)),
+        (ChainId::ARBITRUM, BlockDepth::new(1)),
+    ])
 }
 
 /// A stable log or map decodes nothing when it opens, so a wasm that breaks a stored
