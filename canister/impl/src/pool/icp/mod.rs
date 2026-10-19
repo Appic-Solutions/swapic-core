@@ -15,9 +15,10 @@
 //! beside what the pool's lines expect, less every payout started and not recorded paid (the
 //! ledger may have debited it already), the lines read before and after the read and the
 //! lower of the two expected. A shortfall beyond the tolerance latches the ICP latch, which
-//! closes the pool until a controller reopens it; a read that fails is recorded and passes
-//! nothing: the pool's guard closes the pool when no check read a balance within three
-//! intervals, as it does for Base.
+//! closes the pool until a controller reopens it. Every failure (no settings, a call that
+//! failed, an answer that is no balance) is recorded as a failed check of its kind and
+//! passes nothing: the pool's guard closes the pool when no check read a balance within
+//! three intervals, as it does for Base.
 
 #[cfg(test)]
 mod tests;
@@ -34,8 +35,8 @@ use settlement_api::types::pool::{
 };
 use types::books::assess;
 use types::pool::{
-    op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, PayoutAttempt, PayoutPath, PendingOp,
-    PoolAccount, PoolStep, Shares,
+    op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, IcpReadFailure, PayoutAttempt,
+    PayoutPath, PendingOp, PoolAccount, PoolStep, Shares,
 };
 use types::{Address, TokenAmount};
 
@@ -380,40 +381,61 @@ pub fn icp_expected<S: Store>(
 
 /// The ICP pocket's balance check: nothing before the pool has settings.
 pub async fn check_icp_pocket(tolerance: TokenAmount) {
-    let Some(settings) = pool_store::ledger().settings else {
-        return;
-    };
+    let settings = pool_store::ledger().settings;
     let before = read_state(icp_lines);
-    let balance =
-        ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None)).await;
-    let step = match balance {
-        Ok(balance) => {
-            let observed = TokenAmount::try_from(balance)
-                .ok()
-                .filter(|amount| amount.try_into_u128().is_some())
-                .unwrap_or(TokenAmount::MAX);
-            // the lines read again after the await: the lower of the two is expected
-            let after = read_state(icp_lines);
-            let (expected, shortfall) = judge(before, after, observed, tolerance);
-            if shortfall {
-                log(&format!(
-                    "ALERT: the ICP pocket holds {observed} ckUSDC and {expected} is expected; the pool closes"
-                ));
-            }
-            PoolStep::IcpChecked {
-                check: IcpCheck {
-                    observed,
-                    expected,
-                    shortfall,
-                },
-            }
-        }
-        Err(error) => {
-            log(&format!("the ICP pocket's balance was not read: {error}"));
-            PoolStep::IcpCheckFailed
-        }
+    let answer = match &settings {
+        Some(settings) => Some(
+            ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None))
+                .await,
+        ),
+        None => None,
     };
+    // the lines read again after the await: the lower of the two is expected
+    let after = read_state(icp_lines);
+    let step = check_step(answer, before, after, tolerance);
+    match &step {
+        PoolStep::IcpChecked { check } if check.shortfall => log(&format!(
+            "ALERT: the ICP pocket holds {} ckUSDC and {} is expected; the pool closes",
+            check.observed, check.expected
+        )),
+        PoolStep::IcpCheckFailed { failure } => log(&format!(
+            "the ICP pocket's balance was not read: {failure:?}"
+        )),
+        _ => {}
+    }
     if let Err(error) = pool_store::record(step) {
         log(&format!("the ICP pocket's check was not recorded: {error}"));
+    }
+}
+
+/// What one ICP check records from what it read (`None`: no settings, so no ledger to ask):
+/// a failed check, of its kind, for no settings, a call that failed, and an answer that is
+/// no balance the lines hold; never a pass. Otherwise the balance judged against the lower
+/// of the lines read before and after the read.
+pub fn check_step(
+    answer: Option<Result<Nat, ic::CallError>>,
+    before: TokenAmount,
+    after: TokenAmount,
+    tolerance: TokenAmount,
+) -> PoolStep {
+    let failed = |failure| PoolStep::IcpCheckFailed { failure };
+    let balance = match answer {
+        None => return failed(IcpReadFailure::NoSettings),
+        Some(Err(_)) => return failed(IcpReadFailure::CallFailed),
+        Some(Ok(balance)) => balance,
+    };
+    let Some(observed) = TokenAmount::try_from(balance)
+        .ok()
+        .filter(|amount| amount.try_into_u128().is_some())
+    else {
+        return failed(IcpReadFailure::BadAnswer);
+    };
+    let (expected, shortfall) = judge(before, after, observed, tolerance);
+    PoolStep::IcpChecked {
+        check: IcpCheck {
+            observed,
+            expected,
+            shortfall,
+        },
     }
 }

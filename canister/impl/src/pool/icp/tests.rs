@@ -6,6 +6,7 @@ use crate::storage::pool::tests::{
 };
 use crate::storage::pool::{ledger, record_at};
 use types::books::{BalanceCheck, BookStep, PoolClosed};
+use types::pool::IcpReadFailure;
 use types::{BlockNumber, ChainId, EventType};
 
 fn nobody(_: &Address) -> bool {
@@ -388,7 +389,13 @@ fn a_failed_read_passes_nothing() {
         };
         base_checked(10);
         assert_eq!(status(11), Err(PoolClosed::IcpNeverChecked));
-        record_at(PoolStep::IcpCheckFailed, at(12)).unwrap();
+        record_at(
+            PoolStep::IcpCheckFailed {
+                failure: types::pool::IcpReadFailure::CallFailed,
+            },
+            at(12),
+        )
+        .unwrap();
         assert_eq!(status(13), Err(PoolClosed::IcpNeverChecked));
         record_at(
             PoolStep::IcpChecked {
@@ -405,7 +412,13 @@ fn a_failed_read_passes_nothing() {
         // three intervals of failed reads later
         let later = 14 + interval.as_nanos() as u64 * 3 + 1;
         base_checked(later - 1);
-        record_at(PoolStep::IcpCheckFailed, at(later - 1)).unwrap();
+        record_at(
+            PoolStep::IcpCheckFailed {
+                failure: types::pool::IcpReadFailure::CallFailed,
+            },
+            at(later - 1),
+        )
+        .unwrap();
         assert!(matches!(status(later), Err(PoolClosed::IcpStale { .. })));
     });
 }
@@ -458,5 +471,67 @@ fn a_stopped_payout_is_still_pending_for_the_check() {
         let check = |observed| read_state(|state| icp_expected(state, observed, TokenAmount::ZERO));
         assert_eq!(check(debited), (debited, false));
         assert_eq!(check(usdc(1_000)), (debited, false));
+    });
+}
+
+/// Review fix (fail-open monitoring): every way the ICP check can fail is a failed check of
+/// its kind, recorded, never a pass and never skipped: no settings, a ledger call that failed
+/// or was refused, and an answer that is no balance the lines hold.
+#[test]
+fn every_failure_of_the_icp_check_is_a_failed_check() {
+    let zero = TokenAmount::ZERO;
+    let failed = |failure| PoolStep::IcpCheckFailed { failure };
+    assert_eq!(
+        check_step(None, usdc(1), usdc(1), zero),
+        failed(IcpReadFailure::NoSettings)
+    );
+    assert_eq!(
+        check_step(
+            Some(Err(crate::ic::CallError::Unknown("rejected".into()))),
+            usdc(1),
+            usdc(1),
+            zero
+        ),
+        failed(IcpReadFailure::CallFailed)
+    );
+    assert_eq!(
+        check_step(
+            Some(Err(crate::ic::CallError::Refused("no".into()))),
+            usdc(1),
+            usdc(1),
+            zero
+        ),
+        failed(IcpReadFailure::CallFailed)
+    );
+    // wider than the 128 bits the lines hold: no balance, and never read as a huge one
+    let too_wide = Nat::from(u128::MAX) + Nat::from(1_u8);
+    assert_eq!(
+        check_step(Some(Ok(too_wide)), usdc(1), usdc(1), zero),
+        failed(IcpReadFailure::BadAnswer)
+    );
+    // a balance read is a check, judged on the lower of the lines
+    assert_eq!(
+        check_step(Some(Ok(Nat::from(usdc(1)))), usdc(1), usdc(2), zero),
+        PoolStep::IcpChecked {
+            check: IcpCheck {
+                observed: usdc(1),
+                expected: usdc(1),
+                shortfall: false,
+            },
+        }
+    );
+    // and a failed check refreshes nothing the guard reads
+    on_fresh_memory(move || {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        for failure in [
+            IcpReadFailure::NoSettings,
+            IcpReadFailure::CallFailed,
+            IcpReadFailure::BadAnswer,
+        ] {
+            record_at(failed(failure), at(5)).unwrap();
+            assert_eq!(ledger().icp_checked_at, None);
+            assert_eq!(ledger().icp_failed_at, Some(at(5)));
+        }
     });
 }

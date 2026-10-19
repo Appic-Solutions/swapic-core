@@ -876,7 +876,9 @@ fn a_step_round_trips_through_its_bytes() {
             r#ref: pool_ref(&terms.kind, 1_000_000, terms.salt),
             deposit: terms,
         },
-        PoolStep::IcpCheckFailed,
+        PoolStep::IcpCheckFailed {
+            failure: crate::pool::IcpReadFailure::BadAnswer,
+        },
     ];
     for step in steps {
         assert_eq!(PoolStep::from_bytes(&step.to_bytes()), Some(step));

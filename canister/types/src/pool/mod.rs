@@ -888,6 +888,21 @@ pub struct IcpCheck {
     pub shortfall: bool,
 }
 
+/// Why the ICP pocket's check read no balance: a fixed kind, never a callee's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum IcpReadFailure {
+    /// The pool has no settings, so no ledger to read.
+    #[n(0)]
+    NoSettings,
+    /// The ledger call failed or was refused.
+    #[n(1)]
+    CallFailed,
+    /// The answer is no balance the pool's lines hold (wider than 128 bits).
+    #[n(2)]
+    BadAnswer,
+}
+
 /// One step of the pool, as the log records it.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum PoolStep {
@@ -1098,9 +1113,13 @@ pub enum PoolStep {
         #[n(0)]
         check: IcpCheck,
     },
-    /// The ICP pocket's balance could not be read.
+    /// The ICP pocket's balance check read no balance, and why: it passes nothing, and the
+    /// pool's guard sees the pocket's check go stale.
     #[n(19)]
-    IcpCheckFailed,
+    IcpCheckFailed {
+        #[n(0)]
+        failure: IcpReadFailure,
+    },
     /// The canister's own read of Base reached this block.
     #[n(20)]
     ScanCursor {
@@ -1139,7 +1158,7 @@ impl PoolStep {
             PoolStep::StakeFailed { .. } => "StakeFailed",
             PoolStep::WithdrawStarted { .. } => "WithdrawStarted",
             PoolStep::IcpChecked { .. } => "IcpChecked",
-            PoolStep::IcpCheckFailed => "IcpCheckFailed",
+            PoolStep::IcpCheckFailed { .. } => "IcpCheckFailed",
             PoolStep::ScanCursor { .. } => "ScanCursor",
         }
     }

@@ -608,7 +608,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed => Ok(()),
+            PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
             PoolStep::ScanCursor { block } => match self.scan_cursor {
                 Some(at) if *block < at => Err(PoolStepError::CursorBack { at, to: *block }),
                 _ => Ok(()),
@@ -894,7 +894,7 @@ impl PoolLedger {
                     ledger.icp_shortfall_at = Some(at);
                 }
             }
-            PoolStep::IcpCheckFailed => ledger.icp_failed_at = Some(at),
+            PoolStep::IcpCheckFailed { .. } => ledger.icp_failed_at = Some(at),
             PoolStep::ScanCursor { block } => ledger.scan_cursor = Some(*block),
         }
         PoolEffects {
