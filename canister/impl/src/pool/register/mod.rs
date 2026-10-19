@@ -93,6 +93,29 @@ pub fn register(
     .map_err(|error| PoolError::NotAllowed(error.to_string()))
 }
 
+/// Whether `terms` are the registration already stored under `r#ref` (P13a asks after a
+/// commit that met `Known`): the same kind, fees, minimum, payer, rail and expiry, and the
+/// salt the ref commits. Reads the fold only, and writes nothing.
+pub fn agreed<S: Store>(
+    state: &State<S>,
+    r#ref: PoolRef,
+    terms: &Registration,
+) -> Result<bool, PoolError> {
+    let stored = state
+        .store()
+        .pool_deposit(&r#ref)
+        .ok_or(PoolError::Unknown)?
+        .terms;
+    Ok(stored.kind == terms.kind
+        && stored.premium == terms.premium
+        && stored.rebalance_share == terms.rebalance_share
+        && stored.min_usdc == terms.min_usdc
+        && stored.src_payer == terms.src_payer
+        && stored.rail == terms.rail
+        && stored.expires_at == terms.expires_at
+        && stored.salt == terms.salt)
+}
+
 /// What one pass of the sweep did to the pool's registrations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Expiry {

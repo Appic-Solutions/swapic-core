@@ -209,3 +209,43 @@ fn the_sweep_expires_a_registration_and_releases_its_hold() {
         assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
 }
+
+/// `pool_deposit_agreed` (P13a): after a commit that met `Known`, whether the registration
+/// stored under the ref is this one. Reads, and writes nothing.
+#[test]
+fn a_known_registration_is_agreed_only_when_it_is_the_same() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let terms = good();
+        let r#ref = terms.pool_ref().unwrap();
+        let agreed_on = |terms: &Registration| read_state(|state| agreed(state, r#ref, terms));
+        assert_eq!(agreed_on(&terms), Err(PoolError::Unknown));
+        try_register(terms.clone()).unwrap();
+        let count = event_count();
+        assert_eq!(agreed_on(&terms), Ok(true));
+        let later = Registration {
+            expires_at: in_minutes(11),
+            ..terms.clone()
+        };
+        assert_eq!(agreed_on(&later), Ok(false));
+        let more = Registration {
+            min_usdc: usdc(101),
+            ..terms.clone()
+        };
+        assert_eq!(agreed_on(&more), Ok(false));
+        let other_payer = Registration {
+            src_payer: "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            ..terms.clone()
+        };
+        assert_eq!(agreed_on(&other_payer), Ok(false));
+        let other_rail = Registration {
+            rail: types::pool::PoolRail::Eco,
+            ..terms
+        };
+        assert_eq!(agreed_on(&other_rail), Ok(false));
+        assert_eq!(event_count(), count, "nothing was written");
+    });
+}

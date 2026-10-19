@@ -80,3 +80,15 @@ pub async fn stake_icp(args: StakeIcpArgs) -> Result<StakeIcpOk, PoolError> {
 pub async fn withdraw_icp(args: WithdrawIcpArgs) -> Result<WithdrawIcpOk, PoolError> {
     pool::icp::withdraw(args, is_sanctioned).await
 }
+
+/// Quoter-only, refused while halted. After a commit that met `Known`, whether the
+/// registration stored under `deposit.ref` is this one: the same kind, fees, `min_usdc`,
+/// `src_payer`, rail, expiry and salt. `Unknown` when none is stored. Reads only, and writes
+/// no line.
+#[update]
+pub fn pool_deposit_agreed(deposit: PoolDeposit) -> Result<bool, PoolError> {
+    require_quoter().map_err(pool::guard_error)?;
+    pool::require_running()?;
+    let (r#ref, terms) = deposit.into_domain()?;
+    crate::storage::events::read_state(|state| pool::register::agreed(state, r#ref, &terms))
+}
