@@ -23,6 +23,7 @@ fn entry() -> OutboxEntry {
         data: vec![0xde, 0xad, 0xbe, 0xef],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
+        closed_at: None,
     }
 }
 
@@ -267,4 +268,19 @@ fn an_unsigned_nonce_round_trips_and_knows_when_it_was_abandoned() {
         !unsigned.is_stranded(Timestamp::from_nanos(0), window),
         "a clock behind the stamp has waited no time at all"
     );
+}
+
+/// A kept entry's attempt is closed whichever of the nonce's transactions lands, so a
+/// replacement of it carries the mark: dropped, it would be decided a second time.
+#[test]
+fn a_replacement_of_a_closed_entry_stays_closed() {
+    let mut entry = entry();
+    entry.closed_at = Some(BlockNumber::new(23_600_001));
+    let replacement = entry.replaced(
+        TxHash::new([3; 32]),
+        vec![0x02, 0xff],
+        WeiPerGas::from(4_000_000_000_u64),
+        WeiPerGas::from(200_000_000_u64),
+    );
+    assert_eq!(replacement.closed_at, Some(BlockNumber::new(23_600_001)));
 }

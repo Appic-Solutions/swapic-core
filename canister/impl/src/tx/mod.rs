@@ -545,6 +545,7 @@ pub async fn create_and_send_with(
         data: tx.data,
         gas_limit,
         refusal: None,
+        closed_at: None,
     });
     Ok(Signed { tx_hash, id })
 }
@@ -665,6 +666,7 @@ async fn cancel(key: NonceKey) {
         data: Vec::new(),
         gas_limit,
         refusal: None,
+        closed_at: None,
     });
     task_manager::outbox::arm();
 }
@@ -765,7 +767,7 @@ pub async fn flush() {
 /// be read without the event log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReceiptPass {
-    /// entries that left the outbox on a receipt deep enough, confirmed or reverted
+    /// attempts closed on a receipt deep enough, confirmed or reverted
     pub closed: usize,
     /// chunks whose answer did not come back whole and were read again one entry at a time
     pub reread: usize,
@@ -807,13 +809,17 @@ pub async fn check_open() -> ReceiptPass {
             pass.no_depth += open.len();
             continue;
         };
+        // how long a closed entry keeps its bytes: never shallower than the swap depth,
+        // which it falls back to
+        let credit = credit_confirmations(&config, chain_id).unwrap_or(depth);
         // split so the answer fits one outcall: the head comes with every chunk, so each
         // chunk's receipts are read against a height from the same answer
         for chunk in receipt_chunks(open) {
             match read_receipts(chain_id, &chunk).await {
                 Ok((latest, landed)) => {
                     for (entry, landed) in chunk.iter().zip(landed) {
-                        pass.closed += decide(entry, chain_id, landed, latest, depth, now).await;
+                        pass.closed +=
+                            decide(entry, chain_id, landed, latest, depth, credit, now).await;
                     }
                 }
                 // only a failed call is worth splitting: a head that did not come back as
@@ -825,7 +831,8 @@ pub async fn check_open() -> ReceiptPass {
                             Ok((latest, landed)) => {
                                 let landed = landed.into_iter().next().flatten();
                                 pass.closed +=
-                                    decide(entry, chain_id, landed, latest, depth, now).await;
+                                    decide(entry, chain_id, landed, latest, depth, credit, now)
+                                        .await;
                             }
                             Err(_) => {
                                 pass.unread += 1;
@@ -926,18 +933,33 @@ fn landed(
     Some((latest, landed))
 }
 
-/// Acts on what one entry's answer said, and answers how many entries it closed: one when
-/// a receipt deep enough closed the attempt, none while a receipt waits for depth, and none
-/// when no receipt came back, in which case the transaction is not landing and is re-sent
-/// and then replaced.
+/// Acts on what one entry's answer said, and answers how many attempts it closed: one when
+/// a receipt at the swap depth `depth` closed the attempt, none while a receipt waits for
+/// depth, and none when no receipt came back, in which case the transaction is not landing
+/// and is re-sent and then replaced.
+///
+/// An entry whose attempt already closed is kept only for its bytes, until its receipt is
+/// at the crediting depth `credit`: it is dropped there, sent again if its receipt is gone
+/// (a reorg dropped the transaction), and never closed a second time.
 async fn decide(
     entry: &OutboxEntry,
     chain_id: ChainId,
     landed: Option<Receipt>,
     latest: BlockNumber,
     depth: BlockDepth,
+    credit: BlockDepth,
     now: Timestamp,
 ) -> usize {
+    if entry.closed_at.is_some() {
+        match landed {
+            Some(receipt) if is_confirmed(receipt.block, latest, credit) => {
+                outbox::remove(entry.key())
+            }
+            Some(_) => {}
+            None => push_again(entry, chain_id, now).await,
+        }
+        return 0;
+    }
     match landed {
         // rule A10: only a receipt at the configured depth closes an attempt, and that
         // holds however the transaction ended. A reverted receipt closed at once would
@@ -966,7 +988,7 @@ async fn decide(
                 })
                 .is_ok();
                 if appended {
-                    outbox::remove(entry.key());
+                    settle(entry, block, latest, credit);
                     // the closing line is appended once per transaction, so the fee is too
                     if success {
                         crate::books::credit_fee(chain_id, tx_hash, block, network_fee);
@@ -974,7 +996,7 @@ async fn decide(
                 }
                 return usize::from(appended);
             }
-            let left = if success {
+            let closed = if success {
                 close(entry, |quote_hash, attempt| EventType::TxConfirmed {
                     quote_hash,
                     attempt,
@@ -989,7 +1011,10 @@ async fn decide(
                     reason: "the transaction reverted on the chain".to_string(),
                 })
             };
-            usize::from(left)
+            if closed {
+                settle(entry, block, latest, credit);
+            }
+            usize::from(closed)
         }
         // mined but not deep enough: nothing to do but wait
         Some(_) => 0,
@@ -1074,9 +1099,9 @@ pub(crate) fn credit_confirmations(
     })
 }
 
-/// Drops the entry, appending the line that closes its attempt when it has one, and
-/// answers whether the entry left the outbox. A refused append leaves the entry where it
-/// is, so the next pass sees the same receipt and tries again.
+/// Appends the line that closes the entry's attempt when it has one, and answers whether
+/// the attempt is closed; [`settle`] then says what the outbox keeps of it. A refused
+/// append leaves the entry open, so the next pass sees the same receipt and tries again.
 ///
 /// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
 /// fate before the bytes went out, so what the chain did with them changes nothing in the
@@ -1087,24 +1112,33 @@ pub(crate) fn credit_confirmations(
 /// nobody recorded: the consensus log would otherwise carry an attempt this canister
 /// invented.
 ///
-/// A3, the re-read the two other post-await writes in this module do, is not needed here:
-/// the entry is being removed, not edited, and the only writer that could have put another
-/// entry at this key is `create_and_send`, which only ever writes at a number the allocator
-/// has just handed out and this one is not.
 fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) -> bool {
     match (entry.purpose.attempt_of(), entry.attempt) {
-        (None, _) => {
-            outbox::remove(entry.key());
-            true
-        }
-        (Some(quote_hash), Some(attempt)) => {
-            let appended = append_event(payload(quote_hash, attempt)).is_ok();
-            if appended {
-                outbox::remove(entry.key());
-            }
-            appended
-        }
+        (None, _) => true,
+        (Some(quote_hash), Some(attempt)) => append_event(payload(quote_hash, attempt)).is_ok(),
         (Some(_), None) => false,
+    }
+}
+
+/// What the outbox keeps of an entry whose attempt just closed on a receipt in `block`:
+/// nothing once that receipt is at the crediting depth `credit` against `latest`, which on
+/// a chain that credits at its swap depth is at once, as it always was. Otherwise the entry
+/// itself, marked closed: a reorg that drops the transaction before the crediting depth
+/// finds its bytes to send again, and the nonces behind it are not stranded.
+///
+/// A3: the mark is written on the entry as it is now, not as the pass read it before the
+/// receipts' await, so a broadcast recorded meanwhile is kept. The removal needs no
+/// re-read: the only writer that could have put another entry at this key is
+/// `create_and_send`, which only ever writes at a number the allocator has just handed out,
+/// and this one is not.
+fn settle(entry: &OutboxEntry, block: BlockNumber, latest: BlockNumber, credit: BlockDepth) {
+    if is_confirmed(block, latest, credit) {
+        outbox::remove(entry.key());
+        return;
+    }
+    if let Some(mut current) = outbox::get(entry.key()) {
+        current.closed_at = Some(block);
+        outbox::put(current);
     }
 }
 

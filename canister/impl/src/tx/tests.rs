@@ -532,6 +532,7 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         data: vec![],
         gas_limit: GasAmount::from(120_000_u32),
         refusal: None,
+        closed_at: None,
     }
 }
 
@@ -605,7 +606,8 @@ fn the_outcall_caps_are_derived_from_the_batch() {
 /// default. A cancel closes no attempt and writes no line, and an entry that names a swap
 /// but carries no attempt number is left where it is rather than closed against a number
 /// this canister invented: the consensus log would otherwise hold an attempt nobody signed
-/// for.
+/// for. Rewritten for the kept closed entry: `close` answers whether the attempt closed,
+/// and `settle` says what the outbox keeps of it.
 #[test]
 fn closing_an_entry_never_invents_an_attempt() {
     on_fresh_memory(|| {
@@ -617,18 +619,15 @@ fn closing_an_entry_never_invents_an_attempt() {
         let mut cancel = entry_with(0, 1);
         cancel.purpose = TxPurpose::Cancel(ChainId::BASE);
         cancel.attempt = None;
-        outbox::put(cancel.clone());
-        close(&cancel, never);
-        assert_eq!(
-            outbox::get(cancel.key()),
-            None,
+        assert!(
+            close(&cancel, never),
             "a cancel's receipt closes its entry and writes nothing"
         );
 
         let mut unnumbered = entry_with(1, 1);
         unnumbered.attempt = None;
         outbox::put(unnumbered.clone());
-        close(&unnumbered, never);
+        assert!(!close(&unnumbered, never));
         assert_eq!(
             outbox::get(unnumbered.key()),
             Some(unnumbered),
@@ -641,11 +640,8 @@ fn closing_an_entry_never_invents_an_attempt() {
         let mut pull = entry_with(2, 1);
         pull.purpose = TxPurpose::GaslessPull(QuoteHash::new([2; 32]));
         pull.attempt = None;
-        outbox::put(pull.clone());
-        close(&pull, never);
-        assert_eq!(
-            outbox::get(pull.key()),
-            None,
+        assert!(
+            close(&pull, never),
             "a pull's receipt closes its entry and writes nothing"
         );
     });
@@ -1069,5 +1065,78 @@ fn the_gas_action_is_folded_from_the_log() {
         entry.max_fee = WeiPerGas::from(2_100_000_000_u64);
         let bid = bumped(&entry, ChainId::BASE, at).expect("there is room to bid");
         assert!(bid.max_fee() <= WeiPerGas::from(2_500_000_000_u64));
+    });
+}
+
+/// Polls `future` once: the decisions below await nothing on the paths they take.
+fn poll_once<T>(future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => value,
+        std::task::Poll::Pending => panic!("the decision awaited something"),
+    }
+}
+
+fn receipt_at(block: u64) -> Receipt {
+    Receipt {
+        tx_hash: TxHash::new([0; 32]),
+        block: BlockNumber::new(block),
+        success: true,
+        network_fee: types::TokenAmount::ZERO,
+    }
+}
+
+/// Review fix: on Ethereum an attempt closes at 1 block, long before its receipt is at the
+/// crediting depth of 12. The entry stays, marked closed, so a reorg that drops the
+/// transaction finds its bytes to send again and the nonces behind it are not stranded; it
+/// is never decided twice, and it leaves at the crediting depth.
+#[test]
+fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let swap = BlockDepth::new(1);
+        let credit = BlockDepth::new(12);
+        let open = entry_with(7, 1);
+        outbox::put(open.clone());
+        // its line just landed at the swap depth: kept, with the block it closed at
+        settle(&open, BlockNumber::new(100), BlockNumber::new(100), credit);
+        let kept = outbox::get(open.key()).expect("kept until the crediting depth");
+        assert_eq!(kept.closed_at, Some(BlockNumber::new(100)));
+        // and no longer what the pull door sees as still out
+        assert_eq!(outbox::find(open.purpose), None);
+
+        let log = || read_state(|state| state.meta().next_event_index);
+        let before = log();
+        let now = at(1_000);
+        let decided = |entry: &OutboxEntry, landed: Option<Receipt>, latest: u64| {
+            poll_once(decide(
+                entry,
+                ChainId::BASE,
+                landed,
+                BlockNumber::new(latest),
+                swap,
+                credit,
+                now,
+            ))
+        };
+        // deep at the swap depth, short of the crediting one: kept as it is
+        assert_eq!(decided(&kept, Some(receipt_at(100)), 105), 0);
+        assert_eq!(outbox::get(open.key()), Some(kept.clone()));
+        // the receipt is gone, a reorg dropped it: the same bytes go out again
+        assert_eq!(decided(&kept, None, 105), 0);
+        let again = outbox::get(open.key()).expect("still kept");
+        assert_eq!(again.status, OutboxStatus::Queued);
+        assert_eq!(again.raw_tx, kept.raw_tx);
+        assert_eq!(again.closed_at, Some(BlockNumber::new(100)));
+        // at the crediting depth: dropped
+        assert_eq!(decided(&again, Some(receipt_at(100)), 111), 0);
+        assert_eq!(outbox::get(open.key()), None);
+        assert_eq!(log(), before, "a closed entry never appends a second line");
+
+        // a chain that credits at its swap depth drops the entry at once, as before
+        outbox::put(open.clone());
+        settle(&open, BlockNumber::new(100), BlockNumber::new(100), swap);
+        assert_eq!(outbox::get(open.key()), None);
     });
 }

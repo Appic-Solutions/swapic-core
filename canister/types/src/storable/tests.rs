@@ -64,7 +64,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// the fees their record holds, a pending quote entry with the deadlines it was registered
 /// under, a config at the depths a deploy gets once a swap on Ethereum is acted on at 1
 /// block, a config with crediting depths of its own, a books line with the block its fee
-/// was read at, and a chain's books with a fee no check has read yet.
+/// was read at, a chain's books with a fee no check has read yet, and an outbox entry kept
+/// closed until the crediting depth.
 ///
 /// Every field of a sample differs from its neighbours, so a field that moves to another
 /// index decodes to a different value instead of passing unnoticed. The file is append
@@ -238,6 +239,7 @@ fn samples() -> Vec<Sample> {
                 data: vec![0xde, 0xad, 0xbe, 0xef],
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: None,
+                closed_at: None,
             },
         ),
         sample(
@@ -279,6 +281,7 @@ fn samples() -> Vec<Sample> {
                 // absent, so this sample's bytes stay exactly the ones the golden pins;
                 // the entry appended below is the one that pins the field
                 refusal: None,
+                closed_at: None,
             },
         ),
         sample(
@@ -381,6 +384,7 @@ fn samples() -> Vec<Sample> {
                 data: vec![0x40, 0x10, 0x47, 0x63],
                 gas_limit: GasAmount::from(120_000_u32),
                 refusal: Some(crate::tx::Refusal::new("transaction underpriced")),
+                closed_at: None,
             },
         ),
         sample(
@@ -549,6 +553,32 @@ fn samples() -> Vec<Sample> {
                     block: BlockNumber::new(23_600_001),
                     amount: TokenAmount::from(157_740_u32),
                 }]),
+            },
+        ),
+        // the outbox entries above are open; this one pins the block its attempt closed at
+        sample(
+            "outbox entry kept closed until the crediting depth",
+            OutboxEntry {
+                purpose: TxPurpose::Relay(QuoteHash::new([0x4d; 32])),
+                chain_id: ChainId::ETHEREUM,
+                nonce: Nonce::new(41),
+                attempt: None,
+                hashes: vec![TxHash::new([0x4e; 32]), TxHash::new([0x4f; 32])],
+                raw_tx: vec![0x02, 0xf8, 0x71],
+                max_fee: WeiPerGas::from(6_000_000_000_u64),
+                max_priority_fee: WeiPerGas::from(500_000_000_u64),
+                status: OutboxStatus::Sent,
+                created_at: Timestamp::from_nanos(1_800_000_000_000_000_003),
+                last_sent_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_005)),
+                first_sent_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_004)),
+                to: "0x2222222222222222222222222222222222222222"
+                    .parse()
+                    .unwrap(),
+                value: Wei::ZERO,
+                data: vec![0x3b, 0x8c, 0x2c, 0x51],
+                gas_limit: GasAmount::from(392_732_u32),
+                refusal: None,
+                closed_at: Some(BlockNumber::new(23_600_002)),
             },
         ),
     ]);

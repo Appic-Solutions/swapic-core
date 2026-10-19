@@ -3,8 +3,9 @@
 //! Not a fold of the event log, and deliberately so. The log says a transaction was
 //! created, signed and replaced; how far its broadcast got is work in progress that no
 //! event describes, so this map has a memory of its own and stays out of `State::matches`
-//! and out of the replay audit's comparison. An entry leaves the moment its attempt closes
-//! with `TxConfirmed` or `TxFailed`.
+//! and out of the replay audit's comparison. An entry leaves once its attempt has closed
+//! and the closing receipt is at the chain's crediting depth; between the two it is kept,
+//! marked closed, so its bytes can go out again if a reorg drops the transaction.
 
 use crate::storage::memory::{outbox_memory, Memory};
 use ic_stable_structures::StableBTreeMap;
@@ -55,8 +56,9 @@ pub fn any_sent() -> bool {
     })
 }
 
-/// The entry sent for `purpose`, if one is still out. A walk of the outbox, which is small
-/// by construction (see [`chains`]): what the pull door asks before it sends a second pull
+/// The entry sent for `purpose`, if one is still out: an entry whose attempt has closed is
+/// kept only for its bytes, and is not. A walk of the outbox, which is small by
+/// construction (see [`chains`]): what the pull door asks before it sends a second pull
 /// for a quote whose first has not landed.
 pub fn find(purpose: TxPurpose) -> Option<OutboxEntry> {
     OUTBOX.with(|outbox| {
@@ -64,7 +66,7 @@ pub fn find(purpose: TxPurpose) -> Option<OutboxEntry> {
             .borrow()
             .iter()
             .map(|(_, entry)| entry)
-            .find(|entry| entry.purpose == purpose)
+            .find(|entry| entry.purpose == purpose && entry.closed_at.is_none())
     })
 }
 
@@ -72,9 +74,9 @@ pub fn find(purpose: TxPurpose) -> Option<OutboxEntry> {
 /// is a walk of the map and never of the chains the config lists.
 ///
 /// It is one walk of the whole outbox, which is what a pass opens with. The outbox holds
-/// only what has not landed yet, so it is small by construction: an entry leaves the moment
-/// its attempt closes, and the number of nonces in flight is bounded by how fast this
-/// canister can sign.
+/// only what has not landed yet, or not to the crediting depth, so it is small by
+/// construction: an entry leaves once its closing receipt is that deep, and the number of
+/// nonces in flight is bounded by how fast this canister can sign.
 pub fn chains() -> Vec<ChainId> {
     let mut chains: Vec<ChainId> = Vec::new();
     OUTBOX.with(|outbox| {

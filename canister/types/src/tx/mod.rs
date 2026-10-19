@@ -206,6 +206,13 @@ pub struct OutboxEntry {
     #[n(16)]
     pub refusal: Option<Refusal>,
     // #[n(17)] held the entry's gas action before the log did (`TxCreated`): retired
+    /// The block of the receipt the attempt's closing line was appended at, once it was.
+    /// The line is appended at the chain's swap depth and the entry kept, with its bytes,
+    /// until that receipt is at the crediting depth: a reorg that drops the transaction
+    /// before then finds the bytes to send again, and the nonces behind it are not
+    /// stranded. A closed entry is never decided again.
+    #[n(18)]
+    pub closed_at: Option<BlockNumber>,
 }
 
 impl OutboxEntry {
@@ -286,6 +293,7 @@ impl OutboxEntry {
             last_sent_at: _,
             first_sent_at: _,
             refusal: _,
+            closed_at,
         } = self;
         Self {
             purpose: *purpose,
@@ -308,6 +316,8 @@ impl OutboxEntry {
             first_sent_at: None,
             // and no provider has answered them yet
             refusal: None,
+            // a closed attempt stays closed whichever of the nonce's transactions lands
+            closed_at: *closed_at,
         }
     }
 }
