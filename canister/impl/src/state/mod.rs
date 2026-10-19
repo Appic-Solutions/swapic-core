@@ -238,7 +238,7 @@ impl Store for MemoryStore {
     }
 
     fn book(&self, chain_id: &ChainId) -> Option<Books> {
-        self.books.get(chain_id).copied()
+        self.books.get(chain_id).cloned()
     }
 
     fn put_book(&mut self, chain_id: ChainId, books: Books) {
@@ -248,7 +248,7 @@ impl Store for MemoryStore {
     fn books(&self) -> Vec<(ChainId, Books)> {
         self.books
             .iter()
-            .map(|(chain, books)| (*chain, *books))
+            .map(|(chain, books)| (*chain, books.clone()))
             .collect()
     }
 

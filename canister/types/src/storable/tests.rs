@@ -63,7 +63,8 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// the height it was registered at, a config at the depths a deploy gets, two swaps with
 /// the fees their record holds, a pending quote entry with the deadlines it was registered
 /// under, a config at the depths a deploy gets once a swap on Ethereum is acted on at 1
-/// block, and a config with crediting depths of its own.
+/// block, a config with crediting depths of its own, a books line with the block its fee
+/// was read at, and a chain's books with a fee no check has read yet.
 ///
 /// Every field of a sample differs from its neighbours, so a field that moves to another
 /// index decodes to a different value instead of passing unnoticed. The file is append
@@ -510,6 +511,44 @@ fn samples() -> Vec<Sample> {
                     (ChainId::BASE, BlockDepth::new(2)),
                 ])),
                 ..Config::default()
+            },
+        ),
+        // the books line above (`event 25`) leaves the fee's block absent; this one pins it
+        sample(
+            "books line with the block its fee was read at",
+            Event::seal(
+                EventIndex::new(1_000),
+                Timestamp::from_nanos(1_800_000_000_000_000_000),
+                EventHash::new([0x4b; 32]),
+                crate::events::EventType::Books {
+                    chain_id: ChainId::ETHEREUM,
+                    step: crate::books::BookStep::FeeEarned {
+                        tx_hash: TxHash::new([0x4c; 32]),
+                        amount: TokenAmount::from(157_740_u32),
+                        block: Some(BlockNumber::new(23_600_001)),
+                    },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+        // a chain's books, with a fee no balance check has read at yet
+        sample(
+            "books with a fee no check has read yet",
+            crate::books::Books {
+                fee_income: TokenAmount::from(900_001_u32),
+                unattributed: TokenAmount::from(2_u8),
+                pool: TokenAmount::from(1u128 << 70),
+                last_check: Some(crate::books::BalanceCheck {
+                    block: BlockNumber::new(23_599_990),
+                    observed: TokenAmount::from(742_259_u32),
+                    expected: TokenAmount::from(742_261_u32),
+                }),
+                checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_001)),
+                failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_002)),
+                unseen_fees: crate::books::UnseenFees(vec![crate::books::BookedFee {
+                    block: BlockNumber::new(23_600_001),
+                    amount: TokenAmount::from(157_740_u32),
+                }]),
             },
         ),
     ]);

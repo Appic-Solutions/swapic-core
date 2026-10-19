@@ -15,13 +15,14 @@ use crate::chain::ChainId;
 use crate::hash::TxHash;
 use crate::ledger::LedgerMeta;
 use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
-use minicbor::{Decode, Encode};
+use minicbor::data::Type;
+use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::time::Duration;
 use thiserror::Error;
 
 /// One chain's book lines and its last balance check. `in_flight` is not here: it is the
 /// USDC the flows hold on the chain, read off the flows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Books {
     /// Network and platform fees Swapic withheld to the canister.
     #[n(0)]
@@ -41,6 +42,57 @@ pub struct Books {
     /// When the last balance read that failed was recorded.
     #[n(5)]
     pub failed_at: Option<Timestamp>,
+    /// The fees booked from a block no balance check has read at yet. A fee is booked off
+    /// a receipt at the swap depth and the check reads the crediting depth behind the head,
+    /// so for a while a booked fee is in the lines and not in the balance the check reads.
+    #[n(6)]
+    pub unseen_fees: UnseenFees,
+}
+
+/// A fee and the block of the receipt it was read off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct BookedFee {
+    #[n(0)]
+    pub block: BlockNumber,
+    #[n(1)]
+    pub amount: TokenAmount,
+}
+
+/// The fees booked from blocks no balance check has read at yet, in the order they were
+/// booked. Absent from storage while empty, so books written before it existed read back
+/// with it empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnseenFees(pub Vec<BookedFee>);
+
+/// Stored as the list, and as nothing at all when it is empty.
+impl<C> Encode<C> for UnseenFees {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'b, C> Decode<'b, C> for UnseenFees {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the list absent in the middle
+        // reads back, and it means the same as the list missing off the end
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::default());
+        }
+        Vec::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::default())
+    }
 }
 
 /// A balance read at a confirmed block, and what the lines expected there.
@@ -79,6 +131,10 @@ pub enum BookStep {
         tx_hash: TxHash,
         #[n(1)]
         amount: TokenAmount,
+        /// The block of that receipt. None on lines written before it was recorded, whose
+        /// fee every balance check expects.
+        #[n(2)]
+        block: Option<BlockNumber>,
     },
     /// A balance check; `shortfall` pauses the pool.
     #[n(1)]
@@ -219,15 +275,23 @@ impl Books {
     /// Records a step [`Books::admits`] admitted, sealed at `at`.
     pub fn apply(mut self, step: &BookStep, at: Timestamp) -> Self {
         match step {
-            BookStep::FeeEarned { amount, .. } => {
+            BookStep::FeeEarned { amount, block, .. } => {
                 self.fee_income = self
                     .fee_income
                     .checked_add(*amount)
                     .unwrap_or(TokenAmount::MAX);
+                if let Some(block) = block {
+                    self.unseen_fees.0.push(BookedFee {
+                        block: *block,
+                        amount: *amount,
+                    });
+                }
             }
             BookStep::Checked { check, .. } => {
                 self.last_check = Some(*check);
                 self.checked_at = Some(at);
+                // a fee at or below the block this check read is in its balance
+                self.unseen_fees.0.retain(|fee| fee.block > check.block);
             }
             BookStep::CheckFailed { .. } => self.failed_at = Some(at),
             BookStep::PoolPaused { .. } => {}
@@ -253,6 +317,17 @@ impl Books {
         [self.unattributed, self.pool, in_flight]
             .into_iter()
             .try_fold(self.fee_income, TokenAmount::checked_add)
+            .unwrap_or(TokenAmount::MAX)
+    }
+
+    /// The fees booked from blocks above `block`: in the lines, and not yet in a balance
+    /// read at `block`.
+    pub fn fees_above(&self, block: BlockNumber) -> TokenAmount {
+        self.unseen_fees
+            .0
+            .iter()
+            .filter(|fee| fee.block > block)
+            .try_fold(TokenAmount::ZERO, |sum, fee| sum.checked_add(fee.amount))
             .unwrap_or(TokenAmount::MAX)
     }
 }

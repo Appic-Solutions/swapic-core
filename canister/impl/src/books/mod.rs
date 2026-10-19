@@ -14,7 +14,9 @@ use crate::storage::{chain_data, config};
 use crate::tx::credit_confirmations;
 use serde_json::Value;
 use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed, ReadFailure};
-use types::{ChainId, EventType, EvmAddress, FlowKind, Timestamp, TokenAmount, TxHash};
+use types::{
+    BlockNumber, ChainId, EventType, EvmAddress, FlowKind, Timestamp, TokenAmount, TxHash,
+};
 
 /// The USDC the canister's flows hold at its address on `chain_id`: what landed for an
 /// ICP to EVM quote and has not left yet.
@@ -100,9 +102,9 @@ pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
     total
 }
 
-/// Credits `fee` withheld in `tx_hash` to `chain_id`'s fee income. A line the books refuse
-/// leaves the fee as surplus, which halts nothing.
-pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, fee: TokenAmount) {
+/// Credits `fee` withheld in `tx_hash`, whose receipt is in `block`, to `chain_id`'s fee
+/// income. A line the books refuse leaves the fee as surplus, which halts nothing.
+pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: TokenAmount) {
     if fee == TokenAmount::ZERO {
         return;
     }
@@ -111,6 +113,7 @@ pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, fee: TokenAmount) {
         BookStep::FeeEarned {
             tx_hash,
             amount: fee,
+            block: Some(block),
         },
     ) {
         ic_cdk::println!("fee {fee} of {tx_hash} on chain {chain_id} not booked: {error}");
@@ -183,6 +186,31 @@ pub async fn check_balances() {
     }
 }
 
+/// What the lines expect of `chain_id`'s balance read at `block`, and whether `observed`
+/// falls short of it beyond `tolerance`: the lines as they stand, less the fees booked from
+/// blocks above `block`, which a balance read there cannot hold yet (a fee is booked at the
+/// swap depth, the read is at the crediting depth behind the head), and less what is
+/// signed away and not yet confirmed.
+pub fn expected_at<S: Store>(
+    state: &State<S>,
+    chain_id: ChainId,
+    block: BlockNumber,
+    observed: TokenAmount,
+    tolerance: TokenAmount,
+) -> (TokenAmount, bool) {
+    let books = state.book(&chain_id);
+    let lines = books
+        .total(in_flight(state, chain_id))
+        .checked_sub(books.fees_above(block))
+        .unwrap_or(TokenAmount::ZERO);
+    assess(
+        lines,
+        pending_outflows(state, chain_id),
+        observed,
+        tolerance,
+    )
+}
+
 /// One chain's balance check, or the kind of failure that read no balance.
 async fn check_balance(
     config: &types::Config,
@@ -202,7 +230,7 @@ async fn check_balance(
         .get()
         .checked_sub(depth.get())
         .ok_or(ReadFailure::BelowDepth)?;
-    let block = types::BlockNumber::new(block);
+    let block = BlockNumber::new(block);
     let calldata = types::router::balance_of_calldata(mine);
     let observed = match evm_reads::eth_call_at(chain_id, mine, usdc, &calldata, block).await {
         Ok(Simulated::Returned(bytes)) if bytes.len() == 32 => {
@@ -213,15 +241,8 @@ async fn check_balance(
         Err(error) => return Err(error.kind()),
     };
     // the lines as they stand now, after the read's await
-    let (expected, shortfall) = read_state(|state| {
-        let lines = state.book(&chain_id).total(in_flight(state, chain_id));
-        assess(
-            lines,
-            pending_outflows(state, chain_id),
-            observed,
-            config.books_tolerance.0,
-        )
-    });
+    let (expected, shortfall) =
+        read_state(|state| expected_at(state, chain_id, block, observed, config.books_tolerance.0));
     let step = BookStep::Checked {
         check: BalanceCheck {
             block,

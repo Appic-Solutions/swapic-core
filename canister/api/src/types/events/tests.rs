@@ -151,6 +151,7 @@ fn samples() -> Vec<EventType> {
             let step = types::books::BookStep::FeeEarned {
                 tx_hash: types::TxHash::new([27; 32]),
                 amount: types::TokenAmount::from(28_u8),
+                block: None,
             };
             EventType::Books {
                 chain_id: 8453,

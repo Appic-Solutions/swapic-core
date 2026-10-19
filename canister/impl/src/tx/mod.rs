@@ -969,7 +969,7 @@ async fn decide(
                     outbox::remove(entry.key());
                     // the closing line is appended once per transaction, so the fee is too
                     if success {
-                        crate::books::credit_fee(chain_id, tx_hash, network_fee);
+                        crate::books::credit_fee(chain_id, tx_hash, block, network_fee);
                     }
                 }
                 return usize::from(appended);

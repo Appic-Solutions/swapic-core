@@ -3,6 +3,7 @@ use crate::storage::events::append_event_at;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use serde_json::json;
+use types::books::UnseenFees;
 use types::BlockNumber;
 
 fn checked(observed: u64, expected: u64, shortfall: bool) -> EventType {
@@ -277,5 +278,76 @@ fn a_failed_read_leaves_no_secret_in_the_log() {
                     .any(|window| window == secret.as_bytes()));
             }
         }
+    });
+}
+
+fn fee_earned(chain_id: ChainId, amount: TokenAmount, block: Option<u64>) -> EventType {
+    EventType::Books {
+        chain_id,
+        step: BookStep::FeeEarned {
+            tx_hash: TxHash::new([7; 32]),
+            amount,
+            block: block.map(BlockNumber::new),
+        },
+    }
+}
+
+/// Review fix: a fee is booked off a receipt at the swap depth, 1 block on Ethereum, while
+/// the balance check reads the crediting depth behind the head, 12 there. The check leaves
+/// out of what it expects every fee booked from a block above the one it read: a fee the
+/// read cannot see yet is no shortfall, and it counts once the read reaches its block.
+#[test]
+fn a_fee_from_a_block_the_check_has_not_read_is_not_expected_yet() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let chain = ChainId::ETHEREUM;
+        let fee = TokenAmount::from(500_000_u64);
+        append_event_at(fee_earned(chain, fee, Some(100)), at).unwrap();
+        let check = |block: u64, observed: TokenAmount| {
+            read_state(|state| {
+                expected_at(
+                    state,
+                    chain,
+                    BlockNumber::new(block),
+                    observed,
+                    TokenAmount::ZERO,
+                )
+            })
+        };
+        // read at 99, before the fee's block: not expected, so no shortfall
+        assert_eq!(check(99, TokenAmount::ZERO), (TokenAmount::ZERO, false));
+        // read at its block or above: expected
+        assert_eq!(check(100, TokenAmount::ZERO), (fee, true));
+        assert_eq!(check(100, fee), (fee, false));
+        assert_eq!(check(112, fee), (fee, false));
+
+        // a line from before the block was recorded is expected at every block, as before
+        let older = TokenAmount::from(1_000_u64);
+        append_event_at(fee_earned(chain, older, None), at).unwrap();
+        let both = fee.checked_add(older).unwrap();
+        assert_eq!(check(99, older), (older, false));
+        assert_eq!(check(100, both), (both, false));
+
+        // a check that read at the fee's block has seen it: it is no longer held apart
+        append_event_at(
+            EventType::Books {
+                chain_id: chain,
+                step: BookStep::Checked {
+                    check: BalanceCheck {
+                        block: BlockNumber::new(100),
+                        observed: both,
+                        expected: both,
+                    },
+                    shortfall: false,
+                },
+            },
+            at,
+        )
+        .unwrap();
+        assert_eq!(
+            read_state(|state| state.book(&chain)).unseen_fees,
+            UnseenFees::default()
+        );
     });
 }

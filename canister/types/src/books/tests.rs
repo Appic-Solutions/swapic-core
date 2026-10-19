@@ -23,6 +23,7 @@ fn donation_is_surplus_and_halts_nothing() {
         &BookStep::FeeEarned {
             tx_hash: TxHash::new([1; 32]),
             amount: usdc(100),
+            block: None,
         },
         Timestamp::from_nanos(1),
     );

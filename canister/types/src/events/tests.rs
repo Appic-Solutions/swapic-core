@@ -167,6 +167,9 @@ pub(crate) fn samples() -> Vec<EventType> {
             step: crate::books::BookStep::FeeEarned {
                 tx_hash: TxHash::new([27; 32]),
                 amount: TokenAmount::from(28_u8),
+                // absent, so this sample's bytes stay the ones the golden pins; the line
+                // appended at the end of `storable/tests.rs`'s samples pins the block
+                block: None,
             },
         },
     ]
