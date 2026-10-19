@@ -404,3 +404,71 @@ fn a_pool_arrival_is_expected_from_its_block_on() {
         );
     });
 }
+
+/// Review check (accounting): a gasless same-chain pool deposit's receipt pays the canister
+/// its fee step and the pool its payout, both Runner transfers. The fee is booked once (the
+/// payout is left out of it), the arrival is the pool's once, and the pool chain's check
+/// expects each from its block on: nothing twice, nothing left out.
+#[test]
+fn a_fee_step_and_a_pool_arrival_in_one_receipt_are_each_expected_once() {
+    use crate::storage::pool::tests::{
+        at as pool_at, credit, funded_pool, register, swap_terms, usdc,
+    };
+    use types::pool::PoolStep;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let path = FeePath {
+            usdc: EvmAddress::new([0x83; 20]),
+            runner: EvmAddress::new([0x7e; 20]),
+            canister: EvmAddress::new([0x36; 20]),
+        };
+        let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
+        let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
+        let transfer = |amount: u64| {
+            json!({ "address": format!("0x{}", hex::encode(path.usdc.as_bytes())),
+                    "topics": [topic, word(path.runner), word(path.canister)],
+                    "data": format!("0x{amount:064x}") })
+        };
+        let paid_out = json!({
+            "address": format!("0x{}", hex::encode(path.runner.as_bytes())),
+            "topics": [format!("0x{}", hex::encode(types::swapic::topics::paid_out())),
+                       format!("0x{}", "11".repeat(32)), word(path.canister)],
+            "data": format!("0x{}{:064x}", hex::encode(path.usdc.to_word()), 100_000_000_u64),
+        });
+        let receipt = json!({ "logs": [transfer(166_275), transfer(100_000_000), paid_out] });
+        let fee = network_fee_in(&receipt, path);
+        assert_eq!(fee, TokenAmount::from(166_275_u32), "the payout is no fee");
+        append_event_at(
+            fee_earned(ChainId::BASE, fee, Some(500)),
+            Timestamp::from_nanos(1),
+        )
+        .unwrap();
+        funded_pool(usdc(1_000));
+        let r#ref = register(swap_terms(1, usdc(100), usdc(1), pool_at(1_000)));
+        crate::storage::pool::record_at(
+            PoolStep::Arrived {
+                r#ref,
+                credit: credit(2),
+                amount: usdc(100),
+                block: BlockNumber::new(500),
+            },
+            pool_at(3),
+        )
+        .unwrap();
+        let expected = |block: u64| {
+            read_state(|state| {
+                expected_at(
+                    state,
+                    ChainId::BASE,
+                    Some(ChainId::BASE),
+                    BlockNumber::new(block),
+                    TokenAmount::ZERO,
+                    TokenAmount::ZERO,
+                )
+                .0
+            })
+        };
+        assert_eq!(expected(499), TokenAmount::ZERO);
+        assert_eq!(expected(500), usdc(100).checked_add(fee).unwrap());
+    });
+}
