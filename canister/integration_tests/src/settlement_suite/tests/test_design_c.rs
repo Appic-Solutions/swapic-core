@@ -641,3 +641,75 @@ fn a_relayed_order_answers_its_id_whatever_came_after() {
     let again: Result<u64, String> = update(&pic, canister, watcher(), "relay_gasless", relay_args);
     assert_eq!(again, Ok(relay_id));
 }
+
+/// P10c review focus 1, and the carried reading end to end: a relay and a finish that
+/// carry no reading still refuse on a stale stored one, and the same calls carrying a
+/// reading newer than the stored one are priced on it, with no push before them.
+#[test]
+fn a_call_with_no_reading_refuses_a_stale_one_and_a_carried_reading_prices_it() {
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let (relay_args, order, auth, envelope) = relay_for(address(&mine), now_s(&pic));
+    // pushed once, then older than the config's 10 seconds
+    push(&pic, canister, ARBITRUM);
+    push(&pic, canister, BASE);
+    pic.advance_time(std::time::Duration::from_secs(11));
+    pic.tick();
+    let stale = |answer: &Result<u64, String>| {
+        answer
+            .as_ref()
+            .is_err_and(|error| error.contains("no chain data young enough"))
+    };
+    // above the pushed block, so the call stores it and stamps it itself
+    let reading = ChainData {
+        block: 19_000_001,
+        base_fee_wei_per_gas: Nat::from(10_000_000_u64),
+        priority_fee_wei_per_gas: Nat::from(1_000_000_u64),
+    };
+
+    let refused: Result<u64, String> =
+        update(&pic, canister, watcher(), "relay_gasless", relay_args);
+    assert!(stale(&refused), "{refused:?}");
+    let relayed: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher(),
+        "relay_gasless",
+        encode_args((
+            ARBITRUM,
+            swapic::encode_order(&order),
+            swapic::encode_auth(&auth),
+            SOURCE_GAS,
+            Some(reading.clone()),
+        ))
+        .unwrap(),
+    );
+    assert!(relayed.is_ok(), "{relayed:?}");
+
+    let (finish_args, message, attestation, stored) = finish_for(&envelope);
+    let refused: Result<u64, String> =
+        update(&pic, canister, watcher(), "finish_cctp", finish_args);
+    assert!(stale(&refused), "{refused:?}");
+    let recipe = Recipe {
+        target: swapic::evm(stored.target).to_string(),
+        data: stored.data.to_vec(),
+        scaler: Some(swapic::evm(stored.scaler).to_string()),
+    };
+    let finished: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher(),
+        "finish_cctp",
+        encode_args((
+            BASE,
+            message,
+            attestation,
+            Some(recipe),
+            vec![0x5c_u8; 32],
+            ARRIVAL_GAS,
+            Some(reading),
+        ))
+        .unwrap(),
+    );
+    assert!(finished.is_ok(), "{finished:?}");
+}
