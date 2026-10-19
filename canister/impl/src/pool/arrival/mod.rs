@@ -7,7 +7,9 @@
 //!   that no `PaidOut` explains is a fee step, which the books book, and is no arrival.
 //! - CCTP: the USDC minted to the canister (a transfer from the zero address) and the
 //!   `MessageReceived` of the pool chain's transmitter whose body mints it to the canister,
-//!   the envelope in its hook data a Deliver naming the ref.
+//!   burned by Swapic's Runner (`messageSender`) on a chain the canister knows (its domain
+//!   and its `TokenMessengerV2`), the envelope in its hook data a Deliver naming the ref.
+//!   The order's payer is on the source chain and not in this receipt, so it is not bound.
 //! - Eco: the Portal's `IntentFulfilled(intentHash)` on Base, and on the source chain (one
 //!   more read) the Portal's `IntentPublished(intentHash)` whose route is
 //!   `USDC.transfer(canister, value)` into the pool chain, beside Swapic's one
@@ -17,7 +19,9 @@
 //! unattributed with its payer when known, so the orphan refund (P11b) returns it. Then
 //! against the fold: registered, still `Registered`, arrived by its expiry and grace (at its
 //! block's time), at least `min_usdc`, within the pool's caps on what arrived, paid by the
-//! registered payer, never credited. Every
+//! registered payer, never credited. An arrival whose payer is not bound (CCTP) takes its
+//! ref only as a clean credit: anything else is kept with no ref, so it never closes a
+//! registration it may not belong to. Every
 //! step of one call is appended in the message that checks it, after the last read, so the
 //! same transfer reported twice is credited once.
 
@@ -42,8 +46,18 @@ use types::{BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
 /// The most one receipt read may answer.
 const MAX_RECEIPT_BYTES: u64 = 512 * 1024;
 
-/// The addresses a proof on the pool chain reads, all the canister's own configuration.
+/// A chain a CCTP arrival may leave from, as the canister's config names it: its CCTP domain,
+/// its `TokenMessengerV2` (a burn's sender), and its Runner (the burn's `messageSender`: the
+/// Runner makes an order's burn step).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CctpSource {
+    pub domain: u32,
+    pub token_messenger: EvmAddress,
+    pub runner: EvmAddress,
+}
+
+/// The addresses a proof on the pool chain reads, all the canister's own configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PoolChain {
     pub chain: ChainId,
     pub usdc: EvmAddress,
@@ -52,6 +66,8 @@ pub struct PoolChain {
     pub transmitter: EvmAddress,
     pub eco_portal: Option<EvmAddress>,
     pub canister: EvmAddress,
+    /// Every chain a CCTP arrival may come from.
+    pub cctp_sources: Vec<CctpSource>,
 }
 
 /// The addresses an Eco proof reads on the order's own chain.
@@ -308,17 +324,30 @@ fn same_chain(base: &Receipt, chain: &PoolChain, id: [u8; 32]) -> Proof {
     }
 }
 
-/// The burn body's fields a CCTP proof reads: version 1, its mint recipient, the amount
-/// minted (the burn less Circle's fee), and its hook data.
-fn burn_body(body: &[u8]) -> Option<([u8; 32], TokenAmount, &[u8])> {
+/// The burn body's fields a CCTP proof reads.
+struct BurnRead<'a> {
+    mint_recipient: [u8; 32],
+    /// The burn less Circle's fee: what was minted.
+    minted: TokenAmount,
+    /// Who burned on the source chain.
+    message_sender: [u8; 32],
+    hook: &'a [u8],
+}
+
+/// A version 1 burn body's mint recipient, minted amount, sender and hook data.
+fn burn_body(body: &[u8]) -> Option<BurnRead<'_>> {
     let word = |at: usize| -> Option<[u8; 32]> { body.get(at..at + 32)?.try_into().ok() };
     if body.get(..4)? != 1_u32.to_be_bytes() {
         return None;
     }
-    let mint_recipient = word(36)?;
     let amount = TokenAmount::from_be_bytes(word(68)?);
     let fee = TokenAmount::from_be_bytes(word(164)?);
-    Some((mint_recipient, amount.checked_sub(fee)?, body.get(228..)?))
+    Some(BurnRead {
+        mint_recipient: word(36)?,
+        minted: amount.checked_sub(fee)?,
+        message_sender: word(100)?,
+        hook: body.get(228..)?,
+    })
 }
 
 fn cctp(base: &Receipt, chain: &PoolChain, amount: TokenAmount) -> Proof {
@@ -326,20 +355,33 @@ fn cctp(base: &Receipt, chain: &PoolChain, amount: TokenAmount) -> Proof {
         payer: None,
         why: why.to_string(),
     };
-    let bodies: Vec<Vec<u8>> = base
+    let messages: Vec<swapic::ReceivedMessage> = base
         .logs
         .iter()
         .filter(|log| log.is(chain.transmitter, topics::message_received()))
         .filter_map(|log| swapic::read_message_received(&log.topics, &log.data))
         .collect();
-    let mut minted_here = bodies.iter().filter_map(|body| {
-        let (recipient, minted, hook) = burn_body(body)?;
-        (recipient == chain.canister.to_word() && minted == amount).then_some(hook)
+    let mut minted_here = messages.iter().filter_map(|message| {
+        let burn = burn_body(&message.body)?;
+        let to_us = burn.mint_recipient == chain.canister.to_word() && burn.minted == amount;
+        to_us.then_some((message, burn))
     });
-    let Some(hook) = minted_here.next() else {
+    let Some((message, burn)) = minted_here.next() else {
         return orphan("a mint to the canister that no received message explains");
     };
-    match Envelope::decode(hook) {
+    // a burn Swapic's Runner made on a chain the canister knows, through that chain's
+    // TokenMessengerV2: a burn anyone else made carries a ref it does not own
+    let ours = chain.cctp_sources.iter().any(|source| {
+        source.domain == message.source_domain
+            && source.token_messenger.to_word() == message.sender
+            && source.runner.to_word() == burn.message_sender
+    });
+    if !ours {
+        return orphan("the burn was not made by Swapic's Runner on a chain the canister knows");
+    }
+    match Envelope::decode(burn.hook) {
+        // the order's payer is on the source chain, which this receipt does not show: the
+        // payer is not bound, so only a clean credit may take the ref
         Ok(envelope) if envelope.action == Action::Deliver => Proof::Deposit {
             r#ref: PoolRef::new(envelope.reference),
             payer: None,
@@ -446,11 +488,20 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
         ));
     };
     let terms = &deposit.terms;
+    // a payer the chain does not show (a CCTP arrival's is on its source chain) is not bound:
+    // such an arrival may take the ref only as a clean credit. Anything else is kept with no
+    // ref and no payer, so a stranger's burn under someone's ref never closes their
+    // registration, nor is refunded to them.
+    let (refund_to, closes) = if payer.is_some() {
+        (Some(terms.src_payer), Some(r#ref))
+    } else {
+        (None, None)
+    };
     if deposit.status != DepositStatus::Registered {
         return Some(orphan(
-            payer.or(Some(terms.src_payer)),
+            payer.or(refund_to),
             format!("the deposit is {:?}", deposit.status),
-            Some(r#ref),
+            closes,
         ));
     }
     if let Some(paid_by) = payer.filter(|paid_by| *paid_by != terms.src_payer) {
@@ -469,27 +520,27 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
         .unwrap_or_default();
     if at > terms.credit_until(grace) {
         return Some(orphan(
-            Some(terms.src_payer),
+            refund_to,
             "arrived past its expiry and grace".to_string(),
-            Some(r#ref),
+            closes,
         ));
     }
     if found.amount < terms.min_usdc {
         return Some(orphan(
-            Some(terms.src_payer),
+            refund_to,
             format!(
                 "{} arrived, below the {} registered",
                 found.amount, terms.min_usdc
             ),
-            Some(r#ref),
+            closes,
         ));
     }
     // the caps, on what arrived rather than what was registered
     if let Err(why) = state.pool().arrival_fits(&deposit, found.amount) {
         return Some(orphan(
-            Some(terms.src_payer),
+            refund_to,
             format!("{} arrived: {why}", found.amount),
-            Some(r#ref),
+            closes,
         ));
     }
     Some(PoolStep::Arrived {
@@ -539,6 +590,18 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
     let canister = ecdsa::canister_address()
         .await
         .map_err(|_| PoolError::Unavailable("the canister's address".to_string()))?;
+    let cctp_sources = config
+        .evm_chains
+        .0
+        .iter()
+        .filter_map(|(chain, evm)| {
+            Some(CctpSource {
+                domain: config.cctp_domains.get(*chain)?.get(),
+                token_messenger: evm.token_messenger,
+                runner: evm.runner,
+            })
+        })
+        .collect();
     Ok(PoolChain {
         chain,
         usdc: evm.usdc,
@@ -547,6 +610,7 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
         transmitter: evm.message_transmitter,
         eco_portal: config.eco_portal,
         canister,
+        cctp_sources,
     })
 }
 

@@ -33,6 +33,13 @@ fn base() -> PoolChain {
         transmitter: address("0x81d40f21f12a8f0e3252bccb954d722d4c464b64"),
         eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
         canister: canister(),
+        // the CCTP sample's burn left Ethereum (domain 0) through its TokenMessengerV2, made
+        // by Swapic's Runner (one address on every chain)
+        cctp_sources: vec![CctpSource {
+            domain: 0,
+            token_messenger: address("0x28b5a0e9c621a5badaa536219b3a228c8168cf5d"),
+            runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
+        }],
     }
 }
 
@@ -480,7 +487,8 @@ fn a_receipt_not_deep_enough_is_not_credited() {
 }
 
 /// Review fix: an arrival larger than its registration is measured on what arrived. Above
-/// the per-swap cap it is no credit: unattributed with its payer, its hold released.
+/// the per-swap cap it is no credit. A CCTP arrival's payer is not bound, so it is kept with
+/// no ref and no payer, and the registration keeps its hold.
 #[test]
 fn an_arrival_above_the_cap_is_unattributed() {
     on_fresh_memory(|| {
@@ -505,7 +513,126 @@ fn an_arrival_above_the_cap_is_unattributed() {
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.ends_with("above the per-swap cap")
         ));
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Unattributed);
-        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
+        assert_eq!(
+            ledger().pockets.icp.reserved,
+            usdc(4).checked_sub(TokenAmount::from(10_000_u32)).unwrap()
+        );
+        assert!(matches!(
+            last_step(),
+            PoolStep::Unattributed {
+                src_payer: None,
+                r#ref: None,
+                ..
+            }
+        ));
     });
+}
+
+fn last_step() -> PoolStep {
+    match crate::storage::events::event_at(event_count() - 1)
+        .unwrap()
+        .payload
+    {
+        types::EventType::Pool { step } => step,
+        other => panic!("not a pool line: {other:?}"),
+    }
+}
+
+/// Review fix (CCTP binding): a mint to the canister proves a deposit only when Swapic's
+/// Runner burned it on a chain the canister knows, through that chain's TokenMessengerV2.
+/// Anyone else's burn carrying someone's ref proves nothing.
+#[test]
+fn a_cctp_burn_is_swapics_runners_or_proves_nothing() {
+    let r#ref = the_ref(2);
+    let orphaned = |receipt: &Value, chain: &PoolChain| {
+        matches!(
+            find(&parse(receipt), None, chain).unwrap()[..],
+            [Found {
+                proof: Proof::Orphan { .. },
+                ..
+            }]
+        )
+    };
+    // the real burn, as Swapic's Runner made it
+    assert!(!orphaned(&cctp(r#ref), &base()));
+    // a burn by another sender: the burn body's messageSender rewritten
+    let mut stranger = cctp(r#ref);
+    let received = log_at(&mut stranger, "0x4e");
+    let mut data = data_of(received);
+    data[128 + 100..128 + 132].copy_from_slice(&EvmAddress::new([0x99; 20]).to_word());
+    set_data(received, &data);
+    assert!(orphaned(&stranger, &base()));
+    // a source chain the canister does not know, or another messenger on it
+    let unknown = PoolChain {
+        cctp_sources: vec![],
+        ..base()
+    };
+    assert!(orphaned(&cctp(r#ref), &unknown));
+    let other_messenger = PoolChain {
+        cctp_sources: vec![CctpSource {
+            token_messenger: EvmAddress::new([0x98; 20]),
+            ..base().cctp_sources[0]
+        }],
+        ..base()
+    };
+    assert!(orphaned(&cctp(r#ref), &other_messenger));
+}
+
+/// Review fix (CCTP binding): a CCTP arrival's payer is not bound, so one short of its
+/// registration (a stranger's burn under someone's ref) is kept with no ref and no payer:
+/// it never closes the registration, nor releases its hold, nor is refunded to its payer.
+#[test]
+fn a_short_cctp_arrival_never_closes_a_registration() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(2);
+        let raw = cctp(r#ref);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        crate::storage::pool::tests::register(terms(
+            2,
+            usdc(10),
+            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
+            PoolRail::Cctp,
+        ));
+        let held = ledger().pockets.icp.reserved;
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let outcomes = record(&found, now).unwrap();
+        assert!(matches!(
+            &outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
+        ));
+        assert!(matches!(
+            last_step(),
+            PoolStep::Unattributed {
+                src_payer: None,
+                r#ref: None,
+                ..
+            }
+        ));
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
+        assert_eq!(ledger().pockets.icp.reserved, held);
+        assert!(ledger().open.contains(&r#ref));
+    });
+}
+
+/// P13a's convention: for a CCTP or a same-chain arrival the watcher sends the Base
+/// transaction as its own source (`src_chain = 8453`, `src_tx = base_tx`). The proof is in
+/// the Base receipt alone: no source is read for them, and one given changes nothing.
+#[test]
+fn a_cctp_or_same_chain_arrival_ignores_its_source() {
+    let base_as_source = SourceChain {
+        chain: ChainId::BASE,
+        swapic: base().swapic,
+        eco_portal: base().eco_portal,
+    };
+    for raw in [cctp(the_ref(2)), same_chain(the_ref(1))] {
+        let receipt = parse(&raw);
+        assert!(!needs_source(&receipt, &base()));
+        assert_eq!(
+            find(&receipt, Some((&receipt, &base_as_source)), &base()),
+            find(&receipt, None, &base())
+        );
+    }
 }

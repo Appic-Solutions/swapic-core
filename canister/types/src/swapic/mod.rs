@@ -183,16 +183,31 @@ pub fn read_intent_published(topics: &[[u8; 32]], data: &[u8]) -> Option<Publish
     })
 }
 
-/// The message body a `MessageReceived` log carries, None for a log that is not one.
-pub fn read_message_received(topics: &[[u8; 32]], data: &[u8]) -> Option<Vec<u8>> {
+/// A message CCTP v2's transmitter received, as its `MessageReceived` log says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceivedMessage {
+    /// The CCTP domain the message left from.
+    pub source_domain: u32,
+    /// The message's sender on that domain: its `TokenMessengerV2` for a burn.
+    pub sender: [u8; 32],
+    /// The burn body, its hook data at its end.
+    pub body: Vec<u8>,
+}
+
+/// The message a `MessageReceived` log carries, None for a log that is not one.
+pub fn read_message_received(topics: &[[u8; 32]], data: &[u8]) -> Option<ReceivedMessage> {
     use alloy_sol_types::SolEvent;
-    MessageReceived::decode_raw_log_with_config(
+    let event = MessageReceived::decode_raw_log_with_config(
         topics.iter().map(|topic| FixedBytes(*topic)),
         data,
         strict(),
     )
-    .ok()
-    .map(|event| event.messageBody.to_vec())
+    .ok()?;
+    Some(ReceivedMessage {
+        source_domain: event.sourceDomain,
+        sender: event.sender.0,
+        body: event.messageBody.to_vec(),
+    })
 }
 
 /// The one delivery an Eco Deliver route makes, `token.transfer(to, amount)`: the token, the
