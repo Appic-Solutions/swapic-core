@@ -160,7 +160,33 @@ fn samples() -> Vec<EventType> {
                 step_bytes: step.to_bytes(),
             }
         },
+        {
+            let step = types::pool::PoolStep::Expired {
+                r#ref: types::hash::PoolRef::new([29; 32]),
+            };
+            EventType::Pool {
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            }
+        },
     ]
+}
+
+/// A pool line whose bytes are no pool step is refused at the edge, naming the field.
+#[test]
+fn a_pool_line_that_is_no_pool_step_is_refused() {
+    let refused = types::EventType::try_from(EventType::Pool {
+        step: "Expired".into(),
+        detail: String::new(),
+        step_bytes: vec![0xff],
+    });
+    assert_eq!(
+        refused,
+        Err(types::events::EventError::NotAPoolStep {
+            field: "step_bytes"
+        })
+    );
 }
 
 /// An address that is not an address at all is refused at the edge, naming the field AND

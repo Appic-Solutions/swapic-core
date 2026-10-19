@@ -186,6 +186,12 @@ pub enum EventType {
         detail: String,
         step_bytes: Vec<u8>,
     },
+    /// A step of the pool, rendered and exactly as the log hashes it.
+    Pool {
+        step: String,
+        detail: String,
+        step_bytes: Vec<u8>,
+    },
 }
 
 /// Why an outbound transaction exists. All but the last name the swap they belong to.
@@ -506,6 +512,11 @@ impl From<types::EventType> for EventType {
                 detail: format!("{step:?}"),
                 step_bytes: step.to_bytes(),
             },
+            Domain::Pool { step } => Self::Pool {
+                step: step.name().to_string(),
+                detail: format!("{step:?}"),
+                step_bytes: step.to_bytes(),
+            },
         }
     }
 }
@@ -764,6 +775,13 @@ impl TryFrom<EventType> for types::EventType {
                     },
                 )?,
             },
+            EventType::Pool { step_bytes, .. } => Self::Pool {
+                step: types::pool::PoolStep::from_bytes(&step_bytes).ok_or(
+                    DomainEventError::NotAPoolStep {
+                        field: "step_bytes",
+                    },
+                )?,
+            },
         })
     }
 }
@@ -854,6 +872,9 @@ pub enum EventError {
     NotAGasAction {
         field: String,
     },
+    NotAPoolStep {
+        field: String,
+    },
 }
 
 /// Why a text is not an EVM address. Mirrors `types::evm::EvmAddressError` so a caller
@@ -903,6 +924,9 @@ impl From<types::events::EventError> for EventError {
                 field: field.to_string(),
             },
             Domain::NotAGasAction { field } => Self::NotAGasAction {
+                field: field.to_string(),
+            },
+            Domain::NotAPoolStep { field } => Self::NotAPoolStep {
                 field: field.to_string(),
             },
         }

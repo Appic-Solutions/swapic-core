@@ -2,7 +2,8 @@ use crate::state::transitions::{apply_state_transition, replay, replay_into, Rep
 use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
-    flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, signed_memory, swaps_memory,
+    flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
+    pool_deposits_memory, pool_ledger_memory, pool_shares_memory, signed_memory, swaps_memory,
     unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -13,6 +14,8 @@ use thiserror::Error;
 use types::books::Books;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
+use types::hash::{OwnerKey, PoolRef};
+use types::pool::{CreditKey, PoolLedger, Registered, ShareLine};
 use types::{
     ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
     Timestamp, TransitionError, UnsignedTx, WaitingKey,
@@ -71,6 +74,22 @@ thread_local! {
     // Every chain's USDC books. Part of the fold: only `Books` lines write them.
     static BOOKS: RefCell<StableBTreeMap<ChainId, Books, Memory>> =
         RefCell::new(StableBTreeMap::init(books_memory()));
+
+    // The pool: its ledger, its deposits by ref, its shares by account key, and every
+    // transfer it credited. Part of the fold: only `Pool` lines write them.
+    static POOL_LEDGER: RefCell<StableCell<PoolLedger, Memory>> = RefCell::new(
+        StableCell::init(pool_ledger_memory(), PoolLedger::default())
+            .expect("pool ledger cell init"),
+    );
+
+    static POOL_DEPOSITS: RefCell<StableBTreeMap<PoolRef, Registered, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_deposits_memory()));
+
+    static POOL_SHARES: RefCell<StableBTreeMap<OwnerKey, ShareLine, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_shares_memory()));
+
+    static POOL_CREDITED: RefCell<StableBTreeSet<CreditKey, Memory>> =
+        RefCell::new(StableBTreeSet::init(pool_credited_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -173,6 +192,55 @@ impl Store for StableStore {
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
         SIGNED.with(|signed| signed.borrow().range(range).take(limit).collect())
+    }
+
+    fn pool_ledger(&self) -> PoolLedger {
+        POOL_LEDGER.with(|ledger| ledger.borrow().get().clone())
+    }
+
+    fn put_pool_ledger(&mut self, ledger: PoolLedger) {
+        // out of stable memory is not a caller error, so it traps, rolling back the message
+        POOL_LEDGER.with(|cell| {
+            cell.borrow_mut()
+                .set(ledger)
+                .expect("pool ledger cell write")
+        });
+    }
+
+    fn pool_deposit(&self, r#ref: &PoolRef) -> Option<Registered> {
+        POOL_DEPOSITS.with(|deposits| deposits.borrow().get(r#ref))
+    }
+
+    fn put_pool_deposit(&mut self, r#ref: PoolRef, deposit: Registered) {
+        POOL_DEPOSITS.with(|deposits| deposits.borrow_mut().insert(r#ref, deposit));
+    }
+
+    fn pool_deposits(&self) -> Vec<(PoolRef, Registered)> {
+        POOL_DEPOSITS.with(|deposits| deposits.borrow().iter().collect())
+    }
+
+    fn pool_share(&self, owner: &OwnerKey) -> Option<ShareLine> {
+        POOL_SHARES.with(|shares| shares.borrow().get(owner))
+    }
+
+    fn put_pool_share(&mut self, owner: OwnerKey, line: ShareLine) {
+        POOL_SHARES.with(|shares| shares.borrow_mut().insert(owner, line));
+    }
+
+    fn pool_shares(&self) -> Vec<(OwnerKey, ShareLine)> {
+        POOL_SHARES.with(|shares| shares.borrow().iter().collect())
+    }
+
+    fn is_pool_credited(&self, key: &CreditKey) -> bool {
+        POOL_CREDITED.with(|credited| credited.borrow().contains(key))
+    }
+
+    fn put_pool_credited(&mut self, key: CreditKey) {
+        POOL_CREDITED.with(|credited| credited.borrow_mut().insert(key));
+    }
+
+    fn pool_credited(&self) -> Vec<CreditKey> {
+        POOL_CREDITED.with(|credited| credited.borrow().iter().collect())
     }
 
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
@@ -296,6 +364,10 @@ pub fn init() {
     FLOWS.with(|_| ());
     SIGNED.with(|_| ());
     BOOKS.with(|_| ());
+    POOL_LEDGER.with(|_| ());
+    POOL_DEPOSITS.with(|_| ());
+    POOL_SHARES.with(|_| ());
+    POOL_CREDITED.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

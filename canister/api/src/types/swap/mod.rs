@@ -213,6 +213,7 @@ pub enum TransitionError {
     /// A flow step refused, with the domain's reason.
     Flow(String),
     Books(String),
+    Pool(String),
 }
 
 /// Why a pocket cannot make a move.
@@ -315,6 +316,7 @@ impl From<types::TransitionError> for TransitionError {
             }
             Domain::Flow(error) => Self::Flow(error.to_string()),
             Domain::Books(error) => Self::Books(error.to_string()),
+            Domain::Pool(error) => Self::Pool(error.to_string()),
         }
     }
 }

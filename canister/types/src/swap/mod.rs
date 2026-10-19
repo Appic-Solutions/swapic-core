@@ -261,6 +261,8 @@ pub enum TransitionError {
     Flow(#[from] crate::flow::FlowError),
     #[error(transparent)]
     Books(#[from] crate::books::BooksError),
+    #[error(transparent)]
+    Pool(#[from] crate::pool::PoolStepError),
 }
 
 impl Swap {

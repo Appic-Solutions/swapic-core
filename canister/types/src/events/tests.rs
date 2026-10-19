@@ -172,6 +172,18 @@ pub(crate) fn samples() -> Vec<EventType> {
                 block: None,
             },
         },
+        EventType::Pool {
+            step: crate::pool::PoolStep::Arrived {
+                r#ref: crate::hash::PoolRef::new([29; 32]),
+                credit: crate::pool::CreditKey {
+                    chain: ChainId::BASE,
+                    tx: TxHash::new([30; 32]),
+                    log_index: 31,
+                },
+                amount: TokenAmount::from(32_000_000_u32),
+                block: BlockNumber::new(33),
+            },
+        },
     ]
 }
 

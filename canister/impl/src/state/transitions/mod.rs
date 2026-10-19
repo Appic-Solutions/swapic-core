@@ -274,6 +274,7 @@ impl<S: Store> State<S> {
             // nothing, so it can never strand a wait.
             EventType::WaitingRepaired { .. } => Ok(()),
             EventType::Books { chain_id, step } => Ok(self.book(chain_id).admits(step)?),
+            EventType::Pool { step } => Ok(self.pool().admits(step, &self.pool_view())?),
             // a flow's own rules, and the nonce its signed records spend
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
@@ -627,6 +628,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             state.record_flow(*quote_hash, step, event.index, event.timestamp, action);
         }
         EventType::Books { chain_id, step } => state.record_books(*chain_id, step, event.timestamp),
+        EventType::Pool { step } => state.record_pool(step, event.timestamp),
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

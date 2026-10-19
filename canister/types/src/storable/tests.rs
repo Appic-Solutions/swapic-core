@@ -613,7 +613,177 @@ fn samples() -> Vec<Sample> {
             },
         ),
     ]);
+    all.extend(pool_samples());
     all
+}
+
+/// The pool's stored types (P11a): its ledger cell, a deposit, a share line, and the three
+/// map keys.
+fn pool_samples() -> Vec<Sample> {
+    use crate::hash::{OwnerKey, PoolOpId, PoolRef};
+    use crate::pool::{
+        Arrival, CreditKey, DepositKind, DepositStatus, IcpAccount, IcpCheck, IcpToken, LedgerFee,
+        Paid, PayoutAttempt, PayoutPath, PayoutProgress, PendingOp, Pocket, Pockets, PoolAccount,
+        PoolLedger, PoolRail, PoolSettings, Registered, Registration, ShareLine, Shares, SwapLeg,
+        UnseenArrival,
+    };
+    use candid::Principal;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
+
+    let principal = |byte: u8| Principal::from_slice(&[byte; 10]);
+    let account = IcpAccount {
+        owner: principal(0x71),
+        subaccount: Some([0x72; 32]),
+    };
+    let credit = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([0x73; 32]),
+        log_index: 0x74,
+    };
+    let attempt = PayoutAttempt {
+        created_at: Timestamp::from_nanos(1_800_000_000_000_000_075),
+        memo: [0x76; 32],
+        path: PayoutPath::Icpswap {
+            pool: principal(0x77),
+        },
+    };
+    let ledger = PoolLedger {
+        settings: Some(PoolSettings {
+            tvl_cap: TokenAmount::from(10_000_000_078_u64),
+            per_swap_cap: TokenAmount::from(1_000_000_079_u64),
+            premium_bps: 80,
+            ckusdc_ledger: principal(0x81),
+            icp_tokens: vec![IcpToken {
+                ledger: principal(0x82),
+                icpswap_pool: principal(0x83),
+            }],
+            deposit_grace: Duration::from_secs(132),
+            max_open_per_payer: 5,
+            max_held_bps: 4_096,
+            arrival_backup: Duration::from_secs(301),
+            open_for_swaps: true,
+            ledger_fees: vec![LedgerFee {
+                ledger: principal(0x81),
+                fee: TokenAmount::from(10_084_u32),
+            }],
+        }),
+        pockets: Pockets {
+            base: Pocket {
+                free: TokenAmount::from(85_u8),
+                reserved: TokenAmount::from(86_u8),
+                in_flight: TokenAmount::from(87_u8),
+            },
+            icp: Pocket {
+                free: TokenAmount::from(1u128 << 70),
+                reserved: TokenAmount::from(88_u8),
+                in_flight: TokenAmount::from(89_u8),
+            },
+        },
+        total_shares: Shares::new(1 << 100),
+        owed: TokenAmount::from(90_u8),
+        stake_room: TokenAmount::from(91_u8),
+        open: BTreeSet::from([PoolRef::new([0x92; 32])]),
+        paying: BTreeSet::from([PoolRef::new([0x93; 32])]),
+        open_by_party: BTreeMap::from([(OwnerKey::new([0x94; 32]), 2)]),
+        pending: BTreeMap::from([(
+            PoolOpId::new([0x95; 32]),
+            PendingOp::Withdraw {
+                owner: account,
+                burned: Shares::new(96),
+                usdc: TokenAmount::from(97_u8),
+                to: IcpAccount {
+                    owner: principal(0x98),
+                    subaccount: None,
+                },
+                token_out: principal(0x99),
+                min_out: 0x9a,
+                payout: PayoutProgress {
+                    attempt: Some(attempt),
+                    swap: SwapLeg {
+                        declined: 1,
+                        begun: true,
+                        out: Some(TokenAmount::from(0x9b_u8)),
+                    },
+                    failures: 3,
+                    fell_back: None,
+                    failed: Some("the swap's outcome is unknown".to_string()),
+                },
+            },
+        )]),
+        unseen: vec![UnseenArrival {
+            chain: ChainId::BASE,
+            block: BlockNumber::new(37_000_156),
+            amount: TokenAmount::from(157_u8),
+        }],
+        unattributed: TokenAmount::from(158_u8),
+        icp_shortfall_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_159)),
+        icp_check: Some(IcpCheck {
+            observed: TokenAmount::from(160_u8),
+            expected: TokenAmount::from(161_u8),
+            shortfall: true,
+        }),
+        icp_checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_162)),
+        icp_failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_163)),
+        scan_cursor: Some(BlockNumber::new(37_000_164)),
+    };
+    let deposit = Registered {
+        terms: Registration {
+            kind: DepositKind::Swap {
+                recipient: account,
+                token_out: principal(0xa5),
+                min_out: 0xa6,
+            },
+            min_usdc: TokenAmount::from(167_000_000_u32),
+            premium: TokenAmount::from(168_000_u32),
+            rebalance_share: TokenAmount::ZERO,
+            src_chain: ChainId::ARBITRUM,
+            src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
+                .parse()
+                .unwrap(),
+            rail: PoolRail::Eco,
+            expires_at: Timestamp::from_nanos(1_800_000_000_000_000_169),
+            salt: [0xaa; 32],
+        },
+        status: DepositStatus::PayoutFailed("the pool did not answer".to_string()),
+        arrived: Some(Arrival {
+            credit,
+            amount: TokenAmount::from(171_000_000_u32),
+            block: BlockNumber::new(37_000_172),
+        }),
+        paid: Some(Paid {
+            token: principal(0xad),
+            amount: TokenAmount::from(174_u8),
+            block: 175,
+            spent: TokenAmount::from(176_u8),
+        }),
+        minted: Some(Shares::new(177)),
+        payout: PayoutProgress {
+            attempt: Some(attempt),
+            swap: SwapLeg::default(),
+            failures: 10,
+            fell_back: Some("below the minimum twice".to_string()),
+            failed: None,
+        },
+    };
+    vec![
+        sample("pool ledger", ledger),
+        sample("pool deposit", deposit),
+        sample(
+            "pool share line",
+            ShareLine {
+                account: PoolAccount::Evm(
+                    "0x1111111111111111111111111111111111111111"
+                        .parse()
+                        .unwrap(),
+                ),
+                shares: Shares::new(178 << 64),
+            },
+        ),
+        sample("pool ref key", PoolRef::new([0xb3; 32])),
+        sample("pool owner key", OwnerKey::new([0xb4; 32])),
+        sample("credited transfer key", credit),
+    ]
 }
 
 /// The swap depths the P10c default holds, spelled out for the golden lines that pin them.

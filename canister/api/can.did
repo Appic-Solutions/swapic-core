@@ -289,6 +289,8 @@ type EventType = variant {
     raw_tx : blob;
     tx_hash : blob;
   };
+  // A step of the pool, rendered and exactly as the log hashes it.
+  Pool : record { step : text; detail : text; step_bytes : blob };
   // A step of a chain's USDC books, rendered and exactly as the log hashes it.
   Books : record {
     step : text;
@@ -751,6 +753,7 @@ type TransitionError = variant {
   Pocket : PocketError;
   // A flow step refused, with the domain's reason.
   Flow : text;
+  Pool : text;
   SwapExists : blob;
   AttemptStillOpen : nat32;
   Books : text;

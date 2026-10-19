@@ -11,6 +11,7 @@ use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::numeric::{
     Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei, WeiPerGas,
 };
+use crate::pool::PoolStep;
 use minicbor::{Decode, Encode};
 use sha2::Digest;
 use std::borrow::Borrow;
@@ -19,7 +20,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 26;
+pub const EVENT_VARIANT_COUNT: usize = 27;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -331,6 +332,12 @@ pub enum EventType {
         #[n(1)]
         step: BookStep,
     },
+    /// A step of the pool (`types::pool`).
+    #[n(26)]
+    Pool {
+        #[n(0)]
+        step: PoolStep,
+    },
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -476,6 +483,8 @@ pub enum EventError {
     NotABookStep { field: &'static str },
     #[error("{field} is not a gas action")]
     NotAGasAction { field: &'static str },
+    #[error("{field} is not a pool step")]
+    NotAPoolStep { field: &'static str },
 }
 
 impl EventError {
@@ -583,6 +592,7 @@ impl EventType {
             | EventType::PullSigned { .. }
             | EventType::Books { .. } => false,
             EventType::Flow { step, .. } => step.moves_a_step(),
+            EventType::Pool { step } => step.moves_a_payout(),
         }
     }
 
@@ -616,9 +626,10 @@ impl EventType {
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
             | EventType::PullSigned { .. }
-            // a flow's and a book's amounts are checked by their own rules
+            // a flow's, a book's and the pool's amounts are checked by their own rules
             | EventType::Flow { .. }
-            | EventType::Books { .. } => None,
+            | EventType::Books { .. }
+            | EventType::Pool { .. } => None,
         }
     }
 
@@ -871,6 +882,10 @@ impl EventType {
                 w.put_u16(25)
                     .put_u64(chain_id.get())
                     .put_bytes(&step.to_bytes());
+            }
+            // the step as its minicbor bytes, as a book's are
+            EventType::Pool { step } => {
+                w.put_u16(26).put_bytes(&step.to_bytes());
             }
         }
         w.finish()

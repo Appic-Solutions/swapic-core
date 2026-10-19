@@ -8,6 +8,7 @@ pub mod halt;
 pub mod inflight;
 pub mod memory;
 pub mod outbox;
+pub mod pool;
 pub mod replay_cursor;
 pub mod roles;
 pub mod sanctions;

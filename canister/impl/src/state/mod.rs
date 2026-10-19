@@ -4,6 +4,8 @@ use std::ops::Bound;
 use std::ops::RangeFrom;
 use types::books::{BookStep, Books};
 use types::events::TxPurpose;
+use types::hash::{OwnerKey, PoolRef};
+use types::pool::{CreditKey, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares};
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Flow, LedgerMeta, Leg, Nonce, NonceKey,
     Outcome, Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, TxHash,
@@ -45,6 +47,21 @@ pub trait Store {
     fn put_book(&mut self, chain_id: ChainId, books: Books);
     /// Every chain's books, in chain id order.
     fn books(&self) -> Vec<(ChainId, Books)>;
+    /// The pool's ledger, empty before its first step.
+    fn pool_ledger(&self) -> PoolLedger;
+    fn put_pool_ledger(&mut self, ledger: PoolLedger);
+    fn pool_deposit(&self, r#ref: &PoolRef) -> Option<Registered>;
+    fn put_pool_deposit(&mut self, r#ref: PoolRef, deposit: Registered);
+    /// Every pool deposit, in ref order: what the audit compares, never what a timer reads.
+    fn pool_deposits(&self) -> Vec<(PoolRef, Registered)>;
+    fn pool_share(&self, owner: &OwnerKey) -> Option<ShareLine>;
+    fn put_pool_share(&mut self, owner: OwnerKey, line: ShareLine);
+    /// Every share line, in key order.
+    fn pool_shares(&self) -> Vec<(OwnerKey, ShareLine)>;
+    fn is_pool_credited(&self, key: &CreditKey) -> bool;
+    fn put_pool_credited(&mut self, key: CreditKey);
+    /// Every credited transfer, in key order.
+    fn pool_credited(&self) -> Vec<CreditKey>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -123,6 +140,25 @@ pub trait Store {
     }
 }
 
+/// The fold as the pool's rules read it (`types::pool::PoolLookup`).
+pub struct PoolView<'a, S>(&'a S);
+
+impl<S: Store> PoolLookup for PoolView<'_, S> {
+    fn deposit(&self, r#ref: &PoolRef) -> Option<Registered> {
+        self.0.pool_deposit(r#ref)
+    }
+
+    fn shares_of(&self, owner: &OwnerKey) -> Shares {
+        self.0
+            .pool_share(owner)
+            .map_or(Shares::ZERO, |line| line.shares)
+    }
+
+    fn is_credited(&self, key: &CreditKey) -> bool {
+        self.0.is_pool_credited(key)
+    }
+}
+
 /// Where a page of swaps starts: after `after`, or at the first swap when none is named.
 pub fn after_bound(after: Option<QuoteHash>) -> Bound<QuoteHash> {
     match after {
@@ -154,6 +190,14 @@ pub struct MemoryStore {
     signed: BTreeSet<EventIndex>,
     #[n(8)]
     books: BTreeMap<ChainId, Books>,
+    #[n(9)]
+    pool_ledger: PoolLedger,
+    #[n(10)]
+    pool_deposits: BTreeMap<PoolRef, Registered>,
+    #[n(11)]
+    pool_shares: BTreeMap<OwnerKey, ShareLine>,
+    #[n(12)]
+    pool_credited: BTreeSet<CreditKey>,
 }
 
 impl Store for MemoryStore {
@@ -256,6 +300,56 @@ impl Store for MemoryStore {
         self.signed.range(range).take(limit).copied().collect()
     }
 
+    fn pool_ledger(&self) -> PoolLedger {
+        self.pool_ledger.clone()
+    }
+
+    fn put_pool_ledger(&mut self, ledger: PoolLedger) {
+        self.pool_ledger = ledger;
+    }
+
+    fn pool_deposit(&self, r#ref: &PoolRef) -> Option<Registered> {
+        self.pool_deposits.get(r#ref).cloned()
+    }
+
+    fn put_pool_deposit(&mut self, r#ref: PoolRef, deposit: Registered) {
+        self.pool_deposits.insert(r#ref, deposit);
+    }
+
+    fn pool_deposits(&self) -> Vec<(PoolRef, Registered)> {
+        self.pool_deposits
+            .iter()
+            .map(|(r#ref, deposit)| (*r#ref, deposit.clone()))
+            .collect()
+    }
+
+    fn pool_share(&self, owner: &OwnerKey) -> Option<ShareLine> {
+        self.pool_shares.get(owner).copied()
+    }
+
+    fn put_pool_share(&mut self, owner: OwnerKey, line: ShareLine) {
+        self.pool_shares.insert(owner, line);
+    }
+
+    fn pool_shares(&self) -> Vec<(OwnerKey, ShareLine)> {
+        self.pool_shares
+            .iter()
+            .map(|(key, line)| (*key, *line))
+            .collect()
+    }
+
+    fn is_pool_credited(&self, key: &CreditKey) -> bool {
+        self.pool_credited.contains(key)
+    }
+
+    fn put_pool_credited(&mut self, key: CreditKey) {
+        self.pool_credited.insert(key);
+    }
+
+    fn pool_credited(&self) -> Vec<CreditKey> {
+        self.pool_credited.iter().copied().collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -320,6 +414,10 @@ impl State<MemoryStore> {
             flows,
             signed,
             books,
+            pool_ledger,
+            pool_deposits,
+            pool_shares,
+            pool_credited,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -353,6 +451,18 @@ impl State<MemoryStore> {
                 .books()
                 .iter()
                 .map(|(chain, books)| (chain, books)))
+            && *pool_ledger == other.store.pool_ledger()
+            && pool_deposits.iter().eq(other
+                .store
+                .pool_deposits()
+                .iter()
+                .map(|(r#ref, deposit)| (r#ref, deposit)))
+            && pool_shares.iter().eq(other
+                .store
+                .pool_shares()
+                .iter()
+                .map(|(key, line)| (key, line)))
+            && pool_credited.iter().eq(other.store.pool_credited().iter())
     }
 }
 
@@ -435,6 +545,19 @@ impl<S: Store> State<S> {
     fn record_books(&mut self, chain_id: ChainId, step: &BookStep, at: Timestamp) {
         let books = self.book(&chain_id).apply(step, at);
         self.store.put_book(chain_id, books);
+        // the pool's arrivals on this chain at or below the block a check read are in the
+        // balance it read; a controller's reopening clears the ICP latch with the Base one
+        match step {
+            BookStep::Checked { check, .. } => {
+                let pool = self.store.pool_ledger().seen_through(chain_id, check.block);
+                self.store.put_pool_ledger(pool);
+            }
+            BookStep::PoolPaused { paused: false } => {
+                let pool = self.store.pool_ledger().reopened();
+                self.store.put_pool_ledger(pool);
+            }
+            _ => {}
+        }
         let meta = self.store.meta();
         match step {
             BookStep::Checked {
@@ -453,6 +576,35 @@ impl<S: Store> State<S> {
                 ..meta
             }),
             _ => {}
+        }
+    }
+
+    /// The pool's ledger.
+    pub fn pool(&self) -> PoolLedger {
+        self.store.pool_ledger()
+    }
+
+    /// The fold as the pool's rules read it.
+    pub fn pool_view(&self) -> PoolView<'_, S> {
+        PoolView(&self.store)
+    }
+
+    /// A pool step the guard admitted, sealed at `at`: the ledger and the entries of the maps
+    /// beside it, all from the one step.
+    fn record_pool(&mut self, step: &PoolStep, at: types::Timestamp) {
+        let effects = self
+            .store
+            .pool_ledger()
+            .apply(step, &PoolView(&self.store), at);
+        self.store.put_pool_ledger(effects.ledger);
+        if let Some((r#ref, deposit)) = effects.deposit {
+            self.store.put_pool_deposit(r#ref, deposit);
+        }
+        if let Some((key, line)) = effects.shares {
+            self.store.put_pool_share(key, line);
+        }
+        if let Some(key) = effects.credited {
+            self.store.put_pool_credited(key);
         }
     }
 
