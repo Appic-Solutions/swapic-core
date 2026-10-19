@@ -23,12 +23,13 @@ use crate::ecdsa;
 use crate::engine::flows::Busy;
 use crate::evm_reads::{self, Simulated};
 use crate::guards::{require_not_halted, require_watcher};
-use crate::relay::{envelope_parties, sanctioned_party, signing_gas, Party};
+use crate::relay::{envelope_parties, sanctioned_party, signing_gas, take_reading, Party};
 use crate::state::{State, Store};
 use crate::storage::config;
 use crate::storage::events::read_state;
 use crate::tx::{self, Detail};
 use alloy_primitives::U256;
+use settlement_api::types::chain_data::ChainData;
 use thiserror::Error;
 use types::cctp::{BurnMessage, MessageError};
 use types::config::{ChainTable, EvmChain, GasAction};
@@ -401,7 +402,8 @@ fn source_key(source_tx: TxHash) -> QuoteHash {
     QuoteHash::new(alloy_primitives::keccak256(preimage).0)
 }
 
-/// `finish_cctp`: answers the signed transaction's id in `signed_txs`.
+/// `finish_cctp`: answers the signed transaction's id in `signed_txs`. `reading` is the
+/// destination chain's, the one the watcher priced the finish on.
 pub async fn finish_cctp(
     chain_id: ChainId,
     message: &[u8],
@@ -409,9 +411,17 @@ pub async fn finish_cctp(
     recipe: Option<GivenRecipe>,
     src_tx_hash: &[u8],
     gas_limit: u64,
+    reading: Option<ChainData>,
 ) -> Result<u64, String> {
     require_watcher().map_err(|e| format!("{e:?}"))?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
+    // the reading the watcher priced this call on: stored first, so the fee rule reads it
+    // fresh (no separate push has to land before this call)
+    take_reading(
+        chain_id,
+        reading,
+        Timestamp::from_nanos(ic_cdk::api::time()),
+    )?;
     if message.len() != Envelope::CCTP_MESSAGE_LENGTH {
         return Err(FinishError::MessageLength(message.len()).to_string());
     }

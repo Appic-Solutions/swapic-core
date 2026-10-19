@@ -1419,3 +1419,46 @@ fn each_door_accepts_exactly_what_its_verifier_accepts() {
         "an amount other than amountIn"
     );
 }
+
+/// What both methods do with the reading they were given, right after their guards: none
+/// leaves the stored one as it is (review focus 1); a valid one is stored and fresh at once;
+/// an invalid one refuses with the push's text and is not stored.
+#[test]
+fn a_call_stores_the_reading_it_carries() {
+    use crate::storage::chain_data;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let chain = ChainId::new(137);
+        let at = Timestamp::from_nanos(1_700_000_000_000_000_000);
+        assert_eq!(take_reading(chain, None, at), Ok(()));
+        assert!(chain_data::get(chain).is_none());
+        let reading = ChainData {
+            base_fee_wei_per_gas: candid::Nat::from(250_000_000_000u64),
+            block: 95_798_869,
+            priority_fee_wei_per_gas: candid::Nat::from(30_000_000_000u64),
+        };
+        assert_eq!(take_reading(chain, Some(reading.clone()), at), Ok(()));
+        assert_eq!(
+            chain_data::get(chain).map(|d| d.block.get()),
+            Some(95_798_869)
+        );
+        // 2^256, the first fee no 256-bit price holds
+        let too_large = candid::Nat::parse(
+            b"115792089237316195423570985008687907853269984665640564039457584007913129639936",
+        )
+        .unwrap();
+        let invalid = ChainData {
+            block: 95_798_900,
+            priority_fee_wei_per_gas: too_large,
+            ..reading
+        };
+        assert_eq!(
+            take_reading(chain, Some(invalid), at),
+            Err(r#"InvalidData(FeeTooLarge { field: "priority_fee_wei_per_gas" })"#.to_string())
+        );
+        assert_eq!(
+            chain_data::get(chain).map(|d| d.block.get()),
+            Some(95_798_869)
+        );
+    });
+}

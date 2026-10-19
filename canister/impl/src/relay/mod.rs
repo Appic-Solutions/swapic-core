@@ -2,7 +2,8 @@
 //! `Swapic.runFor` from this canister's address (Swapic's `canister()`, the only caller
 //! `runFor` admits), and handed to the watcher through `signed_txs`.
 //!
-//! Money-first: the role and the halt come before anything else; the order id is
+//! Money-first: the role and the halt come before anything else, the source chain's
+//! reading the call carries right after them (`take_reading`); the order id is
 //! recomputed from the order exactly as every door does; the order must pay this canister
 //! exactly one fee step that covers what it signs for the order (the relay, and on CCTP
 //! the arrival too); the gas is the limit the quoter charged for, held to the chain's
@@ -23,7 +24,9 @@ use crate::guards::{require_not_halted, require_watcher};
 use crate::storage::sanctions::is_sanctioned;
 use crate::storage::{config, flow_settings};
 use crate::tx;
+use crate::updates::store_reading;
 use alloy_primitives::U256;
+use settlement_api::types::chain_data::ChainData;
 use std::fmt;
 use thiserror::Error;
 use types::config::{ChainTable, EvmChain, GasAction};
@@ -727,17 +730,43 @@ pub fn check(
     })
 }
 
+/// What `relay_gasless` and `finish_cctp` do with the reading the watcher priced them on,
+/// right after their guards and before anything else: it is stored as a push stores it,
+/// stamped `at`, so the fee rule reads it fresh and no separate push has to land before
+/// the call. None leaves the stored reading as it is. An invalid one refuses the call with
+/// the push's own error text, and nothing is stored or signed. The reading names no
+/// chain: it is the call's.
+pub fn take_reading(
+    chain_id: ChainId,
+    reading: Option<ChainData>,
+    at: Timestamp,
+) -> Result<(), String> {
+    if let Some(reading) = reading {
+        store_reading(chain_id, reading, at).map_err(|e| format!("{e:?}"))?;
+    }
+    Ok(())
+}
+
 /// `relay_gasless`: answers the signed transaction's id in `signed_txs`. Its status is
-/// `relay_status(order_id)`.
+/// `relay_status(order_id)`. `reading` is the source chain's, the one the watcher priced
+/// the relay on.
 pub async fn relay_gasless(
     chain_id: ChainId,
     order_bytes: &[u8],
     auth_bytes: &[u8],
     gas_limit: u64,
+    reading: Option<ChainData>,
 ) -> Result<u64, String> {
     // the role and the halt before anything else, and before any outcall
     require_watcher().map_err(|e| format!("{e:?}"))?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
+    // the reading the watcher priced this call on: stored first, so the fee rule reads it
+    // fresh (no separate push has to land before this call)
+    take_reading(
+        chain_id,
+        reading,
+        Timestamp::from_nanos(ic_cdk::api::time()),
+    )?;
     let order = swapic::decode_order(order_bytes).ok_or(RelayError::NotAnOrder.to_string())?;
     let auth = swapic::decode_auth(auth_bytes).ok_or(RelayError::NotAnAuth.to_string())?;
     let config = config::get();

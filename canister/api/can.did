@@ -848,7 +848,14 @@ service : (InitArg) -> {
   // its source domain and Circle's nonce, so a re-attested message is the same arrival)
   // and action, and one arrival per source transaction.
   // Answers the signed transaction's id in `signed_txs`.
-  finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64) -> (Result_4);
+  // 
+  // `reading`, when given, is `chain_id`'s reading the watcher priced the finish on. It is
+  // stored right after the role and the halt, exactly as `push_chain_data` stores one, so
+  // no separate push has to land before this call; an invalid one refuses the call with
+  // `push_chain_data`'s error text. With none, the stored reading is used as it is.
+  finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64, opt ChainData) -> (
+      Result_4,
+    );
   // The cached reading for a chain, with the instant the canister stamped it, or nothing for
   // a chain the watcher has never pushed. World-readable: a block height and a gas price are
   // public facts about a public chain, and the stamp is how ops see the watcher stop
@@ -926,7 +933,12 @@ service : (InitArg) -> {
   // that is above the chain's maximum for the action, and held to the gas rule. Signed
   // once per order id: a second call answers the first one's id. Answers the signed
   // transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
-  relay_gasless : (nat64, blob, blob, nat64) -> (Result_4);
+  // 
+  // `reading`, when given, is `chain_id`'s reading the watcher priced the relay on. It is
+  // stored right after the role and the halt, exactly as `push_chain_data` stores one, so
+  // no separate push has to land before this call; an invalid one refuses the call with
+  // `push_chain_data`'s error text. With none, the stored reading is used as it is.
+  relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result_4);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
   // Controller-only, and it takes the whole record, so editing one knob is a

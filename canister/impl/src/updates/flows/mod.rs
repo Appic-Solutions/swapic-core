@@ -4,6 +4,7 @@ use crate::guards::require_controller;
 use crate::relay;
 use crate::storage::flow_settings;
 use ic_cdk::update;
+use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::events::Hash32;
 pub use settlement_api::types::flow::{FlowCallError, FlowSettings};
 use types::ChainId;
@@ -27,14 +28,20 @@ pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
 /// that is above the chain's maximum for the action, and held to the gas rule. Signed
 /// once per order id: a second call answers the first one's id. Answers the signed
 /// transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
+///
+/// `reading`, when given, is `chain_id`'s reading the watcher priced the relay on. It is
+/// stored right after the role and the halt, exactly as `push_chain_data` stores one, so
+/// no separate push has to land before this call; an invalid one refuses the call with
+/// `push_chain_data`'s error text. With none, the stored reading is used as it is.
 #[update]
 pub async fn relay_gasless(
     chain_id: u64,
     order: Vec<u8>,
     auth: Vec<u8>,
     gas_limit: u64,
+    reading: Option<ChainData>,
 ) -> Result<u64, String> {
-    relay::relay_gasless(ChainId::new(chain_id), &order, &auth, gas_limit).await
+    relay::relay_gasless(ChainId::new(chain_id), &order, &auth, gas_limit, reading).await
 }
 
 use crate::engine::flows::{self as flow_engine, Busy, FlowDriveError};
@@ -260,6 +267,11 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
 /// its source domain and Circle's nonce, so a re-attested message is the same arrival)
 /// and action, and one arrival per source transaction.
 /// Answers the signed transaction's id in `signed_txs`.
+///
+/// `reading`, when given, is `chain_id`'s reading the watcher priced the finish on. It is
+/// stored right after the role and the halt, exactly as `push_chain_data` stores one, so
+/// no separate push has to land before this call; an invalid one refuses the call with
+/// `push_chain_data`'s error text. With none, the stored reading is used as it is.
 #[update]
 pub async fn finish_cctp(
     chain_id: u64,
@@ -268,6 +280,7 @@ pub async fn finish_cctp(
     recipe: Option<Recipe>,
     src_tx_hash: Vec<u8>,
     gas_limit: u64,
+    reading: Option<ChainData>,
 ) -> Result<u64, String> {
     use crate::cctp::{parse_address, FinishError, GivenRecipe};
     let recipe = recipe
@@ -293,6 +306,7 @@ pub async fn finish_cctp(
         recipe,
         &src_tx_hash,
         gas_limit,
+        reading,
     )
     .await
 }
