@@ -369,6 +369,13 @@ pub enum PoolClosed {
     Shortfall(ChainId),
     #[error("the balance check of the ICP pocket found a shortfall")]
     IcpShortfall,
+    #[error("the ICP pocket's balance has never been checked")]
+    IcpNeverChecked,
+    #[error(
+        "the ICP pocket's balance was last checked {since:?} ago, more than \
+         {STALE_INTERVALS} intervals of {interval:?}"
+    )]
+    IcpStale { since: Duration, interval: Duration },
     #[error("the books of chain {0} have never been checked")]
     NeverChecked(ChainId),
     #[error(

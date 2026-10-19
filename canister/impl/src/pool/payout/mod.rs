@@ -14,9 +14,11 @@
 //!   unknown, and the payout stops for a human.
 //! - `Paid` (or `WithdrawnIcp`), with the ckUSDC that left the pocket, every fee included.
 //!
-//! A failure that is not a quote below the minimum is `AttemptFailed`, the payout stays
-//! where it is and is driven again; at the tenth it stops for a human (`PayoutFailed`). The
-//! pool's guard runs before any of it: a closed pool pays nothing.
+//! A refusal (or an outcome the ledger can no longer tell) is `AttemptFailed`, the payout
+//! stays where it is and is driven again; at the tenth it stops for a human
+//! (`PayoutFailed`). A call whose outcome is unknown records nothing and is asked again, the
+//! same call: a ledger's passing trouble never stops a payout. The pool's guard runs before
+//! every outflow call, after every await: a pool closed meanwhile pays nothing more.
 
 #[cfg(test)]
 mod tests;
@@ -257,6 +259,25 @@ pub enum Stop {
     Again,
     /// A line could not be appended: driven again.
     Append(String),
+    /// Nothing to record, driven again as it is: a call whose outcome is unknown (asked again
+    /// with the same dedup pair), or the pool closed before an outflow. Never counted toward
+    /// the stop for a human, so a ledger's passing trouble stops no payout.
+    Retry(String),
+}
+
+/// What a call's failure means for a payout: an outcome unknown is asked again as it is; a
+/// refusal, and an outcome the ledger can no longer tell, count toward the stop.
+fn call_stop(what: &str, error: CallError) -> Stop {
+    match error {
+        CallError::Unknown(_) => Stop::Retry(format!("{what}: {error}")),
+        CallError::Refused(_) | CallError::Expired(_) => Stop::Failed(format!("{what}: {error}")),
+    }
+}
+
+/// The pool's guard, read before every outflow call: a pool closed while a payout awaited
+/// moves nothing more.
+fn open(guard: &impl Fn() -> Result<(), String>) -> Result<(), Stop> {
+    guard().map_err(|closed| Stop::Retry(format!("the pool is closed: {closed}")))
 }
 
 impl Payout {
@@ -372,6 +393,7 @@ pub async fn pay(
     settings: &PoolSettings,
     payout: Payout,
     clock: impl Fn() -> Timestamp,
+    guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Done, Stop> {
     let attempt = payout
         .progress
@@ -386,10 +408,11 @@ pub async fn pay(
             let (sent, spent) = payout
                 .ckusdc(fee_ck)
                 .ok_or_else(|| Stop::Failed("the amount does not cover the fee".to_string()))?;
+            open(guard)?;
             let block = ledgers
                 .transfer(ckusdc, payout.to, sent, payout.dedup(&attempt))
                 .await
-                .map_err(|error| Stop::Failed(format!("the ckUSDC transfer: {error}")))?;
+                .map_err(|error| call_stop("the ckUSDC transfer", error))?;
             return Ok(Done {
                 token: ckusdc,
                 paid: sent,
@@ -430,7 +453,7 @@ pub async fn pay(
             let zero_for_one = match ledgers
                 .direction(pool, ckusdc, payout.token_out)
                 .await
-                .map_err(|error| Stop::Failed(format!("the pool's metadata: {error}")))?
+                .map_err(|error| call_stop("the pool's metadata", error))?
             {
                 Some(direction) => direction,
                 None => return fall_back("the pool does not trade the pair".to_string()),
@@ -438,7 +461,7 @@ pub async fn pay(
             let quoted = ledgers
                 .quote(pool, swap_in, zero_for_one)
                 .await
-                .map_err(|error| Stop::Failed(format!("the pool's quote: {error}")))?;
+                .map_err(|error| call_stop("the pool's quote", error))?;
             if quoted < least {
                 let why = format!("the pool quotes {quoted}, below the {least} needed");
                 if payout.progress.swap.declined == 0 {
@@ -456,11 +479,14 @@ pub async fn pay(
             let allowance = swap_in
                 .checked_add(fee_ck)
                 .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
+            open(guard)?;
             ledgers
                 .approve(ckusdc, pool, allowance)
                 .await
-                .map_err(|error| Stop::Failed(format!("the approval: {error}")))?;
+                .map_err(|error| call_stop("the approval", error))?;
+            open(guard)?;
             record(PoolStep::SwapBegun { r#ref: payout.id }, clock())?;
+            // begun: whatever this answers, the swap is never called again
             let out = ledgers
                 .swap(pool, swap_in, zero_for_one, least, fee_ck, fee_out)
                 .await
@@ -479,10 +505,11 @@ pub async fn pay(
         .checked_sub(fee_out)
         .filter(|sent| *sent > TokenAmount::ZERO)
         .ok_or_else(|| Stop::Failed("the output does not cover its fee".to_string()))?;
+    open(guard)?;
     let block = ledgers
         .transfer(payout.token_out, payout.to, sent, payout.dedup(&attempt))
         .await
-        .map_err(|error| Stop::Failed(format!("the output's transfer: {error}")))?;
+        .map_err(|error| call_stop("the output's transfer", error))?;
     Ok(Done {
         token: payout.token_out,
         paid: sent,
@@ -496,6 +523,7 @@ pub async fn drive_deposit(
     ledgers: &impl Ledgers,
     r#ref: PoolRef,
     clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
 ) -> Result<(), Stop> {
     // a payout goes a few lines at most in one drive: start, the swap's, then paid
     for _ in 0..4 {
@@ -539,7 +567,7 @@ pub async fn drive_deposit(
             (DepositStatus::Paying, _) => {
                 let payout = of_deposit(r#ref, &deposit)
                     .ok_or_else(|| Stop::Failed("a stake has no payout".to_string()))?;
-                match pay(ledgers, &settings, payout, clock).await {
+                match pay(ledgers, &settings, payout, clock, guard).await {
                     Ok(done) => {
                         return record(
                             PoolStep::Paid {
@@ -569,6 +597,7 @@ pub async fn drive_withdrawal(
     ledgers: &impl Ledgers,
     id: PoolOpId,
     clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Option<(types::pool::Shares, TokenAmount)>, Stop> {
     for _ in 0..3 {
         let ledger = pool_store::ledger();
@@ -589,7 +618,7 @@ pub async fn drive_withdrawal(
             .clone()
             .ok_or_else(|| Stop::Failed("the pool has no settings".to_string()))?;
         let payout = of_withdrawal(id, &op).expect("BUG: a withdrawal has a payout");
-        match pay(ledgers, &settings, payout, clock).await {
+        match pay(ledgers, &settings, payout, clock, guard).await {
             Ok(done) => {
                 record(
                     PoolStep::WithdrawnIcp {
@@ -660,6 +689,7 @@ pub async fn pull_stake(
             )?;
             Ok(Some(shares))
         }
+        // refused: nothing moved, the room goes back
         Err(CallError::Refused(why)) => {
             record(
                 PoolStep::StakeFailed {
@@ -670,7 +700,12 @@ pub async fn pull_stake(
             )?;
             Err(Stop::Failed(format!("the ledger refused the pull: {why}")))
         }
-        Err(error) => Err(Stop::Append(format!("the pull's outcome: {error}"))),
+        // too old to tell: it may have run, so it is never recorded as failed; the stake
+        // waits for a human
+        Err(error @ CallError::Expired(_)) => Err(Stop::Failed(format!(
+            "ALERT: the pull's outcome can no longer be known: {error}"
+        ))),
+        Err(error @ CallError::Unknown(_)) => Err(Stop::Retry(format!("the pull: {error}"))),
     }
 }
 
@@ -704,57 +739,96 @@ pub fn fail(id: PoolRef, why: String, now: Timestamp) {
     }
 }
 
+/// How long a ledger deduplicates a transfer: a pull asked again after it can no longer be
+/// told from a new one, so the drive stops asking (a little before, for the clocks' skew).
+pub const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(23 * 3_600);
+
+/// The pool's guard, as the payouts read it before every outflow.
+pub fn guard() -> Result<(), String> {
+    crate::pool::pool_closed().map_or(Ok(()), Err)
+}
+
 /// One pass over every payout the pool owes: nothing while the pool is closed.
 pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy) -> usize {
-    if crate::pool::require_pool_open().is_err() {
+    drive_with(ledgers, clock, &guard).await
+}
+
+/// [`drive`] with its guard given.
+pub async fn drive_with(
+    ledgers: &impl Ledgers,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> usize {
+    if guard().is_err() {
         return 0;
     }
+    let now = clock();
     let (deposits, pending): (Vec<PoolRef>, Vec<(PoolOpId, bool)>) = read_state(|state| {
         let ledger = state.store().pool_ledger();
         let pending = ledger
             .pending
             .iter()
             .filter_map(|(id, op)| match op {
-                PendingOp::Stake { .. } => Some((*id, false)),
+                // a pull too old to deduplicate is a human's
+                PendingOp::Stake { created_at, .. }
+                    if now.saturating_duration_since(*created_at) < DEDUP_WINDOW =>
+                {
+                    Some((*id, false))
+                }
+                PendingOp::Stake { .. } => None,
                 PendingOp::Withdraw { payout, .. } if payout.failed.is_none() => Some((*id, true)),
                 PendingOp::Withdraw { .. } => None,
             })
             .collect();
-        (ledger.paying.iter().copied().collect(), pending)
+        // a payout stopped for a human stays in `paying` for the ICP check, and is not driven
+        let deposits = ledger
+            .paying
+            .iter()
+            .filter(|r#ref| {
+                state.store().pool_deposit(r#ref).is_some_and(|deposit| {
+                    matches!(
+                        deposit.status,
+                        DepositStatus::Arrived | DepositStatus::Paying
+                    )
+                })
+            })
+            .copied()
+            .collect();
+        (deposits, pending)
     });
     let mut acted = 0;
     for r#ref in deposits {
-        if crate::pool::require_pool_open().is_err() {
+        if guard().is_err() {
             break;
         }
         let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
             continue;
         };
-        match drive_deposit(ledgers, r#ref, clock).await {
+        match drive_deposit(ledgers, r#ref, clock, guard).await {
             Ok(()) => acted += 1,
             Err(Stop::Failed(why)) => fail(r#ref, why, clock()),
             Err(Stop::Later) | Err(Stop::Again) => acted += 1,
-            Err(Stop::Append(why)) => {
+            Err(Stop::Append(why)) | Err(Stop::Retry(why)) => {
                 crate::pool::log(&format!("the pool payout {} waits: {why}", r#ref))
             }
         }
     }
     for (id, withdraw) in pending {
-        if crate::pool::require_pool_open().is_err() {
+        if guard().is_err() {
             break;
         }
         let Some(_busy) = Busy::take(id.into_bytes()) else {
             continue;
         };
         let stop = if withdraw {
-            drive_withdrawal(ledgers, id, clock).await.err()
+            drive_withdrawal(ledgers, id, clock, guard).await.err()
         } else {
             pull_stake(ledgers, id, clock).await.err()
         };
         match stop {
             None | Some(Stop::Later) | Some(Stop::Again) => acted += 1,
             Some(Stop::Failed(why)) if withdraw => fail(payout_ref(id), why, clock()),
-            Some(Stop::Failed(why)) | Some(Stop::Append(why)) => {
+            Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
                 crate::pool::log(&format!("the pool operation {id} waits: {why}"))
             }
         }

@@ -677,8 +677,7 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
     assert!(pool.ledger.pending.is_empty());
 }
 
-/// A payout that keeps failing stops for a human at the tenth failure, and the drive's index
-/// lets go of it.
+/// A payout that keeps failing stops for a human at the tenth failure.
 #[test]
 fn a_payout_stops_after_ten_failures() {
     let mut pool = funded(usdc(1_000));
@@ -701,7 +700,8 @@ fn a_payout_stops_after_ten_failures() {
         pool.deposits[&r#ref].status,
         DepositStatus::PayoutFailed("try 10".into())
     );
-    assert!(pool.ledger.paying.is_empty());
+    // stopped, and still between its start and its payment for the ICP check
+    assert!(pool.ledger.paying.contains(&r#ref));
     assert!(pool
         .step(PoolStep::AttemptFailed {
             r#ref,

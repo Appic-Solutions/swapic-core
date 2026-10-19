@@ -13,8 +13,11 @@
 //!
 //! The ICP pocket's check: every `books_check_interval`, the canister's ckUSDC balance read
 //! beside what the pool's lines expect, less every payout started and not recorded paid (the
-//! ledger may have debited it already). A shortfall beyond the tolerance latches the ICP
-//! latch, which closes the pool until a controller reopens it.
+//! ledger may have debited it already), the lines read before and after the read and the
+//! lower of the two expected. A shortfall beyond the tolerance latches the ICP latch, which
+//! closes the pool until a controller reopens it; a read that fails is recorded and passes
+//! nothing: the pool's guard closes the pool when no check read a balance within three
+//! intervals, as it does for Base.
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +35,7 @@ use settlement_api::types::pool::{
 use types::books::assess;
 use types::pool::{
     op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, PayoutAttempt, PayoutPath, PendingOp,
-    PoolAccount, PoolStep, Shares, ICPSWAP_PATH_FEES,
+    PoolAccount, PoolStep, Shares,
 };
 use types::{Address, TokenAmount};
 
@@ -238,7 +241,7 @@ pub async fn stake(
             "the stake is no longer in progress".to_string(),
         )),
         Err(Stop::Failed(why)) => Err(PoolError::Ledger(why)),
-        Err(Stop::Append(why)) => Err(PoolError::Unavailable(format!(
+        Err(Stop::Append(why)) | Err(Stop::Retry(why)) => Err(PoolError::Unavailable(format!(
             "{why}; the canister asks again with the same pull"
         ))),
         Err(Stop::Later) | Err(Stop::Again) => Err(PoolError::Unavailable(
@@ -299,7 +302,7 @@ pub async fn withdraw(
             request.usdc
         ))
     };
-    match payout::drive_withdrawal(&Live, id, now).await {
+    match payout::drive_withdrawal(&Live, id, now, &payout::guard).await {
         Ok(Some((burned, paid))) => Ok(WithdrawIcpOk {
             burned: Nat::from(burned.get()),
             paid: nat(paid),
@@ -309,34 +312,29 @@ pub async fn withdraw(
             payout::fail(payout_ref(id), why.clone(), now());
             Err(continues(&why))
         }
-        Err(Stop::Append(why)) => Err(continues(&why)),
+        Err(Stop::Append(why)) | Err(Stop::Retry(why)) => Err(continues(&why)),
         Err(Stop::Later) | Err(Stop::Again) => {
             Err(continues("the pool's quote was below the minimum"))
         }
     }
 }
 
-/// What may leave the ICP pocket for a payout started and not recorded paid: the swap's
-/// amount and every ledger fee its path can cost, or the withdrawal's whole amount.
+/// What may leave the ICP pocket for a payout started and not recorded paid, one stopped
+/// for a human included (it is still between the two): a swap's whole hold (its payout and
+/// every fee its path can cost), a withdrawal's whole amount.
 pub fn pending_payouts<S: Store>(state: &State<S>) -> TokenAmount {
     let ledger = state.pool();
-    let fee = ledger
-        .settings
-        .as_ref()
-        .and_then(|settings| settings.fee_of(settings.ckusdc_ledger))
-        .unwrap_or(TokenAmount::ZERO);
     let deposits = ledger
         .paying
         .iter()
         .filter_map(|r#ref| state.store().pool_deposit(r#ref))
-        .filter(|deposit| deposit.status == DepositStatus::Paying)
-        .filter_map(|deposit| {
-            let fees = match deposit.payout.attempt?.path {
-                PayoutPath::Ckusdc => fee,
-                PayoutPath::Icpswap { .. } => fee.checked_mul(ICPSWAP_PATH_FEES)?,
-            };
-            deposit.owed().checked_add(fees)
-        });
+        .filter(|deposit| {
+            matches!(
+                deposit.status,
+                DepositStatus::Paying | DepositStatus::PayoutFailed(_)
+            ) && deposit.payout.attempt.is_some()
+        })
+        .map(|deposit| deposit.held());
     let withdrawals = ledger.pending.values().filter_map(|op| match op {
         PendingOp::Withdraw { usdc, .. } => Some(*usdc),
         PendingOp::Stake { .. } => None,
@@ -347,19 +345,37 @@ pub fn pending_payouts<S: Store>(state: &State<S>) -> TokenAmount {
         .unwrap_or(TokenAmount::MAX)
 }
 
-/// What the ICP pocket's balance should be, and whether `observed` falls short of it beyond
-/// `tolerance`: its free and reserved lines, less every payout in flight.
+/// What the ICP pocket's balance should be now: its free and reserved lines, less every
+/// payout in flight.
+pub fn icp_lines<S: Store>(state: &State<S>) -> TokenAmount {
+    state
+        .pool()
+        .icp_held()
+        .checked_sub(pending_payouts(state))
+        .unwrap_or(TokenAmount::ZERO)
+}
+
+/// What the check expects of a balance read between two readings of the lines, and whether
+/// `observed` falls short of it beyond `tolerance`: the lower of the two, so money that came
+/// in while the read was out (a stake's pull recorded during it) is never a shortfall, and a
+/// payout recorded during it is in neither.
+pub fn judge(
+    before: TokenAmount,
+    after: TokenAmount,
+    observed: TokenAmount,
+    tolerance: TokenAmount,
+) -> (TokenAmount, bool) {
+    assess(before.min(after), TokenAmount::ZERO, observed, tolerance)
+}
+
+/// [`judge`] of `observed` against the lines as they stand, read before and after alike.
 pub fn icp_expected<S: Store>(
     state: &State<S>,
     observed: TokenAmount,
     tolerance: TokenAmount,
 ) -> (TokenAmount, bool) {
-    assess(
-        state.pool().icp_held(),
-        pending_payouts(state),
-        observed,
-        tolerance,
-    )
+    let lines = icp_lines(state);
+    judge(lines, lines, observed, tolerance)
 }
 
 /// The ICP pocket's balance check: nothing before the pool has settings.
@@ -367,6 +383,7 @@ pub async fn check_icp_pocket(tolerance: TokenAmount) {
     let Some(settings) = pool_store::ledger().settings else {
         return;
     };
+    let before = read_state(icp_lines);
     let balance =
         ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None)).await;
     let step = match balance {
@@ -375,8 +392,9 @@ pub async fn check_icp_pocket(tolerance: TokenAmount) {
                 .ok()
                 .filter(|amount| amount.try_into_u128().is_some())
                 .unwrap_or(TokenAmount::MAX);
-            let (expected, shortfall) =
-                read_state(|state| icp_expected(state, observed, tolerance));
+            // the lines read again after the await: the lower of the two is expected
+            let after = read_state(icp_lines);
+            let (expected, shortfall) = judge(before, after, observed, tolerance);
             if shortfall {
                 log(&format!(
                     "ALERT: the ICP pocket holds {observed} ckUSDC and {expected} is expected; the pool closes"

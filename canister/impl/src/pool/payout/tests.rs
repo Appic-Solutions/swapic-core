@@ -6,6 +6,7 @@ use crate::storage::pool::tests::{
 use crate::storage::pool::{deposit, ledger, record_at};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use types::hash::PoolOpId;
 use types::pool::{IcpToken, LedgerFee, PoolAccount, Shares};
 use types::BlockNumber;
 
@@ -21,6 +22,14 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 fn clock() -> Timestamp {
     at(10)
+}
+
+fn open_pool() -> Result<(), String> {
+    Ok(())
+}
+
+fn closed_pool() -> Result<(), String> {
+    Err("a controller paused the pool".to_string())
 }
 
 fn token() -> Principal {
@@ -46,6 +55,10 @@ struct Fake {
     /// (ledger, memo, created_at) to (to, amount, block)
     executed: RefCell<BTreeMap<TransferKey, Executed>>,
     lose_answers: Cell<u32>,
+    /// The ledger refuses the next transfer: nothing moves.
+    refuse: Cell<bool>,
+    /// What the next pull answers instead of landing.
+    pull_answer: RefCell<Option<CallError>>,
     quote: Cell<Option<TokenAmount>>,
     /// None: the swap's answer never comes
     swap_out: Cell<Option<TokenAmount>>,
@@ -82,6 +95,9 @@ impl Ledgers for Fake {
     ) -> Result<u64, CallError> {
         self.saw();
         self.calls.borrow_mut().push(format!("transfer {amount}"));
+        if self.refuse.replace(false) {
+            return Err(CallError::Refused("InsufficientFunds".into()));
+        }
         let key = (ledger, dedup.memo, dedup.created_at_nanos);
         let mut executed = self.executed.borrow_mut();
         // the ledger's deduplication: the same transfer answers the block it landed in
@@ -105,7 +121,10 @@ impl Ledgers for Fake {
         _dedup: Dedup,
     ) -> Result<u64, CallError> {
         self.calls.borrow_mut().push(format!("pull {amount}"));
-        Ok(7)
+        match self.pull_answer.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(7),
+        }
     }
 
     async fn approve(
@@ -213,7 +232,7 @@ fn the_payout_starts_before_any_call_and_pays_arrived_less_premium() {
         let r#ref = arrived_swap(ckusdc(), 1);
         let fake = Fake::default();
         fake.watch.set(Some(r#ref));
-        block_on(drive_deposit(&fake, r#ref, clock)).unwrap();
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(*fake.seen.borrow(), vec![Some(DepositStatus::Paying)]);
         assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
         let paid = deposit(&r#ref).unwrap();
@@ -242,12 +261,14 @@ fn a_lost_answer_is_asked_again_and_paid_once() {
         let r#ref = arrived_swap(ckusdc(), 1);
         let fake = Fake::default();
         fake.lose_answers.set(1);
-        let stop = block_on(drive_deposit(&fake, r#ref, clock)).unwrap_err();
-        assert!(matches!(stop, Stop::Failed(_)));
-        fail(r#ref, "lost".into(), clock());
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paying);
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap_err();
+        // an outcome unknown: nothing recorded, no attempt counted, asked again as it is
+        assert!(matches!(stop, Stop::Retry(_)));
+        let waiting = deposit(&r#ref).unwrap();
+        assert_eq!(waiting.status, DepositStatus::Paying);
+        assert_eq!(waiting.payout.failures, 0);
         // the next drive, later: the same pair, so the same transfer
-        block_on(drive_deposit(&fake, r#ref, || at(99))).unwrap();
+        block_on(drive_deposit(&fake, r#ref, || at(99), &open_pool)).unwrap();
         assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
         assert_eq!(fake.calls.borrow().len(), 2, "asked twice, executed once");
         let paid = deposit(&r#ref).unwrap();
@@ -286,7 +307,7 @@ fn a_stake_mints_its_shares_at_the_price_before_it() {
         )
         .unwrap();
         let fake = Fake::default();
-        block_on(drive_deposit(&fake, r#ref, clock)).unwrap();
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert!(fake.calls.borrow().is_empty(), "a stake calls no ledger");
         assert_eq!(deposit(&r#ref).unwrap().minted, Some(expected));
         assert_eq!(crate::storage::pool::shares_of(&owner), expected);
@@ -304,12 +325,12 @@ fn a_leg_below_its_minimum_pays_all_of_it_as_ckusdc() {
         // the recipient needs 5000 after the token's 1000 fee: 5999 is one short
         fake.quote.set(Some(TokenAmount::from(5_999_u32)));
         assert_eq!(
-            block_on(drive_deposit(&fake, r#ref, clock)),
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Later)
         );
         assert_eq!(deposit(&r#ref).unwrap().payout.swap.declined, 1);
         assert!(fake.transfers().is_empty());
-        block_on(drive_deposit(&fake, r#ref, clock)).unwrap();
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
         assert!(!fake
             .calls
@@ -334,7 +355,7 @@ fn an_icpswap_leg_pays_its_output() {
         fake.watch.set(Some(r#ref));
         fake.quote.set(Some(TokenAmount::from(8_000_u32)));
         fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
-        block_on(drive_deposit(&fake, r#ref, clock)).unwrap();
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(
             *fake.calls.borrow(),
             vec![
@@ -369,7 +390,7 @@ fn a_swap_with_no_answer_is_never_called_again() {
         let r#ref = arrived_swap(token(), 5_000);
         let fake = Fake::default();
         fake.quote.set(Some(TokenAmount::from(8_000_u32)));
-        let stop = block_on(drive_deposit(&fake, r#ref, clock)).unwrap_err();
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap_err();
         assert!(matches!(stop, Stop::Failed(_)));
         assert!(deposit(&r#ref).unwrap().payout.swap.begun);
         let swaps = |fake: &Fake| {
@@ -380,7 +401,7 @@ fn a_swap_with_no_answer_is_never_called_again() {
                 .count()
         };
         assert_eq!(swaps(&fake), 1);
-        let stop = block_on(drive_deposit(&fake, r#ref, clock)).unwrap_err();
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap_err();
         assert_eq!(
             stop,
             Stop::Failed("the ICPSwap swap's outcome is unknown".to_string())
@@ -398,6 +419,144 @@ fn a_swap_with_no_answer_is_never_called_again() {
             deposit(&r#ref).unwrap().status,
             DepositStatus::PayoutFailed(_)
         ));
-        assert!(ledger().paying.is_empty());
+        // stopped, and still between its start and its payment for the ICP check
+        assert!(ledger().paying.contains(&r#ref));
+    });
+}
+
+/// Review fix: the pool's guard is read before every outflow call: a pool closed after the
+/// payout started pays nothing, records nothing more, and counts no attempt.
+#[test]
+fn a_pool_closed_before_an_outflow_pays_nothing() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &closed_pool)).unwrap_err();
+        assert!(matches!(stop, Stop::Retry(why) if why.contains("closed")));
+        assert!(fake.calls.borrow().is_empty(), "no ledger was called");
+        let waiting = deposit(&r#ref).unwrap();
+        assert_eq!(waiting.status, DepositStatus::Paying);
+        assert_eq!(waiting.payout.failures, 0);
+        // reopened: paid, once
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+
+        // an ICPSwap leg whose pool closes after the quote: no approval, no swap
+        let r#ref = {
+            let mut terms = swap_terms(2, usdc(100), usdc(1), at(1_000));
+            terms.kind = DepositKind::Swap {
+                recipient: account(2),
+                token_out: token(),
+                min_out: 1,
+            };
+            let r#ref = register(terms);
+            record_at(
+                PoolStep::Arrived {
+                    r#ref,
+                    credit: credit(2),
+                    amount: usdc(100),
+                    block: BlockNumber::new(6),
+                },
+                at(3),
+            )
+            .unwrap();
+            r#ref
+        };
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &closed_pool)).unwrap_err();
+        assert!(matches!(stop, Stop::Retry(_)));
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("approve") || call.starts_with("swap")));
+        assert!(!deposit(&r#ref).unwrap().payout.swap.begun);
+    });
+}
+
+/// A refusal is definite: nothing moved, the attempt counts, and the next drive asks again.
+#[test]
+fn a_refused_transfer_counts_an_attempt() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        fake.refuse.set(true);
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap_err();
+        let Stop::Failed(why) = stop else {
+            panic!("a refusal counts: {stop:?}")
+        };
+        fail(r#ref, why, clock());
+        assert_eq!(deposit(&r#ref).unwrap().payout.failures, 1);
+        assert!(fake.transfers().is_empty());
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
+    });
+}
+
+/// A stake's pull: refused, nothing moved and the room goes back; unknown, asked again; too
+/// old for the ledger to tell, never recorded as failed (it may have run): it waits for a
+/// human, and the drive stops asking once the ledger can no longer deduplicate it.
+#[test]
+fn a_stakes_pull_is_failed_only_when_nothing_moved() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let started = |byte: u8| {
+            let id = PoolOpId::new([byte; 32]);
+            record_at(
+                PoolStep::StakeStarted {
+                    id,
+                    owner: PoolAccount::Icp(account(byte)),
+                    from: account(byte),
+                    amount: usdc(10),
+                    created_at: at(2),
+                },
+                at(2),
+            )
+            .unwrap();
+            id
+        };
+        let fake = Fake::default();
+        let refused = started(1);
+        *fake.pull_answer.borrow_mut() = Some(CallError::Refused("InsufficientAllowance".into()));
+        assert!(matches!(
+            block_on(pull_stake(&fake, refused, clock)),
+            Err(Stop::Failed(_))
+        ));
+        assert!(!ledger().pending.contains_key(&refused));
+        assert_eq!(ledger().stake_room, TokenAmount::ZERO);
+
+        let unknown = started(2);
+        *fake.pull_answer.borrow_mut() = Some(CallError::Unknown("rejected".into()));
+        assert!(matches!(
+            block_on(pull_stake(&fake, unknown, clock)),
+            Err(Stop::Retry(_))
+        ));
+        assert!(ledger().pending.contains_key(&unknown));
+        // asked again, it lands: minted
+        assert!(block_on(pull_stake(&fake, unknown, clock))
+            .unwrap()
+            .is_some());
+        assert!(!ledger().pending.contains_key(&unknown));
+
+        let too_old = started(3);
+        *fake.pull_answer.borrow_mut() = Some(CallError::Expired("TooOld".into()));
+        assert!(matches!(
+            block_on(pull_stake(&fake, too_old, clock)),
+            Err(Stop::Failed(why)) if why.starts_with("ALERT")
+        ));
+        assert!(
+            ledger().pending.contains_key(&too_old),
+            "never recorded as failed"
+        );
+        assert_eq!(ledger().stake_room, usdc(10));
+        // past the ledger's window the drive no longer asks
+        let calls = fake.calls.borrow().len();
+        let a_day_later = || at(2 + DEDUP_WINDOW.as_nanos() as u64 + 1);
+        block_on(drive_with(&fake, a_day_later, &open_pool));
+        assert_eq!(fake.calls.borrow().len(), calls);
     });
 }

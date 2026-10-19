@@ -165,9 +165,20 @@ pub fn pool_status<S: Store>(
         config.books_check_interval.0,
         now,
     )?;
-    // the ICP pocket's own latch, cleared with the Base one when a controller reopens
-    if state.pool().icp_shortfall_at.is_some() {
+    // the ICP pocket's own latch, cleared with the Base one when a controller reopens; and
+    // its own staleness once the pool has settings, as the Base books': a read that fails
+    // passes nothing
+    let pool = state.pool();
+    if pool.icp_shortfall_at.is_some() {
         return Err(PoolClosed::IcpShortfall);
+    }
+    if pool.settings.is_some() {
+        let interval = config.books_check_interval.0;
+        let checked_at = pool.icp_checked_at.ok_or(PoolClosed::IcpNeverChecked)?;
+        let since = now.saturating_duration_since(checked_at);
+        if since > interval.saturating_mul(types::books::STALE_INTERVALS) {
+            return Err(PoolClosed::IcpStale { since, interval });
+        }
     }
     Ok(())
 }

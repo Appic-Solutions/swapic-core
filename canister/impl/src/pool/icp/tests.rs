@@ -296,3 +296,167 @@ fn an_icp_shortfall_closes_the_pool_until_reopened() {
         assert_eq!(status(), Ok(()));
     });
 }
+
+/// Review fix: a stake whose pull lands while the check's balance read is out is in the lines
+/// read after the read and not in the balance it read. The check expects the lower of the
+/// lines before and after: no false shortfall, so nothing latches the pool closed.
+#[test]
+fn a_stake_landing_during_the_read_is_no_shortfall() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let tolerance = TokenAmount::ZERO;
+        let before = read_state(icp_lines);
+        // the balance read sees the pocket before the pull
+        let observed = before;
+        let id = types::hash::PoolOpId::new([3; 32]);
+        record_at(
+            PoolStep::StakeStarted {
+                id,
+                owner: PoolAccount::Icp(account(7)),
+                from: account(7),
+                amount: usdc(100),
+                created_at: at(2),
+            },
+            at(2),
+        )
+        .unwrap();
+        let shares = ledger().mint_now(usdc(100)).unwrap();
+        record_at(
+            PoolStep::StakedIcp {
+                id,
+                owner: PoolAccount::Icp(account(7)),
+                amount: usdc(100),
+                rebalance_share: TokenAmount::ZERO,
+                shares,
+                block: 9,
+            },
+            at(3),
+        )
+        .unwrap();
+        let after = read_state(icp_lines);
+        assert_eq!(after, usdc(1_100));
+        // the lines after alone would cry a shortfall of the stake
+        assert_eq!(
+            read_state(|state| icp_expected(state, observed, tolerance)),
+            (usdc(1_100), true)
+        );
+        assert_eq!(
+            judge(before, after, observed, tolerance),
+            (usdc(1_000), false)
+        );
+        // a real shortfall is still one
+        assert_eq!(
+            judge(before, after, usdc(999), tolerance),
+            (usdc(1_000), true)
+        );
+    });
+}
+
+/// Review fix: a read that fails passes nothing. Once the pool has settings, its guard
+/// refuses until a check read the ICP pocket's balance, and again when none did within
+/// three intervals, failed reads or not.
+#[test]
+fn a_failed_read_passes_nothing() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let interval = types::config::BooksInterval::DEFAULT.0;
+        let config = types::Config {
+            pool_chain: Some(ChainId::BASE),
+            ..types::Config::default()
+        };
+        let base_checked = |nanos: u64| {
+            append_event_at(
+                EventType::Books {
+                    chain_id: ChainId::BASE,
+                    step: BookStep::Checked {
+                        check: BalanceCheck {
+                            block: BlockNumber::new(nanos),
+                            observed: TokenAmount::ZERO,
+                            expected: TokenAmount::ZERO,
+                        },
+                        shortfall: false,
+                    },
+                },
+                at(nanos),
+            )
+            .unwrap();
+        };
+        let status = |nanos: u64| {
+            read_state(|state| crate::books::pool_status(state, &config, false, at(nanos)))
+        };
+        base_checked(10);
+        assert_eq!(status(11), Err(PoolClosed::IcpNeverChecked));
+        record_at(PoolStep::IcpCheckFailed, at(12)).unwrap();
+        assert_eq!(status(13), Err(PoolClosed::IcpNeverChecked));
+        record_at(
+            PoolStep::IcpChecked {
+                check: IcpCheck {
+                    observed: usdc(1_000),
+                    expected: usdc(1_000),
+                    shortfall: false,
+                },
+            },
+            at(14),
+        )
+        .unwrap();
+        assert_eq!(status(15), Ok(()));
+        // three intervals of failed reads later
+        let later = 14 + interval.as_nanos() as u64 * 3 + 1;
+        base_checked(later - 1);
+        record_at(PoolStep::IcpCheckFailed, at(later - 1)).unwrap();
+        assert!(matches!(status(later), Err(PoolClosed::IcpStale { .. })));
+    });
+}
+
+/// A payout stopped for a human is still between its start and its payment: the check
+/// leaves it out of what it expects, debited or not.
+#[test]
+fn a_stopped_payout_is_still_pending_for_the_check() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = register(swap_terms(1, usdc(100), usdc(1), at(1_000)));
+        record_at(
+            PoolStep::Arrived {
+                r#ref,
+                credit: credit(1),
+                amount: usdc(100),
+                block: BlockNumber::new(5),
+            },
+            at(3),
+        )
+        .unwrap();
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: r#ref.into_bytes(),
+                    path: PayoutPath::Ckusdc,
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+        for _ in 0..types::pool::MAX_PAYOUT_ATTEMPTS {
+            record_at(
+                PoolStep::AttemptFailed {
+                    r#ref,
+                    why: "the ledger answered nothing".into(),
+                },
+                at(5),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            crate::storage::pool::deposit(&r#ref).unwrap().status,
+            DepositStatus::PayoutFailed(_)
+        ));
+        let debited = usdc(901).checked_sub(TokenAmount::from(FEE)).unwrap();
+        let check = |observed| read_state(|state| icp_expected(state, observed, TokenAmount::ZERO));
+        assert_eq!(check(debited), (debited, false));
+        assert_eq!(check(usdc(1_000)), (debited, false));
+    });
+}

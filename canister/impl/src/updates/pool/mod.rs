@@ -24,6 +24,9 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
     crate::storage::pool::record(PoolStep::SettingsSet { settings })
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     crate::task_manager::restart_pool_arrivals_timer();
+    // the ICP pocket's first check now, so the pool's guard does not wait a whole interval
+    let tolerance = crate::storage::config::get().books_tolerance.0;
+    ic_cdk::spawn(pool::icp::check_icp_pocket(tolerance));
     Ok(())
 }
 

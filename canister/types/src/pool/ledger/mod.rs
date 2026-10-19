@@ -62,7 +62,7 @@ pub struct PoolLedger {
     /// The refs registered and not arrived, expired or unattributed.
     #[n(5)]
     pub open: BTreeSet<PoolRef>,
-    /// The refs arrived and not paid, minted or stopped for a human.
+    /// The refs arrived and not paid or minted, a payout stopped for a human included.
     #[n(6)]
     pub paying: BTreeSet<PoolRef>,
     /// Open registrations per party (payer and owner).
@@ -800,8 +800,9 @@ impl PoolLedger {
                         stopped = true;
                     }
                 });
+                // a stopped payout stays in `paying`: it is still between its start and its
+                // record of payment, which the ICP pocket's check leaves out
                 if stopped {
-                    ledger.paying.remove(r#ref);
                     if let Some((_, deposit)) = deposit_out.as_mut() {
                         deposit.status = DepositStatus::PayoutFailed(why);
                     }

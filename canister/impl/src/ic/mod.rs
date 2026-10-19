@@ -16,6 +16,9 @@ pub enum CallError {
     Unknown(String),
     /// The callee answered a refusal: nothing moved.
     Refused(String),
+    /// The ledger's deduplication window passed (`TooOld`): a retry can no longer tell
+    /// whether the first call ran, so its outcome stays unknown for good.
+    Expired(String),
 }
 
 impl std::fmt::Display for CallError {
@@ -23,6 +26,7 @@ impl std::fmt::Display for CallError {
         match self {
             CallError::Unknown(reason) => write!(f, "outcome unknown: {reason}"),
             CallError::Refused(reason) => write!(f, "refused: {reason}"),
+            CallError::Expired(reason) => write!(f, "outcome unknown for good: {reason}"),
         }
     }
 }
@@ -178,6 +182,9 @@ fn transfer_outcome(answer: Result<Nat, TransferError>) -> Result<u64, CallError
         Err(TransferError::TemporarilyUnavailable) => Err(CallError::Unknown(
             "the ledger is temporarily unavailable".to_string(),
         )),
+        Err(TransferError::TooOld) => Err(CallError::Expired(
+            "the transfer is too old for the ledger to deduplicate".to_string(),
+        )),
         Err(error) => Err(CallError::Refused(format!("{error:?}"))),
     }
 }
@@ -209,6 +216,9 @@ pub async fn icrc2_transfer_from(
         Err(TransferFromError::Duplicate { duplicate_of }) => Ok(nat_u64(&duplicate_of)),
         Err(TransferFromError::TemporarilyUnavailable) => Err(CallError::Unknown(
             "the ledger is temporarily unavailable".to_string(),
+        )),
+        Err(TransferFromError::TooOld) => Err(CallError::Expired(
+            "the pull is too old for the ledger to deduplicate".to_string(),
         )),
         Err(error) => Err(CallError::Refused(format!("{error:?}"))),
     }
@@ -479,9 +489,16 @@ mod tests {
             transfer_outcome(Err(TransferError::TemporarilyUnavailable)),
             Err(CallError::Unknown(_))
         ));
-        // too old to deduplicate: refused, and never sent again under a new instant
+        // too old to deduplicate: unknown for good, never a refusal (it may have run), and
+        // never sent again under a new instant
         assert!(matches!(
             transfer_outcome(Err(TransferError::TooOld)),
+            Err(CallError::Expired(_))
+        ));
+        assert!(matches!(
+            transfer_outcome(Err(TransferError::InsufficientFunds {
+                balance: Nat::from(0_u8)
+            })),
             Err(CallError::Refused(_))
         ));
     }

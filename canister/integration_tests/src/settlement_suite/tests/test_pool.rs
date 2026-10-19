@@ -176,6 +176,8 @@ fn world(canister_usdc: u64) -> World {
         encode_one(settings).unwrap(),
     );
     assert_eq!(set, Ok(()), "the settings read the ledger's fee");
+    // the ICP pocket's first check, which the settings start
+    world.settle();
     world.books_checked();
     world
 }
@@ -408,11 +410,17 @@ fn a_lost_answer_asked_again_pays_once() {
     let r#ref = world.arrive(ckusdc_swap(world.ledger), 2);
     world.settle();
     world.next_tick();
-    // the first answer was lost: the drive recorded it as a failure and asked again
-    let failed = world.pool_steps().into_iter().any(
-        |step| matches!(step, PoolStep::AttemptFailed { r#ref: failed, .. } if failed == r#ref),
-    );
-    assert!(failed, "the lost answer is in the log");
+    // the first answer was lost: asked again under the one dedup pair its start recorded,
+    // as an outcome unknown, which records nothing and counts no attempt
+    let steps = world.pool_steps();
+    let starts = steps
+        .iter()
+        .filter(|step| matches!(step, PoolStep::PayoutStarted { r#ref: started, .. } if *started == r#ref))
+        .count();
+    assert_eq!(starts, 1);
+    assert!(!steps
+        .iter()
+        .any(|step| matches!(step, PoolStep::AttemptFailed { .. })));
     let view = world.deposit(r#ref);
     assert_eq!(view.status, PoolDepositStatus::Paid);
     assert_eq!(world.balance(recipient()), Nat::from(usdc(99)), "paid once");
