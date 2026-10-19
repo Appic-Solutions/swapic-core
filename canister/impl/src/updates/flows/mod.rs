@@ -30,9 +30,10 @@ pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
 /// transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
 ///
 /// `reading`, when given, is `chain_id`'s reading the watcher priced the relay on. It is
-/// stored right after the role and the halt, exactly as `push_chain_data` stores one, so
-/// no separate push has to land before this call; an invalid one refuses the call with
-/// `push_chain_data`'s error text. With none, the stored reading is used as it is.
+/// stored right after the role and the halt, as `push_chain_data` stores one, so no
+/// separate push has to land before this call; an invalid one refuses the call with
+/// `push_chain_data`'s error text. A reading whose block is not above the stored one's is
+/// kept out and the stored one is used, as it is with none.
 #[update]
 pub async fn relay_gasless(
     chain_id: u64,
@@ -269,9 +270,10 @@ pub fn register_evm_quote(quote: EvmToIcpQuote) -> Result<EvmQuoteRegistered, Fl
 /// Answers the signed transaction's id in `signed_txs`.
 ///
 /// `reading`, when given, is `chain_id`'s reading the watcher priced the finish on. It is
-/// stored right after the role and the halt, exactly as `push_chain_data` stores one, so
-/// no separate push has to land before this call; an invalid one refuses the call with
-/// `push_chain_data`'s error text. With none, the stored reading is used as it is.
+/// stored right after the role and the halt, as `push_chain_data` stores one, so no
+/// separate push has to land before this call; an invalid one refuses the call with
+/// `push_chain_data`'s error text. A reading whose block is not above the stored one's is
+/// kept out and the stored one is used, as it is with none.
 #[update]
 pub async fn finish_cctp(
     chain_id: u64,

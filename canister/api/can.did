@@ -856,9 +856,10 @@ service : (InitArg) -> {
   // Answers the signed transaction's id in `signed_txs`.
   // 
   // `reading`, when given, is `chain_id`'s reading the watcher priced the finish on. It is
-  // stored right after the role and the halt, exactly as `push_chain_data` stores one, so
-  // no separate push has to land before this call; an invalid one refuses the call with
-  // `push_chain_data`'s error text. With none, the stored reading is used as it is.
+  // stored right after the role and the halt, as `push_chain_data` stores one, so no
+  // separate push has to land before this call; an invalid one refuses the call with
+  // `push_chain_data`'s error text. A reading whose block is not above the stored one's is
+  // kept out and the stored one is used, as it is with none.
   finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64, opt ChainData) -> (
       Result_4,
     );
@@ -941,9 +942,10 @@ service : (InitArg) -> {
   // transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
   // 
   // `reading`, when given, is `chain_id`'s reading the watcher priced the relay on. It is
-  // stored right after the role and the halt, exactly as `push_chain_data` stores one, so
-  // no separate push has to land before this call; an invalid one refuses the call with
-  // `push_chain_data`'s error text. With none, the stored reading is used as it is.
+  // stored right after the role and the halt, as `push_chain_data` stores one, so no
+  // separate push has to land before this call; an invalid one refuses the call with
+  // `push_chain_data`'s error text. A reading whose block is not above the stored one's is
+  // kept out and the stored one is used, as it is with none.
   relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result_4);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;

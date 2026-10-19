@@ -14,10 +14,13 @@ pub fn store_reading(
     data: ChainData,
     at: Timestamp,
 ) -> Result<(), PushChainDataError> {
-    let reading = types::ChainReading::try_from(data)
-        .map_err(|e| PushChainDataError::InvalidData(e.into()))?;
-    chain_data::put(chain_id, reading, at);
+    chain_data::put(chain_id, validated(data)?, at);
     Ok(())
+}
+
+/// `data` as a reading this canister prices gas with, or the push's refusal of it.
+pub fn validated(data: ChainData) -> Result<types::ChainReading, PushChainDataError> {
+    types::ChainReading::try_from(data).map_err(|e| PushChainDataError::InvalidData(e.into()))
 }
 
 /// Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
