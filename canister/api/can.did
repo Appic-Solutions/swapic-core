@@ -483,6 +483,7 @@ type GuardError = variant {
   Halted;
   RoleNotSet : Role;
 };
+type IcpAccount = record { owner : principal; subaccount : opt blob };
 // The ICP to EVM quote the quoter registers (spec 4b.1, 4b.7). `route` is the router
 // params of the Ethereum continuation as one ABI tuple: its `rail`, `dstChainId`,
 // `maxFee`, `minFinality`, `eco` and `dst` are the user's original destination terms,
@@ -498,6 +499,7 @@ type IcpToEvmQuote = record {
   min_ckusdc : nat;
   route : blob;
 };
+type IcpTokenEntry = record { ledger : principal; icpswap_pool : principal };
 // What an install starts from: the whole config and both service roles, so a canister is
 // never live on default knobs or without its quoter and watcher. Each is validated as
 // `set_config` and `set_roles` validate it, and anything invalid fails the install.
@@ -515,6 +517,109 @@ type PocketError = variant {
   Overflow;
   InsufficientReserved : record { requested : nat; "reserved" : nat };
   InsufficientAvailable : record { requested : nat; available : nat };
+};
+type PocketView = record { free : nat; "reserved" : nat; in_flight : nat };
+// Who owns shares.
+type PoolAccount = variant {
+  // An EIP-55 or lowercase 0x address.
+  Evm : text;
+  Icp : IcpAccount;
+};
+type PoolAccountView = record { value_usdc : nat; shares : nat };
+type PoolDepositKind = variant {
+  Stake : record { owner : PoolAccount };
+  // `token_out`: a ledger in `pool_settings.icp_tokens`, ckUSDC itself included.
+  Swap : record {
+    min_out : nat;
+    recipient : IcpAccount;
+    token_out : principal;
+  };
+};
+type PoolDepositStatus = variant {
+  Arrived;
+  Paying;
+  Paid;
+  Unattributed;
+  PayoutFailed : text;
+  Registered;
+  Expired;
+};
+type PoolDepositView = record {
+  ref : blob;
+  status : PoolDepositStatus;
+  shares_minted : opt nat;
+  base_tx : opt blob;
+  premium : nat;
+  arrived : opt nat;
+  kind : PoolDepositKind;
+  paid : opt nat;
+  rail : PoolRail;
+  min_usdc : nat;
+  src_chain : nat64;
+  payout_block : opt nat64;
+  rebalance_share : nat;
+};
+type PoolError = variant {
+  NotDeep : record { have : nat64; needed : nat64 };
+  Sanctioned : text;
+  TokenNotListed : principal;
+  // The role guard, or an argument the canister does not take.
+  NotAllowed : text;
+  // `require_pool_open`'s reason.
+  Closed : text;
+  AlreadyCredited;
+  AboveTvlCap : record { cap : nat; would_be : nat };
+  AboveSwapCap : record { cap : nat };
+  // The ref is registered already.
+  Known;
+  // The ref does not match section 2.
+  BadRef;
+  // No registration under this ref.
+  Unknown;
+  // An ICRC or ICPSwap call failed.
+  Ledger : text;
+  BadSettings : text;
+  // An outcall failed: ask again.
+  Unavailable : text;
+  // The proof failed: why.
+  BadArrival : text;
+  Halted;
+  PremiumTooLow : record { least : nat };
+  Expired;
+  ShortShares : record { have : nat; need : nat };
+};
+type PoolRail = variant { Eco; Cctp; SameChain };
+type PoolSettings = record {
+  // An arrival this long past `expires_at` is still credited (default 120).
+  deposit_grace_s : nat64;
+  // Micro USDC, launch 1_000_000_000 ($1,000).
+  per_swap_cap : nat;
+  ckusdc_ledger : principal;
+  // Launch 10.
+  premium_bps : nat16;
+  // Micro USDC, launch 10_000_000_000 ($10,000).
+  tvl_cap : nat;
+  icp_tokens : vec IcpTokenEntry;
+  // Off until a controller opens the pool for swaps.
+  pool_open_for_swaps : bool;
+  // Open (registered, not arrived) deposits per `src_payer`, and per EVM or ICP owner
+  // (default 3).
+  max_open_per_payer : nat32;
+  // The canister's own Base read while registrations wait (default 300).
+  arrival_backup_s : nat64;
+  // The most of the ICP pocket held for open swaps at once (default 5000, half).
+  max_held_bps : nat16;
+};
+type PoolStateView = record {
+  icp : PocketView;
+  per_swap_cap : nat;
+  base : PocketView;
+  open : bool;
+  total_shares : nat;
+  premium_bps : nat16;
+  tvl_cap : nat;
+  total_assets : nat;
+  closed_reason : opt text;
 };
 // Why `push_chain_data` stored nothing.
 type PushChainDataError = variant {
@@ -655,9 +760,10 @@ type Result_10 = variant { Ok : blob; Err : RegisterQuoteError };
 type Result_11 = variant { Ok; Err : SetConfigError };
 type Result_12 = variant { Ok; Err : FlowCallError };
 type Result_13 = variant { Ok; Err : GuardError };
-type Result_14 = variant { Ok; Err : SetRolesError };
-type Result_15 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_16 = variant { Ok : nat; Err : FlowCallError };
+type Result_14 = variant { Ok; Err : PoolError };
+type Result_15 = variant { Ok; Err : SetRolesError };
+type Result_16 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_17 = variant { Ok : nat; Err : FlowCallError };
 type Result_2 = variant { Ok : nat64; Err : GuardError };
 type Result_3 = variant { Ok : text; Err : SignError };
 type Result_4 = variant { Ok : nat64; Err : text };
@@ -900,6 +1006,16 @@ service : (InitArg) -> {
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
+  // An account's shares and what they are worth now. An account that is no account (an
+  // address that is none, a subaccount that is not 32 bytes) traps with the reason.
+  pool_account : (PoolAccount) -> (PoolAccountView) query;
+  // A deposit by its ref, if one is registered under it.
+  pool_deposit : (blob) -> (opt PoolDepositView) query;
+  // The pool's knobs; the launch defaults while none are set.
+  pool_settings : () -> (PoolSettings) query;
+  // Whether the pool is open and why not, both pockets' lines, the stakers' assets and the
+  // shares outstanding, and the caps.
+  pool_state : () -> (PoolStateView) query;
   // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
   // canister would otherwise spend an outcall on before every decision. It moves no money,
   // so the halt switch does not gate it: a halted canister still wants a current view of the
@@ -970,9 +1086,13 @@ service : (InitArg) -> {
   // shortfall the last balance check latched, once someone has looked at it. Recorded in
   // the log on the pool chain's books; the pool's guard reads it.
   set_pool_paused : (bool) -> (Result_1);
+  // Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
+  // ledger's fee and every listed token's (`icrc1_fee`), which the registrations' premium
+  // floor reads.
+  set_pool_settings : (PoolSettings) -> (Result_14);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_14);
+  set_roles : (principal, principal) -> (Result_15);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -982,7 +1102,7 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_15);
+  set_sanctioned : (vec text, vec text) -> (Result_16);
   // Every transaction the canister signed after `after_id`, oldest first, at most `limit`
   // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
   // backup.
@@ -992,7 +1112,7 @@ service : (InitArg) -> {
   // the quote hash (and from no other), and answers what was pulled. The engine then swaps
   // on ICPSwap when needed, withdraws through the ck minter to the canister's own Ethereum
   // address, and continues on Ethereum once the USDC lands.
-  start_icp_swap : (blob) -> (Result_16);
+  start_icp_swap : (blob) -> (Result_17);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;
   version : () -> (text) query;

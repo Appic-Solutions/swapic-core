@@ -1,0 +1,48 @@
+//! What the pool's fold holds (interface section 3).
+
+use crate::pool;
+use crate::state::Store;
+use crate::storage::events::read_state;
+use candid::Nat;
+use ic_cdk::query;
+pub use settlement_api::types::pool::{
+    PoolAccount, PoolAccountView, PoolDepositView, PoolSettings, PoolStateView,
+};
+use types::hash::PoolRef;
+
+/// The pool's knobs; the launch defaults while none are set.
+#[query]
+pub fn pool_settings() -> PoolSettings {
+    let settings = crate::storage::pool::ledger().settings.unwrap_or_default();
+    PoolSettings::from(&settings)
+}
+
+/// Whether the pool is open and why not, both pockets' lines, the stakers' assets and the
+/// shares outstanding, and the caps.
+#[query]
+pub fn pool_state() -> PoolStateView {
+    let closed = pool::pool_closed();
+    pool::state_view(&crate::storage::pool::ledger(), closed)
+}
+
+/// An account's shares and what they are worth now. An account that is no account (an
+/// address that is none, a subaccount that is not 32 bytes) traps with the reason.
+#[query]
+pub fn pool_account(account: PoolAccount) -> PoolAccountView {
+    let account = types::pool::PoolAccount::try_from(account)
+        .unwrap_or_else(|error| ic_cdk::trap(&error.to_string()));
+    let ledger = crate::storage::pool::ledger();
+    let shares = crate::storage::pool::shares_of(&account);
+    PoolAccountView {
+        shares: Nat::from(shares.get()),
+        value_usdc: Nat::from(pool::value_of(&ledger, shares)),
+    }
+}
+
+/// A deposit by its ref, if one is registered under it.
+#[query]
+pub fn pool_deposit(r#ref: Vec<u8>) -> Option<PoolDepositView> {
+    let r#ref = PoolRef::new(<[u8; 32]>::try_from(r#ref.as_slice()).ok()?);
+    read_state(|state| state.store().pool_deposit(&r#ref))
+        .map(|deposit| PoolDepositView::of(r#ref, deposit))
+}

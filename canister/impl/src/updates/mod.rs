@@ -9,6 +9,7 @@ mod chain;
 mod config;
 mod flows;
 mod ops;
+mod pool;
 mod quotes;
 mod roles;
 
@@ -17,5 +18,6 @@ pub use chain::*;
 pub use config::*;
 pub use flows::*;
 pub use ops::*;
+pub use pool::*;
 pub use quotes::*;
 pub use roles::*;

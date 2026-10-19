@@ -10,6 +10,7 @@ mod config;
 mod events;
 mod flows;
 mod ops;
+mod pool;
 mod quotes;
 mod swaps;
 
@@ -19,5 +20,6 @@ pub use config::*;
 pub use events::*;
 pub use flows::*;
 pub use ops::*;
+pub use pool::*;
 pub use quotes::*;
 pub use swaps::*;

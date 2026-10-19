@@ -7,6 +7,7 @@ pub mod evm_reads;
 pub mod guards;
 pub mod ic;
 pub mod lifecycle;
+pub mod pool;
 pub mod queries;
 pub mod relay;
 pub mod rpc;

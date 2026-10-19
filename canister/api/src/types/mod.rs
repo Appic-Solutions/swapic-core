@@ -7,6 +7,7 @@ pub mod events;
 pub mod evm;
 pub mod flow;
 pub mod init;
+pub mod pool;
 pub mod quote;
 pub mod rpc;
 pub mod swap;
