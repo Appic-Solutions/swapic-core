@@ -10,6 +10,7 @@ pub mod chain;
 pub mod chain_data;
 pub mod checked_amount;
 pub mod config;
+pub mod eco;
 pub mod entry;
 pub mod events;
 pub mod evm;

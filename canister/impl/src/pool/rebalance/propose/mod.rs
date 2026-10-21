@@ -33,12 +33,6 @@ use types::{ChainId, EvmAddress, Timestamp, TokenAmount};
 /// The latest an order proposed may run: it runs at once, or never.
 pub const MAX_ORDER_LIFE_S: u64 = 900;
 
-/// The latest its route may be filled.
-pub const MAX_ROUTE_LIFE_S: u64 = 3_600;
-
-/// The latest an unfilled intent's reward may come back: Eco's own week, and a day.
-pub const MAX_REWARD_LIFE_S: u64 = 8 * 24 * 3_600;
-
 /// What the checks read besides the order and the move: the source chain the order runs on
 /// (its Swapic, its USDC, the chains it may reach), the destination's USDC, Eco's prover, the
 /// most gas the move's own transaction takes there, and what the canister's own transactions
@@ -158,14 +152,6 @@ pub fn check(
             "the intent's creator is not the canister: an unfilled one would refund another",
         ));
     }
-    match setup.prover {
-        Some(prover) if prover == intent.prover => {}
-        Some(_) => return Err(refused("the intent names another prover than Eco's")),
-        None => return Err(refused("no Eco prover is configured")),
-    }
-    if setup.chains.eco_portal != Some(intent.portal) {
-        return Err(refused("the intent is filled on another Portal than Eco's"));
-    }
     let cap = settings.proposal_fee_cap(item.amount);
     if fee > cap {
         return Err(refused(format!("Eco keeps {fee}, above the cap of {cap}")));
@@ -187,16 +173,16 @@ pub fn check(
             MAX_ORDER_LIFE_S
         )));
     }
-    if intent.route_deadline < deadline
-        || intent.route_deadline > now_s.saturating_add(MAX_ROUTE_LIFE_S)
-    {
-        return Err(refused("the intent's route deadline is not short"));
-    }
-    if intent.reward_deadline < intent.route_deadline
-        || intent.reward_deadline > now_s.saturating_add(MAX_REWARD_LIFE_S)
-    {
-        return Err(refused("the intent's refund comes too late"));
-    }
+    // Eco's prover and Portal, short deadlines: the rules every intent the canister funds
+    // meets (`pool::eco`)
+    crate::pool::eco::check_intent(
+        &intent,
+        setup.chains.eco_portal,
+        setup.prover,
+        deadline,
+        now_s,
+    )
+    .map_err(refused)?;
     if !(MIN_GAS_LIMIT..=setup.max_gas).contains(&gas_limit) {
         return Err(refused(format!(
             "a gas limit of {gas_limit} is not between {MIN_GAS_LIMIT} and {}",

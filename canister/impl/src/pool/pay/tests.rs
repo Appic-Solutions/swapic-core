@@ -86,6 +86,7 @@ impl World {
             },
             swapic: swapic_address(),
             usdc: base_usdc(),
+            eco_prover: Some(address("0xEC08fb4647f3f50d1162a578d481266687C60fc5")),
         }
     }
 }
@@ -529,4 +530,38 @@ fn one_payout_is_signed_once_at_a_time_and_retried_with_its_order() {
         assert_eq!(signable(0), Ok(Some(again.get())));
         assert!(crate::storage::events::verify_replay());
     });
+}
+
+/// P11e (a HIGH of the collected list): a payout's onward intent names Eco's own prover; any
+/// other could pay the reward, the canister's USDC, to whoever it says.
+#[test]
+fn a_payout_intent_of_another_prover_is_refused() {
+    let world = World::new();
+    let theirs = eco();
+    let terms = terms_of(&theirs, &world);
+    // rewritten: the reward's prover a stranger's
+    let mut order = theirs.clone();
+    let mut call = publishAndFundCall::abi_decode(&order.steps[0].data).unwrap();
+    call.reward.prover = swapic::addr(address("0x000000000000000000000000000000000000dEaD"));
+    order.steps[0].data = call.abi_encode().into();
+    assert!(matches!(
+        check(&waiting(&order, terms), &order, &world, 600_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("another prover")
+    ));
+    // with no prover configured, no Eco payout is signed
+    let mut blind = world.payer();
+    blind.eco_prover = None;
+    assert!(matches!(
+        check_order(
+            &waiting(&theirs, terms),
+            &theirs,
+            &swapic::encode_order(&theirs),
+            600_000,
+            &blind,
+            &PayoutSettings::default(),
+            deadline_of(&theirs) - 600,
+            nobody,
+        ),
+        Err(PoolError::NotAllowed(why)) if why.contains("no Eco prover")
+    ));
 }

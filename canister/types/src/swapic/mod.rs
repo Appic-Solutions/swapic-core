@@ -170,6 +170,11 @@ pub struct PublishedIntent {
     pub creator: EvmAddress,
     /// `abi.encode` of the route, its amounts as the Runner wrote them.
     pub route: Vec<u8>,
+    /// The reward, as published: what its hash, and so the intent's, is made of.
+    pub prover: EvmAddress,
+    pub reward_deadline: u64,
+    pub reward_native: U256,
+    pub reward_tokens: Vec<(EvmAddress, U256)>,
 }
 
 /// The intent an `IntentPublished` log publishes, None for a log that is not one.
@@ -186,6 +191,14 @@ pub fn read_intent_published(topics: &[[u8; 32]], data: &[u8]) -> Option<Publish
         destination: event.destination,
         creator: evm(event.creator),
         route: event.route.to_vec(),
+        prover: evm(event.prover),
+        reward_deadline: event.rewardDeadline,
+        reward_native: event.rewardNativeAmount,
+        reward_tokens: event
+            .rewardTokens
+            .iter()
+            .map(|token| (evm(token.token), token.amount))
+            .collect(),
     })
 }
 
