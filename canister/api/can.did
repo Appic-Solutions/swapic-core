@@ -6,12 +6,16 @@ type ActionAmounts = record {
   pool_transfer : opt nat;
   relay_deliver : nat;
   complete_swap : nat;
+  // The rebalancing's rows (P11c), optional as the pool's.
+  pool_move : opt nat;
   release : nat;
+  pool_ck_deposit : opt nat;
   pool_approve : opt nat;
   // The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
   // ConfigChanged JSON when absent, so a config without them keeps its shape.
   pool_payout : opt nat;
   relay_eco : nat;
+  pool_move_finish : opt nat;
 };
 // One gas limit per action the canister signs.
 type ActionGas = record {
@@ -21,12 +25,18 @@ type ActionGas = record {
   pool_transfer : opt nat64;
   relay_deliver : nat64;
   complete_swap : nat64;
+  // The rebalancing's rows (P11c), optional as the pool's: a move's own order, its CCTP
+  // finish (the limit the watcher finishes the canister's own move with), and a Base to
+  // ICP Eco move's ck deposit on Ethereum.
+  pool_move : opt nat64;
   release : nat64;
+  pool_ck_deposit : opt nat64;
   pool_approve : opt nat64;
   // The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
   // ConfigChanged JSON when absent, so a config without them keeps its shape.
   pool_payout : opt nat64;
   relay_eco : nat64;
+  pool_move_finish : opt nat64;
 };
 // Why an event was not appended. Nothing was written.
 type AppendError = variant {
@@ -442,6 +452,9 @@ type FlowSettings = record {
   // The ckETH minter, which withdraws ckERC20 tokens too.
   ck_minter : opt principal;
   ckusdc_ledger : opt principal;
+  // Eco's prover, the one a rebalance proposal's intent may name: an intent proven by
+  // any other pays its reward to whoever that prover says (P11c).
+  eco_prover : opt text;
   // The furthest ahead a relayed quote's deadline may be.
   relay_window_s : nat64;
   // The only ICPSwap pools a quote may name.
@@ -450,6 +463,9 @@ type FlowSettings = record {
   ethereum_usdc : opt text;
   // The chain the ck minter withdraws to and the continuation runs on: Ethereum.
   ethereum_chain_id : nat64;
+  // The ck minter's ERC-20 deposit helper on Ethereum (`depositErc20` with subaccounts):
+  // a Base to ICP rebalance move filled by Eco is deposited through it (P11c).
+  ck_helper : opt text;
 };
 // A flow as the fold holds it.
 type FlowView = record {
@@ -522,6 +538,37 @@ type InitArg = record {
 };
 // The leg of a swap a transaction attempt was signed for.
 type Leg = variant { Payout; Burn; Mint; Refund; Reclaim };
+type MoveDirection = variant { IcpToBase; BaseToIcp };
+// The controller's answer to a stuck move (`resolve_move`): send it on from where it
+// stands, or write it off with why.
+type MoveResolution = variant { Lost : text; Retry };
+// Where a move stands. `Signed` is the id of its transaction in `signed_txs`.
+type MoveStatus = variant {
+  Routed;
+  Arrived;
+  Burned;
+  Stuck : text;
+  Open;
+  Landed;
+  Signed : nat64;
+};
+// One move.
+type MoveView = record {
+  id : nat64;
+  // The move's ref (32 bytes): the `Order.ref` and envelope ref of any route for it.
+  ref : blob;
+  status : MoveStatus;
+  direction : MoveDirection;
+  arrived : opt nat;
+  // Micro USDC, the canister's own CCTP route estimate.
+  own_route_cost : nat;
+  opened_at_ns : nat64;
+  // Proposals are accepted until then; none for an urgent move.
+  window_ends_ns : opt nat64;
+  urgent : bool;
+  // Micro USDC.
+  amount : nat;
+};
 // What a controller does with an orphan.
 type OrphanAction = variant {
   // Booked to the Base books' unattributed line.
@@ -815,6 +862,16 @@ type RailTokenError = variant {
   // The chain has no token configured for the rail.
   NoRailToken : record { rail : text; chain_id : nat64 };
 };
+type RebalanceSettings = record {
+  max_move : nat;
+  standard_when_idle : bool;
+  daily_cap : nat;
+  proposal_window_s : nat64;
+  min_move : nat;
+  band_bps : nat16;
+  target_icp_bps : nat16;
+  max_proposal_fee_bps : nat16;
+};
 // The arrival swap a CCTP Swap completes with (ABI v3 `Recipe`): `target` is called with
 // `data` paying the Runner, rescaled to what arrived by `scaler` when one is named.
 // Addresses are EVM addresses.
@@ -864,8 +921,8 @@ type ReplayError = variant {
 };
 type Result = variant { Ok : AuditProgress; Err : GuardError };
 type Result_1 = variant { Ok; Err : text };
-type Result_10 = variant { Ok; Err : PushChainDataError };
-type Result_11 = variant { Ok; Err : PoolError };
+type Result_10 = variant { Ok; Err : PoolError };
+type Result_11 = variant { Ok; Err : PushChainDataError };
 type Result_12 = variant { Ok : blob; Err : RegisterQuoteError };
 type Result_13 = variant { Ok; Err : SetConfigError };
 type Result_14 = variant { Ok; Err : FlowCallError };
@@ -1033,6 +1090,8 @@ type TxPurpose = variant {
   Relay : blob;
   // An orphan sent back, by the hash of its credit key.
   PoolTransfer : blob;
+  // A rebalance move's own transaction, by the move's id.
+  PoolMove : nat64;
   Finish : blob;
   Cancel : nat64;
   Reclaim : blob;
@@ -1147,6 +1206,12 @@ service : (InitArg) -> {
   // The ICP routes every ICP path of the pool reads: the ICP/ckUSDC pool, and each listed
   // token's route. Empty while none are set.
   icp_routes : () -> (IcpRoutesView) query;
+  // Anyone (the watcher), refused while halted: an ICP to Base move's USDC reached the
+  // canister's Base address in `base_tx` (and, for an Eco route, the order's `src_tx` on
+  // `src_chain`; an empty `src_tx` names none). The canister reads the receipts itself, proves
+  // the transfer carries the move's own ref (its CCTP envelope, or the Eco source's
+  // `OrderStarted`), and credits the move once.
+  note_move_arrival : (nat64, blob, nat64, blob) -> (Result_7);
   // Watcher-only, refused while halted. The watcher saw a USDC transfer to the canister's
   // Base address in `base_tx` (and, for an Eco arrival, the order's `src_tx` on `src_chain`;
   // an empty `src_tx` names none). The canister reads the receipt itself (one batched
@@ -1174,12 +1239,16 @@ service : (InitArg) -> {
   // An account's shares and what they are worth now. An account that is no account (an
   // address that is none, a subaccount that is not 32 bytes) traps with the reason.
   pool_account : (PoolAccount) -> (PoolAccountView) query;
-  // Controller-only, refused while halted, once per deploy: reads the canister's USDC allowance
-  // to Swapic on the pool chain and, below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so
-  // every pool payout is one signature of `Swapic.run`. Safe because `run` pulls only from
-  // `payer == msg.sender`. An allowance already in place answers `Known`; an approval on its
-  // way answers `Unavailable`.
-  pool_approve_swapic : () -> (Result_8);
+  // Controller-only, refused while halted, once per deploy: the canister's standing USDC
+  // allowance to the ck minter's deposit helper on Ethereum (flow settings' `ck_helper`), which
+  // a move to ICP by Eco deposits through. An allowance in place answers `Known`.
+  pool_approve_ck_helper : () -> (Result_8);
+  // Controller-only, refused while halted, once per deploy and chain (Base, and Ethereum for
+  // the moves to Base, P11c): reads the canister's USDC allowance to Swapic on `chain_id` and,
+  // below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so every pool payout and move is one
+  // signature of `Swapic.run`. Safe because `run` pulls only from `payer == msg.sender`. An
+  // allowance already in place answers `Known`; an approval on its way answers `Unavailable`.
+  pool_approve_swapic : (nat64) -> (Result_8);
   // A deposit by its ref, if one is registered under it.
   pool_deposit : (blob) -> (opt PoolDepositView) query;
   // Quoter-only, refused while halted. After a commit that met `Known`, whether the
@@ -1195,6 +1264,11 @@ service : (InitArg) -> {
   // Whether the pool is open and why not, both pockets' lines, the stakers' assets and the
   // shares outstanding, and the caps.
   pool_state : () -> (PoolStateView) query;
+  // Watcher-only, refused while halted and while the pool is closed: an order (`abi.encode` of
+  // an Order) for move `id`, signed with `gas_limit` if its route is taken. Checked as
+  // untrusted input, every rule of the spec's section 3.4; taken only within the move's window
+  // and when cheaper than any taken before: the cheapest at the window's end wins.
+  propose_rebalance : (nat64, blob, nat64) -> (Result_10);
   // Watcher-only. Ambient chain data: the head and the gas prices the watcher saw, which the
   // canister would otherwise spend an outcall on before every decision. It moves no money,
   // so the halt switch does not gate it: a halted canister still wants a current view of the
@@ -1203,7 +1277,13 @@ service : (InitArg) -> {
   // The record carries no instant. The canister stamps what it stores with its own clock,
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
-  push_chain_data : (nat64, ChainData) -> (Result_10);
+  push_chain_data : (nat64, ChainData) -> (Result_11);
+  // The open and in-flight moves, in id order.
+  rebalance_moves : () -> (vec MoveView) query;
+  // The rebalancing's knobs; the defaults while none are set.
+  rebalance_settings : () -> (RebalanceSettings) query;
+  // The moves stopped for a controller, held where they are (in flight where they left).
+  rebalance_stuck : () -> (vec MoveView) query;
   // Quoter-only, refused while halted and while the pool is closed. Registers a deposit at
   // the user's commit (interface section 4): the ref must be the one its terms commit to,
   // the fee included; it expires within 15 minutes; its token is listed; its payer and owner
@@ -1212,7 +1292,7 @@ service : (InitArg) -> {
   // and, on a ckUSDC payout, pays at least its own minimum, and reserves `min_usdc - premium`
   // of the ICP pocket within `max_held_bps` of it; a stake holds its TVL room. The hold is
   // released when it expires.
-  register_pool_deposit : (PoolDeposit) -> (Result_11);
+  register_pool_deposit : (PoolDeposit) -> (Result_10);
   // Quoter-only, for a quote of either gas mode. Records a quote the quoter handed a user,
   // so the funds that arrive later can be matched to it, and returns the hash the deposit
   // must carry. Pre-money, so nothing is written to the log. Refuses what a claim would
@@ -1244,11 +1324,15 @@ service : (InitArg) -> {
   relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result_4);
   // A gasless relay's status: signed, then confirmed or failed at depth.
   relay_status : (blob) -> (opt RelayStatus) query;
+  // Controller-only, refused while halted: a stuck move sent on from where it stands
+  // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
+  // never ran asked again; a wait read again), or written off with why (`Lost`).
+  resolve_move : (nat64, MoveResolution) -> (Result_10);
   // Controller-only, refused while halted (Jeff, 2026-10-19: orphans are ALWAYS held for a
   // controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
   // once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the
   // fee kept for its gas; `Book` books it to the Base books' unattributed line.
-  resolve_orphan : (blob, OrphanAction) -> (Result_11);
+  resolve_orphan : (blob, OrphanAction) -> (Result_10);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
@@ -1267,11 +1351,11 @@ service : (InitArg) -> {
   // ICP/ckUSDC pool, and each listed token's route, directly through its ckUSDC pool or
   // through ICP. Reads the ICP ledger off the ICP/ckUSDC pool and every route ledger's fee.
   // No token has a size cap of its own: the pool's per swap cap applies.
-  set_icp_routes : (opt principal, vec IcpRoute) -> (Result_11);
+  set_icp_routes : (opt principal, vec IcpRoute) -> (Result_10);
   // Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
   // fee, the rebalancing share's floor, how long a waiting payout waits for an order, and the
   // most gas a payout order is signed with.
-  set_payout_settings : (PayoutSettings) -> (Result_11);
+  set_payout_settings : (PayoutSettings) -> (Result_10);
   // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
   // shortfall the last balance check latched, once someone has looked at it. Recorded in
   // the log on the pool chain's books; the pool's guard reads it.
@@ -1279,7 +1363,9 @@ service : (InitArg) -> {
   // Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
   // ledger's fee and every listed token's (`icrc1_fee`), which the registrations' premium
   // floor reads.
-  set_pool_settings : (PoolSettings) -> (Result_11);
+  set_pool_settings : (PoolSettings) -> (Result_10);
+  // Controller-only, refused while halted: the rebalancing's knobs, held together.
+  set_rebalance_settings : (RebalanceSettings) -> (Result_10);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
   set_roles : (principal, principal) -> (Result_16);
