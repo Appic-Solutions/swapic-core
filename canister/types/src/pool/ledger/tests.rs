@@ -1012,11 +1012,11 @@ fn an_arrival_is_measured_on_what_arrived() {
     full.step(arrived(stake_ref, 9, usdc(10))).unwrap();
 }
 
-/// The premium floor both sides use (aligned with P13a): the settings' share rounded up, and
-/// never below the ckUSDC fee for a ckUSDC payout, or the ckUSDC fee and twice the token's
-/// fee for another token.
+/// The premium floor both sides use (interface section 4, 2026-10-21): the settings' share
+/// rounded up, and never below what the pool pays in ckUSDC: one ckUSDC fee for a ckUSDC
+/// payout, three for a token's ICPSwap path. A token's own fee is never added to micro USDC.
 #[test]
-fn the_premium_floor_is_the_quoters() {
+fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
     let token = Principal::from_slice(&[0x70; 10]);
     let settings = PoolSettings {
         icp_tokens: vec![crate::pool::IcpToken {
@@ -1028,31 +1028,27 @@ fn the_premium_floor_is_the_quoters() {
                 ledger: ckusdc(),
                 fee: TokenAmount::from(FEE),
             },
+            // a token whose fee in its own units is far larger than a micro USDC amount
             LedgerFee {
                 ledger: token,
-                fee: TokenAmount::from(7_000_u32),
+                fee: TokenAmount::from(70_000_000_u32),
             },
         ],
         ..settings()
     };
-    // a small swap: the fees decide
+    // a small swap: the ckUSDC fees decide, never the token's
     assert_eq!(
         least_premium(&settings, usdc(2), ckusdc()),
         Some(TokenAmount::from(FEE))
     );
     assert_eq!(
         least_premium(&settings, usdc(2), token),
-        Some(TokenAmount::from(FEE + 2 * 7_000))
+        Some(TokenAmount::from(3 * FEE))
     );
     // a large one: 10 bps of it, rounded up
     let large = usdc(1_000).checked_add(TokenAmount::ONE).unwrap();
     assert_eq!(
         least_premium(&settings, large, token),
         Some(TokenAmount::from(1_000_001_u32))
-    );
-    // a token with no fee read has no floor, and is refused
-    assert_eq!(
-        least_premium(&settings, usdc(2), Principal::from_slice(&[0x72; 10])),
-        None
     );
 }
