@@ -18,7 +18,9 @@ pub fn set_rebalance_settings(settings: RebalanceSettings) -> Result<(), PoolErr
 /// canister's Base address in `base_tx` (and, for an Eco route, the order's `src_tx` on
 /// `src_chain`; an empty `src_tx` names none). The canister reads the receipts itself, proves
 /// the transfer carries the move's own ref (its CCTP envelope, or the Eco source's
-/// `OrderStarted`), and credits the move once.
+/// `OrderStarted`), and credits the move once. A caller other than the watcher is held to 10
+/// reports a minute in total and 3 an hour per `base_tx` (P11e), refused `Unavailable` before
+/// any outcall.
 #[update]
 pub async fn note_move_arrival(
     id: u64,

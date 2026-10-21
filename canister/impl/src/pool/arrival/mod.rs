@@ -1158,6 +1158,8 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
         settlement_api::types::pool::bytes32("base_tx", &arrival.base_tx)
             .map_err(PoolError::from)?,
     );
+    // the cost guard (P11e): a caller other than the watcher, before any outcall
+    pool::report_guard::admit(base_tx, pool::now())?;
     let source = if arrival.src_tx.is_empty() {
         None
     } else {

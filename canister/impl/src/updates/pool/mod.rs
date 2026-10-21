@@ -39,7 +39,9 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
 /// from the terms and credits the transfer whose proof carries it, at most once:
 /// `Credited` (the payout follows on the canister's timer), or `Unattributed` with why,
 /// held for a controller. `BadArrival` when no transfer carries the terms' ref. The
-/// canister trusts only the chain and the fingerprint.
+/// canister trusts only the chain and the fingerprint. A caller other than the watcher is
+/// held to 10 reports a minute in total and 3 an hour per `base_tx` (P11e), refused
+/// `Unavailable` before any outcall.
 #[update]
 pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
     pool::arrival::note(arrival).await

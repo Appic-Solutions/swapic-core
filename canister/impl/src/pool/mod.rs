@@ -13,6 +13,7 @@ pub mod pay;
 pub mod payout;
 pub mod queue;
 pub mod rebalance;
+pub mod report_guard;
 pub mod settings;
 pub mod withdraw;
 
