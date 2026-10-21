@@ -158,7 +158,25 @@ pub enum Next {
     Sweep,
     /// Base to ICP: the sweep's answer was lost: the same transfer again.
     Resweep,
+    /// ICP to Base by Eco, past its route's deadline with no arrival: read the destination
+    /// Portal (never filled?) and the source's reward (refunded to the canister?) (P11e).
+    Unfilled,
     Stuck(String),
+}
+
+/// How long past an Eco route's deadline its fill is first looked for on the Portal: a fill
+/// in its last block is seen first.
+pub const UNFILLED_MARGIN_S: u64 = 300;
+
+/// The fill deadline of the Eco intent `order` (`abi.encode(Order)`) publishes, if it
+/// publishes one.
+pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
+    let order = swapic::decode_order(order)?;
+    order
+        .steps
+        .iter()
+        .find_map(|step| swapic::EcoIntent::of_step(step)?.ok())
+        .map(|intent| intent.route_deadline)
 }
 
 /// The step `item` takes at `now`, pure. `in_flight`: a transaction of it is being signed
@@ -212,6 +230,24 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
         }
         (MoveDirection::BaseToIcp, MoveStatus::Burned) => Next::Sweep,
         (MoveDirection::BaseToIcp, MoveStatus::Sweeping) => Next::Resweep,
+        // an Eco route past its deadline: filled (the arrival is reported), or unfilled and
+        // refunded to the canister's Ethereum address in the end (rescued, or at Eco's week)
+        (MoveDirection::IcpToBase, MoveStatus::Burned) if eco => {
+            let deadline = item
+                .order
+                .as_ref()
+                .and_then(|order| eco_route_deadline(&order.order));
+            match deadline {
+                Some(deadline)
+                    if now.as_secs().get() > deadline.saturating_add(UNFILLED_MARGIN_S) =>
+                {
+                    Next::Unfilled
+                }
+                Some(_) => Next::Wait,
+                None if waited => Next::Stuck("no arrival on Base".to_string()),
+                None => Next::Wait,
+            }
+        }
         (MoveDirection::IcpToBase, MoveStatus::Burned) if waited => {
             Next::Stuck("no arrival on Base".to_string())
         }
@@ -269,6 +305,9 @@ async fn act(item: &Move, step: Next, now: Timestamp) -> Result<(), String> {
         step,
         Next::Route | Next::Sign { .. } | Next::Withdraw | Next::Deposit
     );
+    if step == Next::Unfilled && !unfilled_due(item.id, now) {
+        return Ok(());
+    }
     if outflow {
         if let Some(reason) = pool::pool_closed() {
             return Err(format!("the pool is closed: {reason}"));
@@ -288,6 +327,7 @@ async fn act(item: &Move, step: Next, now: Timestamp) -> Result<(), String> {
         Next::Deposit => deposit(item, &ctx).await,
         Next::Sweep => sweep(&Live, item, &ctx).await,
         Next::Resweep => resweep(&Live, item, &ctx).await,
+        Next::Unfilled => unfilled(item, &ctx).await,
     }
 }
 
@@ -414,6 +454,103 @@ async fn ran(chain: ChainId, order_id: [u8; 32]) -> Option<bool> {
     }
 }
 
+thread_local! {
+    // Heap by necessity, and only a clock: when each Eco move to Base was last looked for on
+    // the Portals. An upgrade loses it, which costs one read more.
+    static UNFILLED_READS: std::cell::RefCell<std::collections::BTreeMap<u64, Timestamp>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// How often an Eco move to Base past its deadline is looked for on the Portals.
+pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
+
+/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`].
+fn unfilled_due(id: u64, now: Timestamp) -> bool {
+    UNFILLED_READS.with(|reads| {
+        let mut reads = reads.borrow_mut();
+        let due = reads
+            .get(&id)
+            .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);
+        if due {
+            reads.insert(id, now);
+        }
+        due
+    })
+}
+
+/// What the Portals say of an Eco move to Base past its deadline, pure: refunded to the
+/// canister on Ethereum with no fill on Base, it is routed again (`Ok(true)`); filled, its
+/// arrival is the watcher's to report, and after hours it stops for a controller (`Err`);
+/// else it waits (`Ok(false)`).
+pub fn unfilled_next(fill: types::eco::Fill, reward: u8, waited: bool) -> Result<bool, String> {
+    match (fill, reward) {
+        (types::eco::Fill::Open | types::eco::Fill::Cancelled, types::eco::REWARD_REFUNDED) => {
+            Ok(true)
+        }
+        (types::eco::Fill::Filled, _) if waited => {
+            Err("its Eco intent was filled and no arrival was reported".to_string())
+        }
+        _ => Ok(false),
+    }
+}
+
+/// ICP to Base by Eco, past its route's deadline: the destination Portal (Base) never shows
+/// it filled and the source Portal (Ethereum) shows its reward refunded to its creator, the
+/// canister: the USDC is back at the canister's Ethereum address, and the move is routed
+/// again on its own route (P11e). It is never written off while it sits there.
+async fn unfilled(item: &Move, ctx: &Ctx) -> Result<(), String> {
+    let intent = item
+        .intent
+        .ok_or("its order published no intent the canister read")?;
+    let pool_chain = config::get()
+        .pool_chain
+        .ok_or("no pool chain is configured")?;
+    let fill = crate::pool::eco::fill(pool_chain, intent).await?;
+    let reward = crate::pool::eco::reward_status(ChainId::ETHEREUM, intent).await?;
+    let waited = ctx.now.saturating_duration_since(item.since) >= STUCK_AFTER;
+    match unfilled_next(fill, reward, waited) {
+        Ok(true) => {
+            pool::log(&format!(
+                "rebalance: move {}'s Eco intent was refunded unfilled on Ethereum: routed again",
+                item.id
+            ));
+            record(PoolStep::MoveUnfilled { id: item.id }, ctx.now)
+        }
+        Ok(false) => Ok(()),
+        Err(why) => record(PoolStep::MoveStuck { id: item.id, why }, ctx.now),
+    }
+}
+
+/// Whether the canister's address on `chain` holds the most `action`'s transaction may cost
+/// there (its gas budget): a move is never signed short of gas, and alerts (P11e).
+async fn gas_in_hand(chain: ChainId, action: GasAction) -> Result<(), String> {
+    let config = config::get();
+    let budget = tx::budget_for(&config, chain, action).map_err(|error| error.to_string())?;
+    let canister = crate::storage::ecdsa_address::get().ok_or("no canister address yet")?;
+    let answers = crate::rpc::rpc_batch(
+        chain,
+        &[(
+            "eth_getBalance",
+            json!([crate::rpc::hex0x(canister.as_bytes()), "latest"]),
+        )],
+        1_024,
+    )
+    .await
+    .map_err(|error| format!("the balance read: {:?}", error.kind()))?;
+    let balance = answers
+        .first()
+        .and_then(Value::as_str)
+        .and_then(|text| Wei::from_str_hex(text.strip_prefix("0x")?).ok())
+        .ok_or("the balance read answered no amount")?;
+    if balance < budget {
+        pool::log(&format!(
+            "ALERT: the canister holds {balance} wei on chain {chain}, below the {budget} a {action:?} may cost: the move waits"
+        ));
+        return Err("short of the chain's coin for gas".to_string());
+    }
+    Ok(())
+}
+
 /// Signs `run(order)` of the pinned order on its chain, the canister the payer, against its
 /// standing allowance to Swapic there. After a revert only once Swapic says it did not run:
 /// a reorg may have turned the revert into a run, and then it never runs again.
@@ -423,6 +560,7 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
         .ok_or("no pool chain is configured")?;
     let chain = order_chain(item, pool_chain);
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
+    gas_in_hand(chain, GasAction::PoolMove).await?;
     if again {
         match ran(chain, pinned.order_id).await {
             Some(false) => {}
@@ -602,17 +740,29 @@ async fn landing(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), St
             transaction_hash,
             ..
         }) => transaction_hash,
-        ic::WithdrawalStatus::TxFinalized(_) => {
+        // reimbursed: its ckUSDC back at the canister's account, back in the ICP pocket (P11e)
+        ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Reimbursed {
+            reimbursed_amount,
+            reimbursed_in_block,
+            ..
+        }) => {
+            let amount = TokenAmount::try_from(reimbursed_amount)
+                .map_err(|_| "the reimbursement does not fit")?;
+            pool::log(&format!(
+                "rebalance: move {}'s withdrawal was reimbursed: {amount} back in the ICP pocket",
+                item.id
+            ));
             return record(
-                PoolStep::MoveStuck {
+                PoolStep::MoveReimbursed {
                     id: item.id,
-                    why: "the minter reimbursed the withdrawal: its ckUSDC is back at the \
-                          canister's account"
-                        .to_string(),
+                    amount: amount.min(item.amount),
+                    block: u64::try_from(reimbursed_in_block.0).unwrap_or(u64::MAX),
                 },
                 ctx.now,
-            )
+            );
         }
+        // a reimbursement on its way: it is read again
+        ic::WithdrawalStatus::TxFinalized(_) => return Ok(()),
         _ => return Ok(()),
     };
     let tx = hash32(&hash).ok_or("the minter's transaction hash does not read")?;
@@ -713,6 +863,7 @@ async fn deposit(item: &Move, ctx: &Ctx) -> Result<(), String> {
         .get(GasAction::PoolCkDeposit)
         .ok_or("Ethereum has no pool_ck_deposit gas row")?;
     let landed = item.landed.ok_or("nothing landed")?;
+    gas_in_hand(ChainId::ETHEREUM, GasAction::PoolCkDeposit).await?;
     let data = ck_deposit_data(
         ethereum.usdc,
         landed.amount,

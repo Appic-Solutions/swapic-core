@@ -832,7 +832,9 @@ impl PoolLedger {
             | PoolStep::MoveStuck { .. }
             | PoolStep::MoveRetried { .. }
             | PoolStep::MoveLost { .. }
-            | PoolStep::MoveRefunded { .. } => self.admits_rebalance(step, lookup),
+            | PoolStep::MoveRefunded { .. }
+            | PoolStep::MoveUnfilled { .. }
+            | PoolStep::MoveReimbursed { .. } => self.admits_rebalance(step, lookup),
             // one rescue per order; the nonce it spends is the state's to check
             PoolStep::EcoRescueSigned { order_id, .. } => {
                 if lookup.eco_rescued(order_id) {
@@ -1292,7 +1294,9 @@ impl PoolLedger {
             | PoolStep::MoveStuck { .. }
             | PoolStep::MoveRetried { .. }
             | PoolStep::MoveLost { .. }
-            | PoolStep::MoveRefunded { .. } => {}
+            | PoolStep::MoveRefunded { .. }
+            | PoolStep::MoveUnfilled { .. }
+            | PoolStep::MoveReimbursed { .. } => {}
             // the state indexes it: nothing of the pool moves
             PoolStep::EcoRescueSigned { .. } => {}
         }

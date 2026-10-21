@@ -338,6 +338,31 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::MoveUnfilled { id } => {
+                let item = move_of(*id)?;
+                let unfilled = item.direction == MoveDirection::IcpToBase
+                    && item.status == MoveStatus::Burned
+                    && item.route.is_some_and(|route| route.is_eco())
+                    && item.intent.is_some();
+                if !unfilled {
+                    return Err(not_from("MoveUnfilled", &item));
+                }
+                Ok(())
+            }
+            PoolStep::MoveReimbursed { id, amount, .. } => {
+                let item = move_of(*id)?;
+                if item.direction != MoveDirection::IcpToBase
+                    || item.status != MoveStatus::Withdrawn
+                {
+                    return Err(not_from("MoveReimbursed", &item));
+                }
+                if *amount > item.amount || item.amount > self.pockets.icp.in_flight {
+                    return Err(PoolStepError::Terms(
+                        "a reimbursement gives back at most the move's amount",
+                    ));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -567,12 +592,20 @@ impl PoolLedger {
                 Some(item)
             }
             // on from where it stood, with fresh tries; a minter's call a controller found never
-            // ran is asked again
+            // ran is asked again, the ckUSDC approval its lost answer may have given booked as
+            // the pool's cost (P11e): on the safe side, a fee too many is a surplus
             PoolStep::MoveRetried { id } => {
                 let mut item = lookup.pool_move(*id)?;
                 item.reverts = None;
                 if item.status == MoveStatus::Withdrawing {
+                    let fee = ledger
+                        .settings
+                        .as_ref()
+                        .and_then(|settings| settings.fee_of(settings.ckusdc_ledger))
+                        .unwrap_or(TokenAmount::ZERO);
+                    lines.cost = sat_add(lines.cost, fee);
                     let icp = &mut ledger.pockets.icp;
+                    icp.free = sat_sub(icp.free, fee);
                     icp.in_flight = sat_sub(icp.in_flight, item.amount);
                     icp.reserved = sat_add(icp.reserved, item.amount);
                     item.left = false;
@@ -624,6 +657,34 @@ impl PoolLedger {
                 item.scan_from = None;
                 item.window_ends = None;
                 item.status = MoveStatus::Open;
+                item.since = at;
+                Some(item)
+            }
+            // landed again at the canister's Ethereum address: routed again, on its own route
+            PoolStep::MoveUnfilled { id } => {
+                let mut item = lookup.pool_move(*id)?;
+                item.route = None;
+                item.order = None;
+                item.proposal = None;
+                item.intent = None;
+                item.tx_hash = None;
+                item.window_ends = None;
+                item.reverts = None;
+                item.status = MoveStatus::Landed;
+                item.since = at;
+                Some(item)
+            }
+            // back in the ICP pocket: what came back free, the rest the move's cost
+            PoolStep::MoveReimbursed { id, amount, .. } => {
+                let mut item = lookup.pool_move(*id)?;
+                let icp = &mut ledger.pockets.icp;
+                icp.in_flight = sat_sub(icp.in_flight, item.amount);
+                icp.free = sat_add(icp.free, *amount);
+                lines.cost = sat_add(lines.cost, sat_sub(item.amount, *amount));
+                lines.open.remove(id);
+                item.left = false;
+                item.stuck = None;
+                item.status = MoveStatus::Returned(format!("the ck minter reimbursed {amount}"));
                 item.since = at;
                 Some(item)
             }

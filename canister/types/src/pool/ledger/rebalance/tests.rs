@@ -849,3 +849,130 @@ fn every_move_step_round_trips_and_is_named() {
         assert!(!step.moves_a_payout());
     }
 }
+
+/// P11e: an ICP to Base move whose Eco intent was refunded unfilled on Ethereum lands again,
+/// routed again, its ckUSDC still in flight (never written off while it sits there); one the
+/// ck minter reimbursed is back in the ICP pocket, closed; a minter call a controller retries
+/// books the approval its lost answer may have given.
+#[test]
+fn an_unfilled_eco_move_lands_again_and_a_reimbursed_one_returns() {
+    let mut world = World::new();
+    let id = world.open(MoveDirection::IcpToBase, usdc(1_000), false);
+    let fee = TokenAmount::from(100_000_u64);
+    for step in [
+        PoolStep::MoveWithdrawing {
+            id,
+            created_at: world.at(),
+        },
+        PoolStep::MoveWithdrawn {
+            id,
+            withdrawal_id: 1,
+            fee: TokenAmount::ZERO,
+        },
+        PoolStep::MoveLanded {
+            id,
+            tx_hash: TxHash::new([0x61; 32]),
+            block: BlockNumber::new(1),
+            amount: usdc(1_000),
+            window_ends: None,
+        },
+        PoolStep::MoveProposed {
+            id,
+            order: order(5),
+            fee,
+        },
+    ] {
+        // a proposal needs its window
+        if let PoolStep::MoveProposed { .. } = step {
+            let mut item = world.item(id);
+            item.window_ends = Some(Timestamp::from_secs(world.now + 60).unwrap());
+            world.moves.insert(id, item);
+        }
+        world.step(step).unwrap();
+    }
+    world
+        .step(PoolStep::MoveRouted {
+            id,
+            route: MoveRoute::Proposed { fee },
+            order: order(5),
+            scan_from: None,
+        })
+        .unwrap();
+    world.step(signed(id, ChainId::ETHEREUM)).unwrap();
+    // not yet out: not unfilled
+    assert!(world.step(PoolStep::MoveUnfilled { id }).is_err());
+    world.step(burned(id, Some([0x95; 32]))).unwrap();
+    world.step(PoolStep::MoveUnfilled { id }).unwrap();
+    let item = world.item(id);
+    assert_eq!(item.status, MoveStatus::Landed);
+    assert_eq!(
+        (item.route, item.intent, item.order.clone()),
+        (None, None, None)
+    );
+    assert!(item.routable());
+    assert_eq!(world.ledger().pockets.icp.in_flight, usdc(1_000));
+}
+
+#[test]
+fn a_reimbursed_move_returns_to_the_icp_pocket_and_a_retried_call_books_its_approval() {
+    let mut world = World::new();
+    let id = world.open(MoveDirection::IcpToBase, usdc(1_000), false);
+    world
+        .step(PoolStep::MoveWithdrawing {
+            id,
+            created_at: world.at(),
+        })
+        .unwrap();
+    world
+        .step(PoolStep::MoveWithdrawn {
+            id,
+            withdrawal_id: 7,
+            fee: TokenAmount::ZERO,
+        })
+        .unwrap();
+    // never more than the move
+    assert!(world
+        .step(PoolStep::MoveReimbursed {
+            id,
+            amount: usdc(1_001),
+            block: 9,
+        })
+        .is_err());
+    world
+        .step(PoolStep::MoveReimbursed {
+            id,
+            amount: usdc(1_000),
+            block: 9,
+        })
+        .unwrap();
+    let icp = world.ledger().pockets.icp;
+    assert_eq!((icp.free, icp.in_flight), (usdc(4_000), TokenAmount::ZERO));
+    assert!(world.item(id).status.is_final());
+    assert!(world.ledger().moves().open.is_empty());
+
+    // a minter call whose answer was lost, retried: one ckUSDC fee booked
+    let again = world.open(MoveDirection::IcpToBase, usdc(500), false);
+    world
+        .step(PoolStep::MoveWithdrawing {
+            id: again,
+            created_at: world.at(),
+        })
+        .unwrap();
+    world
+        .step(PoolStep::MoveStuck {
+            id: again,
+            why: "the minter's answer was lost".to_string(),
+        })
+        .unwrap();
+    let cost = world.ledger().moves().cost;
+    world.step(PoolStep::MoveRetried { id: again }).unwrap();
+    let fee = TokenAmount::from(super::super::tests::FEE);
+    assert_eq!(
+        world.ledger().moves().cost,
+        cost.checked_add(fee).unwrap()
+    );
+    assert_eq!(
+        world.ledger().pockets.icp.free,
+        usdc(3_500).checked_sub(fee).unwrap()
+    );
+}

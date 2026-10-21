@@ -1878,6 +1878,26 @@ pub enum PoolStep {
         #[cbor(n(4), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    /// ICP to Base by Eco: the destination Portal shows the intent never filled and the source
+    /// Portal its reward refunded, so the move's USDC is back at the canister's Ethereum
+    /// address (P11e): landed again, routed again.
+    #[n(78)]
+    MoveUnfilled {
+        #[n(0)]
+        id: u64,
+    },
+    /// ICP to Base: the ck minter reimbursed the withdrawal, `amount` of ckUSDC back at the
+    /// canister's account in its ledger `block` (P11e): back in the ICP pocket, the move
+    /// closed.
+    #[n(79)]
+    MoveReimbursed {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        amount: TokenAmount,
+        #[n(2)]
+        block: u64,
+    },
 }
 
 impl PoolStep {
@@ -1952,6 +1972,8 @@ impl PoolStep {
             PoolStep::MoveLost { .. } => "MoveLost",
             PoolStep::MoveRefunded { .. } => "MoveRefunded",
             PoolStep::EcoRescueSigned { .. } => "EcoRescueSigned",
+            PoolStep::MoveUnfilled { .. } => "MoveUnfilled",
+            PoolStep::MoveReimbursed { .. } => "MoveReimbursed",
         }
     }
 

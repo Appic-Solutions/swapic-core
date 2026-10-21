@@ -170,6 +170,7 @@ struct Fake {
     balance: Nat,
     withdraw: Option<Result<u64, CallError>>,
     transfer: Option<Result<u64, CallError>>,
+    status: Option<ic::WithdrawalStatus>,
 }
 
 impl IcpCalls for Fake {
@@ -236,10 +237,24 @@ impl IcpCalls for Fake {
 
     async fn withdrawal_status(
         &self,
-        _minter: Principal,
-        _id: u64,
+        minter: Principal,
+        id: u64,
     ) -> Result<Vec<ic::WithdrawalDetail>, CallError> {
-        Ok(vec![])
+        Ok(self
+            .status
+            .clone()
+            .map(|status| ic::WithdrawalDetail {
+                withdrawal_id: id,
+                recipient_address: String::new(),
+                from: minter,
+                from_subaccount: None,
+                token_symbol: "ckUSDC".to_string(),
+                withdrawal_amount: Nat::from(0_u8),
+                max_transaction_fee: None,
+                status,
+            })
+            .into_iter()
+            .collect())
     }
 }
 
@@ -503,5 +518,80 @@ fn the_sweep_moves_all_of_the_subaccount_and_credits_the_move_once() {
         assert_eq!(pockets.icp.free, usdc(5_000));
         // credited once: a second sweep of the arrived move is refused by the fold
         assert!(block_on(resweep(&Fake::default(), &arrived, &later)).is_err());
+    });
+}
+
+/// P11e: an ICP to Base move by Eco past its route's deadline is looked for on the Portals;
+/// refunded unfilled it is routed again, filled with no report it stops after hours.
+#[test]
+fn an_eco_move_to_base_past_its_deadline_is_looked_for_on_the_portals() {
+    use types::eco::{Fill, REWARD_REFUNDED, REWARD_WITHDRAWN};
+    assert_eq!(unfilled_next(Fill::Open, REWARD_REFUNDED, false), Ok(true));
+    assert_eq!(unfilled_next(Fill::Cancelled, REWARD_REFUNDED, false), Ok(true));
+    // not refunded yet: it waits (the rescue, or Eco's week)
+    assert_eq!(unfilled_next(Fill::Open, 1, true), Ok(false));
+    // filled: the arrival is the watcher's to report; after hours a controller looks
+    assert_eq!(unfilled_next(Fill::Filled, REWARD_WITHDRAWN, false), Ok(false));
+    assert!(unfilled_next(Fill::Filled, REWARD_WITHDRAWN, true).is_err());
+
+    // the Eco step of the canary's order, its route's deadline its own
+    let order = include_str!("../../pay/samples/eco_base_to_arbitrum.hex");
+    let order = hex::decode(order.trim()).unwrap();
+    let deadline = eco_route_deadline(&order).unwrap();
+    let mut item = item(MoveDirection::IcpToBase, MoveStatus::Burned);
+    item.route = Some(MoveRoute::Proposed {
+        fee: TokenAmount::ONE,
+    });
+    item.order = Some(PinnedOrder {
+        order_id: [1; 32],
+        order,
+        gas_limit: 300_000,
+        deadline_s: deadline,
+    });
+    let at_secs = |secs: u64| Timestamp::from_secs(secs).unwrap();
+    assert_eq!(next(&item, at_secs(deadline), false), Next::Wait);
+    assert_eq!(
+        next(&item, at_secs(deadline + UNFILLED_MARGIN_S + 1), false),
+        Next::Unfilled
+    );
+    // never stopped for hours of waiting: its USDC is somewhere the Portals tell
+    assert_eq!(
+        next(&item, at_secs(deadline + 10 * 3_600), false),
+        Next::Unfilled
+    );
+}
+
+/// P11e: a withdrawal the ck minter reimbursed returns its ckUSDC to the ICP pocket.
+#[test]
+fn a_reimbursed_withdrawal_returns_to_the_icp_pocket() {
+    on_fresh_memory(|| {
+        let id = pool_with_move(MoveDirection::IcpToBase, usdc(1_000), TokenAmount::ZERO);
+        let item = super::super::item(id).unwrap();
+        let fake = Fake {
+            balance: Nat::from(30_000_000_000_000_u64),
+            ..Fake::default()
+        };
+        block_on(withdraw(&fake, &item, &ctx())).unwrap();
+        let withdrawn = super::super::item(id).unwrap();
+        let reimbursed = Fake {
+            status: Some(ic::WithdrawalStatus::TxFinalized(
+                ic::TxFinalizedStatus::Reimbursed {
+                    transaction_hash: "0x01".to_string(),
+                    reimbursed_amount: Nat::from(usdc(1_000)),
+                    reimbursed_in_block: Nat::from(55_u8),
+                },
+            )),
+            ..Fake::default()
+        };
+        block_on(landing(&reimbursed, &withdrawn, &ctx())).unwrap();
+        let returned = super::super::item(id).unwrap();
+        assert!(matches!(returned.status, MoveStatus::Returned(_)));
+        let icp = ledger().pockets.icp;
+        assert_eq!(icp.in_flight, TokenAmount::ZERO);
+        // all of it back but the approval's fee, the move's cost
+        assert_eq!(
+            icp.free,
+            usdc(4_000).checked_sub(TokenAmount::from(FEE)).unwrap()
+        );
     });
 }

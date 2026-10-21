@@ -623,7 +623,50 @@ fn samples() -> Vec<Sample> {
     all.extend(rebalance_samples());
     all.extend(arrival_terms_samples());
     all.extend(rescue_samples());
+    all.extend(returned_move_samples());
     all
+}
+
+/// A move's money back where it left (P11e): a move returned, an Eco move landed again, a
+/// reimbursement.
+fn returned_move_samples() -> Vec<Sample> {
+    use crate::pool::{Move, MoveDirection, MoveStatus, PoolStep};
+    let mut item = Move::opened(
+        1_100,
+        MoveDirection::IcpToBase,
+        TokenAmount::from(1_101_000_000_u64),
+        false,
+        Timestamp::from_nanos(1_800_000_000_000_001_102),
+        None,
+        TokenAmount::from(1_103_u64),
+    );
+    item.status = MoveStatus::Returned("the ck minter reimbursed 1101000000".to_string());
+    item.withdrawal = Some(1_104);
+    let steps = [
+        ("move unfilled", PoolStep::MoveUnfilled { id: 1_105 }),
+        (
+            "move reimbursed",
+            PoolStep::MoveReimbursed {
+                id: 1_106,
+                amount: TokenAmount::from(1_107_u64),
+                block: 1_108,
+            },
+        ),
+    ];
+    let mut out = vec![sample("move returned to its pocket", item)];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(11_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_001_110 + i),
+                EventHash::new([0xce; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// The Eco rescue (P11e): a chain with its gas row, its transaction created, and its signed

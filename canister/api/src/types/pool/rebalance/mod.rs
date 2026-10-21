@@ -103,6 +103,7 @@ impl From<&domain::Move> for MoveStatus {
             domain::MoveStatus::Signed(id) => Self::Signed(*id),
             domain::MoveStatus::Arrived => Self::Arrived,
             domain::MoveStatus::Lost(why) => Self::Stuck(format!("written off: {why}")),
+            domain::MoveStatus::Returned(why) => Self::Stuck(format!("returned: {why}")),
         }
     }
 }

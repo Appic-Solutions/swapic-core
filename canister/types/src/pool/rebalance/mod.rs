@@ -298,12 +298,19 @@ pub enum MoveStatus {
     /// A controller wrote it off.
     #[n(9)]
     Lost(#[n(0)] String),
+    /// Its money came back to its source pocket, why: an ICP to Base move the ck minter
+    /// reimbursed (P11e).
+    #[n(10)]
+    Returned(#[n(0)] String),
 }
 
 impl MoveStatus {
     /// Whether nothing more happens to it.
     pub fn is_final(&self) -> bool {
-        matches!(self, MoveStatus::Arrived | MoveStatus::Lost(_))
+        matches!(
+            self,
+            MoveStatus::Arrived | MoveStatus::Lost(_) | MoveStatus::Returned(_)
+        )
     }
 }
 
