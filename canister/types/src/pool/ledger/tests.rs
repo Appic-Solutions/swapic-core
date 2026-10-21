@@ -217,9 +217,27 @@ fn an_arrival_above_a_cap_or_below_its_icp_fees_is_refused() {
         check_arrival(&pool.ledger, &swap(1, usdc(1_001), usdc(2))),
         Err(RegisterRefusal::AboveSwapCap { cap: usdc(1_000) })
     );
-    // no premium floor: the premium is the user's own term
+    // the premium at arrival (P11e): at least 90% of 10 bps of what arrived, $100 here,
+    // so 90,000 at the least
     assert_eq!(
         check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::ONE)),
+        Err(RegisterRefusal::PremiumTooLow {
+            least: TokenAmount::from(90_000_u64)
+        })
+    );
+    assert_eq!(
+        check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::from(89_999_u64))),
+        Err(RegisterRefusal::PremiumTooLow {
+            least: TokenAmount::from(90_000_u64)
+        })
+    );
+    assert_eq!(
+        check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::from(90_000_u64))),
+        Ok(())
+    );
+    // $1 at 10 bps is a share of 1,000: 900 is its 90%
+    assert_eq!(
+        check_arrival(&pool.ledger, &swap(1, usdc(1), TokenAmount::from(900_u64))),
         Ok(())
     );
     // the ICP fees below the path's own: one ckUSDC fee for a ckUSDC payout

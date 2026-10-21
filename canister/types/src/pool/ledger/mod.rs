@@ -1462,6 +1462,11 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
 /// The premium a swap of `min_usdc` carries at the least (P11d, 2026-10-21: no floor):
 /// exactly the settings' share of it, rounded up, pure pool income. Every ledger fee is the
 /// user's own line beside it.
+/// How much of the settings' premium share of what arrived a swap's premium must be at its
+/// arrival, in percent (P11e): the quoter prices the premium on the most a route delivers, and
+/// a route delivers a little less than its most.
+pub const PREMIUM_AT_ARRIVAL_PERCENT: u32 = 90;
+
 pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<TokenAmount> {
     min_usdc
         .checked_mul(settings.premium_bps)?
@@ -1494,6 +1499,18 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
                 return Err(RegisterRefusal::AboveSwapCap {
                     cap: settings.per_swap_cap,
                 });
+            }
+            // the premium at arrival (P11e): at least 90% of the settings' share of what
+            // arrived, the quoter pricing it on the most a route delivers
+            let share = premium_share(settings, terms.min_usdc).ok_or(RegisterRefusal::NotAllowed(
+                "the premium's share overflows".to_string(),
+            ))?;
+            let least = share
+                .checked_mul(PREMIUM_AT_ARRIVAL_PERCENT)
+                .and_then(|scaled| scaled.checked_div_ceil(100_u32))
+                .unwrap_or(TokenAmount::MAX);
+            if terms.premium < least {
+                return Err(RegisterRefusal::PremiumTooLow { least });
             }
             let floor = icp_fees_floor(settings, token_out)
                 .ok_or_else(|| RegisterRefusal::NotAllowed("no ckUSDC fee was read".to_string()))?;
