@@ -97,6 +97,9 @@ pub struct PayoutWaiting {
     pub kind: PayoutKind,
     pub amount: Nat,
     pub terms: PayoutTerms,
+    /// Micro USDC, the payout's own network fee (P11e): the watcher chooses CCTP only when it
+    /// covers the canister's CCTP costs.
+    pub network_fee: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -192,6 +195,7 @@ impl PayoutWaiting {
             kind: (&payout.kind).into(),
             amount: nat(payout.amount?),
             terms: payout.terms.into(),
+            network_fee: Some(nat(payout.network_fee())),
         })
     }
 }

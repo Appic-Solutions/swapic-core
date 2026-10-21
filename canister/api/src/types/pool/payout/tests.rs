@@ -138,3 +138,41 @@ fn icp_swap_terms_and_withdrawals_cross_the_wire() {
     let bytes = Encode!(&withdrawal).unwrap();
     assert_eq!(Decode!(&bytes, EvmWithdrawal).unwrap(), withdrawal);
 }
+
+/// P11e: a waiting payout names its own network fee, which the watcher's choice of CCTP reads.
+#[test]
+fn a_waiting_payout_names_its_network_fee() {
+    use types::pool::payout::{EvmWithdrawal as Withdrawal, PayoutKind as Kind, Undo};
+    use types::pool::{PoolAccount, Shares};
+    let staker = types::EvmAddress::new([0x11; 20]);
+    let mut payout = domain::EvmPayout::new(
+        4,
+        Kind::Withdrawal(Withdrawal {
+            staker,
+            usdc: types::TokenAmount::from(10_000_000_u64),
+            max_shares: Shares::new(1),
+            rebalance_share: types::TokenAmount::ZERO,
+            network_fee: types::TokenAmount::from(70_000_u64),
+            nonce: 1,
+            burned: Shares::new(1),
+        }),
+        domain::PayoutTerms {
+            dst_chain: types::ChainId::BASE,
+            recipient: staker,
+            token_out: staker,
+            min_out: types::TokenAmount::ONE,
+            deadline: types::Timestamp::from_nanos(9),
+        },
+        Undo::Remint {
+            owner: PoolAccount::Evm(staker),
+            shares: Shares::new(1),
+        },
+        types::Timestamp::from_nanos(1),
+    );
+    assert_eq!(PayoutWaiting::of(&payout), None, "its amount is not known yet");
+    payout.amount = Some(types::TokenAmount::from(9_930_000_u64));
+    let waiting = PayoutWaiting::of(&payout).unwrap();
+    assert_eq!(waiting.network_fee, Some(Nat::from(70_000_u64)));
+    let bytes = candid::Encode!(&waiting).unwrap();
+    assert_eq!(candid::Decode!(&bytes, PayoutWaiting).unwrap(), waiting);
+}
