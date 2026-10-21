@@ -1069,6 +1069,83 @@ async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
         .ok_or_else(|| PoolError::BadArrival("the source receipt does not read".to_string()))
 }
 
+/// The reads of Eco's Portal a refund's proof makes, so a test hands in a fake.
+#[allow(async_fn_in_trait)]
+pub trait FillReads {
+    /// What the destination Portal says of an intent's fill.
+    async fn fill(&self, chain: ChainId, intent: [u8; 32]) -> Result<types::eco::Fill, String>;
+}
+
+/// The destination Portals themselves.
+pub struct LivePortal;
+
+impl FillReads for LivePortal {
+    async fn fill(&self, chain: ChainId, intent: [u8; 32]) -> Result<types::eco::Fill, String> {
+        crate::pool::eco::fill(chain, intent).await
+    }
+}
+
+/// The destination of the intent a refund names: a paid payout's chain, or Ethereum for an
+/// open Base to ICP move's (its Eco route delivers there). None for an intent neither took.
+pub fn refund_destination<S: Store>(state: &State<S>, intent: &[u8; 32]) -> Option<ChainId> {
+    if let Some(id) = state.store().payout_by_intent(&PoolRef::new(*intent)) {
+        return state
+            .store()
+            .pool_payout(id)
+            .map(|payout| payout.terms.dst_chain);
+    }
+    crate::pool::rebalance::open_moves(state)
+        .into_iter()
+        .any(|item| {
+            item.intent == Some(*intent)
+                && item.direction == types::pool::MoveDirection::BaseToIcp
+        })
+        .then_some(ChainId::ETHEREUM)
+}
+
+/// An Eco refund reopens a payout or a move only once the canister read the intent's
+/// destination Portal itself and it shows the intent never filled (P11e, a HIGH of the
+/// collected list): open, or cancelled. A refund of an intent the destination shows filled is
+/// held for a human; one whose fill was not read waits for a read that comes back. A refund
+/// that names no intent a payout or a move took is left to the fold's own rule.
+pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec<Found> {
+    for one in found.iter_mut() {
+        let Proof::Refund { intents } = &one.proof else {
+            continue;
+        };
+        let mut proven = Vec::new();
+        let (mut known, mut filled, mut unread) = (false, false, None);
+        for intent in intents.clone() {
+            let Some(destination) = read_state(|state| refund_destination(state, &intent)) else {
+                continue;
+            };
+            known = true;
+            match reads.fill(destination, intent).await {
+                Ok(types::eco::Fill::Open | types::eco::Fill::Cancelled) => proven.push(intent),
+                Ok(types::eco::Fill::Filled) => filled = true,
+                Err(why) => unread = Some(why),
+            }
+        }
+        if !known {
+            continue;
+        }
+        one.proof = if !proven.is_empty() {
+            Proof::Refund { intents: proven }
+        } else if let (Some(why), false) = (unread, filled) {
+            Proof::Unproven {
+                why: format!("an Eco refund whose intent's fill was not read: {why}"),
+            }
+        } else {
+            Proof::Orphan {
+                payer: None,
+                why: "an Eco refund of an intent its destination shows filled: held for a human"
+                    .to_string(),
+            }
+        };
+    }
+    found
+}
+
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival) and proves every
 /// transfer to the canister in it, recording nothing: what a move's arrival reads (P11c).
 pub async fn read_found(
@@ -1096,12 +1173,13 @@ pub async fn read_found(
     } else {
         None
     };
-    find(
+    let found = find(
         &base,
         source.as_ref().map(|(receipt, at)| (receipt, at)),
         &chain,
     )
-    .map_err(|no| PoolError::BadArrival(no.why().to_string()))
+    .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
+    Ok(prove_refunds(found, &LivePortal).await)
 }
 
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival), proves every
@@ -1138,6 +1216,7 @@ pub async fn read_and_record(
         &chain,
     )
     .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
+    let found = prove_refunds(found, &LivePortal).await;
     // after the last read: the credited set, the pool's guard and the append are in this
     // one message
     pool::require_running()?;

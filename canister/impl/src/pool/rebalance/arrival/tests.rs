@@ -186,3 +186,161 @@ fn a_strangers_small_transfer_under_the_moves_ref_credits_nothing() {
             if credited == TokenAmount::from(999_999_030_u64)
     ));
 }
+
+/// P11e (a HIGH of the collected list): an Eco refund routes a move again only once the
+/// intent's destination Portal shows it never filled; filled, it is held for a human; not
+/// read, it waits.
+mod refunds_proven {
+    use super::*;
+    use crate::pool::arrival::{prove_refunds, FillReads};
+    use crate::storage::on_fresh_memory;
+    use crate::storage::pool::tests::{base_stake, created, funded_pool};
+    use crate::storage::pool::record_at;
+    use types::eco::Fill;
+    use types::events::TxPurpose;
+    use types::pool::payout::PinnedOrder;
+    use types::pool::{MoveRoute, RebalanceSettings};
+    use types::Nonce;
+
+    struct Portal(Result<Fill, String>);
+
+    impl FillReads for Portal {
+        async fn fill(&self, chain: ChainId, _intent: [u8; 32]) -> Result<Fill, String> {
+            assert_eq!(chain, ChainId::ETHEREUM, "a move to ICP is filled on Ethereum");
+            self.0.clone()
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("the fake never waits"),
+        }
+    }
+
+    const INTENT: [u8; 32] = [0x84; 32];
+
+    /// A $1,000 move to ICP routed by Eco, its intent published.
+    fn eco_move() {
+        crate::storage::init();
+        funded_pool(usdc(4_000));
+        base_stake(
+            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+            usdc(6_000),
+            0x53,
+            9,
+        );
+        let at = |n: u64| Timestamp::from_secs(1_800_000_000 + n).unwrap();
+        let fee = TokenAmount::from(100_000_u64);
+        let order = PinnedOrder {
+            order_id: [0x85; 32],
+            order: vec![],
+            gas_limit: 300_000,
+            deadline_s: 1_800_003_600,
+        };
+        let steps = [
+            PoolStep::MoveSettingsSet {
+                settings: RebalanceSettings::default(),
+            },
+            PoolStep::MoveOpened {
+                id: 0,
+                direction: MoveDirection::BaseToIcp,
+                amount: usdc(1_000),
+                urgent: false,
+                opened_at: at(1),
+                window_ends: Some(at(61)),
+                own_cost: usdc(1),
+            },
+            PoolStep::MoveProposed {
+                id: 0,
+                order: order.clone(),
+                fee,
+            },
+            PoolStep::MoveRouted {
+                id: 0,
+                route: MoveRoute::Proposed { fee },
+                order,
+                scan_from: None,
+            },
+        ];
+        for step in steps {
+            record_at(step, at(2)).unwrap();
+        }
+        crate::storage::events::append_event_at(created(TxPurpose::PoolMove(0), 0), at(3))
+            .unwrap();
+        for step in [
+            PoolStep::MoveSigned {
+                id: 0,
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(0),
+                tx_hash: TxHash::new([0x86; 32]),
+                raw_tx: vec![2],
+            },
+            PoolStep::MoveBurned {
+                id: 0,
+                tx_hash: TxHash::new([0x86; 32]),
+                block: BlockNumber::new(50),
+                intent: Some(INTENT),
+            },
+        ] {
+            record_at(step, at(4)).unwrap();
+        }
+    }
+
+    fn refund(intent: [u8; 32]) -> Vec<Found> {
+        vec![found(
+            usdc(1_000),
+            Proof::Refund {
+                intents: vec![intent],
+            },
+        )]
+    }
+
+    #[test]
+    fn a_refund_of_an_intent_never_filled_routes_the_move_again() {
+        on_fresh_memory(|| {
+            eco_move();
+            for fill in [Fill::Open, Fill::Cancelled] {
+                let proven = block_on(prove_refunds(refund(INTENT), &Portal(Ok(fill))));
+                assert_eq!(
+                    proven[0].proof,
+                    Proof::Refund {
+                        intents: vec![INTENT]
+                    }
+                );
+                assert!(matches!(
+                    read_state(|state| step_for(state, &proven[0])),
+                    Some(PoolStep::MoveRefunded { id: 0, .. })
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn a_refund_of_a_filled_intent_is_held_and_an_unread_one_waits() {
+        on_fresh_memory(|| {
+            eco_move();
+            let filled = block_on(prove_refunds(refund(INTENT), &Portal(Ok(Fill::Filled))));
+            assert!(matches!(&filled[0].proof, Proof::Orphan { why, .. } if why.contains("filled")));
+            assert_eq!(read_state(|state| step_for(state, &filled[0])), None);
+            let unread = block_on(prove_refunds(
+                refund(INTENT),
+                &Portal(Err("the read failed".to_string())),
+            ));
+            assert!(matches!(&unread[0].proof, Proof::Unproven { .. }));
+            // an intent no payout or move took: left to the fold's own rule, no read made
+            let theirs = block_on(prove_refunds(
+                refund([0x87; 32]),
+                &Portal(Err("never read".to_string())),
+            ));
+            assert_eq!(
+                theirs[0].proof,
+                Proof::Refund {
+                    intents: vec![[0x87; 32]]
+                }
+            );
+        });
+    }
+}
