@@ -13,6 +13,9 @@ mod tests;
 
 pub mod ledger;
 pub mod payout;
+pub mod routes;
+
+pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 
 pub use payout::{
     EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutSettings,
@@ -390,6 +393,10 @@ pub struct PoolSettings {
     /// The ckUSDC ledger's fee and every listed token's, read by `set_pool_settings`.
     #[n(10)]
     pub ledger_fees: Vec<LedgerFee>,
+    /// The routes every ICP path reads from P11b on (`set_icp_routes`): while none are set,
+    /// `icp_tokens` is the direct list it reads.
+    #[n(11)]
+    pub routes: Option<IcpRoutes>,
 }
 
 /// The mainnet ckUSDC ledger.
@@ -410,6 +417,7 @@ impl Default for PoolSettings {
             arrival_backup: Duration::from_secs(300),
             open_for_swaps: false,
             ledger_fees: Vec::new(),
+            routes: None,
         }
     }
 }
@@ -433,6 +441,8 @@ pub enum PoolSettingsError {
     BadPool(Principal),
     #[error("no fee was read for {0}")]
     MissingFee(Principal),
+    #[error(transparent)]
+    Routes(#[from] RoutesError),
 }
 
 impl PoolSettings {
@@ -479,6 +489,9 @@ impl PoolSettings {
                 return Err(PoolSettingsError::BadPool(token.ledger));
             }
         }
+        if let Some(routes) = &self.routes {
+            routes.validate(self.ckusdc_ledger)?;
+        }
         Ok(())
     }
 
@@ -504,29 +517,45 @@ impl PoolSettings {
         out
     }
 
-    /// The fee read for `ledger`.
+    /// The fee read for `ledger`: by the settings, or with the routes.
     pub fn fee_of(&self, ledger: Principal) -> Option<TokenAmount> {
         self.ledger_fees
             .iter()
             .find(|fee| fee.ledger == ledger)
             .map(|fee| fee.fee)
+            .or_else(|| self.routes.as_ref()?.fee_of(ledger))
     }
 
-    /// The ICPSwap pool `token_out` is bought through, None for ckUSDC and for a token not
-    /// listed.
+    /// The ICPSwap pool `token_out` is bought through directly, None for ckUSDC, for a token
+    /// routed through ICP, and for a token not listed.
     pub fn pool_of(&self, token_out: Principal) -> Option<Principal> {
-        if token_out == self.ckusdc_ledger {
-            return None;
+        match self.path_of(token_out)? {
+            RoutePath::Direct { pool } => Some(pool),
+            RoutePath::Ckusdc | RoutePath::ViaIcp { .. } => None,
         }
-        self.icp_tokens
-            .iter()
-            .find(|token| token.ledger == token_out)
-            .map(|token| token.icpswap_pool)
+    }
+
+    /// The path `token` takes to or from ckUSDC: the routes once set, the direct list before;
+    /// None for a token not listed.
+    pub fn path_of(&self, token: Principal) -> Option<RoutePath> {
+        if token == self.ckusdc_ledger {
+            return Some(RoutePath::Ckusdc);
+        }
+        match &self.routes {
+            Some(routes) => routes.path_of(token, self.ckusdc_ledger),
+            None => self
+                .icp_tokens
+                .iter()
+                .find(|listed| listed.ledger == token)
+                .map(|listed| RoutePath::Direct {
+                    pool: listed.icpswap_pool,
+                }),
+        }
     }
 
     /// Whether a swap may pay out `token_out`: ckUSDC always, another token when listed.
     pub fn is_listed(&self, token_out: Principal) -> bool {
-        token_out == self.ckusdc_ledger || self.pool_of(token_out).is_some()
+        self.path_of(token_out).is_some()
     }
 }
 
@@ -714,7 +743,31 @@ pub enum PayoutPath {
         #[cbor(n(0), with = "principal_cbor")]
         pool: Principal,
     },
+    /// ckUSDC swapped into ICP on `first` (the ICP/ckUSDC pool), the ICP into the token out
+    /// on `second`, then the token's transfer; a second leg that cannot pay swaps the ICP
+    /// back to ckUSDC on `first`, and all of it is paid as ckUSDC.
+    #[n(2)]
+    IcpswapVia {
+        #[cbor(n(0), with = "principal_cbor")]
+        first: Principal,
+        #[cbor(n(1), with = "principal_cbor")]
+        second: Principal,
+        #[cbor(n(2), with = "principal_cbor")]
+        icp: Principal,
+    },
 }
+
+impl PayoutPath {
+    /// Whether it swaps on ICPSwap.
+    pub fn swaps(&self) -> bool {
+        !matches!(self, PayoutPath::Ckusdc)
+    }
+}
+
+/// Which leg of a path a swap step names: the first (none, for a step from before legs were
+/// named), the second, or the way back.
+pub const LEG_SECOND: u8 = 1;
+pub const LEG_BACK: u8 = 2;
 
 /// A principal stored as its raw bytes, for a field that may be absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
@@ -770,12 +823,17 @@ pub struct SwapLeg {
     /// is this leg's.
     #[n(6)]
     pub before: Option<PoolHeld>,
-    /// The ckUSDC withdrawn back from the pool when the swap was undone.
+    /// The ckUSDC withdrawn back from the pool when the swap was undone (for a leg after the
+    /// first, its token in).
     #[n(7)]
     pub withdrawn: Option<TokenAmount>,
+    /// What the leg deposited, its pull's fee aside, recorded when it began.
+    #[n(8)]
+    pub amount_in: Option<TokenAmount>,
 }
 
-/// What an ICPSwap pool holds of the canister's, unused: ckUSDC and the leg's token.
+/// What an ICPSwap pool holds of the canister's, unused: ckUSDC and the leg's token. For a
+/// leg after the first, `ckusdc` holds what it sells and `token` what it buys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct PoolHeld {
     #[n(0)]
@@ -800,6 +858,32 @@ pub struct PayoutProgress {
     /// The last failure, once the payout stopped for a human.
     #[n(4)]
     pub failed: Option<String>,
+    /// A path through ICP: its second leg (ICP into the token out).
+    #[n(5)]
+    pub second: Option<SwapLeg>,
+    /// A path through ICP whose second leg could not pay: the ICP swapped back to ckUSDC.
+    #[n(6)]
+    pub back: Option<SwapLeg>,
+}
+
+impl PayoutProgress {
+    /// The leg a swap step names.
+    pub fn leg(&self, leg: Option<u8>) -> SwapLeg {
+        match leg {
+            Some(LEG_SECOND) => self.second.unwrap_or_default(),
+            Some(LEG_BACK) => self.back.unwrap_or_default(),
+            _ => self.swap,
+        }
+    }
+
+    /// The leg a swap step names, to change.
+    pub fn leg_mut(&mut self, leg: Option<u8>) -> &mut SwapLeg {
+        match leg {
+            Some(LEG_SECOND) => self.second.get_or_insert_with(SwapLeg::default),
+            Some(LEG_BACK) => self.back.get_or_insert_with(SwapLeg::default),
+            _ => &mut self.swap,
+        }
+    }
 }
 
 /// A deposit as the fold holds it: its terms and how far it got.
@@ -1157,6 +1241,9 @@ pub enum PoolStep {
         r#ref: PoolRef,
         #[n(1)]
         why: String,
+        /// The leg it names; none for the first.
+        #[n(2)]
+        leg: Option<u8>,
     },
     /// `depositFromAndSwap` is about to be called.
     #[n(13)]
@@ -1168,6 +1255,13 @@ pub enum PoolStep {
         /// it was read.
         #[n(1)]
         before: Option<PoolHeld>,
+        /// The leg it names; none for the first.
+        #[n(2)]
+        leg: Option<u8>,
+        /// What the leg deposits, its pull's fee aside. None on a leg from before it was
+        /// recorded, whose payout's attempt holds it.
+        #[n(3)]
+        amount_in: Option<TokenAmount>,
     },
     /// `depositFromAndSwap` answered its output.
     #[n(14)]
@@ -1179,6 +1273,9 @@ pub enum PoolStep {
         /// The output's transfer to the recipient, fixed now for every retry.
         #[n(2)]
         send: Option<TokenAmount>,
+        /// The leg it names; none for the first.
+        #[n(3)]
+        leg: Option<u8>,
     },
     /// An ICP stake's pull is about to be asked: its TVL room is held and its dedup pair set.
     #[n(15)]
@@ -1249,6 +1346,9 @@ pub enum PoolStep {
     SwapApproved {
         #[n(0)]
         r#ref: PoolRef,
+        /// The leg it names; none for the first.
+        #[n(1)]
+        leg: Option<u8>,
     },
     /// A swap that did not happen was undone: the ckUSDC it deposited, if any, withdrawn back
     /// from the pool. `cost` is what its deposit took from the canister's ckUSDC account in
@@ -1262,6 +1362,9 @@ pub enum PoolStep {
         /// The ckUSDC withdrawn from the pool: this leg's own, never more than it deposited.
         #[n(2)]
         withdrawn: TokenAmount,
+        /// The leg it names; none for the first.
+        #[n(3)]
+        leg: Option<u8>,
     },
     /// A controller set the Base payouts' knobs.
     #[n(23)]
@@ -1362,6 +1465,13 @@ pub enum PoolStep {
         #[n(2)]
         block: Option<u64>,
     },
+    /// A controller set the ICP routes, with the ICP ledger and every route ledger's fee
+    /// read for them.
+    #[n(33)]
+    IcpRoutesSet {
+        #[n(0)]
+        routes: IcpRoutes,
+    },
 }
 
 impl PoolStep {
@@ -1408,6 +1518,7 @@ impl PoolStep {
             PoolStep::PayoutReverted { .. } => "PayoutReverted",
             PoolStep::PayoutUndoing { .. } => "PayoutUndoing",
             PoolStep::PayoutUndone { .. } => "PayoutUndone",
+            PoolStep::IcpRoutesSet { .. } => "IcpRoutesSet",
         }
     }
 

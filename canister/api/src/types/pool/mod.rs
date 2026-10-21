@@ -6,6 +6,9 @@
 mod tests;
 
 pub mod payout;
+pub mod routes;
+
+pub use routes::{IcpRoute, IcpRouteVia, IcpRoutesView};
 
 pub use payout::{
     EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutSettings, PayoutStatus, PayoutTerms, PayoutView,
@@ -490,6 +493,8 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
             arrival_backup: Duration::from_secs(settings.arrival_backup_s),
             open_for_swaps: settings.pool_open_for_swaps,
             ledger_fees: Vec::new(),
+            // the routes are `set_icp_routes`'s, kept across a change of the knobs
+            routes: None,
         })
     }
 }

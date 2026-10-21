@@ -32,9 +32,11 @@ use thiserror::Error;
 /// How many failed drives a payout gets before it stops for a human.
 pub const MAX_PAYOUT_ATTEMPTS: u32 = 10;
 
-/// The ledger fees an ICPSwap payout's path costs the pool, in ckUSDC fees: the approval,
-/// the pool's pull, and the ckUSDC transfer should the leg fall back.
-pub const ICPSWAP_PATH_FEES: u32 = 3;
+/// The ledger fees each ICPSwap leg of a payout's path can cost the pool, in ckUSDC fees
+/// (interface section 4, 2026-10-21): the approval, the pull into ICPSwap, the transfer out,
+/// and one more for an undone swap's way back. A route through ICP has two legs; the ICP
+/// leg's own fees are far below a ckUSDC fee, so counting them as ckUSDC fees covers them.
+pub const ICPSWAP_PATH_FEES: u32 = 4;
 
 /// What the fold holds besides the ledger, as `admits` and `apply` read it.
 pub trait PoolLookup {
@@ -545,17 +547,27 @@ impl PoolLedger {
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
                 let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                let on_icpswap = matches!(
-                    payout.attempt.map(|attempt| attempt.path),
-                    Some(PayoutPath::Icpswap { .. })
-                );
-                // a leg falls back before its swap, or after one that did not happen and was
-                // undone (the driver read the pool to know): never once the swap paid out
-                if !target.in_payout() || !on_icpswap || payout.swap.out.is_some() {
+                let path = payout.attempt.map(|attempt| attempt.path);
+                if !target.in_payout() || !path.is_some_and(|path| path.swaps()) {
                     return Err(PoolStepError::Terms(
                         "only an ICPSwap leg with no output falls back",
                     ));
                 }
+                // a path through ICP whose first leg paid out falls back once the way back
+                // brought the ICP back as ckUSDC, and never once its second leg paid out
+                if payout.swap.out.is_some() {
+                    let through_icp = matches!(path, Some(PayoutPath::IcpswapVia { .. }));
+                    let second = payout.leg(Some(super::LEG_SECOND));
+                    let back = payout.leg(Some(super::LEG_BACK));
+                    if !through_icp || second.out.is_some() || back.out.is_none() {
+                        return Err(PoolStepError::Terms(
+                            "only an ICPSwap leg with no output falls back",
+                        ));
+                    }
+                    return Ok(());
+                }
+                // a leg falls back before its swap, or after one that did not happen and was
+                // undone (the driver read the pool to know): never once the swap paid out
                 if payout.swap.begun && payout.swap.undone.is_none() {
                     return Err(PoolStepError::Terms("a begun swap falls back once undone"));
                 }
@@ -618,33 +630,32 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::SwapDeclined { r#ref, .. } | PoolStep::SwapBegun { r#ref, .. } => {
+            PoolStep::SwapDeclined { r#ref, leg, .. } | PoolStep::SwapBegun { r#ref, leg, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
                 let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                let on_icpswap = matches!(
-                    payout.attempt.map(|attempt| attempt.path),
-                    Some(PayoutPath::Icpswap { .. })
-                );
-                if !target.in_payout() || !on_icpswap || payout.swap.begun {
+                let swaps = admits_leg(payout, *leg);
+                let this = payout.leg(*leg);
+                if !target.in_payout() || !swaps || this.begun {
                     return Err(PoolStepError::Terms(
                         "the ICPSwap leg is not before its call",
                     ));
                 }
-                if matches!(step, PoolStep::SwapDeclined { .. }) && payout.swap.declined > 0 {
+                if matches!(step, PoolStep::SwapDeclined { .. }) && this.declined > 0 {
                     return Err(PoolStepError::Terms(
                         "a declined leg falls back the second time",
                     ));
                 }
                 Ok(())
             }
-            PoolStep::Swapped { r#ref, .. } => {
+            PoolStep::Swapped { r#ref, leg, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
                 let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                if !payout.swap.begun || payout.swap.out.is_some() {
+                let this = payout.leg(*leg);
+                if !this.begun || this.out.is_some() {
                     return Err(PoolStepError::Terms("only a begun swap answers once"));
                 }
                 Ok(())
@@ -703,20 +714,18 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::SwapApproved { r#ref } | PoolStep::SwapUndone { r#ref, .. } => {
+            PoolStep::SwapApproved { r#ref, leg } | PoolStep::SwapUndone { r#ref, leg, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
                 let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                let on_icpswap = matches!(
-                    payout.attempt.map(|attempt| attempt.path),
-                    Some(PayoutPath::Icpswap { .. })
-                );
-                if !target.in_payout() || !on_icpswap || payout.swap.out.is_some() {
+                let swaps = admits_leg(payout, *leg);
+                let this = payout.leg(*leg);
+                if !target.in_payout() || !swaps || this.out.is_some() {
                     return Err(PoolStepError::Terms("the ICPSwap leg has its output"));
                 }
                 if matches!(step, PoolStep::SwapUndone { .. })
-                    && (!payout.swap.begun || payout.swap.undone.is_some())
+                    && (!this.begun || this.undone.is_some())
                 {
                     return Err(PoolStepError::Terms("only a begun swap is undone, once"));
                 }
@@ -743,6 +752,16 @@ impl PoolLedger {
             | PoolStep::PayoutReverted { .. }
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. } => self.admits_payout(step, lookup),
+            PoolStep::IcpRoutesSet { routes } => {
+                let settings = self.settings()?;
+                routes
+                    .validate(settings.ckusdc_ledger)
+                    .map_err(PoolSettingsError::from)?;
+                routes
+                    .fees_complete(settings.ckusdc_ledger)
+                    .map_err(PoolSettingsError::from)?;
+                Ok(())
+            }
         }
     }
 
@@ -769,7 +788,23 @@ impl PoolLedger {
         let mut shares_out = None;
         let mut credited = None;
         match step {
-            PoolStep::SettingsSet { settings } => ledger.settings = Some(settings.clone()),
+            // the routes are `IcpRoutesSet`'s: new knobs keep the routes set
+            PoolStep::SettingsSet { settings } => {
+                let routes = ledger
+                    .settings
+                    .as_ref()
+                    .and_then(|current| current.routes.clone());
+                let mut settings = settings.clone();
+                if settings.routes.is_none() {
+                    settings.routes = routes;
+                }
+                ledger.settings = Some(settings);
+            }
+            PoolStep::IcpRoutesSet { routes } => {
+                if let Some(settings) = ledger.settings.as_mut() {
+                    settings.routes = Some(routes.clone());
+                }
+            }
             PoolStep::Registered { r#ref, deposit } => {
                 ledger.open.insert(*r#ref);
                 for party in deposit.parties() {
@@ -964,23 +999,38 @@ impl PoolLedger {
                     }
                 }
             }
-            PoolStep::SwapDeclined { r#ref, .. } => {
+            PoolStep::SwapDeclined { r#ref, leg, .. } => {
+                let leg = *leg;
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.swap.declined = payout.swap.declined.saturating_add(1);
+                    let this = payout.leg_mut(leg);
+                    this.declined = this.declined.saturating_add(1);
                 });
             }
-            PoolStep::SwapBegun { r#ref, before } => {
-                let before = *before;
+            PoolStep::SwapBegun {
+                r#ref,
+                before,
+                leg,
+                amount_in,
+            } => {
+                let (before, leg, amount_in) = (*before, *leg, *amount_in);
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.swap.begun = true;
-                    payout.swap.before = before;
+                    let this = payout.leg_mut(leg);
+                    this.begun = true;
+                    this.before = before;
+                    this.amount_in = amount_in;
                 });
             }
-            PoolStep::Swapped { r#ref, out, send } => {
-                let (out, send) = (*out, *send);
+            PoolStep::Swapped {
+                r#ref,
+                out,
+                send,
+                leg,
+            } => {
+                let (out, send, leg) = (*out, *send, *leg);
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.swap.out = Some(out);
-                    payout.swap.send = send;
+                    let this = payout.leg_mut(leg);
+                    this.out = Some(out);
+                    this.send = send;
                 });
             }
             PoolStep::StakeStarted {
@@ -1049,21 +1099,24 @@ impl PoolLedger {
                     },
                 );
             }
-            PoolStep::SwapApproved { r#ref } => {
+            PoolStep::SwapApproved { r#ref, leg } => {
+                let leg = *leg;
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.swap.approvals =
-                        Some(payout.swap.approvals.unwrap_or(0).saturating_add(1));
+                    let this = payout.leg_mut(leg);
+                    this.approvals = Some(this.approvals.unwrap_or(0).saturating_add(1));
                 });
             }
             PoolStep::SwapUndone {
                 r#ref,
                 cost,
                 withdrawn,
+                leg,
             } => {
-                let (cost, withdrawn) = (*cost, *withdrawn);
+                let (cost, withdrawn, leg) = (*cost, *withdrawn, *leg);
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.swap.undone = Some(cost);
-                    payout.swap.withdrawn = Some(withdrawn);
+                    let this = payout.leg_mut(leg);
+                    this.undone = Some(cost);
+                    this.withdrawn = Some(withdrawn);
                 });
             }
             PoolStep::IcpChecked { check } => {
@@ -1160,14 +1213,37 @@ fn owed_line(deposit: &Registered) -> TokenAmount {
     }
 }
 
-/// The ledger fees a payout of `token_out` can cost the pool: ckUSDC's transfer, or the
-/// ICPSwap path's (the approval, the pool's pull, and the ckUSDC fall back).
+/// The ledger fees a payout of `token_out` can cost the pool, in ckUSDC fees: ckUSDC's
+/// transfer alone, or [`ICPSWAP_PATH_FEES`] per ICPSwap leg of its route (4 direct, 8
+/// through ICP). A token not listed pays as ckUSDC.
 pub fn path_fees(settings: &PoolSettings, token_out: Principal) -> Option<TokenAmount> {
     let fee = settings.fee_of(settings.ckusdc_ledger)?;
-    if token_out == settings.ckusdc_ledger {
+    let legs = settings.path_of(token_out).map_or(0, |path| path.legs());
+    if legs == 0 {
         Some(fee)
     } else {
-        fee.checked_mul(ICPSWAP_PATH_FEES)
+        fee.checked_mul(ICPSWAP_PATH_FEES.checked_mul(legs)?)
+    }
+}
+
+/// Whether a swap step may name `leg` of `payout`: the first leg of any ICPSwap path; the
+/// second of a path through ICP once its first paid out; the way back once its second
+/// cannot pay (declined twice, or undone), never once it paid out.
+fn admits_leg(payout: &PayoutProgress, leg: Option<u8>) -> bool {
+    let path = payout.attempt.map(|attempt| attempt.path);
+    match leg {
+        None | Some(0) => path.is_some_and(|path| path.swaps()),
+        Some(super::LEG_SECOND) => {
+            matches!(path, Some(PayoutPath::IcpswapVia { .. })) && payout.swap.out.is_some()
+        }
+        Some(super::LEG_BACK) => {
+            let second = payout.leg(Some(super::LEG_SECOND));
+            matches!(path, Some(PayoutPath::IcpswapVia { .. }))
+                && payout.swap.out.is_some()
+                && second.out.is_none()
+                && (second.undone.is_some() || !second.begun)
+        }
+        Some(_) => false,
     }
 }
 
@@ -1251,9 +1327,9 @@ pub fn check_ref(
 
 /// The least premium a swap of `min_usdc` paying `token_out` carries (interface section 4,
 /// 2026-10-21): the settings' share of it, rounded up, and never below what the pool pays in
-/// ckUSDC for the payout's path: the ckUSDC fee for a ckUSDC payout, three of them for a
-/// token's ICPSwap path (the approval, the pull into ICPSwap, the transfer out). The token's
-/// own ledger fee is the recipient's, out of the output, and never in the premium.
+/// ckUSDC for the payout's path: the ckUSDC fee for a ckUSDC payout, four of them per
+/// ICPSwap leg of a token's route (4 direct, 8 through ICP). The token's own ledger fee is
+/// the recipient's, out of the output, and never in the premium.
 pub fn least_premium(
     settings: &PoolSettings,
     min_usdc: TokenAmount,

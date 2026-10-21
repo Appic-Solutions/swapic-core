@@ -799,12 +799,15 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
     let declined = || PoolStep::SwapDeclined {
         r#ref,
         why: "below".into(),
+        leg: None,
     };
     pool.step(declined()).unwrap();
     assert!(pool.step(declined()).is_err());
     pool.step(PoolStep::SwapBegun {
         r#ref,
         before: None,
+        leg: None,
+        amount_in: None,
     })
     .unwrap();
     assert!(pool
@@ -819,6 +822,7 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
         r#ref,
         out: TokenAmount::from(5_u8),
         send: None,
+        leg: None,
     })
     .unwrap();
     assert!(pool
@@ -826,6 +830,7 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
             r#ref,
             out: TokenAmount::from(5_u8),
             send: None,
+            leg: None,
         })
         .is_err());
 
@@ -906,6 +911,7 @@ fn a_begun_swap_falls_back_only_once_undone() {
         r#ref,
         cost: TokenAmount::from(cost),
         withdrawn: usdc(99),
+        leg: None,
     };
     let fell_back = || PoolStep::FellBack {
         r#ref,
@@ -915,11 +921,15 @@ fn a_begun_swap_falls_back_only_once_undone() {
     };
     // nothing to undo before the swap began
     assert!(pool.step(undone(20_000)).is_err());
-    pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
-    pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
+    pool.step(PoolStep::SwapApproved { r#ref, leg: None })
+        .unwrap();
+    pool.step(PoolStep::SwapApproved { r#ref, leg: None })
+        .unwrap();
     pool.step(PoolStep::SwapBegun {
         r#ref,
         before: None,
+        leg: None,
+        amount_in: None,
     })
     .unwrap();
     // begun, not undone: what happened at the pool is not known yet
@@ -941,12 +951,15 @@ fn a_begun_swap_falls_back_only_once_undone() {
     pool.step(PoolStep::SwapBegun {
         r#ref: paid_out,
         before: None,
+        leg: None,
+        amount_in: None,
     })
     .unwrap();
     pool.step(PoolStep::Swapped {
         r#ref: paid_out,
         out: TokenAmount::from(9_000_u32),
         send: Some(TokenAmount::from(7_000_u32)),
+        leg: None,
     })
     .unwrap();
     assert!(pool
@@ -954,10 +967,14 @@ fn a_begun_swap_falls_back_only_once_undone() {
             r#ref: paid_out,
             cost: TokenAmount::ZERO,
             withdrawn: TokenAmount::ZERO,
+            leg: None,
         })
         .is_err());
     assert!(pool
-        .step(PoolStep::SwapApproved { r#ref: paid_out })
+        .step(PoolStep::SwapApproved {
+            r#ref: paid_out,
+            leg: None
+        })
         .is_err());
     assert_eq!(
         pool.deposits[&paid_out].payout.swap.send,
@@ -1164,7 +1181,8 @@ fn an_arrival_is_measured_on_what_arrived() {
 
 /// The premium floor both sides use (interface section 4, 2026-10-21): the settings' share
 /// rounded up, and never below what the pool pays in ckUSDC: one ckUSDC fee for a ckUSDC
-/// payout, three for a token's ICPSwap path. A token's own fee is never added to micro USDC.
+/// payout, four per ICPSwap leg of a token's route (P11b: 4 direct, 8 through ICP). A
+/// token's own fee is never added to micro USDC.
 #[test]
 fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
     let token = Principal::from_slice(&[0x70; 10]);
@@ -1193,8 +1211,46 @@ fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
     );
     assert_eq!(
         least_premium(&settings, usdc(2), token),
-        Some(TokenAmount::from(3 * FEE))
+        Some(TokenAmount::from(4 * FEE))
     );
+    // through ICP: two legs, eight fees
+    let via = Principal::from_slice(&[0x72; 10]);
+    let icp = Principal::from_slice(&[0x73; 10]);
+    let icp_pool = Principal::from_slice(&[0x74; 10]);
+    let routed = PoolSettings {
+        routes: Some(crate::pool::IcpRoutes {
+            icp_ckusdc_pool: Some(PrincipalBytes(icp_pool)),
+            icp_ledger: Some(PrincipalBytes(icp)),
+            routes: vec![
+                crate::pool::IcpRoute {
+                    ledger: token,
+                    via: crate::pool::IcpRouteVia::Direct(Principal::from_slice(&[0x71; 10])),
+                },
+                crate::pool::IcpRoute {
+                    ledger: via,
+                    via: crate::pool::IcpRouteVia::Icp(Principal::from_slice(&[0x75; 10])),
+                },
+            ],
+            ledger_fees: Vec::new(),
+        }),
+        ..settings.clone()
+    };
+    assert_eq!(
+        least_premium(&routed, usdc(2), via),
+        Some(TokenAmount::from(8 * FEE))
+    );
+    assert_eq!(
+        least_premium(&routed, usdc(2), token),
+        Some(TokenAmount::from(4 * FEE))
+    );
+    // once routes are set they alone list: a token only in icp_tokens is not
+    let unrouted = Principal::from_slice(&[0x76; 10]);
+    let mut listed_before = routed.clone();
+    listed_before.icp_tokens.push(crate::pool::IcpToken {
+        ledger: unrouted,
+        icpswap_pool: Principal::from_slice(&[0x77; 10]),
+    });
+    assert!(!listed_before.is_listed(unrouted));
     // a large one: 10 bps of it, rounded up
     let large = usdc(1_000).checked_add(TokenAmount::ONE).unwrap();
     assert_eq!(
@@ -1262,4 +1318,78 @@ fn the_read_of_base_never_goes_back() {
     assert!(pool.step(cursor(10, Some(5))).is_err(), "done whole");
     pool.step(cursor(11, Some(0))).unwrap();
     assert_eq!(pool.ledger.scan_log, Some(0));
+}
+
+/// A path through ICP (P11b): its second leg only once the first paid out, its way back only
+/// once the second cannot pay, and its fall back to ckUSDC only once the way back brought the
+/// ICP back; never once the second leg paid out.
+#[test]
+fn a_path_through_icp_runs_its_legs_in_order() {
+    use crate::pool::{LEG_BACK, LEG_SECOND};
+    let mut pool = funded(usdc(1_000));
+    let r#ref = register(&mut pool, swap(2, usdc(100), usdc(1)));
+    pool.step(PoolStep::Arrived {
+        r#ref,
+        credit: credit(2),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::IcpswapVia {
+                first: Principal::from_slice(&[5; 10]),
+                second: Principal::from_slice(&[6; 10]),
+                icp: Principal::from_slice(&[7; 10]),
+            },
+            amount: Some(usdc(99)),
+            token: None,
+        },
+    })
+    .unwrap();
+    let begun = |leg| PoolStep::SwapBegun {
+        r#ref,
+        before: None,
+        leg,
+        amount_in: Some(TokenAmount::from(1_000_u32)),
+    };
+    let swapped = |leg| PoolStep::Swapped {
+        r#ref,
+        out: TokenAmount::from(900_u32),
+        send: None,
+        leg,
+    };
+    let fell_back = PoolStep::FellBack {
+        r#ref,
+        why: "the second leg could not pay".into(),
+        amount: Some(usdc(99)),
+        token: None,
+    };
+    // the second leg and the way back wait for the first's output
+    assert!(pool.step(begun(Some(LEG_SECOND))).is_err());
+    assert!(pool.step(begun(Some(LEG_BACK))).is_err());
+    pool.step(begun(None)).unwrap();
+    pool.step(swapped(None)).unwrap();
+    assert_eq!(
+        pool.deposits[&r#ref].payout.swap.amount_in,
+        Some(TokenAmount::from(1_000_u32))
+    );
+    // the first leg paid out: no fall back before the way back brought the ICP back
+    assert!(pool.step(fell_back.clone()).is_err());
+    pool.step(PoolStep::SwapDeclined {
+        r#ref,
+        why: "short".into(),
+        leg: Some(LEG_SECOND),
+    })
+    .unwrap();
+    // the way back, once the second leg did not begin; then the second may not begin
+    pool.step(begun(Some(LEG_BACK))).unwrap();
+    pool.step(swapped(Some(LEG_BACK))).unwrap();
+    pool.step(fell_back).unwrap();
+    let payout = &pool.deposits[&r#ref].payout;
+    assert_eq!(payout.back.unwrap().out, Some(TokenAmount::from(900_u32)));
+    assert!(payout.fell_back.is_some());
 }

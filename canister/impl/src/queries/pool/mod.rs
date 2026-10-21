@@ -6,8 +6,8 @@ use crate::storage::events::read_state;
 use candid::Nat;
 use ic_cdk::query;
 pub use settlement_api::types::pool::{
-    PayoutSettings, PayoutView, PoolAccount, PoolAccountView, PoolDepositView, PoolSettings,
-    PoolStateView,
+    IcpRoutesView, PayoutSettings, PayoutView, PoolAccount, PoolAccountView, PoolDepositView,
+    PoolSettings, PoolStateView,
 };
 use types::hash::PoolRef;
 
@@ -62,4 +62,16 @@ pub fn payout_settings() -> PayoutSettings {
 #[query]
 pub fn payout(id: u64) -> Option<PayoutView> {
     read_state(|state| state.store().pool_payout(id)).map(|payout| PayoutView::from(&payout))
+}
+
+/// The ICP routes every ICP path of the pool reads: the ICP/ckUSDC pool, and each listed
+/// token's route. Empty while none are set.
+#[query]
+pub fn icp_routes() -> IcpRoutesView {
+    let settings = crate::storage::pool::ledger().settings;
+    IcpRoutesView::from(
+        settings
+            .as_ref()
+            .and_then(|settings| settings.routes.as_ref()),
+    )
 }

@@ -27,6 +27,9 @@ pub const EVENT_VARIANT_COUNT: usize = 27;
 ///
 /// Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
 /// new field is optional.
+// a pool step that starts a payout carries its whole path (a route through ICP names three
+// principals): a line is read and written one at a time, so its size is no cost worth a box
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum EventType {
     /// A controller wrote a new config. `json` is its public view as ops set it:

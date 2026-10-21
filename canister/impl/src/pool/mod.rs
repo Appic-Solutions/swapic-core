@@ -5,6 +5,7 @@
 
 pub mod arrival;
 pub mod icp;
+pub mod legs;
 pub mod payout;
 pub mod register;
 pub mod settings;

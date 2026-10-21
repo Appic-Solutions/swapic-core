@@ -462,6 +462,8 @@ fn a_step_written_before_its_new_fields_still_decodes() {
             PoolStep::SwapBegun {
                 r#ref,
                 before: None,
+                leg: None,
+                amount_in: None,
             },
         ),
         (
@@ -473,6 +475,7 @@ fn a_step_written_before_its_new_fields_still_decodes() {
                 r#ref,
                 out: TokenAmount::from(25_u8),
                 send: None,
+                leg: None,
             },
         ),
         (

@@ -615,7 +615,205 @@ fn samples() -> Vec<Sample> {
     ]);
     all.extend(pool_samples());
     all.extend(payout_samples());
+    all.extend(route_samples());
     all
+}
+
+/// The ICP routes' stored types (P11b Task 1b): settings with their routes, a path through
+/// ICP, a payout with its second leg and its way back, and every swap step naming its leg.
+fn route_samples() -> Vec<Sample> {
+    use crate::hash::PoolRef;
+    use crate::pool::{
+        IcpRoute, IcpRouteVia, IcpRoutes, LedgerFee, PayoutAttempt, PayoutPath, PayoutProgress,
+        PoolHeld, PoolLedger, PoolSettings, PoolStep, PrincipalBytes, SwapLeg, LEG_BACK,
+        LEG_SECOND,
+    };
+    use candid::Principal;
+
+    let principal = |byte: u8| Principal::from_slice(&[byte; 10]);
+    let routes = IcpRoutes {
+        icp_ckusdc_pool: Some(PrincipalBytes(principal(0x31))),
+        icp_ledger: Some(PrincipalBytes(principal(0x32))),
+        routes: vec![
+            IcpRoute {
+                ledger: principal(0x32),
+                via: IcpRouteVia::Direct(principal(0x31)),
+            },
+            IcpRoute {
+                ledger: principal(0x33),
+                via: IcpRouteVia::Icp(principal(0x34)),
+            },
+        ],
+        ledger_fees: vec![LedgerFee {
+            ledger: principal(0x33),
+            fee: TokenAmount::from(0x35_u8),
+        }],
+    };
+    let ledger = PoolLedger {
+        settings: Some(PoolSettings {
+            routes: Some(routes.clone()),
+            ..PoolSettings::default()
+        }),
+        ..PoolLedger::default()
+    };
+    let path = PayoutPath::IcpswapVia {
+        first: principal(0x31),
+        second: principal(0x34),
+        icp: principal(0x32),
+    };
+    let leg = |byte: u8| SwapLeg {
+        declined: 1,
+        begun: true,
+        out: Some(TokenAmount::from(byte)),
+        send: Some(TokenAmount::from(byte - 1)),
+        approvals: Some(1),
+        undone: None,
+        before: Some(PoolHeld {
+            ckusdc: TokenAmount::from(byte - 2),
+            token: TokenAmount::from(byte - 3),
+        }),
+        withdrawn: None,
+        amount_in: Some(TokenAmount::from(byte - 4)),
+    };
+    let progress = PayoutProgress {
+        attempt: Some(PayoutAttempt {
+            created_at: Timestamp::from_nanos(1_800_000_000_000_000_301),
+            memo: [0x36; 32],
+            path,
+            amount: Some(TokenAmount::from(302_u32)),
+            token: Some(PrincipalBytes(principal(0x37))),
+        }),
+        swap: leg(0x40),
+        failures: 0,
+        fell_back: Some("the second leg could not pay".to_string()),
+        failed: None,
+        second: Some(leg(0x50)),
+        back: Some(leg(0x60)),
+    };
+    let r#ref = PoolRef::new([0x38; 32]);
+    let steps = [
+        (
+            "pool routes set",
+            PoolStep::IcpRoutesSet {
+                routes: routes.clone(),
+            },
+        ),
+        (
+            "pool payout started through ICP",
+            PoolStep::PayoutStarted {
+                r#ref,
+                attempt: progress.attempt.unwrap(),
+            },
+        ),
+        (
+            "pool swap declined on its second leg",
+            PoolStep::SwapDeclined {
+                r#ref,
+                why: "short".to_string(),
+                leg: Some(LEG_SECOND),
+            },
+        ),
+        (
+            "pool swap approved on its second leg",
+            PoolStep::SwapApproved {
+                r#ref,
+                leg: Some(LEG_SECOND),
+            },
+        ),
+        (
+            "pool swap begun on its way back",
+            PoolStep::SwapBegun {
+                r#ref,
+                before: Some(PoolHeld {
+                    ckusdc: TokenAmount::from(0x39_u8),
+                    token: TokenAmount::from(0x3a_u8),
+                }),
+                leg: Some(LEG_BACK),
+                amount_in: Some(TokenAmount::from(0x3b_u8)),
+            },
+        ),
+        (
+            "pool swap on its way back",
+            PoolStep::Swapped {
+                r#ref,
+                out: TokenAmount::from(0x3c_u8),
+                send: Some(TokenAmount::from(0x3d_u8)),
+                leg: Some(LEG_BACK),
+            },
+        ),
+        (
+            "pool swap undone on its second leg",
+            PoolStep::SwapUndone {
+                r#ref,
+                cost: TokenAmount::from(0x3e_u8),
+                withdrawn: TokenAmount::from(0x3f_u8),
+                leg: Some(LEG_SECOND),
+            },
+        ),
+    ];
+    let mut out = vec![
+        sample("pool ledger with its routes", ledger),
+        sample(
+            "pool deposit paying through ICP",
+            crate::pool::Registered {
+                payout: progress,
+                ..pool_deposit_sample()
+            },
+        ),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(4_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_310 + i),
+                EventHash::new([0xc7; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
+}
+
+/// A swap deposit arrived and paying, for samples that change only its payout.
+fn pool_deposit_sample() -> crate::pool::Registered {
+    use crate::pool::{
+        Arrival, CreditKey, DepositKind, DepositStatus, IcpAccount, PoolRail, Registered,
+        Registration,
+    };
+    use candid::Principal;
+    let recipient = IcpAccount {
+        owner: Principal::from_slice(&[0x41; 10]),
+        subaccount: None,
+    };
+    let mut deposit = Registered::new(Registration {
+        kind: DepositKind::Swap {
+            recipient,
+            token_out: Principal::from_slice(&[0x33; 10]),
+            min_out: 0x42,
+        },
+        min_usdc: TokenAmount::from(43_000_000_u32),
+        premium: TokenAmount::from(44_000_u32),
+        rebalance_share: TokenAmount::ZERO,
+        src_chain: ChainId::ARBITRUM,
+        src_payer: crate::evm::EvmAddress::new([0x45; 20]),
+        rail: PoolRail::Eco,
+        expires_at: Timestamp::from_nanos(1_800_000_000_000_000_346),
+        salt: [0x47; 32],
+    });
+    deposit.status = DepositStatus::Paying;
+    deposit.arrived = Some(Arrival {
+        credit: CreditKey {
+            chain: ChainId::BASE,
+            tx: TxHash::new([0x48; 32]),
+            log_index: 0x49,
+        },
+        amount: TokenAmount::from(43_000_000_u32),
+        block: BlockNumber::new(37_000_350),
+    });
+    deposit.held = Some(TokenAmount::from(43_000_351_u32));
+    deposit
 }
 
 /// The Base payouts' stored types (P11b): a payout of each kind, the ledger with its payout
@@ -869,6 +1067,7 @@ fn pool_samples() -> Vec<Sample> {
                 ledger: principal(0x81),
                 fee: TokenAmount::from(10_084_u32),
             }],
+            routes: None,
         }),
         pockets: Pockets {
             base: Pocket {
@@ -912,10 +1111,13 @@ fn pool_samples() -> Vec<Sample> {
                         undone: None,
                         before: None,
                         withdrawn: None,
+                        amount_in: None,
                     },
                     failures: 3,
                     fell_back: None,
                     failed: Some("the swap's outcome is unknown".to_string()),
+                    second: None,
+                    back: None,
                 },
             },
         )]),
@@ -994,6 +1196,8 @@ fn pool_samples() -> Vec<Sample> {
             failures: 10,
             fell_back: Some("below the minimum twice".to_string()),
             failed: None,
+            second: None,
+            back: None,
         },
         // absent, so this sample's bytes stay the ones the golden pins; the deposit
         // appended at the end of the pool's samples pins it
@@ -1027,10 +1231,13 @@ fn pool_samples() -> Vec<Sample> {
                 // appended after it pins them
                 before: None,
                 withdrawn: None,
+                amount_in: None,
             },
             failures: 1,
             fell_back: None,
             failed: None,
+            second: None,
+            back: None,
         },
         ..holding.clone()
     };
@@ -1117,6 +1324,8 @@ fn pool_step_samples() -> Vec<Sample> {
                     ckusdc: TokenAmount::from(198_u8),
                     token: TokenAmount::from(199_u8),
                 }),
+                leg: None,
+                amount_in: None,
             },
         ),
         (
@@ -1125,15 +1334,20 @@ fn pool_step_samples() -> Vec<Sample> {
                 r#ref,
                 out: TokenAmount::from(200_000_u32),
                 send: Some(TokenAmount::from(198_000_u32)),
+                leg: None,
             },
         ),
-        ("pool swap approved", PoolStep::SwapApproved { r#ref }),
+        (
+            "pool swap approved",
+            PoolStep::SwapApproved { r#ref, leg: None },
+        ),
         (
             "pool swap undone",
             PoolStep::SwapUndone {
                 r#ref,
                 cost: TokenAmount::from(20_000_u32),
                 withdrawn: TokenAmount::from(201_000_000_u32),
+                leg: None,
             },
         ),
         (

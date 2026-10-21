@@ -41,6 +41,7 @@
 mod tests;
 
 use crate::ic::{self, Account, CallError, Dedup};
+use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::state::Store;
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
@@ -50,7 +51,8 @@ use std::collections::BTreeSet;
 use types::hash::{PoolOpId, PoolRef};
 use types::pool::{
     payout_ref, DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress,
-    PendingOp, PoolHeld, PoolSettings, PoolStep, PrincipalBytes, Registered, SwapLeg,
+    PendingOp, PoolHeld, PoolSettings, PoolStep, PrincipalBytes, Registered, RoutePath, SwapLeg,
+    LEG_BACK, LEG_SECOND,
 };
 use types::{Timestamp, TokenAmount};
 
@@ -349,7 +351,7 @@ pub enum Stop {
 
 /// What a call's failure means for a payout: an outcome unknown is asked again as it is; a
 /// refusal, and an outcome the ledger can no longer tell, count toward the stop.
-fn call_stop(what: &str, error: CallError) -> Stop {
+pub(crate) fn call_stop(what: &str, error: CallError) -> Stop {
     match error {
         CallError::Unknown(_) => Stop::Retry(format!("{what}: {error}")),
         CallError::Refused(_) | CallError::Expired(_) => Stop::Failed(format!("{what}: {error}")),
@@ -358,7 +360,7 @@ fn call_stop(what: &str, error: CallError) -> Stop {
 
 /// The pool's guard, read before every outflow call: a pool closed while a payout awaited
 /// moves nothing more.
-fn open(guard: &impl Fn() -> Result<(), String>) -> Result<(), Stop> {
+pub(crate) fn open(guard: &impl Fn() -> Result<(), String>) -> Result<(), Stop> {
     guard().map_err(|closed| Stop::Retry(format!("the pool is closed: {closed}")))
 }
 
@@ -371,15 +373,17 @@ impl Payout {
     }
 
     /// The ckUSDC transfer that pays all of a payout that fell back: a swap deposit's whole
-    /// amount (the pool pays every fee); a withdrawal's amount less the transfer's fee and
-    /// what its leg already cost.
-    fn fallback_amount(&self, swap: &SwapLeg, fee: TokenAmount) -> Option<TokenAmount> {
+    /// amount (the pool pays every fee, and a round trip through ICP's loss); a withdrawal's
+    /// amount less the transfer's fee and what its legs cost in ckUSDC in the end (a way back
+    /// from ICP brings some back).
+    fn fallback_amount(&self, progress: &PayoutProgress, fee: TokenAmount) -> Option<TokenAmount> {
         if self.pool_pays_fees {
             return Some(self.amount);
         }
         self.amount
             .checked_sub(fee)?
-            .checked_sub(leg_cost(swap, None, fee)?)
+            .checked_add(back_gain(progress, fee))?
+            .checked_sub(leg_cost(&progress.swap, None, fee)?)
             .filter(|sent| *sent > TokenAmount::ZERO)
     }
 }
@@ -399,7 +403,8 @@ pub fn path_amount(
     }
     let fees = match path {
         PayoutPath::Ckusdc => fee,
-        PayoutPath::Icpswap { .. } => fee.checked_mul(2_u8)?,
+        // the first leg's approval and pull; a path through ICP's second leg pays in ICP
+        PayoutPath::Icpswap { .. } | PayoutPath::IcpswapVia { .. } => fee.checked_mul(2_u8)?,
     };
     amount
         .checked_sub(fees)
@@ -418,9 +423,22 @@ fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> O
     }
     let deposit = match swap.undone {
         Some(cost) => cost,
-        None => swap_in?.checked_add(fee)?,
+        None => swap_in.or(swap.amount_in)?.checked_add(fee)?,
     };
     approved.checked_add(deposit)
+}
+
+/// The ckUSDC a path through ICP's way back brought into the canister's account: its output
+/// less the pool's withdrawal fee. Nothing on any other path.
+fn back_gain(progress: &PayoutProgress, fee: TokenAmount) -> TokenAmount {
+    match progress
+        .back
+        .and_then(|back| back.out.map(|out| (out, back.send)))
+    {
+        Some((_, Some(landed))) => landed,
+        Some((out, None)) => out.checked_sub(fee).unwrap_or(TokenAmount::ZERO),
+        None => TokenAmount::ZERO,
+    }
 }
 
 /// A payout's progress as the log has it now: a deposit's, or a withdrawal's.
@@ -482,12 +500,15 @@ pub fn of_withdrawal(id: PoolOpId, op: &PendingOp) -> Option<Payout> {
     })
 }
 
-/// The path a payout of `token_out` takes: ckUSDC for ckUSDC, the token's listed pool for
-/// another, and ckUSDC for a token no longer listed.
+/// The path a payout of `token_out` takes: ckUSDC for ckUSDC, its route's leg or legs for a
+/// listed token (directly, or through ICP), and ckUSDC for a token no longer listed.
 pub fn path_for(settings: &PoolSettings, token_out: Principal) -> PayoutPath {
-    match settings.pool_of(token_out) {
-        Some(pool) => PayoutPath::Icpswap { pool },
-        None => PayoutPath::Ckusdc,
+    match settings.path_of(token_out) {
+        Some(RoutePath::Direct { pool }) => PayoutPath::Icpswap { pool },
+        Some(RoutePath::ViaIcp { first, second, icp }) => {
+            PayoutPath::IcpswapVia { first, second, icp }
+        }
+        Some(RoutePath::Ckusdc) | None => PayoutPath::Ckusdc,
     }
 }
 
@@ -534,8 +555,15 @@ pub async fn pay(
     };
     let pool = match attempt.path {
         PayoutPath::Ckusdc => {
+            // what left the ICP pocket: the transfer and its fee, what the legs cost, less
+            // what a way back from ICP brought back
             let spent = leg_cost(&payout.progress.swap, None, fee_ck)
                 .and_then(|cost| first.checked_add(fee_ck)?.checked_add(cost))
+                .map(|spent| {
+                    spent
+                        .checked_sub(back_gain(&payout.progress, fee_ck))
+                        .unwrap_or(TokenAmount::ZERO)
+                })
                 .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
             open(guard)?;
             let block = ledgers
@@ -550,6 +578,21 @@ pub async fn pay(
             });
         }
         PayoutPath::Icpswap { pool } => pool,
+        PayoutPath::IcpswapVia {
+            first: pool,
+            second,
+            icp,
+        } => {
+            let via = ViaAt {
+                ckusdc,
+                fee_ck,
+                pool,
+                second,
+                icp,
+                swap_in: first,
+            };
+            return via_icp(ledgers, settings, &payout, attempt, via, clock, guard).await;
+        }
     };
     let swap_in = first;
     let (out, send) = match (payout.progress.swap.out, payout.progress.swap.send) {
@@ -617,6 +660,354 @@ struct LegAt {
     swap_in: TokenAmount,
 }
 
+/// What a path through ICP works with, fixed when its payout started.
+#[derive(Clone, Copy)]
+struct ViaAt {
+    ckusdc: Principal,
+    fee_ck: TokenAmount,
+    /// The ICP/ckUSDC pool: the first leg and the way back.
+    pool: Principal,
+    /// The token/ICP pool: the second leg.
+    second: Principal,
+    icp: Principal,
+    swap_in: TokenAmount,
+}
+
+impl ViaAt {
+    fn first_leg(&self) -> LegAt {
+        LegAt {
+            ckusdc: self.ckusdc,
+            fee_ck: self.fee_ck,
+            pool: self.pool,
+            swap_in: self.swap_in,
+        }
+    }
+}
+
+/// The ICP fees a path through ICP spends in the canister's ICP account before its second
+/// leg sells: the first leg's withdrawal to the canister, the second leg's approval and its
+/// pull.
+const ICP_FEES_BEFORE_SECOND: u8 = 3;
+
+/// A payout through ICP: ckUSDC into ICP on the ICP/ckUSDC pool, the ICP into the token out on
+/// its ICP pool, the token's transfer. Before the first leg both pools' quotes are read: the
+/// second leg's must reach the recipient's minimum (below it, declined once, then all of it as
+/// ckUSDC), and the first leg's minimum is what the second needs. A first leg that did not
+/// happen falls back as P11a's does. A second leg that cannot pay (its quote short twice, the
+/// pool not trading the pair, its swap not happening) swaps the ICP back to ckUSDC, and all of
+/// it is paid as ckUSDC; a way back that fails too stops for a human. Each leg holds its pool.
+#[allow(clippy::too_many_arguments)]
+async fn via_icp(
+    ledgers: &impl Ledgers,
+    settings: &PoolSettings,
+    payout: &Payout,
+    attempt: PayoutAttempt,
+    via: ViaAt,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> Result<Done, Stop> {
+    let leg0 = via.first_leg();
+    let fee_icp = settings.fee_of(via.icp);
+    let fee_out = settings.fee_of(payout.token_out);
+    let progress = &payout.progress;
+    let least = fee_out
+        .and_then(|fee| fee.checked_mul(2_u8))
+        .and_then(|fees| TokenAmount::from(payout.min_out).checked_add(fees));
+    let out0 = match progress.swap.out {
+        Some(out) => out,
+        None => {
+            let Some(_held) = Leg::take(via.pool) else {
+                return Err(Stop::Retry(format!(
+                    "another payout's leg is at the ICPSwap pool {}",
+                    via.pool
+                )));
+            };
+            let still_routed = settings.path_of(payout.token_out)
+                == Some(RoutePath::ViaIcp {
+                    first: via.pool,
+                    second: via.second,
+                    icp: via.icp,
+                });
+            let (fee_icp, least) = match (fee_icp, least) {
+                (Some(fee_icp), Some(least)) if still_routed || progress.swap.begun => {
+                    (fee_icp, least)
+                }
+                _ if !progress.swap.begun => {
+                    return via_fall_back(
+                        payout,
+                        leg0,
+                        format!(
+                            "{} is no longer routed through ICP with these pools",
+                            payout.token_out
+                        ),
+                        clock(),
+                    )
+                }
+                _ => {
+                    return Err(Stop::Failed(
+                        "no fee was read for ICP or the token".to_string(),
+                    ))
+                }
+            };
+            if let Some(other) = read_state(|state| unsettled_at(state, via.pool, payout.id)) {
+                return Err(Stop::Retry(format!(
+                    "the swap of {other} at the ICPSwap pool {} is not settled yet",
+                    via.pool
+                )));
+            }
+            let mut least0 = TokenAmount::ZERO;
+            if !progress.swap.begun {
+                match chained_least(ledgers, payout, via, fee_icp, least).await? {
+                    Ok(at_least) => least0 = at_least,
+                    Err(why) => {
+                        if progress.swap.declined == 0 {
+                            record(
+                                PoolStep::SwapDeclined {
+                                    r#ref: payout.id,
+                                    why,
+                                    leg: None,
+                                },
+                                clock(),
+                            )?;
+                            return Err(Stop::Later);
+                        }
+                        return via_fall_back(payout, leg0, why, clock());
+                    }
+                }
+            }
+            let spec = LegSpec {
+                id: payout.id,
+                leg: None,
+                pool: via.pool,
+                token_in: via.ckusdc,
+                token_out: via.icp,
+                amount_in: via.swap_in,
+                least: least0,
+                fee_in: via.fee_ck,
+                fee_out: fee_icp,
+                pays_out: false,
+            };
+            match legs::run(ledgers, spec, progress.swap, clock, guard).await? {
+                LegEnd::Out(out) => out,
+                LegEnd::Short(quoted) => {
+                    return via_fall_back(
+                        payout,
+                        leg0,
+                        format!("the ICP/ckUSDC pool quotes {quoted}, below the {least0} needed"),
+                        clock(),
+                    )
+                }
+                LegEnd::NoPair => {
+                    return via_fall_back(
+                        payout,
+                        leg0,
+                        "the ICP/ckUSDC pool does not trade the pair".to_string(),
+                        clock(),
+                    )
+                }
+                LegEnd::NotDone(why) => return via_fall_back(payout, leg0, why, clock()),
+            }
+        }
+    };
+    let fee_icp = fee_icp.ok_or_else(|| Stop::Failed("no fee was read for ICP".to_string()))?;
+    // read again: the first leg's lines this drive recorded are in it
+    let progress = progress_of(payout.id).unwrap_or_else(|| payout.progress.clone());
+    let second = progress.leg(Some(LEG_SECOND));
+    let back = progress.leg(Some(LEG_BACK));
+    let in1 = out0
+        .checked_sub(
+            fee_icp
+                .checked_mul(ICP_FEES_BEFORE_SECOND)
+                .unwrap_or(TokenAmount::MAX),
+        )
+        .unwrap_or(TokenAmount::ZERO);
+    let paid_by_second = if back.begun || back.out.is_some() || in1 == TokenAmount::ZERO {
+        None
+    } else {
+        match (second.out, fee_out, least) {
+            (Some(out), Some(fee_out), _) => Some((out, second.send, fee_out)),
+            (None, Some(fee_out), Some(least)) => {
+                let Some(_held) = Leg::take(via.second) else {
+                    return Err(Stop::Retry(format!(
+                        "another payout's leg is at the ICPSwap pool {}",
+                        via.second
+                    )));
+                };
+                if let Some(other) = read_state(|state| unsettled_at(state, via.second, payout.id))
+                {
+                    return Err(Stop::Retry(format!(
+                        "the swap of {other} at the ICPSwap pool {} is not settled yet",
+                        via.second
+                    )));
+                }
+                let spec = LegSpec {
+                    id: payout.id,
+                    leg: Some(LEG_SECOND),
+                    pool: via.second,
+                    token_in: via.icp,
+                    token_out: payout.token_out,
+                    amount_in: in1,
+                    least,
+                    fee_in: fee_icp,
+                    fee_out,
+                    pays_out: true,
+                };
+                match legs::run(ledgers, spec, second, clock, guard).await? {
+                    LegEnd::Out(out) => Some((out, Some(spec.send_of(out)), fee_out)),
+                    LegEnd::Short(quoted) if second.declined == 0 => {
+                        record(
+                            PoolStep::SwapDeclined {
+                                r#ref: payout.id,
+                                why: format!(
+                                    "the second leg's pool quotes {quoted}, below the {least} needed"
+                                ),
+                                leg: Some(LEG_SECOND),
+                            },
+                            clock(),
+                        )?;
+                        return Err(Stop::Later);
+                    }
+                    LegEnd::Short(_) | LegEnd::NoPair | LegEnd::NotDone(_) => None,
+                }
+            }
+            // the token's fee is no longer known: its output could not be paid
+            _ => None,
+        }
+    };
+    if let Some((out, send, fee_out)) = paid_by_second {
+        let send = send.unwrap_or_else(|| {
+            out.checked_sub(fee_out.checked_mul(2_u8).unwrap_or(TokenAmount::MAX))
+                .unwrap_or(TokenAmount::ZERO)
+        });
+        if send == TokenAmount::ZERO || send < TokenAmount::from(payout.min_out) {
+            return Err(Stop::Failed(format!(
+                "the output {out} would pay {send}, below the {} the recipient asked",
+                payout.min_out
+            )));
+        }
+        let spent = leg_cost(&progress.swap, Some(via.swap_in), via.fee_ck)
+            .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
+        open(guard)?;
+        let block = ledgers
+            .transfer(payout.token_out, payout.to, send, payout.dedup(&attempt))
+            .await
+            .map_err(|error| call_stop("the output's transfer", error))?;
+        return Ok(Done {
+            token: payout.token_out,
+            paid: send,
+            block,
+            spent,
+        });
+    }
+    // the second leg cannot pay: the ICP the canister holds goes back to ckUSDC, all of it
+    let held = out0
+        .checked_sub(fee_icp)
+        .and_then(|left| left.checked_sub(legs::cost_in(&second, fee_icp)?))
+        .unwrap_or(TokenAmount::ZERO);
+    let amount_back = held
+        .checked_sub(fee_icp.checked_mul(2_u8).unwrap_or(TokenAmount::MAX))
+        .unwrap_or(TokenAmount::ZERO);
+    if back.out.is_none() {
+        let Some(_held) = Leg::take(via.pool) else {
+            return Err(Stop::Retry(format!(
+                "another payout's leg is at the ICPSwap pool {}",
+                via.pool
+            )));
+        };
+        if let Some(other) = read_state(|state| unsettled_at(state, via.pool, payout.id)) {
+            return Err(Stop::Retry(format!(
+                "the swap of {other} at the ICPSwap pool {} is not settled yet",
+                via.pool
+            )));
+        }
+        let spec = LegSpec {
+            id: payout.id,
+            leg: Some(LEG_BACK),
+            pool: via.pool,
+            token_in: via.icp,
+            token_out: via.ckusdc,
+            amount_in: amount_back,
+            least: TokenAmount::ONE,
+            fee_in: fee_icp,
+            fee_out: via.fee_ck,
+            pays_out: false,
+        };
+        if amount_back == TokenAmount::ZERO {
+            return Err(Stop::Failed(
+                "ALERT: the ICP the first leg bought does not cover the way back".to_string(),
+            ));
+        }
+        match legs::run(ledgers, spec, back, clock, guard).await? {
+            LegEnd::Out(_) => {}
+            LegEnd::Short(_) | LegEnd::NoPair | LegEnd::NotDone(_) => return Err(Stop::Failed(
+                "ALERT: the ICP could not be swapped back to ckUSDC; the payout waits for a human"
+                    .to_string(),
+            )),
+        }
+    }
+    via_fall_back(
+        payout,
+        leg0,
+        "the second leg could not pay; the ICP came back as ckUSDC".to_string(),
+        clock(),
+    )
+}
+
+/// [`fall_back`] for a path through ICP, which answers a payout or why it stopped.
+fn via_fall_back(payout: &Payout, leg: LegAt, why: String, now: Timestamp) -> Result<Done, Stop> {
+    fall_back(payout, leg, why, now)?;
+    Err(Stop::Again)
+}
+
+/// The least the first leg of a path through ICP must give, from both pools' quotes: the
+/// second leg's quote for what the first buys must reach `least`; below it, why.
+async fn chained_least(
+    ledgers: &impl Ledgers,
+    payout: &Payout,
+    via: ViaAt,
+    fee_icp: TokenAmount,
+    least: TokenAmount,
+) -> Result<Result<TokenAmount, String>, Stop> {
+    let Some(zero_for_one) = ledgers
+        .direction(via.pool, via.ckusdc, via.icp)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+    else {
+        return Ok(Err(
+            "the ICP/ckUSDC pool does not trade the pair".to_string()
+        ));
+    };
+    let bought = ledgers
+        .quote(via.pool, via.swap_in, zero_for_one)
+        .await
+        .map_err(|error| call_stop("the pool's quote", error))?;
+    let fees = fee_icp
+        .checked_mul(ICP_FEES_BEFORE_SECOND)
+        .ok_or_else(|| Stop::Failed("the ICP fees overflow".to_string()))?;
+    let sold = bought.checked_sub(fees).unwrap_or(TokenAmount::ZERO);
+    let Some(zero_for_one) = ledgers
+        .direction(via.second, via.icp, payout.token_out)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+    else {
+        return Ok(Err(
+            "the token's ICP pool does not trade the pair".to_string()
+        ));
+    };
+    let quoted = ledgers
+        .quote(via.second, sold, zero_for_one)
+        .await
+        .map_err(|error| call_stop("the pool's quote", error))?;
+    if sold == TokenAmount::ZERO || quoted < least {
+        return Ok(Err(format!(
+            "the pools quote {quoted} through ICP, below the {least} needed"
+        )));
+    }
+    legs::first_leg_least(sold, quoted, least, fees)
+        .map(Ok)
+        .ok_or_else(|| Stop::Failed("the first leg's minimum overflows".to_string()))
+}
+
 /// Records the fall back of a payout's leg to ckUSDC, with the exact transfer that pays all
 /// of it, read on the payout as the log has it now (the approvals and the undo included).
 fn fall_back(
@@ -625,9 +1016,9 @@ fn fall_back(
     why: String,
     now: Timestamp,
 ) -> Result<(TokenAmount, TokenAmount), Stop> {
-    let swap = progress_of(payout.id).map_or(payout.progress.swap, |progress| progress.swap);
+    let progress = progress_of(payout.id).unwrap_or_else(|| payout.progress.clone());
     let amount = payout
-        .fallback_amount(&swap, leg.fee_ck)
+        .fallback_amount(&progress, leg.fee_ck)
         .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?;
     record(
         PoolStep::FellBack {
@@ -721,6 +1112,7 @@ async fn swap_leg(
                 PoolStep::SwapDeclined {
                     r#ref: payout.id,
                     why,
+                    leg: None,
                 },
                 clock(),
             )?;
@@ -740,12 +1132,20 @@ async fn swap_leg(
         .await
         .map_err(|error| call_stop("the approval", error))?;
     // the approval's fee is the payout's, whatever comes next
-    record(PoolStep::SwapApproved { r#ref: payout.id }, clock())?;
+    record(
+        PoolStep::SwapApproved {
+            r#ref: payout.id,
+            leg: None,
+        },
+        clock(),
+    )?;
     open(guard)?;
     record(
         PoolStep::SwapBegun {
             r#ref: payout.id,
             before: Some(before),
+            amount_in: Some(swap_in),
+            leg: None,
         },
         clock(),
     )?;
@@ -761,6 +1161,7 @@ async fn swap_leg(
                     r#ref: payout.id,
                     out,
                     send: Some(send),
+                    leg: None,
                 },
                 clock(),
             )?;
@@ -819,20 +1220,16 @@ async fn held_at(
 /// undone): until it is, what the pool holds of the canister's is not known to be whose, so
 /// no other leg begins there. A payout stopped for a human is not driven: what it left at
 /// the pool is in what the next leg reads before its swap, and never that leg's.
-fn unsettled_at<S: Store>(
+pub(crate) fn unsettled_at<S: Store>(
     state: &crate::state::State<S>,
     pool: Principal,
     except: PoolRef,
 ) -> Option<PoolRef> {
     let unsettled = |payout: &PayoutProgress| {
         payout.failed.is_none()
-            && payout.swap.begun
-            && payout.swap.out.is_none()
-            && payout.swap.undone.is_none()
-            && matches!(
-                payout.attempt.map(|attempt| attempt.path),
-                Some(PayoutPath::Icpswap { pool: at }) if at == pool
-            )
+            && legs_at(payout).into_iter().any(|(at, leg)| {
+                at == pool && leg.begun && leg.out.is_none() && leg.undone.is_none()
+            })
     };
     let ledger = state.pool();
     let deposits = ledger.paying.iter().copied().filter(|r#ref| {
@@ -845,6 +1242,20 @@ fn unsettled_at<S: Store>(
         _ => None,
     });
     deposits.chain(withdrawals).find(|r#ref| *r#ref != except)
+}
+
+/// Every leg of a payout's path and the pool it trades in: the first leg of a direct path;
+/// a path through ICP's first leg and its way back (on the ICP/ckUSDC pool), and its second.
+pub(crate) fn legs_at(progress: &PayoutProgress) -> Vec<(Principal, SwapLeg)> {
+    match progress.attempt.map(|attempt| attempt.path) {
+        Some(PayoutPath::Icpswap { pool }) => vec![(pool, progress.swap)],
+        Some(PayoutPath::IcpswapVia { first, second, .. }) => vec![
+            (first, progress.swap),
+            (second, progress.leg(Some(LEG_SECOND))),
+            (first, progress.leg(Some(LEG_BACK))),
+        ],
+        Some(PayoutPath::Ckusdc) | None => Vec::new(),
+    }
 }
 
 /// A begun swap that did not answer with its output: what the pool holds of the canister's
@@ -902,6 +1313,7 @@ async fn settle(
                 r#ref: payout.id,
                 out: token_left,
                 send: Some(send),
+                leg: None,
             },
             clock(),
         )?;
@@ -925,6 +1337,7 @@ async fn settle(
                 r#ref: payout.id,
                 cost,
                 withdrawn,
+                leg: None,
             },
             clock(),
         )?;
@@ -942,6 +1355,7 @@ async fn settle(
                     r#ref: payout.id,
                     cost: TokenAmount::ZERO,
                     withdrawn: TokenAmount::ZERO,
+                    leg: None,
                 },
                 clock(),
             )?;

@@ -92,3 +92,37 @@ fn set_payout_settings_refuses_a_stranger_a_halt_and_bad_settings() {
         Ok(types::pool::PayoutSettings::default())
     );
 }
+
+#[test]
+fn set_icp_routes_refuses_a_stranger_and_a_halt_and_reads_icp_off_its_pool() {
+    let ckusdc = candid::Principal::from_text(types::pool::CKUSDC_LEDGER).unwrap();
+    let icp = candid::Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+    assert_eq!(
+        routes_checked(true, true, None, Vec::new()),
+        Err(PoolError::Halted)
+    );
+    assert!(matches!(
+        routes_checked(false, false, None, Vec::new()),
+        Err(PoolError::NotAllowed(_))
+    ));
+    let route = settlement_api::types::pool::IcpRoute {
+        ledger: candid::Principal::from_slice(&[9; 10]),
+        via: settlement_api::types::pool::IcpRouteVia::Icp(candid::Principal::from_slice(&[8; 10])),
+    };
+    let routes = routes_checked(false, true, Some(icp), vec![route]).unwrap();
+    assert_eq!(routes.icp_pool(), Some(icp));
+    assert_eq!(routes.routes.len(), 1);
+    assert_eq!(
+        icp_ledger_of(&ckusdc.to_text(), &icp.to_text(), ckusdc),
+        Some(icp)
+    );
+    assert_eq!(
+        icp_ledger_of(&icp.to_text(), &ckusdc.to_text(), ckusdc),
+        Some(icp)
+    );
+    assert_eq!(icp_ledger_of(&icp.to_text(), &icp.to_text(), ckusdc), None);
+    assert_eq!(
+        icp_ledger_of("not a principal", &ckusdc.to_text(), ckusdc),
+        None
+    );
+}

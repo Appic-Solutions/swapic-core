@@ -1227,6 +1227,8 @@ fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
             PoolStep::SwapBegun {
                 r#ref: swapped,
                 before: None,
+                amount_in: None,
+                leg: None,
             },
             at(4),
         )
@@ -1236,6 +1238,7 @@ fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
                 r#ref: swapped,
                 out: TokenAmount::from(7_900_u32),
                 send: None,
+                leg: None,
             },
             at(4),
         )
@@ -1402,5 +1405,388 @@ fn no_output_is_paid_below_min_out() {
             Err(Stop::Failed(_))
         ));
         assert!(fake.transfers().is_empty());
+    });
+}
+
+// ---- routes through ICP (P11b Task 1b) ----
+
+fn icp_ledger() -> Principal {
+    Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+}
+
+fn icp_pool() -> Principal {
+    Principal::from_slice(&[0x81; 10])
+}
+
+fn token_icp_pool() -> Principal {
+    Principal::from_slice(&[0x82; 10])
+}
+
+const ICP_FEE: u64 = 10;
+
+/// ICPSwap pools one by one, and a ledger that executes a transfer once per dedup pair: each
+/// pool its own quote, its own swap answer and its own unused balances (token in, token out
+/// of the leg asked, as a pool keyed by its pair would).
+#[derive(Default)]
+struct Pools {
+    calls: RefCell<Vec<String>>,
+    executed: RefCell<BTreeMap<TransferKey, Executed>>,
+    /// Each pool's quotes, one per call, the last one kept.
+    quotes: RefCell<BTreeMap<Principal, Vec<TokenAmount>>>,
+    /// None: the pool answers its own `err`
+    outs: RefCell<BTreeMap<Principal, Option<TokenAmount>>>,
+}
+
+impl Pools {
+    fn transfers(&self) -> Vec<(Principal, IcpAccount, TokenAmount)> {
+        self.executed
+            .borrow()
+            .iter()
+            .map(|((ledger, _, _), (to, amount, _))| (*ledger, *to, *amount))
+            .collect()
+    }
+
+    fn name(pool: Principal) -> &'static str {
+        if pool == icp_pool() {
+            "icp/ckusdc"
+        } else {
+            "token/icp"
+        }
+    }
+}
+
+impl Ledgers for Pools {
+    async fn transfer(
+        &self,
+        ledger: Principal,
+        to: IcpAccount,
+        amount: TokenAmount,
+        dedup: Dedup,
+    ) -> Result<u64, CallError> {
+        self.calls.borrow_mut().push(format!("transfer {amount}"));
+        let key = (ledger, dedup.memo, dedup.created_at_nanos);
+        let mut executed = self.executed.borrow_mut();
+        if let Some((_, _, block)) = executed.get(&key) {
+            return Ok(*block);
+        }
+        let block = executed.len() as u64 + 100;
+        executed.insert(key, (to, amount, block));
+        Ok(block)
+    }
+
+    async fn pull(
+        &self,
+        _ledger: Principal,
+        _from: IcpAccount,
+        _amount: TokenAmount,
+        _dedup: Dedup,
+    ) -> Result<u64, CallError> {
+        Ok(7)
+    }
+
+    async fn approve(
+        &self,
+        _ledger: Principal,
+        spender: Principal,
+        amount: TokenAmount,
+    ) -> Result<(), CallError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("approve {} {amount}", Self::name(spender)));
+        Ok(())
+    }
+
+    async fn direction(
+        &self,
+        _pool: Principal,
+        _token_in: Principal,
+        _token_out: Principal,
+    ) -> Result<Option<bool>, CallError> {
+        Ok(Some(true))
+    }
+
+    async fn quote(
+        &self,
+        pool: Principal,
+        amount_in: TokenAmount,
+        _zero_for_one: bool,
+    ) -> Result<TokenAmount, CallError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("quote {} {amount_in}", Self::name(pool)));
+        let mut quotes = self.quotes.borrow_mut();
+        let Some(answers) = quotes.get_mut(&pool) else {
+            return Ok(TokenAmount::ZERO);
+        };
+        Ok(if answers.len() > 1 {
+            answers.remove(0)
+        } else {
+            answers[0]
+        })
+    }
+
+    async fn swap(
+        &self,
+        pool: Principal,
+        amount_in: TokenAmount,
+        _zero_for_one: bool,
+        min_out: TokenAmount,
+        _fee_in: TokenAmount,
+        _fee_out: TokenAmount,
+    ) -> Result<TokenAmount, CallError> {
+        self.calls.borrow_mut().push(format!(
+            "swap {} {amount_in} at least {min_out}",
+            Self::name(pool)
+        ));
+        match self.outs.borrow_mut().remove(&pool) {
+            Some(Some(out)) => Ok(out),
+            Some(None) => Err(CallError::Refused("the pool answered Err(slippage)".into())),
+            None => Err(CallError::Refused("no answer set".into())),
+        }
+    }
+
+    async fn unused(&self, _pool: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
+        Ok((TokenAmount::ZERO, TokenAmount::ZERO))
+    }
+
+    async fn withdraw(
+        &self,
+        _pool: Principal,
+        _token: Principal,
+        _amount: TokenAmount,
+        _fee: TokenAmount,
+    ) -> Result<(), CallError> {
+        Ok(())
+    }
+}
+
+/// A pool with 1000 ckUSDC on ICP, `token()` routed through ICP, and a swap of 100 USDC to
+/// it for `account(1)` arrived.
+fn arrived_via_icp(min_out: u128) -> PoolRef {
+    funded_pool(usdc(1_000));
+    record_at(
+        PoolStep::IcpRoutesSet {
+            routes: types::pool::IcpRoutes {
+                icp_ckusdc_pool: Some(PrincipalBytes(icp_pool())),
+                icp_ledger: Some(PrincipalBytes(icp_ledger())),
+                routes: vec![
+                    types::pool::IcpRoute {
+                        ledger: icp_ledger(),
+                        via: types::pool::IcpRouteVia::Direct(icp_pool()),
+                    },
+                    types::pool::IcpRoute {
+                        ledger: token(),
+                        via: types::pool::IcpRouteVia::Icp(token_icp_pool()),
+                    },
+                ],
+                ledger_fees: vec![
+                    LedgerFee {
+                        ledger: icp_ledger(),
+                        fee: TokenAmount::from(ICP_FEE),
+                    },
+                    LedgerFee {
+                        ledger: token(),
+                        fee: TokenAmount::from(TOKEN_FEE),
+                    },
+                ],
+            },
+        },
+        at(1),
+    )
+    .unwrap();
+    arrive(1, token(), min_out)
+}
+
+/// Both legs through ICP: the pools' quotes read first, the first leg's minimum the ICP the
+/// second needs, each leg recorded before its call, and the token's output to the recipient.
+#[test]
+fn a_route_through_icp_swaps_twice_and_pays_the_token() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_via_icp(5_000);
+        // the hold counts eight ckUSDC fees: two legs
+        assert_eq!(
+            deposit(&r#ref).unwrap().held(),
+            usdc(99).checked_add(fees(8)).unwrap()
+        );
+        let pools = Pools::default();
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(icp_pool(), vec![TokenAmount::from(1_000_030_u64)]);
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(token_icp_pool(), vec![TokenAmount::from(14_000_u32)]);
+        pools
+            .outs
+            .borrow_mut()
+            .insert(icp_pool(), Some(TokenAmount::from(1_000_030_u64)));
+        pools
+            .outs
+            .borrow_mut()
+            .insert(token_icp_pool(), Some(TokenAmount::from(13_000_u32)));
+        block_on(drive_deposit(&pools, r#ref, clock, &open_pool)).unwrap();
+        // the second leg sells what the first bought less three ICP fees: 1,000,000; it must
+        // give 5,000 and two token fees, 7,000, of the 14,000 quoted: half, 500,000, and the
+        // three fees back on top for the first leg's minimum
+        assert_eq!(
+            *pools.calls.borrow(),
+            vec![
+                format!("quote icp/ckusdc {}", usdc(99)),
+                "quote token/icp 1000000".to_string(),
+                format!("quote icp/ckusdc {}", usdc(99)),
+                format!(
+                    "approve icp/ckusdc {}",
+                    usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
+                ),
+                format!("swap icp/ckusdc {} at least 500030", usdc(99)),
+                "quote token/icp 1000000".to_string(),
+                "approve token/icp 1000010".to_string(),
+                "swap token/icp 1000000 at least 7000".to_string(),
+                "transfer 11000".to_string(),
+            ]
+        );
+        assert_eq!(
+            pools.transfers(),
+            vec![(token(), account(1), TokenAmount::from(11_000_u32))]
+        );
+        let paid = deposit(&r#ref).unwrap();
+        assert_eq!(paid.status, DepositStatus::Paid);
+        let second = paid.payout.second.unwrap();
+        assert_eq!(second.out, Some(TokenAmount::from(13_000_u32)));
+        assert_eq!(second.amount_in, Some(TokenAmount::from(1_000_000_u64)));
+        // only the first leg cost ckUSDC: its approval, its deposit and its pull
+        assert_eq!(
+            paid.paid.unwrap().spent,
+            usdc(99).checked_add(fees(2)).unwrap()
+        );
+    });
+}
+
+/// All or nothing over both legs: a second leg that cannot reach the minimum (declined once,
+/// short again) swaps the ICP back to ckUSDC on the ICP/ckUSDC pool, and ALL of it is paid as
+/// ckUSDC; the pool pays the round trip's loss.
+#[test]
+fn a_second_leg_short_pays_everything_as_ckusdc() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_via_icp(5_000);
+        let pools = Pools::default();
+        // the ICP/ckUSDC pool: the chained check, the first leg, then the way back's quote
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(icp_pool(), vec![TokenAmount::from(1_000_030_u64)]);
+        // the token's pool: 14,000 when the legs are planned, then 6,999 for the second leg
+        pools.quotes.borrow_mut().insert(
+            token_icp_pool(),
+            vec![TokenAmount::from(14_000_u32), TokenAmount::from(6_999_u32)],
+        );
+        pools
+            .outs
+            .borrow_mut()
+            .insert(icp_pool(), Some(TokenAmount::from(1_000_030_u64)));
+        assert_eq!(
+            block_on(drive_deposit(&pools, r#ref, clock, &open_pool)),
+            Err(Stop::Later)
+        );
+        let declined = deposit(&r#ref).unwrap().payout;
+        assert!(declined.swap.out.is_some());
+        assert_eq!(declined.second.unwrap().declined, 1);
+        assert!(pools.transfers().is_empty());
+        // short again: the ICP goes back. The canister holds what the first leg bought less
+        // the withdrawal's fee; the way back sells it less its approval's and pull's fees
+        pools.outs.borrow_mut().insert(icp_pool(), Some(usdc(98)));
+        block_on(drive_deposit(&pools, r#ref, clock, &open_pool)).unwrap();
+        let calls = pools.calls.borrow();
+        assert!(calls.contains(&"swap icp/ckusdc 1000000 at least 1".to_string()));
+        assert!(!calls.iter().any(|call| call.starts_with("swap token/icp")));
+        // all of it, as ckUSDC, never a mix
+        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        let paid = deposit(&r#ref).unwrap();
+        assert_eq!(paid.status, DepositStatus::Paid);
+        assert!(paid.payout.fell_back.is_some());
+        assert_eq!(paid.payout.back.unwrap().out, Some(usdc(98)));
+        // what left the ICP pocket: the transfer and its fee, the first leg's deposit, its
+        // approval and pull, less the ckUSDC the way back brought (its output less one fee)
+        let spent = usdc(99)
+            .checked_add(fees(1))
+            .and_then(|sum| sum.checked_add(usdc(99)))
+            .and_then(|sum| sum.checked_add(fees(2)))
+            .and_then(|sum| sum.checked_sub(usdc(98).checked_sub(fees(1)).unwrap()))
+            .unwrap();
+        assert_eq!(paid.paid.unwrap().spent, spent);
+    });
+}
+
+/// A way back that fails too stops the payout for a human, as P11a does after `SwapBegun`:
+/// nothing is paid, nothing is guessed.
+#[test]
+fn a_way_back_that_fails_stops_for_a_human() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_via_icp(5_000);
+        let pools = Pools::default();
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(icp_pool(), vec![TokenAmount::from(1_000_030_u64)]);
+        pools.quotes.borrow_mut().insert(
+            token_icp_pool(),
+            vec![TokenAmount::from(14_000_u32), TokenAmount::from(6_999_u32)],
+        );
+        pools
+            .outs
+            .borrow_mut()
+            .insert(icp_pool(), Some(TokenAmount::from(1_000_030_u64)));
+        assert_eq!(
+            block_on(drive_deposit(&pools, r#ref, clock, &open_pool)),
+            Err(Stop::Later)
+        );
+        // the way back is refused, and nothing of it is left at the pool
+        pools.outs.borrow_mut().insert(icp_pool(), None);
+        let stop = block_on(drive_deposit(&pools, r#ref, clock, &open_pool)).unwrap_err();
+        assert!(matches!(stop, Stop::Failed(ref why) if why.starts_with("ALERT")));
+        assert!(pools.transfers().is_empty());
+        let payout = deposit(&r#ref).unwrap().payout;
+        assert!(payout.fell_back.is_none());
+        assert_eq!(
+            payout.back.unwrap().undone,
+            Some(TokenAmount::ZERO),
+            "the pool refused before the deposit"
+        );
+    });
+}
+
+/// The legs are planned on both pools' quotes before anything is called: a route through ICP
+/// that cannot reach the minimum declines once, then pays all of it as ckUSDC, nothing
+/// approved or swapped.
+#[test]
+fn a_route_through_icp_short_from_the_start_pays_ckusdc_and_calls_nothing() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_via_icp(5_000);
+        let pools = Pools::default();
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(icp_pool(), vec![TokenAmount::from(1_000_030_u64)]);
+        pools
+            .quotes
+            .borrow_mut()
+            .insert(token_icp_pool(), vec![TokenAmount::from(6_999_u32)]);
+        assert_eq!(
+            block_on(drive_deposit(&pools, r#ref, clock, &open_pool)),
+            Err(Stop::Later)
+        );
+        assert_eq!(deposit(&r#ref).unwrap().payout.swap.declined, 1);
+        block_on(drive_deposit(&pools, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert!(!pools
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("approve") || call.starts_with("swap")));
     });
 }

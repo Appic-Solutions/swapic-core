@@ -6,8 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    PayoutSettings, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
-    StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
+    IcpRoute, PayoutSettings, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError,
+    PoolSettings, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -102,6 +102,33 @@ pub fn set_payout_settings(settings: PayoutSettings) -> Result<(), PoolError> {
     let settings =
         pool::settings::payout_checked(is_halted(), ic_cdk::api::is_controller(&caller), settings)?;
     crate::storage::pool::record(PoolStep::PayoutSettingsSet { settings })
+        .map_err(|error| PoolError::BadSettings(error.to_string()))?;
+    Ok(())
+}
+
+/// Controller-only, refused while halted. Sets the ICP routes (interface section 3c): the
+/// ICP/ckUSDC pool, and each listed token's route, directly through its ckUSDC pool or
+/// through ICP. Reads the ICP ledger off the ICP/ckUSDC pool and every route ledger's fee.
+/// No token has a size cap of its own: the pool's per swap cap applies.
+#[update]
+pub async fn set_icp_routes(
+    icp_ckusdc_pool: Option<candid::Principal>,
+    routes: Vec<IcpRoute>,
+) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    let routes = pool::settings::routes_checked(
+        is_halted(),
+        ic_cdk::api::is_controller(&caller),
+        icp_ckusdc_pool,
+        routes,
+    )?;
+    let ckusdc = crate::storage::pool::ledger()
+        .settings
+        .map(|settings| settings.ckusdc_ledger)
+        .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
+    let routes = pool::settings::routes_with_reads(routes, ckusdc).await?;
+    pool::require_running()?;
+    crate::storage::pool::record(PoolStep::IcpRoutesSet { routes })
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     Ok(())
 }

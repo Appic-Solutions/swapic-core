@@ -139,9 +139,10 @@ pub struct WithdrawalPlan {
     pub ckusdc: Principal,
 }
 
-/// How many ckUSDC fees a token path's withdrawal can cost at worst, which its amount must
-/// more than cover: the approval, the pool's pull, the withdrawal back from the pool of a
-/// swap that did not happen, and the ckUSDC transfer it then falls back to.
+/// How many ckUSDC fees each ICPSwap leg of a token path's withdrawal can cost at worst,
+/// which its amount must more than cover (interface section 4: 4 direct, 8 through ICP): the
+/// approval, the pool's pull, the withdrawal back from the pool of a swap that did not happen,
+/// and the ckUSDC transfer it then falls back to.
 pub const TOKEN_PATH_FEES: u8 = 4;
 
 /// Every rule a withdrawal meets before anything is burned, in order: no sanctioned party,
@@ -204,8 +205,15 @@ pub fn plan_withdrawal<S: Store>(
                 ));
             }
         }
-        PayoutPath::Icpswap { .. } => {
-            let fees = fee.checked_mul(TOKEN_PATH_FEES).unwrap_or(TokenAmount::MAX);
+        PayoutPath::Icpswap { .. } | PayoutPath::IcpswapVia { .. } => {
+            let legs: u8 = if matches!(path, PayoutPath::IcpswapVia { .. }) {
+                2
+            } else {
+                1
+            };
+            let fees = fee
+                .checked_mul(TOKEN_PATH_FEES * legs)
+                .unwrap_or(TokenAmount::MAX);
             if request.usdc <= fees {
                 return Err(PoolError::NotAllowed(format!(
                     "the withdrawal does not cover the {fees} of fees its token's path can cost"
