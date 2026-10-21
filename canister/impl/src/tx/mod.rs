@@ -962,6 +962,7 @@ fn landed(
                         network_fee: fee_path.map_or(types::TokenAmount::ZERO, |path| {
                             crate::books::network_fee_in(value, path)
                         }),
+                        eco_intent: fee_path.and_then(|path| eco_intent_in(value, path.canister)),
                         ..receipt
                     })
                 }),
@@ -1025,7 +1026,36 @@ async fn decide(
                 block,
                 success,
                 network_fee,
+                eco_intent,
             } = receipt;
+            // a pool payout closes with its own line: paid (with the Eco intent its order
+            // published, whose refund reopens it) or reverted, back to waiting with its order
+            // pinned. It paid the canister no fee, so none is booked
+            if let TxPurpose::PoolPayout(id) = entry.purpose {
+                let step = if success {
+                    types::pool::PoolStep::PayoutPaid {
+                        id,
+                        tx_hash,
+                        block,
+                        intent: eco_intent,
+                    }
+                } else {
+                    types::pool::PoolStep::PayoutReverted { id }
+                };
+                let appended = match crate::storage::pool::record_at(step, now) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log(&format!(
+                            "the pool payout {id}'s close was refused: {error}"
+                        ));
+                        false
+                    }
+                };
+                if appended {
+                    settle(entry, block, success, latest, credit);
+                }
+                return usize::from(appended);
+            }
             // a flow's transaction closes with a flow line, whichever of the nonce's
             // transactions landed
             if let TxPurpose::Relay(quote_hash)
@@ -1405,6 +1435,21 @@ struct Receipt {
     success: bool,
     /// What the order's fee step paid the canister in it.
     network_fee: types::TokenAmount,
+    /// The Eco intent it published with the canister as the reward's creator: a pool payout's
+    /// onward intent, whose refund comes back to the canister if no one fills it.
+    eco_intent: Option<[u8; 32]>,
+}
+
+/// The hash of the one Eco intent `receipt` published whose reward's creator is `canister`,
+/// if it published one.
+fn eco_intent_in(receipt: &Value, canister: EvmAddress) -> Option<[u8; 32]> {
+    let mut intents = crate::pool::arrival::logs_of(receipt)
+        .into_iter()
+        .filter_map(|log| types::swapic::read_intent_published(&log.topics, &log.data))
+        .filter(|intent| intent.creator == canister);
+    let intent = intents.next()?;
+    // two would name no one intent
+    intents.next().is_none().then_some(intent.intent_hash)
 }
 
 /// Why a provider's answer is not a receipt this entry may be decided on.
@@ -1438,6 +1483,7 @@ fn parse_receipt(value: &Value, ours: &[TxHash]) -> Result<Receipt, NotOurReceip
             block,
             success: status == "0x1",
             network_fee: types::TokenAmount::ZERO,
+            eco_intent: None,
         })
     };
     let receipt = read().ok_or(NotOurReceipt::Unmined)?;

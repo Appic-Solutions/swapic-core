@@ -1,0 +1,482 @@
+//! Review Focus 1 and 2 on REAL orders, the staging canaries' own (2026-10-18/19, mainnet,
+//! Swapic `0xF0Ba68cB...`), copied into `samples/`; each test rewrites only the fields it
+//! names, and says so:
+//! - `same_chain_base.hex`: 1 USDC to ether on Base, user pays: one KyberSwap step, the
+//!   Runner pays the ether out (the "token on Base" payout shape).
+//! - `eco_base_to_arbitrum.hex`: 5 USDC on Base to USDC on Arbitrum through Eco, user pays:
+//!   one `publishAndFund` delivering USDC (the "another chain" payout shape).
+//! - `eco_with_fee_step.hex`: the same, gasless: a fee step to the canister, then the intent.
+//! - `cctp_base_to_arbitrum.hex`: the same over CCTP fast: a fee step, then a burn.
+//!
+//! Every one is rewritten to be paid by the canister (`payer`, and an Eco reward's creator),
+//! as a payout order is.
+
+use super::*;
+use crate::relay::Party;
+use alloy_sol_types::SolCall;
+use std::collections::BTreeMap;
+use types::config::{ChainTable, EvmChain, PerAction};
+use types::pool::payout::{EvmWithdrawal, PayoutKind, PayoutTerms, Undo};
+use types::pool::{PoolAccount, Shares};
+use types::swapic::{publishAndFundCall, NATIVE};
+use types::{CctpDomain, ChainId, TokenAmount};
+
+fn address(text: &str) -> EvmAddress {
+    text.parse().unwrap()
+}
+
+fn canister() -> EvmAddress {
+    address("0x36D34038F04990a58c068e08eD9754e2E3D9bA53")
+}
+
+fn base_usdc() -> EvmAddress {
+    address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+}
+
+fn arbitrum_usdc() -> EvmAddress {
+    address("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
+}
+
+fn swapic_address() -> EvmAddress {
+    address("0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406")
+}
+
+/// The staging deploy: one Swapic, Runner and CctpReceiver address on every chain.
+fn chain(usdc: EvmAddress) -> EvmChain {
+    EvmChain {
+        swapic: swapic_address(),
+        runner: address("0x7E345acaB79102ac9588C60B9358Ec4d79438eEe"),
+        cctp_receiver: address("0x23718C0a081B8bf00aee86722Af40E175562Ad47"),
+        usdc,
+        token_messenger: address("0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"),
+        message_transmitter: address("0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"),
+        gas_limit: PerAction::all(GasAmount::from(2_000_000_u64)),
+        gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::ZERO),
+    }
+}
+
+struct World {
+    evm_chains: ChainTable<EvmChain>,
+    domains: ChainTable<CctpDomain>,
+}
+
+impl World {
+    fn new() -> Self {
+        Self {
+            evm_chains: ChainTable(BTreeMap::from([
+                (ChainId::BASE, chain(base_usdc())),
+                (ChainId::ARBITRUM, chain(arbitrum_usdc())),
+            ])),
+            domains: ChainTable(BTreeMap::from([
+                (ChainId::BASE, CctpDomain::new(6)),
+                (ChainId::ARBITRUM, CctpDomain::new(3)),
+            ])),
+        }
+    }
+
+    fn payer(&self) -> Payer<'_> {
+        Payer {
+            chains: Chains {
+                chain_id: ChainId::BASE,
+                evm_chains: &self.evm_chains,
+                domains: &self.domains,
+                canister: canister(),
+                eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
+            },
+            swapic: swapic_address(),
+            usdc: base_usdc(),
+        }
+    }
+}
+
+fn sample(hex_text: &str) -> Order {
+    swapic::decode_order(&hex::decode(hex_text.trim()).unwrap()).unwrap()
+}
+
+/// A real order rewritten to be the canister's: its payer, and an Eco step's reward creator.
+fn the_canisters(mut order: Order) -> Order {
+    order.payer = swapic::addr(canister());
+    for step in &mut order.steps {
+        if swapic::selector_of(step) == Some(swapic::PUBLISH_AND_FUND) {
+            let mut call = publishAndFundCall::abi_decode(&step.data).unwrap();
+            call.reward.creator = swapic::addr(canister());
+            step.data = call.abi_encode().into();
+        }
+    }
+    order
+}
+
+fn same_chain() -> Order {
+    the_canisters(sample(include_str!("samples/same_chain_base.hex")))
+}
+
+fn eco() -> Order {
+    the_canisters(sample(include_str!("samples/eco_base_to_arbitrum.hex")))
+}
+
+fn amount_of(order: &Order) -> TokenAmount {
+    TokenAmount::from_be_bytes(order.amountIn.to_be_bytes::<32>())
+}
+
+fn deadline_of(order: &Order) -> u64 {
+    u64::try_from(order.deadline).unwrap()
+}
+
+/// The terms the order delivers on, read by the canister's own reader: what a user who asked
+/// for exactly this payout would have signed, its deadline the order's.
+fn terms_of(order: &Order, world: &World) -> PayoutTerms {
+    let delivery = read_plan(order, &world.payer().chains)
+        .unwrap()
+        .delivery
+        .unwrap();
+    PayoutTerms {
+        dst_chain: delivery.chain,
+        recipient: delivery.recipient,
+        token_out: delivery.token,
+        min_out: delivery.min_out,
+        deadline: Timestamp::from_secs(deadline_of(order)).unwrap(),
+    }
+}
+
+/// A withdrawal's payout waiting for `order`, its amount the order's `amountIn`.
+fn waiting(order: &Order, terms: PayoutTerms) -> EvmPayout {
+    let staker = address("0x1111111111111111111111111111111111111111");
+    let withdrawal = EvmWithdrawal {
+        staker,
+        usdc: TokenAmount::from(10_000_000_u64),
+        max_shares: Shares::new(1),
+        rebalance_share: TokenAmount::from(1_000_u64),
+        network_fee: TokenAmount::from(50_000_u64),
+        nonce: 1,
+        burned: Shares::new(1),
+    };
+    let mut payout = EvmPayout::new(
+        3,
+        PayoutKind::Withdrawal(withdrawal),
+        terms,
+        Undo::Remint {
+            owner: PoolAccount::Evm(staker),
+            shares: Shares::new(1),
+        },
+        Timestamp::from_nanos(1),
+    );
+    payout.amount = Some(amount_of(order));
+    payout.status = PayoutStatus::Waiting;
+    payout.base_reserved = true;
+    payout
+}
+
+fn check(
+    payout: &EvmPayout,
+    order: &Order,
+    world: &World,
+    gas_limit: u64,
+    sanctioned: impl Fn(&Party) -> bool,
+) -> Result<PinnedOrder, PoolError> {
+    check_order(
+        payout,
+        order,
+        &swapic::encode_order(order),
+        gas_limit,
+        &world.payer(),
+        &PayoutSettings::default(),
+        deadline_of(order) - 600,
+        sanctioned,
+    )
+}
+
+fn nobody(_: &Party) -> bool {
+    false
+}
+
+#[test]
+fn a_same_chain_payout_order_that_meets_its_terms_is_pinned() {
+    let world = World::new();
+    let order = same_chain();
+    let terms = terms_of(&order, &world);
+    // the ether on Base, the Runner paying at least the order's own minimum
+    assert_eq!(terms.dst_chain, ChainId::BASE);
+    assert_eq!(terms.token_out, NATIVE);
+    let pinned = check(&waiting(&order, terms), &order, &world, 900_000, nobody).unwrap();
+    assert_eq!(
+        pinned.order_id,
+        swapic::order_id(&order, ChainId::BASE, swapic_address()).into_bytes()
+    );
+    assert_eq!(pinned.gas_limit, 900_000);
+    assert_eq!(pinned.deadline_s, deadline_of(&order));
+    assert_eq!(swapic::decode_order(&pinned.order), Some(order));
+}
+
+/// Review Focus 1: each hostile variant of a real order is refused, and the payout keeps
+/// waiting (the check records nothing).
+#[test]
+fn a_hostile_order_is_refused() {
+    let world = World::new();
+    let order = same_chain();
+    let terms = terms_of(&order, &world);
+    let payout = waiting(&order, terms);
+    let refused = |order: &Order| check(&payout, order, &world, 900_000, nobody).is_err();
+    // rewritten: the payout's recipient
+    let mut other = order.clone();
+    other.payout.recipient = swapic::addr(address("0x2222222222222222222222222222222222222222"));
+    assert!(refused(&other), "a different recipient");
+    // rewritten: the payout's recipient, to the canister itself
+    let mut own = order.clone();
+    own.payout.recipient = swapic::addr(canister());
+    assert!(refused(&own), "an order paying the canister");
+    // rewritten: the payout's minimum
+    let mut smaller = order.clone();
+    smaller.payout.minOut -= U256::from(1);
+    assert!(refused(&smaller), "a smaller minimum");
+    // rewritten: the payout's token
+    let mut token = order.clone();
+    token.payout.token = swapic::addr(base_usdc());
+    assert!(refused(&token), "another token");
+    // rewritten: the amount in
+    let mut larger = order.clone();
+    larger.amountIn += U256::from(1);
+    assert!(refused(&larger), "a larger amountIn");
+    // rewritten: the payer
+    let mut payer = order.clone();
+    payer.payer = swapic::addr(address("0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"));
+    assert!(refused(&payer), "a payer other than the canister");
+    // rewritten: the token in
+    let mut token_in = order.clone();
+    token_in.tokenIn = swapic::addr(NATIVE);
+    assert!(refused(&token_in), "a token in other than USDC");
+    // the terms on another chain
+    let elsewhere = waiting(
+        &order,
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            ..terms
+        },
+    );
+    assert!(check(&elsewhere, &order, &world, 900_000, nobody).is_err());
+    // a sanctioned recipient
+    let recipient = terms.recipient;
+    assert!(matches!(
+        check(&payout, &order, &world, 900_000, |party| *party
+            == Party::Evm(recipient)),
+        Err(PoolError::Sanctioned(_))
+    ));
+    // a gas limit above the cap, and one below any transaction's
+    assert!(check(&payout, &order, &world, 2_000_001, nobody).is_err());
+    assert!(check(&payout, &order, &world, 20_999, nobody).is_err());
+    // an order's deadline past the payout's, and one too close
+    let early = waiting(
+        &order,
+        PayoutTerms {
+            deadline: Timestamp::from_secs(deadline_of(&order) - 1).unwrap(),
+            ..terms
+        },
+    );
+    assert!(check(&early, &order, &world, 900_000, nobody).is_err());
+    assert!(check_order(
+        &payout,
+        &order,
+        &swapic::encode_order(&order),
+        900_000,
+        &world.payer(),
+        &PayoutSettings::default(),
+        deadline_of(&order) - ORDER_MARGIN_S + 1,
+        nobody,
+    )
+    .is_err());
+    // and the real one passes
+    assert!(!refused(&order));
+}
+
+/// The "USDC on Base" shape: no step, the Runner pays the whole amount out.
+#[test]
+fn a_usdc_payout_on_base_with_no_step_is_read() {
+    let world = World::new();
+    let mut order = same_chain();
+    // rewritten: no step, the payout in USDC, at least all of it
+    order.steps.clear();
+    order.payout.token = swapic::addr(base_usdc());
+    order.payout.minOut = order.amountIn;
+    let terms = terms_of(&order, &world);
+    assert_eq!(terms.token_out, base_usdc());
+    assert_eq!(terms.min_out, amount_of(&order));
+    assert!(check(&waiting(&order, terms), &order, &world, 300_000, nobody).is_ok());
+}
+
+/// The "another chain" shape: one Eco intent, the canister its reward's creator (an
+/// unfilled intent refunds the canister), USDC delivered on Arbitrum at least the step's
+/// least delta less Eco's fee.
+#[test]
+fn an_eco_payout_order_is_read_and_its_refund_comes_back_to_the_canister() {
+    let world = World::new();
+    let order = eco();
+    let terms = terms_of(&order, &world);
+    assert_eq!(terms.dst_chain, ChainId::ARBITRUM);
+    assert_eq!(terms.token_out, arbitrum_usdc());
+    let payout = waiting(&order, terms);
+    assert!(check(&payout, &order, &world, 600_000, nobody).is_ok());
+    // the real order as the user signed it: its reward refunds the user, not the canister
+    let mut theirs = sample(include_str!("samples/eco_base_to_arbitrum.hex"));
+    theirs.payer = swapic::addr(canister());
+    assert!(check(&payout, &theirs, &world, 600_000, nobody).is_err());
+    // a smaller minimum asked than delivered is fine; a larger one is refused
+    let greedy = waiting(
+        &order,
+        PayoutTerms {
+            min_out: terms.min_out.checked_add(TokenAmount::ONE).unwrap(),
+            ..terms
+        },
+    );
+    assert!(check(&greedy, &order, &world, 600_000, nobody).is_err());
+}
+
+/// A payout order WITH a fee step paying the canister is refused: the canister pays itself
+/// nothing, or the fee would be booked as income and the books would drift.
+#[test]
+fn a_payout_order_paying_the_canister_a_fee_is_refused() {
+    let world = World::new();
+    let order = the_canisters(sample(include_str!("samples/eco_with_fee_step.hex")));
+    let plan = read_plan(&order, &world.payer().chains).unwrap();
+    assert_eq!(plan.fees.len(), 1);
+    let terms = terms_of(&order, &world);
+    assert!(matches!(
+        check(&waiting(&order, terms), &order, &world, 600_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("no fee step")
+    ));
+}
+
+/// A CCTP burn is refused this round: CCTP payouts come later.
+#[test]
+fn a_cctp_payout_order_is_refused() {
+    let world = World::new();
+    let mut order = the_canisters(sample(include_str!("samples/cctp_base_to_arbitrum.hex")));
+    // rewritten: its fee step dropped, so the burn alone is what is refused
+    order.steps.remove(0);
+    let payout = waiting(
+        &order,
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            recipient: address("0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"),
+            token_out: arbitrum_usdc(),
+            min_out: TokenAmount::ONE,
+            deadline: Timestamp::from_secs(deadline_of(&order)).unwrap(),
+        },
+    );
+    assert!(matches!(
+        check(&payout, &order, &world, 600_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("CCTP")
+    ));
+}
+
+/// Review Focus 2: after a revert the payout signs only the order it pinned (the same id).
+#[test]
+fn a_reverted_payout_signs_only_its_pinned_order() {
+    let world = World::new();
+    let order = same_chain();
+    let terms = terms_of(&order, &world);
+    let mut payout = waiting(&order, terms);
+    let pinned = check(&payout, &order, &world, 900_000, nobody).unwrap();
+    payout.order = Some(pinned);
+    // the same order again: accepted
+    assert!(check(&payout, &order, &world, 900_000, nobody).is_ok());
+    // a new order for the same payout, a fresh ref and so a fresh id: refused
+    let mut fresh = order.clone();
+    fresh.r#ref = alloy_primitives::FixedBytes([0x99; 32]);
+    assert!(matches!(
+        check(&payout, &fresh, &world, 900_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("pinned")
+    ));
+}
+
+/// Review Focus 2 in the fold: two signatures racing for one payout, a call after it signed,
+/// and a revert retried with the same order only.
+#[test]
+fn one_payout_is_signed_once_at_a_time_and_retried_with_its_order() {
+    use crate::storage::events::append_event_at;
+    use crate::storage::on_fresh_memory;
+    use crate::storage::pool::tests::{at, base_stake, created, funded_pool, usdc};
+    use crate::storage::pool::{payout as stored, record_at};
+    use types::pool::PoolStep;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+            at(1),
+        )
+        .unwrap();
+        let staker = address("0x1111111111111111111111111111111111111111");
+        base_stake(staker, usdc(500), 0x77, 1);
+        let ledger = crate::storage::pool::ledger();
+        let burned =
+            Shares::burn_for(usdc(100), ledger.total_assets(), ledger.total_shares).unwrap();
+        let withdrawal = EvmWithdrawal {
+            staker,
+            usdc: usdc(100),
+            max_shares: burned,
+            rebalance_share: TokenAmount::from(20_000_u64),
+            network_fee: TokenAmount::from(50_000_u64),
+            nonce: 1,
+            burned,
+        };
+        let terms = PayoutTerms {
+            dst_chain: ChainId::BASE,
+            recipient: staker,
+            token_out: base_usdc(),
+            min_out: TokenAmount::ONE,
+            deadline: at(1_000_000),
+        };
+        for step in [
+            PoolStep::PayoutOpened {
+                id: 0,
+                kind: Box::new(PayoutKind::Withdrawal(withdrawal)),
+                terms,
+                undo: Undo::Remint {
+                    owner: PoolAccount::Evm(staker),
+                    shares: burned,
+                },
+            },
+            PoolStep::PayoutAmountKnown {
+                id: 0,
+                amount: withdrawal.payout_amount().unwrap(),
+                received: None,
+            },
+            PoolStep::PayoutWaiting { id: 0 },
+        ] {
+            record_at(step, at(2)).unwrap();
+        }
+        let order = |byte: u8| PinnedOrder {
+            order_id: [byte; 32],
+            order: vec![byte; 8],
+            gas_limit: 300_000,
+            deadline_s: 900,
+        };
+        let signed = |nonce: u64, byte: u8| PoolStep::PayoutSigned {
+            id: 0,
+            order: order(byte),
+            chain_id: ChainId::BASE,
+            nonce: types::Nonce::new(nonce),
+            tx_hash: types::TxHash::new([byte; 32]),
+            raw_tx: vec![byte; 4],
+        };
+        // the first call allocates; a second racing it is refused its own number
+        append_event_at(created(TxPurpose::PoolPayout(0), 0), at(3)).unwrap();
+        assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(3)).is_err());
+        assert!(matches!(signable(0), Err(PoolError::Unavailable(_))));
+        let index = record_at(signed(0, 1), at(4)).unwrap();
+        // signed: a call after it answers the first transaction's id
+        assert_eq!(signable(0), Ok(Some(index.get())));
+        assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(5)).is_err());
+        // reverted: it waits again with its order pinned, and is signed only with that order
+        record_at(PoolStep::PayoutReverted { id: 0 }, at(6)).unwrap();
+        assert_eq!(stored(0).unwrap().status, PayoutStatus::Waiting);
+        assert_eq!(stored(0).unwrap().order, Some(order(1)));
+        append_event_at(created(TxPurpose::PoolPayout(0), 1), at(7)).unwrap();
+        assert!(record_at(signed(1, 2), at(8)).is_err());
+        let again = record_at(signed(1, 1), at(8)).unwrap();
+        assert_eq!(signable(0), Ok(Some(again.get())));
+        assert!(crate::storage::events::verify_replay());
+    });
+}

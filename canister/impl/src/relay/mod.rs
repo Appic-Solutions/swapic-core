@@ -575,14 +575,42 @@ fn check_swap(swap: &KyberSwap, step: &Step, source: &EvmChain) -> Result<(), Re
     Ok(())
 }
 
+/// Where an order's money ends up, as the canister reads it from the order's own bytes: the
+/// chain, the recipient, the token and the least of it the recipient gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delivery {
+    pub chain: ChainId,
+    pub recipient: EvmAddress,
+    pub token: EvmAddress,
+    pub min_out: TokenAmount,
+}
+
 /// What an order does, read in full: the fee steps it pays the canister, its rail and
-/// arrival, and every party it pays.
+/// arrival, every party it pays, and its final delivery when it has exactly one the canister
+/// reads (its payout on its own chain; a CCTP burn's Swap envelope; an Eco intent's delivery
+/// or its fill's Swap envelope).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub fees: Vec<U256>,
     pub action: GasAction,
     pub arrival: Option<Arrival>,
     pub parties: Vec<Party>,
+    pub delivery: Option<Delivery>,
+}
+
+fn amount_of(value: U256) -> TokenAmount {
+    TokenAmount::from_be_bytes(value.to_be_bytes::<32>())
+}
+
+/// A Swap envelope's delivery on `chain`: its recipient gets at least its `min_out` of its
+/// `token_out`. None for any other envelope.
+fn envelope_delivery(envelope: &Envelope, chain: ChainId) -> Option<Delivery> {
+    (envelope.action == Action::Swap).then(|| Delivery {
+        chain,
+        recipient: envelope.recipient,
+        token: envelope.token_out,
+        min_out: amount_of(envelope.min_out),
+    })
 }
 
 /// An order's plan, read as the Runner will run it, or the refusal: every step is one of
@@ -601,6 +629,8 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
     let mut fees = Vec::new();
     let mut burns = Vec::new();
     let mut intents = Vec::new();
+    // each intent's step: the least delta the Runner gives it, and the fee Eco keeps
+    let mut intent_steps = Vec::new();
     for (index, step) in order.steps.iter().enumerate() {
         let read = match swapic::read_step(step, source.usdc, source.token_messenger) {
             Ok(read) => read,
@@ -617,11 +647,12 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 fees.push(amount);
             }
             KnownStep::Burn(burn) => burns.push(burn),
-            KnownStep::Eco { intent, .. } => {
+            KnownStep::Eco { intent, fee } => {
                 if chains.eco_portal != Some(swapic::evm(step.target)) {
                     return Err(RelayError::Eco("is not published on Eco's Portal"));
                 }
                 intents.push(intent);
+                intent_steps.push((step.min, fee));
             }
             KnownStep::Swap(swap) => check_swap(&swap, step, &source)?,
         }
@@ -634,17 +665,44 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
     if !order.payout.token.is_zero() {
         parties.push(Party::Evm(swapic::evm(order.payout.recipient)));
     }
-    let (action, arrival) = match (burns.as_slice(), intents.as_slice()) {
+    let payout = (!order.payout.token.is_zero()).then(|| Delivery {
+        chain: chain_id,
+        recipient: swapic::evm(order.payout.recipient),
+        token: swapic::evm(order.payout.token),
+        min_out: amount_of(order.payout.minOut),
+    });
+    let (action, arrival, delivery) = match (burns.as_slice(), intents.as_slice()) {
         ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
-        ([], []) => (GasAction::RelayLocal, None),
+        ([], []) => (GasAction::RelayLocal, None, payout),
         ([], [intent]) => {
             parties.extend(eco_parties(intent, payer, &source, chains)?);
-            (GasAction::RelayEco, None)
+            let destination = ChainId::new(intent.destination);
+            let delivered = match intent.arrival {
+                // the route carries the Runner's delta less Eco's fee, and the Runner gives
+                // the step at least its `min`
+                EcoArrival::Deliver { recipient } => {
+                    let (min, fee) = intent_steps[0];
+                    Some(Delivery {
+                        chain: destination,
+                        recipient,
+                        token: intent.token,
+                        min_out: amount_of(min.saturating_sub(fee)),
+                    })
+                }
+                EcoArrival::Fill { envelope, .. } => envelope_delivery(&envelope, destination),
+            };
+            // an intent and a payout too are two deliveries: none is the order's
+            let delivery = if payout.is_some() { None } else { delivered };
+            (GasAction::RelayEco, None, delivery)
         }
         ([burn], []) => {
             let arrival = arrival_of(burn, &source, chains)?;
             parties.extend(arrival.parties.iter().copied());
-            (GasAction::RelayCctp, Some(arrival))
+            let delivered = Envelope::decode(&burn.hook_data)
+                .ok()
+                .and_then(|envelope| envelope_delivery(&envelope, arrival.chain_id));
+            let delivery = if payout.is_some() { None } else { delivered };
+            (GasAction::RelayCctp, Some(arrival), delivery)
         }
         ([_, ..], [_, ..]) => return Err(RelayError::TwoRails),
         (more, []) => return Err(RelayError::Burns(more.len())),
@@ -655,6 +713,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
         action,
         arrival,
         parties,
+        delivery,
     })
 }
 

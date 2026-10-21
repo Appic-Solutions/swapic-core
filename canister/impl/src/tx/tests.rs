@@ -1085,6 +1085,7 @@ fn receipt_at(block: u64) -> Receipt {
         block: BlockNumber::new(block),
         success: true,
         network_fee: types::TokenAmount::ZERO,
+        eco_intent: None,
     }
 }
 
@@ -1229,5 +1230,61 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
         assert_eq!(decided(&again, Some(reverted), 112), 0);
         assert_eq!(outbox::get(open.key()), None);
         assert_eq!(log(), before);
+    });
+}
+
+/// P11b: a pool payout's transaction closes with the payout's own line: paid (with the Eco
+/// intent its receipt published), or reverted, back to waiting with its order pinned; no
+/// fee is booked for it.
+#[test]
+fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
+    use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
+    use types::pool::PayoutStatus;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let staker = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let id = waiting_withdrawal(staker);
+        sign_payout(id, 0, 7);
+        let entry = OutboxEntry {
+            purpose: TxPurpose::PoolPayout(id),
+            attempt: None,
+            ..entry_with(0, 1)
+        };
+        outbox::put(entry.clone());
+        let decided = |landed: Receipt| {
+            poll_once(decide(
+                &entry,
+                ChainId::BASE,
+                Some(landed),
+                BlockNumber::new(105),
+                BlockDepth::new(1),
+                BlockDepth::new(1),
+                at(1_000),
+            ))
+        };
+        let reverted = Receipt {
+            success: false,
+            ..receipt_at(100)
+        };
+        assert_eq!(decided(reverted), 1);
+        let payout = crate::storage::pool::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+        assert!(payout.order.is_some(), "its order pinned");
+        // signed again with that order, then paid
+        sign_payout(id, 1, 7);
+        let paid = Receipt {
+            eco_intent: Some([0x5e; 32]),
+            ..receipt_at(101)
+        };
+        outbox::put(entry.clone());
+        assert_eq!(decided(paid), 1);
+        let payout = crate::storage::pool::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Paid);
+        assert_eq!(payout.intent, Some([0x5e; 32]));
+        assert_eq!(payout.paid_block, Some(BlockNumber::new(101)));
+        let books = read_state(|state| state.book(&ChainId::BASE));
+        assert_eq!(books.fee_income, types::TokenAmount::ZERO);
     });
 }

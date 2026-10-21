@@ -6,7 +6,7 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    EvmWithdrawal, IcpRoute, IcpSwapTerms, PayoutSettings, PoolApproveOk, PoolArrival,
+    EvmWithdrawal, IcpRoute, IcpSwapTerms, PayPayoutOk, PayoutSettings, PoolApproveOk, PoolArrival,
     PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk,
     SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
@@ -179,4 +179,20 @@ pub fn withdraw_evm(
             burned: candid::Nat::from(burned.get()),
         }
     })
+}
+
+/// Watcher-only, refused while halted and while the pool is closed: the order the quoter
+/// built for waiting payout `id` at its exact amount (`abi.encode` of an Order), and the gas
+/// limit to sign it with. The canister checks the untrusted order against the payout's own
+/// terms (payer the canister, Base USDC in, exactly the payout's amount, no fee step, no CCTP
+/// burn, one delivery paying the recipient at least their minimum of their token on their
+/// chain, an Eco intent's reward refunding the canister, a deadline at least 60 s away and
+/// within the payout's, no sanctioned party, the gas within `max_payout_gas`) and signs
+/// `Swapic.run(order)` from its own Base pocket. A payout signed already answers its
+/// transaction's id; a retry after a revert signs only the order it pinned.
+#[update]
+pub async fn pay_payout(id: u64, order: Vec<u8>, gas_limit: u64) -> Result<PayPayoutOk, PoolError> {
+    pool::pay::pay_payout(id, order, gas_limit)
+        .await
+        .map(|tx_id| PayPayoutOk { tx_id })
 }

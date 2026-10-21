@@ -469,3 +469,81 @@ fn a_pool_signature_spends_the_nonce_held_for_its_purpose() {
         assert!(verify_replay(), "the heap fold of the log is the live fold");
     });
 }
+
+/// A pool with 1,000 ckUSDC on ICP, the payout settings, and `staker` with 500 USDC staked
+/// on Base, whose withdrawal of 100 USDC waits for its order: payout 0.
+pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
+    use types::pool::{EvmWithdrawal, PayoutKind, PayoutSettings, PayoutTerms, Shares, Undo};
+    funded_pool(usdc(1_000));
+    record_at(
+        PoolStep::PayoutSettingsSet {
+            settings: PayoutSettings::default(),
+        },
+        at(1),
+    )
+    .unwrap();
+    base_stake(staker, usdc(500), 0x77, 1);
+    let pool = ledger();
+    let burned = Shares::burn_for(usdc(100), pool.total_assets(), pool.total_shares).unwrap();
+    let withdrawal = EvmWithdrawal {
+        staker,
+        usdc: usdc(100),
+        max_shares: burned,
+        rebalance_share: TokenAmount::from(20_000_u64),
+        network_fee: TokenAmount::from(50_000_u64),
+        nonce: 1,
+        burned,
+    };
+    let id = pool.lines().next_id;
+    for step in [
+        PoolStep::PayoutOpened {
+            id,
+            kind: Box::new(PayoutKind::Withdrawal(withdrawal)),
+            terms: PayoutTerms {
+                dst_chain: ChainId::BASE,
+                recipient: staker,
+                token_out: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    .parse()
+                    .unwrap(),
+                min_out: TokenAmount::ONE,
+                deadline: at(1_000_000_000_000),
+            },
+            undo: Undo::Remint {
+                owner: PoolAccount::Evm(staker),
+                shares: burned,
+            },
+        },
+        PoolStep::PayoutAmountKnown {
+            id,
+            amount: withdrawal.payout_amount().unwrap(),
+            received: None,
+        },
+        PoolStep::PayoutWaiting { id },
+    ] {
+        record_at(step, at(2)).unwrap();
+    }
+    id
+}
+
+/// Payout `id` signed at `nonce` on Base with order `byte`: its creation and its record.
+pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
+    crate::storage::events::append_event_at(created(TxPurpose::PoolPayout(id), nonce), at(3))
+        .unwrap();
+    record_at(
+        PoolStep::PayoutSigned {
+            id,
+            order: types::pool::PinnedOrder {
+                order_id: [byte; 32],
+                order: vec![byte; 8],
+                gas_limit: 300_000,
+                deadline_s: 900,
+            },
+            chain_id: ChainId::BASE,
+            nonce: types::Nonce::new(nonce),
+            tx_hash: TxHash::new([byte; 32]),
+            raw_tx: vec![byte; 4],
+        },
+        at(3),
+    )
+    .unwrap()
+}

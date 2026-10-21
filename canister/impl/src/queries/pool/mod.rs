@@ -6,8 +6,8 @@ use crate::storage::events::read_state;
 use candid::Nat;
 use ic_cdk::query;
 pub use settlement_api::types::pool::{
-    IcpRoutesView, PayoutSettings, PayoutView, PoolAccount, PoolAccountView, PoolDepositView,
-    PoolSettings, PoolStateView,
+    IcpRoutesView, PayoutSettings, PayoutView, PayoutWaiting, PoolAccount, PoolAccountView,
+    PoolDepositView, PoolSettings, PoolStateView,
 };
 use types::hash::PoolRef;
 
@@ -74,4 +74,11 @@ pub fn icp_routes() -> IcpRoutesView {
             .as_ref()
             .and_then(|settings| settings.routes.as_ref()),
     )
+}
+
+/// The payouts waiting for an order, the longest waiting first, at most 50: what the watcher
+/// asks the quoter for, each at its exact amount.
+#[query]
+pub fn payouts_waiting() -> Vec<PayoutWaiting> {
+    pool::pay::waiting()
 }
