@@ -1040,8 +1040,22 @@ async fn swap_leg(
             return fall_back(payout, leg, "the swap did not happen".to_string(), clock());
         }
         let before = payout.progress.swap.before;
+        // what it deposited is what its begin recorded
+        let leg = LegAt {
+            swap_in: payout.progress.swap.amount_in.unwrap_or(swap_in),
+            ..leg
+        };
         return settle(ledgers, settings, payout, leg, before, None, clock).await;
     }
+    // an approval given before this run is one fee more: the user's, out of what the leg
+    // deposits (P11e)
+    let swap_in = crate::pool::legs::after_approvals(
+        swap_in,
+        fee_ck,
+        payout.progress.swap.approvals,
+    )
+    .ok_or_else(|| Stop::Failed("the approvals given take all the leg deposits".to_string()))?;
+    let leg = LegAt { swap_in, ..leg };
     // before the swap: a token no longer listed with this pool, or with no fee read, falls
     // back (the token's output could not be paid)
     let fee_out = match settings.fee_of(payout.token_out) {

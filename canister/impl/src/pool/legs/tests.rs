@@ -75,3 +75,32 @@ fn an_output_paid_on_takes_two_fees_and_one_kept_takes_one() {
         TokenAmount::from(45_u32)
     );
 }
+
+/// P11e: an approval given before a run whose swap never began is one fee more, which the
+/// user pays out of what the leg deposits: the leg costs the canister's account what its path
+/// budgeted (one approval, the deposit and its pull's fee), however many approvals it took.
+#[test]
+fn a_retried_approval_is_paid_out_of_what_the_leg_deposits() {
+    let fee = TokenAmount::from(10_u32);
+    let amount = TokenAmount::from(1_000_u32);
+    assert_eq!(after_approvals(amount, fee, None), Some(amount));
+    assert_eq!(after_approvals(amount, fee, Some(0)), Some(amount));
+    // one approval given before this run: the run's own is the second
+    let deposited = after_approvals(amount, fee, Some(1)).unwrap();
+    assert_eq!(deposited, TokenAmount::from(990_u32));
+    let leg = SwapLeg {
+        approvals: Some(2),
+        begun: true,
+        amount_in: Some(deposited),
+        ..SwapLeg::default()
+    };
+    let budget = SwapLeg {
+        approvals: Some(1),
+        begun: true,
+        amount_in: Some(amount),
+        ..SwapLeg::default()
+    };
+    assert_eq!(cost_in(&leg, fee), cost_in(&budget, fee));
+    // approvals that take all of it leave nothing to deposit
+    assert_eq!(after_approvals(amount, fee, Some(100)), None);
+}

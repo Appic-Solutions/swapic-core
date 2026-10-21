@@ -102,6 +102,21 @@ async fn held_at(
     })
 }
 
+/// What a leg deposits once `approvals` approvals were given before its swap began (P11e):
+/// the path budgets one, and each one more (a run that stopped between its approval and its
+/// swap, then ran again) took one more fee of the canister's account, which the user pays out
+/// of what the leg deposits. None when they take all of it.
+pub fn after_approvals(
+    amount_in: TokenAmount,
+    fee_in: TokenAmount,
+    approvals: Option<u32>,
+) -> Option<TokenAmount> {
+    fee_in
+        .checked_mul(approvals.unwrap_or(0))
+        .and_then(|extra| amount_in.checked_sub(extra))
+        .filter(|left| *left > TokenAmount::ZERO)
+}
+
 /// Runs the leg from where `state` stands, as far as it goes now.
 pub async fn run(
     ledgers: &impl Ledgers,
@@ -117,8 +132,20 @@ pub async fn run(
         if state.undone.is_some() {
             return Ok(LegEnd::NotDone("the swap did not happen".to_string()));
         }
+        // what it deposited is what its begin recorded
+        let spec = LegSpec {
+            amount_in: state.amount_in.unwrap_or(spec.amount_in),
+            ..spec
+        };
         return settle(ledgers, spec, state.before, None, clock).await;
     }
+    // an approval given before this run is one fee more: the user's (P11e)
+    let spec = LegSpec {
+        amount_in: after_approvals(spec.amount_in, spec.fee_in, state.approvals).ok_or_else(
+            || Stop::Failed("the approvals given take all the leg deposits".to_string()),
+        )?,
+        ..spec
+    };
     let Some(zero_for_one) = ledgers
         .direction(spec.pool, spec.token_in, spec.token_out)
         .await
