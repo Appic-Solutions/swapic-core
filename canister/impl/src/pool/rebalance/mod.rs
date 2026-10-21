@@ -5,6 +5,9 @@
 #[cfg(test)]
 mod tests;
 
+pub mod cost;
+pub mod trigger;
+
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use settlement_api::types::pool::{
@@ -67,6 +70,9 @@ pub fn open_moves<S: Store>(state: &State<S>) -> Vec<Move> {
 pub fn item(id: u64) -> Option<Move> {
     read_state(|state| state.store().pool_move(id))
 }
+
+/// Drives every open move a step on at `now` (P11c Task 4 fills this in).
+pub async fn drive(_now: types::Timestamp) {}
 
 /// `rebalance_moves`: the open and in-flight moves.
 pub fn views() -> Vec<MoveView> {

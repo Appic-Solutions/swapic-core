@@ -11,6 +11,7 @@ pub mod expiry_sweep;
 pub mod outbox;
 pub mod pool_arrivals;
 pub mod rail_status;
+pub mod rebalance;
 pub mod replay_audit;
 
 pub use rail_status::restart_rail_status_timer;
@@ -23,6 +24,7 @@ thread_local! {
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static PAYOUT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    static REBALANCE_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
 /// How often the payout timer serves the Base queue and walks the payouts' deadlines.
@@ -43,6 +45,16 @@ pub fn start_timers() {
     restart_books_timer();
     restart_pool_arrivals_timer();
     restart_payout_timer();
+    restart_rebalance_timer();
+}
+
+/// The rebalancing's timer, every minute (`rebalance::tick`).
+pub fn restart_rebalance_timer() {
+    restart(&REBALANCE_TIMER, || {
+        ic_cdk_timers::set_timer_interval(rebalance::REBALANCE_EVERY, || {
+            ic_cdk::spawn(rebalance::tick())
+        })
+    });
 }
 
 /// The payout timer, every minute: the engine's drive, which serves the Base queue, drives
