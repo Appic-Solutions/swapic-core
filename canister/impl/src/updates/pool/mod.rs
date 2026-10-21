@@ -6,8 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs,
-    StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
+    PayoutSettings, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
+    StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -91,4 +91,17 @@ pub fn pool_deposit_agreed(deposit: PoolDeposit) -> Result<bool, PoolError> {
     pool::require_running()?;
     let (r#ref, terms) = deposit.into_domain()?;
     crate::storage::events::read_state(|state| pool::register::agreed(state, r#ref, &terms))
+}
+
+/// Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
+/// fee, the rebalancing share's floor, how long a waiting payout waits for an order, and the
+/// most gas a payout order is signed with.
+#[update]
+pub fn set_payout_settings(settings: PayoutSettings) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    let settings =
+        pool::settings::payout_checked(is_halted(), ic_cdk::api::is_controller(&caller), settings)?;
+    crate::storage::pool::record(PoolStep::PayoutSettingsSet { settings })
+        .map_err(|error| PoolError::BadSettings(error.to_string()))?;
+    Ok(())
 }

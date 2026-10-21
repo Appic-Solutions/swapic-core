@@ -51,3 +51,44 @@ fn set_pool_settings_refuses_a_stranger_a_halt_and_bad_settings() {
         Err(PoolError::BadSettings(_))
     ));
 }
+
+fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
+    settlement_api::types::pool::PayoutSettings {
+        min_network_fee: candid::Nat::from(50_000_u64),
+        rebalance_share_floor_bps: 2,
+        order_wait_s: 120,
+        max_payout_gas: 2_000_000,
+    }
+}
+
+#[test]
+fn set_payout_settings_refuses_a_stranger_a_halt_and_bad_settings() {
+    assert_eq!(
+        payout_checked(true, true, payout_wire()),
+        Err(PoolError::Halted)
+    );
+    assert!(matches!(
+        payout_checked(false, false, payout_wire()),
+        Err(PoolError::NotAllowed(_))
+    ));
+    let bad = settlement_api::types::pool::PayoutSettings {
+        max_payout_gas: 1,
+        ..payout_wire()
+    };
+    assert!(matches!(
+        payout_checked(false, true, bad),
+        Err(PoolError::BadSettings(_))
+    ));
+    let bad = settlement_api::types::pool::PayoutSettings {
+        order_wait_s: 0,
+        ..payout_wire()
+    };
+    assert!(matches!(
+        payout_checked(false, true, bad),
+        Err(PoolError::BadSettings(_))
+    ));
+    assert_eq!(
+        payout_checked(false, true, payout_wire()),
+        Ok(types::pool::PayoutSettings::default())
+    );
+}

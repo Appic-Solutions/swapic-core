@@ -614,7 +614,207 @@ fn samples() -> Vec<Sample> {
         ),
     ]);
     all.extend(pool_samples());
+    all.extend(payout_samples());
     all
+}
+
+/// The Base payouts' stored types (P11b): a payout of each kind, the ledger with its payout
+/// lines, the withdrawal nonce key, and one line for each payout step.
+fn payout_samples() -> Vec<Sample> {
+    use crate::pool::payout::{
+        EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutSettings,
+        PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+    };
+    use crate::pool::{IcpAccount, PoolAccount, PoolLedger, PoolStep, Shares};
+    use candid::Principal;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    let principal = |byte: u8| Principal::from_slice(&[byte; 10]);
+    let address = |byte: u8| crate::evm::EvmAddress::new([byte; 20]);
+    let terms = PayoutTerms {
+        dst_chain: ChainId::ARBITRUM,
+        recipient: address(0xd1),
+        token_out: address(0xd2),
+        min_out: TokenAmount::from(1u128 << 80),
+        deadline: Timestamp::from_nanos(1_800_000_000_000_000_211),
+    };
+    let swap = IcpSwapTerms {
+        token_in: principal(0xd3),
+        amount_in: TokenAmount::from(212_000_000_u64),
+        from: IcpAccount {
+            owner: principal(0xd4),
+            subaccount: Some([0xd5; 32]),
+        },
+        min_usdc: TokenAmount::from(213_000_000_u64),
+        premium: TokenAmount::from(214_000_u64),
+        network_fee: TokenAmount::from(215_000_u64),
+        refund_to: IcpAccount {
+            owner: principal(0xd6),
+            subaccount: None,
+        },
+    };
+    let order = PinnedOrder {
+        order_id: [0xd7; 32],
+        order: vec![0xd8; 40],
+        gas_limit: 216_000,
+        deadline_s: 1_800_000_217,
+    };
+    let icp_payout = EvmPayout {
+        id: 218,
+        kind: PayoutKind::IcpSwap(swap),
+        terms,
+        undo: Undo::Refund { to: swap.refund_to },
+        status: PayoutStatus::Signed(219),
+        amount: Some(TokenAmount::from(220_000_000_u64)),
+        base_fee: Some(TokenAmount::from(221_u8)),
+        received: Some(TokenAmount::from(222_000_000_u64)),
+        order: Some(order.clone()),
+        tx_hash: Some(TxHash::new([0xdf; 32])),
+        opened_at: Timestamp::from_nanos(1_800_000_000_000_000_224),
+        waiting_since: Some(Timestamp::from_nanos(1_800_000_000_000_000_225)),
+        queued_at: Some(226),
+        paid_block: Some(BlockNumber::new(37_000_227)),
+        intent: Some([0xe4; 32]),
+        icp_block: Some(229),
+        base_reserved: true,
+    };
+    let withdrawal = EvmWithdrawal {
+        staker: address(0xe6),
+        usdc: TokenAmount::from(231_000_000_u64),
+        max_shares: Shares::new(232 << 64),
+        rebalance_share: TokenAmount::from(233_000_u64),
+        network_fee: TokenAmount::from(234_000_u64),
+        nonce: 235,
+        burned: Shares::new(236 << 64),
+    };
+    let withdrawn = EvmPayout {
+        id: 237,
+        kind: PayoutKind::Withdrawal(withdrawal),
+        undo: Undo::Remint {
+            owner: PoolAccount::Evm(address(0xe6)),
+            shares: Shares::new(236 << 64),
+        },
+        status: PayoutStatus::Undone("past its deadline".to_string()),
+        received: None,
+        ..icp_payout.clone()
+    };
+    let ledger = PoolLedger {
+        payouts: Some(PayoutLines {
+            settings: Some(PayoutSettings {
+                min_network_fee: TokenAmount::from(238_000_u64),
+                rebalance_share_floor_bps: 239,
+                order_wait: Duration::from_secs(240),
+                max_payout_gas: 241_000,
+            }),
+            next_id: 242,
+            fees_icp: TokenAmount::from(243_u8),
+            fees_base: TokenAmount::from(244_u8),
+            queued: TokenAmount::from(245_u8),
+            queue_len: 246,
+            next_seq: 247,
+            open: BTreeSet::from([248, 249]),
+            head_since: Some(Timestamp::from_nanos(1_800_000_000_000_000_250)),
+        }),
+        ..PoolLedger::default()
+    };
+    let steps = [
+        (
+            "pool payout settings set",
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+        ),
+        (
+            "pool payout opened",
+            PoolStep::PayoutOpened {
+                id: 218,
+                kind: Box::new(PayoutKind::IcpSwap(swap)),
+                terms,
+                undo: Undo::Refund { to: swap.refund_to },
+            },
+        ),
+        (
+            "pool payout of a withdrawal opened",
+            PoolStep::PayoutOpened {
+                id: 237,
+                kind: Box::new(PayoutKind::Withdrawal(withdrawal)),
+                terms,
+                undo: withdrawn.undo,
+            },
+        ),
+        (
+            "pool payout amount known",
+            PoolStep::PayoutAmountKnown {
+                id: 218,
+                amount: TokenAmount::from(220_000_000_u64),
+                received: Some(TokenAmount::from(222_000_000_u64)),
+            },
+        ),
+        ("pool payout queued", PoolStep::PayoutQueued { id: 251 }),
+        ("pool payout waiting", PoolStep::PayoutWaiting { id: 252 }),
+        (
+            "pool payout signed",
+            PoolStep::PayoutSigned {
+                id: 218,
+                order,
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(253),
+                tx_hash: TxHash::new([0xfe; 32]),
+                raw_tx: vec![0x02, 0xfd, 0xfc],
+            },
+        ),
+        (
+            "pool payout paid",
+            PoolStep::PayoutPaid {
+                id: 218,
+                tx_hash: TxHash::new([0xfe; 32]),
+                block: BlockNumber::new(37_000_254),
+                intent: Some([0xfb; 32]),
+            },
+        ),
+        ("pool payout reverted", PoolStep::PayoutReverted { id: 255 }),
+        (
+            "pool payout undoing",
+            PoolStep::PayoutUndoing {
+                id: 256,
+                why: "past its deadline".to_string(),
+            },
+        ),
+        (
+            "pool payout undone",
+            PoolStep::PayoutUndone {
+                id: 257,
+                why: "past its deadline".to_string(),
+                block: Some(258),
+            },
+        ),
+    ];
+    let mut out = vec![
+        sample("pool payout of an ICP swap", icp_payout),
+        sample("pool payout of a withdrawal", withdrawn),
+        sample("pool ledger with its payout lines", ledger),
+        sample(
+            "withdrawal nonce key",
+            NonceUse {
+                staker: address(0xe6),
+                nonce: 259,
+            },
+        ),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(3_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_260 + i),
+                EventHash::new([0xc6; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// The pool's stored types (P11a): its ledger cell, a deposit, a share line, and the three
@@ -742,6 +942,9 @@ fn pool_samples() -> Vec<Sample> {
         // absent, so this sample's bytes stay the ones the golden pins; the ledger appended
         // after the step samples pins it
         scan_log: None,
+        // absent, so this sample's bytes stay the ones the golden pins; the ledger with its
+        // payout lines appended at the end pins it
+        payouts: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![

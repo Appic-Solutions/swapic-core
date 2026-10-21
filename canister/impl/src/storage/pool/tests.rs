@@ -290,3 +290,124 @@ fn reopening_the_pool_clears_the_icp_latch() {
         assert!(verify_replay());
     });
 }
+
+/// `usdc` staked on Base by the EVM `staker`, through a registration that arrived.
+pub(crate) fn base_stake(staker: types::EvmAddress, amount: TokenAmount, salt: u8, log: u64) {
+    let terms = Registration {
+        kind: DepositKind::Stake {
+            owner: PoolAccount::Evm(staker),
+        },
+        min_usdc: amount,
+        premium: TokenAmount::ZERO,
+        rebalance_share: TokenAmount::ZERO,
+        src_chain: ChainId::BASE,
+        src_payer: payer(),
+        rail: PoolRail::SameChain,
+        expires_at: at(1_000),
+        salt: [salt; 32],
+    };
+    let r#ref = register(terms);
+    record_at(
+        PoolStep::Arrived {
+            r#ref,
+            credit: credit(log),
+            amount,
+            block: BlockNumber::new(40),
+        },
+        at(3),
+    )
+    .unwrap();
+    let shares = ledger().mint_now(amount).unwrap();
+    record_at(
+        PoolStep::Minted {
+            r#ref,
+            owner: PoolAccount::Evm(staker),
+            shares,
+        },
+        at(3),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
+    use types::pool::{
+        EvmWithdrawal, PayoutKind, PayoutSettings, PayoutStatus, PayoutTerms, PinnedOrder, Shares,
+        Undo,
+    };
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let staker = payer();
+        base_stake(staker, usdc(2_000), 0x51, 1);
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+            at(4),
+        )
+        .unwrap();
+        let pool = ledger();
+        let burned = Shares::burn_for(usdc(500), pool.total_assets(), pool.total_shares).unwrap();
+        let withdrawal = EvmWithdrawal {
+            staker,
+            usdc: usdc(500),
+            max_shares: burned,
+            rebalance_share: TokenAmount::from(1_000_u32),
+            network_fee: TokenAmount::from(50_000_u32),
+            nonce: 1,
+            burned,
+        };
+        let terms = PayoutTerms {
+            dst_chain: ChainId::BASE,
+            recipient: staker,
+            token_out: staker,
+            min_out: TokenAmount::from(1_u8),
+            deadline: at(1_000_000),
+        };
+        let steps = [
+            PoolStep::PayoutOpened {
+                id: 0,
+                kind: Box::new(PayoutKind::Withdrawal(withdrawal)),
+                terms,
+                undo: Undo::Remint {
+                    owner: PoolAccount::Evm(staker),
+                    shares: burned,
+                },
+            },
+            PoolStep::PayoutAmountKnown {
+                id: 0,
+                amount: withdrawal.payout_amount().unwrap(),
+                received: None,
+            },
+            PoolStep::PayoutWaiting { id: 0 },
+        ];
+        for step in steps {
+            record_at(step, at(5)).unwrap();
+        }
+        let signed = record_at(
+            PoolStep::PayoutSigned {
+                id: 0,
+                order: PinnedOrder {
+                    order_id: [1; 32],
+                    order: vec![1; 8],
+                    gas_limit: 300_000,
+                    deadline_s: 1_000,
+                },
+                chain_id: ChainId::BASE,
+                nonce: types::Nonce::new(0),
+                tx_hash: TxHash::new([2; 32]),
+                raw_tx: vec![2; 8],
+            },
+            at(6),
+        )
+        .unwrap();
+        let payout = read_state(|state| state.store().pool_payout(0)).unwrap();
+        // the payout is known by the line that recorded its transaction
+        assert_eq!(payout.status, PayoutStatus::Signed(signed.get()));
+        assert!(read_state(|state| state.store().is_withdrawal_nonce_used(
+            &types::pool::NonceUse { staker, nonce: 1 }
+        )));
+        assert!(verify_replay(), "the heap fold of the log is the live fold");
+    });
+}

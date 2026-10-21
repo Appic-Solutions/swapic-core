@@ -5,7 +5,9 @@
 mod tests;
 
 use crate::ic;
-use settlement_api::types::pool::{PoolError, PoolSettings as WireSettings};
+use settlement_api::types::pool::{
+    PayoutSettings as WirePayoutSettings, PoolError, PoolSettings as WireSettings,
+};
 use types::pool::{LedgerFee, PoolSettings};
 use types::TokenAmount;
 
@@ -25,6 +27,29 @@ pub fn checked(
         ));
     }
     let settings = PoolSettings::try_from(settings)
+        .map_err(|error| PoolError::BadSettings(error.to_string()))?;
+    settings
+        .validate()
+        .map_err(|error| PoolError::BadSettings(error.to_string()))?;
+    Ok(settings)
+}
+
+/// The Base payouts' knobs as the domain takes them, or the refusal: the halt, then the
+/// controller, then settings that hold together.
+pub fn payout_checked(
+    halted: bool,
+    is_controller: bool,
+    settings: WirePayoutSettings,
+) -> Result<types::pool::PayoutSettings, PoolError> {
+    if halted {
+        return Err(PoolError::Halted);
+    }
+    if !is_controller {
+        return Err(PoolError::NotAllowed(
+            "only a controller sets the payout settings".to_string(),
+        ));
+    }
+    let settings = types::pool::PayoutSettings::try_from(settings)
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     settings
         .validate()

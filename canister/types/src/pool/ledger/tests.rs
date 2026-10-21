@@ -13,6 +13,9 @@ pub(crate) struct Pool {
     pub deposits: BTreeMap<PoolRef, Registered>,
     pub shares: BTreeMap<OwnerKey, ShareLine>,
     pub credited: BTreeSet<CreditKey>,
+    pub payouts: BTreeMap<u64, EvmPayout>,
+    pub queue: BTreeMap<u64, u64>,
+    pub nonces: BTreeSet<NonceUse>,
 }
 
 impl PoolLookup for Pool {
@@ -28,6 +31,18 @@ impl PoolLookup for Pool {
 
     fn is_credited(&self, key: &CreditKey) -> bool {
         self.credited.contains(key)
+    }
+
+    fn payout(&self, id: u64) -> Option<EvmPayout> {
+        self.payouts.get(&id).cloned()
+    }
+
+    fn queue_head(&self) -> Option<(u64, u64)> {
+        self.queue.iter().next().map(|(seq, id)| (*seq, *id))
+    }
+
+    fn nonce_used(&self, key: &NonceUse) -> bool {
+        self.nonces.contains(key)
     }
 }
 
@@ -48,6 +63,18 @@ impl Pool {
         if let Some(key) = effects.credited {
             self.credited.insert(key);
         }
+        if let Some(payout) = effects.payout {
+            self.payouts.insert(payout.id, payout);
+        }
+        if let Some(seq) = effects.dequeued {
+            self.queue.remove(&seq);
+        }
+        if let Some((seq, id)) = effects.queued {
+            self.queue.insert(seq, id);
+        }
+        if let Some(key) = effects.nonce {
+            self.nonces.insert(key);
+        }
         Ok(())
     }
 }
@@ -56,11 +83,11 @@ fn ckusdc() -> Principal {
     Principal::from_text(CKUSDC_LEDGER).unwrap()
 }
 
-fn usdc(whole: u64) -> TokenAmount {
+pub(crate) fn usdc(whole: u64) -> TokenAmount {
     TokenAmount::from(whole * 1_000_000)
 }
 
-const FEE: u64 = 10_000;
+pub(crate) const FEE: u64 = 10_000;
 
 pub(crate) fn settings() -> PoolSettings {
     PoolSettings {
@@ -73,13 +100,13 @@ pub(crate) fn settings() -> PoolSettings {
     }
 }
 
-fn payer() -> EvmAddress {
+pub(crate) fn payer() -> EvmAddress {
     "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
         .parse()
         .unwrap()
 }
 
-fn recipient(byte: u8) -> IcpAccount {
+pub(crate) fn recipient(byte: u8) -> IcpAccount {
     IcpAccount {
         owner: Principal::from_slice(&[byte; 10]),
         subaccount: None,
@@ -120,7 +147,7 @@ fn stake(byte: u8, min_usdc: TokenAmount, rebalance_share: TokenAmount) -> Regis
     }
 }
 
-fn credit(log: u64) -> CreditKey {
+pub(crate) fn credit(log: u64) -> CreditKey {
     CreditKey {
         chain: ChainId::BASE,
         tx: TxHash::new([0xab; 32]),
@@ -128,7 +155,7 @@ fn credit(log: u64) -> CreditKey {
     }
 }
 
-fn register(pool: &mut Pool, terms: Registration) -> PoolRef {
+pub(crate) fn register(pool: &mut Pool, terms: Registration) -> PoolRef {
     let r#ref = terms.pool_ref().unwrap();
     pool.step(PoolStep::Registered {
         r#ref,
@@ -139,7 +166,7 @@ fn register(pool: &mut Pool, terms: Registration) -> PoolRef {
 }
 
 /// A pool with settings and `icp` of ckUSDC staked on ICP by `recipient(200)`.
-fn funded(icp: TokenAmount) -> Pool {
+pub(crate) fn funded(icp: TokenAmount) -> Pool {
     let mut pool = Pool::default();
     pool.step(PoolStep::SettingsSet {
         settings: settings(),

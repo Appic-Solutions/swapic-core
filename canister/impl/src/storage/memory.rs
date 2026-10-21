@@ -42,6 +42,9 @@ const POOL_LEDGER_MEMORY_ID: MemoryId = MemoryId::new(28);
 const POOL_DEPOSITS_MEMORY_ID: MemoryId = MemoryId::new(29);
 const POOL_SHARES_MEMORY_ID: MemoryId = MemoryId::new(30);
 const POOL_CREDITED_MEMORY_ID: MemoryId = MemoryId::new(31);
+const POOL_PAYOUTS_MEMORY_ID: MemoryId = MemoryId::new(32);
+const POOL_PAYOUT_QUEUE_MEMORY_ID: MemoryId = MemoryId::new(33);
+const POOL_WITHDRAWAL_NONCES_MEMORY_ID: MemoryId = MemoryId::new(34);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -157,4 +160,16 @@ pub fn pool_shares_memory() -> Memory {
 
 pub fn pool_credited_memory() -> Memory {
     memory(POOL_CREDITED_MEMORY_ID)
+}
+
+pub fn pool_payouts_memory() -> Memory {
+    memory(POOL_PAYOUTS_MEMORY_ID)
+}
+
+pub fn pool_payout_queue_memory() -> Memory {
+    memory(POOL_PAYOUT_QUEUE_MEMORY_ID)
+}
+
+pub fn pool_withdrawal_nonces_memory() -> Memory {
+    memory(POOL_WITHDRAWAL_NONCES_MEMORY_ID)
 }

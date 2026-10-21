@@ -5,7 +5,9 @@ use std::ops::RangeFrom;
 use types::books::{BookStep, Books};
 use types::events::TxPurpose;
 use types::hash::{OwnerKey, PoolRef};
-use types::pool::{CreditKey, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares};
+use types::pool::{
+    CreditKey, EvmPayout, NonceUse, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares,
+};
 use types::{
     Attempt, ChainId, Choice, EventHash, EventIndex, Flow, LedgerMeta, Leg, Nonce, NonceKey,
     Outcome, Pocket, QuoteHash, Swap, SwapStatus, Timestamp, TokenAmount, TransitionError, TxHash,
@@ -62,6 +64,20 @@ pub trait Store {
     fn put_pool_credited(&mut self, key: CreditKey);
     /// Every credited transfer, in key order.
     fn pool_credited(&self) -> Vec<CreditKey>;
+    /// A payout from the Base pocket, by id.
+    fn pool_payout(&self, id: u64) -> Option<EvmPayout>;
+    fn put_pool_payout(&mut self, id: u64, payout: EvmPayout);
+    /// Every Base payout, in id order: what the audit compares.
+    fn pool_payouts(&self) -> Vec<(u64, EvmPayout)>;
+    /// The Base queue: a payout at its place.
+    fn put_payout_queued(&mut self, seq: u64, id: u64);
+    fn remove_payout_queued(&mut self, seq: u64);
+    /// The first `limit` places of the Base queue, in order.
+    fn payout_queue(&self, limit: usize) -> Vec<(u64, u64)>;
+    fn is_withdrawal_nonce_used(&self, key: &NonceUse) -> bool;
+    fn put_withdrawal_nonce(&mut self, key: NonceUse);
+    /// Every withdrawal nonce used, in staker then nonce order.
+    fn withdrawal_nonces(&self) -> Vec<NonceUse>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -157,6 +173,18 @@ impl<S: Store> PoolLookup for PoolView<'_, S> {
     fn is_credited(&self, key: &CreditKey) -> bool {
         self.0.is_pool_credited(key)
     }
+
+    fn payout(&self, id: u64) -> Option<EvmPayout> {
+        self.0.pool_payout(id)
+    }
+
+    fn queue_head(&self) -> Option<(u64, u64)> {
+        self.0.payout_queue(1).into_iter().next()
+    }
+
+    fn nonce_used(&self, key: &NonceUse) -> bool {
+        self.0.is_withdrawal_nonce_used(key)
+    }
 }
 
 /// Where a page of swaps starts: after `after`, or at the first swap when none is named.
@@ -198,6 +226,12 @@ pub struct MemoryStore {
     pool_shares: BTreeMap<OwnerKey, ShareLine>,
     #[n(12)]
     pool_credited: BTreeSet<CreditKey>,
+    #[n(13)]
+    pool_payouts: BTreeMap<u64, EvmPayout>,
+    #[n(14)]
+    payout_queue: BTreeMap<u64, u64>,
+    #[n(15)]
+    withdrawal_nonces: BTreeSet<NonceUse>,
 }
 
 impl Store for MemoryStore {
@@ -350,6 +384,49 @@ impl Store for MemoryStore {
         self.pool_credited.iter().copied().collect()
     }
 
+    fn pool_payout(&self, id: u64) -> Option<EvmPayout> {
+        self.pool_payouts.get(&id).cloned()
+    }
+
+    fn put_pool_payout(&mut self, id: u64, payout: EvmPayout) {
+        self.pool_payouts.insert(id, payout);
+    }
+
+    fn pool_payouts(&self) -> Vec<(u64, EvmPayout)> {
+        self.pool_payouts
+            .iter()
+            .map(|(id, payout)| (*id, payout.clone()))
+            .collect()
+    }
+
+    fn put_payout_queued(&mut self, seq: u64, id: u64) {
+        self.payout_queue.insert(seq, id);
+    }
+
+    fn remove_payout_queued(&mut self, seq: u64) {
+        self.payout_queue.remove(&seq);
+    }
+
+    fn payout_queue(&self, limit: usize) -> Vec<(u64, u64)> {
+        self.payout_queue
+            .iter()
+            .take(limit)
+            .map(|(seq, id)| (*seq, *id))
+            .collect()
+    }
+
+    fn is_withdrawal_nonce_used(&self, key: &NonceUse) -> bool {
+        self.withdrawal_nonces.contains(key)
+    }
+
+    fn put_withdrawal_nonce(&mut self, key: NonceUse) {
+        self.withdrawal_nonces.insert(key);
+    }
+
+    fn withdrawal_nonces(&self) -> Vec<NonceUse> {
+        self.withdrawal_nonces.iter().copied().collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -418,6 +495,9 @@ impl State<MemoryStore> {
             pool_deposits,
             pool_shares,
             pool_credited,
+            pool_payouts,
+            payout_queue,
+            withdrawal_nonces,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -463,6 +543,19 @@ impl State<MemoryStore> {
                 .iter()
                 .map(|(key, line)| (key, line)))
             && pool_credited.iter().eq(other.store.pool_credited().iter())
+            && pool_payouts.iter().eq(other
+                .store
+                .pool_payouts()
+                .iter()
+                .map(|(id, payout)| (id, payout)))
+            && payout_queue.iter().eq(other
+                .store
+                .payout_queue(usize::MAX)
+                .iter()
+                .map(|(seq, id)| (seq, id)))
+            && withdrawal_nonces
+                .iter()
+                .eq(other.store.withdrawal_nonces().iter())
     }
 }
 
@@ -591,11 +684,11 @@ impl<S: Store> State<S> {
 
     /// A pool step the guard admitted, sealed at `at`: the ledger and the entries of the maps
     /// beside it, all from the one step.
-    fn record_pool(&mut self, step: &PoolStep, at: types::Timestamp) {
-        let effects = self
-            .store
-            .pool_ledger()
-            .apply(step, &PoolView(&self.store), at);
+    fn record_pool(&mut self, step: &PoolStep, at: types::Timestamp, index: EventIndex) {
+        let effects =
+            self.store
+                .pool_ledger()
+                .apply_at(step, &PoolView(&self.store), at, index.get());
         self.store.put_pool_ledger(effects.ledger);
         if let Some((r#ref, deposit)) = effects.deposit {
             self.store.put_pool_deposit(r#ref, deposit);
@@ -605,6 +698,18 @@ impl<S: Store> State<S> {
         }
         if let Some(key) = effects.credited {
             self.store.put_pool_credited(key);
+        }
+        if let Some(payout) = effects.payout {
+            self.store.put_pool_payout(payout.id, payout);
+        }
+        if let Some(seq) = effects.dequeued {
+            self.store.remove_payout_queued(seq);
+        }
+        if let Some((seq, id)) = effects.queued {
+            self.store.put_payout_queued(seq, id);
+        }
+        if let Some(key) = effects.nonce {
+            self.store.put_withdrawal_nonce(key);
         }
     }
 

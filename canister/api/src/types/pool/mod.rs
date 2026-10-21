@@ -5,6 +5,13 @@
 #[cfg(test)]
 mod tests;
 
+pub mod payout;
+
+pub use payout::{
+    EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutSettings, PayoutStatus, PayoutTerms, PayoutView,
+    PayoutWaiting,
+};
+
 use candid::{CandidType, Nat, Principal};
 use serde::Deserialize;
 use std::time::Duration;

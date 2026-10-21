@@ -3,7 +3,8 @@ use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
     flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
-    pool_deposits_memory, pool_ledger_memory, pool_shares_memory, signed_memory, swaps_memory,
+    pool_deposits_memory, pool_ledger_memory, pool_payout_queue_memory, pool_payouts_memory,
+    pool_shares_memory, pool_withdrawal_nonces_memory, signed_memory, swaps_memory,
     unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -15,7 +16,7 @@ use types::books::Books;
 use types::canonical::CanonicalError;
 use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::hash::{OwnerKey, PoolRef};
-use types::pool::{CreditKey, PoolLedger, Registered, ShareLine};
+use types::pool::{CreditKey, EvmPayout, NonceUse, PoolLedger, Registered, ShareLine};
 use types::{
     ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
     Timestamp, TransitionError, UnsignedTx, WaitingKey,
@@ -90,6 +91,17 @@ thread_local! {
 
     static POOL_CREDITED: RefCell<StableBTreeSet<CreditKey, Memory>> =
         RefCell::new(StableBTreeSet::init(pool_credited_memory()));
+
+    // The Base payouts by id, the Base queue by place, and every withdrawal nonce a staker
+    // used. Part of the fold: only `Pool` lines write them.
+    static POOL_PAYOUTS: RefCell<StableBTreeMap<u64, EvmPayout, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_payouts_memory()));
+
+    static POOL_PAYOUT_QUEUE: RefCell<StableBTreeMap<u64, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_payout_queue_memory()));
+
+    static POOL_WITHDRAWAL_NONCES: RefCell<StableBTreeSet<NonceUse, Memory>> =
+        RefCell::new(StableBTreeSet::init(pool_withdrawal_nonces_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -243,6 +255,42 @@ impl Store for StableStore {
         POOL_CREDITED.with(|credited| credited.borrow().iter().collect())
     }
 
+    fn pool_payout(&self, id: u64) -> Option<EvmPayout> {
+        POOL_PAYOUTS.with(|payouts| payouts.borrow().get(&id))
+    }
+
+    fn put_pool_payout(&mut self, id: u64, payout: EvmPayout) {
+        POOL_PAYOUTS.with(|payouts| payouts.borrow_mut().insert(id, payout));
+    }
+
+    fn pool_payouts(&self) -> Vec<(u64, EvmPayout)> {
+        POOL_PAYOUTS.with(|payouts| payouts.borrow().iter().collect())
+    }
+
+    fn put_payout_queued(&mut self, seq: u64, id: u64) {
+        POOL_PAYOUT_QUEUE.with(|queue| queue.borrow_mut().insert(seq, id));
+    }
+
+    fn remove_payout_queued(&mut self, seq: u64) {
+        POOL_PAYOUT_QUEUE.with(|queue| queue.borrow_mut().remove(&seq));
+    }
+
+    fn payout_queue(&self, limit: usize) -> Vec<(u64, u64)> {
+        POOL_PAYOUT_QUEUE.with(|queue| queue.borrow().iter().take(limit).collect())
+    }
+
+    fn is_withdrawal_nonce_used(&self, key: &NonceUse) -> bool {
+        POOL_WITHDRAWAL_NONCES.with(|nonces| nonces.borrow().contains(key))
+    }
+
+    fn put_withdrawal_nonce(&mut self, key: NonceUse) {
+        POOL_WITHDRAWAL_NONCES.with(|nonces| nonces.borrow_mut().insert(key));
+    }
+
+    fn withdrawal_nonces(&self) -> Vec<NonceUse> {
+        POOL_WITHDRAWAL_NONCES.with(|nonces| nonces.borrow().iter().collect())
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().get(key))
     }
@@ -368,6 +416,9 @@ pub fn init() {
     POOL_DEPOSITS.with(|_| ());
     POOL_SHARES.with(|_| ());
     POOL_CREDITED.with(|_| ());
+    POOL_PAYOUTS.with(|_| ());
+    POOL_PAYOUT_QUEUE.with(|_| ());
+    POOL_WITHDRAWAL_NONCES.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

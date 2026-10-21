@@ -12,6 +12,8 @@
 #[cfg(test)]
 mod tests;
 
+mod payouts;
+
 use super::{
     Arrival, DepositKind, DepositStatus, IcpCheck, PayoutPath, PayoutProgress, PayoutQueue,
     PendingOp, Pockets, PoolAccount, PoolSettings, PoolSettingsError, PoolStep, Registered,
@@ -20,6 +22,7 @@ use super::{
 use crate::chain::ChainId;
 use crate::hash::{OwnerKey, PoolOpId, PoolRef};
 use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
+use crate::pool::payout::{EvmPayout, NonceUse, PayoutLines, PayoutSettingsError};
 use crate::pool::CreditKey;
 use candid::Principal;
 use minicbor::{Decode, Encode};
@@ -38,6 +41,12 @@ pub trait PoolLookup {
     fn deposit(&self, r#ref: &PoolRef) -> Option<Registered>;
     fn shares_of(&self, owner: &OwnerKey) -> Shares;
     fn is_credited(&self, key: &CreditKey) -> bool;
+    /// A payout from the Base pocket, by id.
+    fn payout(&self, id: u64) -> Option<EvmPayout>;
+    /// The Base queue's head: its place and the payout there.
+    fn queue_head(&self) -> Option<(u64, u64)>;
+    /// Whether a staker used a withdrawal nonce.
+    fn nonce_used(&self, key: &NonceUse) -> bool;
 }
 
 /// The pool's own lines: settings, pockets, shares outstanding, and the indexes the timers
@@ -105,6 +114,9 @@ pub struct PoolLedger {
     /// read yet. None: the block is done whole.
     #[n(18)]
     pub scan_log: Option<u64>,
+    /// The Base payouts' lines (P11b): absent until their first step.
+    #[n(19)]
+    pub payouts: Option<PayoutLines>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -114,6 +126,14 @@ pub struct PoolEffects {
     pub deposit: Option<(PoolRef, Registered)>,
     pub shares: Option<(OwnerKey, ShareLine)>,
     pub credited: Option<CreditKey>,
+    /// A Base payout as the step leaves it.
+    pub payout: Option<EvmPayout>,
+    /// A place in the Base queue taken: the place and the payout.
+    pub queued: Option<(u64, u64)>,
+    /// A place in the Base queue given up.
+    pub dequeued: Option<u64>,
+    /// A withdrawal nonce spent.
+    pub nonce: Option<NonceUse>,
 }
 
 /// Why a pool step was refused.
@@ -174,6 +194,27 @@ pub enum PoolStepError {
     CursorBack { at: BlockNumber, to: BlockNumber },
     #[error("the arrival does not fit the pool: {0}")]
     DoesNotFit(&'static str),
+    #[error(transparent)]
+    PayoutSettings(#[from] PayoutSettingsError),
+    #[error("the payouts have no settings")]
+    NoPayoutSettings,
+    #[error("no payout {0}")]
+    UnknownPayout(u64),
+    #[error("{step} is not a step of payout {id} from {status}")]
+    PayoutNotFrom {
+        step: &'static str,
+        id: u64,
+        status: String,
+    },
+    #[error("the payout's id must be {expected}")]
+    PayoutId { expected: u64 },
+    #[error("the Base pocket holds {free} free behind the queue, and {need} is needed")]
+    BaseShort {
+        free: TokenAmount,
+        need: TokenAmount,
+    },
+    #[error("the withdrawal nonce {0} of the staker is used")]
+    NonceUsed(u64),
 }
 
 /// Why `register_pool_deposit` refuses terms, before anything is appended. Each is one of
@@ -273,14 +314,26 @@ impl PoolLedger {
     /// pocket's held lines and the unattributed transfers.
     pub fn base_held(&self) -> TokenAmount {
         sat_add(
-            sat_add(self.pockets.base.free, self.pockets.base.reserved),
-            self.unattributed,
+            sat_add(
+                sat_add(self.pockets.base.free, self.pockets.base.reserved),
+                self.unattributed,
+            ),
+            self.lines().fees_base,
         )
     }
 
-    /// What the canister's ckUSDC account should hold for the pool.
+    /// What the canister's ckUSDC account should hold for the pool: the ICP pocket's free and
+    /// reserved lines, and the ICP swaps' network fees.
     pub fn icp_held(&self) -> TokenAmount {
-        sat_add(self.pockets.icp.free, self.pockets.icp.reserved)
+        sat_add(
+            sat_add(self.pockets.icp.free, self.pockets.icp.reserved),
+            self.lines().fees_icp,
+        )
+    }
+
+    /// The Base payouts' lines, empty before their first step.
+    pub fn lines(&self) -> PayoutLines {
+        self.payouts.clone().unwrap_or_default()
     }
 
     /// The arrivals on `chain` from blocks above `block`: in the lines, and not yet in a
@@ -405,7 +458,8 @@ impl PoolLedger {
                         || self.total_shares != Shares::ZERO
                         || !self.pending.is_empty()
                         || !self.open.is_empty()
-                        || !self.paying.is_empty();
+                        || !self.paying.is_empty()
+                        || !self.lines().open.is_empty();
                     if current.ckusdc_ledger != settings.ckusdc_ledger && holds_any {
                         return Err(PoolStepError::CkusdcLedgerFixed);
                     }
@@ -679,12 +733,37 @@ impl PoolLedger {
                 }
                 _ => Ok(()),
             },
+            PoolStep::PayoutSettingsSet { .. }
+            | PoolStep::PayoutOpened { .. }
+            | PoolStep::PayoutAmountKnown { .. }
+            | PoolStep::PayoutQueued { .. }
+            | PoolStep::PayoutWaiting { .. }
+            | PoolStep::PayoutSigned { .. }
+            | PoolStep::PayoutPaid { .. }
+            | PoolStep::PayoutReverted { .. }
+            | PoolStep::PayoutUndoing { .. }
+            | PoolStep::PayoutUndone { .. } => self.admits_payout(step, lookup),
         }
     }
 
     /// Records a step [`PoolLedger::admits`] admitted, sealed at `at`. Never fails: a line
     /// that would go below zero stops at zero.
     pub fn apply(self, step: &PoolStep, lookup: &impl PoolLookup, at: Timestamp) -> PoolEffects {
+        self.apply_at(step, lookup, at, 0)
+    }
+
+    /// [`PoolLedger::apply`] of the line at `index` of the log: a step that records a signed
+    /// transaction is known by the index of its line.
+    pub fn apply_at(
+        self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        index: u64,
+    ) -> PoolEffects {
+        if let Some(effects) = self.clone().apply_payout(step, lookup, at, index) {
+            return effects;
+        }
         let mut ledger = self;
         let mut deposit_out = None;
         let mut shares_out = None;
@@ -999,12 +1078,27 @@ impl PoolLedger {
                 ledger.scan_cursor = Some(*block);
                 ledger.scan_log = *log;
             }
+            // `apply_payout` records these, and answered before this match
+            PoolStep::PayoutSettingsSet { .. }
+            | PoolStep::PayoutOpened { .. }
+            | PoolStep::PayoutAmountKnown { .. }
+            | PoolStep::PayoutQueued { .. }
+            | PoolStep::PayoutWaiting { .. }
+            | PoolStep::PayoutSigned { .. }
+            | PoolStep::PayoutPaid { .. }
+            | PoolStep::PayoutReverted { .. }
+            | PoolStep::PayoutUndoing { .. }
+            | PoolStep::PayoutUndone { .. } => {}
         }
         PoolEffects {
             ledger,
             deposit: deposit_out,
             shares: shares_out,
             credited,
+            payout: None,
+            queued: None,
+            dequeued: None,
+            nonce: None,
         }
     }
 

@@ -1,0 +1,459 @@
+//! The pool's payouts from its Base pocket (spec 3.2 and 3.3, the fixed interface section 3b):
+//! an ICP user's swap to any EVM token, and an EVM staker's withdrawal, both paid by ONE
+//! canister signature of `run(order)` on Base, the order sized exactly after any ICPSwap leg.
+//!
+//! A payout is opened with what undoes it, learns its exact amount, waits in a first in first
+//! out queue while the Base pocket cannot cover it, then waits for an order, is signed once
+//! (a retry after a revert signs the SAME order), and is paid or undone. Pure: the rules are
+//! the pool ledger's (`admits`, `apply`); this module holds the records and their policy.
+//!
+//! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a new
+//! field is optional.
+
+#[cfg(test)]
+mod tests;
+
+use super::{principal_cbor, IcpAccount, PoolAccount, Shares};
+use crate::chain::ChainId;
+use crate::evm::EvmAddress;
+use crate::hash::TxHash;
+use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
+use candid::Principal;
+use ic_stable_structures::storable::{Bound, Storable};
+use minicbor::{Decode, Encode};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::time::Duration;
+use thiserror::Error;
+
+/// What a payout pays and to whom: the user's own terms, which the order the watcher hands
+/// over is checked against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PayoutTerms {
+    /// Where the user is paid: a chain the canister signs on, Base included.
+    #[n(0)]
+    pub dst_chain: ChainId,
+    #[n(1)]
+    pub recipient: EvmAddress,
+    /// An EVM token, or `0xEeee...EEeE` for the native coin.
+    #[n(2)]
+    pub token_out: EvmAddress,
+    /// In `token_out`'s units.
+    #[n(3)]
+    pub min_out: TokenAmount,
+    /// After this, nothing is signed and the payout is undone.
+    #[n(4)]
+    pub deadline: Timestamp,
+}
+
+/// An ICP user's swap through the pool, as `swap_from_icp` takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct IcpSwapTerms {
+    /// ckUSDC, or a token of `icp_routes`.
+    #[cbor(n(0), with = "principal_cbor")]
+    pub token_in: Principal,
+    #[n(1)]
+    pub amount_in: TokenAmount,
+    /// The caller's account the token is pulled from (`icrc2_transfer_from`).
+    #[n(2)]
+    pub from: IcpAccount,
+    /// The least ckUSDC the route's ICPSwap legs must give (`amount_in` for ckUSDC).
+    #[n(3)]
+    pub min_usdc: TokenAmount,
+    /// Micro USDC the pool keeps.
+    #[n(4)]
+    pub premium: TokenAmount,
+    /// Micro USDC the canister keeps for the payout's gas.
+    #[n(5)]
+    pub network_fee: TokenAmount,
+    /// Where an undone swap's money goes back to.
+    #[n(6)]
+    pub refund_to: IcpAccount,
+}
+
+/// An EVM staker's withdrawal, as the staker signed it, with the shares it burned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct EvmWithdrawal {
+    /// The EVM address owning the shares, the EIP-712 signer.
+    #[n(0)]
+    pub staker: EvmAddress,
+    /// Micro USDC taken out of the pool.
+    #[n(1)]
+    pub usdc: TokenAmount,
+    #[n(2)]
+    pub max_shares: Shares,
+    /// Stays in the pool.
+    #[n(3)]
+    pub rebalance_share: TokenAmount,
+    /// Kept on Base for the payout's gas.
+    #[n(4)]
+    pub network_fee: TokenAmount,
+    /// Once per staker.
+    #[n(5)]
+    pub nonce: u64,
+    /// `ceil(usdc * S / A)` at the burn.
+    #[n(6)]
+    pub burned: Shares,
+}
+
+impl EvmWithdrawal {
+    /// What the payout order spends on Base: the withdrawal less its rebalancing share and
+    /// its network fee. None when they take all of it.
+    pub fn payout_amount(&self) -> Option<TokenAmount> {
+        self.usdc
+            .checked_sub(self.rebalance_share)?
+            .checked_sub(self.network_fee)
+            .filter(|amount| *amount > TokenAmount::ZERO)
+    }
+}
+
+/// What a payout is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PayoutKind {
+    #[n(0)]
+    IcpSwap(#[n(0)] IcpSwapTerms),
+    #[n(1)]
+    Withdrawal(#[n(0)] EvmWithdrawal),
+}
+
+/// What undoes a payout that cannot be paid by its deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Undo {
+    /// An ICP swap: what it pulled (as ckUSDC once its legs made it ckUSDC, else the token
+    /// itself) goes back to `to`, less the ledger's fee.
+    #[n(0)]
+    Refund {
+        #[n(0)]
+        to: IcpAccount,
+    },
+    /// A withdrawal: exactly the shares it burned, minted back to their owner.
+    #[n(1)]
+    Remint {
+        #[n(0)]
+        owner: PoolAccount,
+        #[n(1)]
+        shares: Shares,
+    },
+}
+
+/// Where a payout stands.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PayoutStatus {
+    /// Opened: an ICP swap's pull is out, or a withdrawal's amount is about to be known.
+    #[n(0)]
+    Opened,
+    /// An ICP swap's pull landed and its ICPSwap legs run.
+    #[n(1)]
+    Swapping,
+    /// Its exact amount is known, and it is in neither the queue nor waiting yet.
+    #[n(2)]
+    Known,
+    /// Waits, first in first out, for the Base pocket to cover it.
+    #[n(3)]
+    Queued,
+    /// Its USDC is reserved on Base; it waits for an order.
+    #[n(4)]
+    Waiting,
+    /// Its order was signed: the line that recorded the transaction's bytes.
+    #[n(5)]
+    Signed(#[n(0)] u64),
+    #[n(6)]
+    Paid,
+    /// Its undo started (an ICP refund is out): nothing is signed for it any more.
+    #[n(7)]
+    Undoing(#[n(0)] String),
+    #[n(8)]
+    Undone(#[n(0)] String),
+    /// Stopped for a human.
+    #[n(9)]
+    Failed(#[n(0)] String),
+}
+
+impl PayoutStatus {
+    /// Whether nothing more happens to it.
+    pub fn is_final(&self) -> bool {
+        matches!(
+            self,
+            PayoutStatus::Paid | PayoutStatus::Undone(_) | PayoutStatus::Failed(_)
+        )
+    }
+}
+
+/// The order a payout was signed with, kept so a retry after a revert signs the same one.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PinnedOrder {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub order_id: [u8; 32],
+    /// `abi.encode` of the Order.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub order: Vec<u8>,
+    #[n(2)]
+    pub gas_limit: u64,
+    /// The order's own deadline, in seconds.
+    #[n(3)]
+    pub deadline_s: u64,
+}
+
+/// A payout from the Base pocket.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct EvmPayout {
+    #[n(0)]
+    pub id: u64,
+    #[n(1)]
+    pub kind: PayoutKind,
+    #[n(2)]
+    pub terms: PayoutTerms,
+    #[n(3)]
+    pub undo: Undo,
+    #[n(4)]
+    pub status: PayoutStatus,
+    /// The exact USDC the payout order spends on Base, once known.
+    #[n(5)]
+    pub amount: Option<TokenAmount>,
+    /// A withdrawal's network fee, held on Base with the payout and booked to the Base fee
+    /// line when it is paid.
+    #[n(6)]
+    pub base_fee: Option<TokenAmount>,
+    /// An ICP swap's ckUSDC, all of it (`u`), once its legs made it.
+    #[n(7)]
+    pub received: Option<TokenAmount>,
+    #[n(8)]
+    pub order: Option<PinnedOrder>,
+    #[n(9)]
+    pub tx_hash: Option<TxHash>,
+    #[n(10)]
+    pub opened_at: Timestamp,
+    /// When it last started waiting for an order.
+    #[n(11)]
+    pub waiting_since: Option<Timestamp>,
+    /// Its place in the queue while queued.
+    #[n(12)]
+    pub queued_at: Option<u64>,
+    /// The block its transaction was paid in.
+    #[n(13)]
+    pub paid_block: Option<BlockNumber>,
+    /// The Eco intent its order published, read off the paid receipt: an unfilled one is
+    /// refunded to the canister, and that refund reopens the payout.
+    #[cbor(n(14), with = "minicbor::bytes")]
+    pub intent: Option<[u8; 32]>,
+    /// The ledger block of an ICP swap's pull, or of its refund.
+    #[n(15)]
+    pub icp_block: Option<u64>,
+    /// Whether its Base hold is reserved in the Base pocket now (while it waits for an
+    /// order, and again after a revert).
+    #[n(16)]
+    pub base_reserved: bool,
+}
+
+crate::storable_as_cbor!(EvmPayout);
+
+impl EvmPayout {
+    pub fn new(id: u64, kind: PayoutKind, terms: PayoutTerms, undo: Undo, at: Timestamp) -> Self {
+        Self {
+            id,
+            kind,
+            terms,
+            undo,
+            status: PayoutStatus::Opened,
+            amount: None,
+            base_fee: None,
+            received: None,
+            order: None,
+            tx_hash: None,
+            opened_at: at,
+            waiting_since: None,
+            queued_at: None,
+            paid_block: None,
+            intent: None,
+            icp_block: None,
+            base_reserved: false,
+        }
+    }
+
+    /// What the payout holds of the Base pocket: the order's amount, and a withdrawal's
+    /// network fee, which stays at the canister's Base address.
+    pub fn base_hold(&self) -> TokenAmount {
+        self.amount
+            .unwrap_or(TokenAmount::ZERO)
+            .checked_add(self.base_fee.unwrap_or(TokenAmount::ZERO))
+            .unwrap_or(TokenAmount::MAX)
+    }
+
+    /// What the payout puts on the pool's `owed` line once its amount is known: the order's
+    /// amount and a withdrawal's network fee, neither of them the stakers'.
+    pub fn owed(&self) -> TokenAmount {
+        match self.amount {
+            Some(_) => self.base_hold(),
+            None => TokenAmount::ZERO,
+        }
+    }
+
+    /// An ICP swap's ckUSDC held in the ICP pocket until the payout is paid or undone: all it
+    /// made but the network fee, which went to the ICP fee line.
+    pub fn icp_hold(&self) -> TokenAmount {
+        match (&self.kind, self.received) {
+            (PayoutKind::IcpSwap(terms), Some(received)) => received
+                .checked_sub(terms.network_fee)
+                .unwrap_or(TokenAmount::ZERO),
+            _ => TokenAmount::ZERO,
+        }
+    }
+
+    /// An ICP swap's network fee, on the ICP fee line once its ckUSDC is known.
+    pub fn icp_fee(&self) -> TokenAmount {
+        match (&self.kind, self.received) {
+            (PayoutKind::IcpSwap(terms), Some(_)) => terms.network_fee,
+            _ => TokenAmount::ZERO,
+        }
+    }
+
+    pub fn is_icp_swap(&self) -> bool {
+        matches!(self.kind, PayoutKind::IcpSwap(_))
+    }
+}
+
+/// The payouts' knobs (interface section 3b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PayoutSettings {
+    /// The least network fee a payout may carry, micro USDC.
+    #[n(0)]
+    pub min_network_fee: TokenAmount,
+    /// The least a stake's or a withdrawal's rebalancing share may be, in bps of its amount.
+    #[n(1)]
+    pub rebalance_share_floor_bps: u16,
+    /// How long a waiting payout waits for a valid order before it is listed again.
+    #[n(2)]
+    pub order_wait: Duration,
+    /// The most gas a payout order may be signed with on Base.
+    #[n(3)]
+    pub max_payout_gas: u64,
+}
+
+/// The least gas any transaction has.
+pub const MIN_PAYOUT_GAS: u64 = 21_000;
+/// The most gas the settings may let a payout order take: a Base block's worth is far above.
+pub const MAX_PAYOUT_GAS: u64 = 10_000_000;
+/// The longest a waiting payout may wait for an order before it is listed again.
+pub const MAX_ORDER_WAIT: Duration = Duration::from_secs(3_600);
+
+impl Default for PayoutSettings {
+    /// The launch values: 5 cents of network fee at the least, a rebalancing share of 2 bps
+    /// at the least, two minutes for an order, two million gas.
+    fn default() -> Self {
+        Self {
+            min_network_fee: TokenAmount::new(50_000),
+            rebalance_share_floor_bps: 2,
+            order_wait: Duration::from_secs(120),
+            max_payout_gas: 2_000_000,
+        }
+    }
+}
+
+/// Why payout settings are not ones the pool runs on.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum PayoutSettingsError {
+    #[error("rebalance_share_floor_bps of {0} is above 10000")]
+    FloorAboveAll(u16),
+    #[error("order_wait_s must be between 1 and {}", MAX_ORDER_WAIT.as_secs())]
+    OrderWait,
+    #[error("max_payout_gas must be between {MIN_PAYOUT_GAS} and {MAX_PAYOUT_GAS}")]
+    Gas,
+}
+
+impl PayoutSettings {
+    pub fn validate(&self) -> Result<(), PayoutSettingsError> {
+        if self.rebalance_share_floor_bps > 10_000 {
+            return Err(PayoutSettingsError::FloorAboveAll(
+                self.rebalance_share_floor_bps,
+            ));
+        }
+        if self.order_wait.is_zero() || self.order_wait > MAX_ORDER_WAIT {
+            return Err(PayoutSettingsError::OrderWait);
+        }
+        if !(MIN_PAYOUT_GAS..=MAX_PAYOUT_GAS).contains(&self.max_payout_gas) {
+            return Err(PayoutSettingsError::Gas);
+        }
+        Ok(())
+    }
+
+    /// The least rebalancing share of `amount`, rounded up.
+    pub fn least_rebalance_share(&self, amount: TokenAmount) -> Option<TokenAmount> {
+        amount
+            .checked_mul(self.rebalance_share_floor_bps)?
+            .checked_div_ceil(10_000_u32)
+    }
+}
+
+/// The pool's lines for its Base payouts, in the pool ledger (absent until the first one).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct PayoutLines {
+    #[n(0)]
+    pub settings: Option<PayoutSettings>,
+    /// The id the next payout opens with.
+    #[n(1)]
+    pub next_id: u64,
+    /// The ICP swaps' network fees: ckUSDC at the canister, not the stakers'.
+    #[n(2)]
+    pub fees_icp: TokenAmount,
+    /// The withdrawals' network fees: USDC at the canister's Base address, not the stakers'.
+    #[n(3)]
+    pub fees_base: TokenAmount,
+    /// What the queued payouts will hold of the Base pocket.
+    #[n(4)]
+    pub queued: TokenAmount,
+    /// How many payouts are queued.
+    #[n(5)]
+    pub queue_len: u64,
+    /// The place the next queued payout takes.
+    #[n(6)]
+    pub next_seq: u64,
+    /// The payouts not paid, undone or stopped: what the timer and `payouts_waiting` read.
+    #[n(7)]
+    pub open: BTreeSet<u64>,
+    /// When the queue's head became its head.
+    #[n(8)]
+    pub head_since: Option<Timestamp>,
+}
+
+/// A withdrawal nonce a staker used: the staker's address and the nonce, big endian, so a
+/// stable set orders them by staker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct NonceUse {
+    #[n(0)]
+    pub staker: EvmAddress,
+    #[n(1)]
+    pub nonce: u64,
+}
+
+impl NonceUse {
+    const BYTES: usize = 20 + 8;
+}
+
+impl Storable for NonceUse {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        out.extend_from_slice(self.staker.as_bytes());
+        out.extend_from_slice(&self.nonce.to_be_bytes());
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(
+            bytes.len(),
+            Self::BYTES,
+            "BUG: a stored nonce use is 28 bytes"
+        );
+        let staker: [u8; 20] = bytes[..20].try_into().expect("BUG: twenty bytes");
+        let nonce = u64::from_be_bytes(bytes[20..].try_into().expect("BUG: eight bytes"));
+        Self {
+            staker: EvmAddress::new(staker),
+            nonce,
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: Self::BYTES as u32,
+        is_fixed_size: true,
+    };
+}

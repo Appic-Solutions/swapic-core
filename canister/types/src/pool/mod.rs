@@ -12,6 +12,12 @@
 mod tests;
 
 pub mod ledger;
+pub mod payout;
+
+pub use payout::{
+    EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutSettings,
+    PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+};
 
 pub use ledger::{
     check_ref, check_terms, least_premium, PoolEffects, PoolLedger, PoolLookup, PoolStepError,
@@ -21,7 +27,7 @@ pub use ledger::{
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::hash::{OwnerKey, PoolOpId, PoolRef, TxHash};
-use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
+use crate::numeric::{BlockNumber, Nonce, Timestamp, TokenAmount};
 use alloy_primitives::keccak256;
 use candid::Principal;
 use ic_stable_structures::storable::{Bound, Storable};
@@ -1257,6 +1263,105 @@ pub enum PoolStep {
         #[n(2)]
         withdrawn: TokenAmount,
     },
+    /// A controller set the Base payouts' knobs.
+    #[n(23)]
+    PayoutSettingsSet {
+        #[n(0)]
+        settings: PayoutSettings,
+    },
+    /// A payout from the Base pocket was opened with what undoes it: an ICP swap before its
+    /// pull, a withdrawal with its shares burned and its nonce spent.
+    #[n(24)]
+    PayoutOpened {
+        #[n(0)]
+        id: u64,
+        /// Boxed: a log line's size is its largest step's.
+        #[n(1)]
+        kind: Box<PayoutKind>,
+        #[n(2)]
+        terms: PayoutTerms,
+        #[n(3)]
+        undo: Undo,
+    },
+    /// The payout's exact amount is known: what its order spends on Base. An ICP swap's
+    /// ckUSDC (`received`) is held on ICP until it is paid, its network fee on the ICP fee
+    /// line; a withdrawal's network fee is held on Base with it.
+    #[n(25)]
+    PayoutAmountKnown {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        amount: TokenAmount,
+        #[n(2)]
+        received: Option<TokenAmount>,
+    },
+    /// The Base pocket cannot cover it behind the queue: it waits, first in first out.
+    #[n(26)]
+    PayoutQueued {
+        #[n(0)]
+        id: u64,
+    },
+    /// Its Base hold is reserved: it waits for an order.
+    #[n(27)]
+    PayoutWaiting {
+        #[n(0)]
+        id: u64,
+    },
+    /// The canister signed `run(order)` for it: the transaction's exact bytes, recorded
+    /// before they are broadcast, spending the nonce `TxCreated` handed out for it.
+    #[n(28)]
+    PayoutSigned {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        order: PinnedOrder,
+        #[n(2)]
+        chain_id: ChainId,
+        #[n(3)]
+        nonce: Nonce,
+        #[n(4)]
+        tx_hash: TxHash,
+        #[cbor(n(5), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
+    /// Its transaction succeeded at depth: the USDC left the Base pocket.
+    #[n(29)]
+    PayoutPaid {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        tx_hash: TxHash,
+        #[n(2)]
+        block: BlockNumber,
+        /// The Eco intent the order published, read off the receipt.
+        #[cbor(n(3), with = "minicbor::bytes")]
+        intent: Option<[u8; 32]>,
+    },
+    /// Its transaction reverted at depth: it waits again, its order pinned.
+    #[n(30)]
+    PayoutReverted {
+        #[n(0)]
+        id: u64,
+    },
+    /// Its undo began: an ICP refund is about to be asked, nothing is signed for it again.
+    #[n(31)]
+    PayoutUndoing {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
+    /// It was undone: an ICP swap refunded (`block`: the refund's ledger block), a
+    /// withdrawal's shares minted back.
+    #[n(32)]
+    PayoutUndone {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+        #[n(2)]
+        block: Option<u64>,
+    },
 }
 
 impl PoolStep {
@@ -1293,10 +1398,35 @@ impl PoolStep {
             PoolStep::ScanCursor { .. } => "ScanCursor",
             PoolStep::SwapApproved { .. } => "SwapApproved",
             PoolStep::SwapUndone { .. } => "SwapUndone",
+            PoolStep::PayoutSettingsSet { .. } => "PayoutSettingsSet",
+            PoolStep::PayoutOpened { .. } => "PayoutOpened",
+            PoolStep::PayoutAmountKnown { .. } => "PayoutAmountKnown",
+            PoolStep::PayoutQueued { .. } => "PayoutQueued",
+            PoolStep::PayoutWaiting { .. } => "PayoutWaiting",
+            PoolStep::PayoutSigned { .. } => "PayoutSigned",
+            PoolStep::PayoutPaid { .. } => "PayoutPaid",
+            PoolStep::PayoutReverted { .. } => "PayoutReverted",
+            PoolStep::PayoutUndoing { .. } => "PayoutUndoing",
+            PoolStep::PayoutUndone { .. } => "PayoutUndone",
         }
     }
 
     /// Whether the step gives a payout something to do now: the engine drives at once.
+    /// The transaction a step records the exact bytes of, if it records one: its chain, its
+    /// nonce, its hash and its bytes.
+    pub fn signed_tx(&self) -> Option<(ChainId, Nonce, TxHash, &[u8])> {
+        match self {
+            PoolStep::PayoutSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                ..
+            } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
+            _ => None,
+        }
+    }
+
     pub fn moves_a_payout(&self) -> bool {
         matches!(
             self,

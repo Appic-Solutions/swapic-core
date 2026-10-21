@@ -6,7 +6,8 @@ use crate::storage::events::read_state;
 use candid::Nat;
 use ic_cdk::query;
 pub use settlement_api::types::pool::{
-    PoolAccount, PoolAccountView, PoolDepositView, PoolSettings, PoolStateView,
+    PayoutSettings, PayoutView, PoolAccount, PoolAccountView, PoolDepositView, PoolSettings,
+    PoolStateView,
 };
 use types::hash::PoolRef;
 
@@ -45,4 +46,20 @@ pub fn pool_deposit(r#ref: Vec<u8>) -> Option<PoolDepositView> {
     let r#ref = PoolRef::new(<[u8; 32]>::try_from(r#ref.as_slice()).ok()?);
     read_state(|state| state.store().pool_deposit(&r#ref))
         .map(|deposit| PoolDepositView::of(r#ref, deposit))
+}
+
+/// The Base payouts' knobs; the launch defaults while none are set.
+#[query]
+pub fn payout_settings() -> PayoutSettings {
+    let settings = crate::storage::pool::ledger()
+        .lines()
+        .settings
+        .unwrap_or_default();
+    PayoutSettings::from(&settings)
+}
+
+/// A payout from the Base pocket by its id, if one was opened under it.
+#[query]
+pub fn payout(id: u64) -> Option<PayoutView> {
+    read_state(|state| state.store().pool_payout(id)).map(|payout| PayoutView::from(&payout))
 }
