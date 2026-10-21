@@ -536,11 +536,22 @@ pub enum GasAction {
     /// `USDC.approve(Swapic, max)` from the canister's Base address, once per deploy.
     #[n(9)]
     PoolApprove,
+    /// `Swapic.run` of a rebalance move's own order, from the canister's address (P11c).
+    #[n(10)]
+    PoolMove,
+    /// The CCTP finish of a rebalance move on its destination, the canister's own: Ethereum's
+    /// `completeCctp` with a CkDeposit, Base's `receiveMessage` (P11c).
+    #[n(11)]
+    PoolMoveFinish,
+    /// The ck helper's `depositErc20` for the canister's own principal and rebalance
+    /// subaccount on Ethereum, after a Base to ICP move's Eco fill (P11c).
+    #[n(12)]
+    PoolCkDeposit,
 }
 
 impl GasAction {
     /// Every action, in code order.
-    pub const ALL: [GasAction; 10] = [
+    pub const ALL: [GasAction; 13] = [
         GasAction::RelayCctp,
         GasAction::RelayEco,
         GasAction::RelayLocal,
@@ -551,6 +562,9 @@ impl GasAction {
         GasAction::PoolPayout,
         GasAction::PoolTransfer,
         GasAction::PoolApprove,
+        GasAction::PoolMove,
+        GasAction::PoolMoveFinish,
+        GasAction::PoolCkDeposit,
     ];
 
     /// The action's one byte in an event's canonical preimage: its index, never reused.
@@ -566,6 +580,9 @@ impl GasAction {
             GasAction::PoolPayout => 7,
             GasAction::PoolTransfer => 8,
             GasAction::PoolApprove => 9,
+            GasAction::PoolMove => 10,
+            GasAction::PoolMoveFinish => 11,
+            GasAction::PoolCkDeposit => 12,
         }
     }
 
@@ -582,6 +599,9 @@ impl GasAction {
             GasAction::PoolPayout => "pool_payout",
             GasAction::PoolTransfer => "pool_transfer",
             GasAction::PoolApprove => "pool_approve",
+            GasAction::PoolMove => "pool_move",
+            GasAction::PoolMoveFinish => "pool_move_finish",
+            GasAction::PoolCkDeposit => "pool_ck_deposit",
         }
     }
 
@@ -615,6 +635,13 @@ pub struct PerAction<T> {
     pub pool_transfer: Option<T>,
     #[n(9)]
     pub pool_approve: Option<T>,
+    /// The rebalancing's rows (P11c), optional as the pool's.
+    #[n(10)]
+    pub pool_move: Option<T>,
+    #[n(11)]
+    pub pool_move_finish: Option<T>,
+    #[n(12)]
+    pub pool_ck_deposit: Option<T>,
 }
 
 impl<T: Copy> PerAction<T> {
@@ -631,6 +658,9 @@ impl<T: Copy> PerAction<T> {
             GasAction::PoolPayout => self.pool_payout,
             GasAction::PoolTransfer => self.pool_transfer,
             GasAction::PoolApprove => self.pool_approve,
+            GasAction::PoolMove => self.pool_move,
+            GasAction::PoolMoveFinish => self.pool_move_finish,
+            GasAction::PoolCkDeposit => self.pool_ck_deposit,
         }
     }
 
@@ -647,6 +677,9 @@ impl<T: Copy> PerAction<T> {
             pool_payout: Some(value),
             pool_transfer: Some(value),
             pool_approve: Some(value),
+            pool_move: Some(value),
+            pool_move_finish: Some(value),
+            pool_ck_deposit: Some(value),
         }
     }
 }

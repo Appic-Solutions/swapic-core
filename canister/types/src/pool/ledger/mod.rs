@@ -13,6 +13,7 @@
 mod tests;
 
 mod payouts;
+mod rebalance;
 
 use super::{
     Arrival, DepositKind, DepositStatus, IcpCheck, PayoutPath, PayoutProgress, PayoutQueue,
@@ -51,6 +52,10 @@ pub trait PoolLookup {
     fn nonce_used(&self, key: &NonceUse) -> bool;
     /// An orphan, by its credit key.
     fn orphan(&self, key: &CreditKey) -> Option<crate::pool::Orphan>;
+    /// A rebalance move, by id (P11c): none in a fold that keeps no moves.
+    fn pool_move(&self, _id: u64) -> Option<crate::pool::Move> {
+        None
+    }
 }
 
 /// A paid payout's Eco intent and the payout: what an Eco refund is matched by.
@@ -128,6 +133,10 @@ pub struct PoolLedger {
     /// never stored (always none between steps).
     #[cbor(skip)]
     pub evm_changed: Option<EvmPayout>,
+    /// The rebalancing's lines (P11c): absent until its first step. At 40, clear of the
+    /// indices other plans add.
+    #[n(40)]
+    pub rebalance: Option<crate::pool::RebalanceLines>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -149,6 +158,8 @@ pub struct PoolEffects {
     pub intent: Option<IntentIndex>,
     /// An orphan as the step leaves it.
     pub orphan: Option<(CreditKey, crate::pool::Orphan)>,
+    /// A rebalance move as the step leaves it.
+    pub moved: Option<crate::pool::Move>,
 }
 
 /// Why a pool step was refused.
@@ -230,6 +241,20 @@ pub enum PoolStepError {
     },
     #[error("the withdrawal nonce {0} of the staker is used")]
     NonceUsed(u64),
+    #[error(transparent)]
+    RebalanceSettings(#[from] crate::pool::RebalanceSettingsError),
+    #[error("the rebalancing has no settings")]
+    NoRebalanceSettings,
+    #[error("no move {0}")]
+    UnknownMove(u64),
+    #[error("{step} is not a step of move {id} from {status}")]
+    MoveNotFrom {
+        step: &'static str,
+        id: u64,
+        status: String,
+    },
+    #[error("the move's id must be {expected}")]
+    MoveId { expected: u64 },
 }
 
 /// Why `register_pool_deposit` refuses terms, before anything is appended. Each is one of
@@ -784,6 +809,23 @@ impl PoolLedger {
             | PoolStep::OrphanRefundClosed { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
             PoolStep::ApproveSigned { .. } => Ok(()),
+            PoolStep::MoveSettingsSet { .. }
+            | PoolStep::MoveOpened { .. }
+            | PoolStep::MoveProposed { .. }
+            | PoolStep::MoveRouted { .. }
+            | PoolStep::MoveSigned { .. }
+            | PoolStep::MoveBurned { .. }
+            | PoolStep::MoveReverted { .. }
+            | PoolStep::MoveWithdrawing { .. }
+            | PoolStep::MoveWithdrawn { .. }
+            | PoolStep::MoveRefused { .. }
+            | PoolStep::MoveLanded { .. }
+            | PoolStep::MoveSweeping { .. }
+            | PoolStep::MoveArrived { .. }
+            | PoolStep::MoveStuck { .. }
+            | PoolStep::MoveRetried { .. }
+            | PoolStep::MoveLost { .. }
+            | PoolStep::MoveRefunded { .. } => self.admits_rebalance(step, lookup),
             PoolStep::IcpRoutesSet { routes } => {
                 let settings = self.settings()?;
                 routes
@@ -813,6 +855,9 @@ impl PoolLedger {
         index: u64,
     ) -> PoolEffects {
         if let Some(effects) = self.clone().apply_payout(step, lookup, at, index) {
+            return effects;
+        }
+        if let Some(effects) = self.clone().apply_rebalance(step, lookup, at, index) {
             return effects;
         }
         let mut ledger = self;
@@ -1195,6 +1240,24 @@ impl PoolLedger {
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. } => {}
+            // `apply_rebalance` records these, and answered before this match
+            PoolStep::MoveSettingsSet { .. }
+            | PoolStep::MoveOpened { .. }
+            | PoolStep::MoveProposed { .. }
+            | PoolStep::MoveRouted { .. }
+            | PoolStep::MoveSigned { .. }
+            | PoolStep::MoveBurned { .. }
+            | PoolStep::MoveReverted { .. }
+            | PoolStep::MoveWithdrawing { .. }
+            | PoolStep::MoveWithdrawn { .. }
+            | PoolStep::MoveRefused { .. }
+            | PoolStep::MoveLanded { .. }
+            | PoolStep::MoveSweeping { .. }
+            | PoolStep::MoveArrived { .. }
+            | PoolStep::MoveStuck { .. }
+            | PoolStep::MoveRetried { .. }
+            | PoolStep::MoveLost { .. }
+            | PoolStep::MoveRefunded { .. } => {}
         }
         let payout = ledger.evm_changed.take();
         PoolEffects {
@@ -1208,6 +1271,7 @@ impl PoolLedger {
             nonce: None,
             intent: None,
             orphan: orphan_out,
+            moved: None,
         }
     }
 

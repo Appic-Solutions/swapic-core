@@ -417,6 +417,27 @@ impl<S: Store> State<S> {
                 }
             }
             TxPurpose::PoolApprove => {}
+            // a move's transaction only while its order is pinned, or its Eco fill landed for
+            // its ck deposit: what `MoveSigned` admits
+            TxPurpose::PoolMove(id) => {
+                let item = self
+                    .store()
+                    .pool_move(*id)
+                    .ok_or(types::pool::PoolStepError::UnknownMove(*id))?;
+                let deposit = item.direction == types::pool::MoveDirection::BaseToIcp
+                    && item.status == types::pool::MoveStatus::Landed
+                    && item.route.is_some_and(|route| route.is_eco());
+                if item.stuck.is_some()
+                    || !(item.status == types::pool::MoveStatus::Routed || deposit)
+                {
+                    return Err(types::pool::PoolStepError::MoveNotFrom {
+                        step: "TxCreated",
+                        id: *id,
+                        status: format!("{:?}", item.status),
+                    }
+                    .into());
+                }
+            }
         }
         // rule A4 from the swap's side: two sends for ONE swap that interleave at the
         // signature would otherwise both allocate, and the second's `TxSigned` would be

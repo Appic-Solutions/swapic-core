@@ -75,6 +75,9 @@ fn chain(usdc: &str) -> EvmChainConfig {
         pool_payout: None,
         pool_transfer: None,
         pool_approve: None,
+        pool_move: None,
+        pool_move_finish: None,
+        pool_ck_deposit: None,
     };
     EvmChainConfig {
         swapic: SWAPIC.to_string(),
@@ -94,6 +97,9 @@ fn chain(usdc: &str) -> EvmChainConfig {
             pool_payout: None,
             pool_transfer: None,
             pool_approve: None,
+            pool_move: None,
+            pool_move_finish: None,
+            pool_ck_deposit: None,
         },
         // a tenth of an ether: the gas rule holds at the fees pushed below
         gas_budget_wei: amounts(100_000_000_000_000_000),

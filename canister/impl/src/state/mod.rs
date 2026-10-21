@@ -88,6 +88,11 @@ pub trait Store {
     fn put_pool_orphan(&mut self, key: CreditKey, orphan: types::pool::Orphan);
     /// Every orphan, in key order.
     fn pool_orphans(&self) -> Vec<(CreditKey, types::pool::Orphan)>;
+    /// A rebalance move, by id (P11c).
+    fn pool_move(&self, id: u64) -> Option<types::pool::Move>;
+    fn put_pool_move(&mut self, id: u64, item: types::pool::Move);
+    /// Every move, in id order: what the audit compares.
+    fn pool_moves(&self) -> Vec<(u64, types::pool::Move)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -199,6 +204,10 @@ impl<S: Store> PoolLookup for PoolView<'_, S> {
     fn orphan(&self, key: &CreditKey) -> Option<types::pool::Orphan> {
         self.0.pool_orphan(key)
     }
+
+    fn pool_move(&self, id: u64) -> Option<types::pool::Move> {
+        self.0.pool_move(id)
+    }
 }
 
 /// Where a page of swaps starts: after `after`, or at the first swap when none is named.
@@ -250,6 +259,9 @@ pub struct MemoryStore {
     payout_intents: BTreeMap<PoolRef, u64>,
     #[n(17)]
     pool_orphans: BTreeMap<CreditKey, types::pool::Orphan>,
+    /// The rebalance moves (P11c). At 40, clear of the indices other plans add.
+    #[n(40)]
+    pool_moves: BTreeMap<u64, types::pool::Move>,
 }
 
 impl Store for MemoryStore {
@@ -475,6 +487,21 @@ impl Store for MemoryStore {
             .collect()
     }
 
+    fn pool_move(&self, id: u64) -> Option<types::pool::Move> {
+        self.pool_moves.get(&id).cloned()
+    }
+
+    fn put_pool_move(&mut self, id: u64, item: types::pool::Move) {
+        self.pool_moves.insert(id, item);
+    }
+
+    fn pool_moves(&self) -> Vec<(u64, types::pool::Move)> {
+        self.pool_moves
+            .iter()
+            .map(|(id, item)| (*id, item.clone()))
+            .collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -548,6 +575,7 @@ impl State<MemoryStore> {
             withdrawal_nonces,
             payout_intents,
             pool_orphans,
+            pool_moves,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -616,6 +644,11 @@ impl State<MemoryStore> {
                 .pool_orphans()
                 .iter()
                 .map(|(key, orphan)| (key, orphan)))
+            && pool_moves.iter().eq(other
+                .store
+                .pool_moves()
+                .iter()
+                .map(|(id, item)| (id, item)))
     }
 }
 
@@ -785,6 +818,9 @@ impl<S: Store> State<S> {
                 self.store.put_book(key.chain, books);
             }
             self.store.put_pool_orphan(key, orphan);
+        }
+        if let Some(item) = effects.moved {
+            self.store.put_pool_move(item.id, item);
         }
     }
 

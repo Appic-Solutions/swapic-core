@@ -647,6 +647,9 @@ fn base_chain() -> settlement_api::types::config::EvmChainConfig {
         pool_payout: Some(Nat::from(value)),
         pool_transfer: Some(Nat::from(value)),
         pool_approve: Some(Nat::from(value)),
+        pool_move: None,
+        pool_move_finish: None,
+        pool_ck_deposit: None,
     };
     EvmChainConfig {
         swapic: "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406".to_string(),
@@ -666,6 +669,9 @@ fn base_chain() -> settlement_api::types::config::EvmChainConfig {
             pool_payout: Some(1_000_000),
             pool_transfer: Some(100_000),
             pool_approve: Some(100_000),
+            pool_move: None,
+            pool_move_finish: None,
+            pool_ck_deposit: None,
         },
         gas_budget_wei: amounts(100_000_000_000_000_000),
         min_network_fee: amounts(0),

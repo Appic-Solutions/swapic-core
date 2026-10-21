@@ -13,6 +13,7 @@ mod tests;
 
 pub mod ledger;
 pub mod payout;
+pub mod rebalance;
 pub mod routes;
 pub mod withdrawal;
 
@@ -22,6 +23,11 @@ pub use payout::{
     evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse,
     Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutSettings, PayoutSettingsError,
     PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+};
+
+pub use rebalance::{
+    move_ref, rebalance_subaccount, Landing, Move, MoveDirection, MoveRoute, MoveStatus,
+    Proposal, RebalanceLines, RebalanceSettings, RebalanceSettingsError, Sweep,
 };
 
 pub use ledger::{
@@ -1561,6 +1567,203 @@ pub enum PoolStep {
         #[n(1)]
         success: bool,
     },
+    // P11c, the rebalancing: indices 60 to 89.
+    /// A controller set the rebalancing's knobs.
+    #[n(60)]
+    MoveSettingsSet {
+        #[n(0)]
+        settings: RebalanceSettings,
+    },
+    /// The canister opened a move from its books: its amount reserved in its source pocket.
+    #[n(61)]
+    MoveOpened {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        direction: MoveDirection,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        urgent: bool,
+        /// The daily cap is read at this instant, the step's own.
+        #[n(4)]
+        opened_at: Timestamp,
+        #[n(5)]
+        window_ends: Option<Timestamp>,
+        #[n(6)]
+        own_cost: TokenAmount,
+    },
+    /// The watcher proposed a route for the move that passed every check, cheaper than any
+    /// before it: pinned as the move's proposal.
+    #[n(62)]
+    MoveProposed {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        order: PinnedOrder,
+        #[n(2)]
+        fee: TokenAmount,
+    },
+    /// The move's route is decided and its order pinned: the cheapest proposal, or the
+    /// canister's own.
+    #[n(63)]
+    MoveRouted {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        route: MoveRoute,
+        #[n(2)]
+        order: PinnedOrder,
+        /// Base to ICP by Eco: the Ethereum block its fill is looked for from.
+        #[n(3)]
+        scan_from: Option<BlockNumber>,
+    },
+    /// The canister signed a transaction of the move (its order's `run`, or a ck deposit):
+    /// the exact bytes, recorded before they are broadcast, spending the nonce `TxCreated`
+    /// handed out for it. Its first order leaves the source pocket (Base to ICP).
+    #[n(64)]
+    MoveSigned {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        tx_hash: TxHash,
+        #[cbor(n(4), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
+    /// Its transaction succeeded at depth, with the Eco intent it published, if any.
+    #[n(65)]
+    MoveBurned {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        tx_hash: TxHash,
+        #[n(2)]
+        block: BlockNumber,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        intent: Option<[u8; 32]>,
+    },
+    /// Its transaction reverted at depth: back to signing the same order, and a Base to ICP
+    /// move's first order back to reserved.
+    #[n(66)]
+    MoveReverted {
+        #[n(0)]
+        id: u64,
+    },
+    /// ICP to Base: the ck minter's withdrawal is about to be asked, its ckUSDC in flight from
+    /// now; `created_at` dedups its approvals.
+    #[n(67)]
+    MoveWithdrawing {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        created_at: Timestamp,
+    },
+    /// ICP to Base: the minter took the ckUSDC (its withdrawal id); `fee` is the ckUSDC its
+    /// approval cost the pool.
+    #[n(68)]
+    MoveWithdrawn {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        withdrawal_id: u64,
+        #[n(2)]
+        fee: TokenAmount,
+    },
+    /// ICP to Base: the minter (or an approval) refused: nothing left, back to reserved;
+    /// `fee` is what an approval made before it cost.
+    #[n(69)]
+    MoveRefused {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+        #[n(2)]
+        fee: TokenAmount,
+    },
+    /// Its USDC reached the canister's Ethereum address, read at the crediting depth: an ICP
+    /// to Base move's from the minter (its window, if any, from now), a Base to ICP move's
+    /// Eco fill.
+    #[n(70)]
+    MoveLanded {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        tx_hash: TxHash,
+        #[n(2)]
+        block: BlockNumber,
+        #[n(3)]
+        amount: TokenAmount,
+        #[n(4)]
+        window_ends: Option<Timestamp>,
+    },
+    /// Base to ICP: the sweep of the rebalance subaccount is about to be asked: its dedup
+    /// instant, what it moves, and what the move is credited (never above its amount less its
+    /// route's cost: a donation is never the pool's).
+    #[n(71)]
+    MoveSweeping {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        created_at: Timestamp,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        credited: TokenAmount,
+    },
+    /// The move arrived: its destination credited, once. On Base by the transfer's credit
+    /// key (and its block); on ICP by the sweep's ledger block.
+    #[n(72)]
+    MoveArrived {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        credited: TokenAmount,
+        #[n(2)]
+        credit: Option<CreditKey>,
+        #[n(3)]
+        block: Option<BlockNumber>,
+        #[n(4)]
+        ledger_block: Option<u64>,
+    },
+    /// The move stopped for a controller, held where it is.
+    #[n(73)]
+    MoveStuck {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
+    /// A controller sent the move on from where it stood.
+    #[n(74)]
+    MoveRetried {
+        #[n(0)]
+        id: u64,
+    },
+    /// A controller wrote the move off.
+    #[n(75)]
+    MoveLost {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
+    /// Base to ICP by Eco: the intent went unfilled and Eco refunded its reward, the move's
+    /// whole amount, to the canister's Base address: reserved again, routed again.
+    #[n(76)]
+    MoveRefunded {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        credit: CreditKey,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        block: BlockNumber,
+    },
 }
 
 impl PoolStep {
@@ -1616,6 +1819,23 @@ impl PoolStep {
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
+            PoolStep::MoveSettingsSet { .. } => "MoveSettingsSet",
+            PoolStep::MoveOpened { .. } => "MoveOpened",
+            PoolStep::MoveProposed { .. } => "MoveProposed",
+            PoolStep::MoveRouted { .. } => "MoveRouted",
+            PoolStep::MoveSigned { .. } => "MoveSigned",
+            PoolStep::MoveBurned { .. } => "MoveBurned",
+            PoolStep::MoveReverted { .. } => "MoveReverted",
+            PoolStep::MoveWithdrawing { .. } => "MoveWithdrawing",
+            PoolStep::MoveWithdrawn { .. } => "MoveWithdrawn",
+            PoolStep::MoveRefused { .. } => "MoveRefused",
+            PoolStep::MoveLanded { .. } => "MoveLanded",
+            PoolStep::MoveSweeping { .. } => "MoveSweeping",
+            PoolStep::MoveArrived { .. } => "MoveArrived",
+            PoolStep::MoveStuck { .. } => "MoveStuck",
+            PoolStep::MoveRetried { .. } => "MoveRetried",
+            PoolStep::MoveLost { .. } => "MoveLost",
+            PoolStep::MoveRefunded { .. } => "MoveRefunded",
         }
     }
 
@@ -1643,6 +1863,13 @@ impl PoolStep {
                 tx_hash,
                 raw_tx,
                 ..
+            }
+            | PoolStep::MoveSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                ..
             } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
             _ => None,
         }
@@ -1657,6 +1884,7 @@ impl PoolStep {
             PoolStep::OrphanRefundSigned { key, .. } => {
                 Some(crate::events::TxPurpose::PoolTransfer(orphan_key(key)))
             }
+            PoolStep::MoveSigned { id, .. } => Some(crate::events::TxPurpose::PoolMove(*id)),
             _ => None,
         }
     }

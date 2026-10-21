@@ -132,6 +132,15 @@ pub struct ActionGas {
     pub pool_transfer: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_approve: Option<u64>,
+    /// The rebalancing's rows (P11c), optional as the pool's: a move's own order, its CCTP
+    /// finish (the limit the watcher finishes the canister's own move with), and a Base to
+    /// ICP Eco move's ck deposit on Ethereum.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_move: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_move_finish: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_ck_deposit: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -168,6 +177,22 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub pool_approve: Option<Nat>,
+    /// The rebalancing's rows (P11c), optional as the pool's.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_move: Option<Nat>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_move_finish: Option<Nat>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_ck_deposit: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -188,6 +213,9 @@ impl From<PerAction<GasAmount>> for ActionGas {
             pool_payout: gas.pool_payout.map(limit),
             pool_transfer: gas.pool_transfer.map(limit),
             pool_approve: gas.pool_approve.map(limit),
+            pool_move: gas.pool_move.map(limit),
+            pool_move_finish: gas.pool_move_finish.map(limit),
+            pool_ck_deposit: gas.pool_ck_deposit.map(limit),
         }
     }
 }
@@ -205,6 +233,9 @@ impl From<ActionGas> for PerAction<GasAmount> {
             pool_payout: gas.pool_payout.map(GasAmount::from),
             pool_transfer: gas.pool_transfer.map(GasAmount::from),
             pool_approve: gas.pool_approve.map(GasAmount::from),
+            pool_move: gas.pool_move.map(GasAmount::from),
+            pool_move_finish: gas.pool_move_finish.map(GasAmount::from),
+            pool_ck_deposit: gas.pool_ck_deposit.map(GasAmount::from),
         }
     }
 }
@@ -222,6 +253,9 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             pool_payout: amounts.pool_payout.map(Into::into),
             pool_transfer: amounts.pool_transfer.map(Into::into),
             pool_approve: amounts.pool_approve.map(Into::into),
+            pool_move: amounts.pool_move.map(Into::into),
+            pool_move_finish: amounts.pool_move_finish.map(Into::into),
+            pool_ck_deposit: amounts.pool_ck_deposit.map(Into::into),
         }
     }
 }
@@ -245,6 +279,9 @@ fn per_action<Unit>(
         pool_payout: amounts.pool_payout.map(amount).transpose()?,
         pool_transfer: amounts.pool_transfer.map(amount).transpose()?,
         pool_approve: amounts.pool_approve.map(amount).transpose()?,
+        pool_move: amounts.pool_move.map(amount).transpose()?,
+        pool_move_finish: amounts.pool_move_finish.map(amount).transpose()?,
+        pool_ck_deposit: amounts.pool_ck_deposit.map(amount).transpose()?,
     })
 }
 

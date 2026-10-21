@@ -620,7 +620,367 @@ fn samples() -> Vec<Sample> {
     all.extend(icp_swap_samples());
     all.extend(queue_samples());
     all.extend(orphan_samples());
+    all.extend(rebalance_samples());
     all
+}
+
+/// The rebalancing (P11c): a move with every field set, a ledger with its lines, every move
+/// step, a move's transaction created, and a chain with the rebalancing's gas rows.
+fn rebalance_samples() -> Vec<Sample> {
+    use crate::config::{EvmChain, GasAction, PerAction};
+    use crate::evm::EvmAddress;
+    use crate::pool::payout::PinnedOrder;
+    use crate::pool::{
+        CreditKey, Landing, Move, MoveDirection, MoveRoute, MoveStatus, PoolLedger, PoolStep,
+        Proposal, RebalanceLines, RebalanceSettings, Sweep,
+    };
+    use std::time::Duration;
+
+    let at = |n: u64| Timestamp::from_nanos(1_800_000_000_000_000_900 + n);
+    let pinned = |byte: u8| PinnedOrder {
+        order_id: [byte; 32],
+        order: vec![byte; 3],
+        gas_limit: 900_000 + u64::from(byte),
+        deadline_s: 1_800_003_600 + u64::from(byte),
+    };
+    let settings = RebalanceSettings {
+        target_icp_bps: 4_001,
+        band_bps: 1_502,
+        min_move: TokenAmount::from(300_000_003_u64),
+        max_move: TokenAmount::from(5_000_000_004_u64),
+        daily_cap: TokenAmount::from(20_000_000_005_u64),
+        proposal_window: Duration::from_secs(66),
+        max_proposal_fee_bps: 7,
+        standard_when_idle: false,
+    };
+    let item = Move {
+        id: 908,
+        direction: MoveDirection::BaseToIcp,
+        amount: TokenAmount::from(909_000_000_u64),
+        urgent: true,
+        opened_at: at(10),
+        own_cost: TokenAmount::from(911_u64),
+        status: MoveStatus::Signed(912),
+        window_ends: Some(at(13)),
+        proposal: Some(Proposal {
+            order: pinned(0x91),
+            fee: TokenAmount::from(914_u64),
+        }),
+        route: Some(MoveRoute::Proposed {
+            fee: TokenAmount::from(914_u64),
+        }),
+        order: Some(pinned(0x91)),
+        tx_hash: Some(TxHash::new([0x92; 32])),
+        left: true,
+        minter_at: Some(at(15)),
+        withdrawal: Some(916),
+        landed: Some(Landing {
+            tx: TxHash::new([0x93; 32]),
+            block: BlockNumber::new(23_000_917),
+            amount: TokenAmount::from(918_u64),
+        }),
+        intent: Some([0x94; 32]),
+        sweep: Some(Sweep {
+            created_at: at(19),
+            amount: TokenAmount::from(920_u64),
+            credited: TokenAmount::from(921_u64),
+        }),
+        arrived: Some(TokenAmount::from(922_u64)),
+        stuck: Some("no arrival in three hours".to_string()),
+        since: at(23),
+        scan_from: Some(BlockNumber::new(23_000_924)),
+    };
+    let own = Move {
+        status: MoveStatus::Lost("written off".to_string()),
+        route: Some(MoveRoute::Own {
+            max_fee: TokenAmount::from(925_u64),
+            fast: true,
+        }),
+        direction: MoveDirection::IcpToBase,
+        ..item.clone()
+    };
+    let ledger = PoolLedger {
+        rebalance: Some(RebalanceLines {
+            settings: Some(settings),
+            next_id: 926,
+            open: [908, 927].into_iter().collect(),
+            recent: vec![(at(28), TokenAmount::from(929_u64))],
+            cost: TokenAmount::from(930_u64),
+            lost: TokenAmount::from(931_u64),
+        }),
+        ..PoolLedger::default()
+    };
+    let key = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([0x95; 32]),
+        log_index: 932,
+    };
+    let steps = [
+        ("move settings set", PoolStep::MoveSettingsSet { settings }),
+        (
+            "move opened",
+            PoolStep::MoveOpened {
+                id: 933,
+                direction: MoveDirection::IcpToBase,
+                amount: TokenAmount::from(934_000_000_u64),
+                urgent: false,
+                opened_at: at(35),
+                window_ends: None,
+                own_cost: TokenAmount::from(936_u64),
+            },
+        ),
+        (
+            "move proposed",
+            PoolStep::MoveProposed {
+                id: 937,
+                order: pinned(0x96),
+                fee: TokenAmount::from(938_u64),
+            },
+        ),
+        (
+            "move routed",
+            PoolStep::MoveRouted {
+                id: 939,
+                route: MoveRoute::Own {
+                    max_fee: TokenAmount::from(940_u64),
+                    fast: false,
+                },
+                order: pinned(0x97),
+                scan_from: Some(BlockNumber::new(23_000_941)),
+            },
+        ),
+        (
+            "move signed",
+            PoolStep::MoveSigned {
+                id: 942,
+                chain_id: ChainId::ETHEREUM,
+                nonce: Nonce::new(943),
+                tx_hash: TxHash::new([0x98; 32]),
+                raw_tx: vec![0x02, 0x99],
+            },
+        ),
+        (
+            "move burned",
+            PoolStep::MoveBurned {
+                id: 944,
+                tx_hash: TxHash::new([0x9a; 32]),
+                block: BlockNumber::new(37_000_945),
+                intent: Some([0x9b; 32]),
+            },
+        ),
+        ("move reverted", PoolStep::MoveReverted { id: 946 }),
+        (
+            "move withdrawing",
+            PoolStep::MoveWithdrawing {
+                id: 947,
+                created_at: at(48),
+            },
+        ),
+        (
+            "move withdrawn",
+            PoolStep::MoveWithdrawn {
+                id: 949,
+                withdrawal_id: 950,
+                fee: TokenAmount::from(951_u64),
+            },
+        ),
+        (
+            "move refused",
+            PoolStep::MoveRefused {
+                id: 952,
+                why: "the minter refused the withdrawal".to_string(),
+                fee: TokenAmount::from(953_u64),
+            },
+        ),
+        (
+            "move landed",
+            PoolStep::MoveLanded {
+                id: 954,
+                tx_hash: TxHash::new([0x9c; 32]),
+                block: BlockNumber::new(23_000_955),
+                amount: TokenAmount::from(956_u64),
+                window_ends: Some(at(57)),
+            },
+        ),
+        (
+            "move sweeping",
+            PoolStep::MoveSweeping {
+                id: 958,
+                created_at: at(59),
+                amount: TokenAmount::from(960_u64),
+                credited: TokenAmount::from(961_u64),
+            },
+        ),
+        (
+            "move arrived on Base",
+            PoolStep::MoveArrived {
+                id: 962,
+                credited: TokenAmount::from(963_u64),
+                credit: Some(key),
+                block: Some(BlockNumber::new(37_000_964)),
+                ledger_block: None,
+            },
+        ),
+        (
+            "move arrived on ICP",
+            PoolStep::MoveArrived {
+                id: 965,
+                credited: TokenAmount::from(966_u64),
+                credit: None,
+                block: None,
+                ledger_block: Some(967),
+            },
+        ),
+        (
+            "move stuck",
+            PoolStep::MoveStuck {
+                id: 968,
+                why: "the minter's answer was lost".to_string(),
+            },
+        ),
+        ("move retried", PoolStep::MoveRetried { id: 969 }),
+        (
+            "move lost",
+            PoolStep::MoveLost {
+                id: 970,
+                why: "the burn was never attested".to_string(),
+            },
+        ),
+        (
+            "move refunded by Eco",
+            PoolStep::MoveRefunded {
+                id: 971,
+                credit: key,
+                amount: TokenAmount::from(972_u64),
+                block: BlockNumber::new(37_000_973),
+            },
+        ),
+    ];
+    let address = |byte: u8| EvmAddress::new([byte; 20]);
+    let rows = |base: u64| PerAction {
+        relay_cctp: base,
+        relay_eco: base + 1,
+        relay_local: base + 2,
+        complete_swap: base + 3,
+        complete_ck: base + 4,
+        relay_deliver: base + 5,
+        release: base + 6,
+        pool_payout: None,
+        pool_transfer: None,
+        pool_approve: Some(base + 9),
+        pool_move: Some(base + 10),
+        pool_move_finish: Some(base + 11),
+        pool_ck_deposit: Some(base + 12),
+    };
+    let chain = EvmChain {
+        swapic: address(0x9d),
+        runner: address(0x9e),
+        cctp_receiver: address(0x9f),
+        usdc: address(0xa0),
+        token_messenger: address(0xa1),
+        message_transmitter: address(0xa2),
+        gas_limit: {
+            let r = rows(500_000);
+            PerAction {
+                relay_cctp: GasAmount::from(r.relay_cctp),
+                relay_eco: GasAmount::from(r.relay_eco),
+                relay_local: GasAmount::from(r.relay_local),
+                complete_swap: GasAmount::from(r.complete_swap),
+                complete_ck: GasAmount::from(r.complete_ck),
+                relay_deliver: GasAmount::from(r.relay_deliver),
+                release: GasAmount::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: r.pool_approve.map(GasAmount::from),
+                pool_move: r.pool_move.map(GasAmount::from),
+                pool_move_finish: r.pool_move_finish.map(GasAmount::from),
+                pool_ck_deposit: r.pool_ck_deposit.map(GasAmount::from),
+            }
+        },
+        gas_budget: {
+            let r = rows(2_000_000_000_000_000);
+            PerAction {
+                relay_cctp: Wei::from(r.relay_cctp),
+                relay_eco: Wei::from(r.relay_eco),
+                relay_local: Wei::from(r.relay_local),
+                complete_swap: Wei::from(r.complete_swap),
+                complete_ck: Wei::from(r.complete_ck),
+                relay_deliver: Wei::from(r.relay_deliver),
+                release: Wei::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: r.pool_approve.map(Wei::from),
+                pool_move: r.pool_move.map(Wei::from),
+                pool_move_finish: r.pool_move_finish.map(Wei::from),
+                pool_ck_deposit: r.pool_ck_deposit.map(Wei::from),
+            }
+        },
+        min_network_fee: {
+            let r = rows(60_000);
+            PerAction {
+                relay_cctp: TokenAmount::from(r.relay_cctp),
+                relay_eco: TokenAmount::from(r.relay_eco),
+                relay_local: TokenAmount::from(r.relay_local),
+                complete_swap: TokenAmount::from(r.complete_swap),
+                complete_ck: TokenAmount::from(r.complete_ck),
+                relay_deliver: TokenAmount::from(r.relay_deliver),
+                release: TokenAmount::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: r.pool_approve.map(TokenAmount::from),
+                pool_move: r.pool_move.map(TokenAmount::from),
+                pool_move_finish: r.pool_move_finish.map(TokenAmount::from),
+                pool_ck_deposit: r.pool_ck_deposit.map(TokenAmount::from),
+            }
+        },
+    };
+    let config = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        confirmations: depths_with_ethereum_swaps_at_one_block(),
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::ETHEREUM, chain)])),
+        pool_chain: Some(ChainId::BASE),
+        ..Config::default()
+    };
+    let mut out = vec![
+        sample("move with every field set", item),
+        sample("move on its own route, written off", own),
+        sample("pool ledger with the rebalancing's lines", ledger),
+        sample("config with the rebalancing's gas rows", config),
+        sample(
+            "move transaction created",
+            Event::seal(
+                EventIndex::new(9_000),
+                Timestamp::from_nanos(1_800_000_000_000_000_974),
+                EventHash::new([0xcc; 32]),
+                crate::events::EventType::TxCreated {
+                    purpose: TxPurpose::PoolMove(975),
+                    chain_id: ChainId::BASE,
+                    nonce: Nonce::new(976),
+                    to: address(0xa3),
+                    value: Wei::ZERO,
+                    data: vec![0xa4; 36],
+                    gas_limit: GasAmount::from(977_000_u64),
+                    max_fee: WeiPerGas::new(978_000_000),
+                    max_priority_fee: WeiPerGas::new(979_000),
+                    action: Some(GasAction::PoolMove),
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(9_001 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_980 + i),
+                EventHash::new([0xcc; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// The orphans (P11b Task 7): one held, one refunding, and each of their steps.
@@ -875,6 +1235,9 @@ fn pool_tx_samples() -> Vec<Sample> {
         pool_payout: Some(base + 7),
         pool_transfer: Some(base + 8),
         pool_approve: Some(base + 9),
+        pool_move: None,
+        pool_move_finish: None,
+        pool_ck_deposit: None,
     };
     let chain = EvmChain {
         swapic: address(0x51),
@@ -896,6 +1259,9 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_payout: r.pool_payout.map(GasAmount::from),
                 pool_transfer: r.pool_transfer.map(GasAmount::from),
                 pool_approve: r.pool_approve.map(GasAmount::from),
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
             }
         },
         gas_budget: {
@@ -911,6 +1277,9 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_payout: r.pool_payout.map(Wei::from),
                 pool_transfer: r.pool_transfer.map(Wei::from),
                 pool_approve: r.pool_approve.map(Wei::from),
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
             }
         },
         min_network_fee: {
@@ -926,6 +1295,9 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_payout: r.pool_payout.map(TokenAmount::from),
                 pool_transfer: r.pool_transfer.map(TokenAmount::from),
                 pool_approve: r.pool_approve.map(TokenAmount::from),
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
             }
         },
     };
@@ -1530,6 +1902,8 @@ fn pool_samples() -> Vec<Sample> {
         payouts: None,
         // never stored
         evm_changed: None,
+        // absent, so this sample's bytes stay the ones the golden pins
+        rebalance: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![

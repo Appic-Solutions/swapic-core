@@ -392,6 +392,10 @@ pub enum TxPurpose {
     /// The canister's standing USDC allowance to Swapic on Base.
     #[n(12)]
     PoolApprove,
+    /// A rebalance move's own transaction (its order's `run`, or a ck deposit), by the move's
+    /// id: one out at a time per move. P11c: indices 60 and up.
+    #[n(60)]
+    PoolMove(#[n(0)] u64),
 }
 
 impl TxPurpose {
@@ -413,6 +417,7 @@ impl TxPurpose {
             Self::PoolPayout(id) => Some(pool_key(b"swapic.pool.v1.tx.payout", &id.to_be_bytes())),
             Self::PoolTransfer(key) => Some(pool_key(b"swapic.pool.v1.tx.transfer", key)),
             Self::PoolApprove => Some(pool_key(b"swapic.pool.v1.tx.approve", &[])),
+            Self::PoolMove(id) => Some(pool_key(b"swapic.pool.v1.tx.move", &id.to_be_bytes())),
             Self::Cancel(_) => None,
         }
     }
@@ -421,7 +426,7 @@ impl TxPurpose {
     pub fn is_pool(&self) -> bool {
         matches!(
             self,
-            Self::PoolPayout(_) | Self::PoolTransfer(_) | Self::PoolApprove
+            Self::PoolPayout(_) | Self::PoolTransfer(_) | Self::PoolApprove | Self::PoolMove(_)
         )
     }
 
@@ -441,7 +446,8 @@ impl TxPurpose {
             | Self::Finish(_)
             | Self::PoolPayout(_)
             | Self::PoolTransfer(_)
-            | Self::PoolApprove => None,
+            | Self::PoolApprove
+            | Self::PoolMove(_) => None,
         }
     }
 
@@ -463,6 +469,7 @@ impl TxPurpose {
             Self::PoolPayout(id) => w.put_u8(10).put_u64(*id),
             Self::PoolTransfer(key) => w.put_u8(11).put_hash(key),
             Self::PoolApprove => w.put_u8(12),
+            Self::PoolMove(id) => w.put_u8(60).put_u64(*id),
         };
     }
 }

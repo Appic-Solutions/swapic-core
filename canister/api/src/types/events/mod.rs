@@ -213,6 +213,8 @@ pub enum TxPurpose {
     PoolTransfer(Hash32),
     /// The canister's standing USDC allowance to Swapic.
     PoolApprove,
+    /// A rebalance move's own transaction, by the move's id.
+    PoolMove(u64),
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -232,6 +234,7 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::PoolPayout(id) => Self::PoolPayout(id),
             Domain::PoolTransfer(key) => Self::PoolTransfer(key),
             Domain::PoolApprove => Self::PoolApprove,
+            Domain::PoolMove(id) => Self::PoolMove(id),
         }
     }
 }
@@ -252,6 +255,7 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::PoolPayout(id) => Self::PoolPayout(id),
             TxPurpose::PoolTransfer(key) => Self::PoolTransfer(key),
             TxPurpose::PoolApprove => Self::PoolApprove,
+            TxPurpose::PoolMove(id) => Self::PoolMove(id),
         }
     }
 }

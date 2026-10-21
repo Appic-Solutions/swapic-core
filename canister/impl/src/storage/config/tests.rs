@@ -117,12 +117,18 @@ fn the_pools_gas_rows_show_in_the_json_only_once_set() {
                 pool_payout: rows.then_some(budget.relay_cctp),
                 pool_transfer: rows.then_some(budget.relay_cctp),
                 pool_approve: rows.then_some(budget.relay_cctp),
+                pool_move: rows.then_some(budget.relay_cctp),
+                pool_move_finish: rows.then_some(budget.relay_cctp),
+                pool_ck_deposit: rows.then_some(budget.relay_cctp),
                 ..budget
             },
             min_network_fee: PerAction {
                 pool_payout: rows.then_some(fees.relay_cctp),
                 pool_transfer: rows.then_some(fees.relay_cctp),
                 pool_approve: rows.then_some(fees.relay_cctp),
+                pool_move: rows.then_some(fees.relay_cctp),
+                pool_move_finish: rows.then_some(fees.relay_cctp),
+                pool_ck_deposit: rows.then_some(fees.relay_cctp),
                 ..fees
             },
         }

@@ -573,6 +573,16 @@ pub async fn create_and_send_with(
                     raw_tx: raw_tx.clone(),
                 },
             },
+            // a move's record is the move's own step, which moves it to signed
+            TxPurpose::PoolMove(id) => EventType::Pool {
+                step: types::pool::PoolStep::MoveSigned {
+                    id,
+                    chain_id,
+                    nonce,
+                    tx_hash,
+                    raw_tx: raw_tx.clone(),
+                },
+            },
             // a pull names its number: no swap holds it for the record to find
             _ => EventType::PullSigned {
                 quote_hash,
@@ -1077,6 +1087,32 @@ async fn decide(
                     .is_ok(),
                     // closed already: nothing left to record
                     None => true,
+                };
+                if appended {
+                    settle(entry, block, success, latest, credit);
+                }
+                return usize::from(appended);
+            }
+            // a move's transaction closes with its own line: burned (with the Eco intent its
+            // order published, whose refund routes it again), or reverted, back to signing
+            // the same order. It paid the canister no fee, so none is booked
+            if let TxPurpose::PoolMove(id) = entry.purpose {
+                let step = if success {
+                    types::pool::PoolStep::MoveBurned {
+                        id,
+                        tx_hash,
+                        block,
+                        intent: eco_intent,
+                    }
+                } else {
+                    types::pool::PoolStep::MoveReverted { id }
+                };
+                let appended = match crate::storage::pool::record_at(step, now) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log(&format!("the move {id}'s close was refused: {error}"));
+                        false
+                    }
                 };
                 if appended {
                     settle(entry, block, success, latest, credit);

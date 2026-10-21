@@ -86,7 +86,8 @@ impl Leg {
             | TxPurpose::Finish(_)
             | TxPurpose::PoolPayout(_)
             | TxPurpose::PoolTransfer(_)
-            | TxPurpose::PoolApprove => None,
+            | TxPurpose::PoolApprove
+            | TxPurpose::PoolMove(_) => None,
         }
     }
 }

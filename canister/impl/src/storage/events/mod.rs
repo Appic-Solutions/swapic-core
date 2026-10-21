@@ -4,7 +4,7 @@ use crate::storage::memory::{
     auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
     flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
     pool_deposits_memory, pool_ledger_memory, pool_orphans_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    pool_moves_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
     pool_withdrawal_nonces_memory, signed_memory, swaps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -110,6 +110,10 @@ thread_local! {
     // The orphans by credit key: held for a controller to refund or book.
     static POOL_ORPHANS: RefCell<StableBTreeMap<CreditKey, types::pool::Orphan, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_orphans_memory()));
+
+    // The rebalance moves by id (P11c). Part of the fold: only `Pool` lines write them.
+    static POOL_MOVES: RefCell<StableBTreeMap<u64, types::pool::Move, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_moves_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -323,6 +327,18 @@ impl Store for StableStore {
         POOL_ORPHANS.with(|orphans| orphans.borrow().iter().collect())
     }
 
+    fn pool_move(&self, id: u64) -> Option<types::pool::Move> {
+        POOL_MOVES.with(|moves| moves.borrow().get(&id))
+    }
+
+    fn put_pool_move(&mut self, id: u64, item: types::pool::Move) {
+        POOL_MOVES.with(|moves| moves.borrow_mut().insert(id, item));
+    }
+
+    fn pool_moves(&self) -> Vec<(u64, types::pool::Move)> {
+        POOL_MOVES.with(|moves| moves.borrow().iter().collect())
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().get(key))
     }
@@ -453,6 +469,7 @@ pub fn init() {
     POOL_WITHDRAWAL_NONCES.with(|_| ());
     POOL_PAYOUT_INTENTS.with(|_| ());
     POOL_ORPHANS.with(|_| ());
+    POOL_MOVES.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

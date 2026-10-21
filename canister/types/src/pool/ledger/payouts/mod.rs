@@ -389,6 +389,7 @@ impl PoolLedger {
             nonce: None,
             intent: None,
             orphan: None,
+            moved: None,
         };
         // takes a payout off the queue, with its hold
         let dequeue = |lines: &mut crate::pool::PayoutLines,

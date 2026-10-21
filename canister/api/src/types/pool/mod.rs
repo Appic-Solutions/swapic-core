@@ -6,8 +6,10 @@
 mod tests;
 
 pub mod payout;
+pub mod rebalance;
 pub mod routes;
 
+pub use rebalance::{MoveDirection, MoveResolution, MoveStatus, MoveView, RebalanceSettings};
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutesView};
 
 pub use payout::{
