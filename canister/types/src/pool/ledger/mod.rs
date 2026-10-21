@@ -1479,14 +1479,14 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
     Ok(())
 }
 
-/// The premium a swap of `min_usdc` carries at the least (P11d, 2026-10-21: no floor):
-/// exactly the settings' share of it, rounded up, pure pool income. Every ledger fee is the
-/// user's own line beside it.
 /// How much of the settings' premium share of what arrived a swap's premium must be at its
 /// arrival, in percent (P11e): the quoter prices the premium on the most a route delivers, and
 /// a route delivers a little less than its most.
 pub const PREMIUM_AT_ARRIVAL_PERCENT: u32 = 90;
 
+/// The premium a swap of `min_usdc` carries at the least (P11d, 2026-10-21: no floor):
+/// exactly the settings' share of it, rounded up, pure pool income. Every ledger fee is the
+/// user's own line beside it.
 pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<TokenAmount> {
     min_usdc
         .checked_mul(settings.premium_bps)?
