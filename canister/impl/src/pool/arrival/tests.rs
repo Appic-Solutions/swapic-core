@@ -762,3 +762,19 @@ fn a_zero_transfer_is_nothing_and_one_refusal_stops_no_other() {
         assert_eq!(recorded.outcomes.len(), 1);
     });
 }
+
+/// Review (backup, denial of service): a receipt too large for the read is refused for good,
+/// never as a passing trouble to ask again; any other failed read is one.
+#[test]
+fn a_receipt_too_large_is_refused_for_good() {
+    assert!(matches!(
+        unavailable(RpcError::AnswerTooLarge { cap: 512 }),
+        PoolError::BadArrival(_)
+    ));
+    assert!(matches!(
+        unavailable(RpcError::Unanswered {
+            method: "eth_getTransactionReceipt".to_string()
+        }),
+        PoolError::Unavailable(_)
+    ));
+}

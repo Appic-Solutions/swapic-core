@@ -726,6 +726,10 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
 
 /// A read that answered nothing usable, as the caller is told: ask again.
 fn unavailable(error: RpcError) -> PoolError {
+    // a receipt too large for the read never grows smaller: asking again changes nothing
+    if let RpcError::AnswerTooLarge { cap } = error {
+        return PoolError::BadArrival(format!("the receipt is larger than the {cap} bytes read"));
+    }
     // the kind only: a provider's text can carry its url and key
     PoolError::Unavailable(format!("the read failed: {:?}", error.kind()))
 }

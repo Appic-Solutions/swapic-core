@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{at, funded_pool, register, swap_terms, usdc};
+use std::cell::Cell;
 use types::pool::{CreditKey, PoolRail};
 
 #[test]
@@ -60,8 +61,8 @@ fn every_transfer_reads_in_block_and_log_order() {
 }
 
 /// Review fix 6: a pass reads each transaction once, never one whose every transfer is
-/// credited or dust, at most the cap of receipts in whole blocks (the first block always),
-/// and says which block is left for the next pass.
+/// credited or dust, at most the cap of receipts in whole blocks; a first block above the cap
+/// is read up to it and the rest passed over, so the cursor always moves.
 #[test]
 fn a_pass_reads_what_is_worth_it_up_to_its_cap() {
     let usdc = 1_000_000;
@@ -80,19 +81,58 @@ fn a_pass_reads_what_is_worth_it_up_to_its_cap() {
     let logged = logged(&logs);
     let credited = |key: &CreditKey| key.tx == TxHash::new([3; 32]);
     let tx = |byte: u8, block: u64| (TxHash::new([byte; 32]), BlockNumber::new(block));
+    let plan = |receipts: usize, transfers: usize| {
+        plan_pass(&logged, ChainId::BASE, credited, receipts, transfers)
+    };
     assert_eq!(
-        plan_pass(&logged, ChainId::BASE, credited, 20),
-        (vec![tx(1, 10), tx(4, 11), tx(5, 11), tx(6, 12)], None)
+        plan(20, 100),
+        PassPlan {
+            read: vec![tx(1, 10), tx(4, 11), tx(5, 11), tx(6, 12)],
+            left: None,
+            cut: None,
+        }
     );
-    // a cap of two: block 10 whole, then block 11 does not fit and is left
+    // a cap of two: block 10 whole, then block 11 does not fit and is left whole
     assert_eq!(
-        plan_pass(&logged, ChainId::BASE, credited, 2),
-        (vec![tx(1, 10)], Some(BlockNumber::new(11)))
+        plan(2, 100),
+        PassPlan {
+            read: vec![tx(1, 10)],
+            left: Some(BlockNumber::new(11)),
+            cut: None,
+        }
     );
-    // a cap of zero still reads the first block, so the cursor moves
+    // a cap of one with block 11 first: one read, the other passed over
+    let from_11 = super::logged(&serde_json::json!([
+        log(4, 11, 0, 5 * usdc),
+        log(5, 11, 1, DUST),
+        log(6, 12, 0, 5 * usdc)
+    ]));
     assert_eq!(
-        plan_pass(&logged, ChainId::BASE, credited, 0),
-        (vec![tx(1, 10)], Some(BlockNumber::new(11)))
+        plan_pass(&from_11, ChainId::BASE, credited, 1, 100),
+        PassPlan {
+            read: vec![tx(4, 11)],
+            left: Some(BlockNumber::new(12)),
+            cut: Some((BlockNumber::new(11), 1)),
+        }
+    );
+    // four transfers considered: block 11's second is not, so block 11 is not whole
+    assert_eq!(
+        plan(20, 5),
+        PassPlan {
+            read: vec![tx(1, 10)],
+            left: Some(BlockNumber::new(11)),
+            cut: None,
+        }
+    );
+    // two considered, and they are block 10's own: block 10 is read as far as considered,
+    // the rest of it passed over
+    assert_eq!(
+        plan(20, 2),
+        PassPlan {
+            read: vec![tx(1, 10)],
+            left: Some(BlockNumber::new(11)),
+            cut: Some((BlockNumber::new(10), 2)),
+        }
     );
 }
 
@@ -152,4 +192,203 @@ fn the_backup_works_only_while_a_registration_it_can_prove_waits() {
             at(1_000 + grace + margin + 1)
         )));
     });
+}
+
+/// Runs a future that never waits: every read of the fake chain answers at once.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(out) => out,
+        std::task::Poll::Pending => panic!("the fake chain never waits"),
+    }
+}
+
+/// A chain whose every transfer to the canister is `logs`.
+#[derive(Default)]
+struct FakeBase {
+    logs: Vec<serde_json::Value>,
+    /// A block whose transfers are too large for one answer.
+    overfull: Option<u64>,
+    /// Receipts that fail, for now or for good.
+    failing: Vec<(TxHash, PoolError)>,
+    transfer_reads: Cell<usize>,
+    receipts: std::cell::RefCell<Vec<TxHash>>,
+}
+
+impl BaseReads for FakeBase {
+    async fn safe_block(&self) -> Result<BlockNumber, String> {
+        // the lookback starts at block 100
+        Ok(BlockNumber::new(100 + MAX_LOOKBACK_BLOCKS))
+    }
+
+    async fn transfers(&self, from: BlockNumber, to: BlockNumber) -> Result<Value, RpcError> {
+        self.transfer_reads.set(self.transfer_reads.get() + 1);
+        let within = |block: u64| from.get() <= block && block <= to.get();
+        if self.overfull.is_some_and(within) {
+            return Err(RpcError::AnswerTooLarge { cap: 1 });
+        }
+        Ok(Value::Array(
+            self.logs
+                .iter()
+                .filter(|log| {
+                    let block = log["blockNumber"].as_str().unwrap();
+                    within(u64::from_str_radix(&block[2..], 16).unwrap())
+                })
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError> {
+        self.receipts.borrow_mut().push(tx);
+        if let Some((_, error)) = self.failing.iter().find(|(failing, _)| *failing == tx) {
+            return Err(error.clone());
+        }
+        // a transaction with no transfer to the canister: proves nothing, records nothing
+        Ok(Receipt {
+            tx,
+            block: BlockNumber::new(1),
+            success: true,
+            logs: vec![],
+        })
+    }
+}
+
+fn chain() -> PoolChain {
+    let address = |byte: u8| types::EvmAddress::new([byte; 20]);
+    PoolChain {
+        chain: ChainId::BASE,
+        usdc: address(1),
+        runner: address(2),
+        swapic: address(3),
+        transmitter: address(4),
+        eco_portal: None,
+        canister: address(5),
+        cctp_sources: vec![],
+    }
+}
+
+/// One transfer log of `amount` from a transaction told apart by `n`.
+fn transfer(n: u32, block: u64, index: u64, amount: u64) -> serde_json::Value {
+    let mut tx = [0_u8; 32];
+    tx[..4].copy_from_slice(&n.to_be_bytes());
+    serde_json::json!({
+        "transactionHash": format!("0x{}", hex::encode(tx)),
+        "blockNumber": format!("0x{block:x}"),
+        "logIndex": format!("0x{index:x}"),
+        "data": format!("0x{:064x}", amount),
+    })
+}
+
+fn pass(base: &FakeBase) -> PassReport {
+    block_on(backup(base, &chain(), || at(10))).unwrap()
+}
+
+/// Review (backup, denial of service): a block whose transfers are too large to read even
+/// alone is passed over with an alert, and the cursor moves past it, never stalls; the
+/// halving reads at most ten times; the next pass goes on after it.
+#[test]
+fn a_single_overfull_block_is_passed_over() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let base = FakeBase {
+            logs: vec![transfer(1, 150, 0, 5_000_000)],
+            overfull: Some(100),
+            ..FakeBase::default()
+        };
+        let first = pass(&base);
+        assert_eq!(first.cursor, Some(BlockNumber::new(100)));
+        assert_eq!(first.receipts, 0);
+        assert!(first.alerts[0].starts_with("ALERT: block 100"));
+        assert!(base.transfer_reads.get() <= 10);
+        // 101 and the 500 blocks from it
+        let second = pass(&base);
+        assert_eq!(second.receipts, 1);
+        assert_eq!(second.cursor, Some(BlockNumber::new(600)));
+    });
+}
+
+/// Review (backup, resource cap): a flood of distinct dust transactions reads no receipt,
+/// and a pass considers at most its cap of transfers, the rest left to the next pass.
+#[test]
+fn a_flood_of_dust_reads_no_receipt() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        // 1500 dust transfers, five a block from block 100
+        let logs = (0..1_500_u32)
+            .map(|n| transfer(n, 100 + u64::from(n / 5), u64::from(n % 5), DUST - 1))
+            .collect();
+        let base = FakeBase {
+            logs,
+            ..FakeBase::default()
+        };
+        let first = pass(&base);
+        assert_eq!(first.receipts, 0);
+        // the thousandth transfer is block 299's last: block 300 is left whole
+        assert_eq!(first.cursor, Some(BlockNumber::new(299)));
+        // from block 300 to the safe block
+        let second = pass(&base);
+        assert_eq!(second.receipts, 0);
+        assert_eq!(second.cursor, Some(BlockNumber::new(700)));
+        assert!(base.receipts.borrow().is_empty());
+    });
+}
+
+/// Review (backup, resource cap): no pass reads more receipts than its cap, whatever one
+/// block holds; a first block above it is read up to the cap and the rest passed over with
+/// an alert; a receipt that can never be read is passed over, one that failed for now holds
+/// the cursor before its block.
+#[test]
+fn no_pass_reads_more_receipts_than_its_cap() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let worth = 5_000_000;
+        let mut logs: Vec<_> = (0..30).map(|n| transfer(n, 120, n.into(), worth)).collect();
+        logs.extend((30..45).map(|n| transfer(n, 130, n.into(), worth)));
+        logs.extend((45..60).map(|n| transfer(n, 131, n.into(), worth)));
+        logs.push(transfer(60, 140, 0, worth));
+        logs.push(transfer(61, 145, 0, worth));
+        let tx = |n: u32| {
+            let mut tx = [0_u8; 32];
+            tx[..4].copy_from_slice(&n.to_be_bytes());
+            TxHash::new(tx)
+        };
+        let base = FakeBase {
+            logs,
+            failing: vec![
+                (tx(60), PoolError::BadArrival("too large".to_string())),
+                (
+                    tx(61),
+                    PoolError::Unavailable("the read failed".to_string()),
+                ),
+            ],
+            ..FakeBase::default()
+        };
+        let first = pass(&base);
+        assert_eq!(first.receipts, MAX_RECEIPTS_PER_PASS);
+        assert!(first.alerts[0].starts_with("ALERT: block 120 holds 10"));
+        assert_eq!(first.cursor, Some(BlockNumber::new(129)));
+        let second = pass(&base);
+        assert_eq!(second.receipts, 15);
+        assert_eq!(second.cursor, Some(BlockNumber::new(130)));
+        // block 131's fifteen, the receipt that never reads (passed over), and the one that
+        // failed for now (the cursor stops before it)
+        let third = pass(&base);
+        assert_eq!(third.receipts, 17);
+        assert!(third.alerts[0].contains("cannot be read"));
+        assert_eq!(third.cursor, Some(BlockNumber::new(144)));
+        let reads = base.receipts.borrow().len();
+        assert_eq!(reads, 20 + 15 + 17);
+    });
+}
+
+/// Review (backup, overlapping tick): a tick while a pass is out returns before reading
+/// anything (were it to go on, it would read the clock, which only a canister has).
+#[test]
+fn a_tick_while_a_pass_is_out_does_nothing() {
+    let running = Pass::take().unwrap();
+    block_on(run_backup());
+    assert!(Pass::take().is_none(), "the running pass still holds");
+    drop(running);
 }
