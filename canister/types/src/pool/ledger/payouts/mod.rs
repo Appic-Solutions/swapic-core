@@ -326,6 +326,14 @@ impl PoolLedger {
                 ) {
                     return Err(not_from("PayoutUndoing", &payout));
                 }
+                // an ICP swap paid once and reopened by an Eco refund: its refund is held back
+                // out of the free ckUSDC before it is asked, never after
+                if payout.icp_released.0 && payout.icp_hold() > self.pockets.icp.free {
+                    return Err(PoolStepError::PocketShort {
+                        free: self.pockets.icp.free,
+                        need: payout.icp_hold(),
+                    });
+                }
                 Ok(())
             }
             // never once signed: a signed payout waits for its transaction's end
@@ -611,6 +619,13 @@ impl PoolLedger {
             }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;
+                if payout.icp_released.0 {
+                    let held = payout.icp_hold();
+                    let icp = &mut ledger.pockets.icp;
+                    icp.free = sat_sub(icp.free, held);
+                    icp.reserved = sat_add(icp.reserved, held);
+                    payout.icp_released = crate::pool::payout::Flag(false);
+                }
                 payout.status = PayoutStatus::Undoing(why.clone());
                 payout.undoing_at = Some(at);
                 effects.payout = Some(payout);

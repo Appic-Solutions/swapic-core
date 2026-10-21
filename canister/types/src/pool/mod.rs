@@ -1670,12 +1670,12 @@ impl PoolStep {
                 | PoolStep::Swapped { .. }
                 | PoolStep::StakeStarted { .. }
                 | PoolStep::WithdrawStarted { .. }
-                // the Base payouts: an ICP swap's next step, a revert's retry, and USDC
-                // freed on Base for the queue
+                // the Base payouts: an ICP swap's next step and USDC freed on Base for the
+                // queue. A revert's retry waits for the payout timer, so an order that keeps
+                // reverting is signed at most once a minute
                 | PoolStep::PayoutPulled { .. }
                 | PoolStep::PayoutUndoing { .. }
                 | PoolStep::PayoutUndone { .. }
-                | PoolStep::PayoutReverted { .. }
                 | PoolStep::PayoutRefunded { .. }
                 | PoolStep::Minted { .. }
         )

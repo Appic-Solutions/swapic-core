@@ -656,3 +656,71 @@ fn a_stakes_rebalancing_share_meets_the_floor() {
     pool.ledger.payouts = None;
     assert_eq!(check_terms(&pool.ledger, &terms(0)), Ok(()));
 }
+
+/// An ICP swap paid, refunded by Eco and undone: its refund is held back out of the free
+/// ckUSDC when its undo begins (refused then if the pocket is short, before any refund is
+/// asked), and every line ends where it was before the swap.
+#[test]
+fn an_icp_swap_reopened_by_an_eco_refund_is_undone_from_the_free_ckusdc() {
+    use crate::pool::CreditKey;
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x4c, 1);
+    let before = pool.ledger.clone();
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    let amount = TokenAmount::from(100_000_000_u64 - 60_000);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(6))).unwrap();
+    pool.step(PoolStep::PayoutPaid {
+        id,
+        tx_hash: TxHash::new([0x77; 32]),
+        block: BlockNumber::new(30),
+        intent: Some([0x9a; 32]),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutRefunded {
+        id,
+        credit: CreditKey {
+            chain: ChainId::BASE,
+            tx: TxHash::new([0x9b; 32]),
+            log_index: 1,
+        },
+        amount,
+        block: BlockNumber::new(40),
+    })
+    .unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Waiting);
+    // the free ckUSDC short of the refund: the undo does not begin
+    let free = pool.ledger.pockets.icp.free;
+    pool.ledger.pockets.icp.free = TokenAmount::ONE;
+    assert!(matches!(
+        pool.step(PoolStep::PayoutUndoing {
+            id,
+            why: "past its deadline".to_string(),
+        }),
+        Err(PoolStepError::PocketShort { .. })
+    ));
+    pool.ledger.pockets.icp.free = free;
+    pool.step(PoolStep::PayoutUndoing {
+        id,
+        why: "past its deadline".to_string(),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: "past its deadline".to_string(),
+        block: Some(9),
+    })
+    .unwrap();
+    // the USDC went out and came back on Base, the ckUSDC came in and went back on ICP:
+    // every line where it was before the swap
+    let after = &pool.ledger;
+    assert_eq!(after.pockets, before.pockets);
+    assert_eq!(after.owed, before.owed);
+    assert_eq!(after.lines().fees_icp, TokenAmount::ZERO);
+}
