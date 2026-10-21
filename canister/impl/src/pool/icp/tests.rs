@@ -610,3 +610,22 @@ fn every_failure_of_the_icp_check_is_a_failed_check() {
         }
     });
 }
+
+/// Review fix 14: a check before the pool has settings is recorded as a failed check of its
+/// kind and logs nothing; a read that failed and a shortfall each log a line.
+#[test]
+fn a_check_before_settings_logs_nothing() {
+    let zero = TokenAmount::ZERO;
+    assert_eq!(check_log(&check_step(None, zero, zero, zero)), None);
+    let failed = check_step(
+        Some(Err(crate::ic::CallError::Unknown("rejected".into()))),
+        zero,
+        zero,
+        zero,
+    );
+    assert!(check_log(&failed).is_some_and(|line| line.contains("CallFailed")));
+    let short = check_step(Some(Ok(Nat::from(1_u8))), usdc(5), usdc(5), zero);
+    assert!(check_log(&short).is_some_and(|line| line.starts_with("ALERT")));
+    let fine = check_step(Some(Ok(Nat::from(usdc(5)))), usdc(5), usdc(5), zero);
+    assert_eq!(check_log(&fine), None);
+}

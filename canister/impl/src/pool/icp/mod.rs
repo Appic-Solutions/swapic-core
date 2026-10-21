@@ -430,18 +430,32 @@ pub async fn check_icp_pocket(tolerance: TokenAmount) {
     // the lines read again after the await: the lower of the two is expected
     let after = read_state(icp_lines);
     let step = check_step(answer, before, after, tolerance);
-    match &step {
-        PoolStep::IcpChecked { check } if check.shortfall => log(&format!(
+    if let Some(line) = check_log(&step) {
+        log(&line);
+    }
+    if let Err(error) = pool_store::record(step) {
+        // before the pool has settings there is nothing to say, every interval
+        if settings.is_some() {
+            log(&format!("the ICP pocket's check was not recorded: {error}"));
+        }
+    }
+}
+
+/// The log line one ICP check is worth: a shortfall's alert, and a read that failed. None
+/// before the pool has settings: a pool not set up yet is no news, every interval.
+pub fn check_log(step: &PoolStep) -> Option<String> {
+    match step {
+        PoolStep::IcpChecked { check } if check.shortfall => Some(format!(
             "ALERT: the ICP pocket holds {} ckUSDC and {} is expected; the pool closes",
             check.observed, check.expected
         )),
-        PoolStep::IcpCheckFailed { failure } => log(&format!(
+        PoolStep::IcpCheckFailed {
+            failure: IcpReadFailure::NoSettings,
+        } => None,
+        PoolStep::IcpCheckFailed { failure } => Some(format!(
             "the ICP pocket's balance was not read: {failure:?}"
         )),
-        _ => {}
-    }
-    if let Err(error) = pool_store::record(step) {
-        log(&format!("the ICP pocket's check was not recorded: {error}"));
+        _ => None,
     }
 }
 
