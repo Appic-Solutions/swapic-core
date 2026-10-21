@@ -247,6 +247,38 @@ pub async fn icrc2_approve(
     }
 }
 
+/// An ICRC-2 approval of `spender` for `amount` from the canister's own account,
+/// deduplicated (P11c): a retry with the same pair is the same approval, which the ledger
+/// answers `Duplicate`, so its fee is spent once.
+pub async fn icrc2_approve_once(
+    ledger: Principal,
+    spender: Principal,
+    amount: Nat,
+    dedup: Dedup,
+) -> Result<(), CallError> {
+    let arg = ApproveArgs {
+        from_subaccount: None,
+        spender: Account::of(spender, None),
+        amount,
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: Some(dedup.memo.to_vec()),
+        created_at_time: Some(dedup.created_at_nanos),
+    };
+    let (answer,): (Result<Nat, ApproveError>,) = call(ledger, "icrc2_approve", (arg,)).await?;
+    match answer {
+        Ok(_) | Err(ApproveError::Duplicate { .. }) => Ok(()),
+        Err(ApproveError::TemporarilyUnavailable) => Err(CallError::Unknown(
+            "the ledger is temporarily unavailable".to_string(),
+        )),
+        Err(ApproveError::TooOld) => Err(CallError::Expired(
+            "the approval is too old for the ledger to deduplicate".to_string(),
+        )),
+        Err(error) => Err(CallError::Refused(format!("{error:?}"))),
+    }
+}
+
 // ICPSwap's SwapPool, the calls made.
 
 #[derive(CandidType, Deserialize, Clone, Debug)]

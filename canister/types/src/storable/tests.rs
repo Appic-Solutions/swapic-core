@@ -689,7 +689,10 @@ fn rebalance_samples() -> Vec<Sample> {
         stuck: Some("no arrival in three hours".to_string()),
         since: at(23),
         scan_from: Some(BlockNumber::new(23_000_924)),
+        // absent, so this sample's bytes stay the ones the golden pins
+        reverts: None,
     };
+    let item_with_reverts = item.clone();
     let own = Move {
         status: MoveStatus::Lost("written off".to_string()),
         route: Some(MoveRoute::Own {
@@ -988,6 +991,14 @@ fn rebalance_samples() -> Vec<Sample> {
     out.push(sample(
         "own source of a payout",
         crate::pool::OwnSource::Payout(991),
+    ));
+    // a move's reverts counted (P11c Task 4)
+    out.push(sample(
+        "move with its reverts counted",
+        Move {
+            reverts: Some(992),
+            ..item_with_reverts
+        },
     ));
     out
 }

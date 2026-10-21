@@ -34,6 +34,10 @@ pub struct FlowSettings {
     pub max_gas_limit: u64,
     /// Whether the ICP flows run. Off unless a controller turns them on.
     pub icp_enabled: bool,
+    /// The ck minter's ERC-20 deposit helper on Ethereum (P11c).
+    pub ck_helper: Option<EvmAddress>,
+    /// Eco's prover a rebalance proposal's intent may name (P11c).
+    pub eco_prover: Option<EvmAddress>,
 }
 
 fn parse(wire: &Wire) -> Result<FlowSettings, String> {
@@ -51,6 +55,14 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
         .map(|text| text.parse::<EvmAddress>())
         .transpose()
         .map_err(|e| format!("ethereum_usdc is not an address: {e:?}"))?;
+    let address = |field: &str, text: &Option<String>| {
+        text.as_ref()
+            .map(|text| text.parse::<EvmAddress>())
+            .transpose()
+            .map_err(|e| format!("{field} is not an address: {e:?}"))
+    };
+    let ck_helper = address("ck_helper", &wire.ck_helper)?;
+    let eco_prover = address("eco_prover", &wire.eco_prover)?;
     let cketh_fee_allowance = TokenAmount::try_from(wire.cketh_fee_allowance.clone())
         .map_err(|_| "cketh_fee_allowance is too large".to_string())?;
     Ok(FlowSettings {
@@ -81,6 +93,8 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
             wire.max_gas_limit
         },
         icp_enabled: false,
+        ck_helper,
+        eco_prover,
     })
 }
 

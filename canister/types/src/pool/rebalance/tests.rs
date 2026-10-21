@@ -195,3 +195,29 @@ fn a_move_round_trips_through_its_stored_bytes() {
     let bytes = item.to_bytes();
     assert_eq!(Move::from_bytes(bytes), item);
 }
+
+/// The ck helper's `depositErc20` (selector `0xdb9751af`, checked against the deployed helper
+/// with cast for DeploySwapic), and the principal's word the helper and `ck_principal` read.
+#[test]
+fn the_ck_deposit_names_the_principal_and_the_subaccount_it_is_given() {
+    let principal = candid::Principal::from_text("2ibo7-dia").unwrap();
+    let word = ck_word(&principal);
+    assert_eq!(crate::swapic::ck_principal(word), Some(principal));
+    let usdc: crate::evm::EvmAddress = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        .parse()
+        .unwrap();
+    let data = ck_deposit_data(usdc, usdc_amount(), word, rebalance_subaccount());
+    assert_eq!(hex::encode(&data[..4]), "db9751af");
+    assert_eq!(data.len(), 4 + 4 * 32);
+    assert_eq!(data[4 + 12..4 + 32], *usdc.as_bytes());
+    assert_eq!(
+        TokenAmount::from_be_bytes(data[36..68].try_into().unwrap()),
+        usdc_amount()
+    );
+    assert_eq!(data[68..100], word);
+    assert_eq!(data[100..132], rebalance_subaccount());
+}
+
+fn usdc_amount() -> TokenAmount {
+    usdc(1_234)
+}

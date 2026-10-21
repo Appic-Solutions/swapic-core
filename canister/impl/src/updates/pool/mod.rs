@@ -134,17 +134,20 @@ pub async fn set_icp_routes(
     Ok(())
 }
 
-/// Controller-only, refused while halted, once per deploy: reads the canister's USDC allowance
-/// to Swapic on the pool chain and, below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so
-/// every pool payout is one signature of `Swapic.run`. Safe because `run` pulls only from
-/// `payer == msg.sender`. An allowance already in place answers `Known`; an approval on its
-/// way answers `Unavailable`.
+/// Controller-only, refused while halted, once per deploy and chain (Base, and Ethereum for
+/// the moves to Base, P11c): reads the canister's USDC allowance to Swapic on `chain_id` and,
+/// below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so every pool payout and move is one
+/// signature of `Swapic.run`. Safe because `run` pulls only from `payer == msg.sender`. An
+/// allowance already in place answers `Known`; an approval on its way answers `Unavailable`.
 #[update]
-pub async fn pool_approve_swapic() -> Result<PoolApproveOk, PoolError> {
+pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolError> {
     let caller = ic_cdk::api::caller();
-    pool::approve::approve_swapic(ic_cdk::api::is_controller(&caller))
-        .await
-        .map(|tx_id| PoolApproveOk { tx_id })
+    pool::approve::approve_swapic(
+        ic_cdk::api::is_controller(&caller),
+        types::ChainId::new(chain_id),
+    )
+    .await
+    .map(|tx_id| PoolApproveOk { tx_id })
 }
 
 /// Any caller, refused while halted, while the pool is closed, and for a sanctioned party: an

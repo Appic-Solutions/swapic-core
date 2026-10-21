@@ -401,6 +401,9 @@ pub struct Move {
     /// Base to ICP by Eco: the Ethereum block its fill is looked for from.
     #[n(21)]
     pub scan_from: Option<BlockNumber>,
+    /// How many times its order reverted: none before the first.
+    #[n(22)]
+    pub reverts: Option<u32>,
 }
 
 crate::storable_as_cbor!(Move);
@@ -439,6 +442,7 @@ impl Move {
             stuck: None,
             since: opened_at,
             scan_from: None,
+            reverts: None,
         }
     }
 

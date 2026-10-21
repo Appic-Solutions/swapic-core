@@ -5,7 +5,10 @@
 #[cfg(test)]
 mod tests;
 
+pub mod arrival;
 pub mod cost;
+pub mod drive;
+pub mod own;
 pub mod trigger;
 
 use crate::state::{State, Store};
@@ -71,8 +74,10 @@ pub fn item(id: u64) -> Option<Move> {
     read_state(|state| state.store().pool_move(id))
 }
 
-/// Drives every open move a step on at `now` (P11c Task 4 fills this in).
-pub async fn drive(_now: types::Timestamp) {}
+/// Drives every open move a step on at `now`.
+pub async fn drive(now: types::Timestamp) {
+    drive::drive(now).await
+}
 
 /// `rebalance_moves`: the open and in-flight moves.
 pub fn views() -> Vec<MoveView> {

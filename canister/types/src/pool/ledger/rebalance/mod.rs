@@ -435,10 +435,19 @@ impl PoolLedger {
                         item.left = false;
                         item.status = MoveStatus::Routed;
                     }
-                    // its ck deposit: the USDC is still at the canister's Ethereum address
-                    (MoveDirection::BaseToIcp, true) => item.status = MoveStatus::Landed,
+                    // its ck deposit: the USDC is still at the canister's Ethereum address, and a
+                    // deposit carries no id a retry could be refused by: a controller decides
+                    (MoveDirection::BaseToIcp, true) => {
+                        item.status = MoveStatus::Landed;
+                        item.stuck = Some(
+                            "its ck deposit reverted: a retry deposits again, once a reorg could \
+                             not have run the first"
+                                .to_string(),
+                        );
+                    }
                     (MoveDirection::IcpToBase, _) => item.status = MoveStatus::Routed,
                 }
+                item.reverts = Some(item.reverts.unwrap_or(0).saturating_add(1));
                 item.since = at;
                 Some(item)
             }

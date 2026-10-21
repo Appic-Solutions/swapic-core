@@ -576,6 +576,14 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
     if state.store().is_pool_credited(&found.credit) {
         return None;
     }
+    // a rebalance move's arrival, or an Eco refund of its intent (P11c): the move's, never a
+    // deposit's, and never an orphan while its own transaction closes
+    if let Some(step) = crate::pool::rebalance::arrival::step_for(state, found) {
+        return Some(step);
+    }
+    if crate::pool::rebalance::arrival::waits_for_its_move(state, found) {
+        return None;
+    }
     let at = found.at.map_or(now, |at| at.min(now));
     let orphan =
         |payer: Option<EvmAddress>, why: String, r#ref: Option<PoolRef>| PoolStep::Unattributed {
@@ -723,6 +731,16 @@ pub fn record(found: &[Found], now: Timestamp) -> Recorded {
                 r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
                 amount: candid::Nat::from(*amount),
             },
+            // a rebalance move's arrival or refund, named by the move's ref (P11c)
+            PoolStep::MoveArrived {
+                id,
+                credited: amount,
+                ..
+            }
+            | PoolStep::MoveRefunded { id, amount, .. } => PoolArrivalOutcome::Credited {
+                r#ref: types::pool::move_ref(*id).into_bytes().to_vec(),
+                amount: candid::Nat::from(*amount),
+            },
             _ => unreachable!("BUG: step_for answers an arrival, a refund or an orphan"),
         };
         match pool_store::record_at(step, now) {
@@ -856,6 +874,41 @@ async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
     Receipt::parse(&receipt)
         .filter(|receipt| receipt.tx == tx)
         .ok_or_else(|| PoolError::BadArrival("the source receipt does not read".to_string()))
+}
+
+/// Reads `base_tx` on the pool chain (and `source` for an Eco arrival) and proves every
+/// transfer to the canister in it, recording nothing: what a move's arrival reads (P11c).
+pub async fn read_found(
+    base_tx: TxHash,
+    source: Option<(ChainId, TxHash)>,
+) -> Result<Vec<Found>, PoolError> {
+    let chain = pool_chain().await?;
+    let base = read_base(&chain, base_tx).await?;
+    let source = if needs_source(&base, &chain) {
+        let (src_chain, src_tx) = source
+            .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
+        let swapic = config::get()
+            .evm_chains
+            .get(src_chain)
+            .ok_or_else(|| {
+                PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
+            })?
+            .swapic;
+        let at = SourceChain {
+            chain: src_chain,
+            swapic,
+            eco_portal: config::get().eco_portal,
+        };
+        Some((read_source(src_chain, src_tx).await?, at))
+    } else {
+        None
+    };
+    find(
+        &base,
+        source.as_ref().map(|(receipt, at)| (receipt, at)),
+        &chain,
+    )
+    .map_err(|no| PoolError::BadArrival(no.why().to_string()))
 }
 
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival), proves every

@@ -36,6 +36,12 @@ pub struct FlowSettings {
     /// `register_evm_quote` and their engine steps. They still speak router ABI v2, so
     /// `true` is refused (`IcpFlowsNotOnV3`) until they move to ABI v3 with the pool (P11).
     pub icp_enabled: Option<bool>,
+    /// The ck minter's ERC-20 deposit helper on Ethereum (`depositErc20` with subaccounts):
+    /// a Base to ICP rebalance move filled by Eco is deposited through it (P11c).
+    pub ck_helper: Option<String>,
+    /// Eco's prover, the one a rebalance proposal's intent may name: an intent proven by
+    /// any other pays its reward to whoever that prover says (P11c).
+    pub eco_prover: Option<String>,
 }
 
 /// Why a flow door refused. Nothing moved.

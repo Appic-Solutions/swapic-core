@@ -63,6 +63,8 @@ fn main() {
             ck_minter: Some(principal(arg(&args, 7))),
             cketh_ledger: None,
             cketh_fee_allowance: Nat::from(0_u8),
+            ck_helper: None,
+            eco_prover: None,
             icpswap_pools: vec![principal(arg(&args, 8))],
             relay_window_s: 3_600,
             continuation_deadline_s: 1_800,
