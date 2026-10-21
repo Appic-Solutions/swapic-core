@@ -7,9 +7,8 @@ use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
     EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutSettings,
-    PoolApproveOk, PoolArrival,
-    PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk,
-    SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
+    PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
+    StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 

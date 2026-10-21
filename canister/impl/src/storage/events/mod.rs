@@ -4,8 +4,8 @@ use crate::storage::memory::{
     auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
     flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
     pool_deposits_memory, pool_ledger_memory, pool_orphans_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory, pool_withdrawal_nonces_memory, signed_memory,
-    swaps_memory, unsigned_nonces_memory, Memory,
+    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    pool_withdrawal_nonces_memory, signed_memory, swaps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};

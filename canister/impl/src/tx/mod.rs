@@ -1057,10 +1057,17 @@ async fn decide(
             // an orphan's refund closes with its own line: refunded, or held again
             if let TxPurpose::PoolTransfer(hash) = entry.purpose {
                 let refunding = read_state(|state| {
-                    state.store().pool_orphans().into_iter().find(|(key, orphan)| {
-                        types::pool::orphan_key(key) == hash
-                            && matches!(orphan.status, types::pool::OrphanStatus::Refunding { .. })
-                    })
+                    state
+                        .store()
+                        .pool_orphans()
+                        .into_iter()
+                        .find(|(key, orphan)| {
+                            types::pool::orphan_key(key) == hash
+                                && matches!(
+                                    orphan.status,
+                                    types::pool::OrphanStatus::Refunding { .. }
+                                )
+                        })
                 });
                 let appended = match refunding {
                     Some((key, _)) => crate::storage::pool::record_at(

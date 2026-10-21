@@ -79,10 +79,7 @@ fn an_orphan_is_booked_once() {
             ))
         };
         assert_eq!(book(), Ok(()));
-        assert_eq!(
-            ledger().unattributed,
-            before.checked_sub(usdc(3)).unwrap()
-        );
+        assert_eq!(ledger().unattributed, before.checked_sub(usdc(3)).unwrap());
         let books = read_state(|state| state.book(&ChainId::BASE));
         assert_eq!(books.unattributed, usdc(3));
         assert!(held().is_empty());
@@ -94,7 +91,10 @@ fn an_orphan_is_booked_once() {
 #[test]
 fn a_stranger_and_a_halt_are_refused() {
     assert_eq!(checked(true, true), Err(PoolError::Halted));
-    assert!(matches!(checked(false, false), Err(PoolError::NotAllowed(_))));
+    assert!(matches!(
+        checked(false, false),
+        Err(PoolError::NotAllowed(_))
+    ));
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
@@ -131,7 +131,10 @@ fn an_orphan_is_refunded_once_and_held_again_after_a_revert() {
         orphaned(1);
         let orphan = read_state(|state| state.store().pool_orphan(&key(1))).unwrap();
         let sent = refund_amount(&orphan, PayoutSettings::default().min_network_fee).unwrap();
-        assert_eq!(sent, usdc(3).checked_sub(TokenAmount::from(50_000_u32)).unwrap());
+        assert_eq!(
+            sent,
+            usdc(3).checked_sub(TokenAmount::from(50_000_u32)).unwrap()
+        );
         let purpose = TxPurpose::PoolTransfer(orphan_key(&key(1)));
         let signed = |nonce: u64| PoolStep::OrphanRefundSigned {
             key: key(1),

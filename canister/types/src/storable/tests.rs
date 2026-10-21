@@ -662,10 +662,7 @@ fn orphan_samples() -> Vec<Sample> {
         ),
         (
             "pool orphan refund closed",
-            PoolStep::OrphanRefundClosed {
-                key,
-                success: true,
-            },
+            PoolStep::OrphanRefundClosed { key, success: true },
         ),
     ];
     let mut out = vec![

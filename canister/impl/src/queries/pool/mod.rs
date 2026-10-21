@@ -7,8 +7,7 @@ use candid::Nat;
 use ic_cdk::query;
 pub use settlement_api::types::pool::{
     IcpRoutesView, OrphanView, PayoutSettings, PayoutView, PayoutWaiting, PoolAccount,
-    PoolAccountView,
-    PoolDepositView, PoolSettings, PoolStateView,
+    PoolAccountView, PoolDepositView, PoolSettings, PoolStateView,
 };
 use types::hash::PoolRef;
 

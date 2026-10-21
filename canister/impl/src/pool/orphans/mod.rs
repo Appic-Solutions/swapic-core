@@ -98,7 +98,9 @@ pub async fn resolve(
         OrphanAction::Refund { to } => {
             let to = evm_address("to", &to)?;
             if sanctioned(&Address::from(to)) {
-                return Err(PoolError::Sanctioned("the refund's address is sanctioned".to_string()));
+                return Err(PoolError::Sanctioned(
+                    "the refund's address is sanctioned".to_string(),
+                ));
             }
             // the refund is an outflow: the pool's guard first
             crate::pool::require_pool_open()?;
@@ -112,12 +114,16 @@ pub async fn resolve(
                 )
             })?;
             let config = crate::storage::config::get();
-            let chain = config.evm_chains.get(key.chain).ok_or_else(|| {
-                PoolError::Closed(format!("chain {} signs nothing", key.chain))
-            })?;
-            let gas_limit = chain.gas_limit.get(GasAction::PoolTransfer).ok_or_else(|| {
-                PoolError::NotAllowed("the chain has no pool_transfer gas row".to_string())
-            })?;
+            let chain = config
+                .evm_chains
+                .get(key.chain)
+                .ok_or_else(|| PoolError::Closed(format!("chain {} signs nothing", key.chain)))?;
+            let gas_limit = chain
+                .gas_limit
+                .get(GasAction::PoolTransfer)
+                .ok_or_else(|| {
+                    PoolError::NotAllowed("the chain has no pool_transfer gas row".to_string())
+                })?;
             tx::create_and_send_with(
                 TxPurpose::PoolTransfer(orphan_key(&key)),
                 key.chain,
