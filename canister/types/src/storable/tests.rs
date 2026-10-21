@@ -617,7 +617,110 @@ fn samples() -> Vec<Sample> {
     all.extend(payout_samples());
     all.extend(route_samples());
     all.extend(pool_tx_samples());
+    all.extend(icp_swap_samples());
     all
+}
+
+/// An ICP swap's legs into ckUSDC (P11b Task 3): a payout with its legs and the instant its
+/// undo began, the pull, and a stop for a human.
+fn icp_swap_samples() -> Vec<Sample> {
+    use crate::pool::payout::{
+        EvmPayout, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms, Undo,
+    };
+    use crate::pool::{
+        IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress, PoolStep, PrincipalBytes, SwapLeg,
+    };
+    use candid::Principal;
+
+    let principal = |byte: u8| Principal::from_slice(&[byte; 10]);
+    let swap = IcpSwapTerms {
+        token_in: principal(0x61),
+        amount_in: TokenAmount::from(5_000_000_u64),
+        from: IcpAccount {
+            owner: principal(0x62),
+            subaccount: None,
+        },
+        min_usdc: TokenAmount::from(2_000_000_u64),
+        premium: TokenAmount::from(40_000_u64),
+        network_fee: TokenAmount::from(50_000_u64),
+        refund_to: IcpAccount {
+            owner: principal(0x63),
+            subaccount: Some([0x64; 32]),
+        },
+    };
+    let attempt = PayoutAttempt {
+        created_at: Timestamp::from_nanos(1_800_000_000_000_000_501),
+        memo: [0x65; 32],
+        path: PayoutPath::IcpswapVia {
+            first: principal(0x66),
+            second: principal(0x67),
+            icp: principal(0x68),
+        },
+        amount: Some(TokenAmount::from(5_000_000_u64)),
+        token: Some(PrincipalBytes(principal(0x61))),
+    };
+    let mut payout = EvmPayout::new(
+        502,
+        PayoutKind::IcpSwap(swap),
+        PayoutTerms {
+            dst_chain: ChainId::BASE,
+            recipient: crate::evm::EvmAddress::new([0x69; 20]),
+            token_out: crate::evm::EvmAddress::new([0x6a; 20]),
+            min_out: TokenAmount::from(503_u32),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_000_504),
+        },
+        Undo::Refund { to: swap.refund_to },
+        Timestamp::from_nanos(1_800_000_000_000_000_505),
+    );
+    payout.status = PayoutStatus::Undoing("below min_usdc".to_string());
+    payout.icp_block = Some(506);
+    payout.undoing_at = Some(Timestamp::from_nanos(1_800_000_000_000_000_507));
+    payout.legs = Some(PayoutProgress {
+        attempt: Some(attempt),
+        swap: SwapLeg {
+            declined: 0,
+            begun: true,
+            out: Some(TokenAmount::from(508_u32)),
+            send: Some(TokenAmount::from(507_u32)),
+            approvals: Some(1),
+            undone: None,
+            before: None,
+            withdrawn: None,
+            amount_in: Some(TokenAmount::from(4_998_000_u64)),
+        },
+        ..PayoutProgress::default()
+    });
+    let steps = [
+        (
+            "pool payout pulled",
+            PoolStep::PayoutPulled {
+                id: 502,
+                block: 509,
+                attempt: Some(attempt),
+            },
+        ),
+        (
+            "pool payout stopped",
+            PoolStep::PayoutStopped {
+                id: 510,
+                why: "ALERT: for a human".to_string(),
+            },
+        ),
+    ];
+    let mut out = vec![sample("pool payout with its legs into ckUSDC", payout)];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(6_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_511 + i),
+                EventHash::new([0xc9; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// The pool's own transactions (P11b Task 2): a chain with the pool's gas rows, a
@@ -1015,6 +1118,10 @@ fn payout_samples() -> Vec<Sample> {
         intent: Some([0xe4; 32]),
         icp_block: Some(229),
         base_reserved: true,
+        // absent, so this sample's bytes stay the ones the golden pins; the payout with its
+        // legs appended after it pins them
+        legs: None,
+        undoing_at: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
@@ -1053,6 +1160,7 @@ fn payout_samples() -> Vec<Sample> {
             open: BTreeSet::from([248, 249]),
             head_since: Some(Timestamp::from_nanos(1_800_000_000_000_000_250)),
         }),
+        evm_changed: None,
         ..PoolLedger::default()
     };
     let steps = [
@@ -1286,6 +1394,8 @@ fn pool_samples() -> Vec<Sample> {
         // absent, so this sample's bytes stay the ones the golden pins; the ledger with its
         // payout lines appended at the end pins it
         payouts: None,
+        // never stored
+        evm_changed: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![

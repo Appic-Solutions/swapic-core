@@ -106,12 +106,19 @@ struct World {
 }
 
 fn world(canister_usdc: u64) -> World {
-    let (pic, canister, admin) = empty_canister();
-    let arg = InitArg {
-        config: Config {
+    world_with(
+        canister_usdc,
+        Config {
             pool_chain: Some(BASE),
             ..init_arg().config
         },
+    )
+}
+
+fn world_with(canister_usdc: u64, config: Config) -> World {
+    let (pic, canister, admin) = empty_canister();
+    let arg = InitArg {
+        config,
         ..init_arg()
     };
     install(&pic, canister, admin, &arg).expect("installs");
@@ -623,5 +630,165 @@ fn an_icp_shortfall_closes_the_pool_and_reopening_clears_it() {
     );
     assert_eq!(reopened, Ok(()));
     assert!(world.state().open, "{:?}", world.state().closed_reason);
+    assert!(world.replay_matches());
+}
+
+/// Base as the pool pays on it: Swapic, the Runner, USDC, and the pool's gas rows.
+fn base_chain() -> settlement_api::types::config::EvmChainConfig {
+    use settlement_api::types::config::{ActionAmounts, ActionGas, EvmChainConfig};
+    let amounts = |value: u64| ActionAmounts {
+        relay_cctp: Nat::from(value),
+        relay_eco: Nat::from(value),
+        relay_local: Nat::from(value),
+        complete_swap: Nat::from(value),
+        complete_ck: Nat::from(value),
+        relay_deliver: Nat::from(value),
+        release: Nat::from(value),
+        pool_payout: Some(Nat::from(value)),
+        pool_transfer: Some(Nat::from(value)),
+        pool_approve: Some(Nat::from(value)),
+    };
+    EvmChainConfig {
+        swapic: "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406".to_string(),
+        runner: "0x7e345aca00000000000000000000000000000001".to_string(),
+        cctp_receiver: "0x7e345aca00000000000000000000000000000002".to_string(),
+        usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+        token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
+        message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
+        gas_limit: ActionGas {
+            relay_cctp: 600_000,
+            relay_eco: 600_000,
+            relay_local: 900_000,
+            complete_swap: 1_300_000,
+            complete_ck: 600_000,
+            relay_deliver: 300_000,
+            release: 300_000,
+            pool_payout: Some(1_000_000),
+            pool_transfer: Some(100_000),
+            pool_approve: Some(100_000),
+        },
+        gas_budget_wei: amounts(100_000_000_000_000_000),
+        min_network_fee: amounts(0),
+    }
+}
+
+/// P11b Task 3: an ICP user swaps 100 ckUSDC to USDC on Base through the pool. The canister
+/// pulls it on the user's approval (the user pays the pull's fee), knows the exact amount at
+/// once, and the payout waits for its order with `100 - premium - network fee` reserved on
+/// Base. A stake planted on Base covers it.
+#[test]
+fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() {
+    use settlement_api::types::pool::{
+        IcpSwapTerms, PayoutSettings, PayoutStatus, PayoutTerms, PayoutView, SwapFromIcpOk,
+    };
+    let world = world_with(
+        usdc(1_000),
+        Config {
+            pool_chain: Some(BASE),
+            evm_chains: std::collections::BTreeMap::from([(BASE, base_chain())]),
+            ..init_arg().config
+        },
+    );
+    world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
+    // the Base pocket: 500 USDC staked from Base, arrived and minted at the pool's price
+    let owner = types::pool::PoolAccount::Evm(
+        "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+    );
+    let stake = Registration {
+        kind: DepositKind::Stake { owner },
+        min_usdc: TokenAmount::from(usdc(500)),
+        premium: TokenAmount::ZERO,
+        rebalance_share: TokenAmount::ZERO,
+        src_chain: ChainId::new(BASE),
+        src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
+            .parse()
+            .unwrap(),
+        rail: PoolRail::SameChain,
+        expires_at: world.now().checked_add(Duration::from_secs(600)).unwrap(),
+        salt: [0x71; 32],
+    };
+    let r#ref = stake.pool_ref().unwrap();
+    world.plant(PoolStep::Registered {
+        r#ref,
+        deposit: stake,
+    });
+    world.plant(PoolStep::Arrived {
+        r#ref,
+        credit: CreditKey {
+            chain: ChainId::new(BASE),
+            tx: TxHash::new([0x71; 32]),
+            log_index: 1,
+        },
+        amount: TokenAmount::from(usdc(500)),
+        block: BlockNumber::new(2),
+    });
+    world.plant(PoolStep::Minted {
+        r#ref,
+        owner,
+        shares: Shares::new(500_000_000_000_000_000_000),
+    });
+    let set: Result<(), PoolError> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_payout_settings",
+        encode_one(PayoutSettings {
+            min_network_fee: Nat::from(50_000_u32),
+            rebalance_share_floor_bps: 2,
+            order_wait_s: 120,
+            max_payout_gas: 2_000_000,
+        })
+        .unwrap(),
+    );
+    assert_eq!(set, Ok(()));
+    world.books_checked();
+    world.approve(staker(), usdc(100) + FEE);
+    let deadline = world.now().checked_add(Duration::from_secs(900)).unwrap();
+    let terms = IcpSwapTerms {
+        token_in: world.ledger,
+        amount_in: Nat::from(usdc(100)),
+        from_subaccount: None,
+        min_usdc: Nat::from(usdc(100)),
+        premium: Nat::from(usdc(1)),
+        network_fee: Nat::from(50_000_u32),
+        payout: PayoutTerms {
+            dst_chain: BASE,
+            recipient: "0x2222222222222222222222222222222222222222".to_string(),
+            token_out: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+            min_out: Nat::from(usdc(98)),
+            deadline_ns: deadline.as_nanos(),
+        },
+        refund_to: None,
+    };
+    let canister_before = world.balance(world.canister);
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(terms).unwrap(),
+    );
+    let id = swapped.expect("the swap is opened").id;
+    // pulled: the canister holds 100 more, the user paid 100, its approval's fee and the
+    // pull's
+    assert_eq!(world.balance(world.canister), canister_before + usdc(100));
+    assert_eq!(
+        world.balance(staker()),
+        Nat::from(usdc(1_000) - usdc(100) - 2 * FEE)
+    );
+    let view: Option<PayoutView> = query(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "payout",
+        encode_one(id).unwrap(),
+    );
+    let view = view.expect("the payout is there");
+    assert_eq!(view.status, PayoutStatus::Waiting);
+    assert_eq!(view.amount, Some(Nat::from(usdc(100) - usdc(1) - 50_000)));
+    let state = world.state();
+    assert_eq!(state.base.reserved, Nat::from(usdc(100) - usdc(1) - 50_000));
     assert!(world.replay_matches());
 }

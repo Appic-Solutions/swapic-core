@@ -6,8 +6,9 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    IcpRoute, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolDeposit,
-    PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
+    IcpRoute, IcpSwapTerms, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome,
+    PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawIcpArgs,
+    WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -144,4 +145,19 @@ pub async fn pool_approve_swapic() -> Result<PoolApproveOk, PoolError> {
     pool::approve::approve_swapic(ic_cdk::api::is_controller(&caller))
         .await
         .map(|tx_id| PoolApproveOk { tx_id })
+}
+
+/// Any caller, refused while halted, while the pool is closed, and for a sanctioned party: an
+/// ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
+/// `icrc2_transfer_from` on the caller's approval of the canister) to any token on an EVM
+/// chain. The token reaches ckUSDC through its route (at least `min_usdc`, held after the
+/// last leg's withdrawal, or it is refunded to `refund_to`); the payout from the Base pocket
+/// is the ckUSDC less `premium` and `network_fee`, paid by `pay_payout` with an order built at
+/// that exact amount, waiting in the queue while the Base pocket is short. Answers the
+/// payout's id; a pull the ledger refused answers its refusal.
+#[update]
+pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolError> {
+    pool::icp_swap::swap_from_icp(terms, is_sanctioned)
+        .await
+        .map(|id| SwapFromIcpOk { id })
 }

@@ -235,6 +235,28 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            // the pull of an ICP swap opened and not pulled yet
+            PoolStep::PayoutPulled { id, attempt, .. } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Opened || !payout.is_icp_swap() {
+                    return Err(not_from("PayoutPulled", &payout));
+                }
+                if attempt.is_some_and(|attempt| !attempt.path.swaps()) {
+                    return Err(PoolStepError::Terms("a pull's legs swap on ICPSwap"));
+                }
+                Ok(())
+            }
+            // what happened to its money is not known: only before it waits for an order
+            PoolStep::PayoutStopped { id, .. } => {
+                let payout = payout_of(*id)?;
+                if !matches!(
+                    payout.status,
+                    PayoutStatus::Opened | PayoutStatus::Swapping | PayoutStatus::Undoing(_)
+                ) {
+                    return Err(not_from("PayoutStopped", &payout));
+                }
+                Ok(())
+            }
             PoolStep::PayoutUndoing { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(
@@ -431,9 +453,30 @@ impl PoolLedger {
                 payout.waiting_since = Some(at);
                 effects.payout = Some(payout);
             }
+            PoolStep::PayoutPulled { id, block, attempt } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.status = PayoutStatus::Swapping;
+                payout.icp_block = Some(*block);
+                payout.legs = attempt.map(|attempt| crate::pool::PayoutProgress {
+                    attempt: Some(attempt),
+                    ..crate::pool::PayoutProgress::default()
+                });
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutStopped { id, why } => {
+                let mut payout = lookup.payout(*id)?;
+                payout
+                    .legs
+                    .get_or_insert_with(crate::pool::PayoutProgress::default)
+                    .failed = Some(why.clone());
+                payout.status = PayoutStatus::Failed(why.clone());
+                lines.open.remove(id);
+                effects.payout = Some(payout);
+            }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.status = PayoutStatus::Undoing(why.clone());
+                payout.undoing_at = Some(at);
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutUndone { id, why, block } => {

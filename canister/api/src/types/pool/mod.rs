@@ -249,6 +249,12 @@ pub struct WithdrawIcpArgs {
     pub to: IcpAccount,
 }
 
+/// `swap_from_icp`'s answer: the payout's id (`payout(id)` tells where it stands).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SwapFromIcpOk {
+    pub id: u64,
+}
+
 /// `pool_approve_swapic`'s answer: the approval's id in `signed_txs`.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PoolApproveOk {

@@ -13,9 +13,10 @@
 #[cfg(test)]
 mod tests;
 
-use super::{principal_cbor, IcpAccount, PoolAccount, Shares};
+use super::{principal_cbor, IcpAccount, PayoutProgress, PoolAccount, Shares};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
+use crate::hash::PoolRef;
 use crate::hash::TxHash;
 use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
 use candid::Principal;
@@ -243,6 +244,16 @@ pub struct EvmPayout {
     /// order, and again after a revert).
     #[n(16)]
     pub base_reserved: bool,
+    /// An ICP swap's legs from its token to ckUSDC: the pull's dedup pair, and its route's
+    /// path read the way the token goes in. A path through ICP's `first` is the token's ICP
+    /// pool (its first leg, the token into ICP, and its way back, ICP into the token) and its
+    /// `second` the ICP/ckUSDC pool (ICP into ckUSDC).
+    /// None for a payout with no leg (ckUSDC in, a withdrawal).
+    #[n(17)]
+    pub legs: Option<PayoutProgress>,
+    /// When its undo began: an ICP refund's `created_at_time`, within the ledger's window.
+    #[n(18)]
+    pub undoing_at: Option<Timestamp>,
 }
 
 crate::storable_as_cbor!(EvmPayout);
@@ -267,6 +278,8 @@ impl EvmPayout {
             intent: None,
             icp_block: None,
             base_reserved: false,
+            legs: None,
+            undoing_at: None,
         }
     }
 
@@ -311,6 +324,24 @@ impl EvmPayout {
         matches!(self.kind, PayoutKind::IcpSwap(_))
     }
 }
+
+/// What a Base payout's steps that name a ref (its ICPSwap legs) name it by: a fixed tag and
+/// its id. No deposit's ref or operation's id is one: those are keccak hashes.
+pub fn evm_payout_ref(id: u64) -> PoolRef {
+    let mut bytes = [0; 32];
+    bytes[..24].copy_from_slice(EVM_PAYOUT_TAG);
+    bytes[24..].copy_from_slice(&id.to_be_bytes());
+    PoolRef::new(bytes)
+}
+
+/// The Base payout a ref names, if it names one.
+pub fn evm_payout_id(r#ref: &PoolRef) -> Option<u64> {
+    let bytes = r#ref.as_ref();
+    (bytes[..24] == *EVM_PAYOUT_TAG)
+        .then(|| u64::from_be_bytes(bytes[24..].try_into().expect("BUG: eight bytes")))
+}
+
+const EVM_PAYOUT_TAG: &[u8; 24] = b"swapic.pool.v1.evm.pay\0\0";
 
 /// The payouts' knobs (interface section 3b).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]

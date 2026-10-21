@@ -72,6 +72,9 @@ fn chain(usdc: &str) -> EvmChainConfig {
         complete_ck: Nat::from(value),
         relay_deliver: Nat::from(value),
         release: Nat::from(value),
+        pool_payout: None,
+        pool_transfer: None,
+        pool_approve: None,
     };
     EvmChainConfig {
         swapic: SWAPIC.to_string(),
@@ -88,6 +91,9 @@ fn chain(usdc: &str) -> EvmChainConfig {
             complete_ck: 600_000,
             relay_deliver: 300_000,
             release: 300_000,
+            pool_payout: None,
+            pool_transfer: None,
+            pool_approve: None,
         },
         // a tenth of an ether: the gas rule holds at the fees pushed below
         gas_budget_wei: amounts(100_000_000_000_000_000),

@@ -33,6 +33,11 @@ pub fn deposit(r#ref: &PoolRef) -> Option<Registered> {
     read_state(|state| state.store().pool_deposit(r#ref))
 }
 
+/// A payout from the Base pocket, by id.
+pub fn payout(id: u64) -> Option<types::pool::EvmPayout> {
+    read_state(|state| state.store().pool_payout(id))
+}
+
 pub fn shares_of(account: &PoolAccount) -> Shares {
     read_state(|state| {
         state

@@ -18,8 +18,8 @@ pub mod routes;
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 
 pub use payout::{
-    EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutSettings,
-    PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+    evm_payout_id, evm_payout_ref, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind,
+    PayoutLines, PayoutSettings, PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Undo,
 };
 
 pub use ledger::{
@@ -1485,6 +1485,25 @@ pub enum PoolStep {
         #[cbor(n(3), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    /// An ICP swap's pull landed (`block`, its ledger block): its legs to ckUSDC run next,
+    /// on the path and with the dedup pair `attempt` fixes (none for ckUSDC, which has none).
+    #[n(35)]
+    PayoutPulled {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        block: u64,
+        #[n(2)]
+        attempt: Option<PayoutAttempt>,
+    },
+    /// A payout stopped for a human: what happened to its money is not known.
+    #[n(36)]
+    PayoutStopped {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
 }
 
 impl PoolStep {
@@ -1533,6 +1552,8 @@ impl PoolStep {
             PoolStep::PayoutUndone { .. } => "PayoutUndone",
             PoolStep::IcpRoutesSet { .. } => "IcpRoutesSet",
             PoolStep::ApproveSigned { .. } => "ApproveSigned",
+            PoolStep::PayoutPulled { .. } => "PayoutPulled",
+            PoolStep::PayoutStopped { .. } => "PayoutStopped",
         }
     }
 

@@ -45,6 +45,9 @@ fn outbox_config() -> Config {
         complete_ck: roomy.clone(),
         relay_deliver: roomy.clone(),
         release: roomy,
+        pool_payout: None,
+        pool_transfer: None,
+        pool_approve: None,
     };
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),

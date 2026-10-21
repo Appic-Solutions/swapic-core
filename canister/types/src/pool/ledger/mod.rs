@@ -119,6 +119,10 @@ pub struct PoolLedger {
     /// The Base payouts' lines (P11b): absent until their first step.
     #[n(19)]
     pub payouts: Option<PayoutLines>,
+    /// A Base payout one step changed through its legs, on its way to the step's effects:
+    /// never stored (always none between steps).
+    #[cbor(skip)]
+    pub evm_changed: Option<EvmPayout>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -260,10 +264,12 @@ fn status_name(status: &DepositStatus) -> String {
     format!("{status:?}")
 }
 
-/// What a step that names a payout (a deposit's or a withdrawal's) names.
+/// What a step that names a payout (a deposit's, a withdrawal's, or a Base payout's ICP
+/// legs) names.
 enum Target {
     Deposit(Box<Registered>),
     Withdraw(Box<PendingOp>),
+    Evm(Box<EvmPayout>),
 }
 
 impl Target {
@@ -274,6 +280,7 @@ impl Target {
                 PendingOp::Withdraw { payout, .. } => Some(payout),
                 PendingOp::Stake { .. } => None,
             },
+            Target::Evm(payout) => payout.legs.as_ref(),
         }
     }
 
@@ -291,6 +298,8 @@ impl Target {
                 PendingOp::Withdraw { payout, .. } => payout.failed.is_none(),
                 PendingOp::Stake { .. } => false,
             },
+            // an ICP swap's legs run once its pull landed, until its amount is known
+            Target::Evm(payout) => payout.status == crate::pool::PayoutStatus::Swapping,
         }
     }
 }
@@ -371,6 +380,11 @@ impl PoolLedger {
     fn target(&self, r#ref: &PoolRef, lookup: &impl PoolLookup) -> Option<Target> {
         if let Some(deposit) = lookup.deposit(r#ref) {
             return Some(Target::Deposit(Box::new(deposit)));
+        }
+        if let Some(id) = crate::pool::evm_payout_id(r#ref) {
+            return lookup
+                .payout(id)
+                .map(|payout| Target::Evm(Box::new(payout)));
         }
         let id = PoolOpId::new(r#ref.into_bytes());
         self.pending
@@ -751,7 +765,9 @@ impl PoolLedger {
             | PoolStep::PayoutPaid { .. }
             | PoolStep::PayoutReverted { .. }
             | PoolStep::PayoutUndoing { .. }
-            | PoolStep::PayoutUndone { .. } => self.admits_payout(step, lookup),
+            | PoolStep::PayoutUndone { .. }
+            | PoolStep::PayoutPulled { .. }
+            | PoolStep::PayoutStopped { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
             PoolStep::ApproveSigned { .. } => Ok(()),
             PoolStep::IcpRoutesSet { routes } => {
@@ -1144,14 +1160,17 @@ impl PoolLedger {
             | PoolStep::PayoutPaid { .. }
             | PoolStep::PayoutReverted { .. }
             | PoolStep::PayoutUndoing { .. }
-            | PoolStep::PayoutUndone { .. } => {}
+            | PoolStep::PayoutUndone { .. }
+            | PoolStep::PayoutPulled { .. }
+            | PoolStep::PayoutStopped { .. } => {}
         }
+        let payout = ledger.evm_changed.take();
         PoolEffects {
             ledger,
             deposit: deposit_out,
             shares: shares_out,
             credited,
-            payout: None,
+            payout,
             queued: None,
             dequeued: None,
             nonce: None,
@@ -1195,6 +1214,13 @@ impl PoolLedger {
         if let Some(mut deposit) = lookup.deposit(r#ref) {
             change(&mut deposit.payout);
             return Some((*r#ref, deposit));
+        }
+        // a Base payout's legs: answered through `evm_changed`, which `apply` collects
+        if let Some(mut payout) = crate::pool::evm_payout_id(r#ref).and_then(|id| lookup.payout(id))
+        {
+            change(payout.legs.get_or_insert_with(PayoutProgress::default));
+            self.evm_changed = Some(payout);
+            return None;
         }
         let id = PoolOpId::new(r#ref.into_bytes());
         if let Some(PendingOp::Withdraw { payout, .. }) = self.pending.get_mut(&id) {

@@ -86,10 +86,10 @@ thread_local! {
 }
 
 /// Held while one payout's leg is at an ICPSwap pool, released on drop, a trap included.
-struct Leg(Principal);
+pub(crate) struct Leg(Principal);
 
 impl Leg {
-    fn take(pool: Principal) -> Option<Self> {
+    pub(crate) fn take(pool: Principal) -> Option<Self> {
         // lazily: a guard built for a refusal would release the holder's pool on its drop
         LEGS.with(|legs| legs.borrow_mut().insert(pool))
             .then(|| Self(pool))
@@ -442,7 +442,7 @@ fn back_gain(progress: &PayoutProgress, fee: TokenAmount) -> TokenAmount {
 }
 
 /// A payout's progress as the log has it now: a deposit's, or a withdrawal's.
-fn progress_of(id: PoolRef) -> Option<PayoutProgress> {
+pub(crate) fn progress_of(id: PoolRef) -> Option<PayoutProgress> {
     if let Some(deposit) = pool_store::deposit(&id) {
         return Some(deposit.payout);
     }
@@ -1241,7 +1241,19 @@ pub(crate) fn unsettled_at<S: Store>(
         PendingOp::Withdraw { payout, .. } if unsettled(payout) => Some(payout_ref(*id)),
         _ => None,
     });
-    deposits.chain(withdrawals).find(|r#ref| *r#ref != except)
+    // an ICP swap's legs into ckUSDC
+    let swaps = ledger.lines().open.into_iter().filter_map(|id| {
+        let payout = state.store().pool_payout(id)?;
+        payout
+            .legs
+            .as_ref()
+            .is_some_and(unsettled)
+            .then(|| types::pool::evm_payout_ref(id))
+    });
+    deposits
+        .chain(withdrawals)
+        .chain(swaps)
+        .find(|r#ref| *r#ref != except)
 }
 
 /// Every leg of a payout's path and the pool it trades in: the first leg of a direct path;
