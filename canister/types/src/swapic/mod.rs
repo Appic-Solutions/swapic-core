@@ -739,6 +739,14 @@ pub struct EcoIntent {
     /// The one token the reward pays the solver, on the source.
     pub reward_token: EvmAddress,
     pub arrival: EcoArrival,
+    /// Who proves the fill to the source chain: its word pays the reward.
+    pub prover: EvmAddress,
+    /// The destination Portal the route is fulfilled on.
+    pub portal: EvmAddress,
+    /// The last instant the route may be fulfilled, unix seconds.
+    pub route_deadline: u64,
+    /// When an unfilled intent's reward may be refunded to its creator, unix seconds.
+    pub reward_deadline: u64,
 }
 
 /// What an Eco route does on the destination: the two shapes the quoter writes.
@@ -881,6 +889,10 @@ impl EcoIntent {
             token: evm(token),
             reward_token: evm(paid.token),
             arrival,
+            prover: evm(call.reward.prover),
+            portal: evm(route.portal),
+            route_deadline: route.deadline,
+            reward_deadline: call.reward.deadline,
         };
         let rebuilt = publishAndFundCall {
             destination: call.destination,

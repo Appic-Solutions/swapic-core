@@ -39,3 +39,12 @@ pub async fn pool_approve_ck_helper() -> Result<PoolApproveOk, PoolError> {
         .await
         .map(|tx_id| PoolApproveOk { tx_id })
 }
+
+/// Watcher-only, refused while halted and while the pool is closed: an order (`abi.encode` of
+/// an Order) for move `id`, signed with `gas_limit` if its route is taken. Checked as
+/// untrusted input, every rule of the spec's section 3.4; taken only within the move's window
+/// and when cheaper than any taken before: the cheapest at the window's end wins.
+#[update]
+pub async fn propose_rebalance(id: u64, order: Vec<u8>, gas_limit: u64) -> Result<(), PoolError> {
+    rebalance::propose::propose(id, order, gas_limit).await
+}

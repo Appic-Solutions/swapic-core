@@ -9,6 +9,7 @@ pub mod arrival;
 pub mod cost;
 pub mod drive;
 pub mod own;
+pub mod propose;
 pub mod trigger;
 
 use crate::state::{State, Store};
