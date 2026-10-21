@@ -858,6 +858,88 @@ fn pool_samples() -> Vec<Sample> {
         sample("pool deposit whose payout fixed its transfers", fixed),
         sample("pool deposit whose swap knew what its pool held", undone),
     ]
+    .into_iter()
+    .chain(pool_step_samples())
+    .collect()
+}
+
+/// One stored line for each pool step this round added or gave new fields, with every new
+/// field present.
+fn pool_step_samples() -> Vec<Sample> {
+    use crate::hash::PoolRef;
+    use crate::pool::{PayoutAttempt, PayoutPath, PoolHeld, PoolStep, PrincipalBytes};
+    use candid::Principal;
+
+    let r#ref = PoolRef::new([0xc1; 32]);
+    let ckusdc = PrincipalBytes(Principal::from_slice(&[0xc2; 10]));
+    let steps = [
+        (
+            "pool payout started with its exact transfer",
+            PoolStep::PayoutStarted {
+                r#ref,
+                attempt: PayoutAttempt {
+                    created_at: Timestamp::from_nanos(1_800_000_000_000_000_195),
+                    memo: [0xc3; 32],
+                    path: PayoutPath::Icpswap {
+                        pool: Principal::from_slice(&[0xc4; 10]),
+                    },
+                    amount: Some(TokenAmount::from(196_000_000_u32)),
+                    token: Some(ckusdc),
+                },
+            },
+        ),
+        (
+            "pool payout fallen back with its exact transfer",
+            PoolStep::FellBack {
+                r#ref,
+                why: "the pool refused the swap".to_string(),
+                amount: Some(TokenAmount::from(197_000_000_u32)),
+                token: Some(ckusdc),
+            },
+        ),
+        (
+            "pool swap begun with what its pool held",
+            PoolStep::SwapBegun {
+                r#ref,
+                before: Some(PoolHeld {
+                    ckusdc: TokenAmount::from(198_u8),
+                    token: TokenAmount::from(199_u8),
+                }),
+            },
+        ),
+        (
+            "pool swap with its output's transfer",
+            PoolStep::Swapped {
+                r#ref,
+                out: TokenAmount::from(200_000_u32),
+                send: Some(TokenAmount::from(198_000_u32)),
+            },
+        ),
+        ("pool swap approved", PoolStep::SwapApproved { r#ref }),
+        (
+            "pool swap undone",
+            PoolStep::SwapUndone {
+                r#ref,
+                cost: TokenAmount::from(20_000_u32),
+                withdrawn: TokenAmount::from(201_000_000_u32),
+            },
+        ),
+    ];
+    (0_u64..)
+        .zip(steps)
+        .map(|(i, (name, step))| {
+            sample(
+                name,
+                Event::seal(
+                    EventIndex::new(2_000 + i),
+                    Timestamp::from_nanos(1_800_000_000_000_000_202 + i),
+                    EventHash::new([0xc5; 32]),
+                    crate::events::EventType::Pool { step },
+                )
+                .expect("every sample has a preimage"),
+            )
+        })
+        .collect()
 }
 
 /// The swap depths the P10c default holds, spelled out for the golden lines that pin them.

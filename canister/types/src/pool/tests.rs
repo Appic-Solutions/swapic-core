@@ -363,3 +363,117 @@ fn a_credit_key_orders_by_chain_then_hash_then_log() {
         assert_eq!(CreditKey::from_bytes(k.to_bytes()), k);
     }
 }
+
+/// The shapes this build's steps had before it gained their optional fields, written as the
+/// earlier build wrote them, field for field and index for index.
+mod earlier {
+    use super::*;
+
+    #[derive(Encode)]
+    pub struct Attempt {
+        #[n(0)]
+        pub created_at: Timestamp,
+        #[cbor(n(1), with = "minicbor::bytes")]
+        pub memo: [u8; 32],
+        #[n(2)]
+        pub path: PayoutPath,
+    }
+
+    #[derive(Encode)]
+    pub enum Step {
+        #[n(5)]
+        PayoutStarted {
+            #[n(0)]
+            r#ref: PoolRef,
+            #[n(1)]
+            attempt: Attempt,
+        },
+        #[n(7)]
+        FellBack {
+            #[n(0)]
+            r#ref: PoolRef,
+            #[n(1)]
+            why: String,
+        },
+        #[n(13)]
+        SwapBegun {
+            #[n(0)]
+            r#ref: PoolRef,
+        },
+        #[n(14)]
+        Swapped {
+            #[n(0)]
+            r#ref: PoolRef,
+            #[n(1)]
+            out: TokenAmount,
+        },
+    }
+}
+
+/// Review (state decode compatibility): a step written before its optional fields existed
+/// still decodes, every new field absent, and one written now with them absent is the same
+/// bytes as before.
+#[test]
+fn a_step_written_before_its_new_fields_still_decodes() {
+    let r#ref = PoolRef::new([0x21; 32]);
+    let path = PayoutPath::Icpswap {
+        pool: Principal::from_slice(&[0x22; 10]),
+    };
+    let cases = [
+        (
+            earlier::Step::PayoutStarted {
+                r#ref,
+                attempt: earlier::Attempt {
+                    created_at: Timestamp::from_nanos(23),
+                    memo: [0x24; 32],
+                    path,
+                },
+            },
+            PoolStep::PayoutStarted {
+                r#ref,
+                attempt: PayoutAttempt {
+                    created_at: Timestamp::from_nanos(23),
+                    memo: [0x24; 32],
+                    path,
+                    amount: None,
+                    token: None,
+                },
+            },
+        ),
+        (
+            earlier::Step::FellBack {
+                r#ref,
+                why: "below the minimum twice".to_string(),
+            },
+            PoolStep::FellBack {
+                r#ref,
+                why: "below the minimum twice".to_string(),
+                amount: None,
+                token: None,
+            },
+        ),
+        (
+            earlier::Step::SwapBegun { r#ref },
+            PoolStep::SwapBegun {
+                r#ref,
+                before: None,
+            },
+        ),
+        (
+            earlier::Step::Swapped {
+                r#ref,
+                out: TokenAmount::from(25_u8),
+            },
+            PoolStep::Swapped {
+                r#ref,
+                out: TokenAmount::from(25_u8),
+                send: None,
+            },
+        ),
+    ];
+    for (written, now) in cases {
+        let bytes = minicbor::to_vec(&written).unwrap();
+        assert_eq!(minicbor::decode::<PoolStep>(&bytes).unwrap(), now);
+        assert_eq!(minicbor::to_vec(&now).unwrap(), bytes);
+    }
+}
