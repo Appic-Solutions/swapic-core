@@ -514,10 +514,8 @@ fn an_arrival_above_the_cap_is_unattributed() {
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("above the per-swap cap")
         ));
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
-        assert_eq!(
-            ledger().pockets.icp.reserved,
-            usdc(4).checked_sub(TokenAmount::from(10_000_u32)).unwrap()
-        );
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        assert!(ledger().open.contains(&r#ref));
         // kept with no ref, the registration's payer its refund target
         assert!(matches!(
             last_step(),

@@ -271,6 +271,9 @@ pub enum Stop {
     /// with the same dedup pair), or the pool closed before an outflow. Never counted toward
     /// the stop for a human, so a ledger's passing trouble stops no payout.
     Retry(String),
+    /// Queued: not the queue's head, or the ICP pocket's free ckUSDC does not cover it yet.
+    /// Nothing recorded; it starts, first in first out, once it is covered.
+    Queued,
 }
 
 /// What a call's failure means for a payout: an outcome unknown is asked again as it is; a
@@ -560,6 +563,12 @@ pub async fn drive_deposit(
                 );
             }
             (DepositStatus::Arrived, DepositKind::Swap { token_out, .. }) => {
+                // the hold and the dedup pair's instant are taken only when the payout really
+                // starts: the queue's head, covered by the free ckUSDC
+                let head = ledger.queue.head().map(|(head, _)| head);
+                if head != Some(r#ref) || deposit.held() > ledger.pockets.icp.free {
+                    return Err(Stop::Queued);
+                }
                 record(
                     PoolStep::PayoutStarted {
                         r#ref,
@@ -788,20 +797,22 @@ pub async fn drive_with(
                 PendingOp::Withdraw { .. } => None,
             })
             .collect();
-        // a payout stopped for a human stays in `paying` for the ICP check, and is not driven
-        let deposits = ledger
-            .paying
-            .iter()
-            .filter(|r#ref| {
-                state.store().pool_deposit(r#ref).is_some_and(|deposit| {
-                    matches!(
-                        deposit.status,
-                        DepositStatus::Arrived | DepositStatus::Paying
-                    )
-                })
-            })
-            .copied()
-            .collect();
+        // the payouts already started and the arrived stakes; a payout stopped for a human
+        // stays in `paying` for the ICP check, and is not driven
+        let mut deposits = Vec::new();
+        for r#ref in &ledger.paying {
+            let Some(deposit) = state.store().pool_deposit(r#ref) else {
+                continue;
+            };
+            let stake = !deposit.terms.kind.is_swap();
+            if deposit.status == DepositStatus::Paying
+                || (deposit.status == DepositStatus::Arrived && stake)
+            {
+                deposits.push(*r#ref);
+            }
+        }
+        // then the queued payouts, first in first out
+        deposits.extend(ledger.queue.0.iter().map(|(r#ref, _)| *r#ref));
         (deposits, pending)
     });
     let mut acted = 0;
@@ -816,6 +827,8 @@ pub async fn drive_with(
             Ok(()) => acted += 1,
             Err(Stop::Failed(why)) => fail(r#ref, why, clock()),
             Err(Stop::Later) | Err(Stop::Again) => acted += 1,
+            // first in first out: nothing behind a queued payout starts ahead of it
+            Err(Stop::Queued) => break,
             Err(Stop::Append(why)) | Err(Stop::Retry(why)) => {
                 crate::pool::log(&format!("the pool payout {} waits: {why}", r#ref))
             }
@@ -834,7 +847,7 @@ pub async fn drive_with(
             pull_stake(ledgers, id, clock).await.err()
         };
         match stop {
-            None | Some(Stop::Later) | Some(Stop::Again) => acted += 1,
+            None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => acted += 1,
             Some(Stop::Failed(why)) if withdraw => fail(payout_ref(id), why, clock()),
             Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
                 crate::pool::log(&format!("the pool operation {id} waits: {why}"))

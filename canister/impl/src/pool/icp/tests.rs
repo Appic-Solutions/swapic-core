@@ -174,12 +174,28 @@ fn a_withdrawal_is_refused_when_it_should_be() {
             )),
             Err(PoolError::Sanctioned(_))
         ));
-        // a swap holds 99 of the ICP pocket: 902 is more than its free ckUSDC
-        register(swap_terms(1, usdc(100), usdc(1), at(1_000)));
+        // a registration holds nothing; an arrived swap's queued payout does, and a
+        // withdrawal waits behind it: 99.01 queued, 901 is more than the 900.99 behind it
+        let r#ref = register(swap_terms(1, usdc(100), usdc(1), at(1_000)));
         assert_eq!(
-            plan(&withdrawal(usdc(902)), None),
+            plan(&withdrawal(usdc(901)), None).map(|(_, path)| path),
+            Ok(PayoutPath::Ckusdc)
+        );
+        record_at(
+            PoolStep::Arrived {
+                r#ref,
+                credit: credit(1),
+                amount: usdc(100),
+                block: BlockNumber::new(5),
+            },
+            at(3),
+        )
+        .unwrap();
+        assert_eq!(
+            plan(&withdrawal(usdc(901)), None),
             Err(PoolError::Closed(POCKET_SHORT.into()))
         );
+        assert!(plan(&withdrawal(usdc(900)), None).is_ok());
     });
 }
 

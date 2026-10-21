@@ -567,8 +567,9 @@ impl Registration {
         Some(pool_ref(&self.kind, self.fee().try_into_u128()?, self.salt))
     }
 
-    /// What a swap holds of the ICP pocket until it is paid: `min_usdc - premium`. A stake
-    /// holds nothing on ICP.
+    /// What a swap's payout will need of the ICP pocket at the least, `min_usdc - premium`:
+    /// what the registration checks is free (it holds none of it). A stake needs nothing on
+    /// ICP.
     pub fn reserve(&self) -> TokenAmount {
         if self.kind.is_swap() {
             self.min_usdc
@@ -770,8 +771,10 @@ pub struct Registered {
     pub minted: Option<Shares>,
     #[n(5)]
     pub payout: PayoutProgress,
-    /// What the deposit holds of the ICP pocket once it arrived: its whole payout and every
-    /// ledger fee its path can cost. None before: the registration's `reserve`.
+    /// What the deposit's payout holds once it arrived: its whole payout and every ledger fee
+    /// its path can cost, queued until the ICP pocket's free ckUSDC covers it, then held there
+    /// from its `PayoutStarted` until it is paid. None before it arrived: a registration holds
+    /// nothing (Jeff, 2026-10-21).
     #[n(6)]
     pub held: Option<TokenAmount>,
 }
@@ -789,10 +792,10 @@ impl Registered {
         }
     }
 
-    /// What the deposit holds of the ICP pocket now: the registration's reserve until it
-    /// arrives, its whole payout and fees after.
+    /// What the deposit's payout takes of the ICP pocket: nothing before it arrived, its
+    /// whole payout and fees after.
     pub fn held(&self) -> TokenAmount {
-        self.held.unwrap_or_else(|| self.terms.reserve())
+        self.held.unwrap_or(TokenAmount::ZERO)
     }
 
     /// What the deposit owes its owner once it arrived: a swap's recipient everything less
@@ -863,6 +866,59 @@ pub enum PendingOp {
         #[n(6)]
         payout: PayoutProgress,
     },
+}
+
+/// The arrived swaps whose payouts wait for the ICP pocket's free ckUSDC, first in first out,
+/// each with what it holds once it starts. Stored as the list, and as nothing at all when it
+/// is empty, so a ledger written before it existed reads back with it empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PayoutQueue(pub Vec<(PoolRef, TokenAmount)>);
+
+impl PayoutQueue {
+    /// What every queued payout will hold.
+    pub fn total(&self) -> TokenAmount {
+        self.0
+            .iter()
+            .try_fold(TokenAmount::ZERO, |sum, (_, held)| sum.checked_add(*held))
+            .unwrap_or(TokenAmount::MAX)
+    }
+
+    pub fn head(&self) -> Option<(PoolRef, TokenAmount)> {
+        self.0.first().copied()
+    }
+}
+
+impl<C> Encode<C> for PayoutQueue {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'b, C> Decode<'b, C> for PayoutQueue {
+    fn decode(d: &mut minicbor::Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        // a null placeholder is how a record written with the list absent in the middle reads
+        // back, and it means the same as the list missing off the end
+        if matches!(
+            d.datatype()?,
+            minicbor::data::Type::Null | minicbor::data::Type::Undefined
+        ) {
+            d.skip()?;
+            return Ok(Self::default());
+        }
+        Vec::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::default())
+    }
 }
 
 /// A pool arrival (or an unattributed transfer) from a block no balance check has read at

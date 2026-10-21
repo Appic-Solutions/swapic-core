@@ -169,7 +169,8 @@ pub fn plan_withdrawal<S: Store>(
     if let Some(reason) = closed {
         return Err(PoolError::Closed(reason));
     }
-    if ledger.pockets.icp.free < request.usdc {
+    // a withdrawal waits behind the queued payouts
+    if ledger.icp_available() < request.usdc {
         return Err(PoolError::Closed(POCKET_SHORT.to_string()));
     }
     if !settings.is_listed(request.token_out) {
@@ -245,7 +246,7 @@ pub async fn stake(
         Err(Stop::Append(why)) | Err(Stop::Retry(why)) => Err(PoolError::Unavailable(format!(
             "{why}; the canister asks again with the same pull"
         ))),
-        Err(Stop::Later) | Err(Stop::Again) => Err(PoolError::Unavailable(
+        Err(Stop::Later) | Err(Stop::Again) | Err(Stop::Queued) => Err(PoolError::Unavailable(
             "the canister asks again with the same pull".to_string(),
         )),
     }
@@ -314,7 +315,7 @@ pub async fn withdraw(
             Err(continues(&why))
         }
         Err(Stop::Append(why)) | Err(Stop::Retry(why)) => Err(continues(&why)),
-        Err(Stop::Later) | Err(Stop::Again) => {
+        Err(Stop::Later) | Err(Stop::Again) | Err(Stop::Queued) => {
             Err(continues("the pool's quote was below the minimum"))
         }
     }

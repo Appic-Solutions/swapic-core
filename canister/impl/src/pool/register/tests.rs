@@ -33,8 +33,9 @@ fn try_register(terms: Registration) -> Result<(), PoolError> {
     register(r#ref, terms, now(), nobody)
 }
 
+/// Jeff's hold rule (2026-10-21): a good registration is recorded and holds nothing.
 #[test]
-fn a_good_registration_reserves() {
+fn a_good_registration_holds_nothing() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
@@ -42,8 +43,8 @@ fn a_good_registration_reserves() {
         let r#ref = terms.pool_ref().unwrap();
         assert_eq!(register(r#ref, terms, now(), nobody), Ok(()));
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
-        assert_eq!(ledger().pockets.icp.reserved, usdc(99));
-        assert_eq!(ledger().pockets.icp.free, usdc(901));
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        assert_eq!(ledger().pockets.icp.free, usdc(1_000));
         // the same ref twice
         assert_eq!(try_register(good()), Err(PoolError::Known));
     });
@@ -119,11 +120,13 @@ fn every_refusal_is_the_interfaces() {
     });
 }
 
+/// The open limits and the free check at this moment refuse; nothing held, so each new
+/// registration finds the same free ckUSDC.
 #[test]
-fn the_open_limit_and_the_held_cap_refuse() {
+fn the_open_limit_and_the_free_check_refuse() {
     on_fresh_memory(|| {
         crate::storage::init();
-        funded_pool(usdc(1_000));
+        funded_pool(usdc(500));
         for byte in 1..=3 {
             try_register(swap_terms(byte, usdc(10), usdc(1), in_minutes(10))).unwrap();
         }
@@ -131,22 +134,24 @@ fn the_open_limit_and_the_held_cap_refuse() {
             try_register(swap_terms(4, usdc(10), usdc(1), in_minutes(10))),
             Err(PoolError::NotAllowed("too many open deposits".into()))
         );
-        // another payer: 27 held of 1000, half may be, 474 is one too many
-        let mut big = swap_terms(4, usdc(475), usdc(1), in_minutes(10));
-        big.src_payer = "0x1111111111111111111111111111111111111111"
-            .parse()
-            .unwrap();
+        // another payer: a payout of 501 is more than the 500 free, 500 fits, twice
+        let other = |byte: u8, min_usdc| {
+            let mut terms = swap_terms(byte, min_usdc, usdc(1), in_minutes(10));
+            terms.src_payer = types::EvmAddress::new([byte; 20]);
+            terms
+        };
         assert_eq!(
-            try_register(big.clone()),
+            try_register(other(5, usdc(502))),
             Err(PoolError::Closed("the ICP pocket is short".into()))
         );
-        big.min_usdc = usdc(474);
-        assert_eq!(try_register(big), Ok(()));
+        assert_eq!(try_register(other(5, usdc(501))), Ok(()));
+        assert_eq!(try_register(other(6, usdc(501))), Ok(()));
     });
 }
 
+/// A stake checks the TVL cap at registration and holds no room.
 #[test]
-fn a_stake_holds_tvl_room_and_nothing_on_icp() {
+fn a_stake_checks_the_tvl_cap_and_holds_nothing() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(9_000));
@@ -158,25 +163,25 @@ fn a_stake_holds_tvl_room_and_nothing_on_icp() {
             rebalance_share: TokenAmount::from(500_u32),
             ..swap_terms(byte, min_usdc, TokenAmount::ZERO, in_minutes(10))
         };
-        try_register(stake(5, usdc(600))).unwrap();
-        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
-        assert_eq!(ledger().stake_room, usdc(600));
-        // 9000 in, 600 on its way: 401 more is past the cap
         assert_eq!(
-            try_register(stake(6, usdc(401))),
+            try_register(stake(5, usdc(1_001))),
             Err(PoolError::AboveTvlCap {
                 cap: Nat::from(10_000_000_000_u64),
                 would_be: Nat::from(10_001_000_000_u64),
             })
         );
-        assert_eq!(try_register(stake(6, usdc(400))), Ok(()));
+        try_register(stake(5, usdc(1_000))).unwrap();
+        assert_eq!(ledger().stake_room, TokenAmount::ZERO);
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        // nothing held: another finds the same room
+        assert_eq!(try_register(stake(6, usdc(1_000))), Ok(()));
     });
 }
 
-/// The sweep expires a registration past its expiry and grace, releases its hold, and leaves
-/// one still in its grace.
+/// The sweep expires a registration past its expiry and grace, and leaves one still in its
+/// grace. Nothing was held, so nothing moves.
 #[test]
-fn the_sweep_expires_a_registration_and_releases_its_hold() {
+fn the_sweep_expires_a_registration() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
@@ -185,7 +190,6 @@ fn the_sweep_expires_a_registration_and_releases_its_hold() {
         let (early_ref, late_ref) = (early.pool_ref().unwrap(), late.pool_ref().unwrap());
         try_register(early).unwrap();
         try_register(late).unwrap();
-        assert_eq!(ledger().pockets.icp.reserved, usdc(148));
         let grace = settings().deposit_grace;
         // at the end of the grace the arrival is still the user's
         let end_of_grace = in_minutes(1).checked_add(grace).unwrap();
@@ -198,15 +202,14 @@ fn the_sweep_expires_a_registration_and_releases_its_hold() {
             deposit(&late_ref).unwrap().status,
             DepositStatus::Registered
         );
-        assert_eq!(ledger().pockets.icp.reserved, usdc(49));
-        assert_eq!(ledger().pockets.icp.free, usdc(951));
+        assert_eq!(ledger().pockets.icp.free, usdc(1_000));
         // bounded: a cap of one leaves the other for the next pass
         try_register(swap_terms(3, usdc(10), usdc(1), in_minutes(2))).unwrap();
         let expiry = expire_due(in_minutes(30), 1);
         assert_eq!((expiry.expired, expiry.more), (1, true));
         let expiry = expire_due(in_minutes(30), 1);
         assert_eq!((expiry.expired, expiry.more), (1, false));
-        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+        assert!(ledger().open.is_empty());
     });
 }
 

@@ -726,6 +726,16 @@ fn pool_samples() -> Vec<Sample> {
         icp_checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_162)),
         icp_failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_163)),
         scan_cursor: Some(BlockNumber::new(37_000_164)),
+        // empty, so this sample's bytes stay the ones the golden pins; the ledger appended
+        // at the end of the pool's samples pins it
+        queue: crate::pool::PayoutQueue::default(),
+    };
+    let queued = PoolLedger {
+        queue: crate::pool::PayoutQueue(vec![
+            (PoolRef::new([0xb5; 32]), TokenAmount::from(182_u8)),
+            (PoolRef::new([0xb6; 32]), TokenAmount::from(1u128 << 70)),
+        ]),
+        ..ledger.clone()
     };
     let deposit = Registered {
         terms: Registration {
@@ -795,6 +805,7 @@ fn pool_samples() -> Vec<Sample> {
         sample("pool owner key", OwnerKey::new([0xb4; 32])),
         sample("credited transfer key", credit),
         sample("pool deposit with what it holds", holding),
+        sample("pool ledger with payouts queued", queued),
     ]
 }
 

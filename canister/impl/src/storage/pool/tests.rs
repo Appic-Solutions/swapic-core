@@ -145,7 +145,11 @@ fn a_recorded_step_is_in_the_log_and_the_fold() {
             }
         ));
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
-        assert_eq!(ledger().pockets.icp.reserved, usdc(99));
+        assert_eq!(
+            ledger().pockets.icp.reserved,
+            TokenAmount::ZERO,
+            "a registration holds nothing"
+        );
         assert_eq!(waiting_refs(at(500)), vec![r#ref]);
         // past its expiry and grace it waits no more
         let grace = settings().deposit_grace.as_nanos() as u64;
@@ -192,11 +196,11 @@ fn a_refused_step_appends_nothing() {
         assert_eq!(event_count(), 0);
         funded_pool(usdc(10));
         let count = event_count();
-        // the ICP pocket holds 10, a 100 USDC swap cannot reserve 99 of it
+        // a ref its terms do not commit to
         let terms = swap_terms(1, usdc(100), usdc(1), at(1_000));
         assert!(record_at(
             PoolStep::Registered {
-                r#ref: terms.pool_ref().unwrap(),
+                r#ref: types::hash::PoolRef::new([0x0b; 32]),
                 deposit: terms,
             },
             at(2),

@@ -560,3 +560,90 @@ fn a_stakes_pull_is_failed_only_when_nothing_moved() {
         assert_eq!(fake.calls.borrow().len(), calls);
     });
 }
+
+/// Jeff's hold rule at the drive: an arrived swap the ICP pocket's free ckUSDC cannot cover
+/// is queued, and the one behind it does not start ahead of it; once the pocket covers them
+/// they start first in first out, each dedup instant taken when it really starts.
+#[test]
+fn queued_payouts_start_first_in_first_out_once_covered() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(150));
+        let arrive = |byte: u8, amount: TokenAmount| {
+            let r#ref = register(swap_terms(byte, usdc(10), usdc(1), at(1_000)));
+            record_at(
+                PoolStep::Arrived {
+                    r#ref,
+                    credit: credit(byte.into()),
+                    amount,
+                    block: BlockNumber::new(5),
+                },
+                at(3),
+            )
+            .unwrap();
+            r#ref
+        };
+        let big = arrive(1, usdc(200));
+        let small = arrive(2, usdc(10));
+        let fake = Fake::default();
+        block_on(drive_with(&fake, clock, &open_pool));
+        assert!(
+            fake.transfers().is_empty(),
+            "the head does not fit, nothing jumps it"
+        );
+        assert_eq!(deposit(&big).unwrap().status, DepositStatus::Arrived);
+        assert_eq!(deposit(&small).unwrap().status, DepositStatus::Arrived);
+        // the pocket grows by a stake on ICP
+        let id = PoolOpId::new([0x55; 32]);
+        record_at(
+            PoolStep::StakeStarted {
+                id,
+                owner: PoolAccount::Icp(account(9)),
+                from: account(9),
+                amount: usdc(100),
+                created_at: at(4),
+            },
+            at(4),
+        )
+        .unwrap();
+        let shares = ledger().mint_now(usdc(100)).unwrap();
+        record_at(
+            PoolStep::StakedIcp {
+                id,
+                owner: PoolAccount::Icp(account(9)),
+                amount: usdc(100),
+                rebalance_share: TokenAmount::ZERO,
+                shares,
+                block: 2,
+            },
+            at(4),
+        )
+        .unwrap();
+        let later = || at(77);
+        block_on(drive_with(&fake, later, &open_pool));
+        // in the queue's order
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                format!("transfer {}", usdc(199)),
+                format!("transfer {}", usdc(9))
+            ]
+        );
+        let mut paid = fake.transfers();
+        paid.sort_by_key(|(_, to, _)| to.owner);
+        assert_eq!(
+            paid,
+            vec![
+                (ckusdc(), account(1), usdc(199)),
+                (ckusdc(), account(2), usdc(9)),
+            ]
+        );
+        for r#ref in [big, small] {
+            let paid = deposit(&r#ref).unwrap();
+            assert_eq!(paid.status, DepositStatus::Paid);
+            assert_eq!(paid.payout.attempt.unwrap().created_at, at(77));
+        }
+        assert!(ledger().queue.0.is_empty());
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+    });
+}

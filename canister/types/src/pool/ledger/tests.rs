@@ -288,9 +288,11 @@ fn the_ref_and_the_fee_it_commits_are_checked() {
     );
 }
 
+/// Jeff's hold rule (2026-10-21): a registration holds nothing, so many registrations may
+/// each find the free ckUSDC at their own moment; the open limits and that free check stay.
 #[test]
-fn the_open_limit_and_the_held_cap_are_kept() {
-    let mut pool = funded(usdc(1_000));
+fn the_open_limit_and_the_free_check_are_kept() {
+    let mut pool = funded(usdc(500));
     for byte in 1..=3 {
         let terms = swap(byte, usdc(10), usdc(1));
         check_terms(&pool.ledger, &terms).unwrap();
@@ -303,27 +305,30 @@ fn the_open_limit_and_the_held_cap_are_kept() {
             "too many open deposits".to_string()
         ))
     );
-    // 27 of 1000 held; half of the pocket may be: 500 - 27 = 473 more, 474 is too much
-    let mut other = swap(4, usdc(475), usdc(1));
-    other.src_payer = "0x1111111111111111111111111111111111111111"
-        .parse()
-        .unwrap();
+    // another payer: 501 of free ckUSDC is one too many, 500 fits, and so does it again,
+    // since nothing is held
+    let other = |byte: u8, min_usdc| {
+        let mut terms = swap(byte, min_usdc, usdc(1));
+        terms.src_payer = EvmAddress::new([byte; 20]);
+        terms
+    };
     assert_eq!(
-        check_terms(&pool.ledger, &other),
+        check_terms(&pool.ledger, &other(5, usdc(502))),
         Err(RegisterRefusal::PocketShort)
     );
-    other.min_usdc = usdc(474);
-    assert_eq!(check_terms(&pool.ledger, &other), Ok(()));
+    register(&mut pool, other(5, usdc(501)));
+    assert_eq!(check_terms(&pool.ledger, &other(6, usdc(501))), Ok(()));
+    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
 }
 
-/// A good registration reserves `min_usdc - premium` of the ICP pocket; its expiry releases
-/// it; a stake holds TVL room and nothing on ICP.
+/// Jeff's hold rule: a registration, swap or stake, holds nothing of the pockets nor of the
+/// TVL room, and its expiry releases nothing.
 #[test]
-fn a_registration_holds_and_its_expiry_releases() {
+fn a_registration_holds_nothing() {
     let mut pool = funded(usdc(1_000));
     let r#ref = register(&mut pool, swap(1, usdc(100), usdc(1)));
-    assert_eq!(pool.ledger.pockets.icp.reserved, usdc(99));
-    assert_eq!(pool.ledger.pockets.icp.free, usdc(901));
+    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
+    assert_eq!(pool.ledger.pockets.icp.free, usdc(1_000));
     assert_eq!(pool.ledger.open_of(&PoolAccount::Evm(payer()).key()), 1);
     assert!(pool.ledger.open.contains(&r#ref));
     // registered twice
@@ -335,7 +340,6 @@ fn a_registration_holds_and_its_expiry_releases() {
         Err(PoolStepError::Known(r#ref))
     );
     pool.step(PoolStep::Expired { r#ref }).unwrap();
-    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
     assert_eq!(pool.ledger.pockets.icp.free, usdc(1_000));
     assert_eq!(pool.ledger.open_of(&PoolAccount::Evm(payer()).key()), 0);
     assert!(pool.ledger.open.is_empty());
@@ -343,10 +347,9 @@ fn a_registration_holds_and_its_expiry_releases() {
     assert!(pool.step(PoolStep::Expired { r#ref }).is_err());
 
     let staked = register(&mut pool, stake(2, usdc(50), TokenAmount::ZERO));
-    assert_eq!(pool.ledger.stake_room, usdc(50));
-    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
-    pool.step(PoolStep::Expired { r#ref: staked }).unwrap();
     assert_eq!(pool.ledger.stake_room, TokenAmount::ZERO);
+    pool.step(PoolStep::Expired { r#ref: staked }).unwrap();
+    assert_eq!(pool.ledger.tvl_measure(), usdc(1_000));
 }
 
 /// Review Focus 1 at the fold: one transfer log is credited once, whatever names it.
@@ -390,9 +393,9 @@ fn a_transfer_is_credited_once() {
 }
 
 /// Review Focus 4 at the fold: a late arrival is recorded unattributed with its payer,
-/// closes its registration, releases its hold, and is no pool asset.
+/// closes its registration, and is no pool asset.
 #[test]
-fn a_late_arrival_is_unattributed_and_releases_its_hold() {
+fn a_late_arrival_is_unattributed_and_closes_its_registration() {
     let mut pool = funded(usdc(1_000));
     let r#ref = register(&mut pool, swap(1, usdc(100), usdc(1)));
     let before = pool.ledger.total_assets();
@@ -689,6 +692,16 @@ fn a_payout_stops_after_ten_failures() {
         block: BlockNumber::new(10),
     })
     .unwrap();
+    // started: the hold is taken
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+        },
+    })
+    .unwrap();
     for n in 1..=MAX_PAYOUT_ATTEMPTS {
         pool.step(PoolStep::AttemptFailed {
             r#ref,
@@ -886,69 +899,117 @@ fn a_step_round_trips_through_its_bytes() {
 }
 
 /// Review fix: the caps are measured on what arrived, not on what was registered. A swap that
-/// arrives above the per-swap cap, or whose larger payout the ICP pocket's free ckUSDC
-/// cannot hold, and a stake that arrives past the TVL cap, are no credit; a swap that arrives
-/// a little larger holds its whole payout and fee, so no other hold is spent.
+/// arrives above the per-swap cap, or a stake that arrives past the TVL cap, is no credit.
+/// Jeff's hold rule: a swap the ICP pocket cannot cover yet is credited all the same, its
+/// payout owed and queued, first in first out; it starts (and holds) once the free ckUSDC
+/// covers it, and a withdrawal waits behind it.
 #[test]
 fn an_arrival_is_measured_on_what_arrived() {
-    let arrived = |r#ref, amount| PoolStep::Arrived {
+    let arrived = |r#ref, credit_log, amount| PoolStep::Arrived {
         r#ref,
-        credit: credit(9),
+        credit: credit(credit_log),
         amount,
         block: BlockNumber::new(10),
     };
+    let started = |r#ref: PoolRef| PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+        },
+    };
     let mut pool = funded(usdc(300));
-    let swap_ref = register(&mut pool, swap(1, usdc(100), usdc(1)));
+    let first = register(&mut pool, swap(1, usdc(100), usdc(1)));
+    let second = register(&mut pool, swap(2, usdc(100), usdc(1)));
     assert_eq!(
-        pool.step(arrived(swap_ref, usdc(1_001))),
+        pool.step(arrived(first, 9, usdc(1_001))),
         Err(PoolStepError::DoesNotFit("above the per-swap cap"))
     );
-    // 201 free beside the 99 held: a payout of 399 and its fee needs 300.01 more
+    // 400 arrives: a payout of 399 and its fee, more than the 300 free, credited and queued
+    pool.step(arrived(first, 9, usdc(400))).unwrap();
+    let held = usdc(399).checked_add(TokenAmount::from(FEE)).unwrap();
+    assert_eq!(pool.deposits[&first].status, DepositStatus::Arrived);
+    assert_eq!(pool.deposits[&first].held, Some(held));
+    assert_eq!(pool.ledger.queue.head(), Some((first, held)));
+    assert_eq!(pool.ledger.owed, held);
+    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
+    assert!(matches!(
+        pool.step(started(first)),
+        Err(PoolStepError::PocketShort { .. })
+    ));
+    // the second queues behind it, and may not start ahead of it
+    pool.step(arrived(second, 10, usdc(100))).unwrap();
     assert_eq!(
-        pool.step(arrived(swap_ref, usdc(400))),
-        Err(PoolStepError::DoesNotFit(
-            "the ICP pocket cannot hold the payout"
-        ))
+        pool.step(started(second)),
+        Err(PoolStepError::Terms("a payout starts first in first out"))
     );
-    pool.step(arrived(swap_ref, usdc(150))).unwrap();
-    let held = usdc(149).checked_add(TokenAmount::from(FEE)).unwrap();
-    assert_eq!(pool.deposits[&swap_ref].held, Some(held));
+    // a withdrawal waits behind the queue: nothing is free once the queue is counted
+    assert_eq!(pool.ledger.icp_available(), TokenAmount::ZERO);
+    let owner = recipient(200);
+    let withdraw = PoolStep::WithdrawStarted {
+        id: PoolOpId::new([0x42; 32]),
+        owner,
+        burned: pool.shares_of(&PoolAccount::Icp(owner).key()),
+        usdc: usdc(1),
+        to: owner,
+        token_out: ckusdc(),
+        min_out: 0,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(6),
+            memo: [0x42; 32],
+            path: PayoutPath::Ckusdc,
+        },
+    };
+    assert!(matches!(
+        pool.step(withdraw),
+        Err(PoolStepError::PocketShort { .. })
+    ));
+    // the pocket grows (a stake on ICP): the head starts and holds all it needs
+    let id = PoolOpId::new([0x43; 32]);
+    pool.step(PoolStep::StakeStarted {
+        id,
+        owner: PoolAccount::Icp(recipient(201)),
+        from: recipient(201),
+        amount: usdc(200),
+        created_at: Timestamp::from_nanos(7),
+    })
+    .unwrap();
+    let shares = pool.ledger.mint_now(usdc(200)).unwrap();
+    pool.step(PoolStep::StakedIcp {
+        id,
+        owner: PoolAccount::Icp(recipient(201)),
+        amount: usdc(200),
+        rebalance_share: TokenAmount::ZERO,
+        shares,
+        block: 3,
+    })
+    .unwrap();
+    pool.step(started(first)).unwrap();
     assert_eq!(pool.ledger.pockets.icp.reserved, held);
     assert_eq!(
         pool.ledger.pockets.icp.free,
-        usdc(300).checked_sub(held).unwrap()
+        usdc(500).checked_sub(held).unwrap()
     );
-    pool.step(PoolStep::PayoutStarted {
-        r#ref: swap_ref,
-        attempt: PayoutAttempt {
-            created_at: Timestamp::from_nanos(5),
-            memo: swap_ref.into_bytes(),
-            path: PayoutPath::Ckusdc,
-        },
-    })
-    .unwrap();
+    assert_eq!(pool.ledger.queue.head().map(|(head, _)| head), Some(second));
     pool.step(PoolStep::Paid {
-        r#ref: swap_ref,
+        r#ref: first,
         token: ckusdc(),
-        amount: usdc(149),
+        amount: usdc(399),
         block: 1,
         spent: held,
     })
     .unwrap();
     assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
-    assert_eq!(
-        pool.ledger.pockets.icp.free,
-        usdc(300).checked_sub(held).unwrap()
-    );
 
     // a stake registered small and arriving large: past the TVL cap is no credit
     let mut full = funded(usdc(9_990));
     let stake_ref = register(&mut full, stake(2, usdc(10), TokenAmount::ZERO));
     assert_eq!(
-        full.step(arrived(stake_ref, usdc(5_000))),
+        full.step(arrived(stake_ref, 9, usdc(5_000))),
         Err(PoolStepError::DoesNotFit("above the TVL cap"))
     );
-    full.step(arrived(stake_ref, usdc(10))).unwrap();
+    full.step(arrived(stake_ref, 9, usdc(10))).unwrap();
 }
 
 /// The premium floor both sides use (aligned with P13a): the settings' share rounded up, and
