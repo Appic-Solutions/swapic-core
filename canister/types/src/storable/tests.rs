@@ -647,6 +647,8 @@ fn pool_samples() -> Vec<Sample> {
         path: PayoutPath::Icpswap {
             pool: principal(0x77),
         },
+        amount: None,
+        token: None,
     };
     let ledger = PoolLedger {
         settings: Some(PoolSettings {
@@ -704,6 +706,10 @@ fn pool_samples() -> Vec<Sample> {
                         declined: 1,
                         begun: true,
                         out: Some(TokenAmount::from(0x9b_u8)),
+                        // absent, so this sample's bytes stay the ones the golden pins
+                        send: None,
+                        approvals: None,
+                        undone: None,
                     },
                     failures: 3,
                     fell_back: None,
@@ -793,6 +799,29 @@ fn pool_samples() -> Vec<Sample> {
         held: Some(TokenAmount::from(171_030_000_u32)),
         ..deposit.clone()
     };
+    // the deposit above with its payout's transfers fixed: the attempt's amount and ledger,
+    // the output's transfer, the approvals counted, a swap undone
+    let fixed = Registered {
+        payout: PayoutProgress {
+            attempt: Some(PayoutAttempt {
+                amount: Some(TokenAmount::from(184_000_000_u32)),
+                token: Some(crate::pool::PrincipalBytes(principal(0xb9))),
+                ..attempt
+            }),
+            swap: SwapLeg {
+                declined: 1,
+                begun: true,
+                out: Some(TokenAmount::from(185_u8)),
+                send: Some(TokenAmount::from(186_u8)),
+                approvals: Some(2),
+                undone: Some(TokenAmount::from(187_u8)),
+            },
+            failures: 1,
+            fell_back: None,
+            failed: None,
+        },
+        ..holding.clone()
+    };
     vec![
         sample("pool ledger", ledger),
         sample("pool deposit", deposit),
@@ -813,6 +842,7 @@ fn pool_samples() -> Vec<Sample> {
         sample("pool deposit with what it holds", holding),
         sample("pool ledger with payouts queued", queued),
         sample("pool ledger whose queue's head waits", waiting),
+        sample("pool deposit whose payout fixed its transfers", fixed),
     ]
 }
 

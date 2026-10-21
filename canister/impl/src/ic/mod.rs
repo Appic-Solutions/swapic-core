@@ -364,9 +364,56 @@ pub async fn deposit_from_and_swap(
         token_out_fee,
     };
     let (answer,): (PoolResult<Nat>,) = call(pool, "depositFromAndSwap", (arg,)).await?;
+    // the pool's own `err` answer: the swap did not happen (what was deposited, if anything,
+    // is the canister's unused balance at the pool)
     answer
         .into_result()
-        .map_err(|error| CallError::Unknown(format!("the pool answered {error:?}")))
+        .map_err(|error| CallError::Refused(format!("the pool answered {error:?}")))
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct UnusedBalance {
+    balance0: Nat,
+    balance1: Nat,
+}
+
+/// The canister's unused balances at an ICPSwap pool (`getUserUnusedBalance`): what it
+/// deposited and did not swap, and what a swap paid it and was not withdrawn, as token0 and
+/// token1. ICPSwap's SwapPool interface, not exercised against a live pool in this build.
+pub async fn pool_unused_balance(pool: Principal) -> Result<(Nat, Nat), CallError> {
+    let (answer,): (PoolResult<UnusedBalance>,) =
+        call(pool, "getUserUnusedBalance", (ic_cdk::api::id(),)).await?;
+    answer
+        .into_result()
+        .map(|unused| (unused.balance0, unused.balance1))
+        .map_err(|error| CallError::Refused(format!("{error:?}")))
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct PoolWithdrawArgs {
+    token: String,
+    fee: Nat,
+    amount: Nat,
+}
+
+/// ICPSwap's `withdraw` of the canister's unused `amount` of `token` back to its own account,
+/// the ledger's `fee` out of it: answers what was withdrawn. ICPSwap's SwapPool interface,
+/// not exercised against a live pool in this build.
+pub async fn pool_withdraw(
+    pool: Principal,
+    token: Principal,
+    amount: Nat,
+    fee: Nat,
+) -> Result<Nat, CallError> {
+    let arg = PoolWithdrawArgs {
+        token: token.to_text(),
+        fee,
+        amount,
+    };
+    let (answer,): (PoolResult<Nat>,) = call(pool, "withdraw", (arg,)).await?;
+    answer
+        .into_result()
+        .map_err(|error| CallError::Refused(format!("{error:?}")))
 }
 
 // The ckETH minter, the calls made.

@@ -483,10 +483,15 @@ impl PoolLedger {
                     payout.attempt.map(|attempt| attempt.path),
                     Some(PayoutPath::Icpswap { .. })
                 );
-                if !target.in_payout() || !on_icpswap || payout.swap.begun {
+                // a leg falls back before its swap, or after one that did not happen and was
+                // undone (the driver read the pool to know): never once the swap paid out
+                if !target.in_payout() || !on_icpswap || payout.swap.out.is_some() {
                     return Err(PoolStepError::Terms(
-                        "only an ICPSwap leg not begun falls back",
+                        "only an ICPSwap leg with no output falls back",
                     ));
+                }
+                if payout.swap.begun && payout.swap.undone.is_none() {
+                    return Err(PoolStepError::Terms("a begun swap falls back once undone"));
                 }
                 Ok(())
             }
@@ -632,6 +637,25 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::SwapApproved { r#ref } | PoolStep::SwapUndone { r#ref, .. } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
+                let on_icpswap = matches!(
+                    payout.attempt.map(|attempt| attempt.path),
+                    Some(PayoutPath::Icpswap { .. })
+                );
+                if !target.in_payout() || !on_icpswap || payout.swap.out.is_some() {
+                    return Err(PoolStepError::Terms("the ICPSwap leg has its output"));
+                }
+                if matches!(step, PoolStep::SwapUndone { .. })
+                    && (!payout.swap.begun || payout.swap.undone.is_some())
+                {
+                    return Err(PoolStepError::Terms("only a begun swap is undone, once"));
+                }
+                Ok(())
+            }
             PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
             PoolStep::ScanCursor { block } => match self.scan_cursor {
                 Some(at) if *block < at => Err(PoolStepError::CursorBack { at, to: *block }),
@@ -768,11 +792,19 @@ impl PoolLedger {
                     deposit_out = Some((*r#ref, deposit));
                 }
             }
-            PoolStep::FellBack { r#ref, why } => {
+            PoolStep::FellBack {
+                r#ref,
+                why,
+                amount,
+                token,
+            } => {
                 let why = why.clone();
+                let (amount, token) = (*amount, *token);
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
                     if let Some(attempt) = payout.attempt.as_mut() {
                         attempt.path = PayoutPath::Ckusdc;
+                        attempt.amount = amount;
+                        attempt.token = token;
                     }
                     payout.fell_back = Some(why);
                 });
@@ -843,10 +875,12 @@ impl PoolLedger {
             PoolStep::SwapBegun { r#ref } => {
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| payout.swap.begun = true);
             }
-            PoolStep::Swapped { r#ref, out } => {
-                let out = *out;
-                deposit_out =
-                    ledger.with_payout(r#ref, lookup, |payout| payout.swap.out = Some(out));
+            PoolStep::Swapped { r#ref, out, send } => {
+                let (out, send) = (*out, *send);
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    payout.swap.out = Some(out);
+                    payout.swap.send = send;
+                });
             }
             PoolStep::StakeStarted {
                 id,
@@ -913,6 +947,18 @@ impl PoolLedger {
                         },
                     },
                 );
+            }
+            PoolStep::SwapApproved { r#ref } => {
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    payout.swap.approvals =
+                        Some(payout.swap.approvals.unwrap_or(0).saturating_add(1));
+                });
+            }
+            PoolStep::SwapUndone { r#ref, cost } => {
+                let cost = *cost;
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    payout.swap.undone = Some(cost);
+                });
             }
             PoolStep::IcpChecked { check } => {
                 ledger.icp_check = Some(*check);

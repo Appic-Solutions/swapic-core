@@ -7,7 +7,7 @@ use crate::storage::pool::{deposit, ledger, record_at};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use types::hash::PoolOpId;
-use types::pool::{IcpToken, LedgerFee, PoolAccount, Shares};
+use types::pool::{IcpToken, LedgerFee, PoolAccount, PrincipalBytes, Shares};
 use types::BlockNumber;
 
 /// Runs a future that never waits: every call of the fake ledger answers at once.
@@ -62,6 +62,10 @@ struct Fake {
     quote: Cell<Option<TokenAmount>>,
     /// None: the swap's answer never comes
     swap_out: Cell<Option<TokenAmount>>,
+    /// The pool answers the swap with its own `err`.
+    swap_refused: Cell<bool>,
+    /// The canister's unused balances at the pool, token0 (ckUSDC) and token1; None: none.
+    unused: Cell<Option<(TokenAmount, TokenAmount)>>,
     /// The status of the deposit under watch at each money call
     watch: Cell<Option<PoolRef>>,
     seen: RefCell<Vec<Option<DepositStatus>>>,
@@ -170,9 +174,44 @@ impl Ledgers for Fake {
         self.calls
             .borrow_mut()
             .push(format!("swap {amount_in} at least {min_out}"));
+        if self.swap_refused.replace(false) {
+            return Err(CallError::Refused("the pool answered Err(slippage)".into()));
+        }
         self.swap_out
             .get()
             .ok_or_else(|| CallError::Unknown("the pool did not answer".into()))
+    }
+
+    async fn unused(&self, _pool: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
+        self.calls.borrow_mut().push("unused".to_string());
+        Ok(self
+            .unused
+            .get()
+            .unwrap_or((TokenAmount::ZERO, TokenAmount::ZERO)))
+    }
+
+    async fn withdraw(
+        &self,
+        _pool: Principal,
+        token: Principal,
+        amount: TokenAmount,
+        fee: TokenAmount,
+    ) -> Result<(), CallError> {
+        let name = if token == ckusdc() { "ckUSDC" } else { "token" };
+        self.calls
+            .borrow_mut()
+            .push(format!("withdraw {name} {amount} fee {fee}"));
+        let (ck, other) = self
+            .unused
+            .get()
+            .unwrap_or((TokenAmount::ZERO, TokenAmount::ZERO));
+        let less = |left: TokenAmount| left.checked_sub(amount).unwrap_or(TokenAmount::ZERO);
+        self.unused.set(Some(if token == ckusdc() {
+            (less(ck), other)
+        } else {
+            (ck, less(other))
+        }));
+        Ok(())
     }
 }
 
@@ -322,8 +361,9 @@ fn a_leg_below_its_minimum_pays_all_of_it_as_ckusdc() {
         crate::storage::init();
         let r#ref = arrived_swap(token(), 5_000);
         let fake = Fake::default();
-        // the recipient needs 5000 after the token's 1000 fee: 5999 is one short
-        fake.quote.set(Some(TokenAmount::from(5_999_u32)));
+        // the recipient needs 5000 after the token's 1000 fee, twice (the pool's withdrawal
+        // to the canister and the canister's transfer): 6999 is one short
+        fake.quote.set(Some(TokenAmount::from(6_999_u32)));
         assert_eq!(
             block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Later)
@@ -345,7 +385,7 @@ fn a_leg_below_its_minimum_pays_all_of_it_as_ckusdc() {
 }
 
 /// The ICPSwap leg: quote, approve, `SwapBegun`, the swap at the minimum plus the token's
-/// fee, `Swapped`, and the output less its fee to the recipient.
+/// fee twice, `Swapped`, and the output less those fees to the recipient.
 #[test]
 fn an_icpswap_leg_pays_its_output() {
     on_fresh_memory(|| {
@@ -364,14 +404,17 @@ fn an_icpswap_leg_pays_its_output() {
                     "approve {}",
                     usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
                 ),
-                format!("swap {} at least 6000", usdc(99)),
-                "transfer 6900".to_string(),
+                format!("swap {} at least 7000", usdc(99)),
+                "transfer 5900".to_string(),
             ]
         );
         assert_eq!(
             fake.transfers(),
-            vec![(token(), account(1), TokenAmount::from(6_900_u32))]
+            vec![(token(), account(1), TokenAmount::from(5_900_u32))]
         );
+        let leg = deposit(&r#ref).unwrap().payout.swap;
+        assert_eq!(leg.approvals, Some(1));
+        assert_eq!(leg.send, Some(TokenAmount::from(5_900_u32)));
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
         assert_eq!(
@@ -681,6 +724,8 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
                     created_at: at(4),
                     memo: started.into_bytes(),
                     path: PayoutPath::Ckusdc,
+                    amount: None,
+                    token: None,
                 },
             },
             at(4),
@@ -709,6 +754,8 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
                     created_at: at(4),
                     memo: id.into_bytes(),
                     path: PayoutPath::Ckusdc,
+                    amount: None,
+                    token: None,
                 },
             },
             at(4),
@@ -767,5 +814,470 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
         assert_eq!(deposit(&head).unwrap().status, DepositStatus::Arrived);
         assert_eq!(ledger().queue.head().map(|(r#ref, _)| r#ref), Some(head));
         assert_eq!(ALERTED_HEAD.with(|alerted| alerted.get()), Some(head));
+    });
+}
+
+/// Another swap of 100 USDC for `account(byte)`, paid in `token_out`, arrived in a pool
+/// `arrived_swap` set up.
+fn arrive(byte: u8, token_out: Principal, min_out: u128) -> PoolRef {
+    let mut terms = swap_terms(byte, usdc(100), usdc(1), at(1_000));
+    terms.kind = DepositKind::Swap {
+        recipient: account(byte),
+        token_out,
+        min_out,
+    };
+    let r#ref = register(terms);
+    record_at(
+        PoolStep::Arrived {
+            r#ref,
+            credit: credit(byte.into()),
+            amount: usdc(100),
+            block: BlockNumber::new(5),
+        },
+        at(3),
+    )
+    .unwrap();
+    r#ref
+}
+
+fn fees(count: u64) -> TokenAmount {
+    TokenAmount::from(count * FEE)
+}
+
+/// Review fix 4: the pool's own refusal after `SwapBegun`. Its ckUSDC left at the pool is
+/// withdrawn back, the swap undone, and all of it paid as ckUSDC; with nothing at the pool
+/// the deposit never happened, and all of it is paid as ckUSDC too. What the leg cost is in
+/// what the payout spent.
+#[test]
+fn a_refused_swap_is_undone_and_paid_all_as_ckusdc() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_refused.set(true);
+        // the pool took the deposit, then refused the swap: the ckUSDC stays there
+        fake.unused.set(Some((usdc(99), TokenAmount::ZERO)));
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                format!("quote {}", usdc(99)),
+                format!("approve {}", usdc(99).checked_add(fees(1)).unwrap()),
+                format!("swap {} at least 7000", usdc(99)),
+                "unused".to_string(),
+                format!("withdraw ckUSDC {} fee {FEE}", usdc(99)),
+                format!("transfer {}", usdc(99)),
+            ]
+        );
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        let paid = deposit(&r#ref).unwrap();
+        assert_eq!(paid.status, DepositStatus::Paid);
+        // the deposit's pull and the withdrawal's transfer
+        assert_eq!(paid.payout.swap.undone, Some(fees(2)));
+        assert!(paid.payout.fell_back.is_some());
+        // 99 to the recipient, its transfer's fee, the approval's, and the undone swap's two
+        assert_eq!(
+            paid.paid.unwrap().spent,
+            usdc(99).checked_add(fees(4)).unwrap()
+        );
+
+        // refused before its deposit: nothing at the pool, nothing withdrawn
+        let other = arrive(2, token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_refused.set(true);
+        block_on(drive_deposit(&fake, other, clock, &open_pool)).unwrap();
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("withdraw")));
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), usdc(99))]);
+        let paid = deposit(&other).unwrap();
+        assert_eq!(paid.payout.swap.undone, Some(TokenAmount::ZERO));
+        assert_eq!(
+            paid.paid.unwrap().spent,
+            usdc(99).checked_add(fees(2)).unwrap()
+        );
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
+    });
+}
+
+/// Review fix 4: a swap whose answer never came is settled by what the pool holds of the
+/// canister's: its output there is withdrawn and paid; all of its ckUSDC there is withdrawn
+/// back and paid as ckUSDC; anything else is unknown, and nothing is withdrawn.
+#[test]
+fn a_swap_with_no_answer_is_settled_by_what_the_pool_holds() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let swapped = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.unused
+            .set(Some((TokenAmount::ZERO, TokenAmount::from(7_900_u32))));
+        block_on(drive_deposit(&fake, swapped, clock, &open_pool)).unwrap();
+        assert!(fake
+            .calls
+            .borrow()
+            .contains(&format!("withdraw token 7900 fee {TOKEN_FEE}")));
+        assert_eq!(
+            fake.transfers(),
+            vec![(token(), account(1), TokenAmount::from(5_900_u32))]
+        );
+        let paid = deposit(&swapped).unwrap();
+        assert_eq!(paid.status, DepositStatus::Paid);
+        assert_eq!(paid.payout.swap.out, Some(TokenAmount::from(7_900_u32)));
+        assert_eq!(
+            paid.paid.unwrap().spent,
+            usdc(99).checked_add(fees(2)).unwrap()
+        );
+
+        let not_swapped = arrive(2, token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.unused.set(Some((usdc(99), TokenAmount::ZERO)));
+        block_on(drive_deposit(&fake, not_swapped, clock, &open_pool)).unwrap();
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), usdc(99))]);
+        assert_eq!(
+            deposit(&not_swapped).unwrap().payout.swap.undone,
+            Some(fees(2))
+        );
+
+        // part of its amount in at the pool, after an answer that never came: unknown
+        let unknown = arrive(3, token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.unused.set(Some((usdc(50), TokenAmount::ZERO)));
+        assert_eq!(
+            block_on(drive_deposit(&fake, unknown, clock, &open_pool)),
+            Err(Stop::Failed(
+                "the ICPSwap swap's outcome is unknown".to_string()
+            ))
+        );
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("withdraw")));
+        assert!(fake.transfers().is_empty());
+    });
+}
+
+/// Review fix 9: one leg at a time at an ICPSwap pool. A payout whose pool another leg holds
+/// waits, calls nothing and counts nothing; once the pool is free it goes on.
+#[test]
+fn two_legs_never_work_one_icpswap_pool_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        let held = Leg::take(icpswap_pool()).unwrap();
+        // a refused taker never releases the holder's pool
+        assert!(Leg::take(icpswap_pool()).is_none());
+        assert!(Leg::take(icpswap_pool()).is_none());
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap_err();
+        assert!(matches!(stop, Stop::Retry(why) if why.contains("another payout's leg")));
+        assert!(fake.calls.borrow().is_empty());
+        assert_eq!(deposit(&r#ref).unwrap().payout.failures, 0);
+        drop(held);
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
+        assert!(Leg::take(icpswap_pool()).is_some(), "released once paid");
+    });
+}
+
+/// Found by the test above: a refused taker of a payout's guard built a guard and dropped
+/// it, which released the holder's id, so a third taker ran beside the first. It holds now.
+#[test]
+fn a_refused_taker_never_releases_a_busy_payout() {
+    let held = Busy::take([0x42; 32]).unwrap();
+    assert!(Busy::take([0x42; 32]).is_none());
+    assert!(Busy::take([0x42; 32]).is_none(), "still held");
+    drop(held);
+    assert!(Busy::take([0x42; 32]).is_some());
+}
+
+/// Review fix 9: every approval's fee is the payout's: a leg approved, then stopped by the
+/// pool's guard, approves again on the next drive, and both fees are in what it spent.
+#[test]
+fn every_approval_is_counted_in_what_the_payout_spent() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        let reads = Cell::new(0);
+        let open_once = || {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                Ok(())
+            } else {
+                Err("a controller paused the pool".to_string())
+            }
+        };
+        let stop = block_on(drive_deposit(&fake, r#ref, clock, &open_once)).unwrap_err();
+        assert!(matches!(stop, Stop::Retry(_)));
+        assert_eq!(deposit(&r#ref).unwrap().payout.swap.approvals, Some(1));
+        assert!(!deposit(&r#ref).unwrap().payout.swap.begun);
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        let paid = deposit(&r#ref).unwrap();
+        assert_eq!(paid.payout.swap.approvals, Some(2));
+        // 99 swapped, the pool's pull, two approvals
+        assert_eq!(
+            paid.paid.unwrap().spent,
+            usdc(99).checked_add(fees(3)).unwrap()
+        );
+    });
+}
+
+/// Review fix 12: a token no longer listed with its pool before the swap began falls back
+/// to ckUSDC, all of it, without asking the pool anything.
+#[test]
+fn a_token_delisted_before_its_swap_falls_back() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: r#ref.into_bytes(),
+                    path: PayoutPath::Icpswap {
+                        pool: icpswap_pool(),
+                    },
+                    amount: Some(usdc(99)),
+                    token: Some(PrincipalBytes(ckusdc())),
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+        record_at(
+            PoolStep::SettingsSet {
+                settings: settings(),
+            },
+            at(5),
+        )
+        .unwrap();
+        let fake = Fake::default();
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(*fake.calls.borrow(), vec![format!("transfer {}", usdc(99))]);
+        let paid = deposit(&r#ref).unwrap();
+        assert_eq!(paid.paid.unwrap().token, ckusdc());
+        assert!(paid
+            .payout
+            .fell_back
+            .is_some_and(|why| why.contains("no longer listed")));
+    });
+}
+
+/// Review fix 8: the exact transfer is fixed when it is first known and every retry reuses
+/// it, whatever the settings say by then: a withdrawal's ckUSDC amount from its start, a
+/// swap's output transfer from its `Swapped`.
+#[test]
+fn a_retry_reuses_the_transfer_its_payout_fixed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let owner = account(200);
+        let id = PoolOpId::new([0x61; 32]);
+        let pool = ledger();
+        let burned = Shares::burn_for(usdc(100), pool.total_assets(), pool.total_shares).unwrap();
+        let fixed = usdc(100).checked_sub(fees(1)).unwrap();
+        record_at(
+            PoolStep::WithdrawStarted {
+                id,
+                owner,
+                burned,
+                usdc: usdc(100),
+                to: owner,
+                token_out: ckusdc(),
+                min_out: 0,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: id.into_bytes(),
+                    path: PayoutPath::Ckusdc,
+                    amount: Some(fixed),
+                    token: Some(PrincipalBytes(ckusdc())),
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        // both transfers' answers are lost
+        fake.lose_answers.set(2);
+        assert!(matches!(
+            block_on(drive_withdrawal(&fake, id, clock, &open_pool)),
+            Err(Stop::Retry(_))
+        ));
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Retry(_))
+        ));
+        // the fees change before the retries
+        let mut dearer = settings();
+        dearer.icp_tokens = vec![IcpToken {
+            ledger: token(),
+            icpswap_pool: icpswap_pool(),
+        }];
+        dearer.ledger_fees = vec![
+            LedgerFee {
+                ledger: ckusdc(),
+                fee: fees(3),
+            },
+            LedgerFee {
+                ledger: token(),
+                fee: TokenAmount::from(3 * TOKEN_FEE),
+            },
+        ];
+        record_at(PoolStep::SettingsSet { settings: dearer }, at(6)).unwrap();
+        assert!(block_on(drive_withdrawal(&fake, id, clock, &open_pool))
+            .unwrap()
+            .is_some());
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        let transfers: Vec<String> = fake
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call.starts_with("transfer"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            transfers,
+            vec![
+                format!("transfer {fixed}"),
+                "transfer 5900".to_string(),
+                format!("transfer {fixed}"),
+                "transfer 5900".to_string(),
+            ]
+        );
+        assert_eq!(
+            fake.transfers(),
+            vec![
+                (ckusdc(), owner, fixed),
+                (token(), account(1), TokenAmount::from(5_900_u32)),
+            ]
+        );
+    });
+}
+
+/// Review (payout, upgrade): a payout started before this build (its attempt with no amount
+/// or ledger, its output with no transfer fixed, its approvals not counted) is still driven
+/// to its end after the upgrade, its amounts worked out as they were then.
+#[test]
+fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let old_attempt = |r#ref: PoolRef, path: PayoutPath| PayoutAttempt {
+            created_at: at(4),
+            memo: r#ref.into_bytes(),
+            path,
+            amount: None,
+            token: None,
+        };
+        // a ckUSDC payout started
+        let ckusdc_payout = arrived_swap(ckusdc(), 1);
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref: ckusdc_payout,
+                attempt: old_attempt(ckusdc_payout, PayoutPath::Ckusdc),
+            },
+            at(4),
+        )
+        .unwrap();
+        // a token payout swapped, its output not sent yet
+        let swapped = arrive(2, token(), 5_000);
+        let path = PayoutPath::Icpswap {
+            pool: icpswap_pool(),
+        };
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref: swapped,
+                attempt: old_attempt(swapped, path),
+            },
+            at(4),
+        )
+        .unwrap();
+        record_at(PoolStep::SwapBegun { r#ref: swapped }, at(4)).unwrap();
+        record_at(
+            PoolStep::Swapped {
+                r#ref: swapped,
+                out: TokenAmount::from(7_900_u32),
+                send: None,
+            },
+            at(4),
+        )
+        .unwrap();
+        // a token payout started, its leg not begun
+        let not_begun = arrive(3, token(), 5_000);
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref: not_begun,
+                attempt: old_attempt(not_begun, path),
+            },
+            at(4),
+        )
+        .unwrap();
+        // a withdrawal started
+        let owner = account(200);
+        let id = PoolOpId::new([0x61; 32]);
+        let pool = ledger();
+        let burned = Shares::burn_for(usdc(100), pool.total_assets(), pool.total_shares).unwrap();
+        record_at(
+            PoolStep::WithdrawStarted {
+                id,
+                owner,
+                burned,
+                usdc: usdc(100),
+                to: owner,
+                token_out: ckusdc(),
+                min_out: 0,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: id.into_bytes(),
+                    path: PayoutPath::Ckusdc,
+                    amount: None,
+                    token: None,
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        block_on(drive_with(&fake, clock, &open_pool));
+        let mut paid = fake.transfers();
+        paid.sort_by_key(|(_, to, _)| to.owner);
+        assert_eq!(
+            paid,
+            vec![
+                (ckusdc(), account(1), usdc(99)),
+                // the output less the token's fee, as an output was sent then
+                (token(), account(2), TokenAmount::from(6_900_u32)),
+                // swapped now, under this build's rule
+                (token(), account(3), TokenAmount::from(5_900_u32)),
+                (ckusdc(), owner, usdc(100).checked_sub(fees(1)).unwrap()),
+            ]
+        );
+        for r#ref in [ckusdc_payout, swapped, not_begun] {
+            assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
+        }
+        // the old leg's one approval, presumed, is in what it spent
+        assert_eq!(
+            deposit(&swapped).unwrap().paid.unwrap().spent,
+            usdc(99).checked_add(fees(2)).unwrap()
+        );
+        assert!(ledger().pending.is_empty());
+        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
 }

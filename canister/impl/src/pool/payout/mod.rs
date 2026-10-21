@@ -7,11 +7,22 @@
 //! - `PayoutStarted`: the dedup pair (`created_at_time`, memo = the ref) and the path. Every
 //!   ICRC transfer of the payout carries this pair, so a transfer whose answer was lost is
 //!   asked again as the same transfer, and the ledger answers `Duplicate`, which is paid.
-//! - ICPSwap: the pool's own quote first; below the minimum, `SwapDeclined` and once more on
-//!   the next drive, then `FellBack` and ALL of it as ckUSDC (all or nothing, never a mix).
-//!   Then the approval, `SwapBegun`, `depositFromAndSwap`, `Swapped` with its output, and the
-//!   output's transfer. A swap begun with no answer is never called again: its outcome is
-//!   unknown, and the payout stops for a human.
+//!   The attempt also fixes the exact transfer: the ckUSDC path's amount, or the ICPSwap
+//!   leg's amount in, and the ckUSDC ledger. Every retry reuses them, whatever the settings
+//!   say by then, so a retried transfer is the same transfer.
+//! - ICPSwap, one payout at a time per ICPSwap pool (an approval sets the pool's allowance,
+//!   and the canister's unused balances there are one per pool): a token no longer listed
+//!   with its pool, or with no fee read, falls back; then the pool's own quote; below the
+//!   minimum (`min_out` plus twice the token's fee: the pool's withdrawal to the canister and
+//!   the canister's transfer each take one), `SwapDeclined` and once more on the next drive,
+//!   then `FellBack` and ALL of it as ckUSDC (all or nothing, never a mix). Then the approval
+//!   (`SwapApproved`, its fee counted), `SwapBegun`, `depositFromAndSwap`, `Swapped` with its
+//!   output and the output's transfer fixed, and that transfer.
+//! - A begun swap that did not answer with its output is never called again: what the pool
+//!   holds of the canister's tells what happened. Its output there is withdrawn and paid; its
+//!   ckUSDC there is withdrawn back (`SwapUndone`) and all of it paid as ckUSDC; nothing there
+//!   after the pool refused the swap means the deposit never happened, and all of it is paid
+//!   as ckUSDC. Only nothing there after an answer that never came stops for a human.
 //! - `Paid` (or `WithdrawnIcp`), with the ckUSDC that left the pocket, every fee included.
 //!
 //! A refusal (or an outcome the ledger can no longer tell) is `AttemptFailed`, the payout
@@ -33,7 +44,7 @@ use std::collections::BTreeSet;
 use types::hash::{PoolOpId, PoolRef};
 use types::pool::{
     payout_ref, DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress,
-    PendingOp, PoolSettings, PoolStep, Registered,
+    PendingOp, PoolSettings, PoolStep, PrincipalBytes, Registered, SwapLeg,
 };
 use types::{Timestamp, TokenAmount};
 
@@ -48,14 +59,38 @@ pub struct Busy([u8; 32]);
 
 impl Busy {
     pub fn take(id: [u8; 32]) -> Option<Self> {
+        // lazily: a guard built for a refusal would release the holder's id on its drop
         BUSY.with(|busy| busy.borrow_mut().insert(id))
-            .then_some(Self(id))
+            .then(|| Self(id))
     }
 }
 
 impl Drop for Busy {
     fn drop(&mut self) {
         BUSY.with(|busy| busy.borrow_mut().remove(&self.0));
+    }
+}
+
+thread_local! {
+    // Heap by necessity: the ICPSwap pools a payout's leg is at right now. Two legs at one
+    // pool would overwrite each other's approval and mix their unused balances there.
+    static LEGS: RefCell<BTreeSet<Principal>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+/// Held while one payout's leg is at an ICPSwap pool, released on drop, a trap included.
+struct Leg(Principal);
+
+impl Leg {
+    fn take(pool: Principal) -> Option<Self> {
+        // lazily: a guard built for a refusal would release the holder's pool on its drop
+        LEGS.with(|legs| legs.borrow_mut().insert(pool))
+            .then(|| Self(pool))
+    }
+}
+
+impl Drop for Leg {
+    fn drop(&mut self) {
+        LEGS.with(|legs| legs.borrow_mut().remove(&self.0));
     }
 }
 
@@ -99,6 +134,7 @@ pub trait Ledgers {
         amount_in: TokenAmount,
         zero_for_one: bool,
     ) -> Result<TokenAmount, CallError>;
+    /// `depositFromAndSwap`: a refusal is the pool's own `err` answer.
     #[allow(clippy::too_many_arguments)]
     async fn swap(
         &self,
@@ -109,6 +145,17 @@ pub trait Ledgers {
         fee_in: TokenAmount,
         fee_out: TokenAmount,
     ) -> Result<TokenAmount, CallError>;
+    /// The canister's unused balances at the pool, as its token0 and token1.
+    async fn unused(&self, pool: Principal) -> Result<(TokenAmount, TokenAmount), CallError>;
+    /// Withdraws `amount` of the canister's unused `token` at the pool to its own account,
+    /// the ledger's `fee` out of it.
+    async fn withdraw(
+        &self,
+        pool: Principal,
+        token: Principal,
+        amount: TokenAmount,
+        fee: TokenAmount,
+    ) -> Result<(), CallError>;
 }
 
 fn amount(nat: &Nat) -> TokenAmount {
@@ -239,6 +286,24 @@ impl Ledgers for Live {
         .await
         .map(|out| amount(&out))
     }
+
+    async fn unused(&self, pool: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
+        ic::pool_unused_balance(pool)
+            .await
+            .map(|(token0, token1)| (amount(&token0), amount(&token1)))
+    }
+
+    async fn withdraw(
+        &self,
+        pool: Principal,
+        token: Principal,
+        amount: TokenAmount,
+        fee: TokenAmount,
+    ) -> Result<(), CallError> {
+        ic::pool_withdraw(pool, token, Nat::from(amount), Nat::from(fee))
+            .await
+            .map(drop)
+    }
 }
 
 /// One payout as the driver works it: a swap deposit's (the pool pays the ledger fees out
@@ -292,39 +357,77 @@ fn open(guard: &impl Fn() -> Result<(), String>) -> Result<(), Stop> {
 }
 
 impl Payout {
-    /// The ckUSDC transfer that pays all of it: what is sent, and what leaves the pocket.
-    fn ckusdc(&self, fee: TokenAmount) -> Option<(TokenAmount, TokenAmount)> {
-        if self.pool_pays_fees {
-            Some((self.amount, self.amount.checked_add(fee)?))
-        } else {
-            let sent = self
-                .amount
-                .checked_sub(fee)
-                .filter(|sent| *sent > TokenAmount::ZERO)?;
-            Some((sent, self.amount))
-        }
-    }
-
-    /// What the ICPSwap leg swaps, and what leaves the pocket for it: the approval's fee and
-    /// the pool's pull's on top.
-    fn swap_in(&self, fee: TokenAmount) -> Option<(TokenAmount, TokenAmount)> {
-        let fees = fee.checked_mul(2_u8)?;
-        if self.pool_pays_fees {
-            Some((self.amount, self.amount.checked_add(fees)?))
-        } else {
-            let swap_in = self
-                .amount
-                .checked_sub(fees)
-                .filter(|left| *left > TokenAmount::ZERO)?;
-            Some((swap_in, self.amount))
-        }
-    }
-
     fn dedup(&self, attempt: &PayoutAttempt) -> Dedup {
         Dedup {
             memo: attempt.memo,
             created_at_nanos: attempt.created_at.as_nanos(),
         }
+    }
+
+    /// The ckUSDC transfer that pays all of a payout that fell back: a swap deposit's whole
+    /// amount (the pool pays every fee); a withdrawal's amount less the transfer's fee and
+    /// what its leg already cost.
+    fn fallback_amount(&self, swap: &SwapLeg, fee: TokenAmount) -> Option<TokenAmount> {
+        if self.pool_pays_fees {
+            return Some(self.amount);
+        }
+        self.amount
+            .checked_sub(fee)?
+            .checked_sub(leg_cost(swap, None, fee)?)
+            .filter(|sent| *sent > TokenAmount::ZERO)
+    }
+}
+
+/// What a payout's path moves first, fixed when it starts and reused on every retry: the
+/// ckUSDC transfer's amount, or the ICPSwap leg's amount in. A swap deposit's pool pays the
+/// fees on top of `amount`; a withdrawal's `amount` pays them (the transfer's, or the leg's
+/// approval and the pool's pull).
+pub fn path_amount(
+    amount: TokenAmount,
+    pool_pays_fees: bool,
+    path: PayoutPath,
+    fee: TokenAmount,
+) -> Option<TokenAmount> {
+    if pool_pays_fees {
+        return Some(amount);
+    }
+    let fees = match path {
+        PayoutPath::Ckusdc => fee,
+        PayoutPath::Icpswap { .. } => fee.checked_mul(2_u8)?,
+    };
+    amount
+        .checked_sub(fees)
+        .filter(|left| *left > TokenAmount::ZERO)
+}
+
+/// What an ICPSwap leg took from the canister's ckUSDC account so far: every approval's fee,
+/// and once begun, the swap's deposit (its amount in, `swap_in`, and the pool's pull's fee),
+/// or what the deposit cost in the end once undone. A leg from before approvals were counted
+/// gave one once begun.
+fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> Option<TokenAmount> {
+    let approvals = swap.approvals.unwrap_or(u32::from(swap.begun));
+    let approved = fee.checked_mul(approvals)?;
+    if !swap.begun {
+        return Some(approved);
+    }
+    let deposit = match swap.undone {
+        Some(cost) => cost,
+        None => swap_in?.checked_add(fee)?,
+    };
+    approved.checked_add(deposit)
+}
+
+/// A payout's progress as the log has it now: a deposit's, or a withdrawal's.
+fn progress_of(id: PoolRef) -> Option<PayoutProgress> {
+    if let Some(deposit) = pool_store::deposit(&id) {
+        return Some(deposit.payout);
+    }
+    match pool_store::ledger()
+        .pending
+        .get(&PoolOpId::new(id.into_bytes()))
+    {
+        Some(PendingOp::Withdraw { payout, .. }) => Some(payout.clone()),
+        _ => None,
     }
 }
 
@@ -403,130 +506,358 @@ pub async fn pay(
     ledgers: &impl Ledgers,
     settings: &PoolSettings,
     payout: Payout,
-    clock: impl Fn() -> Timestamp,
+    clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Done, Stop> {
     let attempt = payout
         .progress
         .attempt
         .ok_or_else(|| Stop::Failed("the payout has no dedup pair".to_string()))?;
-    let ckusdc = settings.ckusdc_ledger;
+    // the ledger the payout started with, whatever the settings say now
+    let ckusdc = attempt
+        .token
+        .map_or(settings.ckusdc_ledger, |token| token.0);
     let fee_ck = settings
         .fee_of(ckusdc)
         .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
+    let first = match attempt.amount {
+        Some(first) => first,
+        // an attempt from before its amount was recorded: worked out as it was then
+        None => path_amount(payout.amount, payout.pool_pays_fees, attempt.path, fee_ck)
+            .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?,
+    };
     let pool = match attempt.path {
         PayoutPath::Ckusdc => {
-            let (sent, spent) = payout
-                .ckusdc(fee_ck)
-                .ok_or_else(|| Stop::Failed("the amount does not cover the fee".to_string()))?;
+            let spent = leg_cost(&payout.progress.swap, None, fee_ck)
+                .and_then(|cost| first.checked_add(fee_ck)?.checked_add(cost))
+                .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
             open(guard)?;
             let block = ledgers
-                .transfer(ckusdc, payout.to, sent, payout.dedup(&attempt))
+                .transfer(ckusdc, payout.to, first, payout.dedup(&attempt))
                 .await
                 .map_err(|error| call_stop("the ckUSDC transfer", error))?;
             return Ok(Done {
                 token: ckusdc,
-                paid: sent,
+                paid: first,
                 block,
                 spent,
             });
         }
         PayoutPath::Icpswap { pool } => pool,
     };
-    let fee_out = settings
-        .fee_of(payout.token_out)
-        .ok_or_else(|| Stop::Failed(format!("no fee was read for {}", payout.token_out)))?;
-    let (swap_in, spent) = payout
-        .swap_in(fee_ck)
-        .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?;
-    let out = match payout.progress.swap.out {
-        Some(out) => out,
-        None => {
-            if payout.progress.swap.begun {
-                return Err(Stop::Failed(
-                    "the ICPSwap swap's outcome is unknown".to_string(),
-                ));
-            }
-            // the recipient gets at least `min_out` after the token's own transfer fee
-            let least = TokenAmount::from(payout.min_out)
-                .checked_add(fee_out)
-                .ok_or_else(|| Stop::Failed("min_out is too large".to_string()))?;
-            let fall_back = |why: String| -> Result<Done, Stop> {
-                record(
-                    PoolStep::FellBack {
-                        r#ref: payout.id,
-                        why,
-                    },
-                    clock(),
-                )?;
-                Err(Stop::Again)
+    let swap_in = first;
+    let (out, send) = match (payout.progress.swap.out, payout.progress.swap.send) {
+        (Some(out), Some(send)) => (out, send),
+        // an output from before its transfer was recorded: worked out as it was then
+        (Some(out), None) => {
+            let fee_out = settings
+                .fee_of(payout.token_out)
+                .ok_or_else(|| Stop::Failed(format!("no fee was read for {}", payout.token_out)))?;
+            (out, out.checked_sub(fee_out).unwrap_or(TokenAmount::ZERO))
+        }
+        (None, _) => {
+            let Some(_leg) = Leg::take(pool) else {
+                return Err(Stop::Retry(format!(
+                    "another payout's leg is at the ICPSwap pool {pool}"
+                )));
             };
-            let zero_for_one = match ledgers
-                .direction(pool, ckusdc, payout.token_out)
-                .await
-                .map_err(|error| call_stop("the pool's metadata", error))?
-            {
-                Some(direction) => direction,
-                None => return fall_back("the pool does not trade the pair".to_string()),
-            };
-            let quoted = ledgers
-                .quote(pool, swap_in, zero_for_one)
-                .await
-                .map_err(|error| call_stop("the pool's quote", error))?;
-            if quoted < least {
-                let why = format!("the pool quotes {quoted}, below the {least} needed");
-                if payout.progress.swap.declined == 0 {
-                    record(
-                        PoolStep::SwapDeclined {
-                            r#ref: payout.id,
-                            why,
-                        },
-                        clock(),
-                    )?;
-                    return Err(Stop::Later);
-                }
-                return fall_back(why);
-            }
-            let allowance = swap_in
-                .checked_add(fee_ck)
-                .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
-            open(guard)?;
-            ledgers
-                .approve(ckusdc, pool, allowance)
-                .await
-                .map_err(|error| call_stop("the approval", error))?;
-            open(guard)?;
-            record(PoolStep::SwapBegun { r#ref: payout.id }, clock())?;
-            // begun: whatever this answers, the swap is never called again
-            let out = ledgers
-                .swap(pool, swap_in, zero_for_one, least, fee_ck, fee_out)
-                .await
-                .map_err(|error| Stop::Failed(format!("the ICPSwap swap: {error}")))?;
-            record(
-                PoolStep::Swapped {
-                    r#ref: payout.id,
-                    out,
+            swap_leg(
+                ledgers,
+                settings,
+                &payout,
+                LegAt {
+                    ckusdc,
+                    fee_ck,
+                    pool,
+                    swap_in,
                 },
-                clock(),
-            )?;
-            out
+                clock,
+                guard,
+            )
+            .await?
         }
     };
-    let sent = out
-        .checked_sub(fee_out)
-        .filter(|sent| *sent > TokenAmount::ZERO)
-        .ok_or_else(|| Stop::Failed("the output does not cover its fee".to_string()))?;
+    if send == TokenAmount::ZERO {
+        return Err(Stop::Failed(format!(
+            "the output {out} does not cover its fees"
+        )));
+    }
+    // read again: the approvals this drive gave are in it
+    let swap = progress_of(payout.id).map_or(payout.progress.swap, |progress| progress.swap);
+    let spent = leg_cost(&swap, Some(swap_in), fee_ck)
+        .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
     open(guard)?;
     let block = ledgers
-        .transfer(payout.token_out, payout.to, sent, payout.dedup(&attempt))
+        .transfer(payout.token_out, payout.to, send, payout.dedup(&attempt))
         .await
         .map_err(|error| call_stop("the output's transfer", error))?;
     Ok(Done {
         token: payout.token_out,
-        paid: sent,
+        paid: send,
         block,
         spent,
     })
+}
+
+/// What an ICPSwap leg works with, fixed when its payout started.
+#[derive(Clone, Copy)]
+struct LegAt {
+    ckusdc: Principal,
+    fee_ck: TokenAmount,
+    pool: Principal,
+    swap_in: TokenAmount,
+}
+
+/// Records the fall back of a payout's leg to ckUSDC, with the exact transfer that pays all
+/// of it, read on the payout as the log has it now (the approvals and the undo included).
+fn fall_back(
+    payout: &Payout,
+    leg: LegAt,
+    why: String,
+    now: Timestamp,
+) -> Result<(TokenAmount, TokenAmount), Stop> {
+    let swap = progress_of(payout.id).map_or(payout.progress.swap, |progress| progress.swap);
+    let amount = payout
+        .fallback_amount(&swap, leg.fee_ck)
+        .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?;
+    record(
+        PoolStep::FellBack {
+            r#ref: payout.id,
+            why,
+            amount: Some(amount),
+            token: Some(PrincipalBytes(leg.ckusdc)),
+        },
+        now,
+    )?;
+    Err(Stop::Again)
+}
+
+/// The ICPSwap leg up to its output, with the pool held for this payout alone: answers the
+/// output and its transfer to the recipient, or why it stopped (`Stop::Again` once a fall
+/// back to ckUSDC was recorded).
+async fn swap_leg(
+    ledgers: &impl Ledgers,
+    settings: &PoolSettings,
+    payout: &Payout,
+    leg: LegAt,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> Result<(TokenAmount, TokenAmount), Stop> {
+    let LegAt {
+        ckusdc,
+        fee_ck,
+        pool,
+        swap_in,
+    } = leg;
+    if payout.progress.swap.begun {
+        // undone already, its fall back not recorded yet
+        if payout.progress.swap.undone.is_some() {
+            return fall_back(payout, leg, "the swap did not happen".to_string(), clock());
+        }
+        return settle(ledgers, settings, payout, leg, None, clock).await;
+    }
+    // before the swap: a token no longer listed with this pool, or with no fee read, falls
+    // back (the token's output could not be paid)
+    let fee_out = match settings.fee_of(payout.token_out) {
+        Some(fee) if settings.pool_of(payout.token_out) == Some(pool) => fee,
+        _ => {
+            return fall_back(
+                payout,
+                leg,
+                format!(
+                    "{} is no longer listed with the pool {pool}",
+                    payout.token_out
+                ),
+                clock(),
+            )
+        }
+    };
+    // the recipient gets at least `min_out` after the pool's withdrawal to the canister and
+    // the canister's transfer, each of which takes the token's fee
+    let least = fee_out
+        .checked_mul(2_u8)
+        .and_then(|fees| TokenAmount::from(payout.min_out).checked_add(fees))
+        .ok_or_else(|| Stop::Failed("min_out is too large".to_string()))?;
+    let zero_for_one = match ledgers
+        .direction(pool, ckusdc, payout.token_out)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+    {
+        Some(direction) => direction,
+        None => {
+            return fall_back(
+                payout,
+                leg,
+                "the pool does not trade the pair".to_string(),
+                clock(),
+            )
+        }
+    };
+    let quoted = ledgers
+        .quote(pool, swap_in, zero_for_one)
+        .await
+        .map_err(|error| call_stop("the pool's quote", error))?;
+    if quoted < least {
+        let why = format!("the pool quotes {quoted}, below the {least} needed");
+        if payout.progress.swap.declined == 0 {
+            record(
+                PoolStep::SwapDeclined {
+                    r#ref: payout.id,
+                    why,
+                },
+                clock(),
+            )?;
+            return Err(Stop::Later);
+        }
+        return fall_back(payout, leg, why, clock());
+    }
+    let allowance = swap_in
+        .checked_add(fee_ck)
+        .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
+    open(guard)?;
+    ledgers
+        .approve(ckusdc, pool, allowance)
+        .await
+        .map_err(|error| call_stop("the approval", error))?;
+    // the approval's fee is the payout's, whatever comes next
+    record(PoolStep::SwapApproved { r#ref: payout.id }, clock())?;
+    open(guard)?;
+    record(PoolStep::SwapBegun { r#ref: payout.id }, clock())?;
+    // begun: whatever this answers, the swap is never called again
+    match ledgers
+        .swap(pool, swap_in, zero_for_one, least, fee_ck, fee_out)
+        .await
+    {
+        Ok(out) => {
+            let send = output_send(out, fee_out);
+            record(
+                PoolStep::Swapped {
+                    r#ref: payout.id,
+                    out,
+                    send: Some(send),
+                },
+                clock(),
+            )?;
+            Ok((out, send))
+        }
+        Err(CallError::Refused(why)) => {
+            settle(ledgers, settings, payout, leg, Some(why), clock).await
+        }
+        Err(_) => settle(ledgers, settings, payout, leg, None, clock).await,
+    }
+}
+
+/// The output's transfer to the recipient: what the pool answered, less the token's fee for
+/// the pool's withdrawal to the canister and for the canister's transfer.
+fn output_send(out: TokenAmount, fee_out: TokenAmount) -> TokenAmount {
+    fee_out
+        .checked_mul(2_u8)
+        .and_then(|fees| out.checked_sub(fees))
+        .unwrap_or(TokenAmount::ZERO)
+}
+
+/// A begun swap that did not answer with its output: what the pool holds of the canister's
+/// tells what happened. The token there: the swap happened and its output stayed at the
+/// pool; withdrawn, and paid. ckUSDC there (all of the amount in, or any of it after the
+/// pool's own refusal): the swap did not happen; withdrawn back, and all of it paid as
+/// ckUSDC. Nothing there after the pool's own refusal (`refused`): the deposit never
+/// happened, all of it paid as ckUSDC. Anything else: the outcome is unknown, for a human.
+/// ICPSwap's unused balances and its `withdraw` are not exercised against a live pool in this
+/// build.
+async fn settle(
+    ledgers: &impl Ledgers,
+    settings: &PoolSettings,
+    payout: &Payout,
+    leg: LegAt,
+    refused: Option<String>,
+    clock: impl Fn() -> Timestamp + Copy,
+) -> Result<(TokenAmount, TokenAmount), Stop> {
+    let LegAt {
+        ckusdc,
+        fee_ck,
+        pool,
+        swap_in,
+    } = leg;
+    let unknown = || Stop::Failed("the ICPSwap swap's outcome is unknown".to_string());
+    let zero_for_one = ledgers
+        .direction(pool, ckusdc, payout.token_out)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+        .ok_or_else(unknown)?;
+    let (unused0, unused1) = ledgers
+        .unused(pool)
+        .await
+        .map_err(|error| call_stop("the pool's unused balances", error))?;
+    let (ck_left, token_left) = if zero_for_one {
+        (unused0, unused1)
+    } else {
+        (unused1, unused0)
+    };
+    // withdrawing from the pool brings money in: no guard
+    if token_left > TokenAmount::ZERO {
+        let fee_out = settings
+            .fee_of(payout.token_out)
+            .ok_or_else(|| Stop::Failed(format!("no fee was read for {}", payout.token_out)))?;
+        ledgers
+            .withdraw(pool, payout.token_out, token_left, fee_out)
+            .await
+            .map_err(|error| call_stop("the output's withdrawal from the pool", error))?;
+        let send = output_send(token_left, fee_out);
+        record(
+            PoolStep::Swapped {
+                r#ref: payout.id,
+                out: token_left,
+                send: Some(send),
+            },
+            clock(),
+        )?;
+        return Ok((token_left, send));
+    }
+    let deposit = swap_in
+        .checked_add(fee_ck)
+        .ok_or_else(|| Stop::Failed("the deposit overflows".to_string()))?;
+    if ck_left >= swap_in || (refused.is_some() && ck_left > TokenAmount::ZERO) {
+        // this leg's own amount at most: the pool holds nothing else of this payout's
+        let back = ck_left.min(swap_in);
+        ledgers
+            .withdraw(pool, ckusdc, back, fee_ck)
+            .await
+            .map_err(|error| call_stop("the ckUSDC's withdrawal from the pool", error))?;
+        // the withdrawal's transfer takes the ledger's fee out of what comes back
+        let returned = back.checked_sub(fee_ck).unwrap_or(TokenAmount::ZERO);
+        let cost = deposit.checked_sub(returned).unwrap_or(TokenAmount::ZERO);
+        record(
+            PoolStep::SwapUndone {
+                r#ref: payout.id,
+                cost,
+            },
+            clock(),
+        )?;
+        return fall_back(
+            payout,
+            leg,
+            format!("the swap did not happen; {returned} came back from the pool"),
+            clock(),
+        );
+    }
+    match refused {
+        Some(why) => {
+            record(
+                PoolStep::SwapUndone {
+                    r#ref: payout.id,
+                    cost: TokenAmount::ZERO,
+                },
+                clock(),
+            )?;
+            fall_back(
+                payout,
+                leg,
+                format!("the pool refused the swap before its deposit: {why}"),
+                clock(),
+            )
+        }
+        None => Err(unknown()),
+    }
 }
 
 /// The deposit's next steps, as far as they go now.
@@ -576,6 +907,9 @@ pub async fn drive_deposit(
                             created_at: clock(),
                             memo: r#ref.into_bytes(),
                             path: path_for(&settings, token_out),
+                            // the pool pays the fees on top: the path moves all of it
+                            amount: Some(deposit.owed()),
+                            token: Some(PrincipalBytes(settings.ckusdc_ledger)),
                         },
                     },
                     clock(),

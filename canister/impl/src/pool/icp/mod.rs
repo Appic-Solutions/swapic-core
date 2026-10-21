@@ -36,7 +36,7 @@ use settlement_api::types::pool::{
 use types::books::assess;
 use types::pool::{
     op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, IcpReadFailure, PayoutAttempt,
-    PayoutPath, PendingOp, PoolAccount, PoolStep, Shares,
+    PayoutPath, PendingOp, PoolAccount, PoolStep, PrincipalBytes, Shares,
 };
 use types::{Address, TokenAmount};
 
@@ -129,16 +129,31 @@ pub fn check_stake<S: Store>(
     Ok(())
 }
 
+/// What a withdrawal burns, the path it pays by, and the exact transfer its payout starts
+/// with: the path's first amount (`payout::path_amount`) on the ckUSDC ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawalPlan {
+    pub burned: Shares,
+    pub path: PayoutPath,
+    pub amount: TokenAmount,
+    pub ckusdc: Principal,
+}
+
+/// How many ckUSDC fees a token path's withdrawal can cost at worst, which its amount must
+/// more than cover: the approval, the pool's pull, the withdrawal back from the pool of a
+/// swap that did not happen, and the ckUSDC transfer it then falls back to.
+pub const TOKEN_PATH_FEES: u8 = 4;
+
 /// Every rule a withdrawal meets before anything is burned, in order: no sanctioned party,
 /// an amount, the shares it burns (rounded up) within `max_shares` and the caller's own, the
-/// pool open, the ICP pocket's free ckUSDC, a listed token, and a ckUSDC payout at least
-/// `min_out`. Answers what it burns and the path it pays by.
+/// pool open, the ICP pocket's free ckUSDC, a listed token, a ckUSDC payout at least
+/// `min_out`, and a token path's amount above every fee the path can cost.
 pub fn plan_withdrawal<S: Store>(
     state: &State<S>,
     request: &WithdrawRequest,
     closed: Option<String>,
     sanctioned: impl Fn(&Address) -> bool,
-) -> Result<(Shares, PayoutPath), PoolError> {
+) -> Result<WithdrawalPlan, PoolError> {
     if screen_principal(request.caller, &sanctioned)
         || screen_principal(request.to.owner, &sanctioned)
     {
@@ -180,15 +195,33 @@ pub fn plan_withdrawal<S: Store>(
         .fee_of(settings.ckusdc_ledger)
         .ok_or_else(|| PoolError::Closed("no ckUSDC fee was read".to_string()))?;
     let path = path_for(&settings, request.token_out);
-    if path == PayoutPath::Ckusdc {
-        let sent = request.usdc.checked_sub(fee).unwrap_or(TokenAmount::ZERO);
-        if sent == TokenAmount::ZERO || sent < TokenAmount::from(request.min_out) {
-            return Err(PoolError::NotAllowed(
-                "the withdrawal pays below min_out after the ledger's fee".to_string(),
-            ));
+    match path {
+        PayoutPath::Ckusdc => {
+            let sent = request.usdc.checked_sub(fee).unwrap_or(TokenAmount::ZERO);
+            if sent == TokenAmount::ZERO || sent < TokenAmount::from(request.min_out) {
+                return Err(PoolError::NotAllowed(
+                    "the withdrawal pays below min_out after the ledger's fee".to_string(),
+                ));
+            }
+        }
+        PayoutPath::Icpswap { .. } => {
+            let fees = fee.checked_mul(TOKEN_PATH_FEES).unwrap_or(TokenAmount::MAX);
+            if request.usdc <= fees {
+                return Err(PoolError::NotAllowed(format!(
+                    "the withdrawal does not cover the {fees} of fees its token's path can cost"
+                )));
+            }
         }
     }
-    Ok((burned, path))
+    let amount = payout::path_amount(request.usdc, false, path, fee).ok_or_else(|| {
+        PoolError::NotAllowed("the withdrawal does not cover its fees".to_string())
+    })?;
+    Ok(WithdrawalPlan {
+        burned,
+        path,
+        amount,
+        ckusdc: settings.ckusdc_ledger,
+    })
 }
 
 fn subaccount(field: &'static str, bytes: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, PoolError> {
@@ -272,11 +305,12 @@ pub async fn withdraw(
     };
     let closed = pool::pool_closed();
     let owner = PoolAccount::Icp(request.owner());
-    let (id, burned, path) = read_state(|state| -> Result<_, PoolError> {
-        let (burned, path) = plan_withdrawal(state, &request, closed, &sanctioned)?;
+    let (id, plan) = read_state(|state| -> Result<_, PoolError> {
+        let plan = plan_withdrawal(state, &request, closed, &sanctioned)?;
         let id = op_id(true, &owner, state.meta().next_event_index.get());
-        Ok((id, burned, path))
+        Ok((id, plan))
     })?;
+    let burned = plan.burned;
     let _busy = Busy::take(id.into_bytes())
         .ok_or_else(|| PoolError::Unavailable("the withdrawal is in progress".to_string()))?;
     let at = now();
@@ -292,7 +326,9 @@ pub async fn withdraw(
             attempt: PayoutAttempt {
                 created_at: at,
                 memo: id.into_bytes(),
-                path,
+                path: plan.path,
+                amount: Some(plan.amount),
+                token: Some(PrincipalBytes(plan.ckusdc)),
             },
         },
         at,

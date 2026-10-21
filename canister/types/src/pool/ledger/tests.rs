@@ -1,7 +1,9 @@
 use super::*;
 use crate::evm::EvmAddress;
 use crate::hash::TxHash;
-use crate::pool::{pool_ref, IcpAccount, LedgerFee, PayoutAttempt, PoolRail, CKUSDC_LEDGER};
+use crate::pool::{
+    pool_ref, IcpAccount, LedgerFee, PayoutAttempt, PoolRail, PrincipalBytes, CKUSDC_LEDGER,
+};
 
 /// The maps the storage layer keeps beside the ledger, on the heap, and the steps applied the
 /// way the storage layer applies them: `admits`, then every effect.
@@ -468,6 +470,8 @@ fn a_swap_moves_the_pockets_and_keeps_the_premium() {
         created_at: Timestamp::from_nanos(5),
         memo: r#ref.into_bytes(),
         path: PayoutPath::Ckusdc,
+        amount: None,
+        token: None,
     };
     pool.step(PoolStep::PayoutStarted { r#ref, attempt })
         .unwrap();
@@ -610,6 +614,8 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
                 created_at: Timestamp::from_nanos(9),
                 memo: [id; 32],
                 path: PayoutPath::Ckusdc,
+                amount: None,
+                token: None,
             },
         }
     };
@@ -664,6 +670,8 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
             created_at: Timestamp::from_nanos(10),
             memo: r#ref.into_bytes(),
             path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
         },
     })
     .unwrap();
@@ -699,6 +707,8 @@ fn a_payout_stops_after_ten_failures() {
             created_at: Timestamp::from_nanos(5),
             memo: r#ref.into_bytes(),
             path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
         },
     })
     .unwrap();
@@ -754,6 +764,8 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
             path: PayoutPath::Icpswap {
                 pool: pool_principal,
             },
+            amount: None,
+            token: None,
         },
     })
     .unwrap();
@@ -767,18 +779,22 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
     assert!(pool
         .step(PoolStep::FellBack {
             r#ref,
-            why: "late".into()
+            why: "late".into(),
+            amount: None,
+            token: None,
         })
         .is_err());
     pool.step(PoolStep::Swapped {
         r#ref,
         out: TokenAmount::from(5_u8),
+        send: None,
     })
     .unwrap();
     assert!(pool
         .step(PoolStep::Swapped {
             r#ref,
             out: TokenAmount::from(5_u8),
+            send: None,
         })
         .is_err());
 
@@ -797,6 +813,8 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
         path: PayoutPath::Icpswap {
             pool: pool_principal,
         },
+        amount: None,
+        token: None,
     };
     pool.step(PoolStep::PayoutStarted {
         r#ref: other,
@@ -806,6 +824,8 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
     pool.step(PoolStep::FellBack {
         r#ref: other,
         why: "below the minimum twice".into(),
+        amount: None,
+        token: None,
     })
     .unwrap();
     let payout = &pool.deposits[&other].payout;
@@ -817,6 +837,90 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
         })
     );
     assert_eq!(payout.fell_back.as_deref(), Some("below the minimum twice"));
+}
+
+/// Review fixes 4, 8 and 9: every approval is counted; a begun swap that did not happen
+/// falls back only once undone, and then with the exact ckUSDC transfer it pays; a swap that
+/// paid its output is never undone; the output's transfer is fixed with the output.
+#[test]
+fn a_begun_swap_falls_back_only_once_undone() {
+    let mut pool = funded(usdc(1_000));
+    let pool_principal = Principal::from_slice(&[5; 10]);
+    let started = |pool: &mut Pool, byte: u8| {
+        let r#ref = register(pool, swap(byte, usdc(100), usdc(1)));
+        pool.step(PoolStep::Arrived {
+            r#ref,
+            credit: credit(u64::from(byte)),
+            amount: usdc(100),
+            block: BlockNumber::new(10),
+        })
+        .unwrap();
+        pool.step(PoolStep::PayoutStarted {
+            r#ref,
+            attempt: PayoutAttempt {
+                created_at: Timestamp::from_nanos(5),
+                memo: r#ref.into_bytes(),
+                path: PayoutPath::Icpswap {
+                    pool: pool_principal,
+                },
+                amount: Some(usdc(99)),
+                token: Some(PrincipalBytes(ckusdc())),
+            },
+        })
+        .unwrap();
+        r#ref
+    };
+    let r#ref = started(&mut pool, 1);
+    let undone = |cost: u32| PoolStep::SwapUndone {
+        r#ref,
+        cost: TokenAmount::from(cost),
+    };
+    let fell_back = || PoolStep::FellBack {
+        r#ref,
+        why: "the pool refused the swap".into(),
+        amount: Some(usdc(99)),
+        token: Some(PrincipalBytes(ckusdc())),
+    };
+    // nothing to undo before the swap began
+    assert!(pool.step(undone(20_000)).is_err());
+    pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
+    pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
+    pool.step(PoolStep::SwapBegun { r#ref }).unwrap();
+    // begun, not undone: what happened at the pool is not known yet
+    assert!(pool.step(fell_back()).is_err());
+    pool.step(undone(20_000)).unwrap();
+    assert!(pool.step(undone(20_000)).is_err(), "undone once");
+    pool.step(fell_back()).unwrap();
+    let payout = &pool.deposits[&r#ref].payout;
+    assert_eq!(payout.swap.approvals, Some(2));
+    assert_eq!(payout.swap.undone, Some(TokenAmount::from(20_000_u32)));
+    let attempt = payout.attempt.unwrap();
+    assert_eq!(attempt.path, PayoutPath::Ckusdc);
+    assert_eq!(attempt.amount, Some(usdc(99)));
+    assert_eq!(attempt.token, Some(PrincipalBytes(ckusdc())));
+
+    // a swap that paid its output: never undone, never approved again, its transfer fixed
+    let paid_out = started(&mut pool, 2);
+    pool.step(PoolStep::SwapBegun { r#ref: paid_out }).unwrap();
+    pool.step(PoolStep::Swapped {
+        r#ref: paid_out,
+        out: TokenAmount::from(9_000_u32),
+        send: Some(TokenAmount::from(7_000_u32)),
+    })
+    .unwrap();
+    assert!(pool
+        .step(PoolStep::SwapUndone {
+            r#ref: paid_out,
+            cost: TokenAmount::ZERO,
+        })
+        .is_err());
+    assert!(pool
+        .step(PoolStep::SwapApproved { r#ref: paid_out })
+        .is_err());
+    assert_eq!(
+        pool.deposits[&paid_out].payout.swap.send,
+        Some(TokenAmount::from(7_000_u32))
+    );
 }
 
 #[test]
@@ -917,6 +1021,8 @@ fn an_arrival_is_measured_on_what_arrived() {
             created_at: Timestamp::from_nanos(5),
             memo: r#ref.into_bytes(),
             path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
         },
     };
     let mut pool = funded(usdc(300));
@@ -959,6 +1065,8 @@ fn an_arrival_is_measured_on_what_arrived() {
             created_at: Timestamp::from_nanos(6),
             memo: [0x42; 32],
             path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
         },
     };
     assert!(matches!(

@@ -95,8 +95,19 @@ fn a_withdrawal_is_refused_when_it_should_be() {
         let plan = |request: &WithdrawRequest, closed: Option<String>| {
             read_state(|state| plan_withdrawal(state, request, closed, nobody))
         };
-        let (burned, path) = plan(&withdrawal(usdc(400)), None).unwrap();
+        let WithdrawalPlan {
+            burned,
+            path,
+            amount,
+            ckusdc: ledger_of_ckusdc,
+        } = plan(&withdrawal(usdc(400)), None).unwrap();
         assert_eq!(path, PayoutPath::Ckusdc);
+        // the exact transfer its payout starts with: the amount less the ledger's fee
+        assert_eq!(
+            amount,
+            usdc(400).checked_sub(TokenAmount::from(FEE)).unwrap()
+        );
+        assert_eq!(ledger_of_ckusdc, ckusdc());
         // 400 of 1000 burns 40% of the shares, rounded up
         let total = ledger().total_shares;
         assert_eq!(
@@ -178,7 +189,7 @@ fn a_withdrawal_is_refused_when_it_should_be() {
         // withdrawal waits behind it: 99.01 queued, 901 is more than the 900.99 behind it
         let r#ref = register(swap_terms(1, usdc(100), usdc(1), at(1_000)));
         assert_eq!(
-            plan(&withdrawal(usdc(901)), None).map(|(_, path)| path),
+            plan(&withdrawal(usdc(901)), None).map(|plan| plan.path),
             Ok(PayoutPath::Ckusdc)
         );
         record_at(
@@ -196,6 +207,50 @@ fn a_withdrawal_is_refused_when_it_should_be() {
             Err(PoolError::Closed(POCKET_SHORT.into()))
         );
         assert!(plan(&withdrawal(usdc(900)), None).is_ok());
+    });
+}
+
+/// Review fixes 8 and 11: a token path's withdrawal must more than cover every ckUSDC fee
+/// its path can cost (the approval, the pool's pull, a withdrawal back, the fall back's
+/// transfer), and its payout starts with the exact amount in: its amount less the two fees
+/// the swap itself takes.
+#[test]
+fn a_token_path_withdrawal_covers_its_fees_and_fixes_its_amount_in() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let token = Principal::from_slice(&[0x70; 10]);
+        let pool = Principal::from_slice(&[0x71; 10]);
+        let mut listed = crate::storage::pool::tests::settings();
+        listed.icp_tokens = vec![types::pool::IcpToken {
+            ledger: token,
+            icpswap_pool: pool,
+        }];
+        listed.ledger_fees.push(types::pool::LedgerFee {
+            ledger: token,
+            fee: TokenAmount::from(1_000_u32),
+        });
+        record_at(PoolStep::SettingsSet { settings: listed }, at(2)).unwrap();
+        let to_token = |usdc_out: TokenAmount| WithdrawRequest {
+            token_out: token,
+            ..withdrawal(usdc_out)
+        };
+        let plan = |request: &WithdrawRequest| {
+            read_state(|state| plan_withdrawal(state, request, None, nobody))
+        };
+        let fees = TokenAmount::from(TOKEN_PATH_FEES as u64 * FEE);
+        assert!(matches!(
+            plan(&to_token(fees)),
+            Err(PoolError::NotAllowed(why)) if why.contains("fees")
+        ));
+        let just_above = fees.checked_add(TokenAmount::from(1_u8)).unwrap();
+        let ok = plan(&to_token(just_above)).unwrap();
+        assert_eq!(ok.path, PayoutPath::Icpswap { pool });
+        assert_eq!(
+            ok.amount,
+            just_above.checked_sub(TokenAmount::from(2 * FEE)).unwrap()
+        );
+        assert_eq!(ok.ckusdc, ckusdc());
     });
 }
 
@@ -224,6 +279,8 @@ fn a_check_during_a_payout_finds_no_shortfall() {
                     created_at: at(4),
                     memo: r#ref.into_bytes(),
                     path: PayoutPath::Ckusdc,
+                    amount: None,
+                    token: None,
                 },
             },
             at(4),
@@ -464,6 +521,8 @@ fn a_stopped_payout_is_still_pending_for_the_check() {
                     created_at: at(4),
                     memo: r#ref.into_bytes(),
                     path: PayoutPath::Ckusdc,
+                    amount: None,
+                    token: None,
                 },
             },
             at(4),

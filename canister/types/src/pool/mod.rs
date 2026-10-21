@@ -710,9 +710,15 @@ pub enum PayoutPath {
     },
 }
 
-/// A payout's deduplication pair and its path, recorded before any call: every ICRC
-/// transfer of the payout carries this `created_at_time` and memo, so a retried transfer
-/// whose first answer was lost is the same transfer to the ledger.
+/// A principal stored as its raw bytes, for a field that may be absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[cbor(transparent)]
+pub struct PrincipalBytes(#[cbor(n(0), with = "principal_cbor")] pub Principal);
+
+/// A payout's deduplication pair, its path, and the exact transfer it makes, recorded before
+/// any call: every ICRC transfer of the payout carries this `created_at_time` and memo, and
+/// this amount of this token, so a retried transfer whose first answer was lost is the same
+/// transfer to the ledger, whatever the settings say by then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct PayoutAttempt {
     #[n(0)]
@@ -721,6 +727,13 @@ pub struct PayoutAttempt {
     pub memo: [u8; 32],
     #[n(2)]
     pub path: PayoutPath,
+    /// The ckUSDC path's transfer amount, or the ICPSwap path's amount in. None on an
+    /// attempt recorded before it was, which the driver works out as it did then.
+    #[n(3)]
+    pub amount: Option<TokenAmount>,
+    /// The token the path's first call moves (ckUSDC on both paths).
+    #[n(4)]
+    pub token: Option<PrincipalBytes>,
 }
 
 /// Where an ICPSwap leg stands.
@@ -736,6 +749,17 @@ pub struct SwapLeg {
     /// What the swap answered it paid into the canister's account.
     #[n(2)]
     pub out: Option<TokenAmount>,
+    /// The output's transfer to the recipient, fixed when the output was recorded.
+    #[n(3)]
+    pub send: Option<TokenAmount>,
+    /// The approvals given the pool, each a ckUSDC fee the payout spent. None on a leg from
+    /// before they were counted, which made one.
+    #[n(4)]
+    pub approvals: Option<u32>,
+    /// A swap that did not happen, undone: what it cost the canister's ckUSDC account in
+    /// the end (its deposit, the pull's fee included, less what was withdrawn back).
+    #[n(5)]
+    pub undone: Option<TokenAmount>,
 }
 
 /// A payout in progress: its dedup pair and path, its ICPSwap leg, and its failures.
@@ -1043,6 +1067,11 @@ pub enum PoolStep {
         r#ref: PoolRef,
         #[n(1)]
         why: String,
+        /// The ckUSDC transfer that pays all of it, fixed now for every retry.
+        #[n(2)]
+        amount: Option<TokenAmount>,
+        #[n(3)]
+        token: Option<PrincipalBytes>,
     },
     /// A stake's shares were minted.
     #[n(8)]
@@ -1120,6 +1149,9 @@ pub enum PoolStep {
         r#ref: PoolRef,
         #[n(1)]
         out: TokenAmount,
+        /// The output's transfer to the recipient, fixed now for every retry.
+        #[n(2)]
+        send: Option<TokenAmount>,
     },
     /// An ICP stake's pull is about to be asked: its TVL room is held and its dedup pair set.
     #[n(15)]
@@ -1182,6 +1214,22 @@ pub enum PoolStep {
         #[n(0)]
         block: BlockNumber,
     },
+    /// The ICPSwap leg's pool was approved for its amount in: one more ckUSDC fee spent.
+    #[n(21)]
+    SwapApproved {
+        #[n(0)]
+        r#ref: PoolRef,
+    },
+    /// A swap that did not happen was undone: the ckUSDC it deposited, if any, withdrawn back
+    /// from the pool. `cost` is what its deposit took from the canister's ckUSDC account in
+    /// the end (zero when the deposit never happened). All of it is paid as ckUSDC next.
+    #[n(22)]
+    SwapUndone {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        cost: TokenAmount,
+    },
 }
 
 impl PoolStep {
@@ -1216,6 +1264,8 @@ impl PoolStep {
             PoolStep::IcpChecked { .. } => "IcpChecked",
             PoolStep::IcpCheckFailed { .. } => "IcpCheckFailed",
             PoolStep::ScanCursor { .. } => "ScanCursor",
+            PoolStep::SwapApproved { .. } => "SwapApproved",
+            PoolStep::SwapUndone { .. } => "SwapUndone",
         }
     }
 
