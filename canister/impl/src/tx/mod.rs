@@ -573,6 +573,16 @@ pub async fn create_and_send_with(
                     raw_tx: raw_tx.clone(),
                 },
             },
+            // a rescue's record names the order whose intent it cancels
+            TxPurpose::EcoRescue(order_id) => EventType::Pool {
+                step: types::pool::PoolStep::EcoRescueSigned {
+                    order_id,
+                    chain_id,
+                    nonce,
+                    tx_hash,
+                    raw_tx: raw_tx.clone(),
+                },
+            },
             // a move's record is the move's own step, which moves it to signed
             TxPurpose::PoolMove(id) => EventType::Pool {
                 step: types::pool::PoolStep::MoveSigned {
@@ -1092,6 +1102,14 @@ async fn decide(
                     settle(entry, block, success, latest, credit);
                 }
                 return usize::from(appended);
+            }
+            // a rescue is logged as it closes: Eco refunds the creator on the source by itself
+            if let TxPurpose::EcoRescue(order_id) = entry.purpose {
+                log(&format!(
+                    "rescue: the cancelAndProve of order 0x{}'s intent {} at block {block} on chain {chain_id}",
+                    hex::encode(order_id),
+                    if success { "succeeded" } else { "reverted" },
+                ));
             }
             // a move's transaction closes with its own line: burned (with the Eco intent its
             // order published, whose refund routes it again), or reverted, back to signing

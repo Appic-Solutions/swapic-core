@@ -50,6 +50,11 @@ pub trait PoolLookup {
     fn pool_move(&self, _id: u64) -> Option<crate::pool::Move> {
         None
     }
+    /// Whether the intent the order `order_id` published was rescued already (P11e): none in
+    /// a fold that keeps no rescues.
+    fn eco_rescued(&self, _order_id: &[u8; 32]) -> bool {
+        false
+    }
 }
 
 /// A paid payout's Eco intent and the payout: what an Eco refund is matched by.
@@ -828,6 +833,13 @@ impl PoolLedger {
             | PoolStep::MoveRetried { .. }
             | PoolStep::MoveLost { .. }
             | PoolStep::MoveRefunded { .. } => self.admits_rebalance(step, lookup),
+            // one rescue per order; the nonce it spends is the state's to check
+            PoolStep::EcoRescueSigned { order_id, .. } => {
+                if lookup.eco_rescued(order_id) {
+                    return Err(PoolStepError::Terms("the order's intent was rescued already"));
+                }
+                Ok(())
+            }
             PoolStep::IcpRoutesSet { routes } => {
                 let settings = self.settings()?;
                 routes
@@ -1281,6 +1293,8 @@ impl PoolLedger {
             | PoolStep::MoveRetried { .. }
             | PoolStep::MoveLost { .. }
             | PoolStep::MoveRefunded { .. } => {}
+            // the state indexes it: nothing of the pool moves
+            PoolStep::EcoRescueSigned { .. } => {}
         }
         let payout = ledger.evm_changed.take();
         PoolEffects {

@@ -463,6 +463,7 @@ fn the_pools_gas_rows_are_optional() {
         pool_move: None,
         pool_move_finish: None,
         pool_ck_deposit: None,
+        eco_rescue: None,
         ..ActionGas::default()
     };
     let domain: types::config::PerAction<types::GasAmount> = set.into();

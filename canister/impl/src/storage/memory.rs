@@ -50,6 +50,8 @@ const POOL_PAYOUT_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(36);
 // P11c, the rebalancing: ids 40 to 49
 const POOL_MOVES_MEMORY_ID: MemoryId = MemoryId::new(40);
 const POOL_OWN_SOURCES_MEMORY_ID: MemoryId = MemoryId::new(41);
+// P11e
+const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -193,4 +195,8 @@ pub fn pool_moves_memory() -> Memory {
 
 pub fn pool_own_sources_memory() -> Memory {
     memory(POOL_OWN_SOURCES_MEMORY_ID)
+}
+
+pub fn eco_rescues_memory() -> Memory {
+    memory(ECO_RESCUES_MEMORY_ID)
 }

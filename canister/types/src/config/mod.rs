@@ -547,11 +547,15 @@ pub enum GasAction {
     /// subaccount on Ethereum, after a Base to ICP move's Eco fill (P11c).
     #[n(12)]
     PoolCkDeposit,
+    /// Eco's `cancelAndProve` on an unfilled intent's destination, the proof's fee paid by the
+    /// canister (P11e).
+    #[n(13)]
+    EcoRescue,
 }
 
 impl GasAction {
     /// Every action, in code order.
-    pub const ALL: [GasAction; 13] = [
+    pub const ALL: [GasAction; 14] = [
         GasAction::RelayCctp,
         GasAction::RelayEco,
         GasAction::RelayLocal,
@@ -565,6 +569,7 @@ impl GasAction {
         GasAction::PoolMove,
         GasAction::PoolMoveFinish,
         GasAction::PoolCkDeposit,
+        GasAction::EcoRescue,
     ];
 
     /// The action's one byte in an event's canonical preimage: its index, never reused.
@@ -583,6 +588,7 @@ impl GasAction {
             GasAction::PoolMove => 10,
             GasAction::PoolMoveFinish => 11,
             GasAction::PoolCkDeposit => 12,
+            GasAction::EcoRescue => 13,
         }
     }
 
@@ -602,6 +608,7 @@ impl GasAction {
             GasAction::PoolMove => "pool_move",
             GasAction::PoolMoveFinish => "pool_move_finish",
             GasAction::PoolCkDeposit => "pool_ck_deposit",
+            GasAction::EcoRescue => "eco_rescue",
         }
     }
 
@@ -642,6 +649,9 @@ pub struct PerAction<T> {
     pub pool_move_finish: Option<T>,
     #[n(12)]
     pub pool_ck_deposit: Option<T>,
+    /// The Eco rescue's row (P11e), optional as the pool's.
+    #[n(13)]
+    pub eco_rescue: Option<T>,
 }
 
 impl<T: Copy> PerAction<T> {
@@ -661,6 +671,7 @@ impl<T: Copy> PerAction<T> {
             GasAction::PoolMove => self.pool_move,
             GasAction::PoolMoveFinish => self.pool_move_finish,
             GasAction::PoolCkDeposit => self.pool_ck_deposit,
+            GasAction::EcoRescue => self.eco_rescue,
         }
     }
 
@@ -680,6 +691,7 @@ impl<T: Copy> PerAction<T> {
             pool_move: Some(value),
             pool_move_finish: Some(value),
             pool_ck_deposit: Some(value),
+            eco_rescue: Some(value),
         }
     }
 }

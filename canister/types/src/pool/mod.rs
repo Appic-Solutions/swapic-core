@@ -1860,6 +1860,24 @@ pub enum PoolStep {
         #[n(3)]
         block: BlockNumber,
     },
+    // P11e: indices 77 and up.
+    /// The canister signed Eco's `cancelAndProve` of an unfilled intent on its destination,
+    /// the intent published by the order `order_id` (a relay's, a payout's or a move's): the
+    /// exact bytes, recorded before they are broadcast, spending the nonce `TxCreated` handed
+    /// out for it. Eco refunds the reward's creator on the source by itself.
+    #[n(77)]
+    EcoRescueSigned {
+        #[cbor(n(0), with = "minicbor::bytes")]
+        order_id: [u8; 32],
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        tx_hash: TxHash,
+        #[cbor(n(4), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 impl PoolStep {
@@ -1933,6 +1951,7 @@ impl PoolStep {
             PoolStep::MoveRetried { .. } => "MoveRetried",
             PoolStep::MoveLost { .. } => "MoveLost",
             PoolStep::MoveRefunded { .. } => "MoveRefunded",
+            PoolStep::EcoRescueSigned { .. } => "EcoRescueSigned",
         }
     }
 
@@ -1967,6 +1986,13 @@ impl PoolStep {
                 tx_hash,
                 raw_tx,
                 ..
+            }
+            | PoolStep::EcoRescueSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                ..
             } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
             _ => None,
         }
@@ -1982,6 +2008,9 @@ impl PoolStep {
                 Some(crate::events::TxPurpose::PoolTransfer(orphan_key(key)))
             }
             PoolStep::MoveSigned { id, .. } => Some(crate::events::TxPurpose::PoolMove(*id)),
+            PoolStep::EcoRescueSigned { order_id, .. } => {
+                Some(crate::events::TxPurpose::EcoRescue(*order_id))
+            }
             _ => None,
         }
     }

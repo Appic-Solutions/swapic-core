@@ -98,6 +98,11 @@ pub trait Store {
     fn put_pool_own_source(&mut self, tx: TxHash, source: types::pool::OwnSource);
     /// Every own source, in hash order: what the audit compares.
     fn pool_own_sources(&self) -> Vec<(TxHash, types::pool::OwnSource)>;
+    /// The line that signed the rescue of the intent an order published, if one did (P11e).
+    fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64>;
+    fn put_eco_rescue(&mut self, order_id: PoolRef, index: u64);
+    /// Every rescue, in order id order: what the audit compares.
+    fn eco_rescues(&self) -> Vec<(PoolRef, u64)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -210,6 +215,10 @@ impl<S: Store> PoolLookup for PoolView<'_, S> {
         self.0.pool_orphan(key)
     }
 
+    fn eco_rescued(&self, order_id: &[u8; 32]) -> bool {
+        self.0.eco_rescue(&PoolRef::new(*order_id)).is_some()
+    }
+
     fn pool_move(&self, id: u64) -> Option<types::pool::Move> {
         self.0.pool_move(id)
     }
@@ -270,6 +279,9 @@ pub struct MemoryStore {
     /// The canister's own CCTP sources (P11c).
     #[n(19)]
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
+    /// The Eco rescues by order id (P11e).
+    #[n(20)]
+    eco_rescues: BTreeMap<PoolRef, u64>,
 }
 
 impl Store for MemoryStore {
@@ -525,6 +537,21 @@ impl Store for MemoryStore {
             .collect()
     }
 
+    fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64> {
+        self.eco_rescues.get(order_id).copied()
+    }
+
+    fn put_eco_rescue(&mut self, order_id: PoolRef, index: u64) {
+        self.eco_rescues.insert(order_id, index);
+    }
+
+    fn eco_rescues(&self) -> Vec<(PoolRef, u64)> {
+        self.eco_rescues
+            .iter()
+            .map(|(order_id, index)| (*order_id, *index))
+            .collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -600,6 +627,7 @@ impl State<MemoryStore> {
             pool_orphans,
             pool_moves,
             pool_own_sources,
+            eco_rescues,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -676,6 +704,11 @@ impl State<MemoryStore> {
                 .pool_own_sources()
                 .iter()
                 .map(|(tx, source)| (tx, source)))
+            && eco_rescues.iter().eq(other
+                .store
+                .eco_rescues()
+                .iter()
+                .map(|(order_id, index)| (order_id, index)))
     }
 }
 
@@ -858,6 +891,10 @@ impl<S: Store> State<S> {
             PoolStep::PayoutPaid { id, tx_hash, .. } => self
                 .store
                 .put_pool_own_source(*tx_hash, types::pool::OwnSource::Payout(*id)),
+            // one rescue per order, answered by the line that signed it
+            PoolStep::EcoRescueSigned { order_id, .. } => self
+                .store
+                .put_eco_rescue(PoolRef::new(*order_id), index.get()),
             _ => {}
         }
     }

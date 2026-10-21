@@ -10,6 +10,7 @@ pub mod lifecycle;
 pub mod pool;
 pub mod queries;
 pub mod relay;
+pub mod rescue;
 pub mod rpc;
 pub mod state;
 pub mod storage;

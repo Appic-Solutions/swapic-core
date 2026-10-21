@@ -622,7 +622,147 @@ fn samples() -> Vec<Sample> {
     all.extend(orphan_samples());
     all.extend(rebalance_samples());
     all.extend(arrival_terms_samples());
+    all.extend(rescue_samples());
     all
+}
+
+/// The Eco rescue (P11e): a chain with its gas row, its transaction created, and its signed
+/// record.
+fn rescue_samples() -> Vec<Sample> {
+    use crate::config::{EvmChain, GasAction, PerAction};
+    use crate::evm::EvmAddress;
+    use crate::pool::PoolStep;
+
+    let address = |byte: u8| EvmAddress::new([byte; 20]);
+    let rows = |base: u64| PerAction {
+        relay_cctp: base,
+        relay_eco: base + 1,
+        relay_local: base + 2,
+        complete_swap: base + 3,
+        complete_ck: base + 4,
+        relay_deliver: base + 5,
+        release: base + 6,
+        pool_payout: None,
+        pool_transfer: None,
+        pool_approve: None,
+        pool_move: None,
+        pool_move_finish: None,
+        pool_ck_deposit: None,
+        eco_rescue: Some(base + 13),
+    };
+    let chain = EvmChain {
+        swapic: address(0xb1),
+        runner: address(0xb2),
+        cctp_receiver: address(0xb3),
+        usdc: address(0xb4),
+        token_messenger: address(0xb5),
+        message_transmitter: address(0xb6),
+        gas_limit: {
+            let r = rows(700_000);
+            PerAction {
+                relay_cctp: GasAmount::from(r.relay_cctp),
+                relay_eco: GasAmount::from(r.relay_eco),
+                relay_local: GasAmount::from(r.relay_local),
+                complete_swap: GasAmount::from(r.complete_swap),
+                complete_ck: GasAmount::from(r.complete_ck),
+                relay_deliver: GasAmount::from(r.relay_deliver),
+                release: GasAmount::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: None,
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
+                eco_rescue: r.eco_rescue.map(GasAmount::from),
+            }
+        },
+        gas_budget: {
+            let r = rows(3_000_000_000_000_000);
+            PerAction {
+                relay_cctp: Wei::from(r.relay_cctp),
+                relay_eco: Wei::from(r.relay_eco),
+                relay_local: Wei::from(r.relay_local),
+                complete_swap: Wei::from(r.complete_swap),
+                complete_ck: Wei::from(r.complete_ck),
+                relay_deliver: Wei::from(r.relay_deliver),
+                release: Wei::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: None,
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
+                eco_rescue: r.eco_rescue.map(Wei::from),
+            }
+        },
+        min_network_fee: {
+            let r = rows(70_000);
+            PerAction {
+                relay_cctp: TokenAmount::from(r.relay_cctp),
+                relay_eco: TokenAmount::from(r.relay_eco),
+                relay_local: TokenAmount::from(r.relay_local),
+                complete_swap: TokenAmount::from(r.complete_swap),
+                complete_ck: TokenAmount::from(r.complete_ck),
+                relay_deliver: TokenAmount::from(r.relay_deliver),
+                release: TokenAmount::from(r.release),
+                pool_payout: None,
+                pool_transfer: None,
+                pool_approve: None,
+                pool_move: None,
+                pool_move_finish: None,
+                pool_ck_deposit: None,
+                eco_rescue: r.eco_rescue.map(TokenAmount::from),
+            }
+        },
+    };
+    let config = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        confirmations: depths_with_ethereum_swaps_at_one_block(),
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::POLYGON, chain)])),
+        ..Config::default()
+    };
+    vec![
+        sample("config with the Eco rescue's gas row", config),
+        sample(
+            "Eco rescue transaction created",
+            Event::seal(
+                EventIndex::new(10_000),
+                Timestamp::from_nanos(1_800_000_000_000_001_000),
+                EventHash::new([0xcd; 32]),
+                crate::events::EventType::TxCreated {
+                    purpose: TxPurpose::EcoRescue([0xb7; 32]),
+                    chain_id: ChainId::POLYGON,
+                    nonce: Nonce::new(1_001),
+                    to: address(0xb8),
+                    value: Wei::from(1_002_u64),
+                    data: vec![0xb9; 36],
+                    gas_limit: GasAmount::from(1_003_000_u64),
+                    max_fee: WeiPerGas::new(1_004_000_000),
+                    max_priority_fee: WeiPerGas::new(1_005_000),
+                    action: Some(GasAction::EcoRescue),
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+        sample(
+            "Eco rescue signed",
+            Event::seal(
+                EventIndex::new(10_001),
+                Timestamp::from_nanos(1_800_000_000_000_001_006),
+                EventHash::new([0xcd; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::EcoRescueSigned {
+                        order_id: [0xb7; 32],
+                        chain_id: ChainId::POLYGON,
+                        nonce: Nonce::new(1_001),
+                        tx_hash: TxHash::new([0xba; 32]),
+                        raw_tx: vec![0x02, 0xbb],
+                    },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// The rebalancing (P11c): a move with every field set, a ledger with its lines, every move
@@ -875,6 +1015,7 @@ fn rebalance_samples() -> Vec<Sample> {
         pool_move: Some(base + 10),
         pool_move_finish: Some(base + 11),
         pool_ck_deposit: Some(base + 12),
+        eco_rescue: None,
     };
     let chain = EvmChain {
         swapic: address(0x9d),
@@ -899,6 +1040,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move: r.pool_move.map(GasAmount::from),
                 pool_move_finish: r.pool_move_finish.map(GasAmount::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(GasAmount::from),
+                eco_rescue: None,
             }
         },
         gas_budget: {
@@ -917,6 +1059,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move: r.pool_move.map(Wei::from),
                 pool_move_finish: r.pool_move_finish.map(Wei::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(Wei::from),
+                eco_rescue: None,
             }
         },
         min_network_fee: {
@@ -935,6 +1078,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move: r.pool_move.map(TokenAmount::from),
                 pool_move_finish: r.pool_move_finish.map(TokenAmount::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(TokenAmount::from),
+                eco_rescue: None,
             }
         },
     };
@@ -1371,6 +1515,7 @@ fn pool_tx_samples() -> Vec<Sample> {
         pool_move: None,
         pool_move_finish: None,
         pool_ck_deposit: None,
+        eco_rescue: None,
     };
     let chain = EvmChain {
         swapic: address(0x51),
@@ -1395,6 +1540,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move: None,
                 pool_move_finish: None,
                 pool_ck_deposit: None,
+                eco_rescue: None,
             }
         },
         gas_budget: {
@@ -1413,6 +1559,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move: None,
                 pool_move_finish: None,
                 pool_ck_deposit: None,
+                eco_rescue: None,
             }
         },
         min_network_fee: {
@@ -1431,6 +1578,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move: None,
                 pool_move_finish: None,
                 pool_ck_deposit: None,
+                eco_rescue: None,
             }
         },
     };

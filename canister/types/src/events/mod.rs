@@ -396,6 +396,10 @@ pub enum TxPurpose {
     /// id: one out at a time per move. P11c: indices 60 and up.
     #[n(60)]
     PoolMove(#[n(0)] u64),
+    /// Eco's `cancelAndProve` of an unfilled intent on its destination (P11e), by the order
+    /// id that published it: one rescue per order.
+    #[n(61)]
+    EcoRescue(#[cbor(n(0), with = "minicbor::bytes")] [u8; 32]),
 }
 
 impl TxPurpose {
@@ -418,6 +422,7 @@ impl TxPurpose {
             Self::PoolTransfer(key) => Some(pool_key(b"swapic.pool.v1.tx.transfer", key)),
             Self::PoolApprove => Some(pool_key(b"swapic.pool.v1.tx.approve", &[])),
             Self::PoolMove(id) => Some(pool_key(b"swapic.pool.v1.tx.move", &id.to_be_bytes())),
+            Self::EcoRescue(order_id) => Some(pool_key(b"swapic.eco.v1.tx.rescue", order_id)),
             Self::Cancel(_) => None,
         }
     }
@@ -426,7 +431,11 @@ impl TxPurpose {
     pub fn is_pool(&self) -> bool {
         matches!(
             self,
-            Self::PoolPayout(_) | Self::PoolTransfer(_) | Self::PoolApprove | Self::PoolMove(_)
+            Self::PoolPayout(_)
+                | Self::PoolTransfer(_)
+                | Self::PoolApprove
+                | Self::PoolMove(_)
+                | Self::EcoRescue(_)
         )
     }
 
@@ -447,7 +456,8 @@ impl TxPurpose {
             | Self::PoolPayout(_)
             | Self::PoolTransfer(_)
             | Self::PoolApprove
-            | Self::PoolMove(_) => None,
+            | Self::PoolMove(_)
+            | Self::EcoRescue(_) => None,
         }
     }
 
@@ -470,6 +480,7 @@ impl TxPurpose {
             Self::PoolTransfer(key) => w.put_u8(11).put_hash(key),
             Self::PoolApprove => w.put_u8(12),
             Self::PoolMove(id) => w.put_u8(60).put_u64(*id),
+            Self::EcoRescue(order_id) => w.put_u8(61).put_hash(order_id),
         };
     }
 }

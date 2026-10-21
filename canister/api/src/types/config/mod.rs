@@ -141,6 +141,9 @@ pub struct ActionGas {
     pub pool_move_finish: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_ck_deposit: Option<u64>,
+    /// Eco's `cancelAndProve` of an unfilled intent (P11e), optional as the pool's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eco_rescue: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -193,6 +196,12 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub pool_ck_deposit: Option<Nat>,
+    /// Eco's `cancelAndProve` of an unfilled intent (P11e), optional as the pool's.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub eco_rescue: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -216,6 +225,7 @@ impl From<PerAction<GasAmount>> for ActionGas {
             pool_move: gas.pool_move.map(limit),
             pool_move_finish: gas.pool_move_finish.map(limit),
             pool_ck_deposit: gas.pool_ck_deposit.map(limit),
+            eco_rescue: gas.eco_rescue.map(limit),
         }
     }
 }
@@ -236,6 +246,7 @@ impl From<ActionGas> for PerAction<GasAmount> {
             pool_move: gas.pool_move.map(GasAmount::from),
             pool_move_finish: gas.pool_move_finish.map(GasAmount::from),
             pool_ck_deposit: gas.pool_ck_deposit.map(GasAmount::from),
+            eco_rescue: gas.eco_rescue.map(GasAmount::from),
         }
     }
 }
@@ -256,6 +267,7 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             pool_move: amounts.pool_move.map(Into::into),
             pool_move_finish: amounts.pool_move_finish.map(Into::into),
             pool_ck_deposit: amounts.pool_ck_deposit.map(Into::into),
+            eco_rescue: amounts.eco_rescue.map(Into::into),
         }
     }
 }
@@ -282,6 +294,7 @@ fn per_action<Unit>(
         pool_move: amounts.pool_move.map(amount).transpose()?,
         pool_move_finish: amounts.pool_move_finish.map(amount).transpose()?,
         pool_ck_deposit: amounts.pool_ck_deposit.map(amount).transpose()?,
+        eco_rescue: amounts.eco_rescue.map(amount).transpose()?,
     })
 }
 

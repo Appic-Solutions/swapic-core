@@ -1050,7 +1050,7 @@ pub fn deep_enough(block: BlockNumber, head: BlockNumber, chain: ChainId) -> Res
 }
 
 /// The source chain's receipt of `tx`, in one outcall.
-async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
+pub(crate) async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
     let calls = [("eth_getTransactionReceipt", json!([hex0x(tx.as_ref())]))];
     let mut answers = rpc::rpc_batch_each(chain, &calls, MAX_RECEIPT_BYTES)
         .await

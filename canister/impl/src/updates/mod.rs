@@ -12,6 +12,7 @@ mod ops;
 mod pool;
 mod quotes;
 mod rebalance;
+mod rescue;
 mod roles;
 
 pub use books::*;
@@ -22,4 +23,5 @@ pub use ops::*;
 pub use pool::*;
 pub use quotes::*;
 pub use rebalance::*;
+pub use rescue::*;
 pub use roles::*;

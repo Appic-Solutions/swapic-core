@@ -417,6 +417,19 @@ impl<S: Store> State<S> {
                 }
             }
             TxPurpose::PoolApprove => {}
+            // one rescue per order
+            TxPurpose::EcoRescue(order_id) => {
+                if self
+                    .store()
+                    .eco_rescue(&types::hash::PoolRef::new(*order_id))
+                    .is_some()
+                {
+                    return Err(types::pool::PoolStepError::Terms(
+                        "the order's intent was rescued already",
+                    )
+                    .into());
+                }
+            }
             // a move's transaction only while its order is pinned, or its Eco fill landed for
             // its ck deposit: what `MoveSigned` admits
             TxPurpose::PoolMove(id) => {

@@ -51,6 +51,7 @@ fn outbox_config() -> Config {
         pool_move: None,
         pool_move_finish: None,
         pool_ck_deposit: None,
+        eco_rescue: None,
     };
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),

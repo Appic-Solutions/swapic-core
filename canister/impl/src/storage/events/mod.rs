@@ -1,7 +1,8 @@
 use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
 use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
-    auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
+    auto_refund_waiting_memory, books_memory, eco_rescues_memory, events_data_memory,
+    events_index_memory,
     flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
     pool_deposits_memory, pool_ledger_memory, pool_moves_memory, pool_orphans_memory,
     pool_own_sources_memory, pool_payout_intents_memory, pool_payout_queue_memory,
@@ -120,6 +121,10 @@ thread_local! {
     // transaction, once it succeeded at depth, which its finish names with no fee step.
     static POOL_OWN_SOURCES: RefCell<StableBTreeMap<types::TxHash, types::pool::OwnSource, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_own_sources_memory()));
+
+    // The Eco rescues by order id (P11e): the line that signed each.
+    static ECO_RESCUES: RefCell<StableBTreeMap<PoolRef, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(eco_rescues_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -357,6 +362,18 @@ impl Store for StableStore {
         POOL_OWN_SOURCES.with(|sources| sources.borrow().iter().collect())
     }
 
+    fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64> {
+        ECO_RESCUES.with(|rescues| rescues.borrow().get(order_id))
+    }
+
+    fn put_eco_rescue(&mut self, order_id: PoolRef, index: u64) {
+        ECO_RESCUES.with(|rescues| rescues.borrow_mut().insert(order_id, index));
+    }
+
+    fn eco_rescues(&self) -> Vec<(PoolRef, u64)> {
+        ECO_RESCUES.with(|rescues| rescues.borrow().iter().collect())
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().get(key))
     }
@@ -489,6 +506,7 @@ pub fn init() {
     POOL_ORPHANS.with(|_| ());
     POOL_MOVES.with(|_| ());
     POOL_OWN_SOURCES.with(|_| ());
+    ECO_RESCUES.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at
