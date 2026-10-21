@@ -287,16 +287,14 @@ fn the_payout_starts_before_any_call_and_pays_arrived_less_premium() {
         fake.watch.set(Some(r#ref));
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(*fake.seen.borrow(), vec![Some(DepositStatus::Paying)]);
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        // the transfer's fee is the user's (P11d)
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), less(99, 1))]);
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
         let attempt = paid.payout.attempt.unwrap();
         assert_eq!(attempt.memo, r#ref.into_bytes());
         assert_eq!(attempt.created_at, clock());
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
-        );
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
         let pool = ledger();
         assert_eq!(pool.owed, TokenAmount::ZERO);
         assert_eq!(pool.pockets.icp.reserved, TokenAmount::ZERO);
@@ -322,7 +320,7 @@ fn a_lost_answer_is_asked_again_and_paid_once() {
         assert_eq!(waiting.payout.failures, 0);
         // the next drive, later: the same pair, so the same transfer
         block_on(drive_deposit(&fake, r#ref, || at(99), &open_pool)).unwrap();
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), less(99, 1))]);
         assert_eq!(fake.calls.borrow().len(), 2, "asked twice, executed once");
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
@@ -340,6 +338,7 @@ fn a_stake_mints_its_shares_at_the_price_before_it() {
             kind: DepositKind::Stake { owner },
             premium: TokenAmount::ZERO,
             rebalance_share: TokenAmount::from(500_000_u32),
+            icp_fees: None,
             ..swap_terms(5, usdc(100), TokenAmount::ZERO, at(1_000))
         };
         let r#ref = register(terms);
@@ -385,7 +384,7 @@ fn a_leg_below_its_minimum_pays_all_of_it_as_ckusdc() {
         assert_eq!(deposit(&r#ref).unwrap().payout.swap.declined, 1);
         assert!(fake.transfers().is_empty());
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), less(99, 1))]);
         assert!(!fake
             .calls
             .borrow()
@@ -413,14 +412,12 @@ fn an_icpswap_leg_pays_its_output() {
         assert_eq!(
             *fake.calls.borrow(),
             vec![
-                format!("quote {}", usdc(99)),
+                // the approval's and the pull's fees out of the user's 99
+                format!("quote {}", less(99, 2)),
                 // what the pool holds of the canister's before the swap
                 "unused".to_string(),
-                format!(
-                    "approve {}",
-                    usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
-                ),
-                format!("swap {} at least 7000", usdc(99)),
+                format!("approve {}", less(99, 1)),
+                format!("swap {} at least 7000", less(99, 2)),
                 "transfer 5900".to_string(),
             ]
         );
@@ -433,10 +430,7 @@ fn an_icpswap_leg_pays_its_output() {
         assert_eq!(leg.send, Some(TokenAmount::from(5_900_u32)));
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(TokenAmount::from(2 * FEE)).unwrap()
-        );
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
     });
 }
 
@@ -499,7 +493,7 @@ fn a_pool_closed_before_an_outflow_pays_nothing() {
         assert_eq!(waiting.payout.failures, 0);
         // reopened: paid, once
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), less(99, 1))]);
 
         // an ICPSwap leg whose pool closes after the quote: no approval, no swap
         let r#ref = {
@@ -684,8 +678,8 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
         assert_eq!(
             *fake.calls.borrow(),
             vec![
-                format!("transfer {}", usdc(199)),
-                format!("transfer {}", usdc(9))
+                format!("transfer {}", less(199, 1)),
+                format!("transfer {}", less(9, 1))
             ]
         );
         let mut paid = fake.transfers();
@@ -693,8 +687,8 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
         assert_eq!(
             paid,
             vec![
-                (ckusdc(), account(1), usdc(199)),
-                (ckusdc(), account(2), usdc(9)),
+                (ckusdc(), account(1), less(199, 1)),
+                (ckusdc(), account(2), less(9, 1)),
             ]
         );
         for r#ref in [big, small] {
@@ -731,7 +725,7 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
             .unwrap();
             r#ref
         };
-        // a payout already started, holding 49.01
+        // a payout already started, holding 49 (its fee the user's)
         let started = arrive(1, usdc(50));
         record_at(
             PoolStep::PayoutStarted {
@@ -777,7 +771,7 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
             at(4),
         )
         .unwrap();
-        // the head: 300 arrives, its 299.01 more than the 250.99 free
+        // the head: 300 arrives, its 299 more than the 251 free
         let head = arrive(2, usdc(300));
         assert!(ledger().queue_need().is_some());
         // an arrived EVM stake to mint, and an ICP stake's pull to ask again
@@ -786,6 +780,7 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
                 owner: PoolAccount::Icp(account(3)),
             },
             premium: TokenAmount::ZERO,
+            icp_fees: None,
             ..swap_terms(3, usdc(10), TokenAmount::ZERO, at(1_000))
         });
         record_at(
@@ -860,6 +855,12 @@ fn fees(count: u64) -> TokenAmount {
     TokenAmount::from(count * FEE)
 }
 
+/// `usdc(whole)` less `count` ckUSDC fees: what a payout moves once the user's own fees
+/// are taken out of it (P11d: the user pays every fee).
+fn less(whole: u64, count: u64) -> TokenAmount {
+    usdc(whole).checked_sub(fees(count)).unwrap()
+}
+
 /// Review fix 4: the pool's own refusal after `SwapBegun`. Its ckUSDC left at the pool is
 /// withdrawn back, the swap undone, and all of it paid as ckUSDC; with nothing at the pool
 /// the deposit never happened, and all of it is paid as ckUSDC too. What the leg cost is in
@@ -873,31 +874,29 @@ fn a_refused_swap_is_undone_and_paid_all_as_ckusdc() {
         fake.quote.set(Some(TokenAmount::from(8_000_u32)));
         fake.swap_refused.set(true);
         // the pool took the deposit, then refused the swap: the ckUSDC stays there
-        fake.swap_leaves.set(Some((usdc(99), TokenAmount::ZERO)));
+        fake.swap_leaves.set(Some((less(99, 2), TokenAmount::ZERO)));
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(
             *fake.calls.borrow(),
             vec![
-                format!("quote {}", usdc(99)),
+                format!("quote {}", less(99, 2)),
                 "unused".to_string(),
-                format!("approve {}", usdc(99).checked_add(fees(1)).unwrap()),
-                format!("swap {} at least 7000", usdc(99)),
+                format!("approve {}", less(99, 1)),
+                format!("swap {} at least 7000", less(99, 2)),
                 "unused".to_string(),
-                format!("withdraw ckUSDC {} fee {FEE}", usdc(99)),
-                format!("transfer {}", usdc(99)),
+                format!("withdraw ckUSDC {} fee {FEE}", less(99, 2)),
+                format!("transfer {}", less(99, 4)),
             ]
         );
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(1), less(99, 4))]);
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
         // the deposit's pull and the withdrawal's transfer
         assert_eq!(paid.payout.swap.undone, Some(fees(2)));
         assert!(paid.payout.fell_back.is_some());
-        // 99 to the recipient, its transfer's fee, the approval's, and the undone swap's two
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(4)).unwrap()
-        );
+        // the user's 99, out of which the transfer's fee, the approval's, and the undone
+        // swap's two
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
 
         // refused before its deposit: nothing at the pool, nothing withdrawn
         let other = arrive(2, token(), 5_000);
@@ -910,13 +909,10 @@ fn a_refused_swap_is_undone_and_paid_all_as_ckusdc() {
             .borrow()
             .iter()
             .any(|call| call.starts_with("withdraw")));
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), less(99, 2))]);
         let paid = deposit(&other).unwrap();
         assert_eq!(paid.payout.swap.undone, Some(TokenAmount::ZERO));
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(2)).unwrap()
-        );
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
         assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
 }
@@ -945,17 +941,14 @@ fn a_swap_with_no_answer_is_settled_by_what_the_pool_holds() {
         let paid = deposit(&swapped).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
         assert_eq!(paid.payout.swap.out, Some(TokenAmount::from(7_900_u32)));
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(2)).unwrap()
-        );
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
 
         let not_swapped = arrive(2, token(), 5_000);
         let fake = Fake::default();
         fake.quote.set(Some(TokenAmount::from(8_000_u32)));
-        fake.swap_leaves.set(Some((usdc(99), TokenAmount::ZERO)));
+        fake.swap_leaves.set(Some((less(99, 2), TokenAmount::ZERO)));
         block_on(drive_deposit(&fake, not_swapped, clock, &open_pool)).unwrap();
-        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), usdc(99))]);
+        assert_eq!(fake.transfers(), vec![(ckusdc(), account(2), less(99, 4))]);
         assert_eq!(
             deposit(&not_swapped).unwrap().payout.swap.undone,
             Some(fees(2))
@@ -1043,10 +1036,11 @@ fn every_approval_is_counted_in_what_the_payout_spent() {
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.payout.swap.approvals, Some(2));
-        // 99 swapped, the pool's pull, two approvals
+        // the user's 99 (its swap, the pool's pull, one approval) and the approval asked
+        // again, the one fee past the user's budget
         assert_eq!(
             paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(3)).unwrap()
+            usdc(99).checked_add(fees(1)).unwrap()
         );
     });
 }
@@ -1067,7 +1061,7 @@ fn a_token_delisted_before_its_swap_falls_back() {
                     path: PayoutPath::Icpswap {
                         pool: icpswap_pool(),
                     },
-                    amount: Some(usdc(99)),
+                    amount: Some(less(99, 2)),
                     token: Some(PrincipalBytes(ckusdc())),
                 },
             },
@@ -1083,7 +1077,10 @@ fn a_token_delisted_before_its_swap_falls_back() {
         .unwrap();
         let fake = Fake::default();
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
-        assert_eq!(*fake.calls.borrow(), vec![format!("transfer {}", usdc(99))]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![format!("transfer {}", less(99, 1))]
+        );
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.paid.unwrap().token, ckusdc());
         assert!(paid
@@ -1288,7 +1285,7 @@ fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
         assert_eq!(
             paid,
             vec![
-                (ckusdc(), account(1), usdc(99)),
+                (ckusdc(), account(1), less(99, 1)),
                 // the output less the token's fee, as an output was sent then
                 (token(), account(2), TokenAmount::from(6_900_u32)),
                 // swapped now, under this build's rule
@@ -1299,11 +1296,8 @@ fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
         for r#ref in [ckusdc_payout, swapped, not_begun] {
             assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
         }
-        // the old leg's one approval, presumed, is in what it spent
-        assert_eq!(
-            deposit(&swapped).unwrap().paid.unwrap().spent,
-            usdc(99).checked_add(fees(2)).unwrap()
-        );
+        // the old leg's one approval, presumed, is in what it spent: the user's 99
+        assert_eq!(deposit(&swapped).unwrap().paid.unwrap().spent, usdc(99));
         assert!(ledger().pending.is_empty());
         assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
@@ -1348,16 +1342,21 @@ fn two_legs_at_one_pool_each_withdraw_only_their_own() {
             .borrow()
             .iter()
             .any(|call| call.starts_with("approve") || call.starts_with("swap")));
-        // the first leg's deposit shows at the pool: it withdraws its 99, not the 149 there
-        fake.unused.set(Some((usdc(149), TokenAmount::ZERO)));
+        // the first leg's deposit shows at the pool: it withdraws its 98.98 (the user's 99
+        // less the approval's and the pull's fees), not the 148.98 there
+        let swap_in = less(99, 2);
+        fake.unused.set(Some((
+            usdc(50).checked_add(swap_in).unwrap(),
+            TokenAmount::ZERO,
+        )));
         block_on(drive_deposit(&fake, first, clock, &open_pool)).unwrap();
         assert!(fake
             .calls
             .borrow()
-            .contains(&format!("withdraw ckUSDC {} fee {FEE}", usdc(99))));
+            .contains(&format!("withdraw ckUSDC {swap_in} fee {FEE}")));
         let undone = deposit(&first).unwrap();
         assert_eq!(undone.status, DepositStatus::Paid);
-        assert_eq!(undone.payout.swap.withdrawn, Some(usdc(99)));
+        assert_eq!(undone.payout.swap.withdrawn, Some(swap_in));
         assert_eq!(fake.unused.get(), Some(theirs));
         // the second leg completes, and withdraws nothing
         fake.calls.borrow_mut().clear();
@@ -1373,7 +1372,7 @@ fn two_legs_at_one_pool_each_withdraw_only_their_own() {
         assert_eq!(
             fake.transfers(),
             vec![
-                (ckusdc(), account(1), usdc(99)),
+                (ckusdc(), account(1), less(99, 4)),
                 (token(), account(2), TokenAmount::from(5_900_u32)),
             ]
         );
@@ -1397,7 +1396,7 @@ fn no_output_is_paid_below_min_out() {
         assert!(fake
             .calls
             .borrow()
-            .contains(&format!("swap {} at least 7000", usdc(99))));
+            .contains(&format!("swap {} at least 7000", less(99, 2))));
         assert!(fake.transfers().is_empty());
         // asked again, still not paid
         assert!(matches!(
@@ -1604,11 +1603,8 @@ fn a_route_through_icp_swaps_twice_and_pays_the_token() {
     on_fresh_memory(|| {
         crate::storage::init();
         let r#ref = arrived_via_icp(5_000);
-        // the hold counts eight ckUSDC fees: two legs
-        assert_eq!(
-            deposit(&r#ref).unwrap().held(),
-            usdc(99).checked_add(fees(8)).unwrap()
-        );
+        // the hold is the user's 99, every fee of both legs out of it (P11d)
+        assert_eq!(deposit(&r#ref).unwrap().held(), usdc(99));
         let pools = Pools::default();
         pools
             .quotes
@@ -1633,14 +1629,11 @@ fn a_route_through_icp_swaps_twice_and_pays_the_token() {
         assert_eq!(
             *pools.calls.borrow(),
             vec![
-                format!("quote icp/ckusdc {}", usdc(99)),
+                format!("quote icp/ckusdc {}", less(99, 2)),
                 "quote token/icp 1000000".to_string(),
-                format!("quote icp/ckusdc {}", usdc(99)),
-                format!(
-                    "approve icp/ckusdc {}",
-                    usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
-                ),
-                format!("swap icp/ckusdc {} at least 500030", usdc(99)),
+                format!("quote icp/ckusdc {}", less(99, 2)),
+                format!("approve icp/ckusdc {}", less(99, 1)),
+                format!("swap icp/ckusdc {} at least 500030", less(99, 2)),
                 "quote token/icp 1000000".to_string(),
                 "approve token/icp 1000010".to_string(),
                 "swap token/icp 1000000 at least 7000".to_string(),
@@ -1656,17 +1649,15 @@ fn a_route_through_icp_swaps_twice_and_pays_the_token() {
         let second = paid.payout.second.unwrap();
         assert_eq!(second.out, Some(TokenAmount::from(13_000_u32)));
         assert_eq!(second.amount_in, Some(TokenAmount::from(1_000_000_u64)));
-        // only the first leg cost ckUSDC: its approval, its deposit and its pull
-        assert_eq!(
-            paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(2)).unwrap()
-        );
+        // only the first leg cost ckUSDC: its approval, its deposit and its pull, the user's
+        // 99 in all
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
     });
 }
 
 /// All or nothing over both legs: a second leg that cannot reach the minimum (declined once,
 /// short again) swaps the ICP back to ckUSDC on the ICP/ckUSDC pool, and ALL of it is paid as
-/// ckUSDC; the pool pays the round trip's loss.
+/// ckUSDC; the round trip's loss is the user's (P11d).
 #[test]
 fn a_second_leg_short_pays_everything_as_ckusdc() {
     on_fresh_memory(|| {
@@ -1702,21 +1693,16 @@ fn a_second_leg_short_pays_everything_as_ckusdc() {
         let calls = pools.calls.borrow();
         assert!(calls.contains(&"swap icp/ckusdc 1000000 at least 1".to_string()));
         assert!(!calls.iter().any(|call| call.starts_with("swap token/icp")));
-        // all of it, as ckUSDC, never a mix
-        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        // all of it, as ckUSDC, never a mix: the 98 the way back brought less its
+        // withdrawal's fee and the transfer's, the first leg's 99 spent
+        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), less(98, 2))]);
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.status, DepositStatus::Paid);
         assert!(paid.payout.fell_back.is_some());
         assert_eq!(paid.payout.back.unwrap().out, Some(usdc(98)));
         // what left the ICP pocket: the transfer and its fee, the first leg's deposit, its
-        // approval and pull, less the ckUSDC the way back brought (its output less one fee)
-        let spent = usdc(99)
-            .checked_add(fees(1))
-            .and_then(|sum| sum.checked_add(usdc(99)))
-            .and_then(|sum| sum.checked_add(fees(2)))
-            .and_then(|sum| sum.checked_sub(usdc(98).checked_sub(fees(1)).unwrap()))
-            .unwrap();
-        assert_eq!(paid.paid.unwrap().spent, spent);
+        // approval and pull, less the ckUSDC the way back brought: the user's 99
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
     });
 }
 
@@ -1782,7 +1768,7 @@ fn a_route_through_icp_short_from_the_start_pays_ckusdc_and_calls_nothing() {
         );
         assert_eq!(deposit(&r#ref).unwrap().payout.swap.declined, 1);
         block_on(drive_deposit(&pools, r#ref, clock, &open_pool)).unwrap();
-        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), usdc(99))]);
+        assert_eq!(pools.transfers(), vec![(ckusdc(), account(1), less(99, 1))]);
         assert!(!pools
             .calls
             .borrow()

@@ -9,10 +9,12 @@
 //! the canister NO fee step (the canister pays itself nothing: a fee step would be booked as
 //! fee income and the books would drift), and has exactly one final delivery (its payout on
 //! the pool chain, one Eco intent whose unfilled reward refunds its creator, the canister, or
-//! from P11c on one CCTP burn, whose finish the canister pays itself: `cctp::own`), which pays
-//! the terms' recipient at least their minimum of their token on their chain (a CCTP Deliver:
-//! what the burn is given less the most Circle may keep); its deadline is at least 60 s away and
-//! at most the payout's; no party is sanctioned; the gas limit is at most `max_payout_gas`.
+//! from P11c on one CCTP burn, whose finish the canister pays itself: `cctp::own`, taken only
+//! for a payout whose network fee is at least `cctp_min_network_fee`: the user paid the
+//! canister's finish), which pays the terms' recipient at least their minimum of their token
+//! on their chain (a CCTP Deliver: what the burn is given less the most Circle may keep); its
+//! deadline is at least 60 s away and at most the payout's; no party is sanctioned; the gas
+//! limit is at most `max_payout_gas`.
 //! A payout signed once answers its transaction's id; a retry after a revert signs only the
 //! order it pinned (the same id: Swapic's `used` refuses a second run of it).
 
@@ -95,6 +97,12 @@ pub fn check_order(
         return Err(refused(
             "a payout order carries no fee step: the canister pays itself nothing",
         ));
+    }
+    if plan.action == GasAction::RelayCctp {
+        // the canister pays a CCTP finish only where the user's network fee paid for one
+        settings
+            .admits_cctp(payout.network_fee())
+            .map_err(refused)?;
     }
     let delivery = plan
         .delivery

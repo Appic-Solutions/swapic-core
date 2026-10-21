@@ -221,7 +221,7 @@ pub fn plan_withdrawal<S: Store>(
             }
         }
     }
-    let amount = payout::path_amount(request.usdc, false, path, fee).ok_or_else(|| {
+    let amount = payout::path_amount(request.usdc, path, fee).ok_or_else(|| {
         PoolError::NotAllowed("the withdrawal does not cover its fees".to_string())
     })?;
     Ok(WithdrawalPlan {

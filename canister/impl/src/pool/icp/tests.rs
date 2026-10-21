@@ -186,10 +186,11 @@ fn a_withdrawal_is_refused_when_it_should_be() {
             Err(PoolError::Sanctioned(_))
         ));
         // a registration holds nothing; an arrived swap's queued payout does, and a
-        // withdrawal waits behind it: 99.01 queued, 901 is more than the 900.99 behind it
+        // withdrawal waits behind it: 99 queued (its fees the user's), 902 is more than the
+        // 901 behind it
         let r#ref = register(swap_terms(1, usdc(100), usdc(1), at(1_000)));
         assert_eq!(
-            plan(&withdrawal(usdc(901)), None).map(|plan| plan.path),
+            plan(&withdrawal(usdc(902)), None).map(|plan| plan.path),
             Ok(PayoutPath::Ckusdc)
         );
         record_at(
@@ -203,10 +204,10 @@ fn a_withdrawal_is_refused_when_it_should_be() {
         )
         .unwrap();
         assert_eq!(
-            plan(&withdrawal(usdc(901)), None),
+            plan(&withdrawal(usdc(902)), None),
             Err(PoolError::Closed(POCKET_SHORT.into()))
         );
-        assert!(plan(&withdrawal(usdc(900)), None).is_ok());
+        assert!(plan(&withdrawal(usdc(901)), None).is_ok());
     });
 }
 
@@ -287,9 +288,9 @@ fn a_check_during_a_payout_finds_no_shortfall() {
         )
         .unwrap();
         let tolerance = TokenAmount::ZERO;
-        let debited = usdc(901).checked_sub(TokenAmount::from(FEE)).unwrap();
+        let debited = usdc(901);
         let check = |observed| read_state(|state| icp_expected(state, observed, tolerance));
-        // the transfer landed: 1000 less 99 and the fee
+        // the transfer landed: 1000 less the user's 99 (the transfer and its fee)
         assert_eq!(check(debited), (debited, false));
         // not yet: a passing surplus
         assert_eq!(check(usdc(1_000)), (debited, false));
@@ -303,9 +304,9 @@ fn a_check_during_a_payout_finds_no_shortfall() {
             PoolStep::Paid {
                 r#ref,
                 token: ckusdc(),
-                amount: usdc(99),
+                amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
                 block: 1,
-                spent: usdc(99).checked_add(TokenAmount::from(FEE)).unwrap(),
+                spent: usdc(99),
             },
             at(5),
         )
@@ -542,7 +543,7 @@ fn a_stopped_payout_is_still_pending_for_the_check() {
             crate::storage::pool::deposit(&r#ref).unwrap().status,
             DepositStatus::PayoutFailed(_)
         ));
-        let debited = usdc(901).checked_sub(TokenAmount::from(FEE)).unwrap();
+        let debited = usdc(901);
         let check = |observed| read_state(|state| icp_expected(state, observed, TokenAmount::ZERO));
         assert_eq!(check(debited), (debited, false));
         assert_eq!(check(usdc(1_000)), (debited, false));

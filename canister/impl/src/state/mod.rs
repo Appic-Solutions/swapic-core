@@ -264,11 +264,11 @@ pub struct MemoryStore {
     payout_intents: BTreeMap<PoolRef, u64>,
     #[n(17)]
     pool_orphans: BTreeMap<CreditKey, types::pool::Orphan>,
-    /// The rebalance moves (P11c). At 40, clear of the indices other plans add.
-    #[n(40)]
+    /// The rebalance moves (P11c).
+    #[n(18)]
     pool_moves: BTreeMap<u64, types::pool::Move>,
     /// The canister's own CCTP sources (P11c).
-    #[n(41)]
+    #[n(19)]
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
 }
 

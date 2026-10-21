@@ -169,9 +169,6 @@ fn world_with(canister_usdc: u64, config: Config) -> World {
         premium_bps: 10,
         ckusdc_ledger: ledger,
         icp_tokens: vec![],
-        deposit_grace_s: 120,
-        max_open_per_payer: 3,
-        max_held_bps: 5_000,
         arrival_backup_s: 300,
         pool_open_for_swaps: true,
     };
@@ -253,7 +250,8 @@ impl World {
         });
     }
 
-    /// A deposit registered and arrived on Base for 100 USDC, with a premium of 1.
+    /// A deposit arrived on Base for 100 USDC with its terms (P11d: no registration), a swap
+    /// with a premium of 1 and one ckUSDC fee of ICP fees, its own.
     fn arrive(&self, kind: DepositKind, salt: u8) -> PoolRef {
         let swap = matches!(kind, DepositKind::Swap { .. });
         let terms = Registration {
@@ -268,6 +266,7 @@ impl World {
             rail: PoolRail::Cctp,
             expires_at: self.now().checked_add(Duration::from_secs(600)).unwrap(),
             salt: [salt; 32],
+            icp_fees: swap.then_some(TokenAmount::from(FEE)),
         };
         let r#ref = terms.pool_ref().unwrap();
         self.plant(PoolStep::Registered {
@@ -378,8 +377,8 @@ fn ckusdc_swap(ledger: Principal) -> DepositKind {
     }
 }
 
-/// A registered swap whose arrival is recorded pays its recipient exactly
-/// `arrived - premium` in ckUSDC, on the canister's own drive.
+/// A swap whose arrival is recorded pays its recipient exactly `arrived - premium - fee` in
+/// ckUSDC, on the canister's own drive: the user pays every fee (P11d).
 #[test]
 fn an_arrived_swap_pays_its_recipient_arrived_less_premium() {
     let world = world(usdc(1_000));
@@ -387,15 +386,16 @@ fn an_arrived_swap_pays_its_recipient_arrived_less_premium() {
     assert!(world.state().open, "{:?}", world.state().closed_reason);
     let r#ref = world.arrive(ckusdc_swap(world.ledger), 1);
     world.settle();
-    assert_eq!(world.balance(recipient()), Nat::from(usdc(99)));
+    assert_eq!(world.balance(recipient()), Nat::from(usdc(99) - FEE));
     let view = world.deposit(r#ref);
     assert_eq!(view.status, PoolDepositStatus::Paid);
-    assert_eq!(view.paid, Some(Nat::from(usdc(99))));
-    // the pocket paid the recipient and the ledger's fee, and holds nothing back for it
+    assert_eq!(view.paid, Some(Nat::from(usdc(99) - FEE)));
+    // the pocket paid the recipient and the ledger's fee out of the user's 99, and holds
+    // nothing back for it
     let state = world.state();
     assert_eq!(state.icp.reserved, Nat::from(0_u8));
-    assert_eq!(state.icp.free, Nat::from(usdc(901) - FEE));
-    assert_eq!(world.balance(world.canister), Nat::from(usdc(901) - FEE));
+    assert_eq!(state.icp.free, Nat::from(usdc(901)));
+    assert_eq!(world.balance(world.canister), Nat::from(usdc(901)));
     assert!(world.replay_matches());
 }
 
@@ -439,8 +439,12 @@ fn a_lost_answer_asked_again_pays_once() {
     assert_eq!(lost, 1);
     let view = world.deposit(r#ref);
     assert_eq!(view.status, PoolDepositStatus::Paid);
-    assert_eq!(world.balance(recipient()), Nat::from(usdc(99)), "paid once");
-    assert_eq!(world.balance(world.canister), Nat::from(usdc(901) - FEE));
+    assert_eq!(
+        world.balance(recipient()),
+        Nat::from(usdc(99) - FEE),
+        "paid once"
+    );
+    assert_eq!(world.balance(world.canister), Nat::from(usdc(901)));
     assert!(world.replay_matches());
 }
 
@@ -534,7 +538,7 @@ fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
     assert_eq!(world.balance(staker()), Nat::from(usdc(900) - 2 * FEE));
     assert_eq!(world.balance(world.canister), Nat::from(usdc(1_100)));
 
-    // a swap of 100 pays 99 and its fee from ICP; its premium stays with the stakers
+    // a swap of 100 pays 99 from ICP, its fee out of it; its premium stays with the stakers
     world.arrive(ckusdc_swap(world.ledger), 4);
     world.settle();
     let value = world.pool_account(staker()).value_usdc;
@@ -714,6 +718,7 @@ fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() 
         rail: PoolRail::SameChain,
         expires_at: world.now().checked_add(Duration::from_secs(600)).unwrap(),
         salt: [0x71; 32],
+        icp_fees: None,
     };
     let r#ref = stake.pool_ref().unwrap();
     world.plant(PoolStep::Registered {
@@ -745,6 +750,7 @@ fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() 
             rebalance_share_floor_bps: 2,
             order_wait_s: 120,
             max_payout_gas: 2_000_000,
+            cctp_min_network_fee: None,
         })
         .unwrap(),
     );

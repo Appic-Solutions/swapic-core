@@ -2,7 +2,8 @@
 //! automatic): USDC at the canister's Base address that no deposit could take. A controller
 //! refunds one to an address (`USDC.transfer(to, amount - min_network_fee)` on Base, the fee
 //! kept on the Base fee line for the transfer's gas) or books it to the Base books'
-//! unattributed line; each one resolved once.
+//! unattributed line; each one resolved once. A deposit's transfer found without its terms
+//! (P11d) awaits them for 24 hours first, and is a controller's only after that.
 
 #[cfg(test)]
 mod tests;
@@ -16,7 +17,7 @@ use settlement_api::types::pool::{evm_address, nat, OrphanAction, OrphanView, Po
 use std::borrow::Cow;
 use types::config::GasAction;
 use types::events::TxPurpose;
-use types::pool::{orphan_key, CreditKey, Orphan, OrphanStatus, PoolStep};
+use types::pool::{orphan_key, CreditKey, Orphan, PoolStep};
 use types::{Address, TokenAmount, Wei};
 
 /// An orphan as `pool_orphans` lists it, its key the credit key's 48 bytes.
@@ -30,14 +31,15 @@ pub fn view(key: &CreditKey, orphan: &Orphan) -> OrphanView {
     }
 }
 
-/// The orphans still held, in key order.
-pub fn held() -> Vec<OrphanView> {
+/// The orphans a controller may resolve at `now`, in key order: held, or past their wait
+/// for terms.
+pub fn held(now: types::Timestamp) -> Vec<OrphanView> {
     read_state(|state| {
         state
             .store()
             .pool_orphans()
             .iter()
-            .filter(|(_, orphan)| orphan.status == OrphanStatus::Held)
+            .filter(|(_, orphan)| orphan.status.resolvable(now))
             .map(|(key, orphan)| view(key, orphan))
             .collect()
     })
@@ -86,9 +88,9 @@ pub async fn resolve(
     checked(crate::guards::require_not_halted().is_err(), is_controller)?;
     let key = key_of(&key)?;
     let orphan = read_state(|state| state.store().pool_orphan(&key)).ok_or(PoolError::Unknown)?;
-    if orphan.status != OrphanStatus::Held {
+    if !orphan.status.resolvable(now) {
         return Err(PoolError::NotAllowed(
-            "the orphan was resolved already".to_string(),
+            "the orphan was resolved already, or still awaits its terms".to_string(),
         ));
     }
     match action {

@@ -55,6 +55,7 @@ fn with_base(mut pool: Pool, base: TokenAmount, salt: u8, log: u64) -> Pool {
         rail: PoolRail::SameChain,
         expires_at: Timestamp::from_nanos(1_000),
         salt: [salt; 32],
+        icp_fees: None,
     };
     let r#ref = register(&mut pool, terms);
     pool.step(PoolStep::Arrived {
@@ -632,7 +633,7 @@ impl Pool {
 /// settings are set (interface section 3: "P11b adds the canister's floor").
 #[test]
 fn a_stakes_rebalancing_share_meets_the_floor() {
-    use crate::pool::check_terms;
+    use crate::pool::check_arrival;
     let mut pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
     let terms = |rebalance_share: u64| Registration {
         kind: DepositKind::Stake {
@@ -646,15 +647,16 @@ fn a_stakes_rebalancing_share_meets_the_floor() {
         rail: PoolRail::Cctp,
         expires_at: Timestamp::from_nanos(1_000),
         salt: [0x4b; 32],
+        icp_fees: None,
     };
     // 2 bps of 100 USDC is 20,000
     assert!(matches!(
-        check_terms(&pool.ledger, &terms(19_999)),
+        check_arrival(&pool.ledger, &terms(19_999)),
         Err(crate::pool::RegisterRefusal::NotAllowed(_))
     ));
-    assert_eq!(check_terms(&pool.ledger, &terms(20_000)), Ok(()));
+    assert_eq!(check_arrival(&pool.ledger, &terms(20_000)), Ok(()));
     pool.ledger.payouts = None;
-    assert_eq!(check_terms(&pool.ledger, &terms(0)), Ok(()));
+    assert_eq!(check_arrival(&pool.ledger, &terms(0)), Ok(()));
 }
 
 /// An ICP swap paid, refunded by Eco and undone: its refund is held back out of the free

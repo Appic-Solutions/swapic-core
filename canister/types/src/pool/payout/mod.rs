@@ -364,6 +364,14 @@ impl EvmPayout {
         }
     }
 
+    /// The network fee the payout's user paid: an ICP swap's, or a withdrawal's.
+    pub fn network_fee(&self) -> TokenAmount {
+        match &self.kind {
+            PayoutKind::IcpSwap(terms) => terms.network_fee,
+            PayoutKind::Withdrawal(withdrawal) => withdrawal.network_fee,
+        }
+    }
+
     pub fn is_icp_swap(&self) -> bool {
         matches!(self.kind, PayoutKind::IcpSwap(_))
     }
@@ -402,6 +410,10 @@ pub struct PayoutSettings {
     /// The most gas a payout order may be signed with on Base.
     #[n(3)]
     pub max_payout_gas: u64,
+    /// The least network fee a payout paid over CCTP carries (2026-10-21): the user's line
+    /// for the canister's own finish on the destination. None: no CCTP payout is signed.
+    #[n(4)]
+    pub cctp_min_network_fee: Option<TokenAmount>,
 }
 
 /// The least gas any transaction has.
@@ -420,6 +432,7 @@ impl Default for PayoutSettings {
             rebalance_share_floor_bps: 2,
             order_wait: Duration::from_secs(120),
             max_payout_gas: 2_000_000,
+            cctp_min_network_fee: None,
         }
     }
 }
@@ -436,6 +449,18 @@ pub enum PayoutSettingsError {
 }
 
 impl PayoutSettings {
+    /// Whether a CCTP payout of `network_fee` is one the user paid the canister's finish
+    /// for: only at `cctp_min_network_fee` or above, never while it is unset.
+    pub fn admits_cctp(&self, network_fee: TokenAmount) -> Result<(), String> {
+        match self.cctp_min_network_fee {
+            None => Err("no CCTP payout is signed: its least network fee is unset".to_string()),
+            Some(least) if network_fee < least => Err(format!(
+                "a CCTP payout's network fee must be at least {least}, not {network_fee}"
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), PayoutSettingsError> {
         if self.rebalance_share_floor_bps > 10_000 {
             return Err(PayoutSettingsError::FloorAboveAll(
@@ -576,6 +601,33 @@ pub enum OrphanStatus {
     /// Booked to the Base books' unattributed line.
     #[n(3)]
     Booked,
+    /// A deposit's transfer the canister's own read of Base found without its terms (P11d:
+    /// nothing is registered): credited to the deposit under `r#ref` when anyone hands the
+    /// terms in, held for a controller once `until` passes.
+    #[n(4)]
+    AwaitingTerms {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        until: Timestamp,
+    },
+    /// Its terms came: its deposit's arrival line takes it next, in the same message.
+    #[n(5)]
+    Claimed,
+    /// Credited to its deposit.
+    #[n(6)]
+    Credited,
+}
+
+impl OrphanStatus {
+    /// Whether a controller may resolve it at `now`: held, or awaiting terms past its time.
+    pub fn resolvable(&self, now: Timestamp) -> bool {
+        match self {
+            OrphanStatus::Held => true,
+            OrphanStatus::AwaitingTerms { until, .. } => now > *until,
+            _ => false,
+        }
+    }
 }
 
 /// The key an orphan's refund transaction is known by: the hash of its credit key's bytes.

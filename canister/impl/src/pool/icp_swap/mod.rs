@@ -34,7 +34,7 @@ use settlement_api::types::pool::{nat, PoolError};
 use std::time::Duration;
 use types::pool::payout::{EvmPayout, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms, Undo};
 use types::pool::{
-    evm_payout_ref, least_premium, IcpAccount, PayoutAttempt, PayoutPath, PoolStep, PrincipalBytes,
+    evm_payout_ref, premium_share, IcpAccount, PayoutAttempt, PayoutPath, PoolStep, PrincipalBytes,
     RoutePath, LEG_BACK, LEG_SECOND,
 };
 use types::{Address, EvmAddress, Timestamp, TokenAmount};
@@ -181,8 +181,10 @@ pub fn check<S: Store>(
             "a party to the swap is sanctioned".to_string(),
         ));
     }
-    let least = least_premium(settings, terms.min_usdc, terms.token_in)
-        .ok_or_else(|| PoolError::Closed("no ckUSDC fee was read".to_string()))?;
+    // no premium floor (P11d): exactly the settings' share of min_usdc; every ICP fee of
+    // the way in is the user's, out of what was pulled
+    let least = premium_share(settings, terms.min_usdc)
+        .ok_or_else(|| PoolError::NotAllowed("min_usdc is too large".to_string()))?;
     if terms.premium < least {
         return Err(PoolError::PremiumTooLow { least: nat(least) });
     }

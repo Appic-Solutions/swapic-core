@@ -43,12 +43,25 @@ fn payout_settings_cross_the_wire_and_back() {
         rebalance_share_floor_bps: 2,
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
+        cctp_min_network_fee: None,
     };
     let bytes = Encode!(&wire).unwrap();
     assert_eq!(Decode!(&bytes, PayoutSettings).unwrap(), wire);
     let domain = domain::PayoutSettings::try_from(wire.clone()).unwrap();
     assert_eq!(domain, domain::PayoutSettings::default());
     assert_eq!(PayoutSettings::from(&domain), wire);
+    // the CCTP payouts' least fee, set: a payout below it is refused, at it signed
+    let cctp = PayoutSettings {
+        cctp_min_network_fee: Some(Nat::from(300_000_u64)),
+        ..wire
+    };
+    let domain = domain::PayoutSettings::try_from(cctp.clone()).unwrap();
+    assert_eq!(PayoutSettings::from(&domain), cctp);
+    assert!(domain.admits_cctp(TokenAmount::from(299_999_u64)).is_err());
+    assert_eq!(domain.admits_cctp(TokenAmount::from(300_000_u64)), Ok(()));
+    assert!(domain::PayoutSettings::default()
+        .admits_cctp(TokenAmount::MAX)
+        .is_err());
 }
 
 #[test]

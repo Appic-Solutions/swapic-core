@@ -26,6 +26,7 @@ fn found(amount: TokenAmount, proof: Proof) -> Found {
         block: BlockNumber::new(37_000_000),
         at: None,
         proof,
+        rail: types::pool::PoolRail::Cctp,
     }
 }
 

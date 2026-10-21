@@ -31,8 +31,8 @@ pub use rebalance::{
 };
 
 pub use ledger::{
-    check_ref, check_terms, least_premium, PoolEffects, PoolLedger, PoolLookup, PoolStepError,
-    RegisterRefusal, ICPSWAP_PATH_FEES, MAX_PAYOUT_ATTEMPTS,
+    check_arrival, icp_fees_floor, premium_share, PoolEffects, PoolLedger, PoolLookup,
+    PoolStepError, RegisterRefusal, MAX_PAYOUT_ATTEMPTS,
 };
 
 use crate::chain::ChainId;
@@ -188,20 +188,22 @@ pub fn owner_hash(account: &PoolAccount) -> OwnerKey {
     OwnerKey::new(keccak256(&preimage).0)
 }
 
-/// The interface's `details`: a swap's token out, its minimum and its premium; a stake's
-/// rebalancing share. `fee` is the premium for a swap and the rebalancing share for a stake,
-/// so the ref commits the fee.
-pub fn details_hash(kind: &DepositKind, fee: u128) -> [u8; 32] {
+/// The interface's `details` (P11d, 2026-10-21): a swap's token out, its minimum, its
+/// premium and its ICP fees (the user's own line for the ledger fees of its payout path); a
+/// stake's rebalancing share. `fee` is the premium for a swap and the rebalancing share for
+/// a stake, so the ref commits every fee.
+pub fn details_hash(kind: &DepositKind, fee: u128, icp_fees: u128) -> [u8; 32] {
     match kind {
         DepositKind::Swap {
             token_out, min_out, ..
         } => {
             let bytes = token_out.as_slice();
-            let mut preimage = Vec::with_capacity(1 + bytes.len() + 64);
+            let mut preimage = Vec::with_capacity(1 + bytes.len() + 96);
             preimage.push(u8::try_from(bytes.len()).expect("BUG: a principal is 29 bytes at most"));
             preimage.extend_from_slice(bytes);
             preimage.extend_from_slice(&word(*min_out));
             preimage.extend_from_slice(&word(fee));
+            preimage.extend_from_slice(&word(icp_fees));
             keccak256(&preimage).0
         }
         DepositKind::Stake { .. } => keccak256(word(fee)).0,
@@ -209,7 +211,7 @@ pub fn details_hash(kind: &DepositKind, fee: u128) -> [u8; 32] {
 }
 
 /// The interface's `ref = keccak256(tag ‖ owner ‖ details ‖ salt32)`.
-pub fn pool_ref(kind: &DepositKind, fee: u128, salt: [u8; 32]) -> PoolRef {
+pub fn pool_ref(kind: &DepositKind, fee: u128, icp_fees: u128, salt: [u8; 32]) -> PoolRef {
     let tag = match kind {
         DepositKind::Swap { .. } => tag_swap(),
         DepositKind::Stake { .. } => tag_stake(),
@@ -217,7 +219,7 @@ pub fn pool_ref(kind: &DepositKind, fee: u128, salt: [u8; 32]) -> PoolRef {
     let mut preimage = Vec::with_capacity(128);
     preimage.extend_from_slice(&tag);
     preimage.extend_from_slice(owner_hash(&kind.owner()).as_ref());
-    preimage.extend_from_slice(&details_hash(kind, fee));
+    preimage.extend_from_slice(&details_hash(kind, fee, icp_fees));
     preimage.extend_from_slice(&salt);
     PoolRef::new(keccak256(&preimage).0)
 }
@@ -593,6 +595,10 @@ pub struct Registration {
     pub expires_at: Timestamp,
     #[cbor(n(8), with = "minicbor::bytes")]
     pub salt: [u8; 32],
+    /// A swap's ICP fees (P11d): the user's own line for its payout path's ledger fees,
+    /// committed in the ref. None on a record from before it existed, read as none.
+    #[n(9)]
+    pub icp_fees: Option<TokenAmount>,
 }
 
 impl Registration {
@@ -607,7 +613,18 @@ impl Registration {
 
     /// The ref these terms commit to, None for a fee no ref holds.
     pub fn pool_ref(&self) -> Option<PoolRef> {
-        Some(pool_ref(&self.kind, self.fee().try_into_u128()?, self.salt))
+        let icp_fees = self.icp_fees.unwrap_or(TokenAmount::ZERO).try_into_u128()?;
+        Some(pool_ref(
+            &self.kind,
+            self.fee().try_into_u128()?,
+            icp_fees,
+            self.salt,
+        ))
+    }
+
+    /// A swap's ICP fees, none for a stake.
+    pub fn icp_fees(&self) -> TokenAmount {
+        self.icp_fees.unwrap_or(TokenAmount::ZERO)
     }
 
     /// What a swap's payout will need of the ICP pocket at the least, `min_usdc - premium`:
@@ -640,6 +657,71 @@ impl Registration {
         self.expires_at
             .checked_add(grace)
             .unwrap_or(Timestamp::from_nanos(u64::MAX))
+    }
+}
+
+/// A deposit's terms as they reach the canister with its arrival (P11d, 2026-10-21: no
+/// registration): the preimage of the ref its order carries. Nothing of it is stored but in
+/// the deposit the arrival credits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepositTerms {
+    pub kind: DepositKind,
+    /// A swap's premium, pure pool income; zero for a stake.
+    pub premium: TokenAmount,
+    /// A swap's ICP fees, the user's own line for its payout path's ledger fees; zero for a
+    /// stake.
+    pub icp_fees: TokenAmount,
+    /// A stake's rebalancing share; zero for a swap.
+    pub rebalance_share: TokenAmount,
+    pub salt: [u8; 32],
+}
+
+impl DepositTerms {
+    /// Whether every fee the ref does not commit is zero: a swap's rebalancing share, a
+    /// stake's premium and ICP fees. Terms that carry one could never be told apart from the
+    /// user's own by their ref, so they are no terms of anyone's.
+    pub fn is_canonical(&self) -> bool {
+        if self.kind.is_swap() {
+            self.rebalance_share == TokenAmount::ZERO
+        } else {
+            self.premium == TokenAmount::ZERO && self.icp_fees == TokenAmount::ZERO
+        }
+    }
+
+    /// The registration these terms make of an arrival of `amount` at `now`, its rail, its
+    /// source chain and its payer as the proof shows them (none: the zero address).
+    pub fn registration(
+        &self,
+        amount: TokenAmount,
+        src_chain: ChainId,
+        src_payer: Option<EvmAddress>,
+        rail: PoolRail,
+        now: Timestamp,
+    ) -> Registration {
+        Registration {
+            kind: self.kind,
+            min_usdc: amount,
+            premium: self.premium,
+            rebalance_share: self.rebalance_share,
+            src_chain,
+            src_payer: src_payer.unwrap_or(EvmAddress::ZERO),
+            rail,
+            expires_at: now,
+            salt: self.salt,
+            icp_fees: self.kind.is_swap().then_some(self.icp_fees),
+        }
+    }
+
+    /// The ref these terms commit to, None for a fee no ref holds.
+    pub fn pool_ref(&self) -> Option<PoolRef> {
+        self.registration(
+            TokenAmount::ZERO,
+            ChainId::new(0),
+            None,
+            PoolRail::SameChain,
+            Timestamp::from_nanos(0),
+        )
+        .pool_ref()
     }
 }
 
@@ -1149,6 +1231,10 @@ pub enum PoolStep {
         /// The registration it named, if any: a late or short arrival closes it.
         #[n(5)]
         r#ref: Option<PoolRef>,
+        /// A deposit's transfer the canister's own read found without its terms (P11d):
+        /// it awaits them until then under `r#ref`, then is held for a controller.
+        #[n(6)]
+        awaiting_until: Option<Timestamp>,
     },
     /// A swap's payout began: its dedup pair and path, before any call.
     #[n(5)]
@@ -1567,6 +1653,16 @@ pub enum PoolStep {
         #[n(1)]
         success: bool,
     },
+    /// The terms of a transfer that awaited them came (P11d): out of the unattributed line,
+    /// for the deposit's own arrival line, which follows in the same message; or, `refused`,
+    /// the terms the pool does not take, and the transfer is held for a controller with why.
+    #[n(42)]
+    TermsClaimed {
+        #[n(0)]
+        credit: CreditKey,
+        #[n(1)]
+        refused: Option<String>,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -1819,6 +1915,7 @@ impl PoolStep {
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
+            PoolStep::TermsClaimed { .. } => "TermsClaimed",
             PoolStep::MoveSettingsSet { .. } => "MoveSettingsSet",
             PoolStep::MoveOpened { .. } => "MoveOpened",
             PoolStep::MoveProposed { .. } => "MoveProposed",

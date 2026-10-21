@@ -39,6 +39,7 @@ fn orphaned(log: u64) {
             why: "no deposit is registered under the ref".to_string(),
             block: BlockNumber::new(40),
             r#ref: None,
+            awaiting_until: None,
         },
         at(2),
     )
@@ -51,7 +52,7 @@ fn the_held_orphans_are_listed_with_their_payer() {
         crate::storage::init();
         funded_pool(usdc(1_000));
         orphaned(1);
-        let listed = held();
+        let listed = held(at(3));
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].key, key(1).to_bytes().to_vec());
         assert_eq!(listed[0].amount, nat(usdc(3)));
@@ -82,7 +83,7 @@ fn an_orphan_is_booked_once() {
         assert_eq!(ledger().unattributed, before.checked_sub(usdc(3)).unwrap());
         let books = read_state(|state| state.book(&ChainId::BASE));
         assert_eq!(books.unattributed, usdc(3));
-        assert!(held().is_empty());
+        assert!(held(at(3)).is_empty());
         assert!(matches!(book(), Err(PoolError::NotAllowed(_))));
         assert!(crate::storage::events::verify_replay());
     });
@@ -109,7 +110,7 @@ fn a_stranger_and_a_halt_are_refused() {
             )),
             Err(PoolError::NotAllowed(_))
         ));
-        assert_eq!(held().len(), 1);
+        assert_eq!(held(at(3)).len(), 1);
     });
 }
 
@@ -154,7 +155,7 @@ fn an_orphan_is_refunded_once_and_held_again_after_a_revert() {
             before.unattributed.checked_sub(usdc(3)).unwrap()
         );
         assert_eq!(after.lines().fees_base, TokenAmount::from(50_000_u32));
-        assert!(held().is_empty());
+        assert!(held(at(3)).is_empty());
         // once: no second refund is created for it
         assert!(append_event_at(created(purpose, 1), at(4)).is_err());
         // reverted at depth: held again, every line back
@@ -166,7 +167,7 @@ fn an_orphan_is_refunded_once_and_held_again_after_a_revert() {
             at(5),
         )
         .unwrap();
-        assert_eq!(held().len(), 1);
+        assert_eq!(held(at(3)).len(), 1);
         assert_eq!(ledger().unattributed, before.unattributed);
         assert_eq!(ledger().lines().fees_base, TokenAmount::ZERO);
         // a fee that takes all of it: book it instead

@@ -174,13 +174,31 @@ fn check(
     gas_limit: u64,
     sanctioned: impl Fn(&Party) -> bool,
 ) -> Result<PinnedOrder, PoolError> {
+    check_with(
+        payout,
+        order,
+        world,
+        gas_limit,
+        sanctioned,
+        &PayoutSettings::default(),
+    )
+}
+
+fn check_with(
+    payout: &EvmPayout,
+    order: &Order,
+    world: &World,
+    gas_limit: u64,
+    sanctioned: impl Fn(&Party) -> bool,
+    settings: &PayoutSettings,
+) -> Result<PinnedOrder, PoolError> {
     check_order(
         payout,
         order,
         &swapic::encode_order(order),
         gas_limit,
         &world.payer(),
-        &PayoutSettings::default(),
+        settings,
         deadline_of(order) - 600,
         sanctioned,
     )
@@ -345,12 +363,21 @@ fn a_payout_order_paying_the_canister_a_fee_is_refused() {
     ));
 }
 
-/// From P11c on a CCTP burn passes (the canister finishes its own transfer, `cctp::own`):
-/// a Deliver pays its recipient the destination's USDC, at least what the Runner gives the
-/// burn less the most Circle may keep.
+/// From P11c on a CCTP burn passes (the canister finishes its own transfer, `cctp::own`),
+/// for a payout whose network fee paid that finish (P11d's `cctp_min_network_fee`): a Deliver
+/// pays its recipient the destination's USDC, at least what the Runner gives the burn less
+/// the most Circle may keep.
 #[test]
 fn a_cctp_payout_order_passes_the_checks() {
     let world = World::new();
+    // the withdrawal's network fee in `waiting` is 50,000: exactly the least taken
+    let settings = PayoutSettings {
+        cctp_min_network_fee: Some(TokenAmount::from(50_000_u64)),
+        ..PayoutSettings::default()
+    };
+    let check = |payout: &EvmPayout, order: &Order, world: &World, gas, sanctioned| {
+        check_with(payout, order, world, gas, sanctioned, &settings)
+    };
     let mut order = the_canisters(sample(include_str!("samples/cctp_base_to_arbitrum.hex")));
     // rewritten: its fee step dropped, as a payout order pays the canister none
     order.steps.remove(0);
@@ -375,6 +402,19 @@ fn a_cctp_payout_order_passes_the_checks() {
     assert!(matches!(
         check(&waiting(&order, greedy), &order, &world, 600_000, nobody),
         Err(PoolError::NotAllowed(why)) if why.contains("guarantees")
+    ));
+    // no least fee set, or a network fee below it: the canister does not pay the finish
+    assert!(matches!(
+        check_with(&payout, &order, &world, 600_000, nobody, &PayoutSettings::default()),
+        Err(PoolError::NotAllowed(why)) if why.contains("unset")
+    ));
+    let dearer = PayoutSettings {
+        cctp_min_network_fee: Some(TokenAmount::from(50_001_u64)),
+        ..PayoutSettings::default()
+    };
+    assert!(matches!(
+        check_with(&payout, &order, &world, 600_000, nobody, &dearer),
+        Err(PoolError::NotAllowed(why)) if why.contains("at least")
     ));
 }
 

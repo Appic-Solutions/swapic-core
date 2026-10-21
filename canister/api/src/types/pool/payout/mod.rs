@@ -110,6 +110,9 @@ pub struct PayoutSettings {
     pub order_wait_s: u64,
     /// The most gas a payout order may be signed with on Base.
     pub max_payout_gas: u64,
+    /// Micro USDC, the least network fee a payout over CCTP carries (the user's line for the
+    /// canister's own finish on the destination). None: no CCTP payout is signed.
+    pub cctp_min_network_fee: Option<Nat>,
 }
 
 impl TryFrom<PayoutTerms> for domain::PayoutTerms {
@@ -202,6 +205,11 @@ impl TryFrom<PayoutSettings> for domain::PayoutSettings {
             rebalance_share_floor_bps: settings.rebalance_share_floor_bps,
             order_wait: Duration::from_secs(settings.order_wait_s),
             max_payout_gas: settings.max_payout_gas,
+            cctp_min_network_fee: settings
+                .cctp_min_network_fee
+                .as_ref()
+                .map(|fee| amount("cctp_min_network_fee", fee))
+                .transpose()?,
         })
     }
 }
@@ -213,6 +221,7 @@ impl From<&domain::PayoutSettings> for PayoutSettings {
             rebalance_share_floor_bps: settings.rebalance_share_floor_bps,
             order_wait_s: settings.order_wait.as_secs(),
             max_payout_gas: settings.max_payout_gas,
+            cctp_min_network_fee: settings.cctp_min_network_fee.map(nat),
         }
     }
 }

@@ -314,18 +314,18 @@ impl Ledgers for Live {
     }
 }
 
-/// One payout as the driver works it: a swap deposit's (the pool pays the ledger fees out
-/// of the premium) or a withdrawal's (the withdrawer's amount pays them).
+/// One payout as the driver works it: a swap deposit's or a withdrawal's, whose own amount
+/// pays every ledger fee of its path (P11d, 2026-10-21: the user pays every fee, the pool
+/// none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payout {
     pub id: PoolRef,
     pub to: IcpAccount,
     pub token_out: Principal,
     pub min_out: u128,
-    /// A deposit: what the recipient gets, `arrived - premium`. A withdrawal: the ckUSDC the
-    /// shares were worth, which every fee comes out of.
+    /// A deposit: `arrived - premium`, its payout and its ICP fees. A withdrawal: the ckUSDC
+    /// the shares were worth. Every fee comes out of it.
     pub amount: TokenAmount,
-    pub pool_pays_fees: bool,
     pub progress: PayoutProgress,
 }
 
@@ -372,14 +372,10 @@ impl Payout {
         }
     }
 
-    /// The ckUSDC transfer that pays all of a payout that fell back: a swap deposit's whole
-    /// amount (the pool pays every fee, and a round trip through ICP's loss); a withdrawal's
-    /// amount less the transfer's fee and what its legs cost in ckUSDC in the end (a way back
-    /// from ICP brings some back).
+    /// The ckUSDC transfer that pays all of a payout that fell back: its amount less the
+    /// transfer's fee and what its legs cost in ckUSDC in the end (a way back from ICP brings
+    /// some back), every fee the user's.
     fn fallback_amount(&self, progress: &PayoutProgress, fee: TokenAmount) -> Option<TokenAmount> {
-        if self.pool_pays_fees {
-            return Some(self.amount);
-        }
         self.amount
             .checked_sub(fee)?
             .checked_add(back_gain(progress, fee))?
@@ -389,18 +385,9 @@ impl Payout {
 }
 
 /// What a payout's path moves first, fixed when it starts and reused on every retry: the
-/// ckUSDC transfer's amount, or the ICPSwap leg's amount in. A swap deposit's pool pays the
-/// fees on top of `amount`; a withdrawal's `amount` pays them (the transfer's, or the leg's
-/// approval and the pool's pull).
-pub fn path_amount(
-    amount: TokenAmount,
-    pool_pays_fees: bool,
-    path: PayoutPath,
-    fee: TokenAmount,
-) -> Option<TokenAmount> {
-    if pool_pays_fees {
-        return Some(amount);
-    }
+/// ckUSDC transfer's amount, or the ICPSwap leg's amount in. `amount` pays the fees (the
+/// transfer's, or the leg's approval and the pool's pull).
+pub fn path_amount(amount: TokenAmount, path: PayoutPath, fee: TokenAmount) -> Option<TokenAmount> {
     let fees = match path {
         PayoutPath::Ckusdc => fee,
         // the first leg's approval and pull; a path through ICP's second leg pays in ICP
@@ -471,7 +458,6 @@ pub fn of_deposit(r#ref: PoolRef, deposit: &Registered) -> Option<Payout> {
         token_out,
         min_out,
         amount: deposit.owed(),
-        pool_pays_fees: true,
         progress: deposit.payout.clone(),
     })
 }
@@ -495,7 +481,6 @@ pub fn of_withdrawal(id: PoolOpId, op: &PendingOp) -> Option<Payout> {
         token_out: *token_out,
         min_out: *min_out,
         amount: *usdc,
-        pool_pays_fees: false,
         progress: payout.clone(),
     })
 }
@@ -550,7 +535,7 @@ pub async fn pay(
     let first = match attempt.amount {
         Some(first) => first,
         // an attempt from before its amount was recorded: worked out as it was then
-        None => path_amount(payout.amount, payout.pool_pays_fees, attempt.path, fee_ck)
+        None => path_amount(payout.amount, attempt.path, fee_ck)
             .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?,
     };
     let pool = match attempt.path {
@@ -1422,15 +1407,22 @@ pub async fn drive_deposit(
                 if head != Some(r#ref) || deposit.held() > ledger.pockets.icp.free {
                     return Err(Stop::Queued);
                 }
+                let path = path_for(&settings, token_out);
+                let fee_ck = settings
+                    .fee_of(settings.ckusdc_ledger)
+                    .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
+                // the user pays every fee (P11d): out of `arrived - premium`
+                let amount = path_amount(deposit.owed(), path, fee_ck).ok_or_else(|| {
+                    Stop::Failed("the amount does not cover the fees".to_string())
+                })?;
                 record(
                     PoolStep::PayoutStarted {
                         r#ref,
                         attempt: PayoutAttempt {
                             created_at: clock(),
                             memo: r#ref.into_bytes(),
-                            path: path_for(&settings, token_out),
-                            // the pool pays the fees on top: the path moves all of it
-                            amount: Some(deposit.owed()),
+                            path,
+                            amount: Some(amount),
                             token: Some(PrincipalBytes(settings.ckusdc_ledger)),
                         },
                     },

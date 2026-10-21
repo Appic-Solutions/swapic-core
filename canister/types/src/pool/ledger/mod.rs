@@ -33,12 +33,6 @@ use thiserror::Error;
 /// How many failed drives a payout gets before it stops for a human.
 pub const MAX_PAYOUT_ATTEMPTS: u32 = 10;
 
-/// The ledger fees each ICPSwap leg of a payout's path can cost the pool, in ckUSDC fees
-/// (interface section 4, 2026-10-21): the approval, the pull into ICPSwap, the transfer out,
-/// and one more for an undone swap's way back. A route through ICP has two legs; the ICP
-/// leg's own fees are far below a ckUSDC fee, so counting them as ckUSDC fees covers them.
-pub const ICPSWAP_PATH_FEES: u32 = 4;
-
 /// What the fold holds besides the ledger, as `admits` and `apply` read it.
 pub trait PoolLookup {
     fn deposit(&self, r#ref: &PoolRef) -> Option<Registered>;
@@ -434,10 +428,11 @@ impl PoolLedger {
         lookup.deposit(r#ref).ok_or(PoolStepError::Unknown(*r#ref))
     }
 
-    /// Whether `amount` arriving for `deposit` fits the pool, measured on what arrived and
-    /// not on what was registered: a swap within the per-swap cap, a stake within the TVL
-    /// cap. Answers what a swap's payout holds once it starts: the payout and every fee its
-    /// path can cost. A payout the ICP pocket cannot cover yet is queued, never refused.
+    /// Whether `amount` arriving for `deposit` fits the pool, measured on what arrived: a
+    /// swap within the per-swap cap, a stake within the TVL cap. Answers what a swap's payout
+    /// holds once it starts (P11d: the user pays every fee): everything that arrived but the
+    /// premium, its payout and its own ICP fees, out of which its path's ledger fees are
+    /// paid. A payout the ICP pocket cannot cover yet is queued, never refused.
     pub fn arrival_fits(
         &self,
         deposit: &Registered,
@@ -445,16 +440,18 @@ impl PoolLedger {
     ) -> Result<TokenAmount, &'static str> {
         let settings = self.settings.as_ref().ok_or("the pool has no settings")?;
         match deposit.terms.kind {
-            DepositKind::Swap { token_out, .. } => {
+            DepositKind::Swap { .. } => {
                 if amount > settings.per_swap_cap {
                     return Err("above the per-swap cap");
                 }
-                let payout = amount
+                let budget = amount
                     .checked_sub(deposit.terms.premium)
                     .ok_or("below the premium")?;
-                path_fees(settings, token_out)
-                    .and_then(|fees| payout.checked_add(fees))
-                    .ok_or("the payout overflows")
+                budget
+                    .checked_sub(deposit.terms.icp_fees())
+                    .filter(|payout| *payout > TokenAmount::ZERO)
+                    .ok_or("below the premium and the ICP fees")?;
+                Ok(budget)
             }
             DepositKind::Stake { .. } => {
                 let would_be = sat_add(self.tvl_measure(), amount);
@@ -543,7 +540,11 @@ impl PoolLedger {
                 if deposit.status != DepositStatus::Registered {
                     return Err(not_from("Arrived", &deposit.status));
                 }
-                if lookup.is_credited(credit) {
+                // a transfer that awaited its terms was credited to nothing until claimed
+                let claimed = lookup
+                    .orphan(credit)
+                    .is_some_and(|orphan| orphan.status == crate::pool::OrphanStatus::Claimed);
+                if lookup.is_credited(credit) && !claimed {
                     return Err(PoolStepError::AlreadyCredited(*credit));
                 }
                 if *amount < deposit.terms.min_usdc {
@@ -806,7 +807,8 @@ impl PoolLedger {
             | PoolStep::PayoutRefunded { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
-            | PoolStep::OrphanRefundClosed { .. } => self.admits_payout(step, lookup),
+            | PoolStep::OrphanRefundClosed { .. }
+            | PoolStep::TermsClaimed { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
             PoolStep::ApproveSigned { .. } => Ok(()),
             PoolStep::MoveSettingsSet { .. }
@@ -928,12 +930,23 @@ impl PoolLedger {
                     deposit_out = Some((*r#ref, deposit));
                 }
                 ledger.pockets.base.free = sat_add(ledger.pockets.base.free, *amount);
-                ledger.unseen.push(UnseenArrival {
-                    chain: credit.chain,
-                    block: *block,
-                    amount: *amount,
-                });
                 credited = Some(*credit);
+                match lookup
+                    .orphan(credit)
+                    .filter(|orphan| orphan.status == crate::pool::OrphanStatus::Claimed)
+                {
+                    // a transfer that awaited its terms: on the Base balance's books since
+                    // its own line, credited once
+                    Some(mut orphan) => {
+                        orphan.status = crate::pool::OrphanStatus::Credited;
+                        orphan_out = Some((*credit, orphan));
+                    }
+                    None => ledger.unseen.push(UnseenArrival {
+                        chain: credit.chain,
+                        block: *block,
+                        amount: *amount,
+                    }),
+                }
             }
             PoolStep::Unattributed {
                 credit,
@@ -942,8 +955,17 @@ impl PoolLedger {
                 r#ref,
                 src_payer,
                 why,
+                awaiting_until,
             } => {
-                // held for a controller, one at a time
+                // held for a controller, one at a time; a deposit's transfer found without
+                // its terms awaits them first
+                let status = match (awaiting_until, r#ref) {
+                    (Some(until), Some(r#ref)) => crate::pool::OrphanStatus::AwaitingTerms {
+                        r#ref: *r#ref,
+                        until: *until,
+                    },
+                    _ => crate::pool::OrphanStatus::Held,
+                };
                 orphan_out = Some((
                     *credit,
                     crate::pool::Orphan {
@@ -951,7 +973,7 @@ impl PoolLedger {
                         block: *block,
                         payer: *src_payer,
                         why: why.clone(),
-                        status: crate::pool::OrphanStatus::Held,
+                        status,
                     },
                 ));
                 ledger.unattributed = sat_add(ledger.unattributed, *amount);
@@ -1239,7 +1261,8 @@ impl PoolLedger {
             | PoolStep::PayoutRefunded { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
-            | PoolStep::OrphanRefundClosed { .. } => {}
+            | PoolStep::OrphanRefundClosed { .. }
+            | PoolStep::TermsClaimed { .. } => {}
             // `apply_rebalance` records these, and answered before this match
             PoolStep::MoveSettingsSet { .. }
             | PoolStep::MoveOpened { .. }
@@ -1340,17 +1363,18 @@ fn owed_line(deposit: &Registered) -> TokenAmount {
     }
 }
 
-/// The ledger fees a payout of `token_out` can cost the pool, in ckUSDC fees: ckUSDC's
-/// transfer alone, or [`ICPSWAP_PATH_FEES`] per ICPSwap leg of its route (4 direct, 8
-/// through ICP). A token not listed pays as ckUSDC.
-pub fn path_fees(settings: &PoolSettings, token_out: Principal) -> Option<TokenAmount> {
+/// The least ICP fees a swap paying `token_out` commits (P11d, 2026-10-21): its path's own
+/// ckUSDC fees, ckUSDC alone 1, a direct token 2 (the approval and the deposit), a token
+/// through ICP 3 (the ckUSDC leg's 2 and 1 covering the ICP leg's ICP fees). None for a token
+/// not listed, or no ckUSDC fee read.
+pub fn icp_fees_floor(settings: &PoolSettings, token_out: Principal) -> Option<TokenAmount> {
     let fee = settings.fee_of(settings.ckusdc_ledger)?;
-    let legs = settings.path_of(token_out).map_or(0, |path| path.legs());
-    if legs == 0 {
-        Some(fee)
-    } else {
-        fee.checked_mul(ICPSWAP_PATH_FEES.checked_mul(legs)?)
-    }
+    let count: u32 = match settings.path_of(token_out)? {
+        crate::pool::RoutePath::Ckusdc => 1,
+        crate::pool::RoutePath::Direct { .. } => 2,
+        crate::pool::RoutePath::ViaIcp { .. } => 3,
+    };
+    fee.checked_mul(count)
 }
 
 /// Whether a swap step may name `leg` of `payout`: the first leg of any ICPSwap path; the
@@ -1409,13 +1433,21 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
             if terms.rebalance_share != TokenAmount::ZERO {
                 return Err(PoolStepError::Terms("a swap carries no rebalancing share"));
             }
-            if terms.premium >= terms.min_usdc {
-                return Err(PoolStepError::Terms("the premium must be below min_usdc"));
+            let fees = terms
+                .premium
+                .checked_add(terms.icp_fees())
+                .ok_or(PoolStepError::Overflow)?;
+            if fees >= terms.min_usdc {
+                return Err(PoolStepError::Terms(
+                    "the premium and the ICP fees must be below min_usdc",
+                ));
             }
         }
         DepositKind::Stake { .. } => {
-            if terms.premium != TokenAmount::ZERO {
-                return Err(PoolStepError::Terms("a stake carries no premium"));
+            if terms.premium != TokenAmount::ZERO || terms.icp_fees() != TokenAmount::ZERO {
+                return Err(PoolStepError::Terms(
+                    "a stake carries no premium and no ICP fees",
+                ));
             }
             if terms.rebalance_share >= terms.min_usdc {
                 return Err(PoolStepError::Terms(
@@ -1427,92 +1459,58 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
     Ok(())
 }
 
-/// The ref and the fee rules of a registration, refused in the interface's words: settings
-/// present, a swap only while the pool is open for swaps, the ref the one its terms commit to,
-/// not registered yet, and the fee its kind does not have at zero.
-pub fn check_ref(
-    ledger: &PoolLedger,
-    r#ref: PoolRef,
-    terms: &Registration,
-    lookup: &impl PoolLookup,
-) -> Result<(), RegisterRefusal> {
-    let settings = ledger
-        .settings
-        .as_ref()
-        .ok_or(RegisterRefusal::NoSettings)?;
-    if terms.kind.is_swap() && !settings.open_for_swaps {
-        return Err(RegisterRefusal::ClosedForSwaps);
-    }
-    if terms.pool_ref() != Some(r#ref) {
-        return Err(RegisterRefusal::BadRef);
-    }
-    if lookup.deposit(&r#ref).is_some() {
-        return Err(RegisterRefusal::Known);
-    }
-    admits_terms(terms).map_err(|error| RegisterRefusal::NotAllowed(error.to_string()))
-}
-
-/// The least premium a swap of `min_usdc` paying `token_out` carries (interface section 4,
-/// 2026-10-21): the settings' share of it, rounded up, and never below what the pool pays in
-/// ckUSDC for the payout's path: the ckUSDC fee for a ckUSDC payout, four of them per
-/// ICPSwap leg of a token's route (4 direct, 8 through ICP). The token's own ledger fee is
-/// the recipient's, out of the output, and never in the premium.
-pub fn least_premium(
-    settings: &PoolSettings,
-    min_usdc: TokenAmount,
-    token_out: Principal,
-) -> Option<TokenAmount> {
-    let share = min_usdc
+/// The premium a swap of `min_usdc` carries at the least (P11d, 2026-10-21: no floor):
+/// exactly the settings' share of it, rounded up, pure pool income. Every ledger fee is the
+/// user's own line beside it.
+pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<TokenAmount> {
+    min_usdc
         .checked_mul(settings.premium_bps)?
-        .checked_div_ceil(10_000_u32)?;
-    Some(share.max(path_fees(settings, token_out)?))
+        .checked_div_ceil(10_000_u32)
 }
 
-/// The pool's limits on a registration, read off the ledger: the token out listed, the open
-/// registrations of the payer and of the owner below the limit, then for a swap the per-swap
-/// cap, the premium's floor, the recipient's own minimum on a ckUSDC payout and enough free
-/// ckUSDC behind the queue at this moment; for a stake the TVL cap. A registration holds
-/// nothing (Jeff, 2026-10-21, interface section 4): `max_held_bps` limits nothing.
-pub fn check_terms(ledger: &PoolLedger, terms: &Registration) -> Result<(), RegisterRefusal> {
+/// Every rule a deposit's terms meet at its arrival (P11d, 2026-10-21: no registration),
+/// `terms.min_usdc` being what arrived, read off the ledger: the fees' own rules, then for a
+/// swap the pool open for swaps, the token listed, the per-swap cap, the ICP fees at least
+/// the path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at
+/// least the recipient's minimum; for a stake the rebalancing share's floor and the TVL cap.
+/// A payout the ICP pocket cannot cover yet is queued, never refused.
+pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), RegisterRefusal> {
     let settings = ledger
         .settings
         .as_ref()
         .ok_or(RegisterRefusal::NoSettings)?;
-    if let DepositKind::Swap { token_out, .. } = terms.kind {
-        if !settings.is_listed(token_out) {
-            return Err(RegisterRefusal::TokenNotListed(token_out));
-        }
-    }
-    for party in terms.parties() {
-        if ledger.open_of(&party) >= settings.max_open_per_payer {
-            return Err(RegisterRefusal::NotAllowed(
-                "too many open deposits".to_string(),
-            ));
-        }
-    }
+    admits_terms(terms).map_err(|error| RegisterRefusal::NotAllowed(error.to_string()))?;
     match terms.kind {
         DepositKind::Swap {
             token_out, min_out, ..
         } => {
+            if !settings.open_for_swaps {
+                return Err(RegisterRefusal::ClosedForSwaps);
+            }
+            if !settings.is_listed(token_out) {
+                return Err(RegisterRefusal::TokenNotListed(token_out));
+            }
             if terms.min_usdc > settings.per_swap_cap {
                 return Err(RegisterRefusal::AboveSwapCap {
                     cap: settings.per_swap_cap,
                 });
             }
-            let least = least_premium(settings, terms.min_usdc, token_out)
+            let floor = icp_fees_floor(settings, token_out)
                 .ok_or_else(|| RegisterRefusal::NotAllowed("no ckUSDC fee was read".to_string()))?;
-            if terms.premium < least {
-                return Err(RegisterRefusal::PremiumTooLow { least });
+            if terms.icp_fees() < floor {
+                return Err(RegisterRefusal::NotAllowed(format!(
+                    "the ICP fees must be at least {floor}"
+                )));
             }
-            let reserve = terms.reserve();
-            if token_out == settings.ckusdc_ledger && reserve < TokenAmount::from(min_out) {
+            let payout = terms
+                .min_usdc
+                .checked_sub(terms.premium)
+                .and_then(|left| left.checked_sub(terms.icp_fees()))
+                .unwrap_or(TokenAmount::ZERO);
+            if token_out == settings.ckusdc_ledger && payout < TokenAmount::from(min_out) {
                 return Err(RegisterRefusal::NotAllowed(
                     "below the recipient's minimum".to_string(),
                 ));
-            }
-            // holds nothing: the free ckUSDC behind the queue must cover it at this moment
-            if ledger.icp_available() < reserve {
-                return Err(RegisterRefusal::PocketShort);
             }
         }
         DepositKind::Stake { .. } => {

@@ -621,6 +621,7 @@ fn samples() -> Vec<Sample> {
     all.extend(queue_samples());
     all.extend(orphan_samples());
     all.extend(rebalance_samples());
+    all.extend(arrival_terms_samples());
     all
 }
 
@@ -1000,6 +1001,118 @@ fn rebalance_samples() -> Vec<Sample> {
             ..item_with_reverts
         },
     ));
+    out
+}
+
+/// No registration (P11d): a deposit whose terms carry its ICP fees, a transfer awaiting its
+/// terms, claimed and credited, the steps that move it, and the CCTP payouts' least fee.
+fn arrival_terms_samples() -> Vec<Sample> {
+    use crate::pool::payout::PayoutSettings;
+    use crate::pool::{
+        CreditKey, DepositKind, IcpAccount, Orphan, OrphanStatus, PoolRail, PoolStep, Registered,
+        Registration,
+    };
+    use candid::Principal;
+    use std::time::Duration;
+    let key = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([0x91; 32]),
+        log_index: 901,
+    };
+    let r#ref = crate::hash::PoolRef::new([0x92; 32]);
+    let until = Timestamp::from_nanos(1_800_000_000_000_000_903);
+    let awaiting = Orphan {
+        amount: TokenAmount::from(904_000_000_u64),
+        block: BlockNumber::new(37_000_905),
+        payer: Some(crate::evm::EvmAddress::new([0x96; 20])),
+        why: "awaiting its terms".to_string(),
+        status: OrphanStatus::AwaitingTerms { r#ref, until },
+    };
+    let claimed = Orphan {
+        status: OrphanStatus::Claimed,
+        ..awaiting.clone()
+    };
+    let credited = Orphan {
+        status: OrphanStatus::Credited,
+        ..awaiting.clone()
+    };
+    let deposit = Registered::new(Registration {
+        kind: DepositKind::Swap {
+            recipient: IcpAccount {
+                owner: Principal::from_slice(&[0x97; 10]),
+                subaccount: None,
+            },
+            token_out: Principal::from_slice(&[0x98; 10]),
+            min_out: 0x99,
+        },
+        min_usdc: TokenAmount::from(904_000_000_u64),
+        premium: TokenAmount::from(904_000_u64),
+        rebalance_share: TokenAmount::ZERO,
+        src_chain: ChainId::ARBITRUM,
+        src_payer: crate::evm::EvmAddress::new([0x96; 20]),
+        rail: PoolRail::Cctp,
+        expires_at: Timestamp::from_nanos(1_800_000_000_000_000_910),
+        salt: [0x9b; 32],
+        icp_fees: Some(TokenAmount::from(20_000_u64)),
+    });
+    let steps = [
+        (
+            "pool transfer awaiting its terms",
+            PoolStep::Unattributed {
+                credit: key,
+                amount: TokenAmount::from(904_000_000_u64),
+                src_payer: Some(crate::evm::EvmAddress::new([0x96; 20])),
+                why: "awaiting its terms".to_string(),
+                block: BlockNumber::new(37_000_905),
+                r#ref: Some(r#ref),
+                awaiting_until: Some(until),
+            },
+        ),
+        (
+            "pool terms claimed",
+            PoolStep::TermsClaimed {
+                credit: key,
+                refused: None,
+            },
+        ),
+        (
+            "pool terms refused",
+            PoolStep::TermsClaimed {
+                credit: key,
+                refused: Some("the pool is closed".to_string()),
+            },
+        ),
+        (
+            "pool payout settings with a cctp fee",
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings {
+                    min_network_fee: TokenAmount::from(911_000_u64),
+                    rebalance_share_floor_bps: 912,
+                    order_wait: Duration::from_secs(913),
+                    max_payout_gas: 914_000,
+                    cctp_min_network_fee: Some(TokenAmount::from(915_000_u64)),
+                },
+            },
+        ),
+    ];
+    let mut out = vec![
+        sample("pool orphan awaiting terms", awaiting),
+        sample("pool orphan claimed", claimed),
+        sample("pool orphan credited", credited),
+        sample("pool deposit with icp fees", deposit),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(9_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_920 + i),
+                EventHash::new([0xcb; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
     out
 }
 
@@ -1568,6 +1681,7 @@ fn pool_deposit_sample() -> crate::pool::Registered {
         rail: PoolRail::Eco,
         expires_at: Timestamp::from_nanos(1_800_000_000_000_000_346),
         salt: [0x47; 32],
+        icp_fees: None,
     });
     deposit.status = DepositStatus::Paying;
     deposit.arrived = Some(Arrival {
@@ -1676,6 +1790,7 @@ fn payout_samples() -> Vec<Sample> {
                 rebalance_share_floor_bps: 239,
                 order_wait: Duration::from_secs(240),
                 max_payout_gas: 241_000,
+                cctp_min_network_fee: None,
             }),
             next_id: 242,
             fees_icp: TokenAmount::from(243_u8),
@@ -1953,6 +2068,7 @@ fn pool_samples() -> Vec<Sample> {
             rail: PoolRail::Eco,
             expires_at: Timestamp::from_nanos(1_800_000_000_000_000_169),
             salt: [0xaa; 32],
+            icp_fees: None,
         },
         status: DepositStatus::PayoutFailed("the pool did not answer".to_string()),
         arrived: Some(Arrival {
