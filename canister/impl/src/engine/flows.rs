@@ -18,8 +18,9 @@ pub struct Busy(QuoteHash);
 
 impl Busy {
     pub fn take(quote_hash: QuoteHash) -> Option<Self> {
+        // lazily: a guard built for a refusal would release the holder's flow on its drop
         BUSY.with(|busy| busy.borrow_mut().insert(quote_hash))
-            .then_some(Self(quote_hash))
+            .then(|| Self(quote_hash))
     }
 }
 
