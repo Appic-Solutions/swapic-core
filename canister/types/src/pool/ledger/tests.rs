@@ -775,7 +775,11 @@ fn an_icpswap_leg_falls_back_only_before_its_call() {
     };
     pool.step(declined()).unwrap();
     assert!(pool.step(declined()).is_err());
-    pool.step(PoolStep::SwapBegun { r#ref }).unwrap();
+    pool.step(PoolStep::SwapBegun {
+        r#ref,
+        before: None,
+    })
+    .unwrap();
     assert!(pool
         .step(PoolStep::FellBack {
             r#ref,
@@ -874,6 +878,7 @@ fn a_begun_swap_falls_back_only_once_undone() {
     let undone = |cost: u32| PoolStep::SwapUndone {
         r#ref,
         cost: TokenAmount::from(cost),
+        withdrawn: usdc(99),
     };
     let fell_back = || PoolStep::FellBack {
         r#ref,
@@ -885,7 +890,11 @@ fn a_begun_swap_falls_back_only_once_undone() {
     assert!(pool.step(undone(20_000)).is_err());
     pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
     pool.step(PoolStep::SwapApproved { r#ref }).unwrap();
-    pool.step(PoolStep::SwapBegun { r#ref }).unwrap();
+    pool.step(PoolStep::SwapBegun {
+        r#ref,
+        before: None,
+    })
+    .unwrap();
     // begun, not undone: what happened at the pool is not known yet
     assert!(pool.step(fell_back()).is_err());
     pool.step(undone(20_000)).unwrap();
@@ -894,6 +903,7 @@ fn a_begun_swap_falls_back_only_once_undone() {
     let payout = &pool.deposits[&r#ref].payout;
     assert_eq!(payout.swap.approvals, Some(2));
     assert_eq!(payout.swap.undone, Some(TokenAmount::from(20_000_u32)));
+    assert_eq!(payout.swap.withdrawn, Some(usdc(99)));
     let attempt = payout.attempt.unwrap();
     assert_eq!(attempt.path, PayoutPath::Ckusdc);
     assert_eq!(attempt.amount, Some(usdc(99)));
@@ -901,7 +911,11 @@ fn a_begun_swap_falls_back_only_once_undone() {
 
     // a swap that paid its output: never undone, never approved again, its transfer fixed
     let paid_out = started(&mut pool, 2);
-    pool.step(PoolStep::SwapBegun { r#ref: paid_out }).unwrap();
+    pool.step(PoolStep::SwapBegun {
+        r#ref: paid_out,
+        before: None,
+    })
+    .unwrap();
     pool.step(PoolStep::Swapped {
         r#ref: paid_out,
         out: TokenAmount::from(9_000_u32),
@@ -912,6 +926,7 @@ fn a_begun_swap_falls_back_only_once_undone() {
         .step(PoolStep::SwapUndone {
             r#ref: paid_out,
             cost: TokenAmount::ZERO,
+            withdrawn: TokenAmount::ZERO,
         })
         .is_err());
     assert!(pool

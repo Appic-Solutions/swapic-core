@@ -19,10 +19,16 @@
 //!   (`SwapApproved`, its fee counted), `SwapBegun`, `depositFromAndSwap`, `Swapped` with its
 //!   output and the output's transfer fixed, and that transfer.
 //! - A begun swap that did not answer with its output is never called again: what the pool
-//!   holds of the canister's tells what happened. Its output there is withdrawn and paid; its
-//!   ckUSDC there is withdrawn back (`SwapUndone`) and all of it paid as ckUSDC; nothing there
-//!   after the pool refused the swap means the deposit never happened, and all of it is paid
-//!   as ckUSDC. Only nothing there after an answer that never came stops for a human.
+//!   holds of the canister's ABOVE what it held just before the swap (read while this leg
+//!   alone was at the pool, recorded with `SwapBegun`) tells what happened, and only that is
+//!   this leg's. Its output there is withdrawn and paid; its ckUSDC there is withdrawn back,
+//!   never more than it deposited (`SwapUndone`, the amount recorded), and all of it paid as
+//!   ckUSDC; nothing there after the pool refused the swap means the deposit never happened,
+//!   and all of it is paid as ckUSDC. Only nothing there after an answer that never came, or
+//!   a leg from before the pool's holdings were read, stops for a human. While a driven leg
+//!   at a pool is begun and not settled, no other leg begins there.
+//! - No path swaps with a minimum below `min_out` plus the token's fee twice, and no output
+//!   transfer pays the recipient below `min_out`: a swap that cannot meet it falls back.
 //! - `Paid` (or `WithdrawnIcp`), with the ckUSDC that left the pocket, every fee included.
 //!
 //! A refusal (or an outcome the ledger can no longer tell) is `AttemptFailed`, the payout
@@ -44,7 +50,7 @@ use std::collections::BTreeSet;
 use types::hash::{PoolOpId, PoolRef};
 use types::pool::{
     payout_ref, DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress,
-    PendingOp, PoolSettings, PoolStep, PrincipalBytes, Registered, SwapLeg,
+    PendingOp, PoolHeld, PoolSettings, PoolStep, PrincipalBytes, Registered, SwapLeg,
 };
 use types::{Timestamp, TokenAmount};
 
@@ -577,9 +583,12 @@ pub async fn pay(
             .await?
         }
     };
-    if send == TokenAmount::ZERO {
+    // never below `min_out`: a swap that could not meet it fell back before it began, so
+    // an output below it is the pool's answer breaking its own minimum, for a human
+    if send == TokenAmount::ZERO || send < TokenAmount::from(payout.min_out) {
         return Err(Stop::Failed(format!(
-            "the output {out} does not cover its fees"
+            "the output {out} would pay {send}, below the {} the recipient asked",
+            payout.min_out
         )));
     }
     // read again: the approvals this drive gave are in it
@@ -654,7 +663,8 @@ async fn swap_leg(
         if payout.progress.swap.undone.is_some() {
             return fall_back(payout, leg, "the swap did not happen".to_string(), clock());
         }
-        return settle(ledgers, settings, payout, leg, None, clock).await;
+        let before = payout.progress.swap.before;
+        return settle(ledgers, settings, payout, leg, before, None, clock).await;
     }
     // before the swap: a token no longer listed with this pool, or with no fee read, falls
     // back (the token's output could not be paid)
@@ -672,6 +682,13 @@ async fn swap_leg(
             )
         }
     };
+    // what the pool holds of the canister's is known to be no one's but a stopped payout's
+    // only while no other driven leg there is begun and unsettled
+    if let Some(other) = read_state(|state| unsettled_at(state, pool, payout.id)) {
+        return Err(Stop::Retry(format!(
+            "the swap of {other} at the ICPSwap pool {pool} is not settled yet"
+        )));
+    }
     // the recipient gets at least `min_out` after the pool's withdrawal to the canister and
     // the canister's transfer, each of which takes the token's fee
     let least = fee_out
@@ -714,6 +731,9 @@ async fn swap_leg(
     let allowance = swap_in
         .checked_add(fee_ck)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
+    // what the pool holds of the canister's before this leg's deposit, read while this leg
+    // alone is at the pool: only what is there above it is ever this leg's
+    let before = held_at(ledgers, pool, zero_for_one).await?;
     open(guard)?;
     ledgers
         .approve(ckusdc, pool, allowance)
@@ -722,7 +742,13 @@ async fn swap_leg(
     // the approval's fee is the payout's, whatever comes next
     record(PoolStep::SwapApproved { r#ref: payout.id }, clock())?;
     open(guard)?;
-    record(PoolStep::SwapBegun { r#ref: payout.id }, clock())?;
+    record(
+        PoolStep::SwapBegun {
+            r#ref: payout.id,
+            before: Some(before),
+        },
+        clock(),
+    )?;
     // begun: whatever this answers, the swap is never called again
     match ledgers
         .swap(pool, swap_in, zero_for_one, least, fee_ck, fee_out)
@@ -740,10 +766,20 @@ async fn swap_leg(
             )?;
             Ok((out, send))
         }
+        // the read just made, not the payout as it was before `SwapBegun`
         Err(CallError::Refused(why)) => {
-            settle(ledgers, settings, payout, leg, Some(why), clock).await
+            settle(
+                ledgers,
+                settings,
+                payout,
+                leg,
+                Some(before),
+                Some(why),
+                clock,
+            )
+            .await
         }
-        Err(_) => settle(ledgers, settings, payout, leg, None, clock).await,
+        Err(_) => settle(ledgers, settings, payout, leg, Some(before), None, clock).await,
     }
 }
 
@@ -756,19 +792,76 @@ fn output_send(out: TokenAmount, fee_out: TokenAmount) -> TokenAmount {
         .unwrap_or(TokenAmount::ZERO)
 }
 
+/// What the pool holds of the canister's, unused, as ckUSDC and the leg's token.
+async fn held_at(
+    ledgers: &impl Ledgers,
+    pool: Principal,
+    zero_for_one: bool,
+) -> Result<PoolHeld, Stop> {
+    let (unused0, unused1) = ledgers
+        .unused(pool)
+        .await
+        .map_err(|error| call_stop("the pool's unused balances", error))?;
+    Ok(if zero_for_one {
+        PoolHeld {
+            ckusdc: unused0,
+            token: unused1,
+        }
+    } else {
+        PoolHeld {
+            ckusdc: unused1,
+            token: unused0,
+        }
+    })
+}
+
+/// Another driven payout whose leg at `pool` began and is not settled (no output, not
+/// undone): until it is, what the pool holds of the canister's is not known to be whose, so
+/// no other leg begins there. A payout stopped for a human is not driven: what it left at
+/// the pool is in what the next leg reads before its swap, and never that leg's.
+fn unsettled_at<S: Store>(
+    state: &crate::state::State<S>,
+    pool: Principal,
+    except: PoolRef,
+) -> Option<PoolRef> {
+    let unsettled = |payout: &PayoutProgress| {
+        payout.failed.is_none()
+            && payout.swap.begun
+            && payout.swap.out.is_none()
+            && payout.swap.undone.is_none()
+            && matches!(
+                payout.attempt.map(|attempt| attempt.path),
+                Some(PayoutPath::Icpswap { pool: at }) if at == pool
+            )
+    };
+    let ledger = state.pool();
+    let deposits = ledger.paying.iter().copied().filter(|r#ref| {
+        state.store().pool_deposit(r#ref).is_some_and(|deposit| {
+            deposit.status == DepositStatus::Paying && unsettled(&deposit.payout)
+        })
+    });
+    let withdrawals = ledger.pending.iter().filter_map(|(id, op)| match op {
+        PendingOp::Withdraw { payout, .. } if unsettled(payout) => Some(payout_ref(*id)),
+        _ => None,
+    });
+    deposits.chain(withdrawals).find(|r#ref| *r#ref != except)
+}
+
 /// A begun swap that did not answer with its output: what the pool holds of the canister's
-/// tells what happened. The token there: the swap happened and its output stayed at the
-/// pool; withdrawn, and paid. ckUSDC there (all of the amount in, or any of it after the
-/// pool's own refusal): the swap did not happen; withdrawn back, and all of it paid as
-/// ckUSDC. Nothing there after the pool's own refusal (`refused`): the deposit never
-/// happened, all of it paid as ckUSDC. Anything else: the outcome is unknown, for a human.
-/// ICPSwap's unused balances and its `withdraw` are not exercised against a live pool in this
-/// build.
+/// above what it held just before the swap tells what happened, and only that is this
+/// leg's. The token there: the swap happened and its output stayed at the pool; withdrawn,
+/// and paid. ckUSDC there (all of the amount in, or any of it after the pool's own refusal):
+/// the swap did not happen; withdrawn back, never more than the amount in, and all of it paid
+/// as ckUSDC. Nothing there after the pool's own refusal (`refused`): the deposit never
+/// happened, all of it paid as ckUSDC. Anything else, or a leg from before the pool's
+/// holdings were read: the outcome is unknown, for a human. ICPSwap's unused balances and
+/// its `withdraw` are not exercised against a live pool in this build.
 async fn settle(
     ledgers: &impl Ledgers,
     settings: &PoolSettings,
     payout: &Payout,
     leg: LegAt,
+    before: Option<PoolHeld>,
     refused: Option<String>,
     clock: impl Fn() -> Timestamp + Copy,
 ) -> Result<(TokenAmount, TokenAmount), Stop> {
@@ -779,20 +872,21 @@ async fn settle(
         swap_in,
     } = leg;
     let unknown = || Stop::Failed("the ICPSwap swap's outcome is unknown".to_string());
+    // a leg from before the pool's holdings were read cannot tell its own from another's
+    let before = before.ok_or_else(unknown)?;
     let zero_for_one = ledgers
         .direction(pool, ckusdc, payout.token_out)
         .await
         .map_err(|error| call_stop("the pool's metadata", error))?
         .ok_or_else(unknown)?;
-    let (unused0, unused1) = ledgers
-        .unused(pool)
-        .await
-        .map_err(|error| call_stop("the pool's unused balances", error))?;
-    let (ck_left, token_left) = if zero_for_one {
-        (unused0, unused1)
-    } else {
-        (unused1, unused0)
+    let now = held_at(ledgers, pool, zero_for_one).await?;
+    let above = |now: TokenAmount, before: TokenAmount| {
+        now.checked_sub(before).unwrap_or(TokenAmount::ZERO)
     };
+    let (ck_left, token_left) = (
+        above(now.ckusdc, before.ckusdc),
+        above(now.token, before.token),
+    );
     // withdrawing from the pool brings money in: no guard
     if token_left > TokenAmount::ZERO {
         let fee_out = settings
@@ -817,19 +911,20 @@ async fn settle(
         .checked_add(fee_ck)
         .ok_or_else(|| Stop::Failed("the deposit overflows".to_string()))?;
     if ck_left >= swap_in || (refused.is_some() && ck_left > TokenAmount::ZERO) {
-        // this leg's own amount at most: the pool holds nothing else of this payout's
-        let back = ck_left.min(swap_in);
+        // this leg's own deposit, never more
+        let withdrawn = ck_left.min(swap_in);
         ledgers
-            .withdraw(pool, ckusdc, back, fee_ck)
+            .withdraw(pool, ckusdc, withdrawn, fee_ck)
             .await
             .map_err(|error| call_stop("the ckUSDC's withdrawal from the pool", error))?;
         // the withdrawal's transfer takes the ledger's fee out of what comes back
-        let returned = back.checked_sub(fee_ck).unwrap_or(TokenAmount::ZERO);
+        let returned = withdrawn.checked_sub(fee_ck).unwrap_or(TokenAmount::ZERO);
         let cost = deposit.checked_sub(returned).unwrap_or(TokenAmount::ZERO);
         record(
             PoolStep::SwapUndone {
                 r#ref: payout.id,
                 cost,
+                withdrawn,
             },
             clock(),
         )?;
@@ -846,6 +941,7 @@ async fn settle(
                 PoolStep::SwapUndone {
                     r#ref: payout.id,
                     cost: TokenAmount::ZERO,
+                    withdrawn: TokenAmount::ZERO,
                 },
                 clock(),
             )?;

@@ -710,6 +710,8 @@ fn pool_samples() -> Vec<Sample> {
                         send: None,
                         approvals: None,
                         undone: None,
+                        before: None,
+                        withdrawn: None,
                     },
                     failures: 3,
                     fell_back: None,
@@ -815,6 +817,10 @@ fn pool_samples() -> Vec<Sample> {
                 send: Some(TokenAmount::from(186_u8)),
                 approvals: Some(2),
                 undone: Some(TokenAmount::from(187_u8)),
+                // absent, so this sample's bytes stay the ones the golden pins; the deposit
+                // appended after it pins them
+                before: None,
+                withdrawn: None,
             },
             failures: 1,
             fell_back: None,
@@ -822,6 +828,13 @@ fn pool_samples() -> Vec<Sample> {
         },
         ..holding.clone()
     };
+    // the deposit above with what its pool held before its swap, and what an undo withdrew
+    let mut undone = fixed.clone();
+    undone.payout.swap.before = Some(crate::pool::PoolHeld {
+        ckusdc: TokenAmount::from(188_u8),
+        token: TokenAmount::from(189_u8),
+    });
+    undone.payout.swap.withdrawn = Some(TokenAmount::from(190_u8));
     vec![
         sample("pool ledger", ledger),
         sample("pool deposit", deposit),
@@ -843,6 +856,7 @@ fn pool_samples() -> Vec<Sample> {
         sample("pool ledger with payouts queued", queued),
         sample("pool ledger whose queue's head waits", waiting),
         sample("pool deposit whose payout fixed its transfers", fixed),
+        sample("pool deposit whose swap knew what its pool held", undone),
     ]
 }
 

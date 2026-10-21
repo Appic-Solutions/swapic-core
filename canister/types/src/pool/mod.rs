@@ -760,6 +760,22 @@ pub struct SwapLeg {
     /// the end (its deposit, the pull's fee included, less what was withdrawn back).
     #[n(5)]
     pub undone: Option<TokenAmount>,
+    /// What the pool held of the canister's just before the swap: what is there above it
+    /// is this leg's.
+    #[n(6)]
+    pub before: Option<PoolHeld>,
+    /// The ckUSDC withdrawn back from the pool when the swap was undone.
+    #[n(7)]
+    pub withdrawn: Option<TokenAmount>,
+}
+
+/// What an ICPSwap pool holds of the canister's, unused: ckUSDC and the leg's token.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct PoolHeld {
+    #[n(0)]
+    pub ckusdc: TokenAmount,
+    #[n(1)]
+    pub token: TokenAmount,
 }
 
 /// A payout in progress: its dedup pair and path, its ICPSwap leg, and its failures.
@@ -1141,6 +1157,11 @@ pub enum PoolStep {
     SwapBegun {
         #[n(0)]
         r#ref: PoolRef,
+        /// What the pool held of the canister's just before, read while this leg alone was
+        /// at the pool: only what is there above it is this leg's. None on a leg from before
+        /// it was read.
+        #[n(1)]
+        before: Option<PoolHeld>,
     },
     /// `depositFromAndSwap` answered its output.
     #[n(14)]
@@ -1229,6 +1250,9 @@ pub enum PoolStep {
         r#ref: PoolRef,
         #[n(1)]
         cost: TokenAmount,
+        /// The ckUSDC withdrawn from the pool: this leg's own, never more than it deposited.
+        #[n(2)]
+        withdrawn: TokenAmount,
     },
 }
 

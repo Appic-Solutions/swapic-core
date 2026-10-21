@@ -552,7 +552,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::SwapDeclined { r#ref, .. } | PoolStep::SwapBegun { r#ref } => {
+            PoolStep::SwapDeclined { r#ref, .. } | PoolStep::SwapBegun { r#ref, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
@@ -872,8 +872,12 @@ impl PoolLedger {
                     payout.swap.declined = payout.swap.declined.saturating_add(1);
                 });
             }
-            PoolStep::SwapBegun { r#ref } => {
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| payout.swap.begun = true);
+            PoolStep::SwapBegun { r#ref, before } => {
+                let before = *before;
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    payout.swap.begun = true;
+                    payout.swap.before = before;
+                });
             }
             PoolStep::Swapped { r#ref, out, send } => {
                 let (out, send) = (*out, *send);
@@ -954,10 +958,15 @@ impl PoolLedger {
                         Some(payout.swap.approvals.unwrap_or(0).saturating_add(1));
                 });
             }
-            PoolStep::SwapUndone { r#ref, cost } => {
-                let cost = *cost;
+            PoolStep::SwapUndone {
+                r#ref,
+                cost,
+                withdrawn,
+            } => {
+                let (cost, withdrawn) = (*cost, *withdrawn);
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
                     payout.swap.undone = Some(cost);
+                    payout.swap.withdrawn = Some(withdrawn);
                 });
             }
             PoolStep::IcpChecked { check } => {
