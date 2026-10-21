@@ -57,9 +57,16 @@ fn the_backup_works_only_while_a_registration_it_can_prove_waits() {
         let grace = types::pool::PoolSettings::default()
             .deposit_grace
             .as_nanos() as u64;
+        // read one margin past its grace (review fix 13), and no more after
+        let margin =
+            read_state(|state| pool_store::read_margin_in(state.store())).as_nanos() as u64;
+        assert!(read_state(|state| has_work(
+            state.store(),
+            at(1_000 + grace + margin)
+        )));
         assert!(!read_state(|state| has_work(
             state.store(),
-            at(1_000 + grace + 1)
+            at(1_000 + grace + margin + 1)
         )));
     });
 }

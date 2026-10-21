@@ -8,7 +8,7 @@ mod tests;
 
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
-use crate::storage::pool::record_at;
+use crate::storage::pool::{self as pool_store, record_at};
 use settlement_api::types::pool::PoolError;
 use std::time::Duration;
 use types::hash::PoolRef;
@@ -125,22 +125,19 @@ pub struct Expiry {
     pub more: bool,
 }
 
-/// The registrations past their expiry and grace with nothing arrived, at most `cap` of them,
-/// read off the open index.
+/// The registrations past their expiry, grace and read margin with nothing arrived, at most
+/// `cap` of them, read off the open index.
 pub fn due<S: Store>(store: &S, now: Timestamp, cap: usize) -> (Vec<PoolRef>, bool) {
+    // the same instant the canister's read of Base stops reading for it
+    let read_until = pool_store::read_until(store);
     let ledger = store.pool_ledger();
-    let grace = ledger
-        .settings
-        .as_ref()
-        .map(|settings| settings.deposit_grace)
-        .unwrap_or_default();
     let mut due: Vec<PoolRef> = ledger
         .open
         .iter()
         .filter(|r#ref| {
             store
                 .pool_deposit(r#ref)
-                .is_some_and(|deposit| deposit.terms.credit_until(grace) < now)
+                .is_some_and(|deposit| read_until(&deposit) < now)
         })
         .take(cap.saturating_add(1))
         .copied()

@@ -191,11 +191,18 @@ fn the_sweep_expires_a_registration() {
         try_register(early).unwrap();
         try_register(late).unwrap();
         let grace = settings().deposit_grace;
-        // at the end of the grace the arrival is still the user's
+        // at the end of the grace the arrival is still the user's, and one read margin past
+        // it an arrival on time may not have been read yet (review fix 13)
         let end_of_grace = in_minutes(1).checked_add(grace).unwrap();
+        let margin = crate::storage::events::read_state(|state| {
+            crate::storage::pool::read_margin_in(state.store())
+        });
+        let end_of_reading = end_of_grace.checked_add(margin).unwrap();
         let swept = run_expiry_sweep(end_of_grace);
         assert_eq!(swept.pool_expired, 0);
-        let swept = run_expiry_sweep(at(end_of_grace.as_nanos() + 1));
+        let swept = run_expiry_sweep(end_of_reading);
+        assert_eq!(swept.pool_expired, 0);
+        let swept = run_expiry_sweep(at(end_of_reading.as_nanos() + 1));
         assert_eq!(swept.pool_expired, 1);
         assert_eq!(deposit(&early_ref).unwrap().status, DepositStatus::Expired);
         assert_eq!(

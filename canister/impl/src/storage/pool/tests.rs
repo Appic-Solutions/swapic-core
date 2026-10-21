@@ -151,9 +151,17 @@ fn a_recorded_step_is_in_the_log_and_the_fold() {
             "a registration holds nothing"
         );
         assert_eq!(waiting_refs(at(500)), vec![r#ref]);
-        // past its expiry and grace it waits no more
+        // past its expiry and grace it is still read for one read margin (review fix 13):
+        // an arrival on time may not have been read yet; past that it waits no more
         let grace = settings().deposit_grace.as_nanos() as u64;
-        assert!(waiting_refs(at(1_000 + grace + 1)).is_empty());
+        let margin = read_state(|state| read_margin_in(state.store())).as_nanos() as u64;
+        assert_eq!(
+            read_margin(std::time::Duration::from_secs(300), 3),
+            std::time::Duration::from_secs(306)
+        );
+        assert_eq!(waiting_refs(at(1_000 + grace + 1)), vec![r#ref]);
+        assert_eq!(waiting_refs(at(1_000 + grace + margin)), vec![r#ref]);
+        assert!(waiting_refs(at(1_000 + grace + margin + 1)).is_empty());
         assert_eq!(
             shares_of(&PoolAccount::Icp(account(200))),
             ledger().total_shares
