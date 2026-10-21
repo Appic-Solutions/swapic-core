@@ -237,7 +237,10 @@ pub fn signing_gas(
     if requested < MIN_GAS_LIMIT {
         return Err(RelayError::GasLimitTooLow(requested));
     }
-    let max = chain.gas_limit.get(action);
+    let max = chain
+        .gas_limit
+        .get(action)
+        .ok_or(RelayError::NoGasLimit { chain_id, action })?;
     let requested_gas = GasAmount::from(requested);
     let gas = if requested_gas <= max {
         requested_gas
@@ -708,14 +711,23 @@ pub fn check(
         ..
     } = plan;
 
-    let mut needed = source.min_network_fee.get(action);
+    // a relay's actions always have their rows: an absent one asks the most
+    let mut needed = source
+        .min_network_fee
+        .get(action)
+        .unwrap_or(TokenAmount::MAX);
     if let Some(arrival) = &arrival {
         let destination = chains
             .evm_chains
             .get(arrival.chain_id)
             .expect("BUG: arrival_of found the destination in this table");
         needed = needed
-            .checked_add(destination.min_network_fee.get(arrival.action))
+            .checked_add(
+                destination
+                    .min_network_fee
+                    .get(arrival.action)
+                    .unwrap_or(TokenAmount::MAX),
+            )
             .unwrap_or(TokenAmount::MAX);
     }
     if fee < needed {

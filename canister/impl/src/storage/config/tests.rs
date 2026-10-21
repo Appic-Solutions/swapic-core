@@ -87,3 +87,54 @@ fn the_key_name_is_fixed_once_the_address_is_derived() {
         assert_eq!(ensure_key_name_is_not_moving(&same_name), Ok(()));
     });
 }
+
+/// The pool's gas rows (P11b) leave a config's ConfigChanged JSON as it was while they are
+/// absent, and show in it once set.
+#[test]
+fn the_pools_gas_rows_show_in_the_json_only_once_set() {
+    use types::config::{ChainTable, EvmChain, PerAction};
+    let chain = |rows: bool| {
+        let gas = PerAction::all(types::GasAmount::from(400_000_u64));
+        let budget = PerAction::all(types::Wei::from(1_000_000_000_000_000_u64));
+        let fees = PerAction::all(types::TokenAmount::from(50_000_u64));
+        let strip = |mut gas: PerAction<types::GasAmount>| {
+            if !rows {
+                gas.pool_payout = None;
+                gas.pool_transfer = None;
+                gas.pool_approve = None;
+            }
+            gas
+        };
+        EvmChain {
+            swapic: types::EvmAddress::new([1; 20]),
+            runner: types::EvmAddress::new([2; 20]),
+            cctp_receiver: types::EvmAddress::new([3; 20]),
+            usdc: types::EvmAddress::new([4; 20]),
+            token_messenger: types::EvmAddress::new([5; 20]),
+            message_transmitter: types::EvmAddress::new([6; 20]),
+            gas_limit: strip(gas),
+            gas_budget: PerAction {
+                pool_payout: rows.then_some(budget.relay_cctp),
+                pool_transfer: rows.then_some(budget.relay_cctp),
+                pool_approve: rows.then_some(budget.relay_cctp),
+                ..budget
+            },
+            min_network_fee: PerAction {
+                pool_payout: rows.then_some(fees.relay_cctp),
+                pool_transfer: rows.then_some(fees.relay_cctp),
+                pool_approve: rows.then_some(fees.relay_cctp),
+                ..fees
+            },
+        }
+    };
+    let config = |rows: bool| Config {
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, chain(rows))])),
+        ..Config::default()
+    };
+    let without = change_json(&config(false));
+    assert!(!without.contains("pool_payout"), "{without}");
+    assert!(!without.contains("pool_approve"), "{without}");
+    let with = change_json(&config(true));
+    assert!(with.contains("\"pool_payout\":400000"), "{with}");
+    assert!(with.contains("\"pool_transfer\":\"50000\""), "{with}");
+}

@@ -527,11 +527,20 @@ pub enum GasAction {
     /// `CctpReceiver.release` after the envelope's deadline.
     #[n(6)]
     Release,
+    /// `Swapic.run` of a pool payout from the canister's own Base pocket.
+    #[n(7)]
+    PoolPayout,
+    /// `USDC.transfer` of an orphan back to its payer, from the canister's Base address.
+    #[n(8)]
+    PoolTransfer,
+    /// `USDC.approve(Swapic, max)` from the canister's Base address, once per deploy.
+    #[n(9)]
+    PoolApprove,
 }
 
 impl GasAction {
     /// Every action, in code order.
-    pub const ALL: [GasAction; 7] = [
+    pub const ALL: [GasAction; 10] = [
         GasAction::RelayCctp,
         GasAction::RelayEco,
         GasAction::RelayLocal,
@@ -539,6 +548,9 @@ impl GasAction {
         GasAction::CompleteCk,
         GasAction::RelayDeliver,
         GasAction::Release,
+        GasAction::PoolPayout,
+        GasAction::PoolTransfer,
+        GasAction::PoolApprove,
     ];
 
     /// The action's one byte in an event's canonical preimage: its index, never reused.
@@ -551,6 +563,9 @@ impl GasAction {
             GasAction::CompleteCk => 4,
             GasAction::RelayDeliver => 5,
             GasAction::Release => 6,
+            GasAction::PoolPayout => 7,
+            GasAction::PoolTransfer => 8,
+            GasAction::PoolApprove => 9,
         }
     }
 
@@ -564,6 +579,9 @@ impl GasAction {
             GasAction::CompleteCk => "complete_ck",
             GasAction::RelayDeliver => "relay_deliver",
             GasAction::Release => "release",
+            GasAction::PoolPayout => "pool_payout",
+            GasAction::PoolTransfer => "pool_transfer",
+            GasAction::PoolApprove => "pool_approve",
         }
     }
 
@@ -572,7 +590,9 @@ impl GasAction {
     }
 }
 
-/// One value per [`GasAction`].
+/// One value per [`GasAction`]. The pool's three rows (P11b) are optional, so a config
+/// written before them reads back with them absent, and an action whose row is absent is
+/// refused at use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct PerAction<T> {
     #[n(0)]
@@ -589,22 +609,32 @@ pub struct PerAction<T> {
     pub relay_deliver: T,
     #[n(6)]
     pub release: T,
+    #[n(7)]
+    pub pool_payout: Option<T>,
+    #[n(8)]
+    pub pool_transfer: Option<T>,
+    #[n(9)]
+    pub pool_approve: Option<T>,
 }
 
 impl<T: Copy> PerAction<T> {
-    pub fn get(&self, action: GasAction) -> T {
+    /// The action's row; None for a pool row the config does not set.
+    pub fn get(&self, action: GasAction) -> Option<T> {
         match action {
-            GasAction::RelayCctp => self.relay_cctp,
-            GasAction::RelayEco => self.relay_eco,
-            GasAction::RelayLocal => self.relay_local,
-            GasAction::CompleteSwap => self.complete_swap,
-            GasAction::CompleteCk => self.complete_ck,
-            GasAction::RelayDeliver => self.relay_deliver,
-            GasAction::Release => self.release,
+            GasAction::RelayCctp => Some(self.relay_cctp),
+            GasAction::RelayEco => Some(self.relay_eco),
+            GasAction::RelayLocal => Some(self.relay_local),
+            GasAction::CompleteSwap => Some(self.complete_swap),
+            GasAction::CompleteCk => Some(self.complete_ck),
+            GasAction::RelayDeliver => Some(self.relay_deliver),
+            GasAction::Release => Some(self.release),
+            GasAction::PoolPayout => self.pool_payout,
+            GasAction::PoolTransfer => self.pool_transfer,
+            GasAction::PoolApprove => self.pool_approve,
         }
     }
 
-    /// The same value for every action.
+    /// The same value for every action, the pool's rows included.
     pub fn all(value: T) -> Self {
         Self {
             relay_cctp: value,
@@ -614,18 +644,21 @@ impl<T: Copy> PerAction<T> {
             complete_ck: value,
             relay_deliver: value,
             release: value,
+            pool_payout: Some(value),
+            pool_transfer: Some(value),
+            pool_approve: Some(value),
         }
     }
 }
 
 impl PerAction<Wei> {
-    /// The least of the seven: what a transaction whose action is not known is held to.
+    /// The least of the rows set: what a transaction whose action is not known is held to.
     pub fn strictest(&self) -> Wei {
         GasAction::ALL
             .into_iter()
-            .map(|action| self.get(action))
+            .filter_map(|action| self.get(action))
             .min()
-            .expect("BUG: there are seven actions")
+            .expect("BUG: the seven relay rows are always set")
     }
 }
 

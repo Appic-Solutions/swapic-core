@@ -260,7 +260,7 @@ pub(crate) fn budget_for(
     config
         .evm_chains
         .get(chain_id)
-        .map(|chain| chain.gas_budget.get(action))
+        .and_then(|chain| chain.gas_budget.get(action))
         .ok_or(TxError::NoGasBudget { chain_id, action })
 }
 
@@ -316,9 +316,11 @@ pub fn signed_once(key: QuoteHash) -> Result<Option<u64>, String> {
     })
 }
 
-/// What a flow's signed record says beyond the transaction itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a flow's or a pool payout's signed record says beyond the transaction itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Detail {
+    /// The order a pool payout is signed with, pinned for a retry after a revert.
+    PoolPayout { order: types::pool::PinnedOrder },
     /// The route action a continuation takes and the landed USDC it spends.
     Continuation {
         action: u8,
@@ -377,6 +379,15 @@ pub async fn create_and_send_with(
     require_not_halted().map_err(TxError::Guard)?;
     if matches!(purpose, TxPurpose::Finish(_)) && !matches!(detail, Some(Detail::Finish { .. })) {
         return Err(TxError::PurposeNeedsASwap("a finish with no detail"));
+    }
+    if matches!(purpose, TxPurpose::PoolPayout(_))
+        && !matches!(detail, Some(Detail::PoolPayout { .. }))
+    {
+        return Err(TxError::PurposeNeedsASwap("a pool payout with no order"));
+    }
+    // an orphan's transfer is signed by its own door, never through here yet
+    if matches!(purpose, TxPurpose::PoolTransfer(_)) {
+        return Err(TxError::PurposeNeedsASwap("a pool transfer"));
     }
     // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
     // pass that ends a stranded allocation, never through here
@@ -515,6 +526,30 @@ pub async fn create_and_send_with(
                     },
                 }
             }
+            // a pool payout's record is the payout's own step, which moves it to signed
+            TxPurpose::PoolPayout(id) => {
+                let Some(Detail::PoolPayout { order }) = detail else {
+                    unreachable!("BUG: a pool payout's order is checked before its nonce");
+                };
+                EventType::Pool {
+                    step: types::pool::PoolStep::PayoutSigned {
+                        id,
+                        order,
+                        chain_id,
+                        nonce,
+                        tx_hash,
+                        raw_tx: raw_tx.clone(),
+                    },
+                }
+            }
+            TxPurpose::PoolApprove => EventType::Pool {
+                step: types::pool::PoolStep::ApproveSigned {
+                    chain_id,
+                    nonce,
+                    tx_hash,
+                    raw_tx: raw_tx.clone(),
+                },
+            },
             // a pull names its number: no swap holds it for the record to find
             _ => EventType::PullSigned {
                 quote_hash,
@@ -1312,6 +1347,9 @@ fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees
         TxPurpose::Relay(key) | TxPurpose::Continue(key) | TxPurpose::Finish(key) => {
             read_state(|state| state.flow(&key)).and_then(|flow| flow.gas_action)
         }
+        TxPurpose::PoolPayout(_) => Some(GasAction::PoolPayout),
+        TxPurpose::PoolTransfer(_) => Some(GasAction::PoolTransfer),
+        TxPurpose::PoolApprove => Some(GasAction::PoolApprove),
         _ => None,
     };
     let budget = match action {

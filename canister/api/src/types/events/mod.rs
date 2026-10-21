@@ -207,6 +207,12 @@ pub enum TxPurpose {
     Relay(Hash32),
     Continue(Hash32),
     Finish(Hash32),
+    /// A pool payout from the canister's Base pocket, by its payout id.
+    PoolPayout(u64),
+    /// An orphan sent back, by the hash of its credit key.
+    PoolTransfer(Hash32),
+    /// The canister's standing USDC allowance to Swapic.
+    PoolApprove,
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -223,6 +229,9 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::Relay(hash) => Self::Relay(hash.into_bytes()),
             Domain::Continue(hash) => Self::Continue(hash.into_bytes()),
             Domain::Finish(hash) => Self::Finish(hash.into_bytes()),
+            Domain::PoolPayout(id) => Self::PoolPayout(id),
+            Domain::PoolTransfer(key) => Self::PoolTransfer(key),
+            Domain::PoolApprove => Self::PoolApprove,
         }
     }
 }
@@ -240,6 +249,9 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::Relay(hash) => Self::Relay(QuoteHash::new(hash)),
             TxPurpose::Continue(hash) => Self::Continue(QuoteHash::new(hash)),
             TxPurpose::Finish(hash) => Self::Finish(QuoteHash::new(hash)),
+            TxPurpose::PoolPayout(id) => Self::PoolPayout(id),
+            TxPurpose::PoolTransfer(key) => Self::PoolTransfer(key),
+            TxPurpose::PoolApprove => Self::PoolApprove,
         }
     }
 }

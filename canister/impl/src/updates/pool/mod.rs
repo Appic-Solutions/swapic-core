@@ -6,8 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    IcpRoute, PayoutSettings, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError,
-    PoolSettings, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
+    IcpRoute, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolDeposit,
+    PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -131,4 +131,17 @@ pub async fn set_icp_routes(
     crate::storage::pool::record(PoolStep::IcpRoutesSet { routes })
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     Ok(())
+}
+
+/// Controller-only, refused while halted, once per deploy: reads the canister's USDC allowance
+/// to Swapic on the pool chain and, below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so
+/// every pool payout is one signature of `Swapic.run`. Safe because `run` pulls only from
+/// `payer == msg.sender`. An allowance already in place answers `Known`; an approval on its
+/// way answers `Unavailable`.
+#[update]
+pub async fn pool_approve_swapic() -> Result<PoolApproveOk, PoolError> {
+    let caller = ic_cdk::api::caller();
+    pool::approve::approve_swapic(ic_cdk::api::is_controller(&caller))
+        .await
+        .map(|tx_id| PoolApproveOk { tx_id })
 }

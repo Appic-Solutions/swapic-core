@@ -3,6 +3,7 @@ use crate::storage::events::{event_at, event_count, verify_replay};
 use crate::storage::on_fresh_memory;
 use candid::Principal;
 use types::books::{BalanceCheck, BookStep};
+use types::events::TxPurpose;
 use types::hash::{PoolOpId, TxHash};
 use types::pool::{
     DepositKind, DepositStatus, IcpAccount, LedgerFee, PoolRail, PoolSettings, Registration,
@@ -385,6 +386,9 @@ fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
         for step in steps {
             record_at(step, at(5)).unwrap();
         }
+        // the payout's transaction is created first, its nonce held for it
+        crate::storage::events::append_event_at(created(TxPurpose::PoolPayout(0), 0), at(6))
+            .unwrap();
         let signed = record_at(
             PoolStep::PayoutSigned {
                 id: 0,
@@ -408,6 +412,60 @@ fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
         assert!(read_state(|state| state.store().is_withdrawal_nonce_used(
             &types::pool::NonceUse { staker, nonce: 1 }
         )));
+        assert!(verify_replay(), "the heap fold of the log is the live fold");
+    });
+}
+
+/// A `TxCreated` on Base at `nonce` for `purpose`.
+pub(crate) fn created(purpose: TxPurpose, nonce: u64) -> EventType {
+    EventType::TxCreated {
+        purpose,
+        chain_id: ChainId::BASE,
+        nonce: types::Nonce::new(nonce),
+        to: payer(),
+        value: types::Wei::ZERO,
+        data: vec![1, 2, 3],
+        gas_limit: types::GasAmount::from(300_000_u64),
+        max_fee: types::WeiPerGas::new(1_000),
+        max_priority_fee: types::WeiPerGas::new(10),
+        action: Some(types::config::GasAction::PoolApprove),
+    }
+}
+
+/// A pool transaction's signed record spends exactly the nonce handed out for its purpose:
+/// never one handed out for another, never one not handed out; and it is indexed among the
+/// signed transactions like any other.
+#[test]
+fn a_pool_signature_spends_the_nonce_held_for_its_purpose() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let approve = |nonce: u64| PoolStep::ApproveSigned {
+            chain_id: ChainId::BASE,
+            nonce: types::Nonce::new(nonce),
+            tx_hash: TxHash::new([7; 32]),
+            raw_tx: vec![7; 4],
+        };
+        // no nonce handed out: refused
+        assert!(record_at(approve(0), at(5)).is_err());
+        // a nonce handed out for another purpose: refused
+        crate::storage::events::append_event_at(created(TxPurpose::PoolPayout(9), 0), at(5))
+            .unwrap_err();
+        crate::storage::events::append_event_at(created(TxPurpose::PoolApprove, 0), at(5)).unwrap();
+        // one approval holds one nonce at a time
+        assert!(
+            crate::storage::events::append_event_at(created(TxPurpose::PoolApprove, 1), at(5))
+                .is_err()
+        );
+        assert!(record_at(approve(1), at(6)).is_err());
+        let signed = record_at(approve(0), at(6)).unwrap();
+        assert!(read_state(|state| state.unsigned_nonces()).is_empty());
+        assert_eq!(
+            read_state(|state| state.store().signed_in(signed.., 10)),
+            vec![signed]
+        );
+        // spent: a second record of it is refused
+        assert!(record_at(approve(0), at(7)).is_err());
         assert!(verify_replay(), "the heap fold of the log is the live fold");
     });
 }

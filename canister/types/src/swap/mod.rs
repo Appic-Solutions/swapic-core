@@ -83,7 +83,10 @@ impl Leg {
             | TxPurpose::Cancel(_)
             | TxPurpose::Relay(_)
             | TxPurpose::Continue(_)
-            | TxPurpose::Finish(_) => None,
+            | TxPurpose::Finish(_)
+            | TxPurpose::PoolPayout(_)
+            | TxPurpose::PoolTransfer(_)
+            | TxPurpose::PoolApprove => None,
         }
     }
 }

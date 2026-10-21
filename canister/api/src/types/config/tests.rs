@@ -447,3 +447,33 @@ fn the_cctp_minimum_fees_cross_the_wire_and_a_bad_one_names_its_chain() {
         }
     );
 }
+
+/// The pool's gas rows (P11b) are optional: absent, the domain rows are absent; set, they
+/// cross the wire and back. (The ConfigChanged JSON is pinned in `storage::config`.)
+#[test]
+fn the_pools_gas_rows_are_optional() {
+    use candid::{Decode, Encode};
+    let absent = ActionGas::default();
+    let domain: types::config::PerAction<types::GasAmount> = absent.into();
+    assert_eq!(domain.get(types::config::GasAction::PoolPayout), None);
+    let set = ActionGas {
+        pool_payout: Some(500_000),
+        pool_transfer: Some(80_000),
+        pool_approve: Some(60_000),
+        ..ActionGas::default()
+    };
+    let domain: types::config::PerAction<types::GasAmount> = set.into();
+    assert_eq!(
+        domain.get(types::config::GasAction::PoolApprove),
+        Some(types::GasAmount::from(60_000_u64))
+    );
+    assert_eq!(ActionGas::from(domain), set);
+    let bytes = Encode!(&set).unwrap();
+    assert_eq!(Decode!(&bytes, ActionGas).unwrap(), set);
+    let amounts = ActionAmounts {
+        pool_payout: Some(candid::Nat::from(10_000_u32)),
+        ..ActionAmounts::default()
+    };
+    let bytes = Encode!(&amounts).unwrap();
+    assert_eq!(Decode!(&bytes, ActionAmounts).unwrap(), amounts);
+}

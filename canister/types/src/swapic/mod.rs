@@ -107,6 +107,8 @@ sol! {
     }
     function publishAndFund(uint64 destination, bytes route, EcoReward reward, bool allowPartial) external payable returns (bytes32 intentHash, address vault);
     function approve(address spender, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function run(Order order) external payable returns (bytes32 id);
     function fill(address token, uint256 amount, bytes envelope, Recipe recipe) external;
 
     /// KyberSwap's MetaAggregationRouterV2 `swap`, the swap step the quoter writes.
@@ -535,6 +537,32 @@ pub fn encode_auth(auth: &GaslessAuth) -> Vec<u8> {
 /// The recipe an `abi.encode(recipe)` holds.
 pub fn decode_recipe(bytes: &[u8]) -> Option<Recipe> {
     <Recipe as SolValue>::abi_decode(bytes).ok()
+}
+
+/// `Swapic.run(order)`: the canister's own pool payout, paid from its own USDC.
+pub fn run_calldata(order: &Order) -> Vec<u8> {
+    runCall {
+        order: order.clone(),
+    }
+    .abi_encode()
+}
+
+/// `token.approve(spender, amount)`.
+pub fn approve_calldata(spender: EvmAddress, amount: U256) -> Vec<u8> {
+    approveCall {
+        spender: addr(spender),
+        amount,
+    }
+    .abi_encode()
+}
+
+/// `token.allowance(owner, spender)`.
+pub fn allowance_calldata(owner: EvmAddress, spender: EvmAddress) -> Vec<u8> {
+    allowanceCall {
+        owner: addr(owner),
+        spender: addr(spender),
+    }
+    .abi_encode()
 }
 
 /// `Swapic.runFor(order, auth)`: the canister's relay of a gasless order.

@@ -274,7 +274,17 @@ impl<S: Store> State<S> {
             // nothing, so it can never strand a wait.
             EventType::WaitingRepaired { .. } => Ok(()),
             EventType::Books { chain_id, step } => Ok(self.book(chain_id).admits(step)?),
-            EventType::Pool { step } => Ok(self.pool().admits(step, &self.pool_view())?),
+            // a pool step that records a signed transaction spends the nonce handed out for
+            // exactly its purpose, as a flow's does
+            EventType::Pool { step } => {
+                self.pool().admits(step, &self.pool_view())?;
+                match (step.signed_tx(), step.signed_purpose()) {
+                    (Some((chain_id, nonce, _, _)), Some(purpose)) => {
+                        self.ensure_flow_nonce(purpose, chain_id, nonce)
+                    }
+                    _ => Ok(()),
+                }
+            }
             // a flow's own rules, and the nonce its signed records spend
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
@@ -374,6 +384,22 @@ impl<S: Store> State<S> {
             // a cancel names no swap, so `quote_hash()` answered none and this function
             // returned before the match
             TxPurpose::Cancel(_) => return Ok(()),
+            // a payout is signed only while it waits with its USDC reserved
+            TxPurpose::PoolPayout(id) => {
+                let payout = self
+                    .store()
+                    .pool_payout(*id)
+                    .ok_or(types::pool::PoolStepError::UnknownPayout(*id))?;
+                if payout.status != types::pool::PayoutStatus::Waiting || !payout.base_reserved {
+                    return Err(types::pool::PoolStepError::PayoutNotFrom {
+                        step: "TxCreated",
+                        id: *id,
+                        status: format!("{:?}", payout.status),
+                    }
+                    .into());
+                }
+            }
+            TxPurpose::PoolTransfer(_) | TxPurpose::PoolApprove => {}
         }
         // rule A4 from the swap's side: two sends for ONE swap that interleave at the
         // signature would otherwise both allocate, and the second's `TxSigned` would be
@@ -628,7 +654,13 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             state.record_flow(*quote_hash, step, event.index, event.timestamp, action);
         }
         EventType::Books { chain_id, step } => state.record_books(*chain_id, step, event.timestamp),
-        EventType::Pool { step } => state.record_pool(step, event.timestamp, event.index),
+        EventType::Pool { step } => {
+            // a signed pool step spends the nonce its `TxCreated` handed out
+            if let Some((chain_id, nonce, _, _)) = step.signed_tx() {
+                state.record_nonce_spent(chain_id, nonce);
+            }
+            state.record_pool(step, event.timestamp, event.index)
+        }
         // audit lines for deploy-time truth that lives in its own stable cell, and for a
         // re-send that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }

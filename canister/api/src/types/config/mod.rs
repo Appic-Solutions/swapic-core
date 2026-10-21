@@ -124,6 +124,14 @@ pub struct ActionGas {
     pub complete_ck: u64,
     pub relay_deliver: u64,
     pub release: u64,
+    /// The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
+    /// ConfigChanged JSON when absent, so a config without them keeps its shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_payout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_transfer: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_approve: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -143,6 +151,23 @@ pub struct ActionAmounts {
     pub relay_deliver: Nat,
     #[serde(serialize_with = "nat_as_decimal")]
     pub release: Nat,
+    /// The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
+    /// ConfigChanged JSON when absent, so a config without them keeps its shape.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_payout: Option<Nat>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_transfer: Option<Nat>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub pool_approve: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -160,6 +185,9 @@ impl From<PerAction<GasAmount>> for ActionGas {
             complete_ck: limit(gas.complete_ck),
             relay_deliver: limit(gas.relay_deliver),
             release: limit(gas.release),
+            pool_payout: gas.pool_payout.map(limit),
+            pool_transfer: gas.pool_transfer.map(limit),
+            pool_approve: gas.pool_approve.map(limit),
         }
     }
 }
@@ -174,6 +202,9 @@ impl From<ActionGas> for PerAction<GasAmount> {
             complete_ck: GasAmount::from(gas.complete_ck),
             relay_deliver: GasAmount::from(gas.relay_deliver),
             release: GasAmount::from(gas.release),
+            pool_payout: gas.pool_payout.map(GasAmount::from),
+            pool_transfer: gas.pool_transfer.map(GasAmount::from),
+            pool_approve: gas.pool_approve.map(GasAmount::from),
         }
     }
 }
@@ -188,6 +219,9 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             complete_ck: amounts.complete_ck.into(),
             relay_deliver: amounts.relay_deliver.into(),
             release: amounts.release.into(),
+            pool_payout: amounts.pool_payout.map(Into::into),
+            pool_transfer: amounts.pool_transfer.map(Into::into),
+            pool_approve: amounts.pool_approve.map(Into::into),
         }
     }
 }
@@ -208,6 +242,9 @@ fn per_action<Unit>(
         complete_ck: amount(amounts.complete_ck)?,
         relay_deliver: amount(amounts.relay_deliver)?,
         release: amount(amounts.release)?,
+        pool_payout: amounts.pool_payout.map(amount).transpose()?,
+        pool_transfer: amounts.pool_transfer.map(amount).transpose()?,
+        pool_approve: amounts.pool_approve.map(amount).transpose()?,
     })
 }
 
@@ -333,6 +370,17 @@ impl fmt::Debug for Config {
 /// underscores, and a JSON number past 2^53 loses digits in most readers.
 fn nat_as_decimal<S: Serializer>(value: &Nat, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&value.0.to_str_radix(10))
+}
+
+/// [`nat_as_decimal`] of a row that is set (an absent row is never serialized).
+fn opt_nat_as_decimal<S: Serializer>(
+    value: &Option<Nat>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => nat_as_decimal(value, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl Config {

@@ -1472,6 +1472,19 @@ pub enum PoolStep {
         #[n(0)]
         routes: IcpRoutes,
     },
+    /// The canister signed `USDC.approve(Swapic, max)` on Base: the transaction's exact bytes,
+    /// recorded before they are broadcast, spending the nonce `TxCreated` handed out for it.
+    #[n(34)]
+    ApproveSigned {
+        #[n(0)]
+        chain_id: ChainId,
+        #[n(1)]
+        nonce: Nonce,
+        #[n(2)]
+        tx_hash: TxHash,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 impl PoolStep {
@@ -1519,6 +1532,7 @@ impl PoolStep {
             PoolStep::PayoutUndoing { .. } => "PayoutUndoing",
             PoolStep::PayoutUndone { .. } => "PayoutUndone",
             PoolStep::IcpRoutesSet { .. } => "IcpRoutesSet",
+            PoolStep::ApproveSigned { .. } => "ApproveSigned",
         }
     }
 
@@ -1533,7 +1547,23 @@ impl PoolStep {
                 tx_hash,
                 raw_tx,
                 ..
+            }
+            | PoolStep::ApproveSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
             } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
+            _ => None,
+        }
+    }
+
+    /// The purpose of the transaction a step records the bytes of: the nonce it spends must
+    /// have been handed out for exactly this.
+    pub fn signed_purpose(&self) -> Option<crate::events::TxPurpose> {
+        match self {
+            PoolStep::PayoutSigned { id, .. } => Some(crate::events::TxPurpose::PoolPayout(*id)),
+            PoolStep::ApproveSigned { .. } => Some(crate::events::TxPurpose::PoolApprove),
             _ => None,
         }
     }

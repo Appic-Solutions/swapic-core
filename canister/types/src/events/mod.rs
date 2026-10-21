@@ -382,11 +382,23 @@ pub enum TxPurpose {
     /// A CCTP arrival finished by this canister, keyed by its message and action.
     #[n(9)]
     Finish(#[n(0)] QuoteHash),
+    /// A pool payout from the canister's Base pocket (`Swapic.run`), by its payout id.
+    #[n(10)]
+    PoolPayout(#[n(0)] u64),
+    /// An orphan's USDC sent back from the canister's Base address, by the hash of its
+    /// credit key.
+    #[n(11)]
+    PoolTransfer(#[cbor(n(0), with = "minicbor::bytes")] [u8; 32]),
+    /// The canister's standing USDC allowance to Swapic on Base.
+    #[n(12)]
+    PoolApprove,
 }
 
 impl TxPurpose {
     /// The quote this transaction is for, if it is for one: the swap's id for the legs of a
-    /// swap, and the quote a pull is paying for before its swap exists.
+    /// swap, and the quote a pull is paying for before its swap exists. A pool transaction
+    /// is keyed by its tag and its own key, so one of them holds one nonce at a time like a
+    /// swap does.
     pub fn quote_hash(&self) -> Option<QuoteHash> {
         match self {
             Self::Burn(hash)
@@ -398,8 +410,19 @@ impl TxPurpose {
             | Self::Relay(hash)
             | Self::Continue(hash)
             | Self::Finish(hash) => Some(*hash),
+            Self::PoolPayout(id) => Some(pool_key(b"swapic.pool.v1.tx.payout", &id.to_be_bytes())),
+            Self::PoolTransfer(key) => Some(pool_key(b"swapic.pool.v1.tx.transfer", key)),
+            Self::PoolApprove => Some(pool_key(b"swapic.pool.v1.tx.approve", &[])),
             Self::Cancel(_) => None,
         }
+    }
+
+    /// Whether it is one of the pool's own transactions, whose signed record is a pool step.
+    pub fn is_pool(&self) -> bool {
+        matches!(
+            self,
+            Self::PoolPayout(_) | Self::PoolTransfer(_) | Self::PoolApprove
+        )
     }
 
     /// The swap whose attempt this transaction is, if it is one: a pull runs before any
@@ -415,7 +438,10 @@ impl TxPurpose {
             | Self::Cancel(_)
             | Self::Relay(_)
             | Self::Continue(_)
-            | Self::Finish(_) => None,
+            | Self::Finish(_)
+            | Self::PoolPayout(_)
+            | Self::PoolTransfer(_)
+            | Self::PoolApprove => None,
         }
     }
 
@@ -434,8 +460,20 @@ impl TxPurpose {
             Self::Relay(hash) => w.put_u8(7).put_hash(hash.as_ref()),
             Self::Continue(hash) => w.put_u8(8).put_hash(hash.as_ref()),
             Self::Finish(hash) => w.put_u8(9).put_hash(hash.as_ref()),
+            Self::PoolPayout(id) => w.put_u8(10).put_u64(*id),
+            Self::PoolTransfer(key) => w.put_u8(11).put_hash(key),
+            Self::PoolApprove => w.put_u8(12),
         };
     }
+}
+
+/// A pool transaction's key: `keccak256(tag ‖ key)`, never a quote's (a quote hash is a
+/// sha256 of the quote's bytes, and no tag here is one).
+fn pool_key(tag: &[u8], key: &[u8]) -> QuoteHash {
+    let mut preimage = Vec::with_capacity(tag.len() + key.len());
+    preimage.extend_from_slice(tag);
+    preimage.extend_from_slice(key);
+    QuoteHash::new(alloy_primitives::keccak256(&preimage).0)
 }
 
 /// The user's answer to a paused swap. One byte in the preimage: Requote 0, Refund 1.
@@ -558,6 +596,9 @@ impl EventType {
                     },
                 ..
             } => Some((*chain_id, *tx_hash, raw_tx)),
+            EventType::Pool { step } => step
+                .signed_tx()
+                .map(|(chain_id, _, tx_hash, raw_tx)| (chain_id, tx_hash, raw_tx)),
             _ => None,
         }
     }

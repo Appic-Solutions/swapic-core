@@ -249,6 +249,12 @@ pub struct WithdrawIcpArgs {
     pub to: IcpAccount,
 }
 
+/// `pool_approve_swapic`'s answer: the approval's id in `signed_txs`.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PoolApproveOk {
+    pub tx_id: u64,
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawIcpOk {
     pub burned: Nat,

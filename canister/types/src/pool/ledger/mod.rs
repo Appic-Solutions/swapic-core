@@ -752,6 +752,8 @@ impl PoolLedger {
             | PoolStep::PayoutReverted { .. }
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. } => self.admits_payout(step, lookup),
+            // the nonce it spends is the state's to check: nothing of the pool moves
+            PoolStep::ApproveSigned { .. } => Ok(()),
             PoolStep::IcpRoutesSet { routes } => {
                 let settings = self.settings()?;
                 routes
@@ -800,6 +802,7 @@ impl PoolLedger {
                 }
                 ledger.settings = Some(settings);
             }
+            PoolStep::ApproveSigned { .. } => {}
             PoolStep::IcpRoutesSet { routes } => {
                 if let Some(settings) = ledger.settings.as_mut() {
                     settings.routes = Some(routes.clone());

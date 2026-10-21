@@ -616,7 +616,146 @@ fn samples() -> Vec<Sample> {
     all.extend(pool_samples());
     all.extend(payout_samples());
     all.extend(route_samples());
+    all.extend(pool_tx_samples());
     all
+}
+
+/// The pool's own transactions (P11b Task 2): a chain with the pool's gas rows, a
+/// transaction created for each pool purpose, and the approval's signed record.
+fn pool_tx_samples() -> Vec<Sample> {
+    use crate::config::{EvmChain, GasAction, PerAction};
+    use crate::evm::EvmAddress;
+    use crate::pool::PoolStep;
+
+    let address = |byte: u8| EvmAddress::new([byte; 20]);
+    let rows = |base: u64| PerAction {
+        relay_cctp: base,
+        relay_eco: base + 1,
+        relay_local: base + 2,
+        complete_swap: base + 3,
+        complete_ck: base + 4,
+        relay_deliver: base + 5,
+        release: base + 6,
+        pool_payout: Some(base + 7),
+        pool_transfer: Some(base + 8),
+        pool_approve: Some(base + 9),
+    };
+    let chain = EvmChain {
+        swapic: address(0x51),
+        runner: address(0x52),
+        cctp_receiver: address(0x53),
+        usdc: address(0x54),
+        token_messenger: address(0x55),
+        message_transmitter: address(0x56),
+        gas_limit: {
+            let r = rows(400_000);
+            PerAction {
+                relay_cctp: GasAmount::from(r.relay_cctp),
+                relay_eco: GasAmount::from(r.relay_eco),
+                relay_local: GasAmount::from(r.relay_local),
+                complete_swap: GasAmount::from(r.complete_swap),
+                complete_ck: GasAmount::from(r.complete_ck),
+                relay_deliver: GasAmount::from(r.relay_deliver),
+                release: GasAmount::from(r.release),
+                pool_payout: r.pool_payout.map(GasAmount::from),
+                pool_transfer: r.pool_transfer.map(GasAmount::from),
+                pool_approve: r.pool_approve.map(GasAmount::from),
+            }
+        },
+        gas_budget: {
+            let r = rows(1_000_000_000_000_000);
+            PerAction {
+                relay_cctp: Wei::from(r.relay_cctp),
+                relay_eco: Wei::from(r.relay_eco),
+                relay_local: Wei::from(r.relay_local),
+                complete_swap: Wei::from(r.complete_swap),
+                complete_ck: Wei::from(r.complete_ck),
+                relay_deliver: Wei::from(r.relay_deliver),
+                release: Wei::from(r.release),
+                pool_payout: r.pool_payout.map(Wei::from),
+                pool_transfer: r.pool_transfer.map(Wei::from),
+                pool_approve: r.pool_approve.map(Wei::from),
+            }
+        },
+        min_network_fee: {
+            let r = rows(50_000);
+            PerAction {
+                relay_cctp: TokenAmount::from(r.relay_cctp),
+                relay_eco: TokenAmount::from(r.relay_eco),
+                relay_local: TokenAmount::from(r.relay_local),
+                complete_swap: TokenAmount::from(r.complete_swap),
+                complete_ck: TokenAmount::from(r.complete_ck),
+                relay_deliver: TokenAmount::from(r.relay_deliver),
+                release: TokenAmount::from(r.release),
+                pool_payout: r.pool_payout.map(TokenAmount::from),
+                pool_transfer: r.pool_transfer.map(TokenAmount::from),
+                pool_approve: r.pool_approve.map(TokenAmount::from),
+            }
+        },
+    };
+    let config = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        confirmations: depths_with_ethereum_swaps_at_one_block(),
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, chain)])),
+        pool_chain: Some(ChainId::BASE),
+        ..Config::default()
+    };
+    let created = |i: u64, purpose: TxPurpose, action: GasAction| {
+        Event::seal(
+            EventIndex::new(5_000 + i),
+            Timestamp::from_nanos(1_800_000_000_000_000_400 + i),
+            EventHash::new([0xc8; 32]),
+            crate::events::EventType::TxCreated {
+                purpose,
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(401 + i),
+                to: address(0x57),
+                value: Wei::ZERO,
+                data: vec![0x58; 36],
+                gas_limit: GasAmount::from(402_000_u64),
+                max_fee: WeiPerGas::new(403_000_000),
+                max_priority_fee: WeiPerGas::new(404_000),
+                action: Some(action),
+            },
+        )
+        .expect("every sample has a preimage")
+    };
+    vec![
+        sample("config with the pool's gas rows", config),
+        sample(
+            "pool payout transaction created",
+            created(0, TxPurpose::PoolPayout(405), GasAction::PoolPayout),
+        ),
+        sample(
+            "pool transfer transaction created",
+            created(
+                1,
+                TxPurpose::PoolTransfer([0x59; 32]),
+                GasAction::PoolTransfer,
+            ),
+        ),
+        sample(
+            "pool approval transaction created",
+            created(2, TxPurpose::PoolApprove, GasAction::PoolApprove),
+        ),
+        sample(
+            "pool approval signed",
+            Event::seal(
+                EventIndex::new(5_003),
+                Timestamp::from_nanos(1_800_000_000_000_000_406),
+                EventHash::new([0xc8; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::ApproveSigned {
+                        chain_id: ChainId::BASE,
+                        nonce: Nonce::new(403),
+                        tx_hash: TxHash::new([0x5a; 32]),
+                        raw_tx: vec![0x02, 0x5b],
+                    },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// The ICP routes' stored types (P11b Task 1b): settings with their routes, a path through
