@@ -47,24 +47,32 @@ pub fn source_of<S: Store>(state: &State<S>, order_id: [u8; 32]) -> Option<(Chai
     }
     let config = config::get();
     let pool_chain = config.pool_chain?;
-    let payout = state.store().pool_payouts().into_iter().find_map(|(_, payout)| {
-        let pinned = payout.order.as_ref()?;
-        (pinned.order_id == order_id).then_some(payout.tx_hash?)
-    });
+    let payout = state
+        .store()
+        .pool_payouts()
+        .into_iter()
+        .find_map(|(_, payout)| {
+            let pinned = payout.order.as_ref()?;
+            (pinned.order_id == order_id).then_some(payout.tx_hash?)
+        });
     if let Some(tx) = payout {
         return Some((pool_chain, tx));
     }
-    state.store().pool_moves().into_iter().find_map(|(_, item)| {
-        let pinned = item.order.as_ref()?;
-        if pinned.order_id != order_id {
-            return None;
-        }
-        let chain = match item.direction {
-            MoveDirection::BaseToIcp => pool_chain,
-            MoveDirection::IcpToBase => ChainId::ETHEREUM,
-        };
-        Some((chain, item.tx_hash?))
-    })
+    state
+        .store()
+        .pool_moves()
+        .into_iter()
+        .find_map(|(_, item)| {
+            let pinned = item.order.as_ref()?;
+            if pinned.order_id != order_id {
+                return None;
+            }
+            let chain = match item.direction {
+                MoveDirection::BaseToIcp => pool_chain,
+                MoveDirection::IcpToBase => ChainId::ETHEREUM,
+            };
+            Some((chain, item.tx_hash?))
+        })
 }
 
 /// The intent `receipt` published on Eco's Portal, if it published one.

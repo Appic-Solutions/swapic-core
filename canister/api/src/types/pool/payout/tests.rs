@@ -169,7 +169,11 @@ fn a_waiting_payout_names_its_network_fee() {
         },
         types::Timestamp::from_nanos(1),
     );
-    assert_eq!(PayoutWaiting::of(&payout), None, "its amount is not known yet");
+    assert_eq!(
+        PayoutWaiting::of(&payout),
+        None,
+        "its amount is not known yet"
+    );
     payout.amount = Some(types::TokenAmount::from(9_930_000_u64));
     let waiting = PayoutWaiting::of(&payout).unwrap();
     assert_eq!(waiting.network_fee, Some(Nat::from(70_000_u64)));

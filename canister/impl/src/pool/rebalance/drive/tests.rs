@@ -527,11 +527,17 @@ fn the_sweep_moves_all_of_the_subaccount_and_credits_the_move_once() {
 fn an_eco_move_to_base_past_its_deadline_is_looked_for_on_the_portals() {
     use types::eco::{Fill, REWARD_REFUNDED, REWARD_WITHDRAWN};
     assert_eq!(unfilled_next(Fill::Open, REWARD_REFUNDED, false), Ok(true));
-    assert_eq!(unfilled_next(Fill::Cancelled, REWARD_REFUNDED, false), Ok(true));
+    assert_eq!(
+        unfilled_next(Fill::Cancelled, REWARD_REFUNDED, false),
+        Ok(true)
+    );
     // not refunded yet: it waits (the rescue, or Eco's week)
     assert_eq!(unfilled_next(Fill::Open, 1, true), Ok(false));
     // filled: the arrival is the watcher's to report; after hours a controller looks
-    assert_eq!(unfilled_next(Fill::Filled, REWARD_WITHDRAWN, false), Ok(false));
+    assert_eq!(
+        unfilled_next(Fill::Filled, REWARD_WITHDRAWN, false),
+        Ok(false)
+    );
     assert!(unfilled_next(Fill::Filled, REWARD_WITHDRAWN, true).is_err());
 
     // the Eco step of the canary's order, its route's deadline its own

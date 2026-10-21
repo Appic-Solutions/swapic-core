@@ -1097,8 +1097,7 @@ pub fn refund_destination<S: Store>(state: &State<S>, intent: &[u8; 32]) -> Opti
     crate::pool::rebalance::open_moves(state)
         .into_iter()
         .any(|item| {
-            item.intent == Some(*intent)
-                && item.direction == types::pool::MoveDirection::BaseToIcp
+            item.intent == Some(*intent) && item.direction == types::pool::MoveDirection::BaseToIcp
         })
         .then_some(ChainId::ETHEREUM)
 }

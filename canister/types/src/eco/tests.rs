@@ -59,7 +59,10 @@ fn the_rescue_is_the_call_that_cancelled_the_live_intent() {
     assert_eq!(proofs.len(), 8 + 32 + 32);
     assert_eq!(proofs[..8], 1_u64.to_be_bytes());
     assert_eq!(proofs[40..], CANCELLED);
-    assert_eq!(fetch_fee_calldata(137, &proofs, &prove_data(prover))[..4], FETCH_FEE);
+    assert_eq!(
+        fetch_fee_calldata(137, &proofs, &prove_data(prover))[..4],
+        FETCH_FEE
+    );
 }
 
 #[test]

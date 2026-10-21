@@ -121,7 +121,10 @@ fn the_intent_is_read_off_the_portals_own_log() {
     };
     assert_eq!(published(&receipt(portal()), portal()), Some(intent));
     assert_eq!(
-        published(&receipt(address("0x000000000000000000000000000000000000dEaD")), portal()),
+        published(
+            &receipt(address("0x000000000000000000000000000000000000dEaD")),
+            portal()
+        ),
         None
     );
 }

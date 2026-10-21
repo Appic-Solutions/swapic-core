@@ -838,7 +838,9 @@ impl PoolLedger {
             // one rescue per order; the nonce it spends is the state's to check
             PoolStep::EcoRescueSigned { order_id, .. } => {
                 if lookup.eco_rescued(order_id) {
-                    return Err(PoolStepError::Terms("the order's intent was rescued already"));
+                    return Err(PoolStepError::Terms(
+                        "the order's intent was rescued already",
+                    ));
                 }
                 Ok(())
             }
@@ -1520,9 +1522,9 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
             }
             // the premium at arrival (P11e): at least 90% of the settings' share of what
             // arrived, the quoter pricing it on the most a route delivers
-            let share = premium_share(settings, terms.min_usdc).ok_or(RegisterRefusal::NotAllowed(
-                "the premium's share overflows".to_string(),
-            ))?;
+            let share = premium_share(settings, terms.min_usdc).ok_or(
+                RegisterRefusal::NotAllowed("the premium's share overflows".to_string()),
+            )?;
             let least = share
                 .checked_mul(PREMIUM_AT_ARRIVAL_PERCENT)
                 .and_then(|scaled| scaled.checked_div_ceil(100_u32))

@@ -194,8 +194,8 @@ mod refunds_proven {
     use super::*;
     use crate::pool::arrival::{prove_refunds, FillReads};
     use crate::storage::on_fresh_memory;
-    use crate::storage::pool::tests::{base_stake, created, funded_pool};
     use crate::storage::pool::record_at;
+    use crate::storage::pool::tests::{base_stake, created, funded_pool};
     use types::eco::Fill;
     use types::events::TxPurpose;
     use types::pool::payout::PinnedOrder;
@@ -206,7 +206,11 @@ mod refunds_proven {
 
     impl FillReads for Portal {
         async fn fill(&self, chain: ChainId, _intent: [u8; 32]) -> Result<Fill, String> {
-            assert_eq!(chain, ChainId::ETHEREUM, "a move to ICP is filled on Ethereum");
+            assert_eq!(
+                chain,
+                ChainId::ETHEREUM,
+                "a move to ICP is filled on Ethereum"
+            );
             self.0.clone()
         }
     }
@@ -227,7 +231,9 @@ mod refunds_proven {
         crate::storage::init();
         funded_pool(usdc(4_000));
         base_stake(
-            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
             usdc(6_000),
             0x53,
             9,
@@ -268,8 +274,7 @@ mod refunds_proven {
         for step in steps {
             record_at(step, at(2)).unwrap();
         }
-        crate::storage::events::append_event_at(created(TxPurpose::PoolMove(0), 0), at(3))
-            .unwrap();
+        crate::storage::events::append_event_at(created(TxPurpose::PoolMove(0), 0), at(3)).unwrap();
         for step in [
             PoolStep::MoveSigned {
                 id: 0,
@@ -323,7 +328,9 @@ mod refunds_proven {
         on_fresh_memory(|| {
             eco_move();
             let filled = block_on(prove_refunds(refund(INTENT), &Portal(Ok(Fill::Filled))));
-            assert!(matches!(&filled[0].proof, Proof::Orphan { why, .. } if why.contains("filled")));
+            assert!(
+                matches!(&filled[0].proof, Proof::Orphan { why, .. } if why.contains("filled"))
+            );
             assert_eq!(read_state(|state| step_for(state, &filled[0])), None);
             let unread = block_on(prove_refunds(
                 refund(INTENT),

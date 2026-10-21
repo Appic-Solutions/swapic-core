@@ -967,10 +967,7 @@ fn a_reimbursed_move_returns_to_the_icp_pocket_and_a_retried_call_books_its_appr
     let cost = world.ledger().moves().cost;
     world.step(PoolStep::MoveRetried { id: again }).unwrap();
     let fee = TokenAmount::from(super::super::tests::FEE);
-    assert_eq!(
-        world.ledger().moves().cost,
-        cost.checked_add(fee).unwrap()
-    );
+    assert_eq!(world.ledger().moves().cost, cost.checked_add(fee).unwrap());
     assert_eq!(
         world.ledger().pockets.icp.free,
         usdc(3_500).checked_sub(fee).unwrap()

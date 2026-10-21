@@ -226,13 +226,19 @@ fn an_arrival_above_a_cap_or_below_its_icp_fees_is_refused() {
         })
     );
     assert_eq!(
-        check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::from(89_999_u64))),
+        check_arrival(
+            &pool.ledger,
+            &swap(1, usdc(100), TokenAmount::from(89_999_u64))
+        ),
         Err(RegisterRefusal::PremiumTooLow {
             least: TokenAmount::from(90_000_u64)
         })
     );
     assert_eq!(
-        check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::from(90_000_u64))),
+        check_arrival(
+            &pool.ledger,
+            &swap(1, usdc(100), TokenAmount::from(90_000_u64))
+        ),
         Ok(())
     );
     // $1 at 10 bps is a share of 1,000: 900 is its 90%

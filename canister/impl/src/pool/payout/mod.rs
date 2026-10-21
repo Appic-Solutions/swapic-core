@@ -1049,12 +1049,11 @@ async fn swap_leg(
     }
     // an approval given before this run is one fee more: the user's, out of what the leg
     // deposits (P11e)
-    let swap_in = crate::pool::legs::after_approvals(
-        swap_in,
-        fee_ck,
-        payout.progress.swap.approvals,
-    )
-    .ok_or_else(|| Stop::Failed("the approvals given take all the leg deposits".to_string()))?;
+    let swap_in =
+        crate::pool::legs::after_approvals(swap_in, fee_ck, payout.progress.swap.approvals)
+            .ok_or_else(|| {
+                Stop::Failed("the approvals given take all the leg deposits".to_string())
+            })?;
     let leg = LegAt { swap_in, ..leg };
     // before the swap: a token no longer listed with this pool, or with no fee read, falls
     // back (the token's output could not be paid)
