@@ -11,6 +11,15 @@ pub fn rebalance_moves() -> Vec<MoveView> {
     rebalance::views()
 }
 
+/// The moves stopped for a controller, held where they are (in flight where they left).
+#[query]
+pub fn rebalance_stuck() -> Vec<MoveView> {
+    read_state(rebalance::stuck)
+        .iter()
+        .map(MoveView::from)
+        .collect()
+}
+
 /// The rebalancing's knobs; the defaults while none are set.
 #[query]
 pub fn rebalance_settings() -> RebalanceSettings {

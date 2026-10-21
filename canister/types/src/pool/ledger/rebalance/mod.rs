@@ -558,9 +558,11 @@ impl PoolLedger {
                 item.stuck = Some(why.clone());
                 Some(item)
             }
-            // on from where it stood; a minter's call a controller found never ran is asked again
+            // on from where it stood, with fresh tries; a minter's call a controller found never
+            // ran is asked again
             PoolStep::MoveRetried { id } => {
                 let mut item = lookup.pool_move(*id)?;
+                item.reverts = None;
                 if item.status == MoveStatus::Withdrawing {
                     let icp = &mut ledger.pockets.icp;
                     icp.in_flight = sat_sub(icp.in_flight, item.amount);

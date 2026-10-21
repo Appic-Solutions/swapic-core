@@ -15,9 +15,10 @@ pub mod trigger;
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use settlement_api::types::pool::{
-    MoveView, PoolError, RebalanceSettings as WireSettings,
+    MoveResolution, MoveView, PoolError, RebalanceSettings as WireSettings,
 };
 use types::pool::{Move, PoolStep, RebalanceSettings};
+use types::Timestamp;
 
 /// The knobs as the domain takes them, or the refusal: the halt, then the controller, then
 /// settings that hold together.
@@ -83,4 +84,40 @@ pub async fn drive(now: types::Timestamp) {
 /// `rebalance_moves`: the open and in-flight moves.
 pub fn views() -> Vec<MoveView> {
     read_state(open_moves).iter().map(MoveView::from).collect()
+}
+
+/// The moves stopped for a controller, held where they are: what `rebalance_stuck` lists.
+pub fn stuck<S: Store>(state: &State<S>) -> Vec<Move> {
+    open_moves(state)
+        .into_iter()
+        .filter(|item| item.stuck.is_some())
+        .collect()
+}
+
+/// `resolve_move`'s body, the guards given: a stuck move sent on from where it stands (a
+/// pinned order signed again, the same one; a wait read again), or a move written off with
+/// why, its reserved or in-flight amount out of the pool's assets.
+pub fn resolve(
+    halted: bool,
+    is_controller: bool,
+    id: u64,
+    resolution: MoveResolution,
+    now: Timestamp,
+) -> Result<(), PoolError> {
+    if halted {
+        return Err(PoolError::Halted);
+    }
+    if !is_controller {
+        return Err(PoolError::NotAllowed(
+            "only a controller resolves a move".to_string(),
+        ));
+    }
+    item(id).ok_or(PoolError::Unknown)?;
+    let step = match resolution {
+        MoveResolution::Retry => PoolStep::MoveRetried { id },
+        MoveResolution::Lost(why) => PoolStep::MoveLost { id, why },
+    };
+    crate::storage::pool::record_at(step, now)
+        .map(drop)
+        .map_err(|error| PoolError::NotAllowed(error.to_string()))
 }
