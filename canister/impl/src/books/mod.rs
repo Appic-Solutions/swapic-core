@@ -59,76 +59,21 @@ pub struct FeePath {
 }
 
 /// The network fee an order paid the canister in a receipt (design C, abi.md 6.1): every
-/// USDC `Transfer` from the chain's Runner to the canister, which is what the fee step
-/// makes, but the ones a `PaidOut(id, canister, USDC, value)` of the Runner in the same
-/// receipt explains: a same-chain order whose payout is the canister (a pool deposit) makes
-/// that transfer too, and it is the pool's arrival, never a fee. Each payout explains one
-/// transfer of its value. Nothing for a receipt with none.
+/// USDC `Transfer` from the chain's Runner to the canister that is a fee step, read by the one
+/// classifier the pool's arrivals read too (`pool::arrival::runner_transfers`): a transfer a
+/// `PaidOut(id, canister, USDC, value)` of the Runner in the same receipt explains is a
+/// same-chain order's payout to the canister (a pool deposit), never a fee. Nothing for a
+/// receipt with none.
 pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
-    let topic = types::router::transfer_topic();
-    let logs: Vec<&Value> = receipt
-        .get("logs")
-        .and_then(Value::as_array)
+    let logs = crate::pool::arrival::logs_of(receipt);
+    crate::pool::arrival::runner_transfers(&logs, path.usdc, path.runner, path.canister)
         .into_iter()
-        .flatten()
-        .collect();
-    let emitted_by = |log: &Value, address: EvmAddress| {
-        log.get("address")
-            .and_then(Value::as_str)
-            .and_then(crate::cctp::parse_address)
-            == Some(address)
-    };
-    let topics_of = |log: &Value| -> Vec<[u8; 32]> {
-        log.get("topics")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|topic| crate::rpc::parse_hash32(Some(topic)))
-            .collect()
-    };
-    let data_of = |log: &Value| -> Option<Vec<u8>> {
-        hex::decode(log.get("data")?.as_str()?.strip_prefix("0x")?).ok()
-    };
-    // the payouts to the canister in USDC, each explaining one transfer of its value
-    let mut payouts: Vec<TokenAmount> = logs
-        .iter()
-        .filter(|log| emitted_by(log, path.runner))
-        .filter_map(|log| {
-            let topics = topics_of(log);
-            let data = data_of(log)?;
-            let paid_out = topics.len() == 3
-                && topics[0] == types::swapic::topics::paid_out()
-                && topics[2] == path.canister.to_word()
-                && data.len() == 64
-                && data[..32] == path.usdc.to_word();
-            paid_out
-                .then(|| TokenAmount::from_be_bytes(data[32..].try_into().expect("BUG: 64 bytes")))
+        .filter_map(|transfer| match transfer {
+            crate::pool::arrival::RunnerTransfer::Fee { amount, .. } => Some(amount),
+            crate::pool::arrival::RunnerTransfer::Payout { .. } => None,
         })
-        .collect();
-    let mut total = TokenAmount::ZERO;
-    for log in logs {
-        let topics = topics_of(log);
-        let runner_to_canister = topics.len() == 3
-            && topics[0] == topic
-            && topics[1] == path.runner.to_word()
-            && topics[2] == path.canister.to_word();
-        if !emitted_by(log, path.usdc) || !runner_to_canister {
-            continue;
-        }
-        let Some(value) = log
-            .get("data")
-            .and_then(|data| crate::rpc::parse_hash32(Some(data)))
-        else {
-            continue;
-        };
-        let value = TokenAmount::from_be_bytes(value);
-        if let Some(at) = payouts.iter().position(|paid| *paid == value) {
-            payouts.remove(at);
-            continue;
-        }
-        total = total.checked_add(value).unwrap_or(TokenAmount::MAX);
-    }
-    total
+        .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
+        .unwrap_or(TokenAmount::MAX)
 }
 
 /// Credits `fee` withheld in `tx_hash`, whose receipt is in `block`, to `chain_id`'s fee

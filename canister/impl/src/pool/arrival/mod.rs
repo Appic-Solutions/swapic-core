@@ -93,6 +93,90 @@ impl Log {
     fn is(&self, emitter: EvmAddress, topic: [u8; 32]) -> bool {
         self.address == emitter && self.topics.first() == Some(&topic)
     }
+
+    /// The log `value` is; its index read as `index` when it carries none.
+    fn parse(value: &Value, index: Option<u64>) -> Option<Self> {
+        Some(Log {
+            index: hex_u64(value.get("logIndex")).or(index)?,
+            address: parse_address(value.get("address")?.as_str()?)?,
+            topics: value
+                .get("topics")?
+                .as_array()?
+                .iter()
+                .map(|topic| parse_hash32(Some(topic)))
+                .collect::<Option<_>>()?,
+            data: hex_bytes(value.get("data"))?,
+            block_time: hex_u64(value.get("blockTimestamp")),
+        })
+    }
+}
+
+/// Every log of a receipt `value` that reads, in order, a removed one left out: what the
+/// books' fee reading and the arrival's proof classify alike.
+pub fn logs_of(value: &Value) -> Vec<Log> {
+    value
+        .get("logs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, log)| log.get("removed").and_then(Value::as_bool) != Some(true))
+        .filter_map(|(at, log)| Log::parse(log, u64::try_from(at).ok()))
+        .collect()
+}
+
+/// A USDC transfer from the Runner to the canister, as one classifier reads it for both the
+/// books and the pool: a same-chain order's payout to the canister, which a `PaidOut(id,
+/// canister, USDC, value)` of the Runner in the same receipt explains (each payout explains
+/// one transfer of its value), or else a relayed order's fee step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunnerTransfer {
+    Payout {
+        index: u64,
+        id: [u8; 32],
+        amount: TokenAmount,
+    },
+    Fee {
+        index: u64,
+        amount: TokenAmount,
+    },
+}
+
+/// The Runner's USDC transfers to the canister in `logs`, each classified, in log order.
+pub fn runner_transfers(
+    logs: &[Log],
+    usdc: EvmAddress,
+    runner: EvmAddress,
+    canister: EvmAddress,
+) -> Vec<RunnerTransfer> {
+    let mut payouts: Vec<([u8; 32], TokenAmount)> = logs
+        .iter()
+        .filter(|log| log.is(runner, topics::paid_out()))
+        .filter(|log| log.topics.len() == 3 && log.topics[2] == canister.to_word())
+        .filter(|log| log.data.len() == 64 && log.data[..32] == usdc.to_word())
+        .map(|log| {
+            let amount: [u8; 32] = log.data[32..].try_into().expect("BUG: 64 bytes");
+            (log.topics[1], TokenAmount::from_be_bytes(amount))
+        })
+        .collect();
+    logs.iter()
+        .filter(|log| log.is(usdc, topics::transfer()) && log.topics.len() == 3)
+        .filter(|log| log.topics[1] == runner.to_word() && log.topics[2] == canister.to_word())
+        .filter_map(|log| {
+            let value: [u8; 32] = log.data.as_slice().try_into().ok()?;
+            Some((log.index, TokenAmount::from_be_bytes(value)))
+        })
+        .map(
+            |(index, amount)| match payouts.iter().position(|(_, paid)| *paid == amount) {
+                Some(at) => RunnerTransfer::Payout {
+                    index,
+                    id: payouts.remove(at).0,
+                    amount,
+                },
+                None => RunnerTransfer::Fee { index, amount },
+            },
+        )
+        .collect()
 }
 
 /// A receipt, as far as a proof reads it.
@@ -127,18 +211,7 @@ impl Receipt {
             if log.get("removed").and_then(Value::as_bool) == Some(true) {
                 continue;
             }
-            logs.push(Log {
-                index: hex_u64(log.get("logIndex"))?,
-                address: parse_address(log.get("address")?.as_str()?)?,
-                topics: log
-                    .get("topics")?
-                    .as_array()?
-                    .iter()
-                    .map(|topic| parse_hash32(Some(topic)))
-                    .collect::<Option<_>>()?,
-                data: hex_bytes(log.get("data"))?,
-                block_time: hex_u64(log.get("blockTimestamp")),
-            });
+            logs.push(Log::parse(log, None)?);
         }
         Some(Self {
             tx,
@@ -159,6 +232,8 @@ impl Receipt {
                 let value: [u8; 32] = log.data.as_slice().try_into().ok()?;
                 Some((log, from, TokenAmount::from_be_bytes(value)))
             })
+            // a transfer of nothing proves nothing and is nothing to keep
+            .filter(|(_, _, value)| *value > TokenAmount::ZERO)
             .collect()
     }
 }
@@ -176,6 +251,9 @@ pub enum Proof {
         payer: Option<EvmAddress>,
         why: String,
     },
+    /// Not proven by what this report read (an Eco transfer the given source does not
+    /// explain): left uncredited, for the report that brings its own source.
+    Unproven { why: String },
 }
 
 /// One transfer to the canister and what it proves.
@@ -242,19 +320,23 @@ pub fn find(
     if transfers.is_empty() {
         return Err(NoArrival::NoTransfer);
     }
-    let mut payouts = paid_outs(base, chain);
+    let runner = runner_transfers(&base.logs, chain.usdc, chain.runner, chain.canister);
+    let mut messages = received_messages(base, chain);
     let mut found = Vec::new();
     for (log, from, amount) in transfers {
         let proof = if from == chain.runner {
-            match payouts.iter().position(|(_, paid)| *paid == amount) {
-                // a payout is consumed by the transfer it explains, so two transfers of one
-                // value need two payouts
-                Some(at) => same_chain(base, chain, payouts.remove(at).0),
+            let classified = runner.iter().find_map(|transfer| match transfer {
+                RunnerTransfer::Payout { index, id, .. } if *index == log.index => Some(Some(*id)),
+                RunnerTransfer::Fee { index, .. } if *index == log.index => Some(None),
+                _ => None,
+            });
+            match classified {
+                Some(Some(id)) => same_chain(base, chain, id),
                 // the fee step of a relayed order: the books' line, never the pool's
-                None => continue,
+                _ => continue,
             }
         } else if from == EvmAddress::ZERO {
-            cctp(base, chain, amount)
+            cctp(&mut messages, log.index, chain, amount)
         } else {
             eco(base, source, chain, amount)?
         };
@@ -274,21 +356,6 @@ pub fn find(
         return Err(NoArrival::OnlyFees);
     }
     Ok(found)
-}
-
-/// The Runner's payouts to the canister in USDC: each order's id and amount.
-fn paid_outs(receipt: &Receipt, chain: &PoolChain) -> Vec<([u8; 32], TokenAmount)> {
-    receipt
-        .logs
-        .iter()
-        .filter(|log| log.is(chain.runner, topics::paid_out()))
-        .filter(|log| log.topics.len() == 3 && log.topics[2] == chain.canister.to_word())
-        .filter(|log| log.data.len() == 64 && log.data[..32] == chain.usdc.to_word())
-        .map(|log| {
-            let amount: [u8; 32] = log.data[32..].try_into().expect("BUG: 64 bytes");
-            (log.topics[1], TokenAmount::from_be_bytes(amount))
-        })
-        .collect()
 }
 
 /// The ref and payer of the order `id` names, from Swapic's `OrderStarted` in `receipt`.
@@ -350,25 +417,44 @@ fn burn_body(body: &[u8]) -> Option<BurnRead<'_>> {
     })
 }
 
-fn cctp(base: &Receipt, chain: &PoolChain, amount: TokenAmount) -> Proof {
+/// The messages the pool chain's transmitter received in `base`, each with its log index:
+/// each mint to the canister takes its own, so two mints of one value in one transaction are
+/// each matched to their own message.
+fn received_messages(base: &Receipt, chain: &PoolChain) -> Vec<(u64, swapic::ReceivedMessage)> {
+    base.logs
+        .iter()
+        .filter(|log| log.is(chain.transmitter, topics::message_received()))
+        .filter_map(|log| {
+            swapic::read_message_received(&log.topics, &log.data)
+                .map(|message| (log.index, message))
+        })
+        .collect()
+}
+
+/// The CCTP proof of a mint to the canister at log `mint`: the first message received after
+/// it (the transmitter logs a message after the mint it makes) that mints `amount` to the
+/// canister, taken so no other mint reads it.
+fn cctp(
+    messages: &mut Vec<(u64, swapic::ReceivedMessage)>,
+    mint: u64,
+    chain: &PoolChain,
+    amount: TokenAmount,
+) -> Proof {
     let orphan = |why: &str| Proof::Orphan {
         payer: None,
         why: why.to_string(),
     };
-    let messages: Vec<swapic::ReceivedMessage> = base
-        .logs
-        .iter()
-        .filter(|log| log.is(chain.transmitter, topics::message_received()))
-        .filter_map(|log| swapic::read_message_received(&log.topics, &log.data))
-        .collect();
-    let mut minted_here = messages.iter().filter_map(|message| {
-        let burn = burn_body(&message.body)?;
-        let to_us = burn.mint_recipient == chain.canister.to_word() && burn.minted == amount;
-        to_us.then_some((message, burn))
+    let position = messages.iter().position(|(index, message)| {
+        *index > mint
+            && burn_body(&message.body).is_some_and(|burn| {
+                burn.mint_recipient == chain.canister.to_word() && burn.minted == amount
+            })
     });
-    let Some((message, burn)) = minted_here.next() else {
+    let Some(position) = position else {
         return orphan("a mint to the canister that no received message explains");
     };
+    let (_, message) = messages.remove(position);
+    let burn = burn_body(&message.body).expect("BUG: the burn body was read to match it");
     // a burn Swapic's Runner made on a chain the canister knows, through that chain's
     // TokenMessengerV2: a burn anyone else made carries a ref it does not own
     let ours = chain.cctp_sources.iter().any(|source| {
@@ -422,13 +508,16 @@ fn eco(
     let Some(portal) = at.eco_portal else {
         return Err(NoArrival::NeedsSource);
     };
-    let orders = order_started(source, at.swapic, None);
-    let payer = match orders.as_slice() {
-        [(_, payer)] => *payer,
-        _ => None,
+    // what the given source does not prove is left for the report that brings its own
+    // source: never kept as an orphan under a payer borrowed from another transaction
+    let unproven = |why: &str| {
+        Ok(Proof::Unproven {
+            why: why.to_string(),
+        })
     };
+    let orders = order_started(source, at.swapic, None);
     if !source.success {
-        return orphan(payer, "the source transaction reverted");
+        return unproven("the source transaction reverted");
     }
     let delivers_here = source
         .logs
@@ -445,17 +534,14 @@ fn eco(
             })
         });
     if !delivers_here {
-        return orphan(
-            payer,
-            "no intent the source published delivers this transfer to the canister",
-        );
+        return unproven("no intent the source published delivers this transfer to the canister");
     }
     match orders.as_slice() {
         [(r#ref, payer)] => Ok(Proof::Deposit {
             r#ref: *r#ref,
             payer: *payer,
         }),
-        _ => orphan(None, "the source transaction holds no single order"),
+        _ => unproven("the source transaction holds no single order"),
     }
 }
 
@@ -478,6 +564,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
         };
     let (r#ref, payer) = match &found.proof {
         Proof::Orphan { payer, why } => return Some(orphan(*payer, why.clone(), None)),
+        Proof::Unproven { .. } => return None,
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
     };
     let Some(deposit) = state.store().pool_deposit(&r#ref) else {
@@ -554,11 +641,24 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
     })
 }
 
-/// Appends what `found` proves, in this message, and answers each transfer's outcome; the
-/// ones credited already are left out.
-pub fn record(found: &[Found], now: Timestamp) -> Result<Vec<PoolArrivalOutcome>, PoolError> {
-    let mut outcomes = Vec::new();
+/// What one report recorded: each transfer's outcome, and why the others were not recorded
+/// (unproven by what was read, or refused by the fold). One transfer never stops the rest.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recorded {
+    pub outcomes: Vec<PoolArrivalOutcome>,
+    pub not: Vec<String>,
+}
+
+/// Appends what `found` proves, in this message, each transfer on its own: the ones credited
+/// already are left out, the unproven ones left for their own report, and a step the fold
+/// refuses is noted and the rest recorded.
+pub fn record(found: &[Found], now: Timestamp) -> Recorded {
+    let mut recorded = Recorded::default();
     for one in found {
+        if let Proof::Unproven { why } = &one.proof {
+            recorded.not.push(why.clone());
+            continue;
+        }
         let Some(step) = read_state(|state| step_for(state, one, now)) else {
             continue;
         };
@@ -573,11 +673,18 @@ pub fn record(found: &[Found], now: Timestamp) -> Result<Vec<PoolArrivalOutcome>
             },
             _ => unreachable!("BUG: step_for answers an arrival or an orphan"),
         };
-        pool_store::record_at(step, now)
-            .map_err(|error| PoolError::BadArrival(error.to_string()))?;
-        outcomes.push(outcome);
+        match pool_store::record_at(step, now) {
+            Ok(_) => recorded.outcomes.push(outcome),
+            Err(error) => {
+                pool::log(&format!(
+                    "the pool arrival {:?} was refused: {error}",
+                    one.credit
+                ));
+                recorded.not.push(error.to_string());
+            }
+        }
     }
-    Ok(outcomes)
+    recorded
 }
 
 /// The pool chain's addresses, from the config and the canister's own address.
@@ -700,7 +807,7 @@ async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
 pub async fn read_and_record(
     base_tx: TxHash,
     source: Option<(ChainId, TxHash)>,
-) -> Result<Vec<PoolArrivalOutcome>, PoolError> {
+) -> Result<Recorded, PoolError> {
     let chain = pool_chain().await?;
     let base = read_base(&chain, base_tx).await?;
     let source = if needs_source(&base, &chain) {
@@ -730,7 +837,7 @@ pub async fn read_and_record(
     .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
     // after the last read: the credited set and the append are in this one message
     pool::require_running()?;
-    record(&found, pool::now())
+    Ok(record(&found, pool::now()))
 }
 
 /// Watcher-only door: the body of `note_pool_arrival`.
@@ -748,12 +855,16 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
             .map_err(PoolError::from)?;
         Some((ChainId::new(arrival.src_chain), TxHash::new(tx)))
     };
-    let outcomes = read_and_record(base_tx, source).await?;
-    let credited = outcomes
+    let recorded = read_and_record(base_tx, source).await?;
+    let credited = recorded
+        .outcomes
         .iter()
         .find(|outcome| matches!(outcome, PoolArrivalOutcome::Credited { .. }));
-    credited
-        .or(outcomes.first())
-        .cloned()
-        .ok_or(PoolError::AlreadyCredited)
+    if let Some(outcome) = credited.or(recorded.outcomes.first()) {
+        return Ok(outcome.clone());
+    }
+    match recorded.not.first() {
+        Some(why) => Err(PoolError::BadArrival(why.clone())),
+        None => Err(PoolError::AlreadyCredited),
+    }
 }

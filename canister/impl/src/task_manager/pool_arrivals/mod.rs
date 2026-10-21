@@ -128,9 +128,9 @@ async fn backup(chain: &PoolChain) -> Result<(), String> {
         if require_not_halted().is_err() {
             return Ok(());
         }
-        if record(&found, crate::pool::now()).is_err() {
-            transient = true;
-        }
+        // a step the fold refuses is noted and never read again for it: only a read that
+        // failed holds the cursor back
+        record(&found, crate::pool::now());
     }
     // a read that failed is read again from the same cursor next time; what was recorded
     // is not recorded twice

@@ -244,10 +244,11 @@ fn an_eco_deposit_is_proven_on_its_source() {
             payer: Some(payer())
         }
     );
-    // a source whose intent does not deliver this transfer to the canister proves nothing
+    // a source whose intent does not deliver this transfer to the canister proves nothing,
+    // and leaves the transfer for the report that brings its own source
     let untouched = parse(&sample("eco_source"));
     let found = find(&fill, Some((&untouched, &arbitrum())), &base()).unwrap();
-    assert!(matches!(found[0].proof, Proof::Orphan { .. }));
+    assert!(matches!(found[0].proof, Proof::Unproven { .. }));
 }
 
 /// A transfer to someone else, or of another token, is no arrival at all: nothing is
@@ -293,7 +294,7 @@ fn a_wrong_ref_is_unattributed_with_its_payer() {
             PoolRail::SameChain,
         ));
         let found = find(&receipt, None, &base()).unwrap();
-        let outcomes = record(&found, now).unwrap();
+        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why == "no deposit is registered under the ref"
@@ -323,7 +324,7 @@ fn the_same_transfer_reported_twice_is_credited_once() {
             PoolRail::Cctp,
         ));
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let first = record(&found, now).unwrap();
+        let first = record(&found, now).outcomes;
         assert_eq!(
             first,
             vec![PoolArrivalOutcome::Credited {
@@ -332,7 +333,7 @@ fn the_same_transfer_reported_twice_is_credited_once() {
             }]
         );
         let count = event_count();
-        assert_eq!(record(&found, now).unwrap(), vec![]);
+        assert_eq!(record(&found, now).outcomes, vec![]);
         assert_eq!(event_count(), count, "nothing more was written");
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Arrived);
         assert_eq!(ledger().pockets.base.free, TokenAmount::from(4_747_709_u32));
@@ -360,7 +361,7 @@ fn a_late_arrival_is_unattributed_with_its_payer() {
         ));
         let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
         // read late by the canister: judged at the block's time, not the read's
-        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).unwrap();
+        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why == "arrived past its expiry and grace"
@@ -393,7 +394,7 @@ fn an_arrival_on_time_read_late_is_credited() {
             PoolRail::Eco,
         ));
         let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
-        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).unwrap();
+        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Credited { .. }]
@@ -413,7 +414,7 @@ fn a_short_arrival_or_another_payers_is_unattributed() {
         let expires = Timestamp::from_secs(block_time(&raw) + 600).unwrap();
         crate::storage::pool::tests::register(terms(1, usdc(2), expires, PoolRail::SameChain));
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).unwrap();
+        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
@@ -434,7 +435,7 @@ fn a_short_arrival_or_another_payers_is_unattributed() {
         // another log index, so it is another transfer
         log_at(&mut raw, "0x3c8")["logIndex"] = Value::String("0x3c9".into());
         let found: Vec<Found> = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).unwrap();
+        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why == "paid by another than the registered payer"
@@ -508,7 +509,7 @@ fn an_arrival_above_the_cap_is_unattributed() {
         settings.per_swap_cap = usdc(4);
         record_at(PoolStep::SettingsSet { settings }, now).unwrap();
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).unwrap();
+        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("above the per-swap cap")
@@ -600,7 +601,7 @@ fn a_short_cctp_arrival_never_closes_a_registration() {
         ));
         let held = ledger().pockets.icp.reserved;
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).unwrap();
+        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
             &outcomes[..],
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
@@ -639,4 +640,125 @@ fn a_cctp_or_same_chain_arrival_ignores_its_source() {
             find(&receipt, None, &base())
         );
     }
+}
+
+/// Review fix: an Eco transfer the given source does not prove is left uncredited, with no
+/// payer borrowed from that source: its own report, with its own source, credits it.
+#[test]
+fn an_eco_transfer_its_source_does_not_prove_waits_for_its_own_report() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let r#ref = the_ref(3);
+        let (fill, source) = eco(r#ref);
+        let time = block_time(&fill);
+        crate::storage::pool::tests::register(terms(
+            3,
+            usdc(4),
+            Timestamp::from_secs(time + 600).unwrap(),
+            PoolRail::Eco,
+        ));
+        let now = Timestamp::from_secs(time + 5).unwrap();
+        let fill = parse(&fill);
+        let count = event_count();
+        let wrong = parse(&sample("eco_source"));
+        let found = find(&fill, Some((&wrong, &arbitrum())), &base()).unwrap();
+        let recorded = record(&found, now);
+        assert!(recorded.outcomes.is_empty());
+        assert_eq!(recorded.not.len(), 1);
+        assert_eq!(
+            event_count(),
+            count,
+            "nothing written, nothing marked credited"
+        );
+        assert!(!crate::storage::pool::credited(&found[0].credit));
+        // its own report credits it
+        let found = find(&fill, Some((&parse(&source), &arbitrum())), &base()).unwrap();
+        assert!(matches!(
+            &record(&found, now).outcomes[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+    });
+}
+
+/// Review fix: two mints of one value in one transaction are each matched to their own
+/// received message, so each is proven under its own ref. The second mint and message are
+/// copies of the CCTP sample's (logs 0x4a and 0x4e) at two new log indices, the second
+/// message's envelope carrying another ref.
+#[test]
+fn two_equal_mints_are_each_their_own_messages() {
+    let (first, second) = (the_ref(2), the_ref(4));
+    let mut raw = cctp(first);
+    let mut mint = log_at(&mut raw, "0x4a").clone();
+    let mut message = log_at(&mut raw, "0x4e").clone();
+    mint["logIndex"] = Value::String("0x50".into());
+    message["logIndex"] = Value::String("0x51".into());
+    let mut data = data_of(&message);
+    data[128 + 228 + 32..128 + 228 + 64].copy_from_slice(&second.into_bytes());
+    set_data(&mut message, &data);
+    let logs = raw["logs"].as_array_mut().unwrap();
+    logs.push(mint);
+    logs.push(message);
+    let found = find(&parse(&raw), None, &base()).unwrap();
+    let proven: Vec<_> = found
+        .iter()
+        .map(|one| (one.credit.log_index, one.proof.clone()))
+        .collect();
+    assert_eq!(
+        proven,
+        vec![
+            (
+                0x4a,
+                Proof::Deposit {
+                    r#ref: first,
+                    payer: None
+                }
+            ),
+            (
+                0x50,
+                Proof::Deposit {
+                    r#ref: second,
+                    payer: None
+                }
+            ),
+        ]
+    );
+}
+
+/// Review fix: a transfer of nothing is no arrival, and one transfer's refused step never
+/// stops the others of the receipt from being recorded.
+#[test]
+fn a_zero_transfer_is_nothing_and_one_refusal_stops_no_other() {
+    let mut raw = same_chain(the_ref(1));
+    let mut zero = log_at(&mut raw, "0x3c8").clone();
+    zero["logIndex"] = Value::String("0x3f0".into());
+    set_topic(&mut zero, 1, EvmAddress::new([0x77; 20]).to_word());
+    set_data(&mut zero, &word(0));
+    raw["logs"].as_array_mut().unwrap().push(zero);
+    let found = find(&parse(&raw), None, &base()).unwrap();
+    assert_eq!(found.len(), 1, "the zero transfer is not read");
+
+    on_fresh_memory(move || {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        // a step the fold refuses (an orphan of nothing), then a good one
+        let refused = Found {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([0x0c; 32]),
+                log_index: 1,
+            },
+            amount: TokenAmount::ZERO,
+            block: BlockNumber::new(1),
+            at: None,
+            proof: Proof::Orphan {
+                payer: None,
+                why: "test".into(),
+            },
+        };
+        let recorded = record(&[refused, found[0].clone()], now);
+        assert_eq!(recorded.not.len(), 1);
+        assert_eq!(recorded.outcomes.len(), 1);
+    });
 }
