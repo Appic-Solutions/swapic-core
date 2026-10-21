@@ -318,7 +318,11 @@ fn the_terms_credit_the_transfer_that_carries_their_ref() {
         assert_eq!(credited.terms.min_usdc, TokenAmount::from(1_000_000_u32));
         assert_eq!(credited.terms.src_payer, payer());
         assert_eq!(credited.terms.rail, PoolRail::SameChain);
-        assert_eq!(credited.terms.src_chain, ChainId::BASE, "proven on Base alone");
+        assert_eq!(
+            credited.terms.src_chain,
+            ChainId::BASE,
+            "proven on Base alone"
+        );
         assert_eq!(credited.terms.icp_fees(), TokenAmount::from(FEE));
         assert_eq!(credited.held(), TokenAmount::from(990_000_u32));
         assert!(ledger().open.is_empty(), "nothing is left open");
@@ -379,7 +383,10 @@ fn the_same_transfer_reported_twice_is_credited_once() {
         );
         let count = event_count();
         assert_eq!(record(&found, &judge(Some(&given)), now).outcomes, vec![]);
-        assert_eq!(record(&found, &Judge::without_terms(), now).outcomes, vec![]);
+        assert_eq!(
+            record(&found, &Judge::without_terms(), now).outcomes,
+            vec![]
+        );
         assert_eq!(event_count(), count, "nothing more was written");
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Arrived);
         assert_eq!(ledger().pockets.base.free, TokenAmount::from(4_747_709_u32));
@@ -487,7 +494,11 @@ fn terms_the_pool_does_not_take_hold_the_transfer() {
         assert!(deposit(&the_ref(2)).is_none());
         assert!(matches!(
             last_step(),
-            PoolStep::Unattributed { src_payer: None, r#ref: None, .. }
+            PoolStep::Unattributed {
+                src_payer: None,
+                r#ref: None,
+                ..
+            }
         ));
         // the ICP fees below the path's own ckUSDC fee
         let mut cheap = swap.clone();
@@ -535,7 +546,11 @@ fn a_transfer_awaiting_its_terms_is_claimed_by_them() {
         let base_free = ledger().pockets.base.free;
         // past its 24 hours: a controller's, and the terms credit nothing
         let given = given(2);
-        let late = now.checked_add(AWAIT_TERMS).unwrap().checked_add(Duration::from_secs(1)).unwrap();
+        let late = now
+            .checked_add(AWAIT_TERMS)
+            .unwrap()
+            .checked_add(Duration::from_secs(1))
+            .unwrap();
         let recorded = record(&found, &judge(Some(&given)), late);
         assert!(recorded.mine.is_empty());
         assert!(recorded.not[0].contains("past its 24 hours"));
@@ -552,7 +567,9 @@ fn a_transfer_awaiting_its_terms_is_claimed_by_them() {
         assert_eq!(ledger().unattributed, TokenAmount::ZERO);
         assert_eq!(
             ledger().pockets.base.free,
-            base_free.checked_add(TokenAmount::from(4_747_709_u32)).unwrap()
+            base_free
+                .checked_add(TokenAmount::from(4_747_709_u32))
+                .unwrap()
         );
         assert_eq!(deposit(&the_ref(2)).unwrap().status, DepositStatus::Arrived);
         let orphan = read_state(|state| state.store().pool_orphan(&found[0].credit)).unwrap();
@@ -884,7 +901,9 @@ fn an_eco_refund_of_a_paid_payout_reopens_it() {
         assert_eq!(after.lines().fees_base, TokenAmount::ZERO);
         assert_eq!(after.owed, before.owed.checked_add(paid.owed()).unwrap());
         // credited once
-        assert!(record(&found, &Judge::without_terms(), at(6)).outcomes.is_empty());
+        assert!(record(&found, &Judge::without_terms(), at(6))
+            .outcomes
+            .is_empty());
         // another intent's refund: no paid payout takes it, kept for a human
         let stranger = parse(&refund([0x2e; 32]));
         let mut found = find(&stranger, None, &base()).unwrap();

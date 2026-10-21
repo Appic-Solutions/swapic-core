@@ -28,7 +28,9 @@
 mod tests;
 
 use crate::guards::require_not_halted;
-use crate::pool::arrival::{self, find, needs_source, read_base, record, Judge, PoolChain, Receipt};
+use crate::pool::arrival::{
+    self, find, needs_source, read_base, record, Judge, PoolChain, Receipt,
+};
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
 use crate::state::Store;
 use crate::storage::events::read_state;

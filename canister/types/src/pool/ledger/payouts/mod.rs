@@ -293,7 +293,8 @@ impl PoolLedger {
                 // held, or awaiting terms (the controller's door checks its time ran out)
                 if !matches!(
                     orphan.status,
-                    crate::pool::OrphanStatus::Held | crate::pool::OrphanStatus::AwaitingTerms { .. }
+                    crate::pool::OrphanStatus::Held
+                        | crate::pool::OrphanStatus::AwaitingTerms { .. }
                 ) {
                     return Err(PoolStepError::Terms("an orphan is resolved once"));
                 }
@@ -313,7 +314,10 @@ impl PoolLedger {
                 let orphan = lookup
                     .orphan(credit)
                     .ok_or(PoolStepError::Terms("no transfer awaits its terms there"))?;
-                if !matches!(orphan.status, crate::pool::OrphanStatus::AwaitingTerms { .. }) {
+                if !matches!(
+                    orphan.status,
+                    crate::pool::OrphanStatus::AwaitingTerms { .. }
+                ) {
                     return Err(PoolStepError::Terms(
                         "only a transfer awaiting its terms is claimed",
                     ));

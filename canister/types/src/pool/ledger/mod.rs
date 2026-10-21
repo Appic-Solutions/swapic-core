@@ -1381,7 +1381,9 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
         }
         DepositKind::Stake { .. } => {
             if terms.premium != TokenAmount::ZERO || terms.icp_fees() != TokenAmount::ZERO {
-                return Err(PoolStepError::Terms("a stake carries no premium and no ICP fees"));
+                return Err(PoolStepError::Terms(
+                    "a stake carries no premium and no ICP fees",
+                ));
             }
             if terms.rebalance_share >= terms.min_usdc {
                 return Err(PoolStepError::Terms(

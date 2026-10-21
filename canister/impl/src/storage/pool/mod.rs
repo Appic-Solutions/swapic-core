@@ -46,4 +46,3 @@ pub fn shares_of(account: &PoolAccount) -> Shares {
 pub fn credited(key: &CreditKey) -> bool {
     read_state(|state| state.store().is_pool_credited(key))
 }
-

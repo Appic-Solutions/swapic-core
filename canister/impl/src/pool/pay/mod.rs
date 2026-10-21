@@ -99,7 +99,9 @@ pub fn check_order(
     }
     if plan.action == GasAction::RelayCctp {
         // the canister pays a CCTP finish only where the user's network fee paid for one
-        settings.admits_cctp(payout.network_fee()).map_err(refused)?;
+        settings
+            .admits_cctp(payout.network_fee())
+            .map_err(refused)?;
         return Err(refused("a CCTP payout comes later: Eco or Base only"));
     }
     let delivery = plan

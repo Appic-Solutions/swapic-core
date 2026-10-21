@@ -629,8 +629,8 @@ fn samples() -> Vec<Sample> {
 fn arrival_terms_samples() -> Vec<Sample> {
     use crate::pool::payout::PayoutSettings;
     use crate::pool::{
-        CreditKey, DepositKind, IcpAccount, Orphan, OrphanStatus, PoolRail, PoolStep,
-        Registered, Registration,
+        CreditKey, DepositKind, IcpAccount, Orphan, OrphanStatus, PoolRail, PoolStep, Registered,
+        Registration,
     };
     use candid::Principal;
     use std::time::Duration;

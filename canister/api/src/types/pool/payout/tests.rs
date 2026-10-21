@@ -57,9 +57,7 @@ fn payout_settings_cross_the_wire_and_back() {
     };
     let domain = domain::PayoutSettings::try_from(cctp.clone()).unwrap();
     assert_eq!(PayoutSettings::from(&domain), cctp);
-    assert!(domain
-        .admits_cctp(TokenAmount::from(299_999_u64))
-        .is_err());
+    assert!(domain.admits_cctp(TokenAmount::from(299_999_u64)).is_err());
     assert_eq!(domain.admits_cctp(TokenAmount::from(300_000_u64)), Ok(()));
     assert!(domain::PayoutSettings::default()
         .admits_cctp(TokenAmount::MAX)

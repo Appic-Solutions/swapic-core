@@ -41,11 +41,11 @@ use crate::storage::events::read_state;
 use crate::storage::{config, pool as pool_store};
 use serde_json::{json, Value};
 use settlement_api::types::pool::{PoolArrival, PoolArrivalOutcome, PoolError};
-use types::hash::PoolRef;
 use std::time::Duration;
+use types::hash::PoolRef;
 use types::pool::{
-    check_arrival, CreditKey, DepositKind, DepositStatus, DepositTerms, OrphanStatus,
-    PoolAccount, PoolRail, PoolStep, Registered,
+    check_arrival, CreditKey, DepositKind, DepositStatus, DepositTerms, OrphanStatus, PoolAccount,
+    PoolRail, PoolStep, Registered,
 };
 use types::swapic::{self, topics, Action, Envelope};
 use types::{Address, BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
@@ -756,9 +756,12 @@ pub fn steps_for<S: Store>(
     let (r#ref, payer) = match &found.proof {
         Proof::Unproven { why } => return Err(why.clone()),
         _ if credited
-            && !state.store().pool_orphan(&found.credit).is_some_and(|orphan| {
-                matches!(orphan.status, OrphanStatus::AwaitingTerms { .. })
-            }) =>
+            && !state
+                .store()
+                .pool_orphan(&found.credit)
+                .is_some_and(|orphan| {
+                    matches!(orphan.status, OrphanStatus::AwaitingTerms { .. })
+                }) =>
         {
             return Ok(Vec::new())
         }
@@ -901,11 +904,9 @@ pub fn record(found: &[Found], judge: &Judge<'_>, now: Timestamp) -> Recorded {
             let answer = outcome_of(&step);
             match pool_store::record_at(step, now) {
                 Ok(_) => {
-                    outcome = answer.or(refused_why.map(|why| {
-                        PoolArrivalOutcome::Unattributed {
-                            amount: candid::Nat::from(one.amount),
-                            why,
-                        }
+                    outcome = answer.or(refused_why.map(|why| PoolArrivalOutcome::Unattributed {
+                        amount: candid::Nat::from(one.amount),
+                        why,
                     }));
                 }
                 Err(error) => {
@@ -1133,9 +1134,13 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
         return Ok(outcome.clone());
     }
     if !recorded.carried {
-        return Err(PoolError::BadArrival(recorded.not.first().cloned().unwrap_or_else(
-            || "no transfer in the receipt carries the terms' ref".to_string(),
-        )));
+        return Err(PoolError::BadArrival(
+            recorded
+                .not
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no transfer in the receipt carries the terms' ref".to_string()),
+        ));
     }
     match recorded.not.first() {
         Some(why) => Err(PoolError::BadArrival(why.clone())),

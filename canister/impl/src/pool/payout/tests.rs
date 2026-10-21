@@ -1077,7 +1077,10 @@ fn a_token_delisted_before_its_swap_falls_back() {
         .unwrap();
         let fake = Fake::default();
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
-        assert_eq!(*fake.calls.borrow(), vec![format!("transfer {}", less(99, 1))]);
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![format!("transfer {}", less(99, 1))]
+        );
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.paid.unwrap().token, ckusdc());
         assert!(paid
@@ -1342,8 +1345,10 @@ fn two_legs_at_one_pool_each_withdraw_only_their_own() {
         // the first leg's deposit shows at the pool: it withdraws its 98.98 (the user's 99
         // less the approval's and the pull's fees), not the 148.98 there
         let swap_in = less(99, 2);
-        fake.unused
-            .set(Some((usdc(50).checked_add(swap_in).unwrap(), TokenAmount::ZERO)));
+        fake.unused.set(Some((
+            usdc(50).checked_add(swap_in).unwrap(),
+            TokenAmount::ZERO,
+        )));
         block_on(drive_deposit(&fake, first, clock, &open_pool)).unwrap();
         assert!(fake
             .calls
