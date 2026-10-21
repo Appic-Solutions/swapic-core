@@ -86,6 +86,9 @@ sol! {
     /// Eco Portal 2.12's intent events (the services' `onchain::eco`, read off its bytecode).
     event IntentPublished(bytes32 indexed intentHash, uint64 destination, bytes route, address indexed creator, address indexed prover, uint64 rewardDeadline, uint256 rewardNativeAmount, EcoTokenAmount[] rewardTokens);
     event IntentFulfilled(bytes32 indexed intentHash, bytes32 indexed claimant);
+    /// Eco Portal 2.12's refund of an unfilled intent's reward to its creator (the services'
+    /// `onchain::eco`, read off its bytecode): the hash in the data, the refundee a topic.
+    event IntentRefunded(bytes32 intentHash, address indexed refundee);
 
     /// Eco Portal 2.12's intent, as the quoter writes it into a `publishAndFund` step.
     struct EcoCall { address target; bytes data; uint256 value; }
@@ -109,6 +112,7 @@ sol! {
     function approve(address spender, uint256 amount) external returns (bool);
     function allowance(address owner, address spender) external view returns (uint256);
     function run(Order order) external payable returns (bytes32 id);
+    function used(bytes32 id) external view returns (bool);
     function fill(address token, uint256 amount, bytes envelope, Recipe recipe) external;
 
     /// KyberSwap's MetaAggregationRouterV2 `swap`, the swap step the quoter writes.
@@ -289,6 +293,10 @@ pub mod topics {
 
     pub fn intent_fulfilled() -> [u8; 32] {
         IntentFulfilled::SIGNATURE_HASH.0
+    }
+
+    pub fn intent_refunded() -> [u8; 32] {
+        IntentRefunded::SIGNATURE_HASH.0
     }
 }
 
@@ -554,6 +562,24 @@ pub fn approve_calldata(spender: EvmAddress, amount: U256) -> Vec<u8> {
         amount,
     }
     .abi_encode()
+}
+
+/// `Swapic.used(id)`: whether an order id ran.
+pub fn used_calldata(id: [u8; 32]) -> Vec<u8> {
+    usedCall { id: FixedBytes(id) }.abi_encode()
+}
+
+/// The refunded intent's hash and its refundee, from an `IntentRefunded` log; None for a log
+/// that is not one.
+pub fn read_intent_refunded(topics: &[[u8; 32]], data: &[u8]) -> Option<([u8; 32], EvmAddress)> {
+    use alloy_sol_types::SolEvent;
+    let event = IntentRefunded::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()?;
+    Some((event.intentHash.0, evm(event.refundee)))
 }
 
 /// `token.allowance(owner, spender)`.

@@ -385,8 +385,21 @@ pub fn pending_payouts<S: Store>(state: &State<S>) -> TokenAmount {
         PendingOp::Withdraw { usdc, .. } => Some(*usdc),
         PendingOp::Stake { .. } => None,
     });
+    // an ICP swap whose undo began: its ckUSDC refund may be debited already
+    let refunds = ledger.lines().open.into_iter().filter_map(|id| {
+        let payout = state.store().pool_payout(id)?;
+        (matches!(payout.status, types::pool::PayoutStatus::Undoing(_))
+            && payout.received.is_some())
+        .then(|| {
+            payout
+                .icp_hold()
+                .checked_add(payout.icp_fee())
+                .unwrap_or(TokenAmount::MAX)
+        })
+    });
     deposits
         .chain(withdrawals)
+        .chain(refunds)
         .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
         .unwrap_or(TokenAmount::MAX)
 }

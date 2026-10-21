@@ -311,6 +311,10 @@ pub async fn drive(
         let Some(payout) = pool_store::payout(id) else {
             return Ok(());
         };
+        // a payout whose amount is known takes its place, whatever it is
+        if payout.status == PayoutStatus::Known {
+            return place(id, clock());
+        }
         if !payout.is_icp_swap() {
             return Ok(());
         }

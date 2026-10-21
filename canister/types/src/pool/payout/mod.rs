@@ -254,6 +254,49 @@ pub struct EvmPayout {
     /// When its undo began: an ICP refund's `created_at_time`, within the ledger's window.
     #[n(18)]
     pub undoing_at: Option<Timestamp>,
+    /// An ICP swap paid once: its ckUSDC went free to the pool then, so an undo after an Eco
+    /// refund reopened it takes the refund from the free ckUSDC.
+    #[n(19)]
+    pub icp_released: Flag,
+}
+
+/// A flag stored as nothing while it is false, so a record written before it existed reads
+/// back with it false and writes back the same bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Flag(pub bool);
+
+impl<C> Encode<C> for Flag {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.bool(self.0)?.ok()
+    }
+
+    fn is_nil(&self) -> bool {
+        !self.0
+    }
+}
+
+impl<'b, C> Decode<'b, C> for Flag {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        _ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        if matches!(
+            d.datatype()?,
+            minicbor::data::Type::Null | minicbor::data::Type::Undefined
+        ) {
+            d.skip()?;
+            return Ok(Self(false));
+        }
+        d.bool().map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self(false))
+    }
 }
 
 crate::storable_as_cbor!(EvmPayout);
@@ -280,6 +323,7 @@ impl EvmPayout {
             base_reserved: false,
             legs: None,
             undoing_at: None,
+            icp_released: Flag(false),
         }
     }
 

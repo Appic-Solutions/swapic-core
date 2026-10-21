@@ -51,6 +51,9 @@ pub trait PoolLookup {
     fn nonce_used(&self, key: &NonceUse) -> bool;
 }
 
+/// A paid payout's Eco intent and the payout: what an Eco refund is matched by.
+pub type IntentIndex = ([u8; 32], u64);
+
 /// The pool's own lines: settings, pockets, shares outstanding, and the indexes the timers
 /// and the guards read instead of a scan of every deposit ever made.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
@@ -140,6 +143,8 @@ pub struct PoolEffects {
     pub dequeued: Option<u64>,
     /// A withdrawal nonce spent.
     pub nonce: Option<NonceUse>,
+    /// A paid payout's Eco intent, indexed.
+    pub intent: Option<IntentIndex>,
 }
 
 /// Why a pool step was refused.
@@ -767,7 +772,9 @@ impl PoolLedger {
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. }
             | PoolStep::PayoutPulled { .. }
-            | PoolStep::PayoutStopped { .. } => self.admits_payout(step, lookup),
+            | PoolStep::PayoutStopped { .. }
+            | PoolStep::PayoutRelisted { .. }
+            | PoolStep::PayoutRefunded { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
             PoolStep::ApproveSigned { .. } => Ok(()),
             PoolStep::IcpRoutesSet { routes } => {
@@ -1162,7 +1169,9 @@ impl PoolLedger {
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. }
             | PoolStep::PayoutPulled { .. }
-            | PoolStep::PayoutStopped { .. } => {}
+            | PoolStep::PayoutStopped { .. }
+            | PoolStep::PayoutRelisted { .. }
+            | PoolStep::PayoutRefunded { .. } => {}
         }
         let payout = ledger.evm_changed.take();
         PoolEffects {
@@ -1174,6 +1183,7 @@ impl PoolLedger {
             queued: None,
             dequeued: None,
             nonce: None,
+            intent: None,
         }
     }
 

@@ -254,6 +254,24 @@ pub enum Proof {
     /// Not proven by what this report read (an Eco transfer the given source does not
     /// explain): left uncredited, for the report that brings its own source.
     Unproven { why: String },
+    /// Eco's Portal refunded the canister, the creator, the reward of these unfilled intents
+    /// in this transaction: a paid payout's whose intent is one of them, and whose amount this
+    /// transfer is, takes it back.
+    Refund { intents: Vec<[u8; 32]> },
+}
+
+/// The intents whose rewards Eco's Portal refunded to the canister in `base`.
+fn refunded_intents(base: &Receipt, chain: &PoolChain) -> Vec<[u8; 32]> {
+    let Some(portal) = chain.eco_portal else {
+        return Vec::new();
+    };
+    base.logs
+        .iter()
+        .filter(|log| log.is(portal, topics::intent_refunded()))
+        .filter_map(|log| swapic::read_intent_refunded(&log.topics, &log.data))
+        .filter(|(_, refundee)| *refundee == chain.canister)
+        .map(|(intent, _)| intent)
+        .collect()
 }
 
 /// One transfer to the canister and what it proves.
@@ -322,6 +340,7 @@ pub fn find(
     }
     let runner = runner_transfers(&base.logs, chain.usdc, chain.runner, chain.canister);
     let mut messages = received_messages(base, chain);
+    let refunds = refunded_intents(base, chain);
     let mut found = Vec::new();
     for (log, from, amount) in transfers {
         let proof = if from == chain.runner {
@@ -337,6 +356,11 @@ pub fn find(
             }
         } else if from == EvmAddress::ZERO {
             cctp(&mut messages, log.index, chain, amount)
+        } else if !refunds.is_empty() {
+            // an unfilled payout intent's reward, back to its creator
+            Proof::Refund {
+                intents: refunds.clone(),
+            }
         } else {
             eco(base, source, chain, amount)?
         };
@@ -566,6 +590,29 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
         Proof::Orphan { payer, why } => return Some(orphan(*payer, why.clone(), None)),
         Proof::Unproven { .. } => return None,
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
+        Proof::Refund { intents } => {
+            // the paid payout whose intent was refunded, for exactly its amount
+            let paid = intents.iter().find_map(|intent| {
+                let id = state.store().payout_by_intent(&PoolRef::new(*intent))?;
+                let payout = state.store().pool_payout(id)?;
+                (payout.status == types::pool::PayoutStatus::Paid
+                    && payout.amount == Some(found.amount))
+                .then_some(id)
+            });
+            return Some(match paid {
+                Some(id) => PoolStep::PayoutRefunded {
+                    id,
+                    credit: found.credit,
+                    amount: found.amount,
+                    block: found.block,
+                },
+                None => orphan(
+                    None,
+                    "an Eco refund to the canister no paid payout of that amount takes".to_string(),
+                    None,
+                ),
+            });
+        }
     };
     let Some(deposit) = state.store().pool_deposit(&r#ref) else {
         return Some(orphan(
@@ -671,7 +718,12 @@ pub fn record(found: &[Found], now: Timestamp) -> Recorded {
                 amount: candid::Nat::from(*amount),
                 why: why.clone(),
             },
-            _ => unreachable!("BUG: step_for answers an arrival or an orphan"),
+            // an Eco refund credited back to its payout, named by the payout's ref
+            PoolStep::PayoutRefunded { id, amount, .. } => PoolArrivalOutcome::Credited {
+                r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
+                amount: candid::Nat::from(*amount),
+            },
+            _ => unreachable!("BUG: step_for answers an arrival, a refund or an orphan"),
         };
         match pool_store::record_at(step, now) {
             Ok(_) => recorded.outcomes.push(outcome),

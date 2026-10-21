@@ -3,9 +3,9 @@ use crate::state::{after_bound, MemoryStore, State, Store};
 use crate::storage::memory::{
     auto_refund_waiting_memory, books_memory, events_data_memory, events_index_memory,
     flows_memory, ledger_meta_memory, nonces_memory, pockets_memory, pool_credited_memory,
-    pool_deposits_memory, pool_ledger_memory, pool_payout_queue_memory, pool_payouts_memory,
-    pool_shares_memory, pool_withdrawal_nonces_memory, signed_memory, swaps_memory,
-    unsigned_nonces_memory, Memory,
+    pool_deposits_memory, pool_ledger_memory, pool_payout_intents_memory, pool_payout_queue_memory,
+    pool_payouts_memory, pool_shares_memory, pool_withdrawal_nonces_memory, signed_memory,
+    swaps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -102,6 +102,10 @@ thread_local! {
 
     static POOL_WITHDRAWAL_NONCES: RefCell<StableBTreeSet<NonceUse, Memory>> =
         RefCell::new(StableBTreeSet::init(pool_withdrawal_nonces_memory()));
+
+    // The paid payouts' Eco intents: what an Eco refund to the canister is matched by.
+    static POOL_PAYOUT_INTENTS: RefCell<StableBTreeMap<PoolRef, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(pool_payout_intents_memory()));
 }
 
 /// The fold in stable memory. Only this module can build one, so `append_event` is its one
@@ -291,6 +295,18 @@ impl Store for StableStore {
         POOL_WITHDRAWAL_NONCES.with(|nonces| nonces.borrow().iter().collect())
     }
 
+    fn payout_by_intent(&self, intent: &PoolRef) -> Option<u64> {
+        POOL_PAYOUT_INTENTS.with(|intents| intents.borrow().get(intent))
+    }
+
+    fn put_payout_intent(&mut self, intent: PoolRef, id: u64) {
+        POOL_PAYOUT_INTENTS.with(|intents| intents.borrow_mut().insert(intent, id));
+    }
+
+    fn payout_intents(&self) -> Vec<(PoolRef, u64)> {
+        POOL_PAYOUT_INTENTS.with(|intents| intents.borrow().iter().collect())
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().get(key))
     }
@@ -419,6 +435,7 @@ pub fn init() {
     POOL_PAYOUTS.with(|_| ());
     POOL_PAYOUT_QUEUE.with(|_| ());
     POOL_WITHDRAWAL_NONCES.with(|_| ());
+    POOL_PAYOUT_INTENTS.with(|_| ());
 }
 
 /// The chain head the log actually ends with: the last event's hash, or the zero hash at

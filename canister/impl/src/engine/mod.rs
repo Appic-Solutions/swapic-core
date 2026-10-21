@@ -109,6 +109,13 @@ pub async fn drive_all() -> Drive {
         return drive;
     }
     drive.acted = crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
+    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines
+    drive.acted += crate::pool::queue::pass(
+        &crate::pool::payout::Live,
+        crate::pool::now,
+        &crate::pool::payout::guard,
+    )
+    .await;
     drive
 }
 

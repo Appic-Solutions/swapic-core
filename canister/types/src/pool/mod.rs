@@ -1505,6 +1505,27 @@ pub enum PoolStep {
         #[n(1)]
         why: String,
     },
+    /// A waiting payout waited `order_wait` with no valid order: listed again, at the back.
+    #[n(37)]
+    PayoutRelisted {
+        #[n(0)]
+        id: u64,
+    },
+    /// The Eco intent a paid payout's order published went unfilled and Eco refunded its
+    /// reward to its creator, the canister: the USDC is back at the canister's Base address
+    /// (credited once, under its transfer's key), and the payout waits again for a new order,
+    /// its first intent never to be filled.
+    #[n(38)]
+    PayoutRefunded {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        credit: CreditKey,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        block: BlockNumber,
+    },
 }
 
 impl PoolStep {
@@ -1555,6 +1576,8 @@ impl PoolStep {
             PoolStep::ApproveSigned { .. } => "ApproveSigned",
             PoolStep::PayoutPulled { .. } => "PayoutPulled",
             PoolStep::PayoutStopped { .. } => "PayoutStopped",
+            PoolStep::PayoutRelisted { .. } => "PayoutRelisted",
+            PoolStep::PayoutRefunded { .. } => "PayoutRefunded",
         }
     }
 
@@ -1599,6 +1622,14 @@ impl PoolStep {
                 | PoolStep::Swapped { .. }
                 | PoolStep::StakeStarted { .. }
                 | PoolStep::WithdrawStarted { .. }
+                // the Base payouts: an ICP swap's next step, a revert's retry, and USDC
+                // freed on Base for the queue
+                | PoolStep::PayoutPulled { .. }
+                | PoolStep::PayoutUndoing { .. }
+                | PoolStep::PayoutUndone { .. }
+                | PoolStep::PayoutReverted { .. }
+                | PoolStep::PayoutRefunded { .. }
+                | PoolStep::Minted { .. }
         )
     }
 }

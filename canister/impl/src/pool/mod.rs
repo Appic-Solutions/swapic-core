@@ -10,6 +10,7 @@ pub mod icp_swap;
 pub mod legs;
 pub mod pay;
 pub mod payout;
+pub mod queue;
 pub mod register;
 pub mod settings;
 pub mod withdraw;

@@ -618,7 +618,78 @@ fn samples() -> Vec<Sample> {
     all.extend(route_samples());
     all.extend(pool_tx_samples());
     all.extend(icp_swap_samples());
+    all.extend(queue_samples());
     all
+}
+
+/// The queue, the deadlines and the Eco refund (P11b Task 6): a payout whose ICP hold was
+/// released, a relisting, and a refund credited back.
+fn queue_samples() -> Vec<Sample> {
+    use crate::pool::payout::{
+        EvmPayout, Flag, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms, Undo,
+    };
+    use crate::pool::{CreditKey, IcpAccount, PoolStep};
+    use candid::Principal;
+
+    let account = IcpAccount {
+        owner: Principal::from_slice(&[0x71; 10]),
+        subaccount: None,
+    };
+    let mut payout = EvmPayout::new(
+        601,
+        PayoutKind::IcpSwap(IcpSwapTerms {
+            token_in: Principal::from_slice(&[0x72; 10]),
+            amount_in: TokenAmount::from(602_000_000_u64),
+            from: account,
+            min_usdc: TokenAmount::from(602_000_000_u64),
+            premium: TokenAmount::from(603_000_u64),
+            network_fee: TokenAmount::from(604_000_u64),
+            refund_to: account,
+        }),
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            recipient: crate::evm::EvmAddress::new([0x73; 20]),
+            token_out: crate::evm::EvmAddress::new([0x74; 20]),
+            min_out: TokenAmount::from(605_u32),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_000_606),
+        },
+        Undo::Refund { to: account },
+        Timestamp::from_nanos(1_800_000_000_000_000_607),
+    );
+    payout.status = PayoutStatus::Paid;
+    payout.received = Some(TokenAmount::from(602_000_000_u64));
+    payout.intent = Some([0x75; 32]);
+    payout.icp_released = Flag(true);
+    let steps = [
+        ("pool payout relisted", PoolStep::PayoutRelisted { id: 608 }),
+        (
+            "pool payout refunded by Eco",
+            PoolStep::PayoutRefunded {
+                id: 601,
+                credit: CreditKey {
+                    chain: ChainId::BASE,
+                    tx: TxHash::new([0x76; 32]),
+                    log_index: 609,
+                },
+                amount: TokenAmount::from(610_000_000_u64),
+                block: BlockNumber::new(37_000_611),
+            },
+        ),
+    ];
+    let mut out = vec![sample("pool payout whose ICP hold was released", payout)];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(7_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_612 + i),
+                EventHash::new([0xca; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// An ICP swap's legs into ckUSDC (P11b Task 3): a payout with its legs and the instant its
@@ -1122,6 +1193,7 @@ fn payout_samples() -> Vec<Sample> {
         // legs appended after it pins them
         legs: None,
         undoing_at: None,
+        icp_released: crate::pool::payout::Flag(false),
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),

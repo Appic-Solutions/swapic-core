@@ -22,7 +22,11 @@ thread_local! {
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
+    static PAYOUT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
+
+/// How often the payout timer serves the Base queue and walks the payouts' deadlines.
+pub const PAYOUT_EVERY: Duration = Duration::from_secs(60);
 
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
 /// nothing, so every configured interval is clamped to at least a second.
@@ -38,6 +42,20 @@ pub fn start_timers() {
     restart_rail_status_timer();
     restart_books_timer();
     restart_pool_arrivals_timer();
+    restart_payout_timer();
+}
+
+/// The payout timer, every minute: the engine's drive, which serves the Base queue, drives
+/// the ICP swaps, signs a reverted payout's pinned order again, and undoes a payout at its
+/// deadline. Every line that moves a payout arms the same drive at once; this is the clock.
+pub fn restart_payout_timer() {
+    restart(&PAYOUT_TIMER, || {
+        ic_cdk_timers::set_timer_interval(PAYOUT_EVERY, || {
+            ic_cdk::spawn(async {
+                crate::engine::drive_all().await;
+            })
+        })
+    });
 }
 
 /// Puts the expiry timer on the configured interval. `set_config` calls it only when that

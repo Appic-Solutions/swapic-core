@@ -778,3 +778,102 @@ fn a_receipt_too_large_is_refused_for_good() {
         PoolError::Unavailable(_)
     ));
 }
+
+/// P11b Task 6, on the real Eco fill on Base rewritten to a refund: the Portal's log that
+/// fulfilled the intent rewritten to `IntentRefunded(intentHash, refundee = the canister)`,
+/// its `IntentFulfilled` dropped (no one filled it), and the USDC transfer rewritten to pay
+/// the canister the payout's amount. A paid payout whose order published that intent takes
+/// it back and waits again for a new order; an unknown intent's refund is an orphan.
+#[test]
+fn an_eco_refund_of_a_paid_payout_reopens_it() {
+    use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
+    use types::pool::PayoutStatus;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let staker: EvmAddress = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let id = waiting_withdrawal(staker);
+        sign_payout(id, 0, 7);
+        let intent = [0x1e; 32];
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([7; 32]),
+                block: BlockNumber::new(30),
+                intent: Some(intent),
+            },
+            at(4),
+        )
+        .unwrap();
+        let paid = crate::storage::pool::payout(id).unwrap();
+        let amount = paid.amount.unwrap();
+        let before = ledger();
+        let refund = |intent: [u8; 32]| {
+            let mut receipt = sample("eco_fill");
+            let fulfilled = topics::intent_fulfilled();
+            let portal = base().eco_portal.unwrap();
+            let logs = receipt["logs"].as_array_mut().unwrap();
+            let at_portal: Vec<usize> = logs
+                .iter()
+                .enumerate()
+                .filter(|(_, log)| parse_address(log["address"].as_str().unwrap()) == Some(portal))
+                .map(|(at, _)| at)
+                .collect();
+            let fulfilled_at = *at_portal
+                .iter()
+                .find(|at| parse_hash32(Some(&logs[**at]["topics"][0])) == Some(fulfilled))
+                .unwrap();
+            let refunded_at = *at_portal.iter().find(|at| **at != fulfilled_at).unwrap();
+            logs[refunded_at]["topics"] = serde_json::json!([
+                hex0x(&topics::intent_refunded()),
+                hex0x(&canister().to_word()),
+            ]);
+            set_data(&mut logs[refunded_at], &intent);
+            logs.remove(fulfilled_at);
+            let transfer = log_at(&mut receipt, "0x5f");
+            set_topic(transfer, 2, canister().to_word());
+            set_data(transfer, &amount.to_be_bytes());
+            receipt
+        };
+        let receipt = parse(&refund(intent));
+        let found = find(&receipt, None, &base()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].proof,
+            Proof::Refund {
+                intents: vec![intent]
+            }
+        );
+        let recorded = record(&found, at(5));
+        assert!(recorded.not.is_empty() || !recorded.outcomes.is_empty());
+        let reopened = crate::storage::pool::payout(id).unwrap();
+        assert_eq!(reopened.status, PayoutStatus::Waiting);
+        assert_eq!(reopened.order, None, "a new order is allowed only now");
+        let after = ledger();
+        let fee = paid.base_fee.unwrap();
+        assert_eq!(
+            after.pockets.base.reserved,
+            before
+                .pockets
+                .base
+                .reserved
+                .checked_add(amount)
+                .and_then(|sum| sum.checked_add(fee))
+                .unwrap()
+        );
+        assert_eq!(after.lines().fees_base, TokenAmount::ZERO);
+        assert_eq!(after.owed, before.owed.checked_add(paid.owed()).unwrap());
+        // credited once
+        assert!(record(&found, at(6)).outcomes.is_empty());
+        // another intent's refund: no paid payout takes it, kept for a human
+        let stranger = parse(&refund([0x2e; 32]));
+        let mut found = find(&stranger, None, &base()).unwrap();
+        found[0].credit.tx = TxHash::new([0x2f; 32]);
+        let recorded = record(&found, at(7));
+        assert!(matches!(
+            recorded.outcomes.as_slice(),
+            [PoolArrivalOutcome::Unattributed { .. }]
+        ));
+    });
+}

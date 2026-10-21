@@ -45,6 +45,8 @@ const POOL_CREDITED_MEMORY_ID: MemoryId = MemoryId::new(31);
 const POOL_PAYOUTS_MEMORY_ID: MemoryId = MemoryId::new(32);
 const POOL_PAYOUT_QUEUE_MEMORY_ID: MemoryId = MemoryId::new(33);
 const POOL_WITHDRAWAL_NONCES_MEMORY_ID: MemoryId = MemoryId::new(34);
+// 35 is the orphans' (P11b Task 7)
+const POOL_PAYOUT_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(36);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -172,4 +174,8 @@ pub fn pool_payout_queue_memory() -> Memory {
 
 pub fn pool_withdrawal_nonces_memory() -> Memory {
     memory(POOL_WITHDRAWAL_NONCES_MEMORY_ID)
+}
+
+pub fn pool_payout_intents_memory() -> Memory {
+    memory(POOL_PAYOUT_INTENTS_MEMORY_ID)
 }

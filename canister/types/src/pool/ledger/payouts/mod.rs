@@ -257,6 +257,35 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::PayoutRelisted { id } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Waiting {
+                    return Err(not_from("PayoutRelisted", &payout));
+                }
+                Ok(())
+            }
+            // the refund of the intent the paid payout published, all of its reward
+            PoolStep::PayoutRefunded {
+                id, credit, amount, ..
+            } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Paid || payout.intent.is_none() {
+                    return Err(not_from("PayoutRefunded", &payout));
+                }
+                if lookup.is_credited(credit) {
+                    return Err(PoolStepError::AlreadyCredited(*credit));
+                }
+                if payout.amount != Some(*amount) {
+                    return Err(PoolStepError::Terms(
+                        "an Eco refund gives back exactly the payout's amount",
+                    ));
+                }
+                let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+                if fee > lines.fees_base {
+                    return Err(PoolStepError::Overflow);
+                }
+                Ok(())
+            }
             PoolStep::PayoutUndoing { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(
@@ -290,6 +319,13 @@ impl PoolLedger {
                         .checked_add(shares)
                         .ok_or(PoolStepError::Overflow)?;
                 }
+                // an ICP swap paid once, then refunded by Eco: its ckUSDC is the free one
+                if payout.icp_released.0 && payout.icp_hold() > self.pockets.icp.free {
+                    return Err(PoolStepError::PocketShort {
+                        free: self.pockets.icp.free,
+                        need: payout.icp_hold(),
+                    });
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -315,6 +351,7 @@ impl PoolLedger {
             queued: None,
             dequeued: None,
             nonce: None,
+            intent: None,
         };
         // takes a payout off the queue, with its hold
         let dequeue = |lines: &mut crate::pool::PayoutLines,
@@ -438,9 +475,12 @@ impl PoolLedger {
                 lines.open.remove(id);
                 payout.status = PayoutStatus::Paid;
                 payout.base_reserved = false;
+                payout.icp_released =
+                    crate::pool::payout::Flag(payout.is_icp_swap() && payout.received.is_some());
                 payout.tx_hash = Some(*tx_hash);
                 payout.paid_block = Some(*block);
                 payout.intent = *intent;
+                effects.intent = intent.map(|intent| (intent, *id));
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutReverted { id } => {
@@ -473,6 +513,40 @@ impl PoolLedger {
                 lines.open.remove(id);
                 effects.payout = Some(payout);
             }
+            PoolStep::PayoutRelisted { id } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.waiting_since = Some(at);
+                effects.payout = Some(payout);
+            }
+            // the reverse of its paid line: the USDC back reserved for it, its fee back from
+            // the fee line, owed again, and waiting for a new order (its intent can no longer
+            // be filled, so its pin is cleared)
+            PoolStep::PayoutRefunded {
+                id,
+                credit,
+                amount,
+                block,
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+                lines.fees_base = sat_sub(lines.fees_base, fee);
+                let base = &mut ledger.pockets.base;
+                base.reserved = sat_add(base.reserved, sat_add(*amount, fee));
+                ledger.owed = sat_add(ledger.owed, payout.owed());
+                ledger.unseen.push(crate::pool::UnseenArrival {
+                    chain: credit.chain,
+                    block: *block,
+                    amount: *amount,
+                });
+                effects.credited = Some(*credit);
+                lines.open.insert(*id);
+                payout.status = PayoutStatus::Waiting;
+                payout.base_reserved = true;
+                payout.order = None;
+                payout.tx_hash = None;
+                payout.waiting_since = Some(at);
+                effects.payout = Some(payout);
+            }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.status = PayoutStatus::Undoing(why.clone());
@@ -490,9 +564,14 @@ impl PoolLedger {
                     payout.base_reserved = false;
                 }
                 ledger.owed = sat_sub(ledger.owed, payout.owed());
-                // an ICP swap's ckUSDC leaves with its refund, its fee with it
+                // an ICP swap's ckUSDC leaves with its refund, its fee with it: from its hold,
+                // or from the free ckUSDC once it was paid and released (an Eco refund)
                 let icp = &mut ledger.pockets.icp;
-                icp.reserved = sat_sub(icp.reserved, payout.icp_hold());
+                if payout.icp_released.0 {
+                    icp.free = sat_sub(icp.free, payout.icp_hold());
+                } else {
+                    icp.reserved = sat_sub(icp.reserved, payout.icp_hold());
+                }
                 lines.fees_icp = sat_sub(lines.fees_icp, payout.icp_fee());
                 if let Undo::Remint { owner, shares } = payout.undo {
                     ledger.total_shares = ledger

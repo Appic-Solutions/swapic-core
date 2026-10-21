@@ -78,6 +78,11 @@ pub trait Store {
     fn put_withdrawal_nonce(&mut self, key: NonceUse);
     /// Every withdrawal nonce used, in staker then nonce order.
     fn withdrawal_nonces(&self) -> Vec<NonceUse>;
+    /// The paid payout whose order published the Eco intent `intent`.
+    fn payout_by_intent(&self, intent: &PoolRef) -> Option<u64>;
+    fn put_payout_intent(&mut self, intent: PoolRef, id: u64);
+    /// Every paid payout's Eco intent, in intent order.
+    fn payout_intents(&self) -> Vec<(PoolRef, u64)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -232,6 +237,8 @@ pub struct MemoryStore {
     payout_queue: BTreeMap<u64, u64>,
     #[n(15)]
     withdrawal_nonces: BTreeSet<NonceUse>,
+    #[n(16)]
+    payout_intents: BTreeMap<PoolRef, u64>,
 }
 
 impl Store for MemoryStore {
@@ -427,6 +434,21 @@ impl Store for MemoryStore {
         self.withdrawal_nonces.iter().copied().collect()
     }
 
+    fn payout_by_intent(&self, intent: &PoolRef) -> Option<u64> {
+        self.payout_intents.get(intent).copied()
+    }
+
+    fn put_payout_intent(&mut self, intent: PoolRef, id: u64) {
+        self.payout_intents.insert(intent, id);
+    }
+
+    fn payout_intents(&self) -> Vec<(PoolRef, u64)> {
+        self.payout_intents
+            .iter()
+            .map(|(intent, id)| (*intent, *id))
+            .collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -498,6 +520,7 @@ impl State<MemoryStore> {
             pool_payouts,
             payout_queue,
             withdrawal_nonces,
+            payout_intents,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -556,6 +579,11 @@ impl State<MemoryStore> {
             && withdrawal_nonces
                 .iter()
                 .eq(other.store.withdrawal_nonces().iter())
+            && payout_intents.iter().eq(other
+                .store
+                .payout_intents()
+                .iter()
+                .map(|(intent, id)| (intent, id)))
     }
 }
 
@@ -710,6 +738,9 @@ impl<S: Store> State<S> {
         }
         if let Some(key) = effects.nonce {
             self.store.put_withdrawal_nonce(key);
+        }
+        if let Some((intent, id)) = effects.intent {
+            self.store.put_payout_intent(PoolRef::new(intent), id);
         }
     }
 
