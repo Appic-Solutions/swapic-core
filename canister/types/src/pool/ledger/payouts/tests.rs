@@ -627,3 +627,32 @@ impl Pool {
         self.shares_of(&PoolAccount::Evm(address).key())
     }
 }
+
+/// A stake from EVM carries at least the canister's rebalancing share floor once the payout
+/// settings are set (interface section 3: "P11b adds the canister's floor").
+#[test]
+fn a_stakes_rebalancing_share_meets_the_floor() {
+    use crate::pool::check_terms;
+    let mut pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
+    let terms = |rebalance_share: u64| Registration {
+        kind: DepositKind::Stake {
+            owner: PoolAccount::Evm(staker()),
+        },
+        min_usdc: usdc(100),
+        premium: TokenAmount::ZERO,
+        rebalance_share: TokenAmount::from(rebalance_share),
+        src_chain: ChainId::ARBITRUM,
+        src_payer: payer(),
+        rail: PoolRail::Cctp,
+        expires_at: Timestamp::from_nanos(1_000),
+        salt: [0x4b; 32],
+    };
+    // 2 bps of 100 USDC is 20,000
+    assert!(matches!(
+        check_terms(&pool.ledger, &terms(19_999)),
+        Err(crate::pool::RegisterRefusal::NotAllowed(_))
+    ));
+    assert_eq!(check_terms(&pool.ledger, &terms(20_000)), Ok(()));
+    pool.ledger.payouts = None;
+    assert_eq!(check_terms(&pool.ledger, &terms(0)), Ok(()));
+}

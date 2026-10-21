@@ -255,6 +255,13 @@ pub struct SwapFromIcpOk {
     pub id: u64,
 }
 
+/// `withdraw_evm`'s answer: the payout's id and the shares burned.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawEvmOk {
+    pub id: u64,
+    pub burned: Nat,
+}
+
 /// `pool_approve_swapic`'s answer: the approval's id in `signed_txs`.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PoolApproveOk {

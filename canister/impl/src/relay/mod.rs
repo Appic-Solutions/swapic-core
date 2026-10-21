@@ -312,7 +312,7 @@ const HALF_ORDER: [u8; 32] = [
 /// exactly: a signature it accepts and the verifier refuses costs a revert, and one it
 /// refuses and the verifier accepts refuses a payer for nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Verifier {
+pub(crate) enum Verifier {
     /// USDC FiatToken v2.2's `ECRecover` (the 3009 door, through Swapic's 65-byte split)
     /// and OpenZeppelin 5.1's `ECDSA.tryRecover` (the 2612 door's acceptance): 65 bytes
     /// `r ++ s ++ v`, `v` 27 or 28, `s` in the low half, a signer that is not zero.
@@ -324,7 +324,7 @@ enum Verifier {
 }
 
 /// The signer of `signature` over `digest`, read as `verifier` reads it.
-fn recover_as(
+pub(crate) fn recover_as(
     verifier: Verifier,
     digest: [u8; 32],
     signature: &[u8],

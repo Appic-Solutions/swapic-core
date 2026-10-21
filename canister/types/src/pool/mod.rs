@@ -14,6 +14,7 @@ mod tests;
 pub mod ledger;
 pub mod payout;
 pub mod routes;
+pub mod withdrawal;
 
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 

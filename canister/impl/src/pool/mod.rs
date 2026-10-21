@@ -11,6 +11,7 @@ pub mod legs;
 pub mod payout;
 pub mod register;
 pub mod settings;
+pub mod withdraw;
 
 use crate::books;
 use crate::guards::require_not_halted;

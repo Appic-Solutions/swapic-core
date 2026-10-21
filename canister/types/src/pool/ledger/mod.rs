@@ -1418,6 +1418,17 @@ pub fn check_terms(ledger: &PoolLedger, terms: &Registration) -> Result<(), Regi
             }
         }
         DepositKind::Stake { .. } => {
+            // the canister's floor on the staker's rebalancing share (P11b), once set
+            if let Some(payouts) = ledger.lines().settings {
+                let least = payouts
+                    .least_rebalance_share(terms.min_usdc)
+                    .unwrap_or(TokenAmount::MAX);
+                if terms.rebalance_share < least {
+                    return Err(RegisterRefusal::NotAllowed(format!(
+                        "the rebalancing share must be at least {least}"
+                    )));
+                }
+            }
             let would_be = sat_add(ledger.tvl_measure(), terms.min_usdc);
             if would_be > settings.tvl_cap {
                 return Err(RegisterRefusal::AboveTvlCap {

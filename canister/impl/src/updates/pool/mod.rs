@@ -6,9 +6,9 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    IcpRoute, IcpSwapTerms, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome,
-    PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawIcpArgs,
-    WithdrawIcpOk,
+    EvmWithdrawal, IcpRoute, IcpSwapTerms, PayoutSettings, PoolApproveOk, PoolArrival,
+    PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk,
+    SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -160,4 +160,23 @@ pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolErr
     pool::icp_swap::swap_from_icp(terms, is_sanctioned)
         .await
         .map(|id| SwapFromIcpOk { id })
+}
+
+/// Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's
+/// `POST /v2/withdraw` forwards here), refused while halted, while the pool is closed, and for
+/// a sanctioned party. Burns the shares `usdc` is worth (rounded up, at most `max_shares` and
+/// the staker's own), keeps the rebalancing share in the pool and the network fee on Base, and
+/// opens a payout of the rest from the Base pocket, waiting for its order or queued while the
+/// pocket is short. One nonce per staker, once. Answers the payout's id and the shares burned.
+#[update]
+pub fn withdraw_evm(
+    withdrawal: EvmWithdrawal,
+    signature: Vec<u8>,
+) -> Result<WithdrawEvmOk, PoolError> {
+    pool::withdraw::withdraw_evm(withdrawal, signature, is_sanctioned).map(|(id, burned)| {
+        WithdrawEvmOk {
+            id,
+            burned: candid::Nat::from(burned.get()),
+        }
+    })
 }
