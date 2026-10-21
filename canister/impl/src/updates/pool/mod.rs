@@ -1,20 +1,19 @@
 //! The pool's update doors (interface section 3).
 
-use crate::guards::require_quoter;
 use crate::pool;
 use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
     EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutSettings,
-    PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings,
+    PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings,
     StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
 /// Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
-/// ledger's fee and every listed token's (`icrc1_fee`), which the registrations' premium
-/// floor reads.
+/// ledger's fee and every listed token's (`icrc1_fee`), which the ICP fees' floor at an
+/// arrival reads.
 #[update]
 pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();
@@ -31,29 +30,16 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
     Ok(())
 }
 
-/// Quoter-only, refused while halted and while the pool is closed. Registers a deposit at
-/// the user's commit (interface section 4): the ref must be the one its terms commit to,
-/// the fee included; it expires within 15 minutes; its token is listed; its payer and owner
-/// are not sanctioned; its payer and its owner hold fewer than `max_open_per_payer` open
-/// registrations; a swap is within the per-swap cap, carries at least the premium's floor
-/// and, on a ckUSDC payout, pays at least its own minimum, and reserves `min_usdc - premium`
-/// of the ICP pocket within `max_held_bps` of it; a stake holds its TVL room. The hold is
-/// released when it expires.
-#[update]
-pub fn register_pool_deposit(deposit: PoolDeposit) -> Result<(), PoolError> {
-    require_quoter().map_err(pool::guard_error)?;
-    pool::require_running()?;
-    pool::require_pool_open()?;
-    let (r#ref, terms) = deposit.into_domain()?;
-    pool::register::register(r#ref, terms, pool::now(), is_sanctioned)
-}
-
-/// Watcher-only, refused while halted. The watcher saw a USDC transfer to the canister's
-/// Base address in `base_tx` (and, for an Eco arrival, the order's `src_tx` on `src_chain`;
-/// an empty `src_tx` names none). The canister reads the receipt itself (one batched
-/// outcall, and one more on the source chain for Eco) at the crediting depth, proves every
-/// transfer to it against its rail, and credits each at most once: `Credited` (the payout
-/// follows on the canister's timer), or `Unattributed` with why, kept for the refund.
+/// Any caller (the watcher, or the user's app as a backup), refused while halted (P11d,
+/// 2026-10-21: no registration). A USDC transfer to the canister's Base address in
+/// `base_tx` (and, for an Eco arrival, the order's `src_tx` on `src_chain`; an empty
+/// `src_tx` names none) pays the deposit whose `terms` are handed over. The canister reads
+/// the receipt itself (one batched outcall, and one more on the source chain for Eco) at
+/// the crediting depth, proves every transfer to it against its rail, recomputes the ref
+/// from the terms and credits the transfer whose proof carries it, at most once:
+/// `Credited` (the payout follows on the canister's timer), or `Unattributed` with why,
+/// held for a controller. `BadArrival` when no transfer carries the terms' ref. The
+/// canister trusts only the chain and the fingerprint.
 #[update]
 pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
     pool::arrival::note(arrival).await
@@ -82,21 +68,9 @@ pub async fn withdraw_icp(args: WithdrawIcpArgs) -> Result<WithdrawIcpOk, PoolEr
     pool::icp::withdraw(args, is_sanctioned).await
 }
 
-/// Quoter-only, refused while halted. After a commit that met `Known`, whether the
-/// registration stored under `deposit.ref` is this one: the same kind, fees, `min_usdc`,
-/// `src_payer`, rail, expiry and salt. `Unknown` when none is stored. Reads only, and writes
-/// no line.
-#[update]
-pub fn pool_deposit_agreed(deposit: PoolDeposit) -> Result<bool, PoolError> {
-    require_quoter().map_err(pool::guard_error)?;
-    pool::require_running()?;
-    let (r#ref, terms) = deposit.into_domain()?;
-    crate::storage::events::read_state(|state| pool::register::agreed(state, r#ref, &terms))
-}
-
 /// Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
-/// fee, the rebalancing share's floor, how long a waiting payout waits for an order, and the
-/// most gas a payout order is signed with.
+/// fee, the rebalancing share's floor, how long a waiting payout waits for an order, the
+/// most gas a payout order is signed with, and the least network fee of a CCTP payout.
 #[update]
 pub fn set_payout_settings(settings: PayoutSettings) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();

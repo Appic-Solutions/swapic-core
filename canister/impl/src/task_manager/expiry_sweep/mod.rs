@@ -28,9 +28,6 @@ pub struct Sweep {
     /// whether either pass stopped at its cap with work still due, so the next tick has
     /// more to do. A pass is bounded; the timer is what makes it total.
     pub more: bool,
-    /// pool registrations past their expiry and grace with nothing arrived, whose hold went
-    /// back; one the log refused is counted in `skipped`
-    pub pool_expired: usize,
 }
 
 /// One pass of the expiry timer, bounded at both ends by the configured caps: an unbounded
@@ -63,11 +60,6 @@ pub fn run_expiry_sweep(now: Timestamp) -> Sweep {
         )
     });
     swept.more |= head.more;
-    // a pool registration's hold is pre-money: bounded by the same cap as the refunds
-    let pool = crate::pool::register::expire_due(now, config.max_refunds_per_sweep.as_usize());
-    swept.pool_expired = pool.expired;
-    swept.skipped += pool.skipped;
-    swept.more |= pool.more;
     // the index is the queue, so an entry that is not work the timer can do is repaired
     // rather than stepped over: left in place it would hold a slot of every pass's cap for
     // good, and a cap's worth of them would starve every refund behind them. The repair is

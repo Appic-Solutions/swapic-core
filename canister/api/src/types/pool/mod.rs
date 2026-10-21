@@ -21,7 +21,7 @@ use std::time::Duration;
 use thiserror::Error;
 use types::hash::PoolRef;
 use types::pool::{self as domain, RegisterRefusal};
-use types::{ChainId, EvmAddress, Timestamp, TokenAmount};
+use types::{EvmAddress, TokenAmount};
 
 /// Who owns shares.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -57,26 +57,21 @@ pub enum PoolRail {
     SameChain,
 }
 
-/// A deposit the quoter registers at the user's commit.
+/// A pool deposit's terms (P11d, 2026-10-21: no registration): the preimage of the ref its
+/// order carries (section 2), handed to the canister with the arrival. Every fee is the
+/// user's own line: a swap's premium (pure pool income) and its ICP path's ledger fees
+/// (`icp_fees`, at least the path's own ckUSDC fees); a stake's rebalancing share.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct PoolDeposit {
-    /// 32 bytes, interface section 2; recomputed by the canister.
-    pub r#ref: Vec<u8>,
+pub struct PoolTerms {
+    pub kind: PoolDepositKind,
+    /// Swap: micro USDC; Stake: 0.
+    pub premium: Nat,
+    /// Swap: micro USDC; Stake: 0.
+    pub icp_fees: Nat,
+    /// Stake: micro USDC; Swap: 0.
+    pub rebalance_share: Nat,
     /// 32 bytes.
     pub salt: Vec<u8>,
-    pub kind: PoolDepositKind,
-    /// Micro USDC that must reach the canister's Base address.
-    pub min_usdc: Nat,
-    /// Swap: at least `premium_bps` of `min_usdc`; Stake: 0.
-    pub premium: Nat,
-    /// Stake: the live estimate; Swap: 0.
-    pub rebalance_share: Nat,
-    pub src_chain: u64,
-    /// The EVM address paying the order.
-    pub src_payer: String,
-    pub rail: PoolRail,
-    /// After this, an arrival for it is unattributed.
-    pub expires_at_ns: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -128,6 +123,8 @@ pub struct PoolArrival {
     pub base_tx: Vec<u8>,
     pub src_chain: u64,
     pub src_tx: Vec<u8>,
+    /// The terms of the deposit the transfer pays, whose ref its proof must carry.
+    pub terms: PoolTerms,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -213,14 +210,8 @@ pub struct PoolSettings {
     pub premium_bps: u16,
     pub ckusdc_ledger: Principal,
     pub icp_tokens: Vec<IcpTokenEntry>,
-    /// An arrival this long past `expires_at` is still credited (default 120).
-    pub deposit_grace_s: u64,
-    /// Open (registered, not arrived) deposits per `src_payer`, and per EVM or ICP owner
-    /// (default 3).
-    pub max_open_per_payer: u32,
-    /// The most of the ICP pocket held for open swaps at once (default 5000, half).
-    pub max_held_bps: u16,
-    /// The canister's own Base read while registrations wait (default 300).
+    /// The canister's own Base read, its backup of the reports (default 300). (P11d drops
+    /// the registrations' knobs: `deposit_grace_s`, `max_open_per_payer`, `max_held_bps`.)
     pub arrival_backup_s: u64,
     /// Off until a controller opens the pool for swaps.
     pub pool_open_for_swaps: bool,
@@ -449,22 +440,16 @@ impl From<domain::PoolRail> for PoolRail {
     }
 }
 
-impl PoolDeposit {
-    /// The ref the quoter sent, and the terms it registers.
-    pub fn into_domain(self) -> Result<(PoolRef, domain::Registration), PoolWireError> {
-        let r#ref = PoolRef::new(bytes32("ref", &self.r#ref)?);
-        let terms = domain::Registration {
+impl PoolTerms {
+    /// The terms as the domain reads them.
+    pub fn into_domain(self) -> Result<domain::DepositTerms, PoolWireError> {
+        Ok(domain::DepositTerms {
             kind: self.kind.try_into()?,
-            min_usdc: amount("min_usdc", &self.min_usdc)?,
             premium: amount("premium", &self.premium)?,
+            icp_fees: amount("icp_fees", &self.icp_fees)?,
             rebalance_share: amount("rebalance_share", &self.rebalance_share)?,
-            src_chain: ChainId::new(self.src_chain),
-            src_payer: evm_address("src_payer", &self.src_payer)?,
-            rail: self.rail.into(),
-            expires_at: Timestamp::from_nanos(self.expires_at_ns),
             salt: bytes32("salt", &self.salt)?,
-        };
-        Ok((r#ref, terms))
+        })
     }
 }
 
@@ -533,14 +518,13 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
                     icpswap_pool: token.icpswap_pool,
                 })
                 .collect(),
-            deposit_grace: Duration::from_secs(settings.deposit_grace_s),
-            max_open_per_payer: settings.max_open_per_payer,
-            max_held_bps: settings.max_held_bps,
             arrival_backup: Duration::from_secs(settings.arrival_backup_s),
             open_for_swaps: settings.pool_open_for_swaps,
             ledger_fees: Vec::new(),
             // the routes are `set_icp_routes`'s, kept across a change of the knobs
             routes: None,
+            // no registration (P11d): kept in the record at their defaults, read by nothing
+            ..domain::PoolSettings::default()
         })
     }
 }
@@ -560,9 +544,6 @@ impl From<&domain::PoolSettings> for PoolSettings {
                     icpswap_pool: token.icpswap_pool,
                 })
                 .collect(),
-            deposit_grace_s: settings.deposit_grace.as_secs(),
-            max_open_per_payer: settings.max_open_per_payer,
-            max_held_bps: settings.max_held_bps,
             arrival_backup_s: settings.arrival_backup.as_secs(),
             pool_open_for_swaps: settings.open_for_swaps,
         }

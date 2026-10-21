@@ -1,9 +1,11 @@
-//! The canister's own read of Base while pool registrations wait (spec section 5): in case
-//! the watcher stopped, every `arrival_backup` the USDC transfers to the canister's address
-//! are read from a stored cursor, at most 500 blocks a call (half as many, and half again,
-//! while the answer is too large), and each one's transaction goes through the same proof
-//! as `note_pool_arrival`. For CCTP and same-chain deposits only: an Eco proof needs the
-//! source transaction, which only the watcher brings.
+//! The canister's own read of Base (spec section 5), always on once the pool has settings
+//! (P11d: no registration says when a deposit is on its way): in case the watcher stopped,
+//! every `arrival_backup` the USDC transfers to the canister's address are read from a
+//! stored cursor, at most 500 blocks a call (half as many, and half again, while the answer
+//! is too large), and each one's transaction goes through the same proof as
+//! `note_pool_arrival`. It has no terms: a deposit's transfer it proves waits 24 hours for
+//! them (anyone may hand them over), then is held for a controller. For CCTP and same-chain
+//! deposits only: an Eco proof needs the source transaction, which only the watcher brings.
 //!
 //! What a pass spends is bounded whatever is sent to the canister's address: one head read,
 //! at most ten reads of the transfers (500 blocks halved down to one), and at most
@@ -26,7 +28,7 @@
 mod tests;
 
 use crate::guards::require_not_halted;
-use crate::pool::arrival::{self, find, needs_source, read_base, record, PoolChain, Receipt};
+use crate::pool::arrival::{self, find, needs_source, read_base, record, Judge, PoolChain, Receipt};
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
 use crate::state::Store;
 use crate::storage::events::read_state;
@@ -34,7 +36,7 @@ use crate::storage::{config, pool as pool_store};
 use serde_json::{json, Value};
 use settlement_api::types::pool::PoolError;
 use std::cell::Cell;
-use types::pool::{CreditKey, PoolRail, PoolStep};
+use types::pool::{CreditKey, PoolStep};
 use types::{BlockNumber, ChainId, Timestamp, TokenAmount, TxHash};
 
 /// The most blocks one `eth_getLogs` reads.
@@ -80,13 +82,10 @@ impl Drop for Pass {
     }
 }
 
-/// Whether a registration the backup can prove waits at `now`.
-pub fn has_work<S: Store>(store: &S, now: Timestamp) -> bool {
-    pool_store::waiting_in(store, now).iter().any(|r#ref| {
-        store.pool_deposit(r#ref).is_some_and(|deposit| {
-            matches!(deposit.terms.rail, PoolRail::Cctp | PoolRail::SameChain)
-        })
-    })
+/// Whether the pool's own read of Base has work (P11d: no registration tells it when a
+/// deposit is on its way): once the pool has settings, always.
+pub fn has_work<S: Store>(store: &S) -> bool {
+    store.pool_ledger().settings.is_some()
 }
 
 /// The blocks the next read covers: after the cursor, from its own block when it stands
@@ -295,8 +294,7 @@ pub async fn run_backup() {
     if require_not_halted().is_err() {
         return;
     }
-    let now = crate::pool::now();
-    if !read_state(|state| has_work(state.store(), now)) {
+    if !read_state(|state| has_work(state.store())) {
         return;
     }
     let Ok(chain) = arrival::pool_chain().await else {
@@ -400,7 +398,7 @@ pub async fn backup(
         }
         // a step the fold refuses is noted, and read: only a read that failed for now holds
         // the cursor back
-        record(&found, clock());
+        record(&found, &Judge::without_terms(), clock());
     }
     let done = if overfull {
         Done::Range

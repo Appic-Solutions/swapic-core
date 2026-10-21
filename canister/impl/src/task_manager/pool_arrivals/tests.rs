@@ -1,8 +1,8 @@
 use super::*;
 use crate::storage::on_fresh_memory;
-use crate::storage::pool::tests::{at, funded_pool, register, swap_terms, usdc};
+use crate::storage::pool::tests::{at, funded_pool, usdc};
 use std::cell::Cell;
-use types::pool::{CreditKey, PoolRail};
+use types::pool::CreditKey;
 
 #[test]
 fn a_read_covers_at_most_five_hundred_blocks_from_its_cursor() {
@@ -154,35 +154,15 @@ fn one_pass_at_a_time() {
     assert!(Pass::take().is_some());
 }
 
-/// The backup reads only while a CCTP or same-chain registration waits: an Eco one is the
-/// watcher's, and a registration past its grace waits no more.
+/// The backup reads once the pool has settings (P11d: no registration says when a deposit
+/// is on its way), and never before.
 #[test]
-fn the_backup_works_only_while_a_registration_it_can_prove_waits() {
+fn the_backup_works_once_the_pool_has_settings() {
     on_fresh_memory(|| {
         crate::storage::init();
+        assert!(!read_state(|state| has_work(state.store())));
         funded_pool(usdc(1_000));
-        let now = at(500);
-        assert!(!read_state(|state| has_work(state.store(), now)));
-        let mut eco = swap_terms(1, usdc(10), usdc(1), at(1_000));
-        eco.rail = PoolRail::Eco;
-        register(eco);
-        assert!(!read_state(|state| has_work(state.store(), now)));
-        register(swap_terms(2, usdc(10), usdc(1), at(1_000)));
-        assert!(read_state(|state| has_work(state.store(), now)));
-        let grace = types::pool::PoolSettings::default()
-            .deposit_grace
-            .as_nanos() as u64;
-        // read one margin past its grace (review fix 13), and no more after
-        let margin =
-            read_state(|state| pool_store::read_margin_in(state.store())).as_nanos() as u64;
-        assert!(read_state(|state| has_work(
-            state.store(),
-            at(1_000 + grace + margin)
-        )));
-        assert!(!read_state(|state| has_work(
-            state.store(),
-            at(1_000 + grace + margin + 1)
-        )));
+        assert!(read_state(|state| has_work(state.store())));
     });
 }
 

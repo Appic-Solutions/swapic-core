@@ -7,7 +7,9 @@
 //! the payer is the canister; `tokenIn` is the pool chain's USDC; `amountIn` is the payout's
 //! exact amount; the order is read as the Runner will run it (the relay's own reader), pays
 //! the canister NO fee step (the canister pays itself nothing: a fee step would be booked as
-//! fee income and the books would drift), burns nothing on CCTP (CCTP payouts come later),
+//! fee income and the books would drift), burns nothing on CCTP (CCTP payouts come later,
+//! and only for a payout whose network fee is at least `cctp_min_network_fee`: the user paid
+//! the canister's finish),
 //! and has exactly one final delivery (its payout on the pool chain, or one Eco intent whose
 //! unfilled reward refunds its creator, the canister), which pays the terms' recipient at
 //! least their minimum of their token on their chain; its deadline is at least 60 s away and
@@ -96,6 +98,8 @@ pub fn check_order(
         ));
     }
     if plan.action == GasAction::RelayCctp {
+        // the canister pays a CCTP finish only where the user's network fee paid for one
+        settings.admits_cctp(payout.network_fee()).map_err(refused)?;
         return Err(refused("a CCTP payout comes later: Eco or Base only"));
     }
     let delivery = plan

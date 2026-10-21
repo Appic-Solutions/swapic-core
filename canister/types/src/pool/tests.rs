@@ -8,7 +8,8 @@ fn usdc(whole: u64) -> TokenAmount {
     TokenAmount::from(whole * 1_000_000)
 }
 
-/// The interface's three vectors (section 2), with the owner and details hashes between.
+/// The interface's three vectors (section 2), with the owner and details hashes between: V1
+/// the P11d swap vector (its ICP fees committed), V2 and V3 unchanged.
 #[test]
 fn the_ref_matches_the_interface_vectors() {
     let anon = Principal::anonymous();
@@ -25,12 +26,12 @@ fn the_ref_matches_the_interface_vectors() {
         "b546ee59c4dfe2b5e18af740a73302a8695435a79d422464a3fba288447f2cb7"
     );
     assert_eq!(
-        hex::encode(details_hash(&v1, 10_000)),
-        "b85c3cdd7f59b775850c67c493737983dac33095e64be5dbd24192dba10bd541"
+        hex::encode(details_hash(&v1, 10_000, 10_000)),
+        "54d75ee3c718aa72b8136e37977f44e240b0b155260bcbc0fba1879bd50a786d"
     );
     assert_eq!(
-        pool_ref(&v1, 10_000, [0x11; 32]).to_string(),
-        "d40d7d8e551abd50fbd433c8b9ec68d2f445fd636d8b97104d77fd984f12fe13"
+        pool_ref(&v1, 10_000, 10_000, [0x11; 32]).to_string(),
+        "2ca558b613087d4829efcfc433da96c2803012b2840e9775d83f94e880a03a35"
     );
 
     let payer: EvmAddress = "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
@@ -44,11 +45,11 @@ fn the_ref_matches_the_interface_vectors() {
         "ef01b19f23d59a2f61bf121d5ff293a5fd0cc722574b74df274851146afc2b56"
     );
     assert_eq!(
-        hex::encode(details_hash(&v2, 500)),
+        hex::encode(details_hash(&v2, 500, 0)),
         "ccd4ae6ef6fa5c628d5b3e95d10589f3cbb4e21e9f997aeda1c7403b267bac1a"
     );
     assert_eq!(
-        pool_ref(&v2, 500, [0x22; 32]).to_string(),
+        pool_ref(&v2, 500, 0, [0x22; 32]).to_string(),
         "27af0178f431306b588718a3e754c7fd1024ab2c720620145bec989680400b56"
     );
 
@@ -65,18 +66,23 @@ fn the_ref_matches_the_interface_vectors() {
         "f60423d4f356b3ebd5c1562ddb311d0df4354b84244921964c4feb2116e24871"
     );
     assert_eq!(
-        hex::encode(details_hash(&v3, 0)),
+        hex::encode(details_hash(&v3, 0, 0)),
         "290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563"
     );
     assert_eq!(
-        pool_ref(&v3, 0, [0x33; 32]).to_string(),
+        pool_ref(&v3, 0, 0, [0x33; 32]).to_string(),
         "66c5a89c63e57dbf6d1180f4af6090d5e7d98508d054e62b8f63d8a79c032b9d"
     );
 
     // a fee other than the committed one gives another ref
     assert_ne!(
-        pool_ref(&v1, 10_001, [0x11; 32]),
-        pool_ref(&v1, 10_000, [0x11; 32])
+        pool_ref(&v1, 10_001, 10_000, [0x11; 32]),
+        pool_ref(&v1, 10_000, 10_000, [0x11; 32])
+    );
+    // and so do other ICP fees
+    assert_ne!(
+        pool_ref(&v1, 10_000, 10_001, [0x11; 32]),
+        pool_ref(&v1, 10_000, 10_000, [0x11; 32])
     );
     assert_eq!(
         hex::encode(tag_swap()),

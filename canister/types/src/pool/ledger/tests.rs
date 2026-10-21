@@ -136,6 +136,7 @@ pub(crate) fn swap(byte: u8, min_usdc: TokenAmount, premium: TokenAmount) -> Reg
         rail: PoolRail::Cctp,
         expires_at: Timestamp::from_nanos(1_000),
         salt: [byte; 32],
+        icp_fees: Some(TokenAmount::from(FEE)),
     }
 }
 
@@ -152,6 +153,7 @@ fn stake(byte: u8, min_usdc: TokenAmount, rebalance_share: TokenAmount) -> Regis
         rail: PoolRail::SameChain,
         expires_at: Timestamp::from_nanos(1_000),
         salt: [byte; 32],
+        icp_fees: None,
     }
 }
 
@@ -203,70 +205,55 @@ pub(crate) fn funded(icp: TokenAmount) -> Pool {
     pool
 }
 
+/// P11d (2026-10-21): the terms are checked at the arrival, on what arrived; no premium
+/// floor, the ICP fees at least the path's own ckUSDC fees.
 #[test]
-fn a_registration_above_a_cap_or_below_the_premium_is_refused() {
+fn an_arrival_above_a_cap_or_below_its_icp_fees_is_refused() {
     let pool = funded(usdc(5_000));
     let good = swap(1, usdc(100), usdc(1));
-    assert_eq!(check_terms(&pool.ledger, &good), Ok(()));
+    assert_eq!(check_arrival(&pool.ledger, &good), Ok(()));
     // above the per-swap cap
     assert_eq!(
-        check_terms(&pool.ledger, &swap(1, usdc(1_001), usdc(2))),
+        check_arrival(&pool.ledger, &swap(1, usdc(1_001), usdc(2))),
         Err(RegisterRefusal::AboveSwapCap { cap: usdc(1_000) })
     );
-    // 10 bps of 100 USDC is 0.1, and the floor rounds up: 100.000001 needs 100_001
+    // no premium floor: the premium is the user's own term
     assert_eq!(
-        check_terms(
-            &pool.ledger,
-            &swap(1, usdc(100), TokenAmount::from(99_999_u32))
-        ),
-        Err(RegisterRefusal::PremiumTooLow {
-            least: TokenAmount::from(100_000_u32)
-        })
+        check_arrival(&pool.ledger, &swap(1, usdc(100), TokenAmount::ONE)),
+        Ok(())
     );
+    // the ICP fees below the path's own: one ckUSDC fee for a ckUSDC payout
+    let cheap = Registration {
+        icp_fees: Some(TokenAmount::from(FEE - 1)),
+        ..good.clone()
+    };
     assert_eq!(
-        check_terms(
-            &pool.ledger,
-            &swap(
-                1,
-                usdc(100).checked_add(TokenAmount::ONE).unwrap(),
-                TokenAmount::from(100_000_u32)
-            )
-        ),
-        Err(RegisterRefusal::PremiumTooLow {
-            least: TokenAmount::from(100_001_u32)
-        })
-    );
-    // a small swap's premium never goes below the ledger fee its payout costs
-    assert_eq!(
-        check_terms(
-            &pool.ledger,
-            &swap(1, usdc(2), TokenAmount::from(2_000_u32))
-        ),
-        Err(RegisterRefusal::PremiumTooLow {
-            least: TokenAmount::from(FEE)
-        })
+        check_arrival(&pool.ledger, &cheap),
+        Err(RegisterRefusal::NotAllowed(format!(
+            "the ICP fees must be at least {FEE}"
+        )))
     );
     // a stake that would take the pool past its TVL cap
     assert_eq!(
-        check_terms(&pool.ledger, &stake(2, usdc(5_001), TokenAmount::ZERO)),
+        check_arrival(&pool.ledger, &stake(2, usdc(5_001), TokenAmount::ZERO)),
         Err(RegisterRefusal::AboveTvlCap {
             cap: usdc(10_000),
             would_be: usdc(10_001)
         })
     );
     assert_eq!(
-        check_terms(&pool.ledger, &stake(2, usdc(5_000), TokenAmount::ZERO)),
+        check_arrival(&pool.ledger, &stake(2, usdc(5_000), TokenAmount::ZERO)),
         Ok(())
     );
-    // a ckUSDC payout below the recipient's own minimum
+    // a ckUSDC payout of arrived - premium - icp_fees below the recipient's own minimum
     let mut short = swap(1, usdc(100), usdc(1));
     short.kind = DepositKind::Swap {
         recipient: recipient(1),
         token_out: ckusdc(),
-        min_out: 99_000_001,
+        min_out: 99_000_000 - u128::from(FEE) + 1,
     };
     assert_eq!(
-        check_terms(&pool.ledger, &short),
+        check_arrival(&pool.ledger, &short),
         Err(RegisterRefusal::NotAllowed(
             "below the recipient's minimum".to_string()
         ))
@@ -280,82 +267,58 @@ fn a_registration_above_a_cap_or_below_the_premium_is_refused() {
         min_out: 1,
     };
     assert_eq!(
-        check_terms(&pool.ledger, &unlisted),
+        check_arrival(&pool.ledger, &unlisted),
         Err(RegisterRefusal::TokenNotListed(other))
+    );
+    // closed for swaps; a stake still arrives
+    let mut closed = funded(usdc(5_000));
+    closed.ledger.settings.as_mut().unwrap().open_for_swaps = false;
+    assert_eq!(
+        check_arrival(&closed.ledger, &good),
+        Err(RegisterRefusal::ClosedForSwaps)
+    );
+    assert_eq!(
+        check_arrival(&closed.ledger, &stake(3, usdc(10), TokenAmount::ZERO)),
+        Ok(())
+    );
+    // nothing is held, so a payout the free ckUSDC cannot cover yet still arrives (queued)
+    assert_eq!(
+        check_arrival(&funded(usdc(10)).ledger, &swap(1, usdc(100), usdc(1))),
+        Ok(())
     );
 }
 
 #[test]
-fn the_ref_and_the_fee_it_commits_are_checked() {
+fn the_fees_the_ref_commits_are_checked() {
     let pool = funded(usdc(5_000));
     let terms = swap(1, usdc(100), usdc(1));
-    let r#ref = terms.pool_ref().unwrap();
-    assert_eq!(check_ref(&pool.ledger, r#ref, &terms, &pool), Ok(()));
-    // the quoter registers a larger premium than the user's app committed to
-    let greedy = Registration {
-        premium: usdc(2),
-        ..terms.clone()
-    };
-    assert_eq!(
-        check_ref(&pool.ledger, r#ref, &greedy, &pool),
-        Err(RegisterRefusal::BadRef)
-    );
     // a swap with a rebalancing share the ref does not commit
     let both = Registration {
         rebalance_share: TokenAmount::ONE,
         ..terms.clone()
     };
-    let both_ref = both.pool_ref().unwrap();
     assert!(matches!(
-        check_ref(&pool.ledger, both_ref, &both, &pool),
+        check_arrival(&pool.ledger, &both),
         Err(RegisterRefusal::NotAllowed(_))
     ));
-    // closed for swaps
-    let mut closed = funded(usdc(5_000));
-    closed.ledger.settings.as_mut().unwrap().open_for_swaps = false;
-    assert_eq!(
-        check_ref(&closed.ledger, r#ref, &terms, &closed),
-        Err(RegisterRefusal::ClosedForSwaps)
-    );
-    // a stake registers while closed for swaps
-    let staked = stake(3, usdc(10), TokenAmount::ZERO);
-    assert_eq!(
-        check_ref(&closed.ledger, staked.pool_ref().unwrap(), &staked, &closed),
-        Ok(())
-    );
-}
-
-/// Jeff's hold rule (2026-10-21): a registration holds nothing, so many registrations may
-/// each find the free ckUSDC at their own moment; the open limits and that free check stay.
-#[test]
-fn the_open_limit_and_the_free_check_are_kept() {
-    let mut pool = funded(usdc(500));
-    for byte in 1..=3 {
-        let terms = swap(byte, usdc(10), usdc(1));
-        check_terms(&pool.ledger, &terms).unwrap();
-        register(&mut pool, terms);
-    }
-    // a fourth from the same payer
-    assert_eq!(
-        check_terms(&pool.ledger, &swap(4, usdc(10), usdc(1))),
-        Err(RegisterRefusal::NotAllowed(
-            "too many open deposits".to_string()
-        ))
-    );
-    // another payer: 501 of free ckUSDC is one too many, 500 fits, and so does it again,
-    // since nothing is held
-    let other = |byte: u8, min_usdc| {
-        let mut terms = swap(byte, min_usdc, usdc(1));
-        terms.src_payer = EvmAddress::new([byte; 20]);
-        terms
+    // the premium and the ICP fees take all that arrived
+    let all = Registration {
+        premium: usdc(100).checked_sub(TokenAmount::from(FEE)).unwrap(),
+        ..terms.clone()
     };
-    assert_eq!(
-        check_terms(&pool.ledger, &other(5, usdc(502))),
-        Err(RegisterRefusal::PocketShort)
-    );
-    register(&mut pool, other(5, usdc(501)));
-    assert_eq!(check_terms(&pool.ledger, &other(6, usdc(501))), Ok(()));
-    assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
+    assert!(matches!(
+        check_arrival(&pool.ledger, &all),
+        Err(RegisterRefusal::NotAllowed(_))
+    ));
+    // a stake with ICP fees
+    let fees = Registration {
+        icp_fees: Some(TokenAmount::ONE),
+        ..stake(2, usdc(10), TokenAmount::ZERO)
+    };
+    assert!(matches!(
+        check_arrival(&pool.ledger, &fees),
+        Err(RegisterRefusal::NotAllowed(_))
+    ));
 }
 
 /// Jeff's hold rule: a registration, swap or stake, holds nothing of the pockets nor of the
@@ -414,6 +377,7 @@ fn a_transfer_is_credited_once() {
             why: "again".into(),
             block: BlockNumber::new(10),
             r#ref: None,
+            awaiting_until: None,
         }),
         Err(PoolStepError::AlreadyCredited(credit(7)))
     );
@@ -443,6 +407,7 @@ fn a_late_arrival_is_unattributed_and_closes_its_registration() {
         why: "arrived past its grace".into(),
         block: BlockNumber::new(10),
         r#ref: Some(r#ref),
+        awaiting_until: None,
     })
     .unwrap();
     assert_eq!(pool.deposits[&r#ref].status, DepositStatus::Unattributed);
@@ -473,6 +438,7 @@ fn a_donation_moves_no_share_price() {
         why: "no proof".into(),
         block: BlockNumber::new(10),
         r#ref: None,
+        awaiting_until: None,
     })
     .unwrap();
     assert_eq!(value(&pool), before);
@@ -493,13 +459,11 @@ fn a_swap_moves_the_pockets_and_keeps_the_premium() {
         block: BlockNumber::new(10),
     })
     .unwrap();
-    // in the pockets twice (Base arrival, ICP reservation), owed once with its fee
-    let held = usdc(99).checked_add(TokenAmount::from(FEE)).unwrap();
+    // in the pockets twice (Base arrival, ICP reservation), owed once: the user's budget,
+    // out of which its ICP fees are paid (P11d)
+    let held = usdc(99);
     assert_eq!(pool.ledger.owed, held);
-    assert_eq!(
-        pool.ledger.total_assets(),
-        usdc(1_001).checked_sub(TokenAmount::from(FEE)).unwrap()
-    );
+    assert_eq!(pool.ledger.total_assets(), usdc(1_001));
     assert!(pool.ledger.paying.contains(&r#ref));
     let attempt = PayoutAttempt {
         created_at: Timestamp::from_nanos(5),
@@ -514,24 +478,18 @@ fn a_swap_moves_the_pockets_and_keeps_the_premium() {
     pool.step(PoolStep::Paid {
         r#ref,
         token: ckusdc(),
-        amount: usdc(99),
+        amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
         block: 42,
-        spent: usdc(99).checked_add(TokenAmount::from(FEE)).unwrap(),
+        spent: usdc(99),
     })
     .unwrap();
     assert_eq!(pool.deposits[&r#ref].status, DepositStatus::Paid);
     assert_eq!(pool.ledger.owed, TokenAmount::ZERO);
     assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
-    // 1000 - 99 - the fee on ICP, 100 on Base: the premium less the fee earned
-    assert_eq!(
-        pool.ledger.pockets.icp.free,
-        usdc(901).checked_sub(TokenAmount::from(FEE)).unwrap()
-    );
+    // 1000 - 99 on ICP (the fee the user's), 100 on Base: the whole premium earned
+    assert_eq!(pool.ledger.pockets.icp.free, usdc(901));
     assert_eq!(pool.ledger.pockets.base.free, usdc(100));
-    assert_eq!(
-        pool.ledger.total_assets(),
-        usdc(1_001).checked_sub(TokenAmount::from(FEE)).unwrap()
-    );
+    assert_eq!(pool.ledger.total_assets(), usdc(1_001));
     assert!(pool.ledger.paying.is_empty());
 }
 
@@ -619,8 +577,9 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
         block: BlockNumber::new(10),
     })
     .unwrap();
-    // the stakers own 1500 and the premium less the payout's fee, never the arrival
-    let fair = usdc(1_501).checked_sub(fee).unwrap();
+    // the stakers own 1500 and the premium (the payout's fee is the user's), never the
+    // arrival
+    let fair = usdc(1_501);
     assert_eq!(pool.ledger.total_assets(), fair);
     let value = |pool: &Pool, owner: IcpAccount| {
         Shares::value_of(
@@ -713,9 +672,9 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
     pool.step(PoolStep::Paid {
         r#ref,
         token: ckusdc(),
-        amount: usdc(99),
+        amount: usdc(99).checked_sub(fee).unwrap(),
         block: 4,
-        spent: usdc(99).checked_add(fee).unwrap(),
+        spent: usdc(99),
     })
     .unwrap();
     assert_eq!(value(&pool, a), a_before_paid, "the same after Paid");
@@ -767,14 +726,8 @@ fn a_payout_stops_after_ten_failures() {
         })
         .is_err());
     // the money is still owed and still held
-    assert_eq!(
-        pool.ledger.owed,
-        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
-    );
-    assert_eq!(
-        pool.ledger.pockets.icp.reserved,
-        usdc(99).checked_add(TokenAmount::from(FEE)).unwrap()
-    );
+    assert_eq!(pool.ledger.owed, usdc(99));
+    assert_eq!(pool.ledger.pockets.icp.reserved, usdc(99));
 }
 
 /// The ICPSwap leg: declined once, then it may only fall back; once begun it never falls
@@ -1057,7 +1010,7 @@ fn a_step_round_trips_through_its_bytes() {
             settings: settings(),
         },
         PoolStep::Registered {
-            r#ref: pool_ref(&terms.kind, 1_000_000, terms.salt),
+            r#ref: pool_ref(&terms.kind, 1_000_000, 0, terms.salt),
             deposit: terms,
         },
         PoolStep::IcpCheckFailed {
@@ -1101,7 +1054,7 @@ fn an_arrival_is_measured_on_what_arrived() {
     );
     // 400 arrives: a payout of 399 and its fee, more than the 300 free, credited and queued
     pool.step(arrived(first, 9, usdc(400))).unwrap();
-    let held = usdc(399).checked_add(TokenAmount::from(FEE)).unwrap();
+    let held = usdc(399);
     assert_eq!(pool.deposits[&first].status, DepositStatus::Arrived);
     assert_eq!(pool.deposits[&first].held, Some(held));
     assert_eq!(pool.ledger.queue.head(), Some((first, held)));
@@ -1187,12 +1140,11 @@ fn an_arrival_is_measured_on_what_arrived() {
     full.step(arrived(stake_ref, 9, usdc(10))).unwrap();
 }
 
-/// The premium floor both sides use (interface section 4, 2026-10-21): the settings' share
-/// rounded up, and never below what the pool pays in ckUSDC: one ckUSDC fee for a ckUSDC
-/// payout, four per ICPSwap leg of a token's route (P11b: 4 direct, 8 through ICP). A
-/// token's own fee is never added to micro USDC.
+/// P11d (2026-10-21): no premium floor, the premium exactly the settings' share rounded up;
+/// the ICP fees' floor is the path's own ckUSDC fees: 1 for ckUSDC, 2 for a direct token,
+/// 3 through ICP. A token's own fee is never added to micro USDC.
 #[test]
-fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
+fn the_icp_fees_floor_is_the_paths_own_ckusdc_fees() {
     let token = Principal::from_slice(&[0x70; 10]);
     let settings = PoolSettings {
         icp_tokens: vec![crate::pool::IcpToken {
@@ -1212,14 +1164,19 @@ fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
         ],
         ..settings()
     };
-    // a small swap: the ckUSDC fees decide, never the token's
+    // the ckUSDC fees decide, never the token's
     assert_eq!(
-        least_premium(&settings, usdc(2), ckusdc()),
+        icp_fees_floor(&settings, ckusdc()),
         Some(TokenAmount::from(FEE))
     );
     assert_eq!(
-        least_premium(&settings, usdc(2), token),
-        Some(TokenAmount::from(4 * FEE))
+        icp_fees_floor(&settings, token),
+        Some(TokenAmount::from(2 * FEE))
+    );
+    // a small swap's premium is its share alone
+    assert_eq!(
+        premium_share(&settings, usdc(2)),
+        Some(TokenAmount::from(2_000_u32))
     );
     // through ICP: two legs, eight fees
     let via = Principal::from_slice(&[0x72; 10]);
@@ -1244,12 +1201,12 @@ fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
         ..settings.clone()
     };
     assert_eq!(
-        least_premium(&routed, usdc(2), via),
-        Some(TokenAmount::from(8 * FEE))
+        icp_fees_floor(&routed, via),
+        Some(TokenAmount::from(3 * FEE))
     );
     assert_eq!(
-        least_premium(&routed, usdc(2), token),
-        Some(TokenAmount::from(4 * FEE))
+        icp_fees_floor(&routed, token),
+        Some(TokenAmount::from(2 * FEE))
     );
     // once routes are set they alone list: a token only in icp_tokens is not
     let unrouted = Principal::from_slice(&[0x76; 10]);
@@ -1262,7 +1219,7 @@ fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
     // a large one: 10 bps of it, rounded up
     let large = usdc(1_000).checked_add(TokenAmount::ONE).unwrap();
     assert_eq!(
-        least_premium(&settings, large, token),
+        premium_share(&settings, large),
         Some(TokenAmount::from(1_000_001_u32))
     );
 }
@@ -1284,8 +1241,8 @@ fn the_queues_head_has_its_need_and_its_wait_and_never_fails() {
         block: BlockNumber::new(10),
     })
     .unwrap();
-    // 299 and its fee held once it starts, 100 free
-    let held = usdc(299).checked_add(TokenAmount::from(FEE)).unwrap();
+    // 299 held once it starts (its fees the user's, out of it), 100 free
+    let held = usdc(299);
     assert_eq!(
         pool.ledger.queue_need(),
         Some(held.checked_sub(usdc(100)).unwrap())
@@ -1400,4 +1357,76 @@ fn a_path_through_icp_runs_its_legs_in_order() {
     let payout = &pool.deposits[&r#ref].payout;
     assert_eq!(payout.back.unwrap().out, Some(TokenAmount::from(900_u32)));
     assert!(payout.fell_back.is_some());
+}
+
+/// P11d (2026-10-21): a deposit's transfer the canister's own read found without its terms
+/// awaits them, on the unattributed line; its terms claim it and its arrival credits it once,
+/// on the Base balance's books once; terms the pool does not take hold it for a controller.
+#[test]
+fn a_transfer_awaiting_its_terms_is_claimed_once() {
+    use crate::pool::OrphanStatus;
+    let mut pool = funded(usdc(1_000));
+    let terms = swap(1, usdc(100), usdc(1));
+    let r#ref = terms.pool_ref().unwrap();
+    let until = Timestamp::from_nanos(500);
+    let awaiting = |log| PoolStep::Unattributed {
+        credit: credit(log),
+        amount: usdc(100),
+        src_payer: Some(payer()),
+        why: "awaiting its terms".into(),
+        block: BlockNumber::new(10),
+        r#ref: Some(r#ref),
+        awaiting_until: Some(until),
+    };
+    pool.step(awaiting(1)).unwrap();
+    assert_eq!(pool.ledger.unattributed, usdc(100));
+    assert_eq!(
+        pool.orphans[&credit(1)].status,
+        OrphanStatus::AwaitingTerms { r#ref, until }
+    );
+    let unseen = pool.ledger.unseen.len();
+    let arrived = PoolStep::Arrived {
+        r#ref,
+        credit: credit(1),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    };
+    pool.step(PoolStep::Registered {
+        r#ref,
+        deposit: terms,
+    })
+    .unwrap();
+    // credited to nothing until claimed
+    assert_eq!(
+        pool.step(arrived.clone()),
+        Err(PoolStepError::AlreadyCredited(credit(1)))
+    );
+    pool.step(PoolStep::TermsClaimed {
+        credit: credit(1),
+        refused: None,
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.unattributed, TokenAmount::ZERO);
+    pool.step(arrived).unwrap();
+    assert_eq!(pool.orphans[&credit(1)].status, OrphanStatus::Credited);
+    assert_eq!(pool.ledger.unseen.len(), unseen, "on the books once");
+    assert_eq!(pool.ledger.owed, usdc(99));
+    assert_eq!(pool.deposits[&r#ref].status, DepositStatus::Arrived);
+    // claimed once
+    assert!(pool
+        .step(PoolStep::TermsClaimed {
+            credit: credit(1),
+            refused: None,
+        })
+        .is_err());
+    // terms the pool does not take: held for a controller with why, still unattributed
+    pool.step(awaiting(2)).unwrap();
+    pool.step(PoolStep::TermsClaimed {
+        credit: credit(2),
+        refused: Some("the pool is closed".into()),
+    })
+    .unwrap();
+    assert_eq!(pool.orphans[&credit(2)].status, OrphanStatus::Held);
+    assert_eq!(pool.orphans[&credit(2)].why, "the pool is closed");
+    assert_eq!(pool.ledger.unattributed, usdc(100));
 }

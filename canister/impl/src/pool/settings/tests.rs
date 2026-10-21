@@ -8,9 +8,6 @@ fn wire() -> WireSettings {
         premium_bps: 10,
         ckusdc_ledger: Principal::from_text(types::pool::CKUSDC_LEDGER).unwrap(),
         icp_tokens: vec![],
-        deposit_grace_s: 120,
-        max_open_per_payer: 3,
-        max_held_bps: 5_000,
         arrival_backup_s: 300,
         pool_open_for_swaps: false,
     }
@@ -42,14 +39,6 @@ fn set_pool_settings_refuses_a_stranger_a_halt_and_bad_settings() {
         checked(false, true, too_wide),
         Err(PoolError::BadSettings(_))
     ));
-    let held_above_all = WireSettings {
-        max_held_bps: 10_001,
-        ..wire()
-    };
-    assert!(matches!(
-        checked(false, true, held_above_all),
-        Err(PoolError::BadSettings(_))
-    ));
 }
 
 fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
@@ -58,6 +47,7 @@ fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
         rebalance_share_floor_bps: 2,
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
+        cctp_min_network_fee: None,
     }
 }
 

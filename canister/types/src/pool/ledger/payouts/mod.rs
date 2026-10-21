@@ -290,7 +290,11 @@ impl PoolLedger {
                 let orphan = lookup
                     .orphan(key)
                     .ok_or(PoolStepError::Terms("no orphan under that key"))?;
-                if orphan.status != crate::pool::OrphanStatus::Held {
+                // held, or awaiting terms (the controller's door checks its time ran out)
+                if !matches!(
+                    orphan.status,
+                    crate::pool::OrphanStatus::Held | crate::pool::OrphanStatus::AwaitingTerms { .. }
+                ) {
                     return Err(PoolStepError::Terms("an orphan is resolved once"));
                 }
                 if orphan.amount > self.unattributed {
@@ -302,6 +306,20 @@ impl PoolLedger {
                             "a refund sends some of the orphan, never more",
                         ));
                     }
+                }
+                Ok(())
+            }
+            PoolStep::TermsClaimed { credit, refused } => {
+                let orphan = lookup
+                    .orphan(credit)
+                    .ok_or(PoolStepError::Terms("no transfer awaits its terms there"))?;
+                if !matches!(orphan.status, crate::pool::OrphanStatus::AwaitingTerms { .. }) {
+                    return Err(PoolStepError::Terms(
+                        "only a transfer awaiting its terms is claimed",
+                    ));
+                }
+                if refused.is_none() && orphan.amount > self.unattributed {
+                    return Err(PoolStepError::Overflow);
                 }
                 Ok(())
             }
@@ -591,6 +609,22 @@ impl PoolLedger {
                 ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
                 orphan.status = crate::pool::OrphanStatus::Booked;
                 effects.orphan = Some((*key, orphan));
+            }
+            // off the unattributed line, for the deposit's own arrival line next; or terms
+            // the pool does not take: held for a controller, with why
+            PoolStep::TermsClaimed { credit, refused } => {
+                let mut orphan = lookup.orphan(credit)?;
+                match refused {
+                    Some(why) => {
+                        orphan.status = crate::pool::OrphanStatus::Held;
+                        orphan.why = why.clone();
+                    }
+                    None => {
+                        ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                        orphan.status = crate::pool::OrphanStatus::Claimed;
+                    }
+                }
+                effects.orphan = Some((*credit, orphan));
             }
             PoolStep::OrphanRefundSigned { key, to, sent, .. } => {
                 let mut orphan = lookup.orphan(key)?;

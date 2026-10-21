@@ -8,10 +8,10 @@
 use super::*;
 use crate::storage::events::event_count;
 use crate::storage::on_fresh_memory;
-use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, payer, usdc};
+use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, payer, usdc, FEE};
 use crate::storage::pool::{deposit, ledger, record_at};
 use alloy_sol_types::SolEvent;
-use types::pool::{DepositKind, PoolRail, Registration};
+use types::pool::{DepositKind, DepositTerms, OrphanStatus};
 
 /// The staging canister's address on every chain.
 fn canister() -> EvmAddress {
@@ -92,21 +92,37 @@ fn block_time(receipt: &Value) -> u64 {
     hex_u64(receipt["logs"][0].get("blockTimestamp")).unwrap()
 }
 
-fn terms(byte: u8, min_usdc: TokenAmount, expires_at: Timestamp, rail: PoolRail) -> Registration {
-    Registration {
+/// A ckUSDC swap's terms for `account(byte)`: a premium of 0.01 and one ckUSDC fee of ICP
+/// fees, its path's own.
+fn terms(byte: u8) -> DepositTerms {
+    DepositTerms {
         kind: DepositKind::Swap {
             recipient: account(byte),
             token_out: ckusdc(),
             min_out: 1,
         },
-        min_usdc,
         premium: TokenAmount::from(10_000_u32),
+        icp_fees: TokenAmount::from(FEE),
         rebalance_share: TokenAmount::ZERO,
-        src_chain: ChainId::BASE,
-        src_payer: payer(),
-        rail,
-        expires_at,
         salt: [byte; 32],
+    }
+}
+
+/// `terms(byte)` as a report hands them over, its source named Arbitrum.
+fn given(byte: u8) -> Given {
+    Given {
+        terms: terms(byte),
+        r#ref: terms(byte).pool_ref().unwrap(),
+        src_chain: ChainId::ARBITRUM,
+    }
+}
+
+/// A judge of `given` with the pool open and nobody sanctioned.
+fn judge(given: Option<&Given>) -> Judge<'_> {
+    Judge {
+        given,
+        closed: None,
+        sanctioned: &|_| false,
     }
 }
 
@@ -190,9 +206,7 @@ fn parse(value: &Value) -> Receipt {
 }
 
 fn the_ref(byte: u8) -> PoolRef {
-    terms(byte, usdc(1), at(0), PoolRail::Cctp)
-        .pool_ref()
-        .unwrap()
+    terms(byte).pool_ref().unwrap()
 }
 
 #[test]
@@ -278,32 +292,68 @@ fn a_transfer_to_someone_else_or_of_another_token_is_no_arrival() {
     );
 }
 
-/// A wrong ref: proven, and registered nowhere, so unattributed with its payer.
+/// No registration (P11d): a report's terms credit only the transfer whose proof carries
+/// their ref, at once, on what arrived; the user pays every fee, so the pool holds the
+/// arrival less the premium.
 #[test]
-fn a_wrong_ref_is_unattributed_with_its_payer() {
+fn the_terms_credit_the_transfer_that_carries_their_ref() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let raw = same_chain(the_ref(1));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let given = given(1);
+        let recorded = record(&found, &judge(Some(&given)), now);
+        assert!(recorded.carried);
+        assert_eq!(
+            recorded.mine,
+            vec![PoolArrivalOutcome::Credited {
+                r#ref: the_ref(1).into_bytes().to_vec(),
+                amount: candid::Nat::from(1_000_000_u32)
+            }]
+        );
+        let credited = deposit(&the_ref(1)).unwrap();
+        assert_eq!(credited.status, DepositStatus::Arrived);
+        assert_eq!(credited.terms.min_usdc, TokenAmount::from(1_000_000_u32));
+        assert_eq!(credited.terms.src_payer, payer());
+        assert_eq!(credited.terms.rail, PoolRail::SameChain);
+        assert_eq!(credited.terms.src_chain, ChainId::BASE, "proven on Base alone");
+        assert_eq!(credited.terms.icp_fees(), TokenAmount::from(FEE));
+        assert_eq!(credited.held(), TokenAmount::from(990_000_u32));
+        assert!(ledger().open.is_empty(), "nothing is left open");
+    });
+}
+
+/// A transfer whose proof carries another ref than the terms' is not theirs: it waits for
+/// its own terms, 24 hours, on the unattributed line, and the report is no credit.
+#[test]
+fn another_refs_transfer_awaits_its_own_terms() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
         let raw = same_chain(the_ref(9));
-        let receipt = parse(&raw);
         let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
-        crate::storage::pool::tests::register(terms(
-            1,
-            usdc(1),
-            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
-            PoolRail::SameChain,
-        ));
-        let found = find(&receipt, None, &base()).unwrap();
-        let outcomes = record(&found, now).outcomes;
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let given = given(1);
+        let recorded = record(&found, &judge(Some(&given)), now);
+        assert!(!recorded.carried);
+        assert!(recorded.mine.is_empty());
         assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "no deposit is registered under the ref"
+            &recorded.outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("awaiting its terms")
         ));
         assert_eq!(ledger().unattributed, TokenAmount::from(1_000_000_u32));
-        assert!(matches!(
-            deposit(&the_ref(1)).unwrap().status,
-            DepositStatus::Registered
-        ));
+        let orphan = read_state(|state| state.store().pool_orphan(&found[0].credit)).unwrap();
+        assert_eq!(
+            orphan.status,
+            OrphanStatus::AwaitingTerms {
+                r#ref: the_ref(9),
+                until: now.checked_add(AWAIT_TERMS).unwrap()
+            }
+        );
+        assert_eq!(orphan.payer, Some(payer()));
+        assert!(deposit(&the_ref(9)).is_none());
     });
 }
 
@@ -317,14 +367,9 @@ fn the_same_transfer_reported_twice_is_credited_once() {
         let r#ref = the_ref(2);
         let raw = cctp(r#ref);
         let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
-        crate::storage::pool::tests::register(terms(
-            2,
-            usdc(4),
-            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
-            PoolRail::Cctp,
-        ));
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let first = record(&found, now).outcomes;
+        let given = given(2);
+        let first = record(&found, &judge(Some(&given)), now).outcomes;
         assert_eq!(
             first,
             vec![PoolArrivalOutcome::Credited {
@@ -333,114 +378,41 @@ fn the_same_transfer_reported_twice_is_credited_once() {
             }]
         );
         let count = event_count();
-        assert_eq!(record(&found, now).outcomes, vec![]);
+        assert_eq!(record(&found, &judge(Some(&given)), now).outcomes, vec![]);
+        assert_eq!(record(&found, &Judge::without_terms(), now).outcomes, vec![]);
         assert_eq!(event_count(), count, "nothing more was written");
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Arrived);
         assert_eq!(ledger().pockets.base.free, TokenAmount::from(4_747_709_u32));
         assert!(crate::storage::pool::credited(&found[0].credit));
+        // a CCTP arrival's payer is on its source chain: none bound
+        assert_eq!(deposit(&r#ref).unwrap().terms.src_payer, EvmAddress::ZERO);
     });
 }
 
-/// Review Focus 4: an arrival past its registration's expiry and grace (at its block's
-/// time) is unattributed with the registered payer, never credited, and its hold goes back.
+/// One deposit per ref: a second transfer under a credited ref is held for a controller with
+/// its payer.
 #[test]
-fn a_late_arrival_is_unattributed_with_its_payer() {
-    on_fresh_memory(|| {
-        crate::storage::init();
-        funded_pool(usdc(1_000));
-        let r#ref = the_ref(3);
-        let (fill, source) = eco(r#ref);
-        let time = block_time(&fill);
-        let grace = types::pool::PoolSettings::default().deposit_grace.as_secs();
-        // expired, and the grace ran out one second before the fill's block
-        crate::storage::pool::tests::register(terms(
-            3,
-            usdc(4),
-            Timestamp::from_secs(time - grace - 1).unwrap(),
-            PoolRail::Eco,
-        ));
-        let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
-        // read late by the canister: judged at the block's time, not the read's
-        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).outcomes;
-        assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "arrived past its expiry and grace"
-        ));
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Unattributed);
-        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
-        let orphan = crate::storage::events::event_at(event_count() - 1).unwrap();
-        assert!(matches!(
-            orphan.payload,
-            types::EventType::Pool {
-                step: PoolStep::Unattributed { src_payer: Some(p), .. }
-            } if p == payer()
-        ));
-    });
-}
-
-/// An arrival on time at its block, read after its grace by the backup, is credited.
-#[test]
-fn an_arrival_on_time_read_late_is_credited() {
-    on_fresh_memory(|| {
-        crate::storage::init();
-        funded_pool(usdc(1_000));
-        let r#ref = the_ref(3);
-        let (fill, source) = eco(r#ref);
-        let time = block_time(&fill);
-        crate::storage::pool::tests::register(terms(
-            3,
-            usdc(4),
-            Timestamp::from_secs(time).unwrap(),
-            PoolRail::Eco,
-        ));
-        let found = find(&parse(&fill), Some((&parse(&source), &arbitrum())), &base()).unwrap();
-        let outcomes = record(&found, Timestamp::from_secs(time + 3_600).unwrap()).outcomes;
-        assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Credited { .. }]
-        ));
-    });
-}
-
-/// Below its registered minimum, or paid by another than the registered payer: kept
-/// unattributed; another payer's money leaves the user's registration open.
-#[test]
-fn a_short_arrival_or_another_payers_is_unattributed() {
+fn a_second_arrival_under_a_credited_ref_is_held() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
         let raw = same_chain(the_ref(1));
         let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
-        let expires = Timestamp::from_secs(block_time(&raw) + 600).unwrap();
-        crate::storage::pool::tests::register(terms(1, usdc(2), expires, PoolRail::SameChain));
+        let given = given(1);
         let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).outcomes;
+        record(&found, &judge(Some(&given)), now);
+        let mut again = same_chain(the_ref(1));
+        log_at(&mut again, "0x3c8")["logIndex"] = Value::String("0x3c9".into());
+        let found = find(&parse(&again), None, &base()).unwrap();
+        let recorded = record(&found, &judge(Some(&given)), now);
         assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
+            &recorded.mine[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("credited already")
         ));
-        assert_eq!(
-            deposit(&the_ref(1)).unwrap().status,
-            DepositStatus::Unattributed
-        );
-
-        // another payer
-        let mut other = terms(2, usdc(1), expires, PoolRail::SameChain);
-        other.src_payer = "0x1111111111111111111111111111111111111111"
-            .parse()
-            .unwrap();
-        let r#ref = other.pool_ref().unwrap();
-        crate::storage::pool::tests::register(other);
-        let mut raw = same_chain(r#ref);
-        // another log index, so it is another transfer
-        log_at(&mut raw, "0x3c8")["logIndex"] = Value::String("0x3c9".into());
-        let found: Vec<Found> = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).outcomes;
         assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why == "paid by another than the registered payer"
+            last_step(),
+            PoolStep::Unattributed { src_payer: Some(p), r#ref: None, .. } if p == payer()
         ));
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
     });
 }
 
@@ -487,46 +459,135 @@ fn a_receipt_not_deep_enough_is_not_credited() {
     });
 }
 
-/// Review fix: an arrival larger than its registration is measured on what arrived. Above
-/// the per-swap cap it is no credit. A CCTP arrival's payer is not bound, so it is kept with
-/// no ref and no payer, and the registration keeps its hold.
+/// Terms the pool does not take hold the transfer for a controller, with the terms and the
+/// payer the proof shows: above the per-swap cap (measured on what arrived), ICP fees below
+/// the path's own, the pool closed, a sanctioned party. Nothing is registered.
 #[test]
-fn an_arrival_above_the_cap_is_unattributed() {
+fn terms_the_pool_does_not_take_hold_the_transfer() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
-        let r#ref = the_ref(2);
-        let raw = cctp(r#ref);
+        let raw = cctp(the_ref(2));
         let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
-        crate::storage::pool::tests::register(terms(
-            2,
-            usdc(4),
-            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
-            PoolRail::Cctp,
-        ));
+        let found = find(&parse(&raw), None, &base()).unwrap();
         // a per-swap cap below the 4.747709 that arrived
         let mut settings = ledger().settings.unwrap();
         settings.per_swap_cap = usdc(4);
         record_at(PoolStep::SettingsSet { settings }, now).unwrap();
-        let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).outcomes;
-        assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("above the per-swap cap")
-        ));
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
-        assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
-        assert!(ledger().open.contains(&r#ref));
-        // kept with no ref, the registration's payer its refund target
+        let swap = given(2);
+        let held = |found: &[Found], judge: &Judge<'_>| -> String {
+            match &record(found, judge, now).mine[..] {
+                [PoolArrivalOutcome::Unattributed { why, .. }] => why.clone(),
+                other => panic!("not held: {other:?}"),
+            }
+        };
+        let why = held(&found, &judge(Some(&swap)));
+        assert!(why.contains("above the per-swap cap"), "{why}");
+        assert!(why.contains("held with its terms: swap to"), "{why}");
+        assert!(deposit(&the_ref(2)).is_none());
         assert!(matches!(
             last_step(),
-            PoolStep::Unattributed {
-                src_payer: Some(p),
-                r#ref: None,
-                ref why,
-                ..
-            } if p == payer() && why.ends_with("(payer presumed: the registration's)")
+            PoolStep::Unattributed { src_payer: None, r#ref: None, .. }
         ));
+        // the ICP fees below the path's own ckUSDC fee
+        let mut cheap = swap.clone();
+        cheap.terms.icp_fees = TokenAmount::from(FEE - 1);
+        cheap.r#ref = cheap.terms.pool_ref().unwrap();
+        let raw = same_chain(cheap.r#ref);
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let why = held(&found, &judge(Some(&cheap)));
+        assert!(why.contains("the ICP fees must be at least"), "{why}");
+        // the pool closed, a sanctioned payer
+        let mut other = same_chain(the_ref(1));
+        log_at(&mut other, "0x3c8")["logIndex"] = Value::String("0x3ca".into());
+        let found = find(&parse(&other), None, &base()).unwrap();
+        let mine = given(1);
+        let closed = Judge {
+            closed: Some("the books are off".to_string()),
+            ..judge(Some(&mine))
+        };
+        assert!(held(&found, &closed).contains("the pool is closed: the books are off"));
+        let mut other = same_chain(the_ref(1));
+        log_at(&mut other, "0x3c8")["logIndex"] = Value::String("0x3cb".into());
+        let found = find(&parse(&other), None, &base()).unwrap();
+        let sanctioned = Judge {
+            sanctioned: &|address| *address == Address::from(payer()),
+            ..judge(Some(&mine))
+        };
+        assert!(held(&found, &sanctioned).contains("the payer is sanctioned"));
+        assert!(deposit(&the_ref(1)).is_none());
+    });
+}
+
+/// The canister's own read finds a deposit's transfer without its terms: it waits for them.
+/// Anyone hands them over within the 24 hours: claimed off the unattributed line and
+/// credited once. Past the 24 hours it is a controller's.
+#[test]
+fn a_transfer_awaiting_its_terms_is_claimed_by_them() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let raw = cctp(the_ref(2));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        record(&found, &Judge::without_terms(), now);
+        assert_eq!(ledger().unattributed, TokenAmount::from(4_747_709_u32));
+        let base_free = ledger().pockets.base.free;
+        // past its 24 hours: a controller's, and the terms credit nothing
+        let given = given(2);
+        let late = now.checked_add(AWAIT_TERMS).unwrap().checked_add(Duration::from_secs(1)).unwrap();
+        let recorded = record(&found, &judge(Some(&given)), late);
+        assert!(recorded.mine.is_empty());
+        assert!(recorded.not[0].contains("past its 24 hours"));
+        // within them: claimed and credited
+        let later = now.checked_add(Duration::from_secs(3_600)).unwrap();
+        let recorded = record(&found, &judge(Some(&given)), later);
+        assert_eq!(
+            recorded.mine,
+            vec![PoolArrivalOutcome::Credited {
+                r#ref: the_ref(2).into_bytes().to_vec(),
+                amount: candid::Nat::from(4_747_709_u32)
+            }]
+        );
+        assert_eq!(ledger().unattributed, TokenAmount::ZERO);
+        assert_eq!(
+            ledger().pockets.base.free,
+            base_free.checked_add(TokenAmount::from(4_747_709_u32)).unwrap()
+        );
+        assert_eq!(deposit(&the_ref(2)).unwrap().status, DepositStatus::Arrived);
+        let orphan = read_state(|state| state.store().pool_orphan(&found[0].credit)).unwrap();
+        assert_eq!(orphan.status, OrphanStatus::Credited);
+        // once
+        let count = event_count();
+        assert!(record(&found, &judge(Some(&given)), later).mine.is_empty());
+        assert_eq!(event_count(), count);
+    });
+}
+
+/// Terms that came for a transfer awaiting them but that the pool does not take hold it for
+/// a controller, with why, still on the unattributed line.
+#[test]
+fn terms_refused_for_an_awaiting_transfer_hold_it() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let raw = cctp(the_ref(2));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        record(&found, &Judge::without_terms(), now);
+        let given = given(2);
+        let closed = Judge {
+            closed: Some("the books are off".to_string()),
+            ..judge(Some(&given))
+        };
+        assert!(matches!(
+            &record(&found, &closed, now).mine[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("the pool is closed")
+        ));
+        let orphan = read_state(|state| state.store().pool_orphan(&found[0].credit)).unwrap();
+        assert_eq!(orphan.status, OrphanStatus::Held);
+        assert_eq!(ledger().unattributed, TokenAmount::from(4_747_709_u32));
+        assert!(deposit(&the_ref(2)).is_none());
     });
 }
 
@@ -580,48 +641,6 @@ fn a_cctp_burn_is_swapics_runners_or_proves_nothing() {
     assert!(orphaned(&cctp(r#ref), &other_messenger));
 }
 
-/// Review fix (CCTP binding, and the loss of user funds): a CCTP arrival's payer is not
-/// bound, so one short of its registration is kept with no ref: it never closes the
-/// registration nor releases its hold (a stranger's burn under someone's ref). It is kept
-/// with the registration's payer as its refund target, so a user's own short arrival is
-/// never lost, and a stranger's only goes back to that payer.
-#[test]
-fn a_short_cctp_arrival_never_closes_a_registration() {
-    on_fresh_memory(|| {
-        crate::storage::init();
-        funded_pool(usdc(1_000));
-        let r#ref = the_ref(2);
-        let raw = cctp(r#ref);
-        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
-        crate::storage::pool::tests::register(terms(
-            2,
-            usdc(10),
-            Timestamp::from_secs(block_time(&raw) + 600).unwrap(),
-            PoolRail::Cctp,
-        ));
-        let held = ledger().pockets.icp.reserved;
-        let found = find(&parse(&raw), None, &base()).unwrap();
-        let outcomes = record(&found, now).outcomes;
-        assert!(matches!(
-            &outcomes[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the")
-        ));
-        // kept with no ref, the registration's payer its refund target
-        assert!(matches!(
-            last_step(),
-            PoolStep::Unattributed {
-                src_payer: Some(p),
-                r#ref: None,
-                ref why,
-                ..
-            } if p == payer() && why.ends_with("(payer presumed: the registration's)")
-        ));
-        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Registered);
-        assert_eq!(ledger().pockets.icp.reserved, held);
-        assert!(ledger().open.contains(&r#ref));
-    });
-}
-
 /// P13a's convention: for a CCTP or a same-chain arrival the watcher sends the Base
 /// transaction as its own source (`src_chain = 8453`, `src_tx = base_tx`). The proof is in
 /// the Base receipt alone: no source is read for them, and one given changes nothing.
@@ -652,18 +671,13 @@ fn an_eco_transfer_its_source_does_not_prove_waits_for_its_own_report() {
         let r#ref = the_ref(3);
         let (fill, source) = eco(r#ref);
         let time = block_time(&fill);
-        crate::storage::pool::tests::register(terms(
-            3,
-            usdc(4),
-            Timestamp::from_secs(time + 600).unwrap(),
-            PoolRail::Eco,
-        ));
         let now = Timestamp::from_secs(time + 5).unwrap();
         let fill = parse(&fill);
         let count = event_count();
         let wrong = parse(&sample("eco_source"));
+        let given = given(3);
         let found = find(&fill, Some((&wrong, &arbitrum())), &base()).unwrap();
-        let recorded = record(&found, now);
+        let recorded = record(&found, &judge(Some(&given)), now);
         assert!(recorded.outcomes.is_empty());
         assert_eq!(recorded.not.len(), 1);
         assert_eq!(
@@ -672,12 +686,16 @@ fn an_eco_transfer_its_source_does_not_prove_waits_for_its_own_report() {
             "nothing written, nothing marked credited"
         );
         assert!(!crate::storage::pool::credited(&found[0].credit));
-        // its own report credits it
+        // its own report credits it, its source chain the one the report read
         let found = find(&fill, Some((&parse(&source), &arbitrum())), &base()).unwrap();
         assert!(matches!(
-            &record(&found, now).outcomes[..],
+            &record(&found, &judge(Some(&given)), now).mine[..],
             [PoolArrivalOutcome::Credited { .. }]
         ));
+        let credited = deposit(&r#ref).unwrap();
+        assert_eq!(credited.terms.rail, PoolRail::Eco);
+        assert_eq!(credited.terms.src_chain, ChainId::ARBITRUM);
+        assert_eq!(credited.terms.src_payer, payer());
     });
 }
 
@@ -752,12 +770,13 @@ fn a_zero_transfer_is_nothing_and_one_refusal_stops_no_other() {
             amount: TokenAmount::ZERO,
             block: BlockNumber::new(1),
             at: None,
+            rail: PoolRail::Eco,
             proof: Proof::Orphan {
                 payer: None,
                 why: "test".into(),
             },
         };
-        let recorded = record(&[refused, found[0].clone()], now);
+        let recorded = record(&[refused, found[0].clone()], &Judge::without_terms(), now);
         assert_eq!(recorded.not.len(), 1);
         assert_eq!(recorded.outcomes.len(), 1);
     });
@@ -845,7 +864,7 @@ fn an_eco_refund_of_a_paid_payout_reopens_it() {
                 intents: vec![intent]
             }
         );
-        let recorded = record(&found, at(5));
+        let recorded = record(&found, &Judge::without_terms(), at(5));
         assert!(recorded.not.is_empty() || !recorded.outcomes.is_empty());
         let reopened = crate::storage::pool::payout(id).unwrap();
         assert_eq!(reopened.status, PayoutStatus::Waiting);
@@ -865,12 +884,12 @@ fn an_eco_refund_of_a_paid_payout_reopens_it() {
         assert_eq!(after.lines().fees_base, TokenAmount::ZERO);
         assert_eq!(after.owed, before.owed.checked_add(paid.owed()).unwrap());
         // credited once
-        assert!(record(&found, at(6)).outcomes.is_empty());
+        assert!(record(&found, &Judge::without_terms(), at(6)).outcomes.is_empty());
         // another intent's refund: no paid payout takes it, kept for a human
         let stranger = parse(&refund([0x2e; 32]));
         let mut found = find(&stranger, None, &base()).unwrap();
         found[0].credit.tx = TxHash::new([0x2f; 32]);
-        let recorded = record(&found, at(7));
+        let recorded = record(&found, &Judge::without_terms(), at(7));
         assert!(matches!(
             recorded.outcomes.as_slice(),
             [PoolArrivalOutcome::Unattributed { .. }]

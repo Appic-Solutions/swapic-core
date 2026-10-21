@@ -324,7 +324,8 @@ fn each_refusal_comes_before_anything_is_recorded() {
             with(&|r| r.terms.min_usdc = usdc(99)),
             Err(PoolError::NotAllowed(_))
         ));
-        // ckUSDC alone: one ckUSDC fee at the least, and 10 bps of 100 USDC is above it
+        // the premium is exactly 10 bps of min_usdc (P11d: no floor; every ICP fee is the
+        // user's, out of what is pulled)
         assert_eq!(
             with(&|r| r.terms.premium = TokenAmount::from(99_999_u32)),
             Err(PoolError::PremiumTooLow {
@@ -377,24 +378,24 @@ fn each_refusal_comes_before_anything_is_recorded() {
             })
         });
         assert!(matches!(sanctioned, Err(PoolError::Sanctioned(_))));
-        // a token's route: four ckUSDC fees a leg
+        // a token's route: no fee floor either, 10 bps of its 2 USDC
         let direct = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
         assert_eq!(
             checked(&SwapRequest {
                 terms: IcpSwapTerms {
-                    premium: TokenAmount::from(4 * FEE - 1),
+                    premium: TokenAmount::from(1_999_u32),
                     ..direct.terms
                 },
                 ..direct.clone()
             }),
             Err(PoolError::PremiumTooLow {
-                least: candid::Nat::from(4 * FEE)
+                least: candid::Nat::from(2_000_u32)
             })
         );
         assert!(matches!(
             checked(&SwapRequest {
                 terms: IcpSwapTerms {
-                    premium: TokenAmount::from(4 * FEE),
+                    premium: TokenAmount::from(2_000_u32),
                     ..direct.terms
                 },
                 ..direct
@@ -620,8 +621,8 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
         )
         .unwrap();
         let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
-        // two legs: eight ckUSDC fees at the least
-        request.terms.premium = TokenAmount::from(8 * FEE - 1);
+        // two legs: still 10 bps of min_usdc at the least, no fee floor
+        request.terms.premium = TokenAmount::from(1_999_u32);
         assert!(matches!(
             checked(&request),
             Err(PoolError::PremiumTooLow { .. })

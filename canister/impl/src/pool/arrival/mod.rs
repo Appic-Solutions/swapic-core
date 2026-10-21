@@ -15,22 +15,25 @@
 //!   `USDC.transfer(canister, value)` into the pool chain, beside Swapic's one
 //!   `OrderStarted(ref)`.
 //!
-//! A transfer whose proof holds names a ref; one whose proof fails for good is recorded
-//! unattributed with its payer when known, so the orphan refund (P11b) returns it. Then
-//! against the fold: registered, still `Registered`, arrived by its expiry and grace (at its
-//! block's time), at least `min_usdc`, within the pool's caps on what arrived, paid by the
-//! registered payer, never credited. An arrival whose payer is not bound (CCTP) takes its
-//! ref only as a clean credit: anything else is kept with no ref, so it never closes a
-//! registration it may not belong to. Every
-//! step of one call is appended in the message that checks it, after the last read, so the
-//! same transfer reported twice is credited once.
+//! No registration (P11d, Jeff 2026-10-21): the canister learns of a deposit only when its
+//! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
+//! the ref the order carries; the canister recomputes the ref and credits the transfer whose
+//! proof carries it, checking the terms on what arrived: the parties not sanctioned, the
+//! pool open, a swap within the per-swap cap with its ICP fees at least its path's own
+//! ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at least `min_out`;
+//! a stake within the TVL cap. Terms it does not take hold the transfer for a controller,
+//! with the terms and the payer. One deposit per ref: a second arrival under a credited ref
+//! is held. A transfer whose proof fails for good is held with its payer when known. A
+//! deposit's transfer found without its terms (the canister's own read of Base) waits 24
+//! hours for them on the unattributed line, then is held for a controller. Every step of
+//! one call is appended in the message that checks it, after the last read, so the same
+//! transfer reported twice is credited once.
 
 #[cfg(test)]
 mod tests;
 
 use crate::cctp::parse_address;
 use crate::ecdsa;
-use crate::guards::require_watcher;
 use crate::pool;
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
 use crate::state::{State, Store};
@@ -39,9 +42,45 @@ use crate::storage::{config, pool as pool_store};
 use serde_json::{json, Value};
 use settlement_api::types::pool::{PoolArrival, PoolArrivalOutcome, PoolError};
 use types::hash::PoolRef;
-use types::pool::{CreditKey, DepositStatus, PoolStep};
+use std::time::Duration;
+use types::pool::{
+    check_arrival, CreditKey, DepositKind, DepositStatus, DepositTerms, OrphanStatus,
+    PoolAccount, PoolRail, PoolStep, Registered,
+};
 use types::swapic::{self, topics, Action, Envelope};
-use types::{BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
+use types::{Address, BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
+
+/// How long a deposit's transfer found without its terms waits for them before it is a
+/// controller's to resolve (P11d, Jeff 2026-10-21).
+pub const AWAIT_TERMS: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The terms an arrival's report hands over, the ref they commit to, and the source chain
+/// the report names (proven by the Eco read; the pool chain on the other rails).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Given {
+    pub terms: DepositTerms,
+    pub r#ref: PoolRef,
+    pub src_chain: ChainId,
+}
+
+/// What a report's terms are judged with beside the fold: why the pool is closed, if it is,
+/// and the sanctions set.
+pub struct Judge<'a> {
+    pub given: Option<&'a Given>,
+    pub closed: Option<String>,
+    pub sanctioned: &'a dyn Fn(&Address) -> bool,
+}
+
+impl Judge<'_> {
+    /// A judge with no terms: every deposit's transfer awaits its own.
+    pub fn without_terms() -> Judge<'static> {
+        Judge {
+            given: None,
+            closed: None,
+            sanctioned: &|_| false,
+        }
+    }
+}
 
 /// The most one receipt read may answer.
 const MAX_RECEIPT_BYTES: u64 = 512 * 1024;
@@ -282,6 +321,8 @@ pub struct Found {
     pub block: BlockNumber,
     /// When it arrived: its block's time where the provider gives it.
     pub at: Option<Timestamp>,
+    /// The rail it came by: the Runner's same-chain payout, a CCTP mint, or else Eco.
+    pub rail: PoolRail,
     pub proof: Proof,
 }
 
@@ -343,6 +384,13 @@ pub fn find(
     let refunds = refunded_intents(base, chain);
     let mut found = Vec::new();
     for (log, from, amount) in transfers {
+        let rail = if from == chain.runner {
+            PoolRail::SameChain
+        } else if from == EvmAddress::ZERO {
+            PoolRail::Cctp
+        } else {
+            PoolRail::Eco
+        };
         let proof = if from == chain.runner {
             let classified = runner.iter().find_map(|transfer| match transfer {
                 RunnerTransfer::Payout { index, id, .. } if *index == log.index => Some(Some(*id)),
@@ -373,6 +421,7 @@ pub fn find(
             amount,
             block: base.block,
             at: log.block_time.and_then(Timestamp::from_secs),
+            rail,
             proof,
         });
     }
@@ -569,27 +618,154 @@ fn eco(
     }
 }
 
-/// What the fold makes of one transfer, judged at `now` (its block's time when known):
-/// `Arrived`, or `Unattributed` with why and the payer to refund. None when the transfer was
-/// credited already.
-pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Option<PoolStep> {
-    if state.store().is_pool_credited(&found.credit) {
-        return None;
+/// The payer, and the owner whoever it is: an EVM address as the set keys it, a principal
+/// as its text.
+fn screened(
+    payer: Option<EvmAddress>,
+    kind: &DepositKind,
+    sanctioned: &dyn Fn(&Address) -> bool,
+) -> Option<&'static str> {
+    if payer.is_some_and(|payer| sanctioned(&Address::from(payer))) {
+        return Some("the payer is sanctioned");
     }
-    let at = found.at.map_or(now, |at| at.min(now));
-    let orphan =
-        |payer: Option<EvmAddress>, why: String, r#ref: Option<PoolRef>| PoolStep::Unattributed {
-            credit: found.credit,
-            amount: found.amount,
-            src_payer: payer,
-            why,
-            block: found.block,
-            r#ref,
-        };
+    let owner = match kind.owner() {
+        PoolAccount::Evm(address) => Some(Address::from(address)),
+        PoolAccount::Icp(account) => account.owner.to_text().parse::<Address>().ok(),
+    };
+    owner
+        .is_some_and(|owner| sanctioned(&owner))
+        .then_some("the owner is sanctioned")
+}
+
+/// The terms in one line, kept with a transfer held for a controller.
+fn summary(terms: &DepositTerms) -> String {
+    let kind = match terms.kind {
+        DepositKind::Swap {
+            recipient,
+            token_out,
+            min_out,
+        } => format!(
+            "swap to {}{} of {token_out}, min_out {min_out}",
+            recipient.owner,
+            recipient
+                .subaccount
+                .map(|sub| format!(" subaccount {}", hex::encode(sub)))
+                .unwrap_or_default()
+        ),
+        DepositKind::Stake { owner } => match owner {
+            PoolAccount::Evm(address) => format!("stake for {address}"),
+            PoolAccount::Icp(account) => format!("stake for {}", account.owner),
+        },
+    };
+    format!(
+        "{kind}, premium {}, icp_fees {}, rebalance_share {}, salt {}",
+        terms.premium,
+        terms.icp_fees,
+        terms.rebalance_share,
+        hex::encode(terms.salt)
+    )
+}
+
+/// What a deposit's transfer whose terms came makes: its registration and its arrival line
+/// (the registration skipped where one waits under the ref already), or why the pool does
+/// not take it, with the terms.
+fn decide<S: Store>(
+    state: &State<S>,
+    found: &Found,
+    payer: Option<EvmAddress>,
+    given: &Given,
+    judge: &Judge<'_>,
+    now: Timestamp,
+) -> Result<Vec<PoolStep>, String> {
+    let held = |why: &str| format!("{why}; held with its terms: {}", summary(&given.terms));
+    // the source chain a report names is read on Eco only; the other rails are proven in
+    // the pool chain's receipt
+    let src_chain = match found.rail {
+        PoolRail::Eco => given.src_chain,
+        PoolRail::Cctp | PoolRail::SameChain => found.credit.chain,
+    };
+    let registration = given
+        .terms
+        .registration(found.amount, src_chain, payer, found.rail, now);
+    // one deposit per ref; a registration left waiting under it (an arrival line refused
+    // after it) is the one credited
+    let waiting = match state.store().pool_deposit(&given.r#ref) {
+        Some(deposit) if deposit.status == DepositStatus::Registered => Some(deposit),
+        Some(deposit) => {
+            return Err(held(&format!(
+                "the ref was credited already ({:?})",
+                deposit.status
+            )))
+        }
+        None => None,
+    };
+    if let Some(reason) = &judge.closed {
+        return Err(held(&format!("the pool is closed: {reason}")));
+    }
+    if let Some(why) = screened(payer, &given.terms.kind, judge.sanctioned) {
+        return Err(held(why));
+    }
+    let ledger = state.pool();
+    let registered = waiting.is_some();
+    let deposit = waiting.unwrap_or_else(|| Registered::new(registration.clone()));
+    check_arrival(&ledger, &deposit.terms).map_err(|refusal| held(&refusal.to_string()))?;
+    if found.amount < deposit.terms.min_usdc {
+        return Err(held(&format!(
+            "{} arrived, below the {} registered",
+            found.amount, deposit.terms.min_usdc
+        )));
+    }
+    ledger
+        .arrival_fits(&deposit, found.amount)
+        .map_err(|why| held(&format!("{} arrived: {why}", found.amount)))?;
+    let mut steps = Vec::with_capacity(2);
+    if !registered {
+        steps.push(PoolStep::Registered {
+            r#ref: given.r#ref,
+            deposit: registration,
+        });
+    }
+    steps.push(PoolStep::Arrived {
+        r#ref: given.r#ref,
+        credit: found.credit,
+        amount: found.amount,
+        block: found.block,
+    });
+    Ok(steps)
+}
+
+/// What the fold makes of one transfer, judged at `now` (its block's time when known, for
+/// its wait for terms): the steps to append, in order (none when it was credited already),
+/// or why nothing is (a proof this report does not make, or terms that waited too long).
+pub fn steps_for<S: Store>(
+    state: &State<S>,
+    found: &Found,
+    judge: &Judge<'_>,
+    now: Timestamp,
+) -> Result<Vec<PoolStep>, String> {
+    let credited = state.store().is_pool_credited(&found.credit);
+    let orphan = |payer: Option<EvmAddress>, why: String| PoolStep::Unattributed {
+        credit: found.credit,
+        amount: found.amount,
+        src_payer: payer,
+        why,
+        block: found.block,
+        r#ref: None,
+        awaiting_until: None,
+    };
     let (r#ref, payer) = match &found.proof {
-        Proof::Orphan { payer, why } => return Some(orphan(*payer, why.clone(), None)),
-        Proof::Unproven { .. } => return None,
+        Proof::Unproven { why } => return Err(why.clone()),
+        _ if credited
+            && !state.store().pool_orphan(&found.credit).is_some_and(|orphan| {
+                matches!(orphan.status, OrphanStatus::AwaitingTerms { .. })
+            }) =>
+        {
+            return Ok(Vec::new())
+        }
+        Proof::Orphan { payer, why } if !credited => return Ok(vec![orphan(*payer, why.clone())]),
+        Proof::Orphan { .. } => return Ok(Vec::new()),
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
+        Proof::Refund { .. } if credited => return Ok(Vec::new()),
         Proof::Refund { intents } => {
             // the paid payout whose intent was refunded, for exactly its amount
             let paid = intents.iter().find_map(|intent| {
@@ -599,7 +775,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
                     && payout.amount == Some(found.amount))
                 .then_some(id)
             });
-            return Some(match paid {
+            return Ok(vec![match paid {
                 Some(id) => PoolStep::PayoutRefunded {
                     id,
                     credit: found.credit,
@@ -609,82 +785,58 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
                 None => orphan(
                     None,
                     "an Eco refund to the canister no paid payout of that amount takes".to_string(),
-                    None,
                 ),
-            });
+            }]);
         }
     };
-    let Some(deposit) = state.store().pool_deposit(&r#ref) else {
-        return Some(orphan(
-            payer,
-            "no deposit is registered under the ref".to_string(),
-            None,
-        ));
+    let Some(given) = judge.given.filter(|given| given.r#ref == r#ref) else {
+        if credited {
+            // it awaits its terms already
+            return Ok(Vec::new());
+        }
+        let until = now
+            .checked_add(AWAIT_TERMS)
+            .unwrap_or(Timestamp::from_nanos(u64::MAX));
+        return Ok(vec![PoolStep::Unattributed {
+            credit: found.credit,
+            amount: found.amount,
+            src_payer: payer,
+            why: format!("a deposit's transfer awaiting its terms (ref {ref})", ref = r#ref),
+            block: found.block,
+            r#ref: Some(r#ref),
+            awaiting_until: Some(until),
+        }]);
     };
-    let terms = &deposit.terms;
-    // a payer the chain does not show (a CCTP arrival's is on its source chain) is not bound:
-    // such an arrival takes its ref only as a clean credit. Anything else is kept with no ref,
-    // so a stranger's burn under someone's ref never closes their registration, and with the
-    // registration's payer as its refund target, so a user's own short or late arrival is
-    // never lost (a stranger's burn under the ref only goes back to that payer).
-    let refund_to = Some(terms.src_payer);
-    let closes = payer.is_some().then_some(r#ref);
-    let presumed = if payer.is_some() {
-        ""
-    } else {
-        " (payer presumed: the registration's)"
-    };
-    if deposit.status != DepositStatus::Registered {
-        return Some(orphan(
-            payer.or(refund_to),
-            format!("the deposit is {:?}{presumed}", deposit.status),
-            closes,
-        ));
+    if credited {
+        // a transfer awaiting its terms, which came: claimed while it may be
+        let awaiting = state
+            .store()
+            .pool_orphan(&found.credit)
+            .map(|orphan| orphan.status);
+        if let Some(OrphanStatus::AwaitingTerms { until, .. }) = awaiting {
+            if now > until {
+                return Err(
+                    "the transfer waited for its terms past its 24 hours: it is held for a controller"
+                        .to_string(),
+                );
+            }
+        }
+        return Ok(match decide(state, found, payer, given, judge, now) {
+            Ok(steps) => std::iter::once(PoolStep::TermsClaimed {
+                credit: found.credit,
+                refused: None,
+            })
+            .chain(steps)
+            .collect(),
+            Err(why) => vec![PoolStep::TermsClaimed {
+                credit: found.credit,
+                refused: Some(why),
+            }],
+        });
     }
-    if let Some(paid_by) = payer.filter(|paid_by| *paid_by != terms.src_payer) {
-        // another payer's money under this ref: theirs to get back, and the registration
-        // stays the user's
-        return Some(orphan(
-            Some(paid_by),
-            "paid by another than the registered payer".to_string(),
-            None,
-        ));
-    }
-    let grace = state
-        .pool()
-        .settings
-        .map(|settings| settings.deposit_grace)
-        .unwrap_or_default();
-    if at > terms.credit_until(grace) {
-        return Some(orphan(
-            refund_to,
-            format!("arrived past its expiry and grace{presumed}"),
-            closes,
-        ));
-    }
-    if found.amount < terms.min_usdc {
-        return Some(orphan(
-            refund_to,
-            format!(
-                "{} arrived, below the {} registered{presumed}",
-                found.amount, terms.min_usdc
-            ),
-            closes,
-        ));
-    }
-    // the caps, on what arrived rather than what was registered
-    if let Err(why) = state.pool().arrival_fits(&deposit, found.amount) {
-        return Some(orphan(
-            refund_to,
-            format!("{} arrived: {why}{presumed}", found.amount),
-            closes,
-        ));
-    }
-    Some(PoolStep::Arrived {
-        r#ref,
-        credit: found.credit,
-        amount: found.amount,
-        block: found.block,
+    Ok(match decide(state, found, payer, given, judge, now) {
+        Ok(steps) => steps,
+        Err(why) => vec![orphan(payer, why)],
     })
 }
 
@@ -693,47 +845,85 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> Op
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recorded {
     pub outcomes: Vec<PoolArrivalOutcome>,
+    /// The outcomes of the transfers whose proof carries the report's ref.
+    pub mine: Vec<PoolArrivalOutcome>,
+    /// Whether any transfer's proof carries the report's ref.
+    pub carried: bool,
     pub not: Vec<String>,
+}
+
+/// The outcome a transfer's last appended step answers.
+fn outcome_of(step: &PoolStep) -> Option<PoolArrivalOutcome> {
+    match step {
+        PoolStep::Arrived { r#ref, amount, .. } => Some(PoolArrivalOutcome::Credited {
+            r#ref: r#ref.into_bytes().to_vec(),
+            amount: candid::Nat::from(*amount),
+        }),
+        PoolStep::Unattributed { amount, why, .. } => Some(PoolArrivalOutcome::Unattributed {
+            amount: candid::Nat::from(*amount),
+            why: why.clone(),
+        }),
+        // an Eco refund credited back to its payout, named by the payout's ref
+        PoolStep::PayoutRefunded { id, amount, .. } => Some(PoolArrivalOutcome::Credited {
+            r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
+            amount: candid::Nat::from(*amount),
+        }),
+        _ => None,
+    }
 }
 
 /// Appends what `found` proves, in this message, each transfer on its own: the ones credited
 /// already are left out, the unproven ones left for their own report, and a step the fold
-/// refuses is noted and the rest recorded.
-pub fn record(found: &[Found], now: Timestamp) -> Recorded {
+/// refuses is noted and the rest of that transfer's steps left out.
+pub fn record(found: &[Found], judge: &Judge<'_>, now: Timestamp) -> Recorded {
     let mut recorded = Recorded::default();
     for one in found {
-        if let Proof::Unproven { why } = &one.proof {
-            recorded.not.push(why.clone());
-            continue;
-        }
-        let Some(step) = read_state(|state| step_for(state, one, now)) else {
-            continue;
-        };
-        let outcome = match &step {
-            PoolStep::Arrived { r#ref, amount, .. } => PoolArrivalOutcome::Credited {
-                r#ref: r#ref.into_bytes().to_vec(),
-                amount: candid::Nat::from(*amount),
-            },
-            PoolStep::Unattributed { amount, why, .. } => PoolArrivalOutcome::Unattributed {
-                amount: candid::Nat::from(*amount),
-                why: why.clone(),
-            },
-            // an Eco refund credited back to its payout, named by the payout's ref
-            PoolStep::PayoutRefunded { id, amount, .. } => PoolArrivalOutcome::Credited {
-                r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
-                amount: candid::Nat::from(*amount),
-            },
-            _ => unreachable!("BUG: step_for answers an arrival, a refund or an orphan"),
-        };
-        match pool_store::record_at(step, now) {
-            Ok(_) => recorded.outcomes.push(outcome),
-            Err(error) => {
-                pool::log(&format!(
-                    "the pool arrival {:?} was refused: {error}",
-                    one.credit
-                ));
-                recorded.not.push(error.to_string());
+        let mine = matches!(
+            (&one.proof, judge.given),
+            (Proof::Deposit { r#ref, .. }, Some(given)) if *r#ref == given.r#ref
+        );
+        recorded.carried |= mine;
+        let steps = match read_state(|state| steps_for(state, one, judge, now)) {
+            Ok(steps) => steps,
+            Err(why) => {
+                recorded.not.push(why);
+                continue;
             }
+        };
+        let mut outcome = None;
+        for step in steps {
+            let refused_why = match &step {
+                PoolStep::TermsClaimed {
+                    refused: Some(why), ..
+                } => Some(why.clone()),
+                _ => None,
+            };
+            let answer = outcome_of(&step);
+            match pool_store::record_at(step, now) {
+                Ok(_) => {
+                    outcome = answer.or(refused_why.map(|why| {
+                        PoolArrivalOutcome::Unattributed {
+                            amount: candid::Nat::from(one.amount),
+                            why,
+                        }
+                    }));
+                }
+                Err(error) => {
+                    pool::log(&format!(
+                        "ALERT: the pool arrival {:?} was refused: {error}",
+                        one.credit
+                    ));
+                    recorded.not.push(error.to_string());
+                    outcome = None;
+                    break;
+                }
+            }
+        }
+        if let Some(outcome) = outcome {
+            if mine {
+                recorded.mine.push(outcome.clone());
+            }
+            recorded.outcomes.push(outcome);
         }
     }
     recorded
@@ -859,10 +1049,11 @@ async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
 }
 
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival), proves every
-/// transfer to the canister in it, and records them.
+/// transfer to the canister in it, and records them on `given`'s terms.
 pub async fn read_and_record(
     base_tx: TxHash,
     source: Option<(ChainId, TxHash)>,
+    given: Option<&Given>,
 ) -> Result<Recorded, PoolError> {
     let chain = pool_chain().await?;
     let base = read_base(&chain, base_tx).await?;
@@ -891,14 +1082,21 @@ pub async fn read_and_record(
         &chain,
     )
     .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
-    // after the last read: the credited set and the append are in this one message
+    // after the last read: the credited set, the pool's guard and the append are in this
+    // one message
     pool::require_running()?;
-    Ok(record(&found, pool::now()))
+    let judge = Judge {
+        given,
+        closed: pool::pool_closed(),
+        sanctioned: &crate::storage::sanctions::is_sanctioned,
+    };
+    Ok(record(&found, &judge, pool::now()))
 }
 
-/// Watcher-only door: the body of `note_pool_arrival`.
+/// Anyone's door (P11d: the watcher, or the user's app as a backup): the body of
+/// `note_pool_arrival`. The canister trusts only the chain and the fingerprint: the terms
+/// credit only the transfer whose proof carries the ref they commit to.
 pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
-    require_watcher().map_err(pool::guard_error)?;
     pool::require_running()?;
     let base_tx = TxHash::new(
         settlement_api::types::pool::bytes32("base_tx", &arrival.base_tx)
@@ -911,13 +1109,33 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
             .map_err(PoolError::from)?;
         Some((ChainId::new(arrival.src_chain), TxHash::new(tx)))
     };
-    let recorded = read_and_record(base_tx, source).await?;
+    let terms = arrival.terms.into_domain().map_err(PoolError::from)?;
+    // a fee the ref does not commit would let anyone hand the user's ref other terms
+    if !terms.is_canonical() {
+        return Err(PoolError::BadArrival(
+            "the terms carry a fee their ref does not commit".to_string(),
+        ));
+    }
+    let r#ref = terms
+        .pool_ref()
+        .ok_or_else(|| PoolError::BadArrival("the terms' fees fit no ref".to_string()))?;
+    let given = Given {
+        terms,
+        r#ref,
+        src_chain: ChainId::new(arrival.src_chain),
+    };
+    let recorded = read_and_record(base_tx, source, Some(&given)).await?;
     let credited = recorded
-        .outcomes
+        .mine
         .iter()
         .find(|outcome| matches!(outcome, PoolArrivalOutcome::Credited { .. }));
-    if let Some(outcome) = credited.or(recorded.outcomes.first()) {
+    if let Some(outcome) = credited.or(recorded.mine.first()) {
         return Ok(outcome.clone());
+    }
+    if !recorded.carried {
+        return Err(PoolError::BadArrival(recorded.not.first().cloned().unwrap_or_else(
+            || "no transfer in the receipt carries the terms' ref".to_string(),
+        )));
     }
     match recorded.not.first() {
         Some(why) => Err(PoolError::BadArrival(why.clone())),
