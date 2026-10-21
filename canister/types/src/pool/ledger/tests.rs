@@ -1052,3 +1052,45 @@ fn the_premium_floor_is_what_the_pool_pays_in_ckusdc() {
         Some(TokenAmount::from(1_000_001_u32))
     );
 }
+
+/// Review fix (head of line): the queue stays first in first out, its head's need of the ICP
+/// pocket is read off the ledger (what P11c's urgent rebalance moves), with when it became
+/// the head; and a queued payout never fails for a human, so it never blocks the queue for
+/// good.
+#[test]
+fn the_queues_head_has_its_need_and_its_wait_and_never_fails() {
+    let mut pool = funded(usdc(100));
+    let first = register(&mut pool, swap(1, usdc(300), usdc(1)));
+    let second = register(&mut pool, swap(2, usdc(50), usdc(1)));
+    assert_eq!(pool.ledger.queue_need(), None);
+    pool.step(PoolStep::Arrived {
+        r#ref: first,
+        credit: credit(1),
+        amount: usdc(300),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    // 299 and its fee held once it starts, 100 free
+    let held = usdc(299).checked_add(TokenAmount::from(FEE)).unwrap();
+    assert_eq!(
+        pool.ledger.queue_need(),
+        Some(held.checked_sub(usdc(100)).unwrap())
+    );
+    assert_eq!(pool.ledger.head_since, Some(Timestamp::from_nanos(1)));
+    pool.step(PoolStep::Arrived {
+        r#ref: second,
+        credit: credit(2),
+        amount: usdc(50),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    // the head's wait does not move for what queues behind it
+    assert_eq!(pool.ledger.head_since, Some(Timestamp::from_nanos(1)));
+    assert_eq!(
+        pool.step(PoolStep::AttemptFailed {
+            r#ref: first,
+            why: "no settings".into()
+        }),
+        Err(PoolStepError::Terms("a queued payout has not started"))
+    );
+}

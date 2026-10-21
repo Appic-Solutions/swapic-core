@@ -96,6 +96,10 @@ pub struct PoolLedger {
     /// out: credited and owed, and held only when they start.
     #[n(16)]
     pub queue: PayoutQueue,
+    /// When the queue's head became its head: how long it has waited, which P11c's urgent
+    /// rebalance and the alert read.
+    #[n(17)]
+    pub head_since: Option<Timestamp>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -360,6 +364,15 @@ impl PoolLedger {
         sat_sub(self.pockets.icp.free, self.queue.total())
     }
 
+    /// What the queue's head still needs of the ICP pocket: what it holds, less the free
+    /// ckUSDC. Nothing when the queue is empty or its head is covered. What P11c's urgent
+    /// rebalance moves to ICP.
+    pub fn queue_need(&self) -> Option<TokenAmount> {
+        let (_, held) = self.queue.head()?;
+        held.checked_sub(self.pockets.icp.free)
+            .filter(|need| *need > TokenAmount::ZERO)
+    }
+
     /// What a stake of `amount` mints now.
     pub fn mint_now(&self, amount: TokenAmount) -> Option<Shares> {
         Shares::mint_for(amount, self.total_assets(), self.total_shares)
@@ -525,6 +538,10 @@ impl PoolLedger {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
+                // a queued payout has not started: it waits, and never fails for a human
+                if self.queue.0.iter().any(|(queued, _)| queued == r#ref) {
+                    return Err(PoolStepError::Terms("a queued payout has not started"));
+                }
                 if !target.in_payout() {
                     return Err(PoolStepError::Terms("only a payout in progress fails"));
                 }
@@ -659,6 +676,9 @@ impl PoolLedger {
                         // first in first out until the pocket's free ckUSDC covers them
                         if let Ok(held) = ledger.arrival_fits(&deposit, *amount) {
                             deposit.held = Some(held);
+                            if ledger.queue.0.is_empty() {
+                                ledger.head_since = Some(at);
+                            }
                             ledger.queue.0.push((*r#ref, held));
                         }
                     }
@@ -715,6 +735,8 @@ impl PoolLedger {
             PoolStep::PayoutStarted { r#ref, attempt } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     ledger.queue.0.retain(|(queued, _)| queued != r#ref);
+                    // the next head waits from now
+                    ledger.head_since = (!ledger.queue.0.is_empty()).then_some(at);
                     let held = deposit.held();
                     let icp = &mut ledger.pockets.icp;
                     icp.free = sat_sub(icp.free, held);

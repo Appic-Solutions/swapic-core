@@ -647,3 +647,125 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
         assert_eq!(ledger().pockets.icp.reserved, TokenAmount::ZERO);
     });
 }
+
+/// Review fix (head of line, and fix 10): a queued head the ICP pocket cannot cover holds
+/// back only the payouts behind it. With the pool closed, what moves nothing out still runs
+/// (a stake's pull asked again, an arrived stake's mint); with it open, the payout already
+/// started and the withdrawal are paid around the head, and the head, once it has waited a
+/// books interval, is alerted on.
+#[test]
+fn a_waiting_head_holds_back_only_what_queues_behind_it() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(400));
+        let arrive = |byte: u8, amount: TokenAmount| {
+            let r#ref = register(swap_terms(byte, usdc(10), usdc(1), at(1_000)));
+            record_at(
+                PoolStep::Arrived {
+                    r#ref,
+                    credit: credit(byte.into()),
+                    amount,
+                    block: BlockNumber::new(5),
+                },
+                at(3),
+            )
+            .unwrap();
+            r#ref
+        };
+        // a payout already started, holding 49.01
+        let started = arrive(1, usdc(50));
+        record_at(
+            PoolStep::PayoutStarted {
+                r#ref: started,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: started.into_bytes(),
+                    path: PayoutPath::Ckusdc,
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+        // a withdrawal of 100 by the staker, reserved
+        let owner = account(200);
+        let id = PoolOpId::new([0x61; 32]);
+        let ledger_now = ledger();
+        let burned = Shares::burn_for(
+            usdc(100),
+            ledger_now.total_assets(),
+            ledger_now.total_shares,
+        )
+        .unwrap();
+        record_at(
+            PoolStep::WithdrawStarted {
+                id,
+                owner,
+                burned,
+                usdc: usdc(100),
+                to: owner,
+                token_out: ckusdc(),
+                min_out: 0,
+                attempt: PayoutAttempt {
+                    created_at: at(4),
+                    memo: id.into_bytes(),
+                    path: PayoutPath::Ckusdc,
+                },
+            },
+            at(4),
+        )
+        .unwrap();
+        // the head: 300 arrives, its 299.01 more than the 250.99 free
+        let head = arrive(2, usdc(300));
+        assert!(ledger().queue_need().is_some());
+        // an arrived EVM stake to mint, and an ICP stake's pull to ask again
+        let staked = register(types::pool::Registration {
+            kind: DepositKind::Stake {
+                owner: PoolAccount::Icp(account(3)),
+            },
+            premium: TokenAmount::ZERO,
+            ..swap_terms(3, usdc(10), TokenAmount::ZERO, at(1_000))
+        });
+        record_at(
+            PoolStep::Arrived {
+                r#ref: staked,
+                credit: credit(3),
+                amount: usdc(10),
+                block: BlockNumber::new(5),
+            },
+            at(3),
+        )
+        .unwrap();
+        let pull = PoolOpId::new([0x62; 32]);
+        record_at(
+            PoolStep::StakeStarted {
+                id: pull,
+                owner: PoolAccount::Icp(account(4)),
+                from: account(4),
+                amount: usdc(1),
+                created_at: at(4),
+            },
+            at(4),
+        )
+        .unwrap();
+
+        let fake = Fake::default();
+        block_on(drive_with(&fake, clock, &closed_pool));
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![format!("pull {}", usdc(1))],
+            "closed: the pull is asked again, nothing goes out"
+        );
+        assert!(
+            deposit(&staked).unwrap().minted.is_some(),
+            "and the stake is minted"
+        );
+
+        let a_while_later = || at(4 + 601_000_000_000);
+        block_on(drive_with(&fake, a_while_later, &open_pool));
+        assert_eq!(deposit(&started).unwrap().status, DepositStatus::Paid);
+        assert!(ledger().pending.is_empty(), "the withdrawal is paid");
+        assert_eq!(deposit(&head).unwrap().status, DepositStatus::Arrived);
+        assert_eq!(ledger().queue.head().map(|(r#ref, _)| r#ref), Some(head));
+        assert_eq!(ALERTED_HEAD.with(|alerted| alerted.get()), Some(head));
+    });
+}

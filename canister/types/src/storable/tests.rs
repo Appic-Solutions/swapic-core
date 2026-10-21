@@ -729,6 +729,8 @@ fn pool_samples() -> Vec<Sample> {
         // empty, so this sample's bytes stay the ones the golden pins; the ledger appended
         // at the end of the pool's samples pins it
         queue: crate::pool::PayoutQueue::default(),
+        // absent, as the line above pins it; the last ledger sample pins it
+        head_since: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![
@@ -736,6 +738,10 @@ fn pool_samples() -> Vec<Sample> {
             (PoolRef::new([0xb6; 32]), TokenAmount::from(1u128 << 70)),
         ]),
         ..ledger.clone()
+    };
+    let waiting = PoolLedger {
+        head_since: Some(Timestamp::from_nanos(1_800_000_000_000_000_183)),
+        ..queued.clone()
     };
     let deposit = Registered {
         terms: Registration {
@@ -806,6 +812,7 @@ fn pool_samples() -> Vec<Sample> {
         sample("credited transfer key", credit),
         sample("pool deposit with what it holds", holding),
         sample("pool ledger with payouts queued", queued),
+        sample("pool ledger whose queue's head waits", waiting),
     ]
 }
 

@@ -545,7 +545,7 @@ pub async fn drive_deposit(
         let settings = ledger
             .settings
             .clone()
-            .ok_or_else(|| Stop::Failed("the pool has no settings".to_string()))?;
+            .ok_or_else(|| Stop::Retry("the pool has no settings".to_string()))?;
         match (&deposit.status, deposit.terms.kind) {
             (DepositStatus::Arrived, DepositKind::Stake { owner }) => {
                 let minted = deposit
@@ -765,94 +765,161 @@ pub fn guard() -> Result<(), String> {
     crate::pool::pool_closed().map_or(Ok(()), Err)
 }
 
-/// One pass over every payout the pool owes: nothing while the pool is closed.
+/// One pass over everything the pool owes (`drive_with`).
 pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy) -> usize {
     drive_with(ledgers, clock, &guard).await
 }
 
-/// [`drive`] with its guard given.
+thread_local! {
+    // Heap by necessity, and only for the log: the queue's head already alerted on, so a
+    // head that waits raises one line and not one per drive. An upgrade may repeat it once.
+    static ALERTED_HEAD: std::cell::Cell<Option<PoolRef>> = const { std::cell::Cell::new(None) };
+}
+
+/// One line for ops when the queue's head has waited longer than one books interval for
+/// the ICP pocket to cover it: what P11c's urgent rebalance is for.
+fn alert_if_waited(now: Timestamp) {
+    let ledger = pool_store::ledger();
+    let (Some((head, _)), Some(since), Some(need)) =
+        (ledger.queue.head(), ledger.head_since, ledger.queue_need())
+    else {
+        return;
+    };
+    let interval = crate::storage::config::get().books_check_interval.0;
+    if now.saturating_duration_since(since) <= interval
+        || ALERTED_HEAD.with(|alerted| alerted.get()) == Some(head)
+    {
+        return;
+    }
+    ALERTED_HEAD.with(|alerted| alerted.set(Some(head)));
+    crate::pool::log(&format!(
+        "ALERT: the pool payout {head} has waited {:?} for the ICP pocket, which is {need} short",
+        now.saturating_duration_since(since)
+    ));
+}
+
+/// One pass over everything the pool owes. What moves nothing out runs whatever the pool's
+/// guard says: an ICP stake's pull asked again, an arrived stake's mint. Then, while the pool
+/// is open: the payouts already started, the queued ones first in first out (stopping at the
+/// first the ICP pocket does not cover, which waits and is alerted on), and the withdrawals.
+/// A head that waits holds back only the payouts queued behind it.
 pub async fn drive_with(
     ledgers: &impl Ledgers,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
-    if guard().is_err() {
-        return 0;
-    }
     let now = clock();
-    let (deposits, pending): (Vec<PoolRef>, Vec<(PoolOpId, bool)>) = read_state(|state| {
+    let work = read_state(|state| {
         let ledger = state.store().pool_ledger();
-        let pending = ledger
-            .pending
-            .iter()
-            .filter_map(|(id, op)| match op {
+        let mut work = Work::default();
+        for (id, op) in &ledger.pending {
+            match op {
                 // a pull too old to deduplicate is a human's
                 PendingOp::Stake { created_at, .. }
                     if now.saturating_duration_since(*created_at) < DEDUP_WINDOW =>
                 {
-                    Some((*id, false))
+                    work.pulls.push(*id)
                 }
-                PendingOp::Stake { .. } => None,
-                PendingOp::Withdraw { payout, .. } if payout.failed.is_none() => Some((*id, true)),
-                PendingOp::Withdraw { .. } => None,
-            })
-            .collect();
-        // the payouts already started and the arrived stakes; a payout stopped for a human
-        // stays in `paying` for the ICP check, and is not driven
-        let mut deposits = Vec::new();
+                PendingOp::Stake { .. } => {}
+                PendingOp::Withdraw { payout, .. } if payout.failed.is_none() => {
+                    work.withdrawals.push(*id)
+                }
+                PendingOp::Withdraw { .. } => {}
+            }
+        }
+        // a payout stopped for a human stays in `paying` for the ICP check, and is not driven
         for r#ref in &ledger.paying {
             let Some(deposit) = state.store().pool_deposit(r#ref) else {
                 continue;
             };
-            let stake = !deposit.terms.kind.is_swap();
-            if deposit.status == DepositStatus::Paying
-                || (deposit.status == DepositStatus::Arrived && stake)
-            {
-                deposits.push(*r#ref);
+            match (&deposit.status, deposit.terms.kind.is_swap()) {
+                (DepositStatus::Arrived, false) => work.mints.push(*r#ref),
+                (DepositStatus::Paying, true) => work.started.push(*r#ref),
+                _ => {}
             }
         }
-        // then the queued payouts, first in first out
-        deposits.extend(ledger.queue.0.iter().map(|(r#ref, _)| *r#ref));
-        (deposits, pending)
+        work.queue = ledger.queue.0.iter().map(|(r#ref, _)| *r#ref).collect();
+        work
     });
     let mut acted = 0;
-    for r#ref in deposits {
-        if guard().is_err() {
-            break;
+    let mut tally = |stop: Option<Stop>, id: PoolRef, counts: bool| match stop {
+        None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => acted += 1,
+        Some(Stop::Failed(why)) if counts => fail(id, why, clock()),
+        Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
+            crate::pool::log(&format!("the pool's {id} waits: {why}"))
         }
+    };
+    for id in work.pulls {
+        let Some(_busy) = Busy::take(id.into_bytes()) else {
+            continue;
+        };
+        tally(
+            pull_stake(ledgers, id, clock).await.err(),
+            payout_ref(id),
+            false,
+        );
+    }
+    for r#ref in work.mints {
         let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
             continue;
         };
+        tally(
+            drive_deposit(ledgers, r#ref, clock, guard).await.err(),
+            r#ref,
+            true,
+        );
+    }
+    if guard().is_err() {
+        return acted;
+    }
+    for r#ref in work.started {
+        let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
+            continue;
+        };
+        tally(
+            drive_deposit(ledgers, r#ref, clock, guard).await.err(),
+            r#ref,
+            true,
+        );
+    }
+    for r#ref in work.queue {
+        if guard().is_err() {
+            return acted;
+        }
+        let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
+            break;
+        };
         match drive_deposit(ledgers, r#ref, clock, guard).await {
-            Ok(()) => acted += 1,
-            Err(Stop::Failed(why)) => fail(r#ref, why, clock()),
-            Err(Stop::Later) | Err(Stop::Again) => acted += 1,
             // first in first out: nothing behind a queued payout starts ahead of it
-            Err(Stop::Queued) => break,
-            Err(Stop::Append(why)) | Err(Stop::Retry(why)) => {
-                crate::pool::log(&format!("the pool payout {} waits: {why}", r#ref))
+            Err(Stop::Queued) => {
+                alert_if_waited(now);
+                break;
             }
+            other => tally(other.err(), r#ref, true),
         }
     }
-    for (id, withdraw) in pending {
+    for id in work.withdrawals {
         if guard().is_err() {
-            break;
+            return acted;
         }
         let Some(_busy) = Busy::take(id.into_bytes()) else {
             continue;
         };
-        let stop = if withdraw {
-            drive_withdrawal(ledgers, id, clock, guard).await.err()
-        } else {
-            pull_stake(ledgers, id, clock).await.err()
-        };
-        match stop {
-            None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => acted += 1,
-            Some(Stop::Failed(why)) if withdraw => fail(payout_ref(id), why, clock()),
-            Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
-                crate::pool::log(&format!("the pool operation {id} waits: {why}"))
-            }
-        }
+        tally(
+            drive_withdrawal(ledgers, id, clock, guard).await.err(),
+            payout_ref(id),
+            true,
+        );
     }
     acted
+}
+
+/// What one drive works through, read once at its start.
+#[derive(Default)]
+struct Work {
+    pulls: Vec<PoolOpId>,
+    mints: Vec<PoolRef>,
+    started: Vec<PoolRef>,
+    queue: Vec<PoolRef>,
+    withdrawals: Vec<PoolOpId>,
 }
