@@ -9,21 +9,26 @@ fn a_read_covers_at_most_five_hundred_blocks_from_its_cursor() {
     let block = BlockNumber::new;
     // no cursor: from the lookback
     assert_eq!(
-        range(None, block(10_000)),
+        range(None, None, block(10_000)),
         Some((block(9_400), block(9_899)))
     );
     // a cursor behind the head: from the block after it
     assert_eq!(
-        range(Some(block(9_950)), block(10_000)),
+        range(Some(block(9_950)), None, block(10_000)),
         Some((block(9_951), block(10_000)))
+    );
+    // a cursor inside a block: from that block, where the read goes on
+    assert_eq!(
+        range(Some(block(9_950)), Some(7), block(10_000)),
+        Some((block(9_950), block(10_000)))
     );
     // a cursor older than the lookback: from the lookback
     assert_eq!(
-        range(Some(block(1)), block(10_000)),
+        range(Some(block(1)), None, block(10_000)),
         Some((block(9_400), block(9_899)))
     );
     // nothing new
-    assert_eq!(range(Some(block(10_000)), block(10_000)), None);
+    assert_eq!(range(Some(block(10_000)), None, block(10_000)), None);
 }
 
 /// One transfer log of `eth_getLogs`, of `amount` micro USDC.
@@ -60,9 +65,10 @@ fn every_transfer_reads_in_block_and_log_order() {
     );
 }
 
-/// Review fix 6: a pass reads each transaction once, never one whose every transfer is
-/// credited or dust, at most the cap of receipts in whole blocks; a first block above the cap
-/// is read up to it and the rest passed over, so the cursor always moves.
+/// Review fix 6, and the cursor rule: a pass reads each transaction once, never one whose
+/// every transfer is credited or dust, at most its cap of receipts out of its cap of
+/// transfers considered, and is done only through the transfer before the first worth
+/// reading that it did not read, inside a block if need be.
 #[test]
 fn a_pass_reads_what_is_worth_it_up_to_its_cap() {
     let usdc = 1_000_000;
@@ -80,76 +86,62 @@ fn a_pass_reads_what_is_worth_it_up_to_its_cap() {
     ]);
     let logged = logged(&logs);
     let credited = |key: &CreditKey| key.tx == TxHash::new([3; 32]);
-    let tx = |byte: u8, block: u64| (TxHash::new([byte; 32]), BlockNumber::new(block));
+    let at = |block: u64, log: u64| (BlockNumber::new(block), log);
+    let tx = |byte: u8, block: u64, log: u64| (TxHash::new([byte; 32]), at(block, log));
     let plan = |receipts: usize, transfers: usize| {
         plan_pass(&logged, ChainId::BASE, credited, receipts, transfers)
     };
     assert_eq!(
         plan(20, 100),
         PassPlan {
-            read: vec![tx(1, 10), tx(4, 11), tx(5, 11), tx(6, 12)],
-            left: None,
-            cut: None,
+            read: vec![tx(1, 10, 0), tx(4, 11, 0), tx(5, 11, 1), tx(6, 12, 0)],
+            done: Done::Range,
         }
     );
-    // a cap of two: block 10 whole, then block 11 does not fit and is left whole
+    // a cap of two: done through block 10's last transfer, and block 11's second is not
+    // passed: done through its first
     assert_eq!(
         plan(2, 100),
         PassPlan {
-            read: vec![tx(1, 10)],
-            left: Some(BlockNumber::new(11)),
-            cut: None,
+            read: vec![tx(1, 10, 0), tx(4, 11, 0)],
+            done: Done::Through(at(11, 0)),
         }
     );
-    // a cap of one with block 11 first: one read, the other passed over
-    let from_11 = super::logged(&serde_json::json!([
-        log(4, 11, 0, 5 * usdc),
-        log(5, 11, 1, DUST),
-        log(6, 12, 0, 5 * usdc)
-    ]));
-    assert_eq!(
-        plan_pass(&from_11, ChainId::BASE, credited, 1, 100),
-        PassPlan {
-            read: vec![tx(4, 11)],
-            left: Some(BlockNumber::new(12)),
-            cut: Some((BlockNumber::new(11), 1)),
-        }
-    );
-    // four transfers considered: block 11's second is not, so block 11 is not whole
+    // five transfers considered: block 11's first is the last of them
     assert_eq!(
         plan(20, 5),
         PassPlan {
-            read: vec![tx(1, 10)],
-            left: Some(BlockNumber::new(11)),
-            cut: None,
+            read: vec![tx(1, 10, 0), tx(4, 11, 0)],
+            done: Done::Through(at(11, 0)),
         }
     );
-    // two considered, and they are block 10's own: block 10 is read as far as considered,
-    // the rest of it passed over
+    // a cap of one: nothing passed that was not read
     assert_eq!(
-        plan(20, 2),
+        plan(1, 100),
         PassPlan {
-            read: vec![tx(1, 10)],
-            left: Some(BlockNumber::new(11)),
-            cut: Some((BlockNumber::new(10), 2)),
+            read: vec![tx(1, 10, 0)],
+            done: Done::Through(at(10, 3)),
         }
     );
+    // a receipt that failed for now holds the read before its first transfer
+    assert_eq!(
+        done_after(&logged, Done::Range, Some(at(11, 0))),
+        Done::Through(at(10, 3))
+    );
+    assert_eq!(
+        done_after(&logged, Done::Range, Some(at(10, 0))),
+        Done::Nothing
+    );
+    assert_eq!(done_after(&logged, Done::Range, None), Done::Range);
 }
 
-/// Review fix 6: an answer too large is asked again over half the blocks, down to one; the
-/// cursor stops before the first block left, and stays where it is when that is the first.
+/// Review fix 6: an answer too large is asked again over half the blocks, down to one.
 #[test]
-fn a_range_halves_and_the_cursor_stops_before_what_is_left() {
+fn a_range_halves_down_to_one_block() {
     let block = BlockNumber::new;
     assert_eq!(halved(block(100), block(599)), Some(block(349)));
     assert_eq!(halved(block(100), block(101)), Some(block(100)));
     assert_eq!(halved(block(100), block(100)), None);
-    assert_eq!(cursor_after(block(100), block(599), None), Some(block(599)));
-    assert_eq!(
-        cursor_after(block(100), block(599), Some(block(250))),
-        Some(block(249))
-    );
-    assert_eq!(cursor_after(block(100), block(599), Some(block(100))), None);
 }
 
 /// Review fix 6: one pass at a time, and a refused one never ends the running one.
@@ -298,14 +290,14 @@ fn a_single_overfull_block_is_passed_over() {
             ..FakeBase::default()
         };
         let first = pass(&base);
-        assert_eq!(first.cursor, Some(BlockNumber::new(100)));
+        assert_eq!(first.cursor, Some((BlockNumber::new(100), None)));
         assert_eq!(first.receipts, 0);
         assert!(first.alerts[0].starts_with("ALERT: block 100"));
         assert!(base.transfer_reads.get() <= 10);
         // 101 and the 500 blocks from it
         let second = pass(&base);
         assert_eq!(second.receipts, 1);
-        assert_eq!(second.cursor, Some(BlockNumber::new(600)));
+        assert_eq!(second.cursor, Some((BlockNumber::new(600), None)));
     });
 }
 
@@ -325,20 +317,21 @@ fn a_flood_of_dust_reads_no_receipt() {
         };
         let first = pass(&base);
         assert_eq!(first.receipts, 0);
-        // the thousandth transfer is block 299's last: block 300 is left whole
-        assert_eq!(first.cursor, Some(BlockNumber::new(299)));
+        // done through the thousandth transfer, block 299's last
+        assert_eq!(first.cursor, Some((BlockNumber::new(299), Some(4))));
         // from block 300 to the safe block
         let second = pass(&base);
         assert_eq!(second.receipts, 0);
-        assert_eq!(second.cursor, Some(BlockNumber::new(700)));
+        assert_eq!(second.cursor, Some((BlockNumber::new(700), None)));
         assert!(base.receipts.borrow().is_empty());
     });
 }
 
-/// Review (backup, resource cap): no pass reads more receipts than its cap, whatever one
-/// block holds; a first block above it is read up to the cap and the rest passed over with
-/// an alert; a receipt that can never be read is passed over, one that failed for now holds
-/// the cursor before its block.
+/// Review (backup, resource cap, and the cursor rule): no pass reads more receipts than its
+/// cap, whatever one block holds, and the read never passes a transfer worth reading that
+/// it did not read: a block of thirty is read over two passes, from inside it. A receipt
+/// that can never be read is passed over with an alert; one that failed for now holds the
+/// cursor before it, and is read again.
 #[test]
 fn no_pass_reads_more_receipts_than_its_cap() {
     on_fresh_memory(|| {
@@ -365,21 +358,25 @@ fn no_pass_reads_more_receipts_than_its_cap() {
             ],
             ..FakeBase::default()
         };
-        let first = pass(&base);
-        assert_eq!(first.receipts, MAX_RECEIPTS_PER_PASS);
-        assert!(first.alerts[0].starts_with("ALERT: block 120 holds 10"));
-        assert_eq!(first.cursor, Some(BlockNumber::new(129)));
-        let second = pass(&base);
-        assert_eq!(second.receipts, 15);
-        assert_eq!(second.cursor, Some(BlockNumber::new(130)));
-        // block 131's fifteen, the receipt that never reads (passed over), and the one that
-        // failed for now (the cursor stops before it)
-        let third = pass(&base);
-        assert_eq!(third.receipts, 17);
-        assert!(third.alerts[0].contains("cannot be read"));
-        assert_eq!(third.cursor, Some(BlockNumber::new(144)));
-        let reads = base.receipts.borrow().len();
-        assert_eq!(reads, 20 + 15 + 17);
+        let cursor = |block: u64, log: Option<u64>| Some((BlockNumber::new(block), log));
+        let passes: Vec<PassReport> = (0..5).map(|_| pass(&base)).collect();
+        for one in &passes {
+            assert!(one.receipts <= MAX_RECEIPTS_PER_PASS);
+        }
+        // block 120's first twenty, then its last ten and block 130's first ten
+        assert_eq!(passes[0].cursor, cursor(120, Some(19)));
+        assert_eq!(passes[1].cursor, cursor(130, Some(39)));
+        assert_eq!(passes[2].cursor, cursor(131, Some(59)));
+        // the receipt that never reads is passed over; the one that failed for now holds the
+        // cursor before it, and is read again, never passed
+        assert!(passes[3].alerts[0].contains("cannot be read"));
+        assert_eq!(passes[3].cursor, cursor(140, Some(0)));
+        assert_eq!(passes[4].receipts, 1);
+        assert_eq!(passes[4].cursor, None);
+        // every transaction worth reading was read before the cursor passed it
+        let read: std::collections::BTreeSet<TxHash> =
+            base.receipts.borrow().iter().copied().collect();
+        assert!((0..61).all(|n| read.contains(&tx(n))));
     });
 }
 

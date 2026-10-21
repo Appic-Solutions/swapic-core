@@ -739,6 +739,9 @@ fn pool_samples() -> Vec<Sample> {
         queue: crate::pool::PayoutQueue::default(),
         // absent, as the line above pins it; the last ledger sample pins it
         head_since: None,
+        // absent, so this sample's bytes stay the ones the golden pins; the ledger appended
+        // after the step samples pins it
+        scan_log: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![
@@ -835,6 +838,11 @@ fn pool_samples() -> Vec<Sample> {
         token: TokenAmount::from(189_u8),
     });
     undone.payout.swap.withdrawn = Some(TokenAmount::from(190_u8));
+    // the waiting ledger above, its read of Base standing inside a block
+    let reading = PoolLedger {
+        scan_log: Some(205),
+        ..waiting.clone()
+    };
     vec![
         sample("pool ledger", ledger),
         sample("pool deposit", deposit),
@@ -860,6 +868,7 @@ fn pool_samples() -> Vec<Sample> {
     ]
     .into_iter()
     .chain(pool_step_samples())
+    .chain([sample("pool ledger reading inside a block", reading)])
     .collect()
 }
 
@@ -922,6 +931,13 @@ fn pool_step_samples() -> Vec<Sample> {
                 r#ref,
                 cost: TokenAmount::from(20_000_u32),
                 withdrawn: TokenAmount::from(201_000_000_u32),
+            },
+        ),
+        (
+            "pool read of Base done through a log of a block",
+            PoolStep::ScanCursor {
+                block: BlockNumber::new(37_000_203),
+                log: Some(204),
             },
         ),
     ];

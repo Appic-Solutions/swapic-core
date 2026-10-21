@@ -1217,3 +1217,22 @@ fn the_queues_head_has_its_need_and_its_wait_and_never_fails() {
         Err(PoolStepError::Terms("a queued payout has not started"))
     );
 }
+
+/// The cursor rule: the canister's read of Base stands at a block or at a log inside one,
+/// and never goes back; a block done whole is past every log of it.
+#[test]
+fn the_read_of_base_never_goes_back() {
+    let mut pool = funded(usdc(1));
+    let cursor = |block: u64, log: Option<u64>| PoolStep::ScanCursor {
+        block: BlockNumber::new(block),
+        log,
+    };
+    pool.step(cursor(10, Some(3))).unwrap();
+    assert_eq!(pool.ledger.scan_position(), Some((BlockNumber::new(10), 3)));
+    assert!(pool.step(cursor(10, Some(2))).is_err());
+    assert!(pool.step(cursor(9, None)).is_err());
+    pool.step(cursor(10, None)).unwrap();
+    assert!(pool.step(cursor(10, Some(5))).is_err(), "done whole");
+    pool.step(cursor(11, Some(0))).unwrap();
+    assert_eq!(pool.ledger.scan_log, Some(0));
+}

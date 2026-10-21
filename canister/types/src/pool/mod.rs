@@ -1229,11 +1229,14 @@ pub enum PoolStep {
         #[n(0)]
         failure: IcpReadFailure,
     },
-    /// The canister's own read of Base reached this block.
+    /// The canister's own read of Base is done through this block: all of it, or with `log`
+    /// through that log of it (the read goes on in the same block).
     #[n(20)]
     ScanCursor {
         #[n(0)]
         block: BlockNumber,
+        #[n(1)]
+        log: Option<u64>,
     },
     /// The ICPSwap leg's pool was approved for its amount in: one more ckUSDC fee spent.
     #[n(21)]

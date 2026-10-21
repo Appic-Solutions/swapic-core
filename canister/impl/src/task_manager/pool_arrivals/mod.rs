@@ -8,12 +8,19 @@
 //! What a pass spends is bounded whatever is sent to the canister's address: one head read,
 //! at most ten reads of the transfers (500 blocks halved down to one), and at most
 //! [`MAX_RECEIPTS_PER_PASS`] receipts out of at most [`MAX_TRANSFERS_PER_PASS`] transfers
-//! considered. A transaction whose every transfer is already credited or dust is never read.
-//! The cursor always moves, never stalls: it stops before the first block left for the next
-//! pass, or the first whose receipt read failed for now; a block too full to read whole (its
-//! transfers too large for one answer, or more transactions worth reading than one pass
-//! reads), and a receipt that can never be read, are passed over with an alert line, for
-//! the watcher (which reports each arrival itself) and ops. One pass at a time.
+//! considered. A transfer skipped (dust, already credited) is never read and never marked
+//! credited.
+//!
+//! The cursor stands at a block, or at a log inside one, and every transfer at or before it
+//! is done: credited (an arrival or an orphan), or read and proven no arrival the canister
+//! can credit (no transfer of the pool's, a fee step, an Eco fill whose proof only the
+//! watcher brings, a step the fold refused). It never moves past a transfer worth reading
+//! that was not read, nor past one whose read failed for now: the next pass starts there,
+//! inside the same block if need be, so a block of any size is read over as many passes as
+//! it takes. Two things an outsider could send would hold it forever, so they alone are
+//! passed over, each with an alert line for ops (the watcher reports each arrival itself):
+//! a block whose transfers are too large for one answer even alone, and a receipt too large
+//! (or malformed) to ever read. One pass at a time.
 
 #[cfg(test)]
 mod tests;
@@ -82,16 +89,27 @@ pub fn has_work<S: Store>(store: &S, now: Timestamp) -> bool {
     })
 }
 
-/// The blocks the next read covers: after the cursor (or the lookback, when the cursor is
-/// older), at most [`MAX_LOG_BLOCKS`], none above `safe`.
-pub fn range(cursor: Option<BlockNumber>, safe: BlockNumber) -> Option<(BlockNumber, BlockNumber)> {
+/// The blocks the next read covers: after the cursor, from its own block when it stands
+/// inside one (`log`), or from the lookback when the cursor is older; at most
+/// [`MAX_LOG_BLOCKS`], none above `safe`.
+pub fn range(
+    cursor: Option<BlockNumber>,
+    log: Option<u64>,
+    safe: BlockNumber,
+) -> Option<(BlockNumber, BlockNumber)> {
     let floor = safe.get().saturating_sub(MAX_LOOKBACK_BLOCKS);
-    let from = cursor
-        .map_or(floor, |at| at.get().saturating_add(1))
-        .max(floor);
+    let from = match (cursor, log) {
+        (Some(at), Some(_)) => at.get(),
+        (Some(at), None) => at.get().saturating_add(1),
+        (None, _) => floor,
+    }
+    .max(floor);
     let to = from.saturating_add(MAX_LOG_BLOCKS - 1).min(safe.get());
     (from <= to).then(|| (BlockNumber::new(from), BlockNumber::new(to)))
 }
+
+/// Where a transfer sits: its block and its log.
+pub type Position = (BlockNumber, u64);
 
 /// One USDC transfer to the canister, as `eth_getLogs` answers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +118,12 @@ pub struct Logged {
     pub block: BlockNumber,
     pub log_index: u64,
     pub amount: TokenAmount,
+}
+
+impl Logged {
+    pub fn position(&self) -> Position {
+        (self.block, self.log_index)
+    }
 }
 
 /// The transfers in `logs` (an `eth_getLogs` answer) that read, a removed one left out, in
@@ -124,23 +148,28 @@ pub fn logged(logs: &Value) -> Vec<Logged> {
     logged
 }
 
-/// What one pass reads of the transfers it considered.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PassPlan {
-    /// Each transaction worth a receipt's read, once, with its block.
-    pub read: Vec<(TxHash, BlockNumber)>,
-    /// The first block left whole for the next pass.
-    pub left: Option<BlockNumber>,
-    /// A block too full for one pass, passed over: its number, and how many of its
-    /// transactions worth reading (or transfers not even considered) were not read.
-    pub cut: Option<(BlockNumber, usize)>,
+/// How far a pass got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Done {
+    /// Every transfer of the range.
+    Range,
+    /// Every transfer at or before this one.
+    Through(Position),
+    /// Nothing new.
+    Nothing,
 }
 
-/// What one pass reads of `logged`: the first `max_transfers` transfers considered, each
-/// transaction worth a receipt's read once (one of its transfers neither credited nor dust),
-/// whole blocks at a time, at most `max_receipts`. A first block with more than that is read
-/// up to the cap and the rest of it passed over (`cut`), so the cursor always moves; a later
-/// one is left whole for the next pass.
+/// What one pass reads of the transfers after the cursor: the first `max_transfers`
+/// considered, each transaction worth a receipt's read (one of its transfers neither
+/// credited nor dust) once, in order, at most `max_receipts`; and how far that gets the read
+/// when every receipt is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassPlan {
+    /// Each transaction to read, with the position of its first transfer.
+    pub read: Vec<(TxHash, Position)>,
+    pub done: Done,
+}
+
 pub fn plan_pass(
     logged: &[Logged],
     chain: ChainId,
@@ -157,74 +186,50 @@ pub fn plan_pass(
             })
     };
     let considered = &logged[..logged.len().min(max_transfers)];
-    // the block of the first transfer not considered, if any: it is not whole here
-    let beyond = logged.get(max_transfers).map(|one| one.block);
-    // the first block after `block` with a transfer, considered or not
-    let after = |block: BlockNumber| {
-        logged
-            .iter()
-            .find(|one| one.block > block)
-            .map(|one| one.block)
+    let through = |at: usize| {
+        at.checked_sub(1).map_or(Done::Nothing, |before| {
+            Done::Through(considered[before].position())
+        })
     };
-    let mut plan = PassPlan::default();
-    let mut at = 0;
-    while at < considered.len() {
-        let block = considered[at].block;
-        let end = considered[at..]
-            .iter()
-            .position(|one| one.block != block)
-            .map_or(considered.len(), |len| at + len);
-        let mut txs: Vec<(TxHash, BlockNumber)> = Vec::new();
-        for one in considered[at..end].iter().filter(|one| worth(one)) {
-            if !txs.iter().any(|(tx, _)| *tx == one.tx) {
-                txs.push((one.tx, block));
-            }
-        }
-        let whole = beyond != Some(block);
-        if whole && plan.read.len() + txs.len() <= max_receipts {
-            plan.read.extend(txs);
-            at = end;
+    let mut read: Vec<(TxHash, Position)> = Vec::new();
+    for (at, one) in considered.iter().enumerate() {
+        if !worth(one) || read.iter().any(|(tx, _)| *tx == one.tx) {
             continue;
         }
-        if !plan.read.is_empty() {
-            plan.left = Some(block);
-            return plan;
+        // the cap: done through the transfer before the first left unread
+        if read.len() >= max_receipts {
+            return PassPlan {
+                read,
+                done: through(at),
+            };
         }
-        // the first block, too full for one pass: read up to the cap, pass over the rest
-        let unconsidered = logged[at..]
-            .iter()
-            .filter(|one| one.block == block)
-            .count()
-            .saturating_sub(end - at);
-        let passed_over = txs.len().saturating_sub(max_receipts) + unconsidered;
-        txs.truncate(max_receipts);
-        plan.read = txs;
-        plan.cut = (passed_over > 0).then_some((block, passed_over));
-        plan.left = after(block);
-        return plan;
+        read.push((one.tx, one.position()));
     }
-    plan.left = beyond;
-    plan
+    let done = if considered.len() < logged.len() {
+        through(considered.len())
+    } else {
+        Done::Range
+    };
+    PassPlan { read, done }
+}
+
+/// How far a pass got once some receipts failed to read for now: through the transfer before
+/// the first of them (`failed`, the position of its first transfer), else as planned.
+pub fn done_after(logged: &[Logged], planned: Done, failed: Option<Position>) -> Done {
+    let Some(failed) = failed else {
+        return planned;
+    };
+    logged
+        .iter()
+        .rev()
+        .find(|one| one.position() < failed)
+        .map_or(Done::Nothing, |one| Done::Through(one.position()))
 }
 
 /// The blocks a read covers once `from..=to` answered too large: the first half of them,
 /// none when it is one block already.
 pub fn halved(from: BlockNumber, to: BlockNumber) -> Option<BlockNumber> {
     (to > from).then(|| BlockNumber::new(from.get() + (to.get() - from.get()) / 2))
-}
-
-/// Where the cursor goes after a pass over `from..=to`: to `to` when nothing is left, else
-/// to the block before the first one left (`left`), and nowhere when that is `from` itself.
-pub fn cursor_after(
-    from: BlockNumber,
-    to: BlockNumber,
-    left: Option<BlockNumber>,
-) -> Option<BlockNumber> {
-    match left {
-        None => Some(to),
-        Some(block) if block > from => Some(BlockNumber::new(block.get() - 1)),
-        Some(_) => None,
-    }
 }
 
 /// What a pass reads of Base, so it runs the same against the chain and a fake.
@@ -302,11 +307,12 @@ pub async fn run_backup() {
     }
 }
 
-/// What one pass did: the receipts it read, where it left the cursor, and its alert lines.
+/// What one pass did: the receipts it read, where it left the cursor (a block, and the log
+/// of it the read is done through when it stands inside it), and its alert lines.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
     pub receipts: usize,
-    pub cursor: Option<BlockNumber>,
+    pub cursor: Option<(BlockNumber, Option<u64>)>,
     pub alerts: Vec<String>,
 }
 
@@ -326,11 +332,14 @@ pub async fn backup(
 ) -> Result<PassReport, String> {
     let safe = reads.safe_block().await?;
     let mut report = PassReport::default();
-    let Some((from, mut to)) = range(pool_store::ledger().scan_cursor, safe) else {
+    let ledger = pool_store::ledger();
+    let (cursor, cursor_log) = (ledger.scan_cursor, ledger.scan_log);
+    let Some((from, mut to)) = range(cursor, cursor_log, safe) else {
         return Ok(report);
     };
     // an answer too large is asked again over half the blocks; one block that is still too
     // large is passed over, so the cursor never stalls on it
+    let mut overfull = false;
     let logs = loop {
         match reads.transfers(from, to).await {
             Ok(logs) => break logs,
@@ -341,14 +350,18 @@ pub async fn backup(
                         "ALERT: block {from}'s transfers to the canister are too large to read; \
                          the canister's read of Base passes over it"
                     ));
-                    to = from;
+                    overfull = true;
                     break Value::Null;
                 }
             },
             Err(error) => return Err(format!("{:?}", error.kind())),
         }
     };
-    let logged = logged(&logs);
+    let mut logged = logged(&logs);
+    // the transfers of the cursor's own block it is done through already
+    if let (Some(at), Some(log)) = (cursor, cursor_log) {
+        logged.retain(|one| one.block != at || one.log_index > log);
+    }
     let plan = plan_pass(
         &logged,
         chain.chain,
@@ -356,14 +369,8 @@ pub async fn backup(
         MAX_RECEIPTS_PER_PASS,
         MAX_TRANSFERS_PER_PASS,
     );
-    if let Some((block, passed_over)) = plan.cut {
-        report.alert(format!(
-            "ALERT: block {block} holds {passed_over} transfers to the canister more than one pass \
-             reads; the canister's read of Base passes over them"
-        ));
-    }
-    let mut left = plan.left;
-    for (tx, block) in plan.read {
+    let mut failed: Option<Position> = None;
+    for (tx, first) in plan.read {
         report.receipts += 1;
         let base = match reads.receipt(tx).await {
             Ok(base) => base,
@@ -375,9 +382,9 @@ pub async fn backup(
                 ));
                 continue;
             }
-            // read again next pass: the cursor stops before its block
+            // read again next pass: the cursor stops before it
             Err(_) => {
-                left = Some(left.map_or(block, |first| first.min(block)));
+                failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
                 continue;
             }
         };
@@ -391,13 +398,22 @@ pub async fn backup(
         if require_not_halted().is_err() {
             return Ok(report);
         }
-        // a step the fold refuses is noted and never read again for it: only a read that
-        // failed for now holds the cursor back
+        // a step the fold refuses is noted, and read: only a read that failed for now holds
+        // the cursor back
         record(&found, clock());
     }
-    report.cursor = cursor_after(from, to, left);
-    if let Some(block) = report.cursor {
-        pool_store::record_at(PoolStep::ScanCursor { block }, clock())
+    let done = if overfull {
+        Done::Range
+    } else {
+        done_after(&logged, plan.done, failed)
+    };
+    report.cursor = match done {
+        Done::Range => Some((to, None)),
+        Done::Through((block, log)) => Some((block, Some(log))),
+        Done::Nothing => None,
+    };
+    if let Some((block, log)) = report.cursor {
+        pool_store::record_at(PoolStep::ScanCursor { block, log }, clock())
             .map_err(|error| error.to_string())?;
     }
     Ok(report)

@@ -89,7 +89,8 @@ pub struct PoolLedger {
     pub icp_checked_at: Option<Timestamp>,
     #[n(14)]
     pub icp_failed_at: Option<Timestamp>,
-    /// How far the canister's own read of Base got.
+    /// How far the canister's own read of Base got: done through this block, all of it, or
+    /// with `scan_log` through that log of it.
     #[n(15)]
     pub scan_cursor: Option<BlockNumber>,
     /// The arrived swaps whose payouts wait for the ICP pocket's free ckUSDC, first in first
@@ -100,6 +101,10 @@ pub struct PoolLedger {
     /// rebalance and the alert read.
     #[n(17)]
     pub head_since: Option<Timestamp>,
+    /// The log of `scan_cursor`'s block the read is done through, the rest of the block to
+    /// read yet. None: the block is done whole.
+    #[n(18)]
+    pub scan_log: Option<u64>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -356,6 +361,13 @@ impl PoolLedger {
                 Ok(TokenAmount::ZERO)
             }
         }
+    }
+
+    /// Where the canister's read of Base stands, in order: a block, then its log (a block
+    /// done whole above every log of it).
+    pub fn scan_position(&self) -> Option<(BlockNumber, u128)> {
+        self.scan_cursor
+            .map(|block| (block, self.scan_log.map_or(u128::MAX, u128::from)))
     }
 
     /// The ICP pocket's free ckUSDC less what the queued payouts will take: what a
@@ -657,8 +669,14 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
-            PoolStep::ScanCursor { block } => match self.scan_cursor {
-                Some(at) if *block < at => Err(PoolStepError::CursorBack { at, to: *block }),
+            // never back: a block done whole is past any log of it
+            PoolStep::ScanCursor { block, log } => match self.scan_position() {
+                Some(at) if (*block, log.map_or(u128::MAX, u128::from)) < at => {
+                    Err(PoolStepError::CursorBack {
+                        at: at.0,
+                        to: *block,
+                    })
+                }
                 _ => Ok(()),
             },
         }
@@ -977,7 +995,10 @@ impl PoolLedger {
                 }
             }
             PoolStep::IcpCheckFailed { .. } => ledger.icp_failed_at = Some(at),
-            PoolStep::ScanCursor { block } => ledger.scan_cursor = Some(*block),
+            PoolStep::ScanCursor { block, log } => {
+                ledger.scan_cursor = Some(*block);
+                ledger.scan_log = *log;
+            }
         }
         PoolEffects {
             ledger,
