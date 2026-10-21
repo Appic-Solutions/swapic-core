@@ -47,6 +47,64 @@ pub fn move_ref(id: u64) -> PoolRef {
     PoolRef::new(keccak256(&preimage).0)
 }
 
+/// The ck helper's word for the principal a CkDeposit credits: its length in the first byte,
+/// its bytes after it, zeros after them (`swapic::ck_principal` reads it back).
+pub fn ck_word(principal: &candid::Principal) -> [u8; 32] {
+    let bytes = principal.as_slice();
+    let mut word = [0; 32];
+    word[0] = u8::try_from(bytes.len()).expect("BUG: a principal is 29 bytes at most");
+    word[1..1 + bytes.len()].copy_from_slice(bytes);
+    word
+}
+
+/// A transaction the canister signed whose CCTP burn it finishes itself, with no fee step:
+/// the source of a move's or a payout's own transfer, indexed by its hash once it succeeded
+/// at depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum OwnSource {
+    #[n(0)]
+    Move(#[n(0)] u64),
+    #[n(1)]
+    Payout(#[n(0)] u64),
+}
+
+crate::storable_as_cbor!(OwnSource);
+
+alloy_sol_types::sol! {
+    /// The ck minter's ERC-20 deposit helper on Ethereum.
+    function depositErc20(address erc20Address, uint256 amount, bytes32 principal, bytes32 subaccount) external;
+}
+
+/// A CCTP v2 `depositForBurnWithHook` call's data, read back: None for data that is not one.
+pub fn read_burn(data: &[u8]) -> Option<crate::swapic::depositForBurnWithHookCall> {
+    use alloy_sol_types::SolCall;
+    crate::swapic::depositForBurnWithHookCall::abi_decode(data).ok()
+}
+
+/// A CCTP v2 `depositForBurnWithHook` call's data.
+pub fn burn_data(call: &crate::swapic::depositForBurnWithHookCall) -> Vec<u8> {
+    use alloy_sol_types::SolCall;
+    call.abi_encode()
+}
+
+/// The ck helper's `depositErc20(token, amount, principal, subaccount)`: a deposit for the
+/// principal the word names, at that subaccount.
+pub fn ck_deposit_data(
+    token: crate::evm::EvmAddress,
+    amount: TokenAmount,
+    principal: [u8; 32],
+    subaccount: [u8; 32],
+) -> Vec<u8> {
+    use alloy_sol_types::SolCall;
+    depositErc20Call {
+        erc20Address: crate::swapic::addr(token),
+        amount: alloy_primitives::U256::from_be_bytes(amount.to_be_bytes()),
+        principal: alloy_primitives::FixedBytes(principal),
+        subaccount: alloy_primitives::FixedBytes(subaccount),
+    }
+    .abi_encode()
+}
+
 /// How long the daily cap looks back.
 pub const DAY: Duration = Duration::from_secs(24 * 3_600);
 

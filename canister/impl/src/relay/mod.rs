@@ -646,7 +646,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 }
                 fees.push(amount);
             }
-            KnownStep::Burn(burn) => burns.push(burn),
+            KnownStep::Burn(burn) => burns.push((burn, step.min)),
             KnownStep::Eco { intent, fee } => {
                 if chains.eco_portal != Some(swapic::evm(step.target)) {
                     return Err(RelayError::Eco("is not published on Eco's Portal"));
@@ -695,12 +695,26 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
             let delivery = if payout.is_some() { None } else { delivered };
             (GasAction::RelayEco, None, delivery)
         }
-        ([burn], []) => {
+        ([(burn, min)], []) => {
             let arrival = arrival_of(burn, &source, chains)?;
             parties.extend(arrival.parties.iter().copied());
+            // a Deliver mints the destination's USDC to its recipient: at least what the
+            // Runner gives the burn less the most Circle may keep (P11c, CCTP payouts)
+            let usdc = chains
+                .evm_chains
+                .get(arrival.chain_id)
+                .map(|destination| destination.usdc);
             let delivered = Envelope::decode(&burn.hook_data)
                 .ok()
-                .and_then(|envelope| envelope_delivery(&envelope, arrival.chain_id));
+                .and_then(|envelope| match (envelope.action, usdc) {
+                    (Action::Deliver, Some(usdc)) => Some(Delivery {
+                        chain: arrival.chain_id,
+                        recipient: envelope.recipient,
+                        token: usdc,
+                        min_out: amount_of(min.saturating_sub(burn.max_fee)),
+                    }),
+                    _ => envelope_delivery(&envelope, arrival.chain_id),
+                });
             let delivery = if payout.is_some() { None } else { delivered };
             (GasAction::RelayCctp, Some(arrival), delivery)
         }

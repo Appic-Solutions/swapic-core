@@ -26,8 +26,8 @@ pub use payout::{
 };
 
 pub use rebalance::{
-    move_ref, rebalance_subaccount, Landing, Move, MoveDirection, MoveRoute, MoveStatus,
-    Proposal, RebalanceLines, RebalanceSettings, RebalanceSettingsError, Sweep,
+    ck_word, move_ref, rebalance_subaccount, Landing, Move, MoveDirection, MoveRoute, MoveStatus,
+    OwnSource, Proposal, RebalanceLines, RebalanceSettings, RebalanceSettingsError, Sweep,
 };
 
 pub use ledger::{

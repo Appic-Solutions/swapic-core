@@ -345,26 +345,39 @@ fn a_payout_order_paying_the_canister_a_fee_is_refused() {
     ));
 }
 
-/// A CCTP burn is refused this round: CCTP payouts come later.
+/// From P11c on a CCTP burn passes (the canister finishes its own transfer, `cctp::own`):
+/// a Deliver pays its recipient the destination's USDC, at least what the Runner gives the
+/// burn less the most Circle may keep.
 #[test]
-fn a_cctp_payout_order_is_refused() {
+fn a_cctp_payout_order_passes_the_checks() {
     let world = World::new();
     let mut order = the_canisters(sample(include_str!("samples/cctp_base_to_arbitrum.hex")));
-    // rewritten: its fee step dropped, so the burn alone is what is refused
+    // rewritten: its fee step dropped, as a payout order pays the canister none
     order.steps.remove(0);
-    let payout = waiting(
-        &order,
-        PayoutTerms {
-            dst_chain: ChainId::ARBITRUM,
-            recipient: address("0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"),
-            token_out: arbitrum_usdc(),
-            min_out: TokenAmount::ONE,
-            deadline: Timestamp::from_secs(deadline_of(&order)).unwrap(),
-        },
+    let plan = read_plan(&order, &world.payer().chains).unwrap();
+    let delivery = plan.delivery.unwrap();
+    assert_eq!(delivery.chain, ChainId::ARBITRUM);
+    assert_eq!(delivery.token, arbitrum_usdc());
+    let burn = &order.steps[0];
+    let call = types::swapic::depositForBurnWithHookCall::abi_decode(&burn.data).unwrap();
+    assert_eq!(
+        delivery.min_out,
+        TokenAmount::from_be_bytes((burn.min - call.maxFee).to_be_bytes::<32>())
     );
+    let terms = terms_of(&order, &world);
+    let payout = waiting(&order, terms);
+    assert!(check(&payout, &order, &world, 600_000, nobody).is_ok());
+    // a minimum the burn cannot guarantee is refused
+    let greedy = PayoutTerms {
+        min_out: delivery
+            .min_out
+            .checked_add(TokenAmount::ONE)
+            .unwrap(),
+        ..terms
+    };
     assert!(matches!(
-        check(&payout, &order, &world, 600_000, nobody),
-        Err(PoolError::NotAllowed(why)) if why.contains("CCTP")
+        check(&waiting(&order, greedy), &order, &world, 600_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("guarantees")
     ));
 }
 

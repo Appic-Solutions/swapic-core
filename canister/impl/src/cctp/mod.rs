@@ -19,6 +19,8 @@
 #[cfg(test)]
 mod tests;
 
+pub mod own;
+
 use crate::ecdsa;
 use crate::engine::flows::Busy;
 use crate::evm_reads::{self, Simulated};
@@ -446,7 +448,13 @@ pub async fn finish_cctp(
         domains: &config.cctp_domains,
         canister,
     };
-    let plan = decide(&parsed, &setup, now_s).map_err(|e| e.to_string())?;
+    let mut plan = decide(&parsed, &setup, now_s).map_err(|e| e.to_string())?;
+    // the canister's own transfer (a move's, a payout's) is finished with no fee step, only
+    // from its own source transaction (P11c)
+    plan.gas_action = read_state(|state| {
+        own::finish_action(state, source_tx, &parsed, &plan, ic_cdk::api::id())
+    })
+    .map_err(|e| e.to_string())?;
     screen(&plan).map_err(|e| e.to_string())?;
     let recipe = recipe_for(&plan, recipe).map_err(|e| e.to_string())?;
     let destination = config

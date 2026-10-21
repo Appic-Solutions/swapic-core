@@ -93,6 +93,11 @@ pub trait Store {
     fn put_pool_move(&mut self, id: u64, item: types::pool::Move);
     /// Every move, in id order: what the audit compares.
     fn pool_moves(&self) -> Vec<(u64, types::pool::Move)>;
+    /// The canister's own transfer a source transaction is, if it is one (P11c).
+    fn pool_own_source(&self, tx: &TxHash) -> Option<types::pool::OwnSource>;
+    fn put_pool_own_source(&mut self, tx: TxHash, source: types::pool::OwnSource);
+    /// Every own source, in hash order: what the audit compares.
+    fn pool_own_sources(&self) -> Vec<(TxHash, types::pool::OwnSource)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -262,6 +267,9 @@ pub struct MemoryStore {
     /// The rebalance moves (P11c). At 40, clear of the indices other plans add.
     #[n(40)]
     pool_moves: BTreeMap<u64, types::pool::Move>,
+    /// The canister's own CCTP sources (P11c).
+    #[n(41)]
+    pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
 }
 
 impl Store for MemoryStore {
@@ -502,6 +510,21 @@ impl Store for MemoryStore {
             .collect()
     }
 
+    fn pool_own_source(&self, tx: &TxHash) -> Option<types::pool::OwnSource> {
+        self.pool_own_sources.get(tx).copied()
+    }
+
+    fn put_pool_own_source(&mut self, tx: TxHash, source: types::pool::OwnSource) {
+        self.pool_own_sources.insert(tx, source);
+    }
+
+    fn pool_own_sources(&self) -> Vec<(TxHash, types::pool::OwnSource)> {
+        self.pool_own_sources
+            .iter()
+            .map(|(tx, source)| (*tx, *source))
+            .collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -576,6 +599,7 @@ impl State<MemoryStore> {
             payout_intents,
             pool_orphans,
             pool_moves,
+            pool_own_sources,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -649,6 +673,11 @@ impl State<MemoryStore> {
                 .pool_moves()
                 .iter()
                 .map(|(id, item)| (id, item)))
+            && pool_own_sources.iter().eq(other
+                .store
+                .pool_own_sources()
+                .iter()
+                .map(|(tx, source)| (tx, source)))
     }
 }
 
@@ -821,6 +850,17 @@ impl<S: Store> State<S> {
         }
         if let Some(item) = effects.moved {
             self.store.put_pool_move(item.id, item);
+        }
+        // the canister's own transactions a CCTP finish names with no fee step: a move's or
+        // a payout's, once it succeeded at depth
+        match step {
+            PoolStep::MoveBurned { id, tx_hash, .. } => self
+                .store
+                .put_pool_own_source(*tx_hash, types::pool::OwnSource::Move(*id)),
+            PoolStep::PayoutPaid { id, tx_hash, .. } => self
+                .store
+                .put_pool_own_source(*tx_hash, types::pool::OwnSource::Payout(*id)),
+            _ => {}
         }
     }
 

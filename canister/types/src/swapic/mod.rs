@@ -691,6 +691,8 @@ pub struct CctpBurn {
     pub destination_caller: [u8; 32],
     /// The envelope, as the burn carries it to the destination.
     pub hook_data: Vec<u8>,
+    /// The most Circle may keep of the burn.
+    pub max_fee: U256,
 }
 
 impl CctpBurn {
@@ -711,6 +713,7 @@ impl CctpBurn {
                     burn_token: evm(call.burnToken),
                     destination_caller: call.destinationCaller.0,
                     hook_data: call.hookData.to_vec(),
+                    max_fee: call.maxFee,
                 })
                 .map_err(|_| NotABurn),
         )
@@ -1011,6 +1014,7 @@ pub fn read_step(
                 burn_token: evm(call.burnToken),
                 destination_caller: call.destinationCaller.0,
                 hook_data: call.hookData.to_vec(),
+                max_fee: call.maxFee,
             };
             let rebuilt = depositForBurnWithHookCall {
                 amount: U256::ZERO,

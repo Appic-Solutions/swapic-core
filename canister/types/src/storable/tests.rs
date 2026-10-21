@@ -980,6 +980,15 @@ fn rebalance_samples() -> Vec<Sample> {
             .expect("every sample has a preimage"),
         )
     }));
+    // the canister's own CCTP sources (P11c Task 3)
+    out.push(sample(
+        "own source of a move",
+        crate::pool::OwnSource::Move(990),
+    ));
+    out.push(sample(
+        "own source of a payout",
+        crate::pool::OwnSource::Payout(991),
+    ));
     out
 }
 
