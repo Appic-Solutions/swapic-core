@@ -321,6 +321,12 @@ pub fn signed_once(key: QuoteHash) -> Result<Option<u64>, String> {
 pub enum Detail {
     /// The order a pool payout is signed with, pinned for a retry after a revert.
     PoolPayout { order: types::pool::PinnedOrder },
+    /// The orphan a pool transfer refunds, to whom, and what it sends.
+    PoolTransfer {
+        key: types::pool::CreditKey,
+        to: EvmAddress,
+        sent: types::TokenAmount,
+    },
     /// The route action a continuation takes and the landed USDC it spends.
     Continuation {
         action: u8,
@@ -385,9 +391,10 @@ pub async fn create_and_send_with(
     {
         return Err(TxError::PurposeNeedsASwap("a pool payout with no order"));
     }
-    // an orphan's transfer is signed by its own door, never through here yet
-    if matches!(purpose, TxPurpose::PoolTransfer(_)) {
-        return Err(TxError::PurposeNeedsASwap("a pool transfer"));
+    if matches!(purpose, TxPurpose::PoolTransfer(_))
+        && !matches!(detail, Some(Detail::PoolTransfer { .. }))
+    {
+        return Err(TxError::PurposeNeedsASwap("a pool transfer with no orphan"));
     }
     // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
     // pass that ends a stranded allocation, never through here
@@ -535,6 +542,22 @@ pub async fn create_and_send_with(
                     step: types::pool::PoolStep::PayoutSigned {
                         id,
                         order,
+                        chain_id,
+                        nonce,
+                        tx_hash,
+                        raw_tx: raw_tx.clone(),
+                    },
+                }
+            }
+            TxPurpose::PoolTransfer(_) => {
+                let Some(Detail::PoolTransfer { key, to, sent }) = detail else {
+                    unreachable!("BUG: a pool transfer's orphan is checked before its nonce");
+                };
+                EventType::Pool {
+                    step: types::pool::PoolStep::OrphanRefundSigned {
+                        key,
+                        to,
+                        sent,
                         chain_id,
                         nonce,
                         tx_hash,
@@ -1031,6 +1054,28 @@ async fn decide(
             // a pool payout closes with its own line: paid (with the Eco intent its order
             // published, whose refund reopens it) or reverted, back to waiting with its order
             // pinned. It paid the canister no fee, so none is booked
+            // an orphan's refund closes with its own line: refunded, or held again
+            if let TxPurpose::PoolTransfer(hash) = entry.purpose {
+                let refunding = read_state(|state| {
+                    state.store().pool_orphans().into_iter().find(|(key, orphan)| {
+                        types::pool::orphan_key(key) == hash
+                            && matches!(orphan.status, types::pool::OrphanStatus::Refunding { .. })
+                    })
+                });
+                let appended = match refunding {
+                    Some((key, _)) => crate::storage::pool::record_at(
+                        types::pool::PoolStep::OrphanRefundClosed { key, success },
+                        now,
+                    )
+                    .is_ok(),
+                    // closed already: nothing left to record
+                    None => true,
+                };
+                if appended {
+                    settle(entry, block, success, latest, credit);
+                }
+                return usize::from(appended);
+            }
             if let TxPurpose::PoolPayout(id) = entry.purpose {
                 let step = if success {
                     types::pool::PoolStep::PayoutPaid {

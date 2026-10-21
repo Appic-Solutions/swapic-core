@@ -268,6 +268,27 @@ pub struct PayPayoutOk {
     pub tx_id: u64,
 }
 
+/// An orphan held for a controller: its credit key (48 bytes: chain, transaction, log
+/// index), what arrived, the block, its payer where the chain showed it, and why no deposit
+/// took it.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OrphanView {
+    pub key: Vec<u8>,
+    pub amount: Nat,
+    pub block: u64,
+    pub payer: Option<String>,
+    pub why: String,
+}
+
+/// What a controller does with an orphan.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum OrphanAction {
+    /// Sent back on Base, less the least network fee.
+    Refund { to: String },
+    /// Booked to the Base books' unattributed line.
+    Book,
+}
+
 /// `pool_approve_swapic`'s answer: the approval's id in `signed_txs`.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PoolApproveOk {

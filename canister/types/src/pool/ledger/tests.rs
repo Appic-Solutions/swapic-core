@@ -16,6 +16,7 @@ pub(crate) struct Pool {
     pub payouts: BTreeMap<u64, EvmPayout>,
     pub queue: BTreeMap<u64, u64>,
     pub nonces: BTreeSet<NonceUse>,
+    pub orphans: BTreeMap<CreditKey, crate::pool::Orphan>,
 }
 
 impl PoolLookup for Pool {
@@ -43,6 +44,10 @@ impl PoolLookup for Pool {
 
     fn nonce_used(&self, key: &NonceUse) -> bool {
         self.nonces.contains(key)
+    }
+
+    fn orphan(&self, key: &CreditKey) -> Option<crate::pool::Orphan> {
+        self.orphans.get(key).cloned()
     }
 }
 
@@ -74,6 +79,9 @@ impl Pool {
         }
         if let Some(key) = effects.nonce {
             self.nonces.insert(key);
+        }
+        if let Some((key, orphan)) = effects.orphan {
+            self.orphans.insert(key, orphan);
         }
         Ok(())
     }

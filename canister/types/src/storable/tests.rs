@@ -619,7 +619,72 @@ fn samples() -> Vec<Sample> {
     all.extend(pool_tx_samples());
     all.extend(icp_swap_samples());
     all.extend(queue_samples());
+    all.extend(orphan_samples());
     all
+}
+
+/// The orphans (P11b Task 7): one held, one refunding, and each of their steps.
+fn orphan_samples() -> Vec<Sample> {
+    use crate::pool::{CreditKey, Orphan, OrphanStatus, PoolStep};
+    let key = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([0x81; 32]),
+        log_index: 801,
+    };
+    let held = Orphan {
+        amount: TokenAmount::from(802_000_000_u64),
+        block: BlockNumber::new(37_000_803),
+        payer: Some(crate::evm::EvmAddress::new([0x84; 20])),
+        why: "no deposit is registered under the ref".to_string(),
+        status: OrphanStatus::Held,
+    };
+    let refunding = Orphan {
+        payer: None,
+        status: OrphanStatus::Refunding {
+            to: crate::evm::EvmAddress::new([0x85; 20]),
+            sent: TokenAmount::from(806_000_000_u64),
+        },
+        ..held.clone()
+    };
+    let steps = [
+        ("pool orphan booked", PoolStep::OrphanBooked { key }),
+        (
+            "pool orphan refund signed",
+            PoolStep::OrphanRefundSigned {
+                key,
+                to: crate::evm::EvmAddress::new([0x85; 20]),
+                sent: TokenAmount::from(806_000_000_u64),
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(807),
+                tx_hash: TxHash::new([0x88; 32]),
+                raw_tx: vec![0x02, 0x89],
+            },
+        ),
+        (
+            "pool orphan refund closed",
+            PoolStep::OrphanRefundClosed {
+                key,
+                success: true,
+            },
+        ),
+    ];
+    let mut out = vec![
+        sample("pool orphan held", held),
+        sample("pool orphan refunding", refunding),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(8_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_000_810 + i),
+                EventHash::new([0xcb; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// The queue, the deadlines and the Eco refund (P11b Task 6): a payout whose ICP hold was

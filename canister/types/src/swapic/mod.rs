@@ -564,6 +564,15 @@ pub fn approve_calldata(spender: EvmAddress, amount: U256) -> Vec<u8> {
     .abi_encode()
 }
 
+/// `token.transfer(to, amount)`.
+pub fn transfer_calldata(to: EvmAddress, amount: U256) -> Vec<u8> {
+    transferCall {
+        to: addr(to),
+        amount,
+    }
+    .abi_encode()
+}
+
 /// `Swapic.used(id)`: whether an order id ran.
 pub fn used_calldata(id: [u8; 32]) -> Vec<u8> {
     usedCall { id: FixedBytes(id) }.abi_encode()

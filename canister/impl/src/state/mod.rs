@@ -83,6 +83,11 @@ pub trait Store {
     fn put_payout_intent(&mut self, intent: PoolRef, id: u64);
     /// Every paid payout's Eco intent, in intent order.
     fn payout_intents(&self) -> Vec<(PoolRef, u64)>;
+    /// An orphan, by its credit key.
+    fn pool_orphan(&self, key: &CreditKey) -> Option<types::pool::Orphan>;
+    fn put_pool_orphan(&mut self, key: CreditKey, orphan: types::pool::Orphan);
+    /// Every orphan, in key order.
+    fn pool_orphans(&self) -> Vec<(CreditKey, types::pool::Orphan)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -190,6 +195,10 @@ impl<S: Store> PoolLookup for PoolView<'_, S> {
     fn nonce_used(&self, key: &NonceUse) -> bool {
         self.0.is_withdrawal_nonce_used(key)
     }
+
+    fn orphan(&self, key: &CreditKey) -> Option<types::pool::Orphan> {
+        self.0.pool_orphan(key)
+    }
 }
 
 /// Where a page of swaps starts: after `after`, or at the first swap when none is named.
@@ -239,6 +248,8 @@ pub struct MemoryStore {
     withdrawal_nonces: BTreeSet<NonceUse>,
     #[n(16)]
     payout_intents: BTreeMap<PoolRef, u64>,
+    #[n(17)]
+    pool_orphans: BTreeMap<CreditKey, types::pool::Orphan>,
 }
 
 impl Store for MemoryStore {
@@ -449,6 +460,21 @@ impl Store for MemoryStore {
             .collect()
     }
 
+    fn pool_orphan(&self, key: &CreditKey) -> Option<types::pool::Orphan> {
+        self.pool_orphans.get(key).cloned()
+    }
+
+    fn put_pool_orphan(&mut self, key: CreditKey, orphan: types::pool::Orphan) {
+        self.pool_orphans.insert(key, orphan);
+    }
+
+    fn pool_orphans(&self) -> Vec<(CreditKey, types::pool::Orphan)> {
+        self.pool_orphans
+            .iter()
+            .map(|(key, orphan)| (*key, orphan.clone()))
+            .collect()
+    }
+
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx> {
         self.unsigned.get(key).copied()
     }
@@ -521,6 +547,7 @@ impl State<MemoryStore> {
             payout_queue,
             withdrawal_nonces,
             payout_intents,
+            pool_orphans,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_pockets = other.store.pockets();
@@ -584,6 +611,11 @@ impl State<MemoryStore> {
                 .payout_intents()
                 .iter()
                 .map(|(intent, id)| (intent, id)))
+            && pool_orphans.iter().eq(other
+                .store
+                .pool_orphans()
+                .iter()
+                .map(|(key, orphan)| (key, orphan)))
     }
 }
 
@@ -741,6 +773,18 @@ impl<S: Store> State<S> {
         }
         if let Some((intent, id)) = effects.intent {
             self.store.put_payout_intent(PoolRef::new(intent), id);
+        }
+        if let Some((key, orphan)) = effects.orphan {
+            // a booked orphan joins the books' unattributed line of its chain
+            if let PoolStep::OrphanBooked { .. } = step {
+                let mut books = self.book(&key.chain);
+                books.unattributed = books
+                    .unattributed
+                    .checked_add(orphan.amount)
+                    .unwrap_or(TokenAmount::MAX);
+                self.store.put_book(key.chain, books);
+            }
+            self.store.put_pool_orphan(key, orphan);
         }
     }
 

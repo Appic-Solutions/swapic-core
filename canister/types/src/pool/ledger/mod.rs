@@ -49,6 +49,8 @@ pub trait PoolLookup {
     fn queue_head(&self) -> Option<(u64, u64)>;
     /// Whether a staker used a withdrawal nonce.
     fn nonce_used(&self, key: &NonceUse) -> bool;
+    /// An orphan, by its credit key.
+    fn orphan(&self, key: &CreditKey) -> Option<crate::pool::Orphan>;
 }
 
 /// A paid payout's Eco intent and the payout: what an Eco refund is matched by.
@@ -145,6 +147,8 @@ pub struct PoolEffects {
     pub nonce: Option<NonceUse>,
     /// A paid payout's Eco intent, indexed.
     pub intent: Option<IntentIndex>,
+    /// An orphan as the step leaves it.
+    pub orphan: Option<(CreditKey, crate::pool::Orphan)>,
 }
 
 /// Why a pool step was refused.
@@ -774,7 +778,10 @@ impl PoolLedger {
             | PoolStep::PayoutPulled { .. }
             | PoolStep::PayoutStopped { .. }
             | PoolStep::PayoutRelisted { .. }
-            | PoolStep::PayoutRefunded { .. } => self.admits_payout(step, lookup),
+            | PoolStep::PayoutRefunded { .. }
+            | PoolStep::OrphanBooked { .. }
+            | PoolStep::OrphanRefundSigned { .. }
+            | PoolStep::OrphanRefundClosed { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
             PoolStep::ApproveSigned { .. } => Ok(()),
             PoolStep::IcpRoutesSet { routes } => {
@@ -812,6 +819,7 @@ impl PoolLedger {
         let mut deposit_out = None;
         let mut shares_out = None;
         let mut credited = None;
+        let mut orphan_out = None;
         match step {
             // the routes are `IcpRoutesSet`'s: new knobs keep the routes set
             PoolStep::SettingsSet { settings } => {
@@ -887,8 +895,20 @@ impl PoolLedger {
                 amount,
                 block,
                 r#ref,
-                ..
+                src_payer,
+                why,
             } => {
+                // held for a controller, one at a time
+                orphan_out = Some((
+                    *credit,
+                    crate::pool::Orphan {
+                        amount: *amount,
+                        block: *block,
+                        payer: *src_payer,
+                        why: why.clone(),
+                        status: crate::pool::OrphanStatus::Held,
+                    },
+                ));
                 ledger.unattributed = sat_add(ledger.unattributed, *amount);
                 ledger.unseen.push(UnseenArrival {
                     chain: credit.chain,
@@ -1171,7 +1191,10 @@ impl PoolLedger {
             | PoolStep::PayoutPulled { .. }
             | PoolStep::PayoutStopped { .. }
             | PoolStep::PayoutRelisted { .. }
-            | PoolStep::PayoutRefunded { .. } => {}
+            | PoolStep::PayoutRefunded { .. }
+            | PoolStep::OrphanBooked { .. }
+            | PoolStep::OrphanRefundSigned { .. }
+            | PoolStep::OrphanRefundClosed { .. } => {}
         }
         let payout = ledger.evm_changed.take();
         PoolEffects {
@@ -1184,6 +1207,7 @@ impl PoolLedger {
             dequeued: None,
             nonce: None,
             intent: None,
+            orphan: orphan_out,
         }
     }
 

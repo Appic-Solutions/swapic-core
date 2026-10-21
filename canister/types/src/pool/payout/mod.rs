@@ -532,3 +532,54 @@ impl Storable for NonceUse {
         is_fixed_size: true,
     };
 }
+
+/// An orphan: USDC at the canister's Base address that no deposit could take, held for a
+/// controller to refund to its payer or book (Jeff, 2026-10-19: nothing automatic).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Orphan {
+    #[n(0)]
+    pub amount: TokenAmount,
+    #[n(1)]
+    pub block: BlockNumber,
+    /// Who paid it, where the chain showed it.
+    #[n(2)]
+    pub payer: Option<EvmAddress>,
+    #[n(3)]
+    pub why: String,
+    #[n(4)]
+    pub status: OrphanStatus,
+}
+
+crate::storable_as_cbor!(Orphan);
+
+/// Where an orphan stands.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum OrphanStatus {
+    /// Held for a controller.
+    #[n(0)]
+    Held,
+    /// Its refund was signed: `sent` to `to`, the rest kept for the transfer's gas.
+    #[n(1)]
+    Refunding {
+        #[n(0)]
+        to: EvmAddress,
+        #[n(1)]
+        sent: TokenAmount,
+    },
+    #[n(2)]
+    Refunded {
+        #[n(0)]
+        to: EvmAddress,
+        #[n(1)]
+        sent: TokenAmount,
+    },
+    /// Booked to the Base books' unattributed line.
+    #[n(3)]
+    Booked,
+}
+
+/// The key an orphan's refund transaction is known by: the hash of its credit key's bytes.
+pub fn orphan_key(credit: &super::CreditKey) -> [u8; 32] {
+    use ic_stable_structures::Storable;
+    alloy_primitives::keccak256(credit.to_bytes()).0
+}

@@ -399,7 +399,20 @@ impl<S: Store> State<S> {
                     .into());
                 }
             }
-            TxPurpose::PoolTransfer(_) | TxPurpose::PoolApprove => {}
+            // an orphan's refund only while it is held
+            TxPurpose::PoolTransfer(hash) => {
+                let held = self.store().pool_orphans().into_iter().any(|(key, orphan)| {
+                    types::pool::orphan_key(&key) == *hash
+                        && orphan.status == types::pool::OrphanStatus::Held
+                });
+                if !held {
+                    return Err(types::pool::PoolStepError::Terms(
+                        "no orphan held under that transfer's key",
+                    )
+                    .into());
+                }
+            }
+            TxPurpose::PoolApprove => {}
         }
         // rule A4 from the swap's side: two sends for ONE swap that interleave at the
         // signature would otherwise both allocate, and the second's `TxSigned` would be

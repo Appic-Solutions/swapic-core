@@ -19,7 +19,7 @@ pub mod withdrawal;
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 
 pub use payout::{
-    evm_payout_id, evm_payout_ref, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind,
+    evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, Orphan, OrphanStatus, EvmWithdrawal, IcpSwapTerms, NonceUse, PayoutKind,
     PayoutLines, PayoutSettings, PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Undo,
 };
 
@@ -1526,6 +1526,40 @@ pub enum PoolStep {
         #[n(3)]
         block: BlockNumber,
     },
+    /// A controller booked an orphan to the Base books' unattributed line.
+    #[n(39)]
+    OrphanBooked {
+        #[n(0)]
+        key: CreditKey,
+    },
+    /// The canister signed an orphan's refund, `USDC.transfer(to, sent)` on Base: the
+    /// transaction's exact bytes, spending the nonce `TxCreated` handed out for it. What it
+    /// keeps of the orphan (the least network fee) goes to the Base fee line.
+    #[n(40)]
+    OrphanRefundSigned {
+        #[n(0)]
+        key: CreditKey,
+        #[n(1)]
+        to: EvmAddress,
+        #[n(2)]
+        sent: TokenAmount,
+        #[n(3)]
+        chain_id: ChainId,
+        #[n(4)]
+        nonce: Nonce,
+        #[n(5)]
+        tx_hash: TxHash,
+        #[cbor(n(6), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
+    /// An orphan's refund closed at depth: refunded, or reverted and held again.
+    #[n(41)]
+    OrphanRefundClosed {
+        #[n(0)]
+        key: CreditKey,
+        #[n(1)]
+        success: bool,
+    },
 }
 
 impl PoolStep {
@@ -1578,6 +1612,9 @@ impl PoolStep {
             PoolStep::PayoutStopped { .. } => "PayoutStopped",
             PoolStep::PayoutRelisted { .. } => "PayoutRelisted",
             PoolStep::PayoutRefunded { .. } => "PayoutRefunded",
+            PoolStep::OrphanBooked { .. } => "OrphanBooked",
+            PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
+            PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
         }
     }
 
@@ -1598,6 +1635,13 @@ impl PoolStep {
                 nonce,
                 tx_hash,
                 raw_tx,
+            }
+            | PoolStep::OrphanRefundSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                ..
             } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
             _ => None,
         }
@@ -1609,6 +1653,9 @@ impl PoolStep {
         match self {
             PoolStep::PayoutSigned { id, .. } => Some(crate::events::TxPurpose::PoolPayout(*id)),
             PoolStep::ApproveSigned { .. } => Some(crate::events::TxPurpose::PoolApprove),
+            PoolStep::OrphanRefundSigned { key, .. } => {
+                Some(crate::events::TxPurpose::PoolTransfer(orphan_key(key)))
+            }
             _ => None,
         }
     }

@@ -6,7 +6,8 @@ use crate::storage::events::read_state;
 use candid::Nat;
 use ic_cdk::query;
 pub use settlement_api::types::pool::{
-    IcpRoutesView, PayoutSettings, PayoutView, PayoutWaiting, PoolAccount, PoolAccountView,
+    IcpRoutesView, OrphanView, PayoutSettings, PayoutView, PayoutWaiting, PoolAccount,
+    PoolAccountView,
     PoolDepositView, PoolSettings, PoolStateView,
 };
 use types::hash::PoolRef;
@@ -81,4 +82,11 @@ pub fn icp_routes() -> IcpRoutesView {
 #[query]
 pub fn payouts_waiting() -> Vec<PayoutWaiting> {
     pool::pay::waiting()
+}
+
+/// The orphans held for a controller: USDC at the canister's Base address no deposit could
+/// take, not refunded or booked yet.
+#[query]
+pub fn pool_orphans() -> Vec<OrphanView> {
+    pool::orphans::held()
 }

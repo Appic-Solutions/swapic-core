@@ -286,6 +286,34 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::OrphanBooked { key } | PoolStep::OrphanRefundSigned { key, .. } => {
+                let orphan = lookup
+                    .orphan(key)
+                    .ok_or(PoolStepError::Terms("no orphan under that key"))?;
+                if orphan.status != crate::pool::OrphanStatus::Held {
+                    return Err(PoolStepError::Terms("an orphan is resolved once"));
+                }
+                if orphan.amount > self.unattributed {
+                    return Err(PoolStepError::Overflow);
+                }
+                if let PoolStep::OrphanRefundSigned { sent, .. } = step {
+                    if *sent == TokenAmount::ZERO || *sent > orphan.amount {
+                        return Err(PoolStepError::Terms(
+                            "a refund sends some of the orphan, never more",
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            PoolStep::OrphanRefundClosed { key, .. } => {
+                let orphan = lookup
+                    .orphan(key)
+                    .ok_or(PoolStepError::Terms("no orphan under that key"))?;
+                if !matches!(orphan.status, crate::pool::OrphanStatus::Refunding { .. }) {
+                    return Err(PoolStepError::Terms("only a refund on its way closes"));
+                }
+                Ok(())
+            }
             PoolStep::PayoutUndoing { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(
@@ -352,6 +380,7 @@ impl PoolLedger {
             dequeued: None,
             nonce: None,
             intent: None,
+            orphan: None,
         };
         // takes a payout off the queue, with its hold
         let dequeue = |lines: &mut crate::pool::PayoutLines,
@@ -546,6 +575,39 @@ impl PoolLedger {
                 payout.tx_hash = None;
                 payout.waiting_since = Some(at);
                 effects.payout = Some(payout);
+            }
+            // out of the pool's unattributed line: to the Base books' (the state moves the
+            // books), or on its way back to its payer, the fee kept on the Base fee line
+            PoolStep::OrphanBooked { key } => {
+                let mut orphan = lookup.orphan(key)?;
+                ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                orphan.status = crate::pool::OrphanStatus::Booked;
+                effects.orphan = Some((*key, orphan));
+            }
+            PoolStep::OrphanRefundSigned { key, to, sent, .. } => {
+                let mut orphan = lookup.orphan(key)?;
+                ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                lines.fees_base = sat_add(lines.fees_base, sat_sub(orphan.amount, *sent));
+                orphan.status = crate::pool::OrphanStatus::Refunding {
+                    to: *to,
+                    sent: *sent,
+                };
+                effects.orphan = Some((*key, orphan));
+            }
+            PoolStep::OrphanRefundClosed { key, success } => {
+                let mut orphan = lookup.orphan(key)?;
+                let crate::pool::OrphanStatus::Refunding { to, sent } = orphan.status else {
+                    return None;
+                };
+                if *success {
+                    orphan.status = crate::pool::OrphanStatus::Refunded { to, sent };
+                } else {
+                    // reverted: nothing left, held again
+                    ledger.unattributed = sat_add(ledger.unattributed, orphan.amount);
+                    lines.fees_base = sat_sub(lines.fees_base, sat_sub(orphan.amount, sent));
+                    orphan.status = crate::pool::OrphanStatus::Held;
+                }
+                effects.orphan = Some((*key, orphan));
             }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;

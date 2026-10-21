@@ -6,7 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    EvmWithdrawal, IcpRoute, IcpSwapTerms, PayPayoutOk, PayoutSettings, PoolApproveOk, PoolArrival,
+    EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutSettings,
+    PoolApproveOk, PoolArrival,
     PoolArrivalOutcome, PoolDeposit, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk,
     SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
@@ -195,4 +196,21 @@ pub async fn pay_payout(id: u64, order: Vec<u8>, gas_limit: u64) -> Result<PayPa
     pool::pay::pay_payout(id, order, gas_limit)
         .await
         .map(|tx_id| PayPayoutOk { tx_id })
+}
+
+/// Controller-only, refused while halted (Jeff, 2026-10-19: orphans are ALWAYS held for a
+/// controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
+/// once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the
+/// fee kept for its gas; `Book` books it to the Base books' unattributed line.
+#[update]
+pub async fn resolve_orphan(key: Vec<u8>, action: OrphanAction) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    pool::orphans::resolve(
+        ic_cdk::api::is_controller(&caller),
+        key,
+        action,
+        pool::now(),
+        is_sanctioned,
+    )
+    .await
 }

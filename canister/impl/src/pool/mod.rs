@@ -8,6 +8,7 @@ pub mod arrival;
 pub mod icp;
 pub mod icp_swap;
 pub mod legs;
+pub mod orphans;
 pub mod pay;
 pub mod payout;
 pub mod queue;
