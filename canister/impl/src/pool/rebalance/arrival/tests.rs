@@ -54,6 +54,11 @@ fn up(status: MoveStatus) -> Move {
     );
     item.status = status;
     item.left = true;
+    // its own route, fast: Circle keeps 970 at the most
+    item.route = Some(types::pool::MoveRoute::Own {
+        max_fee: TokenAmount::from(970_u64),
+        fast: true,
+    });
     item
 }
 
@@ -150,4 +155,33 @@ fn an_eco_refund_of_a_moves_intent_routes_it_again() {
     // another intent, or another amount, is not the move's
     assert_eq!(step_for(&state, &refund(usdc(1_000), [0x83; 32])), None);
     assert_eq!(step_for(&state, &refund(usdc(999), [0x82; 32])), None);
+}
+
+/// Review Focus 2 and 5: the ref is public, and anyone's order may carry it. A stranger's $1
+/// under the move's ref credits nothing and becomes no orphan; the move's own arrival after
+/// it is credited.
+#[test]
+fn a_strangers_small_transfer_under_the_moves_ref_credits_nothing() {
+    // its own route offered Circle 970 at the most: it carries at least $999.99903
+    let state = state_with(up(MoveStatus::Burned));
+    let under = |amount| {
+        found(
+            amount,
+            Proof::Deposit {
+                r#ref: move_ref(3),
+                payer: None,
+            },
+        )
+    };
+    let dollar = under(usdc(1));
+    assert_eq!(step_for(&state, &dollar), None);
+    assert!(waits_for_its_move(&state, &dollar));
+    let short = under(TokenAmount::from(999_999_029_u64));
+    assert_eq!(step_for(&state, &short), None);
+    // the move's own mint, Circle having kept 970
+    assert!(matches!(
+        step_for(&state, &under(TokenAmount::from(999_999_030_u64))),
+        Some(PoolStep::MoveArrived { credited, .. })
+            if credited == TokenAmount::from(999_999_030_u64)
+    ));
 }

@@ -26,6 +26,12 @@ use types::{ChainId, TxHash};
 /// Base move on its way under its own ref, or the Eco refund of a Base to ICP move's intent
 /// for its whole amount. None for any other transfer, which is the pool's deposits' to judge.
 /// A move whose own transaction is not closed yet is not credited: its arrival waits for it.
+///
+/// The ref is public and anyone's order may carry it: so a move is credited only by a
+/// transfer of at least all it may carry (its amount less its route's most: what its own
+/// CCTP mint or Eco fill always brings), and a smaller one under its ref is nobody's credit.
+/// A stranger who pays that much in under the ref pays the pool in full, and the move's own
+/// arrival after it is then held for a controller like any transfer no open move takes.
 pub fn step_for<S: Store>(state: &State<S>, found: &Found) -> Option<PoolStep> {
     let open = super::open_moves(state);
     match &found.proof {
@@ -33,7 +39,8 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found) -> Option<PoolStep> {
             let item = open.into_iter().find(|item| {
                 item.direction == MoveDirection::IcpToBase && move_ref(item.id) == *r#ref
             })?;
-            (item.status == MoveStatus::Burned).then(|| PoolStep::MoveArrived {
+            let whole = found.amount >= item.creditable();
+            (item.status == MoveStatus::Burned && whole).then(|| PoolStep::MoveArrived {
                 id: item.id,
                 credited: found.amount.min(item.amount),
                 credit: Some(found.credit),
@@ -60,9 +67,10 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found) -> Option<PoolStep> {
     }
 }
 
-/// Whether `found` names a move the canister's own read of Base must leave alone for now: an
-/// ICP to Base move's ref whose own transaction is not closed yet. Kept out of the deposits'
-/// rule, so it never becomes an orphan.
+/// Whether `found` names a move the canister's own read of Base must leave alone: an open
+/// ICP to Base move's ref that `step_for` does not credit (its own transaction not closed
+/// yet, or less than all it may carry). Kept out of the deposits' rule, so the move's own
+/// arrival never becomes an orphan before its move closes.
 pub fn waits_for_its_move<S: Store>(state: &State<S>, found: &Found) -> bool {
     let Proof::Deposit { r#ref, .. } = &found.proof else {
         return false;
