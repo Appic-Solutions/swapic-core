@@ -5,13 +5,13 @@
 //! dropped and its payer the canister, as a move's own order is.
 
 use super::*;
-use alloy_sol_types::SolCall;
-use types::swapic::depositForBurnWithHookCall;
 use crate::state::MemoryStore;
+use alloy_sol_types::SolCall;
 use types::cctp::BurnBody;
 use types::evm::EvmAddress;
 use types::pool::payout::PinnedOrder;
 use types::pool::{Move, MoveDirection, MoveStatus, PoolLedger, RebalanceLines};
+use types::swapic::depositForBurnWithHookCall;
 use types::{BlockNumber, Timestamp, TokenAmount};
 
 fn canister_principal() -> Principal {
@@ -19,7 +19,9 @@ fn canister_principal() -> Principal {
 }
 
 fn canister() -> EvmAddress {
-    "0x36D34038F04990a58c068e08eD9754e2E3D9bA53".parse().unwrap()
+    "0x36D34038F04990a58c068e08eD9754e2E3D9bA53"
+        .parse()
+        .unwrap()
 }
 
 /// The canary's order, the canister's: its fee step dropped, its payer the canister.

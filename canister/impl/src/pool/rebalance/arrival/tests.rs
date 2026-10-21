@@ -130,7 +130,14 @@ fn an_eco_refund_of_a_moves_intent_routes_it_again() {
     });
     down.intent = Some([0x82; 32]);
     let state = state_with(down);
-    let refund = |amount, intent| found(amount, Proof::Refund { intents: vec![intent] });
+    let refund = |amount, intent| {
+        found(
+            amount,
+            Proof::Refund {
+                intents: vec![intent],
+            },
+        )
+    };
     assert_eq!(
         step_for(&state, &refund(usdc(1_000), [0x82; 32])),
         Some(PoolStep::MoveRefunded {

@@ -7,8 +7,8 @@
 //! the canister's own reader (`relay::read_plan`) as the CkDeposit the CctpReceiver completes.
 
 use super::*;
-use alloy_sol_types::SolCall;
 use crate::relay::{read_plan, Chains, Party};
+use alloy_sol_types::SolCall;
 use std::collections::BTreeMap;
 use types::config::{ChainTable, PerAction};
 use types::{CctpDomain, ChainId, GasAmount, Wei};
@@ -50,8 +50,10 @@ fn base() -> EvmChain {
 }
 
 fn canary() -> Order {
-    swapic::decode_order(&hex::decode(include_str!("../samples/eth_cctp_to_base.hex").trim()).unwrap())
-        .unwrap()
+    swapic::decode_order(
+        &hex::decode(include_str!("../samples/eth_cctp_to_base.hex").trim()).unwrap(),
+    )
+    .unwrap()
 }
 
 /// The canary's own inputs: 4.9 USDC, fast, Circle offered 970 at the most.
@@ -91,7 +93,11 @@ fn an_icp_to_base_order_decodes_as_the_canarys_burn_but_amount_ref_and_recipient
     assert_eq!(ours.tokenIn, theirs.tokenIn);
     assert_eq!(ours.amountIn, theirs.amountIn);
     assert_eq!(ours.payout, theirs.payout);
-    assert_eq!(theirs.steps.len(), 2, "the canary's fee step, then its burn");
+    assert_eq!(
+        theirs.steps.len(),
+        2,
+        "the canary's fee step, then its burn"
+    );
     assert_eq!(ours.steps.len(), 1, "no fee step");
     assert_eq!(ours.payer, swapic::addr(canister()));
     assert_eq!(ours.r#ref.0, move_ref(1).into_bytes());
@@ -100,7 +106,10 @@ fn an_icp_to_base_order_decodes_as_the_canarys_burn_but_amount_ref_and_recipient
     let (mine, canarys) = (&ours.steps[0], &theirs.steps[1]);
     assert_eq!(mine.target, canarys.target, "TokenMessengerV2");
     assert_eq!(mine.token, canarys.token);
-    assert_eq!(mine.writes, canarys.writes, "the Runner writes the amount at 4");
+    assert_eq!(
+        mine.writes, canarys.writes,
+        "the Runner writes the amount at 4"
+    );
     // the step's min is the delta the Runner gives it: the whole amount with no fee step
     assert_eq!(mine.min, U256::from(AMOUNT));
     let (a, b) = (burn_call(mine), burn_call(canarys));
@@ -108,7 +117,10 @@ fn an_icp_to_base_order_decodes_as_the_canarys_burn_but_amount_ref_and_recipient
     assert_eq!(a.amount, b.amount);
     assert_eq!(a.destinationDomain, b.destinationDomain, "Base");
     assert_eq!(a.burnToken, b.burnToken);
-    assert_eq!(a.destinationCaller, b.destinationCaller, "received by anyone");
+    assert_eq!(
+        a.destinationCaller, b.destinationCaller,
+        "received by anyone"
+    );
     assert_eq!(a.maxFee, b.maxFee);
     assert_eq!(a.minFinalityThreshold, b.minFinalityThreshold, "fast: 1000");
     // the recipient: the canister's own Base address
@@ -143,7 +155,13 @@ fn standard_finality_is_2000() {
         canister: canister(),
         principal: principal(),
     }
-    .order(1, TokenAmount::from(AMOUNT), TokenAmount::ZERO, false, NOW_S);
+    .order(
+        1,
+        TokenAmount::from(AMOUNT),
+        TokenAmount::ZERO,
+        false,
+        NOW_S,
+    );
     let call = burn_call(&order.steps[0]);
     assert_eq!(call.minFinalityThreshold, STANDARD_FINALITY);
     assert_eq!(call.maxFee, U256::ZERO);

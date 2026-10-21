@@ -5,11 +5,11 @@ use super::super::tests::{settings, usdc, Pool};
 use super::*;
 use crate::chain::ChainId;
 use crate::hash::TxHash;
+use crate::hash::{OwnerKey, PoolRef};
 use crate::numeric::{BlockNumber, Nonce};
 use crate::pool::payout::PinnedOrder;
-use crate::pool::{CreditKey, EvmPayout, NonceUse, Registered, Shares};
-use crate::hash::{OwnerKey, PoolRef};
 use crate::pool::RebalanceSettings;
+use crate::pool::{CreditKey, EvmPayout, NonceUse, Registered, Shares};
 use std::collections::BTreeMap;
 
 /// The pool's maps on the heap and the moves beside them, steps applied as the storage
@@ -198,7 +198,10 @@ fn a_base_to_icp_move_reserves_leaves_and_arrives_on_its_own_route() {
     // signing leaves the Base pocket: in flight, expected at the address no more
     world.step(signed(id, ChainId::BASE)).unwrap();
     let base = world.ledger().pockets.base;
-    assert_eq!((base.reserved, base.in_flight), (TokenAmount::ZERO, usdc(1_000)));
+    assert_eq!(
+        (base.reserved, base.in_flight),
+        (TokenAmount::ZERO, usdc(1_000))
+    );
     assert!(matches!(world.item(id).status, MoveStatus::Signed(_)));
     // the assets keep it: in flight stays the stakers'
     assert_eq!(world.ledger().total_assets(), usdc(10_000));
@@ -245,7 +248,10 @@ fn an_icp_to_base_move_leaves_at_the_minter_and_arrives_once_on_base() {
         })
         .unwrap();
     let icp = world.ledger().pockets.icp;
-    assert_eq!((icp.reserved, icp.in_flight), (TokenAmount::ZERO, usdc(2_000)));
+    assert_eq!(
+        (icp.reserved, icp.in_flight),
+        (TokenAmount::ZERO, usdc(2_000))
+    );
     // the approval's ckUSDC fee is the pool's cost
     let fee = TokenAmount::from(10_000_u64);
     world
@@ -382,7 +388,10 @@ fn a_refused_minter_call_and_a_reverted_first_order_put_the_amount_back() {
         })
         .unwrap();
     let icp = world.ledger().pockets.icp;
-    assert_eq!((icp.reserved, icp.in_flight), (usdc(500), TokenAmount::ZERO));
+    assert_eq!(
+        (icp.reserved, icp.in_flight),
+        (usdc(500), TokenAmount::ZERO)
+    );
     assert_eq!(world.item(up).status, MoveStatus::Open);
 
     let down = world.open(MoveDirection::BaseToIcp, usdc(700), false);
@@ -397,7 +406,10 @@ fn a_refused_minter_call_and_a_reverted_first_order_put_the_amount_back() {
     world.step(signed(down, ChainId::BASE)).unwrap();
     world.step(PoolStep::MoveReverted { id: down }).unwrap();
     let base = world.ledger().pockets.base;
-    assert_eq!((base.reserved, base.in_flight), (usdc(700), TokenAmount::ZERO));
+    assert_eq!(
+        (base.reserved, base.in_flight),
+        (usdc(700), TokenAmount::ZERO)
+    );
     // back to signing the order it pinned
     let item = world.item(down);
     assert_eq!(item.status, MoveStatus::Routed);
@@ -469,7 +481,10 @@ fn a_retry_of_a_minter_call_a_controller_found_never_ran_asks_it_again() {
         .unwrap();
     world.step(PoolStep::MoveRetried { id }).unwrap();
     let icp = world.ledger().pockets.icp;
-    assert_eq!((icp.reserved, icp.in_flight), (usdc(500), TokenAmount::ZERO));
+    assert_eq!(
+        (icp.reserved, icp.in_flight),
+        (usdc(500), TokenAmount::ZERO)
+    );
     assert_eq!(world.item(id).status, MoveStatus::Open);
 }
 
@@ -514,11 +529,17 @@ fn an_unfilled_eco_move_is_refunded_and_routed_again() {
         })
         .unwrap();
     let base = world.ledger().pockets.base;
-    assert_eq!((base.reserved, base.in_flight), (usdc(1_000), TokenAmount::ZERO));
+    assert_eq!(
+        (base.reserved, base.in_flight),
+        (usdc(1_000), TokenAmount::ZERO)
+    );
     assert!(world.pool.credited.contains(&key(0x92)));
     let item = world.item(id);
     assert_eq!(item.status, MoveStatus::Open);
-    assert_eq!((item.route, item.proposal.clone(), item.window_ends), (None, None, None));
+    assert_eq!(
+        (item.route, item.proposal.clone(), item.window_ends),
+        (None, None, None)
+    );
     assert!(item.routable());
 }
 

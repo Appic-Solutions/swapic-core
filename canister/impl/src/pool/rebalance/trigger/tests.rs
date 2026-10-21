@@ -3,7 +3,7 @@
 use super::*;
 use types::hash::PoolRef;
 use types::pool::payout::PayoutLines;
-use types::pool::{Pocket, Pockets, PayoutQueue, PoolSettings, RebalanceLines};
+use types::pool::{PayoutQueue, Pocket, Pockets, PoolSettings, RebalanceLines};
 
 fn usdc(whole: u64) -> TokenAmount {
     TokenAmount::from(whole * 1_000_000)
@@ -123,7 +123,9 @@ fn a_move_is_capped_by_max_move_the_day_and_the_pocket_behind_its_queue() {
     });
     assert_eq!(decide(&tired, &[], &settings(), now()), None);
     // a day later it is free again
-    let later = now().checked_add(std::time::Duration::from_secs(86_401)).unwrap();
+    let later = now()
+        .checked_add(std::time::Duration::from_secs(86_401))
+        .unwrap();
     assert!(decide(&tired, &[], &settings(), later).is_some());
     // the Base queue keeps its USDC: only $800 is available to move
     let mut queued = pool(8_000, 2_000);

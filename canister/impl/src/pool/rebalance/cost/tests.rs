@@ -31,7 +31,10 @@ fn config() -> Config {
             (ChainId::BASE, chain(20_000, 30_000)),
             (ChainId::ETHEREUM, chain(400_000, 500_000)),
         ])),
-        cctp_min_fees: ChainTable(BTreeMap::from([(ChainId::ETHEREUM, CctpMinFee::new(1_000))])),
+        cctp_min_fees: ChainTable(BTreeMap::from([(
+            ChainId::ETHEREUM,
+            CctpMinFee::new(1_000),
+        )])),
         ..Config::default()
     }
 }
@@ -85,8 +88,11 @@ fn the_own_route_costs_its_fee_and_both_network_fees() {
         ),
         TokenAmount::from(200_000_u64 + 400_000 + 30_000)
     );
-    assert!(fast(false, &RebalanceSettings {
-        standard_when_idle: false,
-        ..settings
-    }));
+    assert!(fast(
+        false,
+        &RebalanceSettings {
+            standard_when_idle: false,
+            ..settings
+        }
+    ));
 }

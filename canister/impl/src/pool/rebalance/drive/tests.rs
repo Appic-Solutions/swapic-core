@@ -7,8 +7,8 @@ use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{base_stake, funded_pool, usdc, FEE};
 use crate::storage::pool::{ledger, record_at};
 use std::cell::RefCell;
-use types::pool::RebalanceSettings;
 use types::events::TxPurpose;
+use types::pool::RebalanceSettings;
 
 fn at(secs: u64) -> Timestamp {
     Timestamp::from_secs(1_800_000_000 + secs).unwrap()
@@ -143,7 +143,10 @@ fn a_sweep_credits_at_most_what_the_move_may_carry() {
     // all of it less the fee moves; the fee is the move's cost
     assert_eq!(
         swept(usdc(500), fee, usdc(500)),
-        Some((usdc(500).checked_sub(fee).unwrap(), usdc(500).checked_sub(fee).unwrap()))
+        Some((
+            usdc(500).checked_sub(fee).unwrap(),
+            usdc(500).checked_sub(fee).unwrap()
+        ))
     );
     // a donation moves with it, and is never credited
     assert_eq!(
@@ -171,7 +174,9 @@ struct Fake {
 
 impl IcpCalls for Fake {
     async fn balance(&self, ledger: Principal, account: Account) -> Result<Nat, CallError> {
-        self.asked.borrow_mut().push(Asked::Balance(ledger, account));
+        self.asked
+            .borrow_mut()
+            .push(Asked::Balance(ledger, account));
         Ok(self.balance.clone())
     }
 
@@ -259,7 +264,9 @@ fn ctx() -> Ctx {
     Ctx {
         now: at(100),
         principal: Principal::from_slice(&[0x63; 10]),
-        canister: "0x36D34038F04990a58c068e08eD9754e2E3D9bA53".parse().unwrap(),
+        canister: "0x36D34038F04990a58c068e08eD9754e2E3D9bA53"
+            .parse()
+            .unwrap(),
     }
 }
 
@@ -270,7 +277,9 @@ fn pool_with_move(direction: MoveDirection, amount: TokenAmount, base: TokenAmou
     funded_pool(usdc(4_000));
     if base > TokenAmount::ZERO {
         base_stake(
-            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
             base,
             0x51,
             7,
@@ -378,7 +387,10 @@ fn a_refusing_minter_puts_the_ckusdc_back_and_short_ckether_asks_nothing() {
         let item = super::super::item(id).unwrap();
         assert_eq!(item.status, MoveStatus::Open);
         let icp = ledger().pockets.icp;
-        assert_eq!((icp.reserved, icp.in_flight), (usdc(1_000), TokenAmount::ZERO));
+        assert_eq!(
+            (icp.reserved, icp.in_flight),
+            (usdc(1_000), TokenAmount::ZERO)
+        );
     });
 }
 

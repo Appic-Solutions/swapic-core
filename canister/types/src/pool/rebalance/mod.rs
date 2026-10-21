@@ -475,9 +475,7 @@ impl Move {
     /// keep. A donation to where it arrives is never the pool's.
     pub fn creditable(&self) -> TokenAmount {
         let cost = self.route.map_or(TokenAmount::ZERO, |route| route.cost());
-        self.amount
-            .checked_sub(cost)
-            .unwrap_or(TokenAmount::ZERO)
+        self.amount.checked_sub(cost).unwrap_or(TokenAmount::ZERO)
     }
 }
 
@@ -510,7 +508,9 @@ impl RebalanceLines {
         self.recent
             .iter()
             .filter(|(opened, _)| *opened > since)
-            .try_fold(TokenAmount::ZERO, |sum, (_, amount)| sum.checked_add(*amount))
+            .try_fold(TokenAmount::ZERO, |sum, (_, amount)| {
+                sum.checked_add(*amount)
+            })
             .unwrap_or(TokenAmount::MAX)
     }
 }

@@ -97,7 +97,9 @@ pub async fn note(
         MoveStatus::Burned => {}
         MoveStatus::Arrived => return Err(PoolError::AlreadyCredited),
         MoveStatus::Lost(_) => {
-            return Err(PoolError::BadArrival("the move was written off".to_string()))
+            return Err(PoolError::BadArrival(
+                "the move was written off".to_string(),
+            ))
         }
         _ => {
             return Err(PoolError::Unavailable(
@@ -112,7 +114,8 @@ pub async fn note(
     let mut credited_already = false;
     for one in &found {
         if read_state(|state| state.store().is_pool_credited(&one.credit)) {
-            credited_already |= matches!(&one.proof, Proof::Deposit { r#ref, .. } if *r#ref == move_ref(id));
+            credited_already |=
+                matches!(&one.proof, Proof::Deposit { r#ref, .. } if *r#ref == move_ref(id));
             continue;
         }
         let Some(step) = read_state(|state| step_for(state, one)) else {

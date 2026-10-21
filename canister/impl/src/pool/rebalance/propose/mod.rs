@@ -138,11 +138,17 @@ pub fn check(
             intent.destination, setup.destination
         )));
     }
-    if intent.arrival != (EcoArrival::Deliver { recipient: canister }) {
+    if intent.arrival
+        != (EcoArrival::Deliver {
+            recipient: canister,
+        })
+    {
         return Err(refused("the intent delivers to another than the canister"));
     }
     if intent.token != setup.destination_usdc {
-        return Err(refused("the intent carries another token than the USDC there"));
+        return Err(refused(
+            "the intent carries another token than the USDC there",
+        ));
     }
     if intent.reward_token != setup.source_usdc {
         return Err(refused("the intent's reward is another token"));

@@ -668,11 +668,9 @@ impl State<MemoryStore> {
                 .pool_orphans()
                 .iter()
                 .map(|(key, orphan)| (key, orphan)))
-            && pool_moves.iter().eq(other
-                .store
-                .pool_moves()
+            && pool_moves
                 .iter()
-                .map(|(id, item)| (id, item)))
+                .eq(other.store.pool_moves().iter().map(|(id, item)| (id, item)))
             && pool_own_sources.iter().eq(other
                 .store
                 .pool_own_sources()

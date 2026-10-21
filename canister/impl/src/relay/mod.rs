@@ -704,9 +704,8 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 .evm_chains
                 .get(arrival.chain_id)
                 .map(|destination| destination.usdc);
-            let delivered = Envelope::decode(&burn.hook_data)
-                .ok()
-                .and_then(|envelope| match (envelope.action, usdc) {
+            let delivered = Envelope::decode(&burn.hook_data).ok().and_then(|envelope| {
+                match (envelope.action, usdc) {
                     (Action::Deliver, Some(usdc)) => Some(Delivery {
                         chain: arrival.chain_id,
                         recipient: envelope.recipient,
@@ -714,7 +713,8 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                         min_out: amount_of(min.saturating_sub(burn.max_fee)),
                     }),
                     _ => envelope_delivery(&envelope, arrival.chain_id),
-                });
+                }
+            });
             let delivery = if payout.is_some() { None } else { delivered };
             (GasAction::RelayCctp, Some(arrival), delivery)
         }

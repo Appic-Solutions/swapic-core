@@ -369,10 +369,7 @@ fn a_cctp_payout_order_passes_the_checks() {
     assert!(check(&payout, &order, &world, 600_000, nobody).is_ok());
     // a minimum the burn cannot guarantee is refused
     let greedy = PayoutTerms {
-        min_out: delivery
-            .min_out
-            .checked_add(TokenAmount::ONE)
-            .unwrap(),
+        min_out: delivery.min_out.checked_add(TokenAmount::ONE).unwrap(),
         ..terms
     };
     assert!(matches!(

@@ -958,7 +958,9 @@ pub fn eco_writes(arrival: &EcoArrival, route_len: usize, fee: U256) -> Vec<Writ
     writes
 }
 
-/// A step of a shape this canister reads, read exactly as the Runner will run it.
+/// A step of a shape this canister reads, read exactly as the Runner will run it. Read one
+/// step at a time and never stored, so the intent's size is no cost worth a box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KnownStep {
     /// `usdc.transfer(to, amount)`, a fixed amount: the fee step's shape (abi.md 6.1).

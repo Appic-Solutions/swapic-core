@@ -98,7 +98,9 @@ impl PoolLedger {
                 }
                 let within_day = sat_add(lines.opened_within_day(*opened_at), *amount);
                 if within_day > settings.daily_cap {
-                    return Err(PoolStepError::Terms("the moves of a day pass the daily cap"));
+                    return Err(PoolStepError::Terms(
+                        "the moves of a day pass the daily cap",
+                    ));
                 }
                 match direction {
                     MoveDirection::BaseToIcp if *amount > self.base_available() => {
@@ -121,7 +123,11 @@ impl PoolLedger {
                 if !item.proposable() {
                     return Err(not_from("MoveProposed", &item));
                 }
-                if item.proposal.as_ref().is_some_and(|taken| *fee >= taken.fee) {
+                if item
+                    .proposal
+                    .as_ref()
+                    .is_some_and(|taken| *fee >= taken.fee)
+                {
                     return Err(PoolStepError::Terms(
                         "a proposal is taken only when cheaper than the one taken",
                     ));
@@ -363,7 +369,9 @@ impl PoolLedger {
             } => {
                 lines.next_id = id.saturating_add(1);
                 lines.open.insert(*id);
-                let since = opened_at.checked_sub(DAY).unwrap_or(Timestamp::from_nanos(0));
+                let since = opened_at
+                    .checked_sub(DAY)
+                    .unwrap_or(Timestamp::from_nanos(0));
                 lines.recent.retain(|(opened, _)| *opened > since);
                 lines.recent.push((*opened_at, *amount));
                 let pocket = source(&mut ledger.pockets, *direction);

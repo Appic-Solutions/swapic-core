@@ -12,7 +12,10 @@ fn settings_are_set_by_a_controller_and_hold_together() {
         checked(false, false, wire()),
         Err(PoolError::NotAllowed(_))
     ));
-    assert_eq!(checked(false, true, wire()), Ok(RebalanceSettings::default()));
+    assert_eq!(
+        checked(false, true, wire()),
+        Ok(RebalanceSettings::default())
+    );
     let bad = WireSettings {
         max_move: Nat::from(1_u8),
         ..wire()
@@ -53,7 +56,9 @@ mod stuck_moves {
         crate::storage::init();
         funded_pool(usdc(4_000));
         base_stake(
-            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
             usdc(6_000),
             0x52,
             8,
@@ -180,7 +185,10 @@ mod stuck_moves {
             record_at(PoolStep::MoveStuck { id, why }, at(10)).unwrap();
             // reverted, it is reserved again on Base, not in flight
             let base = ledger().pockets.base;
-            assert_eq!((base.reserved, base.in_flight), (usdc(1_000), TokenAmount::ZERO));
+            assert_eq!(
+                (base.reserved, base.in_flight),
+                (usdc(1_000), TokenAmount::ZERO)
+            );
             assert_eq!(
                 resolve(true, true, id, MoveResolution::Retry, at(11)),
                 Err(PoolError::Halted)

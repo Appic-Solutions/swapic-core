@@ -41,9 +41,8 @@ fn amount_of(value: i128) -> TokenAmount {
 /// The two pockets' USDC as the split reads them: each pocket's free and reserved lines (a
 /// payout's USDC in flight has left the pool), every open move counted at its destination.
 pub fn split(ledger: &PoolLedger, open: &[Move]) -> (i128, i128) {
-    let held = |pocket: types::pool::Pocket| {
-        signed(pocket.free).saturating_add(signed(pocket.reserved))
-    };
+    let held =
+        |pocket: types::pool::Pocket| signed(pocket.free).saturating_add(signed(pocket.reserved));
     let mut icp = held(ledger.pockets.icp);
     let mut base = held(ledger.pockets.base);
     for item in open {
@@ -197,7 +196,9 @@ pub fn open_if_needed(now: Timestamp) -> Option<u64> {
             Some(id)
         }
         Err(error) => {
-            pool::log(&format!("rebalance: the move the books ask for was refused: {error}"));
+            pool::log(&format!(
+                "rebalance: the move the books ask for was refused: {error}"
+            ));
             None
         }
     }

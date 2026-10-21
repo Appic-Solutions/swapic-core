@@ -143,7 +143,9 @@ pub enum Next {
     /// Decide its route: the cheapest proposal taken, or the canister's own.
     Route,
     /// Sign its pinned order; after a revert, once Swapic says it did not run.
-    Sign { again: bool },
+    Sign {
+        again: bool,
+    },
     /// ICP to Base: ask the ck minter.
     Withdraw,
     /// ICP to Base: read the minter's withdrawal and its landing on Ethereum.
@@ -223,7 +225,8 @@ fn in_flight(id: u64) -> bool {
     let key = purpose
         .quote_hash()
         .expect("BUG: a move's purpose has a key");
-    read_state(|state| state.store().has_unsigned_nonce_for(&key)) || outbox::find(purpose).is_some()
+    read_state(|state| state.store().has_unsigned_nonce_for(&key))
+        || outbox::find(purpose).is_some()
 }
 
 fn record(step: PoolStep, now: Timestamp) -> Result<(), String> {
@@ -347,7 +350,11 @@ async fn route(item: &Move, now: Timestamp) -> Result<(), String> {
 }
 
 /// The canister's own order for `item`, pinned.
-fn own_order(item: &Move, setup: &Setup, now: Timestamp) -> Result<(MoveRoute, PinnedOrder), String> {
+fn own_order(
+    item: &Move,
+    setup: &Setup,
+    now: Timestamp,
+) -> Result<(MoveRoute, PinnedOrder), String> {
     let (src, dst) = cost::chains(item.direction, setup.pool_chain);
     let source = setup
         .config
@@ -411,7 +418,9 @@ async fn ran(chain: ChainId, order_id: [u8; 32]) -> Option<bool> {
 /// standing allowance to Swapic there. After a revert only once Swapic says it did not run:
 /// a reorg may have turned the revert into a run, and then it never runs again.
 async fn sign(item: &Move, again: bool) -> Result<(), String> {
-    let pool_chain = config::get().pool_chain.ok_or("no pool chain is configured")?;
+    let pool_chain = config::get()
+        .pool_chain
+        .ok_or("no pool chain is configured")?;
     let chain = order_chain(item, pool_chain);
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
     if again {
@@ -502,7 +511,10 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
         )
     };
     let amount = item.amount.checked_add(fee).ok_or("the amount overflows")?;
-    match calls.approve(ckusdc, minter, Nat::from(amount), dedup).await {
+    match calls
+        .approve(ckusdc, minter, Nat::from(amount), dedup)
+        .await
+    {
         Ok(()) => {}
         Err(CallError::Refused(why)) => {
             return refused(
@@ -539,7 +551,10 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
 
 /// The landing read at Ethereum's crediting depth: how much of `token` the transaction moved
 /// to the canister.
-async fn landed_by(tx: TxHash, canister: EvmAddress) -> Result<Option<(TokenAmount, BlockNumber)>, String> {
+async fn landed_by(
+    tx: TxHash,
+    canister: EvmAddress,
+) -> Result<Option<(TokenAmount, BlockNumber)>, String> {
     let config = config::get();
     let usdc = config
         .evm_chains
@@ -636,7 +651,9 @@ fn first_tx(answer: &Value) -> Option<TxHash> {
 async fn fill(item: &Move, ctx: &Ctx) -> Result<(), String> {
     let now = ctx.now;
     let config = config::get();
-    let intent = item.intent.ok_or("its order published no intent the canister read")?;
+    let intent = item
+        .intent
+        .ok_or("its order published no intent the canister read")?;
     let portal = config.eco_portal.ok_or("no Eco Portal is configured")?;
     let head = chain_data::fresh(ChainId::ETHEREUM, now, config.chain_data_max_age)
         .map(|reading| reading.block.get())
@@ -654,9 +671,13 @@ async fn fill(item: &Move, ctx: &Ctx) -> Result<(), String> {
         "fromBlock": format!("0x{from:x}"),
         "toBlock": format!("0x{to:x}"),
     });
-    let answers = crate::rpc::rpc_batch(ChainId::ETHEREUM, &[("eth_getLogs", json!([filter]))], 64 * 1024)
-        .await
-        .map_err(|error| format!("the fill read: {:?}", error.kind()))?;
+    let answers = crate::rpc::rpc_batch(
+        ChainId::ETHEREUM,
+        &[("eth_getLogs", json!([filter]))],
+        64 * 1024,
+    )
+    .await
+    .map_err(|error| format!("the fill read: {:?}", error.kind()))?;
     let Some(tx) = answers.first().and_then(first_tx) else {
         return Ok(());
     };

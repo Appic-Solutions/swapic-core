@@ -123,7 +123,11 @@ fn item(direction: MoveDirection) -> Move {
         TokenAmount::from(AMOUNT),
         false,
         now(),
-        Some(now().checked_add(std::time::Duration::from_secs(60)).unwrap()),
+        Some(
+            now()
+                .checked_add(std::time::Duration::from_secs(60))
+                .unwrap(),
+        ),
         TokenAmount::from(1_000_000_u64),
     );
     if direction == MoveDirection::IcpToBase {
@@ -180,7 +184,10 @@ fn proposal(direction: MoveDirection, fee: u64) -> Order {
     order
 }
 
-fn checked(direction: MoveDirection, order: &Order) -> Result<(PinnedOrder, TokenAmount), PoolError> {
+fn checked(
+    direction: MoveDirection,
+    order: &Order,
+) -> Result<(PinnedOrder, TokenAmount), PoolError> {
     let world = world();
     check(
         &item(direction),
@@ -260,7 +267,9 @@ fn an_order_paying_another_or_more_is_refused() {
     other_ref.r#ref = alloy_primitives::FixedBytes(move_ref(8).into_bytes());
     refused_with(checked(direction, &other_ref), "ref is not the move's");
     // rewritten: to another chain than the move's other pocket
-    let elsewhere = rewritten(proposal(direction, 100_000), |call| call.destination = 42_161);
+    let elsewhere = rewritten(proposal(direction, 100_000), |call| {
+        call.destination = 42_161
+    });
     refused_with(checked(direction, &elsewhere), "");
 }
 
@@ -371,7 +380,9 @@ fn outside_the_window_for_an_urgent_move_or_with_long_deadlines_nothing_is_taken
             when,
         )
     };
-    let late = now().checked_add(std::time::Duration::from_secs(60)).unwrap();
+    let late = now()
+        .checked_add(std::time::Duration::from_secs(60))
+        .unwrap();
     refused_with(at(&item(direction), late, 400_000), "window is over");
     let mut urgent = item(direction);
     urgent.urgent = true;
@@ -379,7 +390,11 @@ fn outside_the_window_for_an_urgent_move_or_with_long_deadlines_nothing_is_taken
     // an ICP to Base move before its USDC landed takes none
     let mut early = item(MoveDirection::IcpToBase);
     early.status = MoveStatus::Withdrawn;
-    assert!(checked(MoveDirection::IcpToBase, &proposal(MoveDirection::IcpToBase, 1)).is_ok());
+    assert!(checked(
+        MoveDirection::IcpToBase,
+        &proposal(MoveDirection::IcpToBase, 1)
+    )
+    .is_ok());
     refused_with(
         check(
             &early,
