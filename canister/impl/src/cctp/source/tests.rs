@@ -1,8 +1,10 @@
 //! On Circle's real attested message (`samples/cctp_base_to_arbitrum.json`, burn tx
-//! 0x90cc...da0c) and the source receipt that sent it, as Base's transmitter emits a message:
-//! the four fields the attestation service fills in blank. No real source receipt of that burn
-//! was captured, so its `MessageSent` is the attested message with those four fields zeroed,
-//! which is what CCTP v2 emits.
+//! 0x90cc...da0c) and the REAL source receipt that sent it
+//! (`samples/cctp_base_to_arbitrum_source_receipt.json`: Base block 52,390,157, status 1, 17
+//! logs, one `MessageSent`, read read-only for the final review round): Base's transmitter
+//! emitted the message with the four fields the attestation service fills in blank. That
+//! burn was no canister relay, so its source paid the canister no fee step: the tests that
+//! need one add the Runner's fee transfer to the real logs.
 
 use super::*;
 use crate::pool::arrival::Log;
@@ -66,40 +68,56 @@ fn log(index: u64, address: EvmAddress, topics: Vec<[u8; 32]>, data: Vec<u8>) ->
     }
 }
 
-/// The source receipt: the Runner's fee step to the canister (`fee`, none for zero), then
-/// the transmitter's `MessageSent` of `sent`.
-fn receipt(sent: &BurnMessage, fee: u64) -> Receipt {
-    use alloy_sol_types::SolEvent;
+/// The real source receipt of the sample's burn.
+fn real() -> Receipt {
+    let json: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../samples/cctp_base_to_arbitrum_source_receipt.json"
+    ))
+    .unwrap();
+    Receipt::parse(&json).unwrap()
+}
+
+/// The real receipt with the Runner's fee step to the canister (`fee`) among its logs.
+fn with_fee(mut receipt: Receipt, fee: u64) -> Receipt {
     let chain = base();
-    let mut logs = vec![];
-    if fee > 0 {
-        logs.push(log(
-            1,
-            chain.usdc,
-            vec![
-                topics::transfer(),
-                chain.runner.to_word(),
-                CANISTER.to_word(),
-            ],
-            TokenAmount::from(fee).to_be_bytes().to_vec(),
-        ));
-    }
-    let data = swapic::MessageSent {
-        message: sent.encode().into(),
-    }
-    .encode_data();
-    logs.push(log(
-        4,
-        chain.message_transmitter,
-        vec![topics::message_sent()],
-        data,
+    receipt.logs.push(log(
+        1_000,
+        chain.usdc,
+        vec![
+            topics::transfer(),
+            chain.runner.to_word(),
+            CANISTER.to_word(),
+        ],
+        TokenAmount::from(fee).to_be_bytes().to_vec(),
     ));
-    Receipt {
-        tx: TxHash::new([0x90; 32]),
-        block: BlockNumber::new(52_390_157),
-        success: true,
-        logs,
-    }
+    receipt
+}
+
+/// What Base's transmitter emitted in the real receipt.
+fn sent_in(receipt: &Receipt) -> Vec<BurnMessage> {
+    let chain = base();
+    receipt
+        .logs
+        .iter()
+        .filter(|log| {
+            log.address == chain.message_transmitter
+                && log.topics.first() == Some(&topics::message_sent())
+        })
+        .filter_map(|log| swapic::read_message_sent(&log.topics, &log.data))
+        .map(|bytes| BurnMessage::parse(&bytes).unwrap())
+        .collect()
+}
+
+/// The real source sent exactly the attested message with the four fields Circle fills in
+/// blank: the derivation the earlier tests used equals what Base emitted.
+#[test]
+fn the_real_source_sent_the_attested_message_with_the_four_fields_blank() {
+    let receipt = real();
+    assert!(receipt.success);
+    assert_eq!(receipt.block, BlockNumber::new(52_390_157));
+    assert_eq!(receipt.logs.len(), 17);
+    let message = attested();
+    assert_eq!(sent_in(&receipt), vec![emitted(&message)]);
 }
 
 /// The attested message is the emitted one but for the four fields Circle fills in.
@@ -119,77 +137,58 @@ fn the_attested_message_is_the_one_the_source_sent() {
     assert!(!message.attests(&other));
 }
 
-/// M-06: a finish's source sent this message and paid the canister fee steps worth the
-/// arrival's least network fee; a source with no fee step or less, another message, another
-/// emitter, or a revert proves nothing.
+/// M-06, on the real receipt: a finish's source sent this message and paid the canister fee
+/// steps worth the arrival's least network fee. The real burn, no canister relay, paid no fee
+/// step; a fee step of one unit, a fee to someone else, another message, another emitter, or
+/// a revert proves nothing either.
 #[test]
 fn a_source_proves_its_message_and_its_fee() {
     let message = attested();
     let chain = base();
+    let proved = |receipt: &Receipt, message: &BurnMessage, canister: EvmAddress| {
+        proves(receipt, message, &chain, canister, NEEDED)
+    };
     assert_eq!(
-        proves(
-            &receipt(&emitted(&message), 166_275),
-            &message,
-            &chain,
-            CANISTER,
-            NEEDED
-        ),
+        proved(&with_fee(real(), 166_275), &message, CANISTER),
         Ok(())
     );
     assert_eq!(
-        proves(
-            &receipt(&emitted(&message), 0),
-            &message,
-            &chain,
-            CANISTER,
-            NEEDED
-        ),
+        proved(&real(), &message, CANISTER),
         Err(FinishError::Source("paid the canister no fee step"))
     );
-    let mut other = emitted(&message);
-    other.body.amount = TokenAmount::from(1_u32);
     assert_eq!(
-        proves(
-            &receipt(&other, 166_275),
-            &message,
-            &chain,
-            CANISTER,
-            NEEDED
-        ),
-        Err(FinishError::Source("did not send this message"))
-    );
-    let mut forged = receipt(&emitted(&message), 166_275);
-    forged.logs[1].address = EvmAddress::new([0x66; 20]);
-    assert_eq!(
-        proves(&forged, &message, &chain, CANISTER, NEEDED),
-        Err(FinishError::Source("did not send this message"))
-    );
-    // a fee to someone else is no fee to the canister
-    assert!(proves(
-        &receipt(&emitted(&message), 166_275),
-        &message,
-        &chain,
-        EvmAddress::new([0x01; 20]),
-        NEEDED
-    )
-    .is_err());
-    // a fee step of one unit is no fee for the arrival (M-06's own story)
-    assert_eq!(
-        proves(
-            &receipt(&emitted(&message), 1),
-            &message,
-            &chain,
-            CANISTER,
-            NEEDED
-        ),
+        proved(&with_fee(real(), 1), &message, CANISTER),
         Err(FinishError::Source(
             "paid the canister less than the arrival's least network fee"
         ))
     );
-    let mut reverted = receipt(&emitted(&message), 166_275);
+    // a fee to someone else is no fee to the canister
+    assert!(proved(
+        &with_fee(real(), 166_275),
+        &message,
+        EvmAddress::new([0x01; 20])
+    )
+    .is_err());
+    let mut other = message.clone();
+    other.body.amount = TokenAmount::from(1_u32);
+    assert_eq!(
+        proved(&with_fee(real(), 166_275), &other, CANISTER),
+        Err(FinishError::Source("did not send this message"))
+    );
+    let mut forged = with_fee(real(), 166_275);
+    for log in forged.logs.iter_mut() {
+        if log.address == chain.message_transmitter {
+            log.address = EvmAddress::new([0x66; 20]);
+        }
+    }
+    assert_eq!(
+        proved(&forged, &message, CANISTER),
+        Err(FinishError::Source("did not send this message"))
+    );
+    let mut reverted = with_fee(real(), 166_275);
     reverted.success = false;
     assert_eq!(
-        proves(&reverted, &message, &chain, CANISTER, NEEDED),
+        proved(&reverted, &message, CANISTER),
         Err(FinishError::Source("reverted"))
     );
 }
