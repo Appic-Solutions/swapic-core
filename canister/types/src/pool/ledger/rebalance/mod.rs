@@ -657,6 +657,9 @@ impl PoolLedger {
                 item.scan_from = None;
                 item.window_ends = None;
                 item.status = MoveStatus::Open;
+                // a refund comes days after a move is marked stuck: the money is back in
+                // the Base pocket and the move routes again on its own (L-11)
+                item.stuck = None;
                 item.since = at;
                 Some(item)
             }
