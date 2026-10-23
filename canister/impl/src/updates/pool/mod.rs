@@ -47,7 +47,8 @@ pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcom
     pool::arrival::note(arrival).await
 }
 
-/// Any caller, refused while halted, while the pool is closed, and for a sanctioned party.
+/// Any caller, refused while halted, while the pool is closed, for a sanctioned party, and past
+/// five calls a minute or thirty an hour (this door and `swap_from_icp` together).
 /// Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister (its main account; the
 /// approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
@@ -126,7 +127,8 @@ pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolErr
     .map(|tx_id| PoolApproveOk { tx_id })
 }
 
-/// Any caller, refused while halted, while the pool is closed, and for a sanctioned party: an
+/// Any caller, refused while halted, while the pool is closed, for a sanctioned party, and
+/// past five calls a minute or thirty an hour (this door and `stake_icp` together): an
 /// ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister) to any token on an EVM
 /// chain, with the quoter's payout plan (the order for the payout it expects, its gas) and

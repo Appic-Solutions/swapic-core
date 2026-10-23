@@ -627,6 +627,15 @@ fn samples() -> Vec<Sample> {
     all.extend(eco_payout_samples());
     all.extend(planned_swap_samples());
     all.extend(resolved_payout_samples());
+    all.push(sample(
+        "a caller's calls let through the free doors",
+        crate::pool::callers::CallerCalls {
+            minute_from: Timestamp::from_nanos(1_800_000_000_000_001_501),
+            in_minute: 4,
+            hour_from: Timestamp::from_nanos(1_800_000_000_000_001_502),
+            in_hour: 29,
+        },
+    ));
     all
 }
 

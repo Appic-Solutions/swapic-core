@@ -246,6 +246,8 @@ pub async fn stake(
 ) -> Result<StakeIcpOk, PoolError> {
     pool::require_running()?;
     pool::require_pool_open()?;
+    // counted before anything is recorded: past the limit, nothing is written
+    pool::callers::admit(ic_cdk::api::caller(), now())?;
     let request = StakeRequest {
         caller: ic_cdk::api::caller(),
         from_subaccount: subaccount("from_subaccount", args.from_subaccount)?,

@@ -52,6 +52,9 @@ const POOL_MOVES_MEMORY_ID: MemoryId = MemoryId::new(40);
 const POOL_OWN_SOURCES_MEMORY_ID: MemoryId = MemoryId::new(41);
 // P11e
 const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
+// the final review fixes (2026-10-23): 37 to 39 are lane C2's stable cells; 43 the per-caller
+// limit on the free doors
+const POOL_CALLERS_MEMORY_ID: MemoryId = MemoryId::new(43);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -67,6 +70,10 @@ pub fn events_data_memory() -> Memory {
 
 pub fn config_memory() -> Memory {
     memory(CONFIG_MEMORY_ID)
+}
+
+pub fn pool_callers_memory() -> Memory {
+    memory(POOL_CALLERS_MEMORY_ID)
 }
 
 pub fn roles_memory() -> Memory {

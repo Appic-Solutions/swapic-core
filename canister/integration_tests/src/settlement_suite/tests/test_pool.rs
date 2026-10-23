@@ -1337,3 +1337,60 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
     assert_eq!(world.balance(staker()), refunded);
     assert!(world.replay_matches());
 }
+
+/// The per-caller limit (Jeff, 2026-10-23): a caller with no approval calls the free doors
+/// over and over. Each call let through writes its lines and is refused its pull; past five a
+/// minute, both doors together, it is refused with nothing written. Another caller is
+/// counted apart.
+#[test]
+fn a_caller_past_five_calls_a_minute_is_refused_with_nothing_written() {
+    use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = usdc_plan(canister_address, usdc(100) - 150_000, deadline_s);
+    let swap = |caller: Principal| -> Result<SwapFromIcpOk, PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            caller,
+            "swap_from_icp",
+            encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
+        )
+    };
+    for _ in 0..4 {
+        assert!(matches!(swap(staker()), Err(PoolError::Ledger(_))));
+    }
+    // the stake door counts with it
+    let staked: Result<StakeIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "stake_icp",
+        encode_one(StakeIcpArgs {
+            from_subaccount: None,
+            amount: Nat::from(usdc(100)),
+            owner: PoolAccount::Icp(settlement_api::types::pool::IcpAccount {
+                owner: staker(),
+                subaccount: None,
+            }),
+        })
+        .unwrap(),
+    );
+    assert!(staked.is_err());
+    let count = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    assert!(matches!(
+        swap(staker()),
+        Err(PoolError::Unavailable(why)) if why.contains("a minute")
+    ));
+    assert_eq!(
+        crate::client::settlement::event_count(&world.pic, world.canister, world.admin),
+        count,
+        "nothing written"
+    );
+    // another caller is counted apart
+    assert!(matches!(swap(recipient()), Err(PoolError::Ledger(_))));
+    // a minute on, the first passes again
+    world.pic.advance_time(Duration::from_secs(61));
+    world.books_checked();
+    assert!(matches!(swap(staker()), Err(PoolError::Ledger(_))));
+}

@@ -1,4 +1,5 @@
 pub mod audit_cursor;
+pub mod callers;
 pub mod chain_data;
 pub mod config;
 pub mod ecdsa_address;
@@ -31,6 +32,7 @@ pub fn init() {
     sanctions::init();
     inflight::init();
     flow_settings::init();
+    callers::init();
 }
 
 /// Runs `f` on a thread of its own, so it starts on empty stable memory and leaves nothing

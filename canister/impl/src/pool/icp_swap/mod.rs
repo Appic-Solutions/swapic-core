@@ -353,6 +353,8 @@ pub async fn swap_from_icp(
 ) -> Result<SwapFromIcpOk, PoolError> {
     pool::require_running()?;
     pool::require_pool_open()?;
+    // counted before anything is recorded: past the limit, nothing is written
+    crate::pool::callers::admit(ic_cdk::api::caller(), now())?;
     let request = request_of(ic_cdk::api::caller(), args)?;
     let config = crate::storage::config::get();
     let canister = crate::storage::ecdsa_address::get();
