@@ -1053,10 +1053,15 @@ fn unavailable(error: RpcError) -> PoolError {
     PoolError::Unavailable(format!("the read failed: {:?}", error.kind()))
 }
 
-/// How far below the one node's head the block every node reads beside a receipt stands: a
-/// block that new may not be at every node's provider yet, and nodes that disagree on it
-/// fail the read. The depth is still counted from the head itself.
-pub const HEADER_BEHIND: u64 = 2;
+/// How far below the one node's head the block every node reads beside a receipt stands: the
+/// head itself may not be at every node's provider yet. The depth is counted from that agreed
+/// block, never from the one node's head (a node that lies about the head gains no depth).
+pub const HEADER_BEHIND: u64 = 1;
+
+/// The block every node reads beside a receipt, named from the one node's `head`.
+pub fn named_block(head: BlockNumber) -> BlockNumber {
+    BlockNumber::new(head.get().saturating_sub(HEADER_BEHIND))
+}
 
 /// The receipt every node agreed on in `answers` (`[receipt, header]`, read beside the block
 /// `named` a little below the head one node read), pure: a receipt of `tx`, and a header of
@@ -1092,10 +1097,32 @@ pub fn agreed_receipt(
     Ok(receipt)
 }
 
+/// The receipt of `tx` the nodes agreed on in `answers`, read beside the block named from the
+/// one node's `head`, and deep enough under that agreed block, pure: the depth is counted from
+/// a block every node saw, so a head claimed past the real one names no block and is
+/// refused, and one claimed a block past it is judged on the real head.
+pub fn based(
+    tx: TxHash,
+    head: BlockNumber,
+    answers: Vec<Result<Value, RpcError>>,
+    chain: &PoolChain,
+) -> Result<Receipt, PoolError> {
+    let named = named_block(head);
+    let receipt = agreed_receipt(tx, named, answers)?;
+    let largest = receipt
+        .transfers_to(chain)
+        .into_iter()
+        .map(|(_, _, amount)| amount)
+        .max()
+        .unwrap_or(TokenAmount::ZERO);
+    deep_enough(receipt.block, named, chain.chain, largest)?;
+    Ok(receipt)
+}
+
 /// The pool chain's receipt of `tx` at the crediting depth, read by every node and agreed on
 /// (M-03): one node reads the head, which only names the block every node reads beside the
-/// receipt ([`HEADER_BEHIND`] below it), so a head no node sees near a block is no depth, and
-/// a lower one only waits.
+/// receipt ([`HEADER_BEHIND`] below it); the depth is counted from that agreed block
+/// ([`based`]).
 pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
     let head = rpc::rpc_batch(
         chain.chain,
@@ -1108,7 +1135,7 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
     .and_then(Value::as_str)
     .and_then(parse_block_number)
     .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
-    let named = BlockNumber::new(head.get().saturating_sub(HEADER_BEHIND));
+    let named = named_block(head);
     let calls = [
         (
             "eth_getTransactionReceipt",
@@ -1124,15 +1151,7 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
     let answers = rpc::rpc_batch_agreed(chain.chain, &calls, MAX_RECEIPT_BYTES)
         .await
         .map_err(unavailable)?;
-    let receipt = agreed_receipt(tx, named, answers)?;
-    let largest = receipt
-        .transfers_to(chain)
-        .into_iter()
-        .map(|(_, _, amount)| amount)
-        .max()
-        .unwrap_or(TokenAmount::ZERO);
-    deep_enough(receipt.block, head, chain.chain, largest)?;
-    Ok(receipt)
+    based(tx, head, answers, chain)
 }
 
 /// The receipt at `block` is at the pool chain's crediting depth under `head`, or, when its
