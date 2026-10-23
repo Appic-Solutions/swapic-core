@@ -1108,3 +1108,62 @@ fn an_agreed_receipt_stands_beside_the_head_every_node_sees() {
         Err(PoolError::BadArrival(_))
     ));
 }
+
+/// M-04: a refund the scan cannot prove holds its cursor, so a refund that can never be
+/// proven (its payout's pinned order names no route deadline to read past) is held for a
+/// human at once, with no read, and never stalls the scan.
+#[test]
+fn a_refund_whose_deadline_never_reads_is_held_for_a_human() {
+    use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
+    struct NoRead;
+    impl FillReads for NoRead {
+        async fn fill(&self, _: ChainId, _: [u8; 32], _: u64) -> Result<types::eco::Fill, String> {
+            panic!("nothing to read past")
+        }
+    }
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+        );
+        sign_payout(id, 0, 7);
+        let intent = [0x1e; 32];
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([7; 32]),
+                block: BlockNumber::new(30),
+                intent: Some(intent),
+            },
+            at(4),
+        )
+        .unwrap();
+        let found = vec![Found {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([9; 32]),
+                log_index: 3,
+            },
+            amount: TokenAmount::from(1_u32),
+            block: BlockNumber::new(40),
+            at: None,
+            rail: PoolRail::Eco,
+            proof: Proof::Refund {
+                intents: vec![intent],
+            },
+        }];
+        use std::future::Future;
+        let mut future = std::pin::pin!(prove_refunds(found, &NoRead));
+        let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(proven) = future.as_mut().poll(context) else {
+            panic!("nothing waits");
+        };
+        assert!(
+            matches!(&proven[0].proof, Proof::Orphan { why, .. } if why.contains("deadline")),
+            "{:?}",
+            proven[0].proof
+        );
+    });
+}

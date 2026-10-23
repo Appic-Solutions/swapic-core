@@ -186,6 +186,24 @@ struct FakeBase {
     failing: Vec<(TxHash, PoolError)>,
     transfer_reads: Cell<usize>,
     receipts: std::cell::RefCell<Vec<TxHash>>,
+    /// Receipts that carry more than a transfer of nothing to the canister.
+    carrying: Vec<Receipt>,
+    /// What the destination Portal answers of an intent's fill.
+    fill: std::cell::RefCell<Option<Result<types::eco::Fill, String>>>,
+}
+
+impl crate::pool::arrival::FillReads for FakeBase {
+    async fn fill(
+        &self,
+        _chain: ChainId,
+        _intent: [u8; 32],
+        _route_deadline: u64,
+    ) -> Result<types::eco::Fill, String> {
+        self.fill
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Err("no fill read in this test".to_string()))
+    }
 }
 
 impl BaseReads for FakeBase {
@@ -216,6 +234,9 @@ impl BaseReads for FakeBase {
         self.receipts.borrow_mut().push(tx);
         if let Some((_, error)) = self.failing.iter().find(|(failing, _)| *failing == tx) {
             return Err(error.clone());
+        }
+        if let Some(receipt) = self.carrying.iter().find(|receipt| receipt.tx == tx) {
+            return Ok(receipt.clone());
         }
         // a transaction with no transfer to the canister: proves nothing, records nothing
         Ok(Receipt {
@@ -368,4 +389,100 @@ fn a_tick_while_a_pass_is_out_does_nothing() {
     block_on(run_backup());
     assert!(Pass::take().is_none(), "the running pass still holds");
     drop(running);
+}
+
+/// M-04: an Eco refund whose intent's fill could not be read is held like a receipt that
+/// failed to read: the cursor stops before it and the next pass asks again, which credits
+/// it once the fill reads. Before, the cursor moved past it and the refund was lost.
+#[test]
+fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
+    use crate::pool::arrival::Log;
+    use crate::storage::pool::tests::{eco_order, sign_payout_with, waiting_withdrawal};
+    use crate::storage::pool::{payout, record_at};
+    use types::pool::{PayoutStatus, PoolStep, Reclaim};
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let intent = [0x1e; 32];
+        let id = waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+        );
+        sign_payout_with(id, 0, 7, eco_order(1_800_000_000));
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([7; 32]),
+                block: BlockNumber::new(30),
+                intent: Some(intent),
+            },
+            at(4),
+        )
+        .unwrap();
+        let amount = payout(id).unwrap().amount.unwrap();
+        let portal = types::EvmAddress::new([6; 20]);
+        let chain = PoolChain {
+            eco_portal: Some(portal),
+            ..chain()
+        };
+        // the Portal pays the canister back the intent's reward, at block 150
+        let logged = transfer(
+            1,
+            150,
+            3,
+            u64::from_be_bytes(amount.to_be_bytes()[24..].try_into().unwrap()),
+        );
+        let tx = TxHash::new(parse_hash32(Some(&logged["transactionHash"])).unwrap());
+        let topic = |address: types::EvmAddress| address.to_word();
+        let refund = Receipt {
+            tx,
+            block: BlockNumber::new(150),
+            success: true,
+            logs: vec![
+                Log {
+                    index: 2,
+                    address: portal,
+                    topics: vec![
+                        types::swapic::topics::intent_refunded(),
+                        topic(chain.canister),
+                    ],
+                    data: intent.to_vec(),
+                    block_time: None,
+                },
+                Log {
+                    index: 3,
+                    address: chain.usdc,
+                    topics: vec![
+                        types::swapic::topics::transfer(),
+                        topic(portal),
+                        topic(chain.canister),
+                    ],
+                    data: amount.to_be_bytes().to_vec(),
+                    block_time: None,
+                },
+            ],
+        };
+        let base = FakeBase {
+            logs: vec![logged],
+            carrying: vec![refund],
+            ..FakeBase::default()
+        };
+        let first = block_on(backup(&base, &chain, || at(10))).unwrap();
+        assert_eq!(first.receipts, 1);
+        assert!(
+            first.cursor.is_none_or(
+                |(block, log)| (block, log.unwrap_or(u64::MAX)) < (BlockNumber::new(150), 3)
+            ),
+            "the cursor stops before the refund: {:?}",
+            first.cursor
+        );
+        assert_eq!(payout(id).unwrap().reclaim, None, "nothing credited yet");
+        // the fill reads now: the next pass reads the refund again and credits it once
+        *base.fill.borrow_mut() = Some(Ok(types::eco::Fill::Open));
+        let second = block_on(backup(&base, &chain, || at(11))).unwrap();
+        assert_eq!(second.receipts, 1, "the refund is read again");
+        let refunded = payout(id).unwrap();
+        assert_eq!(refunded.status, PayoutStatus::Unfilled);
+        assert_eq!(refunded.reclaim, Some(Reclaim::Credited));
+    });
 }

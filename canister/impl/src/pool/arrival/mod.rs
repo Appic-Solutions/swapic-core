@@ -1225,7 +1225,7 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
             continue;
         };
         let mut proven = Vec::new();
-        let (mut known, mut filled, mut unread) = (false, false, None);
+        let (mut known, mut filled, mut unread, mut unreadable) = (false, false, None, false);
         for intent in intents.clone() {
             let Some((destination, deadline)) =
                 read_state(|state| refund_destination(state, &intent))
@@ -1233,8 +1233,9 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
                 continue;
             };
             known = true;
+            // the pinned order never changes: a deadline that does not read never will
             let Some(deadline) = deadline else {
-                unread = Some("its route's deadline does not read from its order".to_string());
+                unreadable = true;
                 continue;
             };
             match reads.fill(destination, intent, deadline).await {
@@ -1251,6 +1252,13 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
         } else if let (Some(why), false) = (unread, filled) {
             Proof::Unproven {
                 why: format!("an Eco refund whose intent's fill was not read: {why}"),
+            }
+        } else if unreadable && !filled {
+            Proof::Orphan {
+                payer: None,
+                why: "an Eco refund of an intent whose route deadline does not read from its \
+                      order: held for a human"
+                    .to_string(),
             }
         } else {
             Proof::Orphan {

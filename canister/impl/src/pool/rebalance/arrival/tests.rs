@@ -230,52 +230,7 @@ mod refunds_proven {
     /// The move's order: one `publishAndFund` delivering USDC on Ethereum, its route's
     /// deadline [`ROUTE_DEADLINE`].
     fn eco_order() -> Vec<u8> {
-        use alloy_primitives::{Address, FixedBytes, U256};
-        use alloy_sol_types::SolCall;
-        use types::swapic::{publishAndFundCall, EcoReward, EcoTokenAmount, Order, Payout, Step};
-        let usdc = Address::repeat_byte(0x11);
-        let route = types::swapic::deliver_route(
-            [0x5a; 32],
-            ROUTE_DEADLINE,
-            types::EvmAddress::new([0xec; 20]),
-            types::EvmAddress::new([0x11; 20]),
-            types::EvmAddress::new([0x36; 20]),
-            U256::ZERO,
-        );
-        let publish = publishAndFundCall {
-            destination: 1,
-            route: route.into(),
-            reward: EcoReward {
-                deadline: ROUTE_DEADLINE + 7 * 24 * 3_600,
-                creator: Address::repeat_byte(0x36),
-                prover: Address::repeat_byte(0xec),
-                nativeAmount: U256::ZERO,
-                tokens: vec![EcoTokenAmount {
-                    token: usdc,
-                    amount: U256::ZERO,
-                }],
-            },
-            allowPartial: false,
-        };
-        types::swapic::encode_order(&Order {
-            r#ref: FixedBytes([0x85; 32]),
-            payer: Address::repeat_byte(0x36),
-            tokenIn: usdc,
-            amountIn: U256::from(1_000_000_000_u64),
-            deadline: U256::from(1_800_001_200_u64),
-            steps: vec![Step {
-                target: Address::repeat_byte(0xec),
-                data: publish.abi_encode().into(),
-                token: usdc,
-                min: U256::ZERO,
-                writes: vec![],
-            }],
-            payout: Payout {
-                token: Address::ZERO,
-                recipient: Address::ZERO,
-                minOut: U256::ZERO,
-            },
-        })
+        crate::storage::pool::tests::eco_order(ROUTE_DEADLINE)
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {

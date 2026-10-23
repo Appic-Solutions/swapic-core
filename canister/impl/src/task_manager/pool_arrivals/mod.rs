@@ -29,7 +29,7 @@ mod tests;
 
 use crate::guards::require_not_halted;
 use crate::pool::arrival::{
-    self, find, needs_source, read_base, record, Judge, PoolChain, Receipt,
+    self, find, needs_source, read_base, record, FillReads, Judge, PoolChain, Proof, Receipt,
 };
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
 use crate::state::Store;
@@ -233,9 +233,10 @@ pub fn halved(from: BlockNumber, to: BlockNumber) -> Option<BlockNumber> {
     (to > from).then(|| BlockNumber::new(from.get() + (to.get() - from.get()) / 2))
 }
 
-/// What a pass reads of Base, so it runs the same against the chain and a fake.
+/// What a pass reads of Base (and of an Eco refund's destination Portal), so it runs the
+/// same against the chains and a fake.
 #[allow(async_fn_in_trait)]
-pub trait BaseReads {
+pub trait BaseReads: FillReads {
     /// The newest block a pass reads: the head less the crediting depth.
     async fn safe_block(&self) -> Result<BlockNumber, String>;
     /// `eth_getLogs` of the USDC transfers to the canister over `from..=to`.
@@ -283,6 +284,19 @@ impl BaseReads for LiveBase<'_> {
 
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError> {
         read_base(self.0, tx).await
+    }
+}
+
+impl FillReads for LiveBase<'_> {
+    async fn fill(
+        &self,
+        chain: ChainId,
+        intent: [u8; 32],
+        route_deadline: u64,
+    ) -> Result<types::eco::Fill, String> {
+        crate::pool::arrival::LivePortal
+            .fill(chain, intent, route_deadline)
+            .await
     }
 }
 
@@ -396,10 +410,21 @@ pub async fn backup(
             continue;
         };
         // an Eco refund only once its intent's destination shows it never filled (P11e)
-        let found =
-            crate::pool::arrival::prove_refunds(found, &crate::pool::arrival::LivePortal).await;
+        let found = crate::pool::arrival::prove_refunds(found, reads).await;
         if require_not_halted().is_err() {
             return Ok(report);
+        }
+        // a refund whose fill was not read is read again next pass, like a receipt that
+        // failed: the cursor stops before it, and the rest of it is credited now (M-04)
+        if let Some(why) = found.iter().find_map(|one| match &one.proof {
+            Proof::Unproven { why } => Some(why),
+            _ => None,
+        }) {
+            report.alert(format!(
+                "ALERT: a transfer in {tx} is not proven yet ({why}); the canister's read of \
+                 Base stops before it and asks again"
+            ));
+            failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
         }
         // a step the fold refuses is noted, and read: only a read that failed for now holds
         // the cursor back
