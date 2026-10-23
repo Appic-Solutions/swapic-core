@@ -1,7 +1,7 @@
 //! The canister finishes CCTP arrivals itself, design C (`finish_cctp`). The watcher hands
-//! in the attested message, the source transaction that burned it (once it has proven that
-//! transaction paid the canister's fee, I-3.4), the stored recipe and the gas limit the
-//! quoter charged for. The canister checks the message is a burn it may finish, decides
+//! in the attested message, the source transaction that burned it, the stored recipe and
+//! the gas limit the quoter charged for. The canister reads that source transaction itself
+//! (M-06, `source`): it must have sent this message and paid the canister its fee step. The canister checks the message is a burn it may finish, decides
 //! from the envelope's action and the clock what to call, and signs it once per arrival
 //! (the burn, by its source domain and Circle's nonce, whatever Circle rewrites in its
 //! message) and action, finishing at most one arrival per source transaction.
@@ -20,6 +20,7 @@
 mod tests;
 
 pub mod own;
+pub mod source;
 
 use crate::ecdsa;
 use crate::engine::flows::Busy;
@@ -109,6 +110,8 @@ pub enum FinishError {
     SourceFinished(TxHash),
     #[error("{0} is sanctioned")]
     Sanctioned(Party),
+    #[error("the source transaction {0}")]
+    Source(&'static str),
 }
 
 /// What `finish_cctp` reads besides the message: the chains the canister signs on and
@@ -133,6 +136,17 @@ pub struct Plan {
     pub mint_recipient: EvmAddress,
 }
 
+/// The chain a message was burned on, by its source domain, and its configuration.
+pub fn source_of(message: &BurnMessage, setup: &Setup) -> Result<(ChainId, EvmChain), FinishError> {
+    setup
+        .domains
+        .0
+        .iter()
+        .find(|(_, domain)| domain.get() == message.source_domain)
+        .and_then(|(chain, _)| Some((*chain, setup.evm_chains.get(*chain)?)))
+        .ok_or(FinishError::UnknownSource(message.source_domain))
+}
+
 /// The finish a message asks for at `now_s`, or why the canister will not finish it.
 /// Pure, so every rule is a unit test.
 pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, FinishError> {
@@ -155,13 +169,7 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
     if message.recipient != destination.token_messenger.to_word() {
         return Err(FinishError::NotABurn);
     }
-    let source = setup
-        .domains
-        .0
-        .iter()
-        .find(|(_, domain)| domain.get() == message.source_domain)
-        .and_then(|(chain, _)| setup.evm_chains.get(*chain))
-        .ok_or(FinishError::UnknownSource(message.source_domain))?;
+    let (_, source) = source_of(message, setup)?;
     if message.sender != source.token_messenger.to_word() {
         return Err(FinishError::NotABurn);
     }
@@ -462,6 +470,15 @@ pub async fn finish_cctp(
         .expect("BUG: decide found the chain in this table");
     let gas = signing_gas(chain_id, &destination, plan.gas_action, gas_limit)
         .map_err(|e| e.to_string())?;
+    // the watcher's word is not enough (M-06): the source transaction itself shows this
+    // burn and its fee step. The canister's own transfers are finished from its own
+    // transactions only (`own`), and pay no fee step
+    if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {
+        let (source_chain, source) = source_of(&parsed, &setup).map_err(|e| e.to_string())?;
+        let receipt = source::read(source_chain, source_tx).await?;
+        source::proves(&receipt, &parsed, &source, canister).map_err(|e| e.to_string())?;
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+    }
 
     let _busy =
         Busy::take(source_key(source_tx)).ok_or("the source transaction is being finished")?;

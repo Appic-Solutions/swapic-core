@@ -605,6 +605,11 @@ fn the_arrival_topics_are_the_chains_own() {
         hex(topics::intent_fulfilled()),
         "c471de166a60c0b81727dfa2f57d4fc3ad1b45b057c1f034b7058365613bde8d"
     );
+    // CCTP v2's `MessageSent(bytes)`, Circle's own topic
+    assert_eq!(
+        hex(topics::message_sent()),
+        "8c5261668696ce22758910d05bab8f186d6eb247ceac2af2e82c7dc17669b036"
+    );
     // the Arbitrum Portal's funding log, 0x13
     assert_eq!(
         hex(topics::intent_funded()),
