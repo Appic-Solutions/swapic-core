@@ -627,7 +627,42 @@ fn samples() -> Vec<Sample> {
     all.extend(eco_payout_samples());
     all.extend(planned_swap_samples());
     all.extend(deposit_tier_samples());
+    all.extend(timer_state_samples());
     all
+}
+
+/// What the doors and timers remember (C-09), every field set.
+fn timer_state_samples() -> Vec<Sample> {
+    use crate::hash::{PoolRef, TxHash};
+    use crate::pool::{Pocket, Pockets};
+    use crate::timer_state::{Limiter, TimerState};
+    let at = |n: u64| Timestamp::from_nanos(1_800_000_000_000_001_500 + n);
+    vec![sample(
+        "the doors' and timers' memory",
+        TimerState {
+            reports: Limiter {
+                recent: vec![at(1), at(2)],
+                by_tx: BTreeMap::from([(TxHash::new([0xf1; 32]), vec![at(1)])]),
+            },
+            unfilled_reads: BTreeMap::from([(1_502, at(3))]),
+            last_check: Some((
+                at(4),
+                Pockets {
+                    base: Pocket {
+                        free: TokenAmount::from(1_505_u32),
+                        reserved: TokenAmount::from(1_506_u32),
+                        in_flight: TokenAmount::from(1_507_u32),
+                    },
+                    icp: Pocket {
+                        free: TokenAmount::from(1_508_u32),
+                        reserved: TokenAmount::from(1_509_u32),
+                        in_flight: TokenAmount::from(1_510_u32),
+                    },
+                },
+            )),
+            alerted_head: Some(PoolRef::new([0xf2; 32])),
+        },
+    )]
 }
 
 /// The deposit tiers (2026-10-23): settings with a large deposit's threshold and its

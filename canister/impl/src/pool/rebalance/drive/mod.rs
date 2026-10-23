@@ -438,20 +438,14 @@ fn own_order(
     Ok((MoveRoute::Own { max_fee, fast }, pinned))
 }
 
-thread_local! {
-    // Heap by necessity, and only a clock: when each Eco move to Base was last looked for on
-    // the Portals. An upgrade loses it, which costs one read more.
-    static UNFILLED_READS: std::cell::RefCell<std::collections::BTreeMap<u64, Timestamp>> =
-        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
-}
-
 /// How often an Eco move to Base past its deadline is looked for on the Portals.
 pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
 
-/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`].
+/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
+/// kept in stable memory (C-09).
 fn unfilled_due(id: u64, now: Timestamp) -> bool {
-    UNFILLED_READS.with(|reads| {
-        let mut reads = reads.borrow_mut();
+    crate::storage::timer_state::update(|state| {
+        let reads = &mut state.unfilled_reads;
         let due = reads
             .get(&id)
             .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);

@@ -824,7 +824,11 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
         assert!(ledger().pending.is_empty(), "the withdrawal is paid");
         assert_eq!(deposit(&head).unwrap().status, DepositStatus::Arrived);
         assert_eq!(ledger().queue.head().map(|(r#ref, _)| r#ref), Some(head));
-        assert_eq!(ALERTED_HEAD.with(|alerted| alerted.get()), Some(head));
+        assert_eq!(
+            crate::storage::timer_state::get().alerted_head,
+            Some(head),
+            "the alert on the head is kept in stable memory"
+        );
     });
 }
 

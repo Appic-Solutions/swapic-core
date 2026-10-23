@@ -1,0 +1,26 @@
+use super::*;
+use crate::storage::on_fresh_memory;
+use types::{Timestamp, TxHash};
+
+/// C-09: what the doors and timers remember is in the stable cell, read back as written:
+/// what an upgrade keeps.
+#[test]
+fn the_timers_memory_is_kept_in_stable_memory() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        assert_eq!(get(), TimerState::default());
+        let now = Timestamp::from_secs(1_800_000_000).unwrap();
+        update(|state| {
+            state.reports.admit(TxHash::new([1; 32]), now).unwrap();
+            state.unfilled_reads.insert(7, now);
+        });
+        let kept = get();
+        assert_eq!(kept.reports.recent, vec![now]);
+        assert_eq!(kept.unfilled_reads.get(&7), Some(&now));
+        // the guard counts what the cell holds: the minute's ten are spent across calls
+        for byte in 2..11 {
+            update(|state| state.reports.admit(TxHash::new([byte; 32]), now)).unwrap();
+        }
+        assert!(update(|state| state.reports.admit(TxHash::new([20; 32]), now)).is_err());
+    });
+}

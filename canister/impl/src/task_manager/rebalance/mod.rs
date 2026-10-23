@@ -8,7 +8,6 @@ mod tests;
 
 use crate::pool;
 use crate::storage::halt::is_halted;
-use std::cell::Cell;
 use std::time::Duration;
 use types::pool::Pockets;
 use types::Timestamp;
@@ -18,12 +17,6 @@ pub const REBALANCE_EVERY: Duration = Duration::from_secs(60);
 
 /// How often the books are read for a move when nothing moved.
 pub const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
-
-thread_local! {
-    // Heap by necessity, and only a clock: an upgrade loses it, and the next tick reads the
-    // books at once, which is what a fresh canister should do anyway.
-    static LAST_CHECK: Cell<Option<(Timestamp, Pockets)>> = const { Cell::new(None) };
-}
 
 /// Whether the books are read for a move now: never read yet, read 15 minutes ago, the
 /// pockets moved since, or a payout waits in a queue.
@@ -50,8 +43,15 @@ pub async fn tick() {
     let now = pool::now();
     let ledger = crate::storage::pool::ledger();
     let queued = !ledger.queue.0.is_empty() || ledger.lines().queue_len > 0;
-    if due(LAST_CHECK.get(), now, ledger.pockets, queued) {
-        LAST_CHECK.set(Some((now, ledger.pockets)));
+    // the last read is kept in stable memory (C-09): an upgrade reads no extra time
+    let read = crate::storage::timer_state::update(|state| {
+        let read = due(state.last_check, now, ledger.pockets, queued);
+        if read {
+            state.last_check = Some((now, ledger.pockets));
+        }
+        read
+    });
+    if read {
         pool::rebalance::trigger::open_if_needed(now);
     }
 }

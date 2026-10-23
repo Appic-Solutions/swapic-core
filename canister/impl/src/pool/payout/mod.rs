@@ -1636,12 +1636,6 @@ pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy)
     drive_with(ledgers, clock, &guard).await
 }
 
-thread_local! {
-    // Heap by necessity, and only for the log: the queue's head already alerted on, so a
-    // head that waits raises one line and not one per drive. An upgrade may repeat it once.
-    static ALERTED_HEAD: std::cell::Cell<Option<PoolRef>> = const { std::cell::Cell::new(None) };
-}
-
 /// One line for ops when the queue's head has waited longer than one books interval for
 /// the ICP pocket to cover it: what P11c's urgent rebalance is for.
 fn alert_if_waited(now: Timestamp) {
@@ -1652,12 +1646,15 @@ fn alert_if_waited(now: Timestamp) {
         return;
     };
     let interval = crate::storage::config::get().books_check_interval.0;
-    if now.saturating_duration_since(since) <= interval
-        || ALERTED_HEAD.with(|alerted| alerted.get()) == Some(head)
-    {
+    if now.saturating_duration_since(since) <= interval {
         return;
     }
-    ALERTED_HEAD.with(|alerted| alerted.set(Some(head)));
+    // the head already alerted on is kept in stable memory (C-09): one line per head, an
+    // upgrade included
+    if crate::storage::timer_state::get().alerted_head == Some(head) {
+        return;
+    }
+    crate::storage::timer_state::update(|state| state.alerted_head = Some(head));
     crate::pool::log(&format!(
         "ALERT: the pool payout {head} has waited {:?} for the ICP pocket, which is {need} short",
         now.saturating_duration_since(since)
