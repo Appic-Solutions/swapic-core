@@ -7,7 +7,8 @@ use ic_cdk::update;
 pub use settlement_api::types::pool::{
     EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutResolution,
     PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings,
-    StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
+    StakeIcpArgs, StakeIcpOk, StakeResolution, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs,
+    WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -152,6 +153,27 @@ pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolErr
 pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();
     pool::resolve::resolve(
+        is_halted(),
+        ic_cdk::api::is_controller(&caller),
+        id,
+        resolution,
+        pool::now(),
+    )
+}
+
+/// Controller-only, refused while halted (Jeff, 2026-10-24): an ICP stake whose pull's answer
+/// was lost, past the ledger's deduplication window (23 hours after it started; the canister
+/// stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
+/// `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
+/// ckUSDC ledger block, and its shares are minted at the pool's price now. `NotPulled`: it
+/// never landed, and it is dropped, its room freed.
+#[update]
+pub fn resolve_stake(id: Vec<u8>, resolution: StakeResolution) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    let id = <[u8; 32]>::try_from(id.as_slice())
+        .map(types::hash::PoolOpId::new)
+        .map_err(|_| PoolError::NotAllowed("a stake's id is its 32 bytes".to_string()))?;
+    pool::resolve::stake::resolve(
         is_halted(),
         ic_cdk::api::is_controller(&caller),
         id,

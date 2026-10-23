@@ -14,6 +14,7 @@
 //! pull can no longer be asked are not payouts from the Base pocket, keyed by a ref and an op
 //! id: this door does not take them.
 
+pub mod stake;
 #[cfg(test)]
 mod tests;
 

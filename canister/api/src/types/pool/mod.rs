@@ -244,6 +244,15 @@ pub struct StakeIcpOk {
     pub shares: Nat,
 }
 
+/// A controller's answer to an ICP stake whose pull's answer was lost past the ledger's
+/// deduplication window (`resolve_stake`): the pull landed in ledger block `block`, or it
+/// never landed.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StakeResolution {
+    Pulled { block: u64 },
+    NotPulled,
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawIcpArgs {
     /// The caller's subaccount owning the shares.

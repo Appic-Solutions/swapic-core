@@ -1586,7 +1586,7 @@ pub async fn pull_stake(
             Err(Stop::Failed(format!("the ledger refused the pull: {why}")))
         }
         // too old to tell: it may have run, so it is never recorded as failed; the stake
-        // waits for a human
+        // waits for a human (`resolve_stake`)
         Err(error @ CallError::Expired(_)) => Err(Stop::Failed(format!(
             "ALERT: the pull's outcome can no longer be known: {error}"
         ))),
@@ -1679,7 +1679,7 @@ pub async fn drive_with(
         let mut work = Work::default();
         for (id, op) in &ledger.pending {
             match op {
-                // a pull too old to deduplicate is a human's
+                // a pull too old to deduplicate is a human's (`resolve_stake`)
                 PendingOp::Stake { created_at, .. }
                     if now.saturating_duration_since(*created_at) < DEDUP_WINDOW =>
                 {
