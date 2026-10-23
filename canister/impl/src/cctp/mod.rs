@@ -475,8 +475,14 @@ pub async fn finish_cctp(
     // transactions only (`own`), and pay no fee step
     if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {
         let (source_chain, source) = source_of(&parsed, &setup).map_err(|e| e.to_string())?;
+        // the least the quoter charges for the arrival it charged for; an absent row asks
+        // the most, as the relay's rule does
+        let needed = destination
+            .min_network_fee
+            .get(source::charged_action(&plan.envelope))
+            .unwrap_or(types::TokenAmount::MAX);
         let receipt = source::read(source_chain, source_tx).await?;
-        source::proves(&receipt, &parsed, &source, canister).map_err(|e| e.to_string())?;
+        source::proves(&receipt, &parsed, &source, canister, needed).map_err(|e| e.to_string())?;
         require_not_halted().map_err(|e| format!("{e:?}"))?;
     }
 

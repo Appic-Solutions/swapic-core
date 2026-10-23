@@ -33,6 +33,9 @@ fn emitted(message: &BurnMessage) -> BurnMessage {
 
 const CANISTER: EvmAddress = EvmAddress::new([0xca; 20]);
 
+/// The destination's least network fee for the arrival charged for.
+const NEEDED: TokenAmount = TokenAmount::new(60_000);
+
 /// Base as the sample's burn left it: its USDC, its transmitter, and the burn's own sender as
 /// the Runner.
 fn base() -> EvmChain {
@@ -116,8 +119,9 @@ fn the_attested_message_is_the_one_the_source_sent() {
     assert!(!message.attests(&other));
 }
 
-/// M-06: a finish's source sent this message and paid the canister a fee step; a source
-/// with no fee step, another message, another emitter, or a revert proves nothing.
+/// M-06: a finish's source sent this message and paid the canister fee steps worth the
+/// arrival's least network fee; a source with no fee step or less, another message, another
+/// emitter, or a revert proves nothing.
 #[test]
 fn a_source_proves_its_message_and_its_fee() {
     let message = attested();
@@ -127,24 +131,37 @@ fn a_source_proves_its_message_and_its_fee() {
             &receipt(&emitted(&message), 166_275),
             &message,
             &chain,
-            CANISTER
+            CANISTER,
+            NEEDED
         ),
         Ok(())
     );
     assert_eq!(
-        proves(&receipt(&emitted(&message), 0), &message, &chain, CANISTER),
+        proves(
+            &receipt(&emitted(&message), 0),
+            &message,
+            &chain,
+            CANISTER,
+            NEEDED
+        ),
         Err(FinishError::Source("paid the canister no fee step"))
     );
     let mut other = emitted(&message);
     other.body.amount = TokenAmount::from(1_u32);
     assert_eq!(
-        proves(&receipt(&other, 166_275), &message, &chain, CANISTER),
+        proves(
+            &receipt(&other, 166_275),
+            &message,
+            &chain,
+            CANISTER,
+            NEEDED
+        ),
         Err(FinishError::Source("did not send this message"))
     );
     let mut forged = receipt(&emitted(&message), 166_275);
     forged.logs[1].address = EvmAddress::new([0x66; 20]);
     assert_eq!(
-        proves(&forged, &message, &chain, CANISTER),
+        proves(&forged, &message, &chain, CANISTER, NEEDED),
         Err(FinishError::Source("did not send this message"))
     );
     // a fee to someone else is no fee to the canister
@@ -152,13 +169,27 @@ fn a_source_proves_its_message_and_its_fee() {
         &receipt(&emitted(&message), 166_275),
         &message,
         &chain,
-        EvmAddress::new([0x01; 20])
+        EvmAddress::new([0x01; 20]),
+        NEEDED
     )
     .is_err());
+    // a fee step of one unit is no fee for the arrival (M-06's own story)
+    assert_eq!(
+        proves(
+            &receipt(&emitted(&message), 1),
+            &message,
+            &chain,
+            CANISTER,
+            NEEDED
+        ),
+        Err(FinishError::Source(
+            "paid the canister less than the arrival's least network fee"
+        ))
+    );
     let mut reverted = receipt(&emitted(&message), 166_275);
     reverted.success = false;
     assert_eq!(
-        proves(&reverted, &message, &chain, CANISTER),
+        proves(&reverted, &message, &chain, CANISTER, NEEDED),
         Err(FinishError::Source("reverted"))
     );
 }
