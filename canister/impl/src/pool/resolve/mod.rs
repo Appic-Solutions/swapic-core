@@ -19,12 +19,47 @@ pub mod stake;
 #[cfg(test)]
 mod tests;
 
+use crate::ic::{Account, CallError, LedgerTransfer};
 use crate::pool::payout::DEDUP_WINDOW;
 use crate::storage::pool as pool_store;
+use candid::Principal;
 use settlement_api::types::pool::{PayoutResolution as WireResolution, PoolError};
 use types::pool::payout::{EvmPayout, PayoutResolution, PayoutStatus};
-use types::pool::PoolStep;
+use types::pool::{IcpAccount, PoolStep};
 use types::Timestamp;
+
+/// What a controller's resolution reads of an ICRC ledger, so a door runs the same against a
+/// fake.
+#[allow(async_fn_in_trait)]
+pub trait LedgerBlocks {
+    /// The transfer in `ledger`'s block `block`: none for no such block, or one that is no
+    /// transfer.
+    async fn transfer_at(
+        &self,
+        ledger: Principal,
+        block: u64,
+    ) -> Result<Option<LedgerTransfer>, CallError>;
+}
+
+impl LedgerBlocks for crate::pool::payout::Live {
+    async fn transfer_at(
+        &self,
+        ledger: Principal,
+        block: u64,
+    ) -> Result<Option<LedgerTransfer>, CallError> {
+        crate::ic::ledger_transfer_at(ledger, block).await
+    }
+}
+
+/// Whether `account` is `expected`, the default subaccount written either way.
+pub fn same_account(account: &Account, expected: IcpAccount) -> bool {
+    let default_as_none = |bytes: [u8; 32]| (bytes != [0; 32]).then_some(bytes);
+    let theirs = match account.subaccount.as_deref() {
+        None => Some(None),
+        Some(bytes) => <[u8; 32]>::try_from(bytes).ok().map(default_as_none),
+    };
+    account.owner == expected.owner && theirs == Some(expected.subaccount.and_then(default_as_none))
+}
 
 /// The dedup instant of a refund a controller asks for: the payout's undo's own while a
 /// ledger still deduplicates it, else `now`.

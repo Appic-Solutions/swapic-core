@@ -675,6 +675,39 @@ impl PoolLedger {
                 Some(_) => Err(PoolStepError::Mismatch),
                 None => Err(PoolStepError::NotPending(*id)),
             },
+            // a payout's transfer asked: never on other terms while one may have landed
+            PoolStep::TransferAsked {
+                r#ref,
+                token,
+                amount,
+                ..
+            } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                if !target.in_payout() {
+                    return Err(PoolStepError::Terms("only a payout in progress asks"));
+                }
+                match target.payout().and_then(|payout| payout.sent) {
+                    Some(sent)
+                        if !sent.refused && (sent.token, sent.amount) != (*token, *amount) =>
+                    {
+                        Err(PoolStepError::Terms(
+                            "a transfer asked on other terms may have landed",
+                        ))
+                    }
+                    _ => Ok(()),
+                }
+            }
+            PoolStep::TransferRefused { r#ref } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                match target.payout().and_then(|payout| payout.sent) {
+                    Some(sent) if !sent.refused => Ok(()),
+                    _ => Err(PoolStepError::Terms("only a transfer asked is refused")),
+                }
+            }
             PoolStep::AttemptFailed { r#ref, .. } => {
                 let target = self
                     .target(r#ref, lookup)
@@ -771,15 +804,39 @@ impl PoolLedger {
                         "a resolution keeps its payout's own dedup instant",
                     ));
                 }
+                let started = deposit.payout.attempt.is_some();
                 match resolution {
-                    DepositResolution::Retry => Ok(()),
-                    DepositResolution::Refund => {
-                        // a started payout's transfer may have landed, its answer lost: it is
-                        // only ever retried, so the ledger tells (the review, 2026-10-24)
-                        if deposit.payout.attempt.is_some() {
+                    // a started payout keeps its dedup pair: only on the pool's own ckUSDC
+                    // ledger, which deduplicates its transfer (the review, 2026-10-24)
+                    DepositResolution::Retry => {
+                        let ckusdc = self.settings()?.ckusdc_ledger;
+                        match deposit.out_ledger(ckusdc) {
+                            Some(out) if out != ckusdc => Err(PoolStepError::Terms(
+                                "a started payout paying another token is never retried with \
+                                 its old dedup pair",
+                            )),
+                            _ => Ok(()),
+                        }
+                    }
+                    // its transfer as asked, which the door read in the block named
+                    DepositResolution::MarkPaid { .. } => {
+                        if !started || deposit.payout.sent.is_none() {
                             return Err(PoolStepError::Terms(
-                                "a started payout is never refunded on Base",
+                                "only a payout that asked its transfer is marked paid",
                             ));
+                        }
+                        Ok(())
+                    }
+                    DepositResolution::Refund => {
+                        // only when the canister knows nothing went out: a transfer that may
+                        // have landed, or a leg that moved money, could pay twice
+                        if !deposit.payout.nothing_went_out() {
+                            return Err(PoolStepError::Terms(
+                                "its payout may have sent something: it is not refunded on Base",
+                            ));
+                        }
+                        if started && deposit.held() > self.pockets.icp.reserved {
+                            return Err(PoolStepError::Overflow);
                         }
                         let (credit, orphan) = deposit
                             .refund_orphan()
@@ -1218,10 +1275,32 @@ impl PoolLedger {
                                 }
                             }
                         }
+                        // its transfer as asked, paid in `block`: as `Paid` books it
+                        DepositResolution::MarkPaid { block } => {
+                            if let Some(sent) = deposit.payout.sent {
+                                ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
+                                ledger.spend_reserved(deposit.held(), sent.spent);
+                                ledger.paying.remove(r#ref);
+                                deposit.status = DepositStatus::Paid;
+                                deposit.held = Some(TokenAmount::ZERO);
+                                deposit.paid = Some(super::Paid {
+                                    token: sent.token.0,
+                                    amount: sent.amount,
+                                    block: *block,
+                                    spent: sent.spent,
+                                });
+                            }
+                        }
                         DepositResolution::Refund => {
-                            // never started: nothing of it was held on ICP
                             ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
                             ledger.paying.remove(r#ref);
+                            // started, nothing went out: its hold is free again on ICP
+                            if deposit.payout.attempt.is_some() {
+                                let held = deposit.held();
+                                let icp = &mut ledger.pockets.icp;
+                                icp.reserved = sat_sub(icp.reserved, held);
+                                icp.free = sat_add(icp.free, held);
+                            }
                             // out of the Base pocket's free line, onto the unattributed one:
                             // the Base balance's books stay where they were
                             if let Some((credit, orphan)) = deposit.refund_orphan() {
@@ -1242,6 +1321,27 @@ impl PoolLedger {
                     ledger.owed = sat_sub(ledger.owed, usdc);
                     ledger.spend_reserved(usdc, *spent);
                 }
+            }
+            PoolStep::TransferAsked {
+                r#ref,
+                token,
+                amount,
+                spent,
+            } => {
+                let sent = super::Sent {
+                    token: *token,
+                    amount: *amount,
+                    spent: *spent,
+                    refused: false,
+                };
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| payout.sent = Some(sent));
+            }
+            PoolStep::TransferRefused { r#ref } => {
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    if let Some(sent) = payout.sent.as_mut() {
+                        sent.refused = true;
+                    }
+                });
             }
             PoolStep::AttemptFailed { r#ref, why } => {
                 let why = why.clone();

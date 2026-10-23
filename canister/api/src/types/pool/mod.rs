@@ -159,11 +159,13 @@ pub enum PoolDepositStatus {
 }
 
 /// A controller's answer to a deposit held for a human (`resolve_deposit`): back to its
-/// payout with fresh attempts, or what arrived back to its payer on Base.
+/// payout with fresh attempts, what arrived back to its payer on Base, or its transfer found
+/// landed in ledger block `block`.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepositResolution {
     Retry,
     Refund,
+    MarkPaid { block: u64 },
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]

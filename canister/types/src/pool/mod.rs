@@ -794,13 +794,21 @@ pub enum DepositStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum DepositResolution {
     /// Back to its payout with fresh attempts: a started one paying again with its own dedup
-    /// pair, one that never started queued again at the back, a stake minting again.
+    /// pair (only on the pool's ckUSDC ledger, which deduplicates it), one that never
+    /// started queued again at the back, a stake minting again.
     #[n(0)]
     Retry,
-    /// What arrived back to its payer on Base, through the orphan refund path: only for a
-    /// deposit whose payout never started (nothing went out on ICP).
+    /// What arrived back to its payer on Base, through the orphan refund path: only when
+    /// the canister knows nothing of its payout went out on ICP.
     #[n(1)]
     Refund,
+    /// Its payout's transfer as asked landed in ledger `block`, which the door read: paid,
+    /// once.
+    #[n(2)]
+    MarkPaid {
+        #[n(0)]
+        block: u64,
+    },
 }
 
 /// What a controller found of an ICP stake whose pull's answer was lost past the ledger's
@@ -1030,9 +1038,45 @@ pub struct PayoutProgress {
     /// A path through ICP whose second leg could not pay: the ICP swapped back to ckUSDC.
     #[n(6)]
     pub back: Option<SwapLeg>,
+    /// Its transfer to the recipient as last asked (the review, 2026-10-24): none never.
+    #[n(7)]
+    pub sent: Option<Sent>,
+}
+
+/// A payout's transfer to its recipient as the canister asked it, recorded before the call
+/// (the review, 2026-10-24): of which ledger, how much, and what it spends of the ICP pocket
+/// once paid; and whether the ledger refused it for sure at that ask. Asked and not refused,
+/// it may have landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Sent {
+    #[n(0)]
+    pub token: PrincipalBytes,
+    #[n(1)]
+    pub amount: TokenAmount,
+    #[n(2)]
+    pub spent: TokenAmount,
+    #[n(3)]
+    pub refused: bool,
 }
 
 impl PayoutProgress {
+    /// Whether any ICPSwap leg of it moved money on ICP: approved (a fee spent), begun, or
+    /// answered.
+    pub fn moved_on_icp(&self) -> bool {
+        [Some(self.swap), self.second, self.back]
+            .into_iter()
+            .flatten()
+            .any(|leg| leg.begun || leg.approvals.unwrap_or(0) > 0 || leg.out.is_some())
+    }
+
+    /// Whether the canister knows nothing of it went out (the review, 2026-10-24): never
+    /// started; or started, no ICPSwap leg moved money, and no transfer to the recipient may
+    /// have landed (none asked, or the last ask refused by the ledger for sure).
+    pub fn nothing_went_out(&self) -> bool {
+        self.attempt.is_none()
+            || (!self.moved_on_icp() && self.sent.is_none_or(|sent| sent.refused))
+    }
+
     /// The leg a swap step names.
     pub fn leg(&self, leg: Option<u8>) -> SwapLeg {
         match leg {
@@ -1088,6 +1132,21 @@ impl Registered {
             minted: None,
             payout: PayoutProgress::default(),
             held: None,
+        }
+    }
+
+    /// The ledger its payout's transfer to the recipient is on, once it started: the one it
+    /// asked; else its path's, ckUSDC (`ckusdc`, the pool's own, when the attempt names none)
+    /// or the token out through ICPSwap. None before it started, and for a stake.
+    pub fn out_ledger(&self, ckusdc: Principal) -> Option<Principal> {
+        let attempt = self.payout.attempt?;
+        if let Some(sent) = self.payout.sent {
+            return Some(sent.token.0);
+        }
+        match (attempt.path, self.terms.kind) {
+            (PayoutPath::Ckusdc, _) => Some(attempt.token.map_or(ckusdc, |token| token.0)),
+            (_, DepositKind::Swap { token_out, .. }) => Some(token_out),
+            (_, DepositKind::Stake { .. }) => None,
         }
     }
 
@@ -1815,11 +1874,14 @@ pub enum PoolStep {
         #[n(0)]
         id: u64,
     },
-    /// A controller resolved a deposit held for a human (`resolve_deposit`): `Retry` puts it
-    /// back on its payout with fresh attempts, a started one with its own dedup pair;
-    /// `Refund`, of one that never started, holds what arrived as an orphan under its
-    /// transfer's key, for its payer, once. `retry_at` is always none (the review,
-    /// 2026-10-24: a payout keeps its own dedup instant), kept for the line's layout.
+    /// A controller resolved a deposit held for a human (`resolve_deposit`), once: `Retry`
+    /// puts it back on its payout with fresh attempts, a started one with its own dedup pair;
+    /// `Refund`, when nothing of its payout went out, holds what arrived as an orphan under
+    /// its transfer's key, for its payer; `MarkPaid` books its transfer as asked paid in the
+    /// block named. `retry_at` is always none (the review, 2026-10-24: a payout keeps its own
+    /// dedup instant), kept for the line's layout. The lines the intermediate builds of
+    /// 1649a9f..117b35d wrote were never replayed anywhere (never deployed): no rule of theirs
+    /// is kept for them.
     #[n(48)]
     DepositResolved {
         #[n(0)]
@@ -1837,6 +1899,26 @@ pub enum PoolStep {
         id: PoolOpId,
         #[n(1)]
         resolution: StakeResolution,
+    },
+    /// A payout's transfer to its recipient is asked next (the review, 2026-10-24): `amount`
+    /// of `token`, spending `spent` of the ICP pocket once paid. From here it may have
+    /// landed, until the ledger refuses it for sure.
+    #[n(50)]
+    TransferAsked {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        token: PrincipalBytes,
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        spent: TokenAmount,
+    },
+    /// The ledger refused a payout's transfer as asked, for sure: nothing of it landed.
+    #[n(51)]
+    TransferRefused {
+        #[n(0)]
+        r#ref: PoolRef,
     },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
@@ -2135,6 +2217,8 @@ impl PoolStep {
             PoolStep::PayoutFillEarly { .. } => "PayoutFillEarly",
             PoolStep::DepositResolved { .. } => "DepositResolved",
             PoolStep::StakeResolved { .. } => "StakeResolved",
+            PoolStep::TransferAsked { .. } => "TransferAsked",
+            PoolStep::TransferRefused { .. } => "TransferRefused",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",

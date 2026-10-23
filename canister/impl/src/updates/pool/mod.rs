@@ -164,15 +164,20 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
 /// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
 /// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
-/// `Retry`: back to its payout with fresh attempts; a started one keeps its own dedup pair
-/// and is retried only with an hour of the ledger's deduplication (23 hours) left, so a
-/// transfer that landed is answered `Duplicate` and recorded paid once; past that it is
-/// refused, and the controller reads the ledger. `Refund`: only for a deposit whose payout never started (a
-/// started one's transfer may have landed), refused while the pool is closed and for a
-/// sanctioned or zero payer; what arrived is held as an orphan under its transfer's key and
-/// the canister signs `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept
-/// for its gas. A signature that fails answers `Unavailable`, the orphan held for
-/// `resolve_orphan`.
+/// `Retry`: back to its payout with fresh attempts; a started one keeps its own dedup pair,
+/// so a transfer that landed is answered `Duplicate` and recorded paid once: only when it
+/// pays on the pool's ckUSDC ledger, and with an hour of the ledger's deduplication (23
+/// hours) left. `Refund`: only when the canister knows nothing of its payout went out (never
+/// started, or no ICPSwap leg moved money and its transfer never asked or refused by the
+/// ledger for sure), refused while the pool is closed and for a sanctioned or zero payer;
+/// what arrived is held as an orphan under its transfer's key and the canister signs
+/// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
+/// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`.
+/// `MarkPaid { block }`: its transfer landed in that block; the canister reads it on the
+/// transfer's ledger (`get_transactions`, on the ledger or its archive) and books the deposit
+/// paid only on exactly the transfer its payout asked (from the canister to the recipient, of
+/// what it sent, its memo and `created_at_time`); a ledger not read answers `Unavailable`, to
+/// be asked again. A refusal names what to search the ledger for.
 #[update]
 pub async fn resolve_deposit(
     r#ref: Vec<u8>,
@@ -183,14 +188,17 @@ pub async fn resolve_deposit(
         .map(types::hash::PoolRef::new)
         .map_err(|_| PoolError::NotAllowed("a deposit's ref is its 32 bytes".to_string()))?;
     let refund = pool::resolve::deposit::resolve(
-        is_halted(),
+        is_halted,
         ic_cdk::api::is_controller(&caller),
+        ic_cdk::api::id(),
         r#ref,
         resolution,
-        pool::now(),
+        pool::now,
         is_sanctioned,
         pool::require_pool_open,
-    )?;
+        &pool::payout::Live,
+    )
+    .await?;
     let Some(refund) = refund else {
         return Ok(());
     };

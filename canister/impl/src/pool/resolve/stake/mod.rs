@@ -10,7 +10,9 @@
 //!   (as `pull_stake` asks it). Its shares are minted at the pool's price now, as a pull
 //!   answered late is, and its ckUSDC is free on ICP. One block resolves one stake. A
 //!   ledger that cannot be read now refuses, to be asked again later.
-//! - `NotPulled`: it never landed: dropped, its room freed.
+//! - `NotPulled`: it never landed: dropped, its room freed. On the controller's word: no
+//!   ledger read proves a pull absent, so the controller checks the ledger has no block of
+//!   it (its op id as the memo) before answering this.
 //!
 //! Only past the window, so the drive and the controller never both decide one stake, and
 //! never while a drive holds it.
@@ -18,7 +20,8 @@
 #[cfg(test)]
 mod tests;
 
-use crate::ic::{Account, CallError, LedgerTransfer};
+use super::{same_account as same, LedgerBlocks};
+use crate::ic::LedgerTransfer;
 use crate::pool::payout::{Busy, DEDUP_WINDOW};
 use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
@@ -26,38 +29,6 @@ use settlement_api::types::pool::{PoolError, StakeResolution as WireResolution};
 use types::hash::PoolOpId;
 use types::pool::{IcpAccount, PendingOp, PoolStep, Shares, StakeResolution};
 use types::{Timestamp, TokenAmount};
-
-/// What `resolve_stake` reads of a ledger, so the door runs the same against a fake.
-#[allow(async_fn_in_trait)]
-pub trait PullBlocks {
-    /// The transfer in `ledger`'s block `block`: none for no such block, or one that is no
-    /// transfer.
-    async fn transfer_at(
-        &self,
-        ledger: Principal,
-        block: u64,
-    ) -> Result<Option<LedgerTransfer>, CallError>;
-}
-
-impl PullBlocks for crate::pool::payout::Live {
-    async fn transfer_at(
-        &self,
-        ledger: Principal,
-        block: u64,
-    ) -> Result<Option<LedgerTransfer>, CallError> {
-        crate::ic::ledger_transfer_at(ledger, block).await
-    }
-}
-
-/// Whether `account` is `expected`, the default subaccount written either way.
-fn same(account: &Account, expected: IcpAccount) -> bool {
-    let default_as_none = |bytes: [u8; 32]| (bytes != [0; 32]).then_some(bytes);
-    let theirs = match account.subaccount.as_deref() {
-        None => Some(None),
-        Some(bytes) => <[u8; 32]>::try_from(bytes).ok().map(default_as_none),
-    };
-    account.owner == expected.owner && theirs == Some(expected.subaccount.and_then(default_as_none))
-}
 
 /// The stake a controller resolves: who, from where, how much, since when.
 struct Stake {
@@ -143,7 +114,7 @@ pub async fn resolve(
     id: PoolOpId,
     resolution: WireResolution,
     clock: impl Fn() -> Timestamp,
-    blocks: &impl PullBlocks,
+    blocks: &impl LedgerBlocks,
 ) -> Result<(), PoolError> {
     if halted() {
         return Err(PoolError::Halted);

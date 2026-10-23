@@ -644,7 +644,102 @@ fn samples() -> Vec<Sample> {
     all.extend(reverted_at_samples());
     all.extend(held_resolution_samples());
     all.extend(resolved_pull_samples());
+    all.extend(transfer_asked_samples());
     all
+}
+
+/// A payout's transfer to its recipient as asked, and refused (the review, 2026-10-24); a
+/// held deposit marked paid.
+fn transfer_asked_samples() -> Vec<Sample> {
+    use crate::hash::PoolRef;
+    use crate::pool::{
+        DepositKind, DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath,
+        PayoutProgress, PoolRail, PoolStep, PrincipalBytes, Registered, Registration, Sent,
+    };
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    let sent = Sent {
+        token: PrincipalBytes(principal(0xc1)),
+        amount: TokenAmount::from(2_101_u32),
+        spent: TokenAmount::from(2_102_u32),
+        refused: true,
+    };
+    let deposit = Registered {
+        terms: Registration {
+            kind: DepositKind::Swap {
+                recipient: IcpAccount {
+                    owner: principal(0xc4),
+                    subaccount: None,
+                },
+                token_out: principal(0xc1),
+                min_out: 0x2_105,
+            },
+            min_usdc: TokenAmount::from(2_106_000_000_u64),
+            premium: TokenAmount::from(2_107_u32),
+            rebalance_share: TokenAmount::ZERO,
+            src_chain: ChainId::ARBITRUM,
+            src_payer: crate::evm::EvmAddress::new([0xc5; 20]),
+            rail: PoolRail::Cctp,
+            expires_at: Timestamp::from_nanos(1_800_000_000_000_002_108),
+            salt: [0xc6; 32],
+            icp_fees: Some(TokenAmount::from(2_109_u32)),
+        },
+        status: DepositStatus::Paying,
+        arrived: None,
+        paid: None,
+        minted: None,
+        payout: PayoutProgress {
+            attempt: Some(PayoutAttempt {
+                created_at: Timestamp::from_nanos(1_800_000_000_000_002_110),
+                memo: [0xc3; 32],
+                path: PayoutPath::Ckusdc,
+                amount: Some(TokenAmount::from(2_101_u32)),
+                token: Some(sent.token),
+            }),
+            sent: Some(sent),
+            ..PayoutProgress::default()
+        },
+        held: Some(TokenAmount::from(2_111_u32)),
+    };
+    let line = |index: u64, step: PoolStep| {
+        Event::seal(
+            EventIndex::new(index),
+            Timestamp::from_nanos(1_800_000_000_000_002_103),
+            EventHash::new([0xc2; 32]),
+            crate::events::EventType::Pool { step },
+        )
+        .expect("every sample has a preimage")
+    };
+    let r#ref = PoolRef::new([0xc3; 32]);
+    vec![
+        sample("deposit with its transfer asked and refused", deposit),
+        sample(
+            "transfer asked",
+            line(
+                21_000,
+                PoolStep::TransferAsked {
+                    r#ref,
+                    token: sent.token,
+                    amount: sent.amount,
+                    spent: sent.spent,
+                },
+            ),
+        ),
+        sample(
+            "transfer refused",
+            line(21_001, PoolStep::TransferRefused { r#ref }),
+        ),
+        sample(
+            "deposit marked paid",
+            line(
+                21_002,
+                PoolStep::DepositResolved {
+                    r#ref,
+                    resolution: DepositResolution::MarkPaid { block: 2_104 },
+                    retry_at: None,
+                },
+            ),
+        ),
+    ]
 }
 
 /// The ledger blocks controllers resolved lost stake pulls with (the review, 2026-10-24).
@@ -2393,6 +2488,7 @@ fn route_samples() -> Vec<Sample> {
         failed: None,
         second: Some(leg(0x50)),
         back: Some(leg(0x60)),
+        sent: None,
     };
     let r#ref = PoolRef::new([0x38; 32]);
     let steps = [
@@ -2850,6 +2946,7 @@ fn pool_samples() -> Vec<Sample> {
                     failed: Some("the swap's outcome is unknown".to_string()),
                     second: None,
                     back: None,
+                    sent: None,
                 },
             },
         )]),
@@ -2938,6 +3035,7 @@ fn pool_samples() -> Vec<Sample> {
             failed: None,
             second: None,
             back: None,
+            sent: None,
         },
         // absent, so this sample's bytes stay the ones the golden pins; the deposit
         // appended at the end of the pool's samples pins it
@@ -2978,6 +3076,7 @@ fn pool_samples() -> Vec<Sample> {
             failed: None,
             second: None,
             back: None,
+            sent: None,
         },
         ..holding.clone()
     };

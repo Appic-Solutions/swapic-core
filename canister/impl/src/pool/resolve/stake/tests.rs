@@ -1,5 +1,5 @@
 use super::*;
-use crate::ic::{Account, CallError, LedgerTransfer};
+use crate::ic::{Account, CallError};
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, usdc};
 use crate::storage::pool::{ledger, record_at, shares_of};
@@ -28,7 +28,7 @@ struct Blocks {
     reads: RefCell<Vec<(Principal, u64)>>,
 }
 
-impl PullBlocks for Blocks {
+impl LedgerBlocks for Blocks {
     async fn transfer_at(
         &self,
         ledger: Principal,

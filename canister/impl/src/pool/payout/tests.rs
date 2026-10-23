@@ -7,7 +7,7 @@ use crate::storage::pool::{deposit, ledger, record_at};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use types::hash::PoolOpId;
-use types::pool::{IcpToken, LedgerFee, PoolAccount, PoolHeld, PrincipalBytes, Shares};
+use types::pool::{IcpToken, LedgerFee, PoolAccount, PoolHeld, PrincipalBytes, Sent, Shares};
 use types::BlockNumber;
 
 /// Runs a future that never waits: every call of the fake ledger answers at once.
@@ -544,6 +544,47 @@ fn a_refused_transfer_counts_an_attempt() {
         fail(r#ref, why, clock());
         assert_eq!(deposit(&r#ref).unwrap().payout.failures, 1);
         assert!(fake.transfers().is_empty());
+        block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
+        assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
+    });
+}
+
+/// The review (2026-10-24): the payout's transfer is recorded as asked before its call, with
+/// what it sends and spends; a definite refusal is recorded as such (nothing landed), a lost
+/// answer is not (it may have landed), and a refusal asked again may land again.
+#[test]
+fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        let asked = Sent {
+            token: types::pool::PrincipalBytes(ckusdc()),
+            amount: less(99, 1),
+            spent: usdc(99),
+            refused: false,
+        };
+        let sent = || deposit(&r#ref).unwrap().payout.sent;
+        fake.refuse.set(true);
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Failed(_))
+        ));
+        assert_eq!(
+            sent(),
+            Some(Sent {
+                refused: true,
+                ..asked
+            })
+        );
+        assert!(deposit(&r#ref).unwrap().payout.nothing_went_out());
+        fake.lose_answers.set(1);
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Retry(_))
+        ));
+        assert_eq!(sent(), Some(asked));
+        assert!(!deposit(&r#ref).unwrap().payout.nothing_went_out());
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
     });

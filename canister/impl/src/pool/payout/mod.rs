@@ -558,10 +558,17 @@ pub async fn pay(
                 })
                 .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
             open(guard)?;
-            let block = ledgers
-                .transfer(ckusdc, payout.to, first, payout.dedup(&attempt))
-                .await
-                .map_err(|error| call_stop("the ckUSDC transfer", error))?;
+            let block = send_out(
+                ledgers,
+                &payout,
+                &attempt,
+                ckusdc,
+                first,
+                spent,
+                "the ckUSDC transfer",
+                clock,
+            )
+            .await?;
             return Ok(Done {
                 token: ckusdc,
                 paid: first,
@@ -631,16 +638,69 @@ pub async fn pay(
     let spent = leg_cost(&swap, Some(swap_in), fee_ck)
         .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
     open(guard)?;
-    let block = ledgers
-        .transfer(payout.token_out, payout.to, send, payout.dedup(&attempt))
-        .await
-        .map_err(|error| call_stop("the output's transfer", error))?;
+    let block = send_out(
+        ledgers,
+        &payout,
+        &attempt,
+        payout.token_out,
+        send,
+        spent,
+        "the output's transfer",
+        clock,
+    )
+    .await?;
     Ok(Done {
         token: payout.token_out,
         paid: send,
         block,
         spent,
     })
+}
+
+/// The payout's transfer of `amount` of `token` to its recipient, its ask recorded before the
+/// call (the review, 2026-10-24): from then on it may have landed, until the ledger refuses
+/// it for sure, which is recorded too. A controller refunds a payout only when nothing of it
+/// may have landed, and marks it paid on the block of exactly this transfer.
+#[allow(clippy::too_many_arguments)]
+async fn send_out(
+    ledgers: &impl Ledgers,
+    payout: &Payout,
+    attempt: &PayoutAttempt,
+    token: Principal,
+    amount: TokenAmount,
+    spent: TokenAmount,
+    what: &str,
+    clock: impl Fn() -> Timestamp,
+) -> Result<u64, Stop> {
+    let asked = types::pool::Sent {
+        token: PrincipalBytes(token),
+        amount,
+        spent,
+        refused: false,
+    };
+    if progress_of(payout.id).and_then(|progress| progress.sent) != Some(asked) {
+        record(
+            PoolStep::TransferAsked {
+                r#ref: payout.id,
+                token: asked.token,
+                amount,
+                spent,
+            },
+            clock(),
+        )?;
+    }
+    match ledgers
+        .transfer(token, payout.to, amount, payout.dedup(attempt))
+        .await
+    {
+        Ok(block) => Ok(block),
+        Err(error) => {
+            if matches!(error, CallError::Refused(_)) {
+                record(PoolStep::TransferRefused { r#ref: payout.id }, clock())?;
+            }
+            Err(call_stop(what, error))
+        }
+    }
 }
 
 /// What an ICPSwap leg works with, fixed when its payout started.
@@ -880,10 +940,17 @@ async fn via_icp(
         let spent = leg_cost(&progress.swap, Some(via.swap_in), via.fee_ck)
             .ok_or_else(|| Stop::Failed("the payout's cost is unknown".to_string()))?;
         open(guard)?;
-        let block = ledgers
-            .transfer(payout.token_out, payout.to, send, payout.dedup(&attempt))
-            .await
-            .map_err(|error| call_stop("the output's transfer", error))?;
+        let block = send_out(
+            ledgers,
+            payout,
+            &attempt,
+            payout.token_out,
+            send,
+            spent,
+            "the output's transfer",
+            clock,
+        )
+        .await?;
         return Ok(Done {
             token: payout.token_out,
             paid: send,

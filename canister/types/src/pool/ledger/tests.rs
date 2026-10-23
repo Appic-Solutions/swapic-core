@@ -2,7 +2,7 @@ use super::*;
 use crate::evm::EvmAddress;
 use crate::hash::TxHash;
 use crate::pool::{
-    pool_ref, IcpAccount, LedgerFee, PayoutAttempt, PoolRail, PrincipalBytes, CKUSDC_LEDGER,
+    pool_ref, IcpAccount, LedgerFee, PayoutAttempt, PoolRail, PrincipalBytes, Sent, CKUSDC_LEDGER,
 };
 
 /// The maps the storage layer keeps beside the ledger, on the heap, and the steps applied the
@@ -1509,9 +1509,8 @@ fn a_queued_payout_that_never_starts_is_held_for_a_human_and_frees_the_queue() {
     );
 }
 
-/// A swap of 100 USDC (premium 1) arrived for `byte`, started, and held for a human after
-/// its tenth failure.
-fn held_started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
+/// A swap of 100 USDC (premium 1) arrived for `byte` and started on the ckUSDC path.
+fn started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
     let r#ref = register(pool, swap(byte, usdc(100), usdc(1)));
     pool.step(PoolStep::Arrived {
         r#ref,
@@ -1531,8 +1530,58 @@ fn held_started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
         },
     })
     .unwrap();
+    r#ref
+}
+
+/// [`started`], then held for a human after its tenth failure, no transfer asked.
+fn held_started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
+    let r#ref = started(pool, byte, log);
     hold(pool, r#ref);
     r#ref
+}
+
+/// The ckUSDC transfer a started payout of 99 USDC asks: 99 less one fee, its fee spent.
+fn asked(r#ref: PoolRef) -> PoolStep {
+    PoolStep::TransferAsked {
+        r#ref,
+        token: PrincipalBytes(ckusdc()),
+        amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
+        spent: usdc(99),
+    }
+}
+
+/// The review (2026-10-24): a payout's transfer to its recipient is recorded as asked before
+/// its call (it may have landed from then on) and as refused once the ledger refuses it for
+/// sure; asked again, it may have landed again. A transfer asked on other terms while one may
+/// have landed is refused.
+#[test]
+fn a_transfer_asked_may_have_landed_until_the_ledger_refuses_it() {
+    let mut pool = funded(usdc(1_000));
+    let r#ref = started(&mut pool, 1, 1);
+    let sent = |pool: &Pool| pool.deposits[&r#ref].payout.sent;
+    assert_eq!(sent(&pool), None);
+    assert!(pool.step(PoolStep::TransferRefused { r#ref }).is_err());
+    pool.step(asked(r#ref)).unwrap();
+    assert_eq!(
+        sent(&pool),
+        Some(Sent {
+            token: PrincipalBytes(ckusdc()),
+            amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
+            spent: usdc(99),
+            refused: false,
+        })
+    );
+    let mut other = asked(r#ref);
+    if let PoolStep::TransferAsked { amount, .. } = &mut other {
+        *amount = usdc(1);
+    }
+    assert!(pool.step(other.clone()).is_err());
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    assert!(sent(&pool).unwrap().refused);
+    assert!(pool.step(PoolStep::TransferRefused { r#ref }).is_err());
+    // refused for sure, it is asked again, on other terms too
+    pool.step(asked(r#ref)).unwrap();
+    assert!(!sent(&pool).unwrap().refused);
 }
 
 /// Fails `r#ref`'s payout until it is held for a human.
@@ -1690,34 +1739,145 @@ fn a_held_deposit_refunded_is_an_orphan_held_for_its_payer() {
     assert_eq!(pool.orphans[&credit(4)].amount, usdc(50));
 }
 
-/// The review (2026-10-24): a refund is refused when it could pay twice or burn. A started
-/// payout (its transfer may have landed, its answer lost) is never refunded on Base, only
-/// retried; nor is a deposit whose payer is the zero address, or one the Base pocket's free
-/// USDC no longer covers.
+/// The review (2026-10-24): a refund is allowed only when the canister knows nothing went
+/// out. A started payout that asked no transfer and moved nothing on ICP, or whose transfer
+/// the ledger refused for sure at its last ask, is refunded, its hold free again on ICP; one
+/// whose transfer may have landed, or whose ICPSwap leg moved money, is not. Nor is a deposit
+/// whose payer is the zero address, or one the Base pocket's free USDC no longer covers.
 #[test]
-fn a_held_deposit_is_refunded_only_when_it_never_started_and_someone_paid() {
+fn a_held_deposit_is_refunded_only_when_nothing_went_out() {
     let mut pool = funded(usdc(1_000));
-    let started = held_started(&mut pool, 1, 1);
+    let unasked = held_started(&mut pool, 1, 1);
+    let icp = pool.ledger.pockets.icp;
+    let held = pool.deposits[&unasked].held();
+    pool.step(resolved(unasked, DepositResolution::Refund, None))
+        .unwrap();
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        icp.free.checked_add(held).unwrap()
+    );
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        icp.reserved.checked_sub(held).unwrap()
+    );
+    let landed = started(&mut pool, 2, 2);
+    pool.step(asked(landed)).unwrap();
+    hold(&mut pool, landed);
     assert!(pool
-        .step(resolved(started, DepositResolution::Refund, None))
+        .step(resolved(landed, DepositResolution::Refund, None))
         .is_err());
-    let nobody = held_never_started(&mut pool, 3, 3);
+    let refused = started(&mut pool, 3, 3);
+    pool.step(asked(refused)).unwrap();
+    pool.step(PoolStep::TransferRefused { r#ref: refused })
+        .unwrap();
+    hold(&mut pool, refused);
+    pool.step(resolved(refused, DepositResolution::Refund, None))
+        .unwrap();
+    assert_eq!(pool.deposits[&refused].status, DepositStatus::Refunded);
+    let approved = held_started(&mut pool, 4, 4);
+    let mut deposit = pool.deposits[&approved].clone();
+    deposit.payout.swap.approvals = Some(1);
+    pool.deposits.insert(approved, deposit);
+    assert!(pool
+        .step(resolved(approved, DepositResolution::Refund, None))
+        .is_err());
+    let nobody = held_never_started(&mut pool, 5, 5);
     let mut deposit = pool.deposits[&nobody].clone();
     deposit.terms.src_payer = EvmAddress::ZERO;
     pool.deposits.insert(nobody, deposit);
     assert!(pool
         .step(resolved(nobody, DepositResolution::Refund, None))
         .is_err());
-    let short = held_never_started(&mut pool, 4, 4);
+    let short = held_never_started(&mut pool, 6, 6);
     pool.ledger.pockets.base.free = usdc(99);
     assert!(pool
         .step(resolved(short, DepositResolution::Refund, None))
         .is_err());
-    // each may still be retried
-    for r#ref in [started, nobody, short] {
+    // each the canister cannot refund may still be retried
+    for r#ref in [landed, approved, nobody, short] {
         pool.step(resolved(r#ref, DepositResolution::Retry, None))
             .unwrap();
     }
+}
+
+/// The review (2026-10-24): a started payout is retried with its old dedup pair only when its
+/// transfer is on the pool's own ckUSDC ledger, which deduplicates it; one paying another ICP
+/// token out is not (that ledger may take the old pair as a new transfer).
+#[test]
+fn a_started_payout_paying_another_token_is_never_retried() {
+    let mut pool = funded(usdc(1_000));
+    let token = Principal::from_slice(&[0x70; 10]);
+    let mut terms = swap(1, usdc(100), usdc(1));
+    terms.kind = DepositKind::Swap {
+        recipient: recipient(1),
+        token_out: token,
+        min_out: 1,
+    };
+    let r#ref = register(&mut pool, terms);
+    pool.step(PoolStep::Arrived {
+        r#ref,
+        credit: credit(1),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Icpswap {
+                pool: Principal::from_slice(&[0x71; 10]),
+            },
+            amount: None,
+            token: None,
+        },
+    })
+    .unwrap();
+    hold(&mut pool, r#ref);
+    assert_eq!(pool.deposits[&r#ref].out_ledger(ckusdc()), Some(token));
+    assert!(pool
+        .step(resolved(r#ref, DepositResolution::Retry, None))
+        .is_err());
+    // nothing went out: refunded
+    pool.step(resolved(r#ref, DepositResolution::Refund, None))
+        .unwrap();
+}
+
+/// The review (2026-10-24): `MarkPaid` books a started payout's transfer, as the payout
+/// asked it, paid in the block the door read, once: owed nothing, its hold spent.
+#[test]
+fn a_held_deposit_marked_paid_is_paid_as_its_transfer_was_asked() {
+    let mut pool = funded(usdc(1_000));
+    let mark = |r#ref, block| resolved(r#ref, DepositResolution::MarkPaid { block }, None);
+    let unasked = held_started(&mut pool, 1, 1);
+    assert!(pool.step(mark(unasked, 77)).is_err(), "no transfer asked");
+    let never = held_never_started(&mut pool, 2, 2);
+    assert!(pool.step(mark(never, 77)).is_err(), "never started");
+    let landed = started(&mut pool, 3, 3);
+    pool.step(asked(landed)).unwrap();
+    hold(&mut pool, landed);
+    let (owed, icp) = (pool.ledger.owed, pool.ledger.pockets.icp);
+    let held = pool.deposits[&landed].held();
+    pool.step(mark(landed, 77)).unwrap();
+    let deposit = &pool.deposits[&landed];
+    assert_eq!(deposit.status, DepositStatus::Paid);
+    assert_eq!(
+        deposit.paid,
+        Some(crate::pool::Paid {
+            token: ckusdc(),
+            amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
+            block: 77,
+            spent: usdc(99),
+        })
+    );
+    assert!(!pool.ledger.paying.contains(&landed));
+    assert_eq!(pool.ledger.owed, owed.checked_sub(held).unwrap());
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        icp.reserved.checked_sub(held).unwrap()
+    );
+    assert!(pool.step(mark(landed, 77)).is_err(), "once");
 }
 
 /// `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost past the
