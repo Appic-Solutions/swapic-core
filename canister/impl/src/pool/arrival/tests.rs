@@ -1071,3 +1071,40 @@ fn an_intent_the_canister_created_is_a_moves_never_a_deposit() {
         assert!(deposit(&given.r#ref).is_none());
     });
 }
+
+/// M-03: the receipt every node agreed on is taken only beside a header of the very block
+/// one node named as the head: a head no node sees as a block is no depth, and asked again;
+/// no receipt yet is asked again; another transaction's receipt never reads.
+#[test]
+fn an_agreed_receipt_stands_beside_the_head_every_node_sees() {
+    let raw = same_chain(the_ref(1));
+    let tx = parse(&raw).tx;
+    let head = BlockNumber::new(0x100);
+    let header = |number: &str| {
+        Ok(serde_json::json!({"number": number, "hash": "0xab", "timestamp": "0x6ad5e897"}))
+    };
+    assert_eq!(
+        agreed_receipt(tx, head, vec![Ok(raw.clone()), header("0x100")]),
+        Ok(parse(&raw))
+    );
+    for (receipt, header) in [
+        (Ok(raw.clone()), Ok(Value::Null)),
+        (Ok(raw.clone()), header("0x101")),
+        (Ok(Value::Null), header("0x100")),
+        (
+            Err(RpcError::Unreachable {
+                reason: crate::rpc::Summary::of("no consensus"),
+            }),
+            header("0x100"),
+        ),
+    ] {
+        assert!(matches!(
+            agreed_receipt(tx, head, vec![receipt, header]),
+            Err(PoolError::Unavailable(_))
+        ));
+    }
+    assert!(matches!(
+        agreed_receipt(TxHash::new([9; 32]), head, vec![Ok(raw), header("0x100")]),
+        Err(PoolError::BadArrival(_))
+    ));
+}

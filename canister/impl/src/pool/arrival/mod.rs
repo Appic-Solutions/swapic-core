@@ -31,7 +31,8 @@
 //! deposit's transfer found without its terms (the canister's own read of Base) waits 24
 //! hours for them on the unattributed line, then is held for a controller. Every step of
 //! one call is appended in the message that checks it, after the last read, so the same
-//! transfer reported twice is credited once.
+//! transfer reported twice is credited once. Every receipt a proof reads is read by every
+//! node of the subnet and agreed on (M-03): no one provider or node makes up a deposit.
 
 #[cfg(test)]
 mod tests;
@@ -39,7 +40,7 @@ mod tests;
 use crate::cctp::parse_address;
 use crate::ecdsa;
 use crate::pool;
-use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
+use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, Keep, RpcError};
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::{config, pool as pool_store};
@@ -1052,22 +1053,20 @@ fn unavailable(error: RpcError) -> PoolError {
     PoolError::Unavailable(format!("the read failed: {:?}", error.kind()))
 }
 
-/// The pool chain's receipt of `tx` and its head, in one outcall, the receipt at the
-/// crediting depth.
-pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
-    let calls = [
-        ("eth_getTransactionReceipt", json!([hex0x(tx.as_ref())])),
-        ("eth_blockNumber", json!([])),
-    ];
-    let answers = rpc::rpc_batch_each(chain.chain, &calls, MAX_RECEIPT_BYTES)
-        .await
-        .map_err(unavailable)?;
+/// The receipt every node agreed on in `answers` (`[receipt, header]`, read beside the head
+/// `head` one node named), pure: a receipt of `tx`, and a header of that very block, which
+/// every node saw. A head no node agrees is a block is no depth: asked again.
+pub fn agreed_receipt(
+    tx: TxHash,
+    head: BlockNumber,
+    answers: Vec<Result<Value, RpcError>>,
+) -> Result<Receipt, PoolError> {
     let mut answers = answers.into_iter();
     let receipt = answers
         .next()
         .ok_or_else(|| PoolError::Unavailable("no receipt answer".to_string()))?
         .map_err(unavailable)?;
-    let head = answers
+    let header = answers
         .next()
         .ok_or_else(|| PoolError::Unavailable("no head answer".to_string()))?
         .map_err(unavailable)?;
@@ -1079,10 +1078,45 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
     let receipt = Receipt::parse(&receipt)
         .filter(|receipt| receipt.tx == tx)
         .ok_or_else(|| PoolError::BadArrival("the receipt does not read".to_string()))?;
-    let head = head
-        .as_str()
-        .and_then(parse_block_number)
-        .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
+    if crate::agreed::Header::parse(&header).map(|header| header.number) != Some(head) {
+        return Err(PoolError::Unavailable(
+            "the head is not a block every node sees yet".to_string(),
+        ));
+    }
+    Ok(receipt)
+}
+
+/// The pool chain's receipt of `tx` at the crediting depth, read by every node and agreed on
+/// (M-03): one node reads the head, which only names the block every node reads beside the
+/// receipt, so a head no node sees is no depth, and a lower one only waits.
+pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
+    let head = rpc::rpc_batch(
+        chain.chain,
+        &[("eth_blockNumber", json!([]))],
+        rpc::MAX_BLOCK_NUMBER_BYTES,
+    )
+    .await
+    .map_err(unavailable)?
+    .first()
+    .and_then(Value::as_str)
+    .and_then(parse_block_number)
+    .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
+    let calls = [
+        (
+            "eth_getTransactionReceipt",
+            json!([hex0x(tx.as_ref())]),
+            Keep::Receipt,
+        ),
+        (
+            "eth_getBlockByNumber",
+            json!([format!("0x{:x}", head.get()), false]),
+            Keep::Header,
+        ),
+    ];
+    let answers = rpc::rpc_batch_agreed(chain.chain, &calls, MAX_RECEIPT_BYTES)
+        .await
+        .map_err(unavailable)?;
+    let receipt = agreed_receipt(tx, head, answers)?;
     deep_enough(receipt.block, head, chain.chain)?;
     Ok(receipt)
 }
@@ -1104,10 +1138,14 @@ pub fn deep_enough(block: BlockNumber, head: BlockNumber, chain: ChainId) -> Res
     })
 }
 
-/// The source chain's receipt of `tx`, in one outcall.
+/// The source chain's receipt of `tx`, read by every node and agreed on (M-03).
 pub(crate) async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
-    let calls = [("eth_getTransactionReceipt", json!([hex0x(tx.as_ref())]))];
-    let mut answers = rpc::rpc_batch_each(chain, &calls, MAX_RECEIPT_BYTES)
+    let calls = [(
+        "eth_getTransactionReceipt",
+        json!([hex0x(tx.as_ref())]),
+        Keep::Receipt,
+    )];
+    let mut answers = rpc::rpc_batch_agreed(chain, &calls, MAX_RECEIPT_BYTES)
         .await
         .map_err(unavailable)?;
     let receipt = answers

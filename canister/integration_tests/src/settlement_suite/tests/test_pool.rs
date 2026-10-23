@@ -1234,3 +1234,117 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
     let _ = order_id;
     assert!(world.replay_matches());
 }
+
+/// M-03: a pool arrival's receipt decides a credit alone, so every node reads it and they
+/// must agree. One node reads the head, which only names the block every node then reads
+/// beside the receipt. A receipt one node's provider makes up is outvoted by the others',
+/// and nodes split on it agree on nothing: either way nothing is credited, and the report is
+/// asked again.
+#[test]
+fn a_pool_arrivals_receipt_is_read_by_every_node() {
+    use pocket_ic::common::rest::{
+        CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
+    };
+    use settlement_api::types::pool::{
+        PoolArrival, PoolArrivalOutcome, PoolDepositKind, PoolTerms,
+    };
+    let world = signing_world(
+        usdc(1_000),
+        Config {
+            pool_chain: Some(BASE),
+            evm_chains: std::collections::BTreeMap::from([(BASE, base_chain())]),
+            rpc_urls: std::collections::BTreeMap::from([(
+                BASE,
+                "https://base-mainnet.example/v2/key".to_string(),
+            )]),
+            ..init_arg().config
+        },
+    );
+    crate::client::settlement::derive_evm_address(&world.pic, world.canister, world.admin)
+        .expect("the test key derives an address");
+    let subnet = world.pic.get_subnet(world.canister).expect("a subnet");
+    let nodes = world.pic.topology().subnet_configs[&subnet].node_ids.len();
+    let answer = |receipt: serde_json::Value| {
+        CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!([
+                {"jsonrpc": "2.0", "id": 0, "result": receipt},
+                {"jsonrpc": "2.0", "id": 1, "result": {
+                    "number": "0x100", "hash": format!("0x{}", "cd".repeat(32)), "timestamp": "0x6ad5e897",
+                }},
+            ])
+            .to_string()
+            .into_bytes(),
+        })
+    };
+    let made_up = serde_json::json!({
+        "transactionHash": format!("0x{}", "ab".repeat(32)),
+        "blockNumber": "0xf0",
+        "status": "0x1",
+        "logs": [],
+    });
+    // node `i` answers the made-up receipt when `lies(i)`, else no receipt
+    let report = |lies: &dyn Fn(usize) -> bool| -> Result<PoolArrivalOutcome, PoolError> {
+        let arrival = PoolArrival {
+            base_tx: vec![0xab; 32],
+            src_chain: BASE,
+            src_tx: vec![],
+            terms: PoolTerms {
+                kind: PoolDepositKind::Stake {
+                    owner: PoolAccount::Evm(
+                        "0x1111111111111111111111111111111111111111".to_string(),
+                    ),
+                },
+                premium: Nat::from(0_u32),
+                icp_fees: Nat::from(0_u32),
+                rebalance_share: Nat::from(0_u32),
+                salt: vec![7; 32],
+            },
+        };
+        let call = world
+            .pic
+            .submit_call(
+                world.canister,
+                world.admin,
+                "note_pool_arrival",
+                encode_one(arrival).unwrap(),
+            )
+            .expect("the door takes the call");
+        let head = world.next_outcall(&["eth_blockNumber"]);
+        world.reply(&head, serde_json::json!("0x100"), false);
+        let read = world.next_outcall(&["eth_getTransactionReceipt", "eth_getBlockByNumber"]);
+        let body: serde_json::Value = serde_json::from_slice(&read.body).unwrap();
+        assert_eq!(
+            body[0]["params"],
+            serde_json::json!([format!("0x{}", "ab".repeat(32))])
+        );
+        assert_eq!(body[1]["params"], serde_json::json!(["0x100", false]));
+        let mut answers = (0..nodes).map(|node| {
+            answer(if lies(node) {
+                made_up.clone()
+            } else {
+                serde_json::Value::Null
+            })
+        });
+        world
+            .pic
+            .mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: read.subnet_id,
+                request_id: read.request_id,
+                response: answers.next().unwrap(),
+                additional_responses: answers.collect(),
+            });
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap()
+    };
+    let outvoted = report(&|node| node == 0);
+    assert!(
+        matches!(&outvoted, Err(PoolError::Unavailable(why)) if why.contains("no receipt")),
+        "{outvoted:?}"
+    );
+    let split = report(&|node| node % 2 == 0);
+    assert!(
+        matches!(&split, Err(PoolError::Unavailable(why)) if why.contains("Unreachable")),
+        "{split:?}"
+    );
+}
