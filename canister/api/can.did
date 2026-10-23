@@ -239,6 +239,9 @@ type ConfigError = variant {
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };
 };
+// A controller's answer to a deposit held for a human (`resolve_deposit`): back to its
+// payout with fresh attempts, or what arrived back to its payer on Base.
+type DepositResolution = variant { Refund; Retry };
 // Why a key or a signature is not one this canister can use. A refused management call is
 // reported rather than trapped: the interface specification says a rejected signing
 // request may leave the signature in the system anyway, so a caller that retries has to
@@ -705,6 +708,9 @@ type PoolDepositKind = variant {
 type PoolDepositStatus = variant {
   Arrived;
   Paying;
+  // A controller sent what arrived back to its payer on Base (`resolve_deposit`): an
+  // orphan under its transfer's key (`pool_orphans`) until its refund is signed.
+  Refunded;
   Paid;
   Unattributed;
   PayoutFailed : text;
@@ -1011,6 +1017,10 @@ type StakeIcpArgs = record {
   amount : nat;
 };
 type StakeIcpOk = record { shares : nat };
+// A controller's answer to an ICP stake whose pull's answer was lost past the ledger's
+// deduplication window (`resolve_stake`): the pull landed in ledger block `block`, or it
+// never landed.
+type StakeResolution = variant { NotPulled; Pulled : record { block : nat64 } };
 // The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
 type Swap = record {
   status : SwapStatus;
@@ -1361,6 +1371,18 @@ service : (InitArg) -> {
   // by itself. One rescue per order: a second call answers the first one's id. Every rescue
   // is logged.
   rescue_eco_intent : (blob) -> (Result_12);
+  // Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
+  // human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
+  // started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
+  // `Retry`: back to its payout with fresh attempts, a started one with its own dedup instant
+  // within 23 hours of it, else a fresh one. `Refund`: refused while the pool is closed, for a
+  // sanctioned or zero payer, and for a payout whose ICPSwap leg moved money; what arrived is
+  // held as an orphan under its transfer's key and the canister signs
+  // `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
+  // signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`. Before a
+  // refund, or a retry past 23 hours, the controller checks the payout's transfer never went
+  // out.
+  resolve_deposit : (blob, DepositResolution) -> (Result_9);
   // Controller-only, refused while halted: a stuck move sent on from where it stands
   // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
   // never ran asked again; a wait read again), or written off with why (`Lost`).
@@ -1376,6 +1398,13 @@ service : (InitArg) -> {
   // the controller checked no refund went out before. `MarkPaid`: its signed order ran after
   // all, and its paid line is booked.
   resolve_payout : (nat64, PayoutResolution) -> (Result_9);
+  // Controller-only, refused while halted (Jeff, 2026-10-24): an ICP stake whose pull's answer
+  // was lost, past the ledger's deduplication window (23 hours after it started; the canister
+  // stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
+  // `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
+  // ckUSDC ledger block, and its shares are minted at the pool's price now. `NotPulled`: it
+  // never landed, and it is dropped, its room freed.
+  resolve_stake : (blob, StakeResolution) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
