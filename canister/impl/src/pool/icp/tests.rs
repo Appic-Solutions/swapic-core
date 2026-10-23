@@ -630,3 +630,21 @@ fn a_check_before_settings_logs_nothing() {
     let fine = check_step(Some(Ok(Nat::from(usdc(5)))), usdc(5), usdc(5), zero);
     assert_eq!(check_log(&fine), None);
 }
+
+/// L-01: before the pool has settings the ICP check records nothing: no failed check lands in
+/// the permanent log every books interval of a canister that has not set the pool up.
+#[test]
+fn a_check_before_settings_records_nothing() {
+    use std::future::Future;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let count = crate::storage::events::event_count();
+        let mut check = std::pin::pin!(check_icp_pocket(TokenAmount::ZERO));
+        let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            check.as_mut().poll(context).is_ready(),
+            "no ledger is asked"
+        );
+        assert_eq!(crate::storage::events::event_count(), count);
+    });
+}
