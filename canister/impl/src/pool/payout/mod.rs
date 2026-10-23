@@ -71,6 +71,11 @@ impl Busy {
         BUSY.with(|busy| busy.borrow_mut().insert(id))
             .then(|| Self(id))
     }
+
+    /// Whether a drive or a door holds the payout `r#ref` names now.
+    pub fn is_held(r#ref: &PoolRef) -> bool {
+        BUSY.with(|busy| busy.borrow().contains(&r#ref.into_bytes()))
+    }
 }
 
 impl Drop for Busy {

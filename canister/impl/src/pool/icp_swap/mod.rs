@@ -8,7 +8,9 @@
 //! route's leg or legs, at least the sale floor (half the slippage below what the plan
 //! needs), and only then knows the exact ckUSDC `u`: the payout from the Base pocket is `u`
 //! less the settings' premium on it and the payouts' flat network fee. No per swap cap: a
-//! swap opens only while the Base pocket can pay it.
+//! swap opens only while the Base pocket can pay it. A plan that fits that payout is signed by
+//! the canister in the same message chain ([`crate::pool::plan`]); one that does not waits for
+//! the watcher's order (`pay_payout`).
 //!
 //! Each line before the call it guards:
 //! - `PayoutOpened` with the plan, the undo account and the pull's dedup pair (the payout's
@@ -23,6 +25,8 @@
 //! - `PayoutAmountKnown`, then `PayoutWaiting` (the Base pocket covers it behind an empty
 //!   queue). A planned swap never queues: one the Base pocket cannot pay any more is undone
 //!   at once, its ckUSDC refunded; one opened before the plan flow is queued.
+//! - A planned swap's fit, read and checked after those lines: its signature's own lines
+//!   (`TxCreated`, `PayoutSigned`) are the caller's, which holds the payout.
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +34,8 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, AmountIn};
-use crate::pool::payout::{call_stop, open, Ledgers, Leg, Stop};
+use crate::pool::payout::{call_stop, open, Busy, Ledgers, Leg, Stop};
+use crate::pool::plan::{Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Party};
 use crate::state::{State, Store};
@@ -378,15 +383,23 @@ pub async fn swap_from_icp(
         at,
     )
     .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
-    if let Some(_busy) = crate::pool::payout::Busy::take(evm_payout_ref(id).into_bytes()) {
-        // whatever stops it, the payout timer carries it on
-        let _ = drive(
+    if let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
+        // whatever stops it, the payout timer carries it on; a plan that fits is signed in
+        // this same message chain, and one that is not waits for the watcher's order
+        if let Ok(Some(fitted)) = drive(
             &crate::pool::payout::Live,
             id,
             now,
             &crate::pool::payout::guard,
         )
-        .await;
+        .await
+        {
+            if let Err(error) = pay::sign_held(&busy, id, &fitted.order, fitted.pinned).await {
+                pool::log(&format!(
+                    "the pool payout {id}'s plan was not signed ({error:?}): it waits for an order"
+                ));
+            }
+        }
     }
     match pool_store::payout(id) {
         // the pull was refused: nothing moved
@@ -434,36 +447,63 @@ fn terms_of(payout: &EvmPayout) -> Result<IcpSwapTerms, Stop> {
     }
 }
 
-/// An ICP swap's next steps, as far as they go now: the pull, the legs, the amount, its place
-/// in the queue, and an undo's refund.
+/// An ICP swap's next steps, as far as they go now: the pull, the legs, the amount, its place,
+/// a planned swap's fit (the order to sign, answered to the caller, which holds the payout),
+/// and an undo's refund.
 pub async fn drive(
-    ledgers: &impl Ledgers,
+    ledgers: &(impl Ledgers + PlanReads),
     id: u64,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
-) -> Result<(), Stop> {
-    // a swap goes a few lines at most in one drive: pulled, the legs, known, placed
+) -> Result<Option<Fitted>, Stop> {
+    let mut placed = false;
+    // a swap goes a few lines at most in one drive: pulled, the legs, known, placed, undone
     for _ in 0..6 {
         let Some(payout) = pool_store::payout(id) else {
-            return Ok(());
+            return Ok(None);
         };
         // a payout whose amount is known takes its place, whatever it is: a planned swap the
         // Base pocket cannot pay any more is undone, its refund next
         if payout.status == PayoutStatus::Known {
             place(id, clock())?;
+            placed = true;
             continue;
         }
+        // a planned swap placed by this drive: its plan fitted to its exact amount, once
+        if placed && payout.status == PayoutStatus::Waiting && is_planned(&payout) {
+            placed = false;
+            match crate::pool::plan::fit(ledgers, &payout, clock()).await {
+                Fit::Sign(fitted) => return Ok(open(guard).is_ok().then_some(*fitted)),
+                Fit::Wait(why) => {
+                    pool::log(&format!(
+                        "the pool payout {id} waits for an order: its plan {why}"
+                    ));
+                    return Ok(None);
+                }
+                // it could only revert: the user's ckUSDC back at once
+                Fit::Undo(why) => {
+                    undo(id, why, clock())?;
+                    continue;
+                }
+            }
+        }
         if !payout.is_icp_swap() {
-            return Ok(());
+            return Ok(None);
         }
         match &payout.status {
             PayoutStatus::Opened => pull(ledgers, &payout, clock).await?,
             PayoutStatus::Swapping => swap(ledgers, &payout, clock, guard).await?,
-            PayoutStatus::Undoing(_) => return refund(ledgers, &payout, clock, guard).await,
-            _ => return Ok(()),
+            PayoutStatus::Undoing(_) => {
+                return refund(ledgers, &payout, clock, guard).await.map(|()| None)
+            }
+            _ => return Ok(None),
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+fn is_planned(payout: &EvmPayout) -> bool {
+    matches!(payout.kind, PayoutKind::IcpSwap(terms) if terms.is_planned())
 }
 
 /// Why a planned swap the Base pocket cannot pay any more is undone.
@@ -479,7 +519,7 @@ pub fn place(id: u64, now: Timestamp) -> Result<(), Stop> {
     let covered = ledger.lines().queue_len == 0 && payout.base_hold() <= ledger.pockets.base.free;
     if covered {
         record(PoolStep::PayoutWaiting { id }, now)
-    } else if matches!(payout.kind, PayoutKind::IcpSwap(terms) if terms.is_planned()) {
+    } else if is_planned(&payout) {
         undo(id, BASE_SHORT.to_string(), now)
     } else {
         record(PoolStep::PayoutQueued { id }, now)

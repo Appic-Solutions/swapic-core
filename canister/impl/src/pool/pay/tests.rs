@@ -629,3 +629,20 @@ fn check_order_refuses_alike_whether_the_amount_is_known_or_not() {
     assert!(in_mode(&known, &order, 900_000, AmountIn::NotKnownYet).is_err());
     assert!(in_mode(&opening, &order, 900_000, AmountIn::Exact).is_err());
 }
+
+/// A payout the canister is fitting to its plan (its drive holds it) is not listed for the
+/// watcher, which would quote for nothing; listed again once let go.
+#[test]
+fn payouts_waiting_leaves_out_a_payout_being_fitted() {
+    use crate::storage::on_fresh_memory;
+    use crate::storage::pool::tests::waiting_withdrawal;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(address("0x1111111111111111111111111111111111111111"));
+        assert_eq!(super::waiting().len(), 1);
+        let held = crate::pool::payout::Busy::take(types::pool::evm_payout_ref(id).into_bytes());
+        assert!(super::waiting().is_empty());
+        drop(held);
+        assert_eq!(super::waiting().len(), 1);
+    });
+}

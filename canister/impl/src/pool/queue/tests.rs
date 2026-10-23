@@ -246,6 +246,26 @@ struct Fake {
     transfers: RefCell<Vec<(Principal, IcpAccount, TokenAmount)>>,
 }
 
+/// No plan is fitted here: the drive's own tests fit them.
+impl PlanReads for Fake {
+    async fn scaled(&self, _route: &[u8], _amount: TokenAmount) -> Result<Vec<u8>, String> {
+        Err("no scaler here".to_string())
+    }
+
+    fn checked(
+        &self,
+        _payout: &EvmPayout,
+        _order: &types::swapic::Order,
+        _order_bytes: &[u8],
+        _gas_limit: u64,
+        _now: Timestamp,
+    ) -> Result<PinnedOrder, settlement_api::types::pool::PoolError> {
+        Err(settlement_api::types::pool::PoolError::Unavailable(
+            "no checks here".to_string(),
+        ))
+    }
+}
+
 impl Ledgers for Fake {
     async fn transfer(
         &self,

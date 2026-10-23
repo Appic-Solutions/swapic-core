@@ -12,6 +12,7 @@ pub mod legs;
 pub mod orphans;
 pub mod pay;
 pub mod payout;
+pub mod plan;
 pub mod queue;
 pub mod rebalance;
 pub mod report_guard;

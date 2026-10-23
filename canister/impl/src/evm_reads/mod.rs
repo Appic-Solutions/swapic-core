@@ -38,6 +38,18 @@ pub async fn eth_call(
     call_at(chain_id, from, to, data, json!("latest")).await
 }
 
+/// [`eth_call`] whose answer may be up to `max_bytes`: a call that answers more than a word or
+/// two, a KyberSwap route rewritten (hex, twice its bytes).
+pub async fn eth_call_capped(
+    chain_id: ChainId,
+    from: EvmAddress,
+    to: EvmAddress,
+    data: &[u8],
+    max_bytes: u64,
+) -> Result<Simulated, RpcError> {
+    call_capped(chain_id, from, to, data, json!("latest"), max_bytes).await
+}
+
 /// `eth_call` of `data` from `from` to `to` at `block`.
 pub async fn eth_call_at(
     chain_id: ChainId,
@@ -63,8 +75,19 @@ async fn call_at(
     data: &[u8],
     block: Value,
 ) -> Result<Simulated, RpcError> {
+    call_capped(chain_id, from, to, data, block, MAX_CALL_BYTES).await
+}
+
+async fn call_capped(
+    chain_id: ChainId,
+    from: EvmAddress,
+    to: EvmAddress,
+    data: &[u8],
+    block: Value,
+    max_bytes: u64,
+) -> Result<Simulated, RpcError> {
     let calls = [("eth_call", json!([call_object(from, to, data), block]))];
-    let mut answers = rpc::rpc_batch_each(chain_id, &calls, MAX_CALL_BYTES).await?;
+    let mut answers = rpc::rpc_batch_each(chain_id, &calls, max_bytes).await?;
     match answers.pop() {
         Some(Ok(value)) => Ok(Simulated::Returned(bytes_of(&value).unwrap_or_default())),
         Some(Err(RpcError::Rpc { message, .. })) => Ok(Simulated::Reverted(message)),

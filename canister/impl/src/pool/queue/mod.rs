@@ -24,6 +24,7 @@
 mod tests;
 
 use crate::pool::payout::{Busy, Ledgers, Stop, DEDUP_WINDOW};
+use crate::pool::plan::PlanReads;
 use crate::pool::{icp_swap, log};
 use crate::state::Store;
 use crate::storage::events::read_state;
@@ -248,7 +249,7 @@ fn undo(payout: &EvmPayout, why: String, now: Timestamp) -> bool {
 /// One pass over the Base payouts, reading the chains themselves: answers how many it acted
 /// on.
 pub async fn pass(
-    ledgers: &impl Ledgers,
+    ledgers: &(impl Ledgers + PlanReads),
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
@@ -258,7 +259,7 @@ pub async fn pass(
 /// One pass over the Base payouts, with `reads` for the chain reads: answers how many it
 /// acted on.
 pub async fn pass_with(
-    ledgers: &impl Ledgers,
+    ledgers: &(impl Ledgers + PlanReads),
     reads: &impl ChainReads,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
@@ -279,7 +280,20 @@ pub async fn pass_with(
         match next(&payout, &settings, now, in_flight(id)) {
             Next::Wait => {}
             Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
-                Ok(()) => acted += 1,
+                Ok(fitted) => {
+                    acted += 1;
+                    // a planned swap whose amount this drive learnt: its plan, fitted
+                    if let Some(fitted) = fitted {
+                        if let Err(error) =
+                            crate::pool::pay::sign_held(&_busy, id, &fitted.order, fitted.pinned)
+                                .await
+                        {
+                            log(&format!(
+                                "the pool payout {id}'s plan was not signed ({error:?}): it waits for an order"
+                            ));
+                        }
+                    }
+                }
                 Err(Stop::Retry(why)) | Err(Stop::Append(why)) => {
                     log(&format!("the pool payout {id} waits: {why}"))
                 }

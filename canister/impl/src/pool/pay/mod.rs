@@ -203,6 +203,10 @@ pub fn waiting() -> Vec<PayoutWaiting> {
             .into_iter()
             .filter_map(|id| state.store().pool_payout(id))
             .filter(|payout| payout.status == PayoutStatus::Waiting)
+            // one being fitted to its plan is the canister's to sign
+            .filter(|payout| {
+                !crate::pool::payout::Busy::is_held(&types::pool::evm_payout_ref(payout.id))
+            })
             .collect();
         waiting.sort_by_key(|payout| (payout.waiting_since, payout.id));
         waiting
@@ -334,6 +338,19 @@ pub fn checked_payout(
 /// recorded. One signature per payout at a time: the fold refuses a second creation while
 /// one is unsigned, and a signature unless the payout waits.
 pub async fn sign(id: u64, order: &Order, pinned: PinnedOrder) -> Result<u64, PoolError> {
+    let busy = crate::pool::payout::Busy::take(types::pool::evm_payout_ref(id).into_bytes())
+        .ok_or_else(|| PoolError::Unavailable("the payout is being signed".to_string()))?;
+    sign_held(&busy, id, order, pinned).await
+}
+
+/// [`sign`] for a caller that holds the payout already (`swap_from_icp`'s drive, the pass):
+/// a planned swap's plan, fitted.
+pub async fn sign_held(
+    _held: &crate::pool::payout::Busy,
+    id: u64,
+    order: &Order,
+    pinned: PinnedOrder,
+) -> Result<u64, PoolError> {
     let config = crate::storage::config::get();
     let chain_id = config
         .pool_chain
@@ -343,8 +360,6 @@ pub async fn sign(id: u64, order: &Order, pinned: PinnedOrder) -> Result<u64, Po
         .get(chain_id)
         .map(|chain| chain.swapic)
         .ok_or_else(|| PoolError::Closed(format!("the pool chain {chain_id} signs nothing")))?;
-    let _busy = crate::pool::payout::Busy::take(types::pool::evm_payout_ref(id).into_bytes())
-        .ok_or_else(|| PoolError::Unavailable("the payout is being signed".to_string()))?;
     let gas_limit = GasAmount::from(pinned.gas_limit);
     let signed = tx::create_and_send_with(
         TxPurpose::PoolPayout(id),

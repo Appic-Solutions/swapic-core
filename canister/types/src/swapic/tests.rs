@@ -611,3 +611,16 @@ fn the_arrival_topics_are_the_chains_own() {
         "c1ed05721d27ad6b2555d61388ac393b120f5cc0e6009e53230e02c68e60064a"
     );
 }
+
+/// KyberSwap's InputScalingHelper as the deployed Runner calls it: its address, and the
+/// selector of `getScaledInputData(bytes,uint256)`.
+#[test]
+fn the_scaler_is_kybers_input_scaling_helper() {
+    assert_eq!(
+        KYBER_SCALER,
+        "0x2f577A41BeC1BE1152AeEA12e73b7391d15f655D"
+            .parse::<EvmAddress>()
+            .unwrap()
+    );
+    assert_eq!(getScaledInputDataCall::SELECTOR, [0xe4, 0xda, 0x6f, 0x2e]);
+}

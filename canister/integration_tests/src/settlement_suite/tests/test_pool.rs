@@ -117,6 +117,30 @@ fn world(canister_usdc: u64) -> World {
 
 fn world_with(canister_usdc: u64, config: Config) -> World {
     let (pic, canister, admin) = empty_canister();
+    world_in(pic, canister, admin, canister_usdc, config)
+}
+
+/// The pool's world on a network holding the test threshold keys (the canister on an
+/// application subnet, the keys on the II subnet): what signing needs.
+fn signing_world(canister_usdc: u64, config: Config) -> World {
+    let pic = pocket_ic::PocketIcBuilder::new()
+        .with_ii_subnet()
+        .with_application_subnet()
+        .build();
+    let admin = Principal::from_slice(&[1; 29]);
+    let subnet = pic.topology().get_app_subnets()[0];
+    let canister = pic.create_canister_on_subnet(Some(admin), None, subnet);
+    pic.add_cycles(canister, 1_000_000_000_000_000);
+    world_in(pic, canister, admin, canister_usdc, config)
+}
+
+fn world_in(
+    pic: PocketIc,
+    canister: Principal,
+    admin: Principal,
+    canister_usdc: u64,
+    config: Config,
+) -> World {
     let arg = InitArg {
         config,
         ..init_arg()
@@ -708,15 +732,29 @@ fn usdc_plan(canister: types::EvmAddress, payout: u64, deadline_s: u64) -> Vec<u
     })
 }
 
-/// A world whose Base pocket holds 500 USDC staked from Base and the payout settings, its
-/// canister's EVM address derived: what an ICP swap to EVM needs.
+/// The deployed Runner on Base.
+const RUNNER: &str = "0x7E345acaB79102ac9588C60B9358Ec4d79438eEe";
+
+/// A world whose Base pocket holds 1,000 USDC staked from Base and the payout settings, its
+/// canister's EVM address derived on the test key: what an ICP swap to EVM needs.
 fn swap_world() -> (World, types::EvmAddress) {
     use settlement_api::types::pool::PayoutSettings;
-    let world = world_with(
+    let world = signing_world(
         usdc(1_000),
         Config {
             pool_chain: Some(BASE),
-            evm_chains: std::collections::BTreeMap::from([(BASE, base_chain())]),
+            evm_chains: std::collections::BTreeMap::from([(
+                BASE,
+                settlement_api::types::config::EvmChainConfig {
+                    // the deployed Runner: the real KyberSwap route pays it
+                    runner: RUNNER.to_string(),
+                    ..base_chain()
+                },
+            )]),
+            rpc_urls: std::collections::BTreeMap::from([(
+                BASE,
+                "https://base-mainnet.example/v2/key".to_string(),
+            )]),
             ..init_arg().config
         },
     );
@@ -734,7 +772,7 @@ fn swap_world() -> (World, types::EvmAddress) {
     );
     let stake = Registration {
         kind: DepositKind::Stake { owner },
-        min_usdc: TokenAmount::from(usdc(500)),
+        min_usdc: TokenAmount::from(usdc(1_000)),
         premium: TokenAmount::ZERO,
         rebalance_share: TokenAmount::ZERO,
         src_chain: ChainId::new(BASE),
@@ -758,13 +796,13 @@ fn swap_world() -> (World, types::EvmAddress) {
             tx: TxHash::new([0x71; 32]),
             log_index: 1,
         },
-        amount: TokenAmount::from(usdc(500)),
+        amount: TokenAmount::from(usdc(1_000)),
         block: BlockNumber::new(2),
     });
     world.plant(PoolStep::Minted {
         r#ref,
         owner,
-        shares: Shares::new(500_000_000_000_000_000_000),
+        shares: Shares::new(1_000_000_000_000_000_000_000),
     });
     let set: Result<(), PoolError> = update(
         &world.pic,
@@ -787,11 +825,16 @@ fn swap_world() -> (World, types::EvmAddress) {
 
 /// The swap's arguments: 100 ckUSDC with `plan`, 100 bps of slippage, its deadline 15
 /// minutes away.
-fn swap_terms(world: &World, plan: Vec<u8>) -> settlement_api::types::pool::IcpSwapTerms {
+fn swap_terms(
+    world: &World,
+    amount_in: u64,
+    plan: Vec<u8>,
+    gas_limit: u64,
+) -> settlement_api::types::pool::IcpSwapTerms {
     use settlement_api::types::pool::{IcpSwapTerms, PayoutPlan};
     IcpSwapTerms {
         token_in: world.ledger,
-        amount_in: Nat::from(usdc(100)),
+        amount_in: Nat::from(amount_in),
         from_subaccount: None,
         refund_to: None,
         slippage_bps: 100,
@@ -802,43 +845,239 @@ fn swap_terms(world: &World, plan: Vec<u8>) -> settlement_api::types::pool::IcpS
             .as_nanos(),
         plan: PayoutPlan {
             order: plan,
-            gas_limit: 400_000,
+            gas_limit,
         },
     }
 }
 
-/// The payout plan (2026-10-23): an ICP user swaps 100 ckUSDC to USDC on Base with the
-/// quoter's plan for its payout. The canister pulls it on the user's approval (the user pays
-/// the pull's fee), takes the premium from the 100 it made, and the payout waits for its
-/// order with `100 - premium - network fee` reserved on Base.
+/// KyberSwap's InputScalingHelper on Base.
+const SCALER: &str = "0x2f577A41BeC1BE1152AeEA12e73b7391d15f655D";
+
+/// The real KyberSwap route on Base for 500 USDC to WETH, the deployed Runner its receiver,
+/// and the scaler's own answers for it, read on Base for lane C1 (2026-10-23).
+fn scaler_sample() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../../impl/src/pool/plan/samples/scaler_base.json"
+    ))
+    .unwrap()
+}
+
+fn sample_hex(value: &serde_json::Value) -> Vec<u8> {
+    hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
+}
+
+/// The scaler's raw answer for `amount`.
+fn scaler_answer(amount: u64) -> Vec<u8> {
+    let sample = scaler_sample();
+    let found = sample["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|answer| {
+            answer["new_amount"]
+                .as_str()
+                .and_then(|text| text.parse().ok())
+                == Some(amount)
+        })
+        .unwrap()
+        .clone();
+    sample_hex(&found["result"])
+}
+
+/// A payout plan for 500 USDC through the real route to WETH on Base, at least 0.2 WETH to
+/// the recipient, paid by the canister at `canister`.
+fn kyber_plan(canister: types::EvmAddress, deadline_s: u64) -> Vec<u8> {
+    use alloy_primitives::{FixedBytes, U256};
+    use types::swapic::{addr, encode_order, Order, Payout, Step, KYBER_ROUTER};
+    let base_usdc: types::EvmAddress = base_chain().usdc.parse().unwrap();
+    let to: types::EvmAddress = "0x2222222222222222222222222222222222222222"
+        .parse()
+        .unwrap();
+    encode_order(&Order {
+        r#ref: FixedBytes([0x62; 32]),
+        payer: addr(canister),
+        tokenIn: addr(base_usdc),
+        amountIn: U256::from(usdc(500)),
+        deadline: U256::from(deadline_s),
+        steps: vec![Step {
+            target: addr(KYBER_ROUTER),
+            data: sample_hex(&scaler_sample()["route_calldata"]).into(),
+            token: addr(base_usdc),
+            min: U256::ZERO,
+            writes: vec![],
+        }],
+        payout: Payout {
+            token: "0x4200000000000000000000000000000000000006"
+                .parse()
+                .unwrap(),
+            recipient: addr(to),
+            minOut: U256::from(200_000_000_000_000_000_u64),
+        },
+    })
+}
+
+/// 502.202203 ckUSDC pays exactly 501.65 USDC: less 10 bps (502,203) and 5 cents.
+const PAYS_501_65: u64 = 502_202_203;
+
+impl World {
+    /// A fresh Base reading: a transaction is priced from it.
+    fn push_reading(&self) {
+        crate::client::settlement::push_chain_data(
+            &self.pic,
+            self.canister,
+            crate::settlement_suite::init::watcher(),
+            BASE,
+            &settlement_api::types::chain_data::ChainData {
+                block: 19_000_000,
+                base_fee_wei_per_gas: Nat::from(1_000_000_000_u64),
+                priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+            },
+        )
+        .expect("the watcher may push");
+    }
+
+    /// The next outcall whose calls are exactly `methods`, after the rounds it takes.
+    fn next_outcall(&self, methods: &[&str]) -> pocket_ic::common::rest::CanisterHttpRequest {
+        for _ in 0..100 {
+            let found = self.pic.get_canister_http().into_iter().find(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let asked: Vec<&str> = body
+                    .as_array()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .filter_map(|call| call["method"].as_str())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                asked == methods
+            });
+            if let Some(request) = found {
+                return request;
+            }
+            self.pic.tick();
+        }
+        panic!("no outcall of {methods:?}");
+    }
+
+    /// Answers `request` with `result` for its one call: from one node, or from every node of
+    /// the subnet alike for a read every node makes (`agreed`).
+    fn reply(
+        &self,
+        request: &pocket_ic::common::rest::CanisterHttpRequest,
+        result: serde_json::Value,
+        agreed: bool,
+    ) {
+        use pocket_ic::common::rest::{
+            CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
+        };
+        let body = serde_json::json!([{"jsonrpc": "2.0", "id": 0, "result": result}])
+            .to_string()
+            .into_bytes();
+        let reply = || {
+            CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                status: 200,
+                headers: vec![],
+                body: body.clone(),
+            })
+        };
+        let subnet = self.pic.get_subnet(self.canister).expect("a subnet");
+        let nodes = self.pic.topology().subnet_configs[&subnet].node_ids.len();
+        let others = if agreed {
+            (1..nodes).map(|_| reply()).collect()
+        } else {
+            vec![]
+        };
+        self.pic
+            .mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: reply(),
+                additional_responses: others,
+            });
+        for _ in 0..12 {
+            self.pic.tick();
+        }
+    }
+}
+
+/// The payout plan (2026-10-23): an ICP user swaps 502.202203 ckUSDC to WETH on Base with
+/// the quoter's plan for 500 USDC through KyberSwap. The canister pulls it, knows the exact
+/// payout (501.65 USDC, the premium taken from what it pulled), reads KyberSwap's scaler for
+/// exactly that, and signs the rewritten plan itself in the same call: no `pay_payout`.
 #[test]
-fn an_icp_user_swaps_ckusdc_to_evm_with_a_plan_and_the_payout_waits_with_its_exact_amount() {
+fn an_icp_user_swaps_ckusdc_with_a_plan_that_fits_and_it_is_signed_without_pay_payout() {
+    use alloy_primitives::U256;
     use settlement_api::types::pool::{PayoutStatus, PayoutView, SwapFromIcpOk};
     let (world, canister_address) = swap_world();
-    world.approve(staker(), usdc(100) + FEE);
-    let payout = usdc(100) - 100_000 - 50_000;
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
     let deadline_s = world.now().as_secs().get() + 600;
-    let canister_before = world.balance(world.canister);
-    let swapped: Result<SwapFromIcpOk, PoolError> = update(
-        &world.pic,
-        world.canister,
-        staker(),
-        "swap_from_icp",
-        encode_one(swap_terms(
-            &world,
-            usdc_plan(canister_address, payout, deadline_s),
-        ))
-        .unwrap(),
+    let terms = swap_terms(
+        &world,
+        PAYS_501_65,
+        kyber_plan(canister_address, deadline_s),
+        900_000,
     );
-    let swapped = swapped.expect("the swap is opened");
-    assert_eq!(swapped.status, PayoutStatus::Waiting);
-    // pulled: the canister holds 100 more, the user paid 100, its approval's fee and the
-    // pull's
-    assert_eq!(world.balance(world.canister), canister_before + usdc(100));
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(terms).unwrap(),
+        )
+        .expect("submitted");
+    // the scaler's read, once the pull answered: for exactly the payout
+    let request = world.next_outcall(&["eth_call"]);
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    let call_object = &body[0]["params"][0];
+    assert_eq!(
+        call_object["to"].as_str().unwrap().to_lowercase(),
+        SCALER.to_lowercase()
+    );
+    let data = hex::decode(
+        call_object["data"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap();
+    assert_eq!(data[..4], [0xe4, 0xda, 0x6f, 0x2e]);
+    assert_eq!(
+        data[36..68],
+        U256::from(501_650_000_u64).to_be_bytes::<32>()
+    );
     assert_eq!(
         world.balance(staker()),
-        Nat::from(usdc(1_000) - usdc(100) - 2 * FEE)
+        Nat::from(usdc(1_000) - PAYS_501_65 - 2 * FEE)
     );
+    world.reply(
+        &request,
+        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+        false,
+    );
+    let raw = world.pic.await_call(call).expect("the swap answers");
+    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
+    let swapped = swapped.expect("the swap is opened");
+    let PayoutStatus::Signed(tx_id) = swapped.status else {
+        panic!("signed at once, not {:?}", swapped.status);
+    };
+    // the order signed: exactly the payout in, its swap the scaler's own rewrite
+    let pinned = world
+        .pool_steps()
+        .into_iter()
+        .find_map(|step| match step {
+            PoolStep::PayoutSigned { order, .. } => Some(order),
+            _ => None,
+        })
+        .expect("the payout is signed");
+    let order = types::swapic::decode_order(&pinned.order).unwrap();
+    assert_eq!(order.amountIn, U256::from(501_650_000_u64));
+    let scaled = types::swapic::scaled_route(&scaler_answer(501_650_000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(order.steps[0].data.to_vec(), scaled);
     let view: Option<PayoutView> = query(
         &world.pic,
         world.canister,
@@ -847,11 +1086,151 @@ fn an_icp_user_swaps_ckusdc_to_evm_with_a_plan_and_the_payout_waits_with_its_exa
         encode_one(swapped.id).unwrap(),
     );
     let view = view.expect("the payout is there");
-    assert_eq!(view.status, PayoutStatus::Waiting);
-    assert_eq!(view.amount, Some(Nat::from(payout)));
-    assert_eq!(view.received, Some(Nat::from(usdc(100))));
-    assert_eq!(view.planned, Some(Nat::from(payout)));
-    let state = world.state();
-    assert_eq!(state.base.reserved, Nat::from(payout));
+    assert_eq!(view.status, PayoutStatus::Signed(tx_id));
+    assert_eq!(view.amount, Some(Nat::from(501_650_000_u64)));
+    assert_eq!(view.planned, Some(Nat::from(usdc(500))));
+    assert_eq!(world.state().base.in_flight, Nat::from(501_650_000_u64));
+    assert!(world.replay_matches());
+}
+
+/// A plan the scaler refuses to rewrite for the payout: the payout waits for the watcher's
+/// order, as every payout did before the plan flow, listed for it.
+#[test]
+fn a_plan_the_scaler_refuses_waits_for_an_order() {
+    use settlement_api::types::pool::{PayoutStatus, PayoutWaiting, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
+    let deadline_s = world.now().as_secs().get() + 600;
+    let terms = swap_terms(
+        &world,
+        PAYS_501_65,
+        kyber_plan(canister_address, deadline_s),
+        900_000,
+    );
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(terms).unwrap(),
+        )
+        .expect("submitted");
+    let request = world.next_outcall(&["eth_call"]);
+    // the scaler's own refusal, as it answered 530 USDC on this route
+    world.reply(
+        &request,
+        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(530_000_000)))),
+        false,
+    );
+    let raw = world.pic.await_call(call).expect("the swap answers");
+    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    let waiting: Vec<PayoutWaiting> = query(
+        &world.pic,
+        world.canister,
+        crate::settlement_suite::init::watcher(),
+        "payouts_waiting",
+        encode_one(()).unwrap(),
+    );
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].id, swapped.id);
+    assert_eq!(waiting[0].amount, Nat::from(501_650_000_u64));
+    assert!(world
+        .pool_steps()
+        .iter()
+        .all(|step| !matches!(step, PoolStep::PayoutSigned { .. })));
+}
+
+/// Item 6: a payout whose transaction reverted is never signed again. Once its transaction
+/// is out of the outbox and every node agrees Swapic never ran its order, the user's ckUSDC
+/// comes back at once: all of it less one ledger fee, no Swapic fee.
+#[test]
+fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
+    use settlement_api::types::pool::{PayoutStatus, PayoutView, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.approve(staker(), usdc(100) + FEE);
+    let payout = usdc(100) - 100_000 - 50_000;
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = usdc_plan(canister_address, payout, deadline_s);
+    // no chain reading: the plan fits but its transaction cannot be priced, so it waits
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
+    );
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    let id = swapped.id;
+    // its transaction signed, then reverted at depth, as the outbox records them
+    let created = types::EventType::TxCreated {
+        purpose: types::events::TxPurpose::PoolPayout(id),
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        to: base_chain().swapic.parse().unwrap(),
+        value: types::Wei::ZERO,
+        data: vec![0x01],
+        gas_limit: types::GasAmount::from(400_000_u64),
+        max_fee: types::WeiPerGas::new(2_000_000_000),
+        max_priority_fee: types::WeiPerGas::new(100_000_000),
+        action: Some(types::config::GasAction::PoolPayout),
+    };
+    append(
+        &world.pic,
+        world.canister,
+        world.admin,
+        &EventType::from(created),
+    )
+    .expect("the nonce is handed out");
+    let order_id = [0x63; 32];
+    world.plant(PoolStep::PayoutSigned {
+        id,
+        order: types::pool::PinnedOrder {
+            order_id,
+            order: plan,
+            gas_limit: 400_000,
+            deadline_s,
+        },
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        tx_hash: TxHash::new([0x64; 32]),
+        raw_tx: vec![0x02, 0x01],
+    });
+    world.plant(PoolStep::PayoutReverted { id });
+    let before = world.balance(staker());
+    // the payout timer: every node reads Swapic's `used` at one agreed block
+    world.pic.advance_time(Duration::from_secs(61));
+    let head = world.next_outcall(&["eth_blockNumber"]);
+    world.reply(&head, serde_json::json!("0x1ec55b90"), true);
+    let used = world.next_outcall(&["eth_call"]);
+    let body: serde_json::Value = serde_json::from_slice(&used.body).unwrap();
+    assert_ne!(body[0]["params"][1], "latest", "read at an agreed block");
+    world.reply(
+        &used,
+        serde_json::json!(format!("0x{}", "00".repeat(32))),
+        true,
+    );
+    world.settle();
+    let view: Option<PayoutView> = query(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "payout",
+        encode_one(id).unwrap(),
+    );
+    assert_eq!(
+        view.expect("the payout is there").status,
+        PayoutStatus::Undone("its transaction reverted".to_string())
+    );
+    let refunded = before + Nat::from(usdc(100) - FEE);
+    assert_eq!(world.balance(staker()), refunded);
+    // undone once: nothing more moves
+    world.next_tick();
+    assert_eq!(world.balance(staker()), refunded);
+    let _ = order_id;
     assert!(world.replay_matches());
 }

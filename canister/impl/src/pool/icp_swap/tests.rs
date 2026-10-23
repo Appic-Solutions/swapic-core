@@ -53,9 +53,12 @@ fn swapic() -> EvmAddress {
 fn config() -> types::Config {
     let chain = EvmChain {
         swapic: swapic(),
-        runner: EvmAddress::new([0x22; 20]),
+        // the deployed Runner, the real KyberSwap route's receiver
+        runner: "0x7E345acaB79102ac9588C60B9358Ec4d79438eEe"
+            .parse()
+            .unwrap(),
         cctp_receiver: EvmAddress::new([0x23; 20]),
-        usdc: EvmAddress::new([0x24; 20]),
+        usdc: base_usdc(),
         token_messenger: EvmAddress::new([0x25; 20]),
         message_transmitter: EvmAddress::new([0x26; 20]),
         gas_limit: PerAction::all(types::GasAmount::from(500_000_u64)),
@@ -192,6 +195,42 @@ struct Fake {
     quotes: RefCell<BTreeMap<Principal, TokenAmount>>,
     outs: RefCell<BTreeMap<Principal, TokenAmount>>,
     transfers: RefCell<Transfers>,
+    /// What the scaler answers: none, it is not read.
+    scaled: RefCell<Option<Result<Vec<u8>, String>>>,
+}
+
+/// The scaler as the fake answers it, and a payout order's checks on `config()`.
+impl PlanReads for Fake {
+    async fn scaled(&self, _route: &[u8], amount: TokenAmount) -> Result<Vec<u8>, String> {
+        self.calls.borrow_mut().push(format!("scale {amount}"));
+        self.scaled
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Err("no scaler here".to_string()))
+    }
+
+    fn checked(
+        &self,
+        payout: &EvmPayout,
+        order: &types::swapic::Order,
+        order_bytes: &[u8],
+        gas_limit: u64,
+        now: Timestamp,
+    ) -> Result<PinnedOrder, PoolError> {
+        let config = config();
+        let payer = pay::payer_of(&config, canister(), None)?;
+        pay::check_order(
+            payout,
+            order,
+            order_bytes,
+            gas_limit,
+            &payer,
+            &PayoutSettings::default(),
+            now.as_secs().get(),
+            |_| false,
+            AmountIn::Exact,
+        )
+    }
 }
 
 impl Ledgers for Fake {
@@ -558,9 +597,11 @@ fn canister() -> EvmAddress {
     EvmAddress::new([0x36; 20])
 }
 
-/// The pool chain's USDC in `config()`.
+/// The pool chain's USDC in `config()`: Base's.
 fn base_usdc() -> EvmAddress {
-    EvmAddress::new([0x24; 20])
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap()
 }
 
 /// A payout plan for `planned`: USDC on Base paid out to `recipient()`, at least `min_out`,
@@ -919,5 +960,256 @@ fn a_planned_token_sale_has_half_the_slippage_as_its_floor() {
         assert_eq!(payout.received, Some(TokenAmount::from(2_090_000_u64)));
         assert_eq!(payout.amount, Some(TokenAmount::from(2_037_910_u64)));
         assert_eq!(payout.status, PayoutStatus::Waiting);
+    });
+}
+
+/// The real KyberSwap route on Base for 500 USDC and the scaler's own answers for it
+/// (`pool/plan/samples/scaler_base.json`).
+fn scaler_sample() -> serde_json::Value {
+    serde_json::from_str(include_str!("../plan/samples/scaler_base.json")).unwrap()
+}
+
+fn sample_hex(value: &serde_json::Value) -> Vec<u8> {
+    hex::decode(value.as_str().unwrap().trim_start_matches("0x")).unwrap()
+}
+
+/// The scaler's rewritten route for `amount`, as its answer carries it.
+fn scaled_route(amount: u64) -> Vec<u8> {
+    let sample = scaler_sample();
+    let found = sample["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|answer| {
+            answer["new_amount"]
+                .as_str()
+                .and_then(|text| text.parse().ok())
+                == Some(amount)
+        })
+        .unwrap()
+        .clone();
+    crate::pool::plan::scaled_of(&sample_hex(&found["result"])).unwrap()
+}
+
+/// A payout plan for 500 USDC through the real KyberSwap route to WETH on Base.
+fn swap_plan() -> types::swapic::Order {
+    use alloy_primitives::U256;
+    let mut order = plan_order(usdc(500), usdc(1));
+    order.steps = vec![types::swapic::Step {
+        target: types::swapic::addr(types::swapic::KYBER_ROUTER),
+        data: sample_hex(&scaler_sample()["route_calldata"]).into(),
+        token: types::swapic::addr(base_usdc()),
+        min: U256::ZERO,
+        writes: vec![],
+    }];
+    order.payout.token = "0x4200000000000000000000000000000000000006"
+        .parse()
+        .unwrap();
+    order.payout.minOut = U256::from(200_000_000_000_000_000_u64);
+    order
+}
+
+/// 502.202203 ckUSDC pays exactly 501.65 USDC: less 10 bps (502,203) and 5 cents.
+const PAYS_501_65: u64 = 502_202_203;
+
+/// ckUSDC in, a plan with no swap: its plan fits the exact amount and is handed to be signed
+/// in the same drive, its order spending exactly the payout, with no read at all.
+#[test]
+fn a_ckusdc_plan_that_fits_is_handed_to_sign_at_its_exact_amount() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let order = plan_order(ckusdc_payout(), usdc(1));
+        let id = open_planned(&planned(ckusdc(), usdc(100), &order));
+        let fake = Fake::default();
+        let fitted = block_on(drive(&fake, id, clock, &open_pool))
+            .unwrap()
+            .expect("the plan fits");
+        assert_eq!(
+            fitted.order.amountIn,
+            alloy_primitives::U256::from(99_850_000_u64)
+        );
+        assert_eq!(
+            fitted.pinned.order,
+            types::swapic::encode_order(&fitted.order)
+        );
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec!["pull ckUSDC 100000000".to_string()]
+        );
+        // the payout waits, its USDC reserved, for the caller's signature
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+        assert_eq!(ledger().pockets.base.reserved, ckusdc_payout());
+    });
+}
+
+/// ckUSDC in, a plan through KyberSwap on Base: the scaler is read once the pull answered
+/// (never beside it), for the exact payout, and its real answer is the signed step.
+#[test]
+fn a_kyber_plan_is_rewritten_by_the_scaler_after_the_pull() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(600));
+        let id = open_planned(&planned(
+            ckusdc(),
+            TokenAmount::from(PAYS_501_65),
+            &swap_plan(),
+        ));
+        let fake = Fake::default();
+        *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
+        let fitted = block_on(drive(&fake, id, clock, &open_pool))
+            .unwrap()
+            .expect("the plan fits");
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                format!("pull ckUSDC {PAYS_501_65}"),
+                "scale 501650000".to_string()
+            ]
+        );
+        assert_eq!(
+            fitted.order.amountIn,
+            alloy_primitives::U256::from(501_650_000_u64)
+        );
+        assert_eq!(
+            fitted.order.steps[0].data.to_vec(),
+            scaled_route(501_650_000)
+        );
+    });
+}
+
+/// A token in: the scaler is read after the last leg's answer, which is when the amount is
+/// first known.
+#[test]
+fn a_token_plan_reads_the_scaler_after_its_last_leg() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(600));
+        let id = open_planned(&planned(
+            token(),
+            TokenAmount::from(900_000_000_u64),
+            &swap_plan(),
+        ));
+        let fake = Fake::default();
+        // the leg's output less the ckUSDC fee pays exactly 501.65
+        let out = TokenAmount::from(PAYS_501_65 + FEE);
+        fake.quote.set(Some(out));
+        fake.out.set(Some(out));
+        *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
+        let fitted = block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        assert!(fitted.is_some());
+        let calls = fake.calls.borrow();
+        assert!(calls[calls.len() - 2].starts_with("swap "), "{calls:?}");
+        assert_eq!(calls.last().unwrap(), "scale 501650000");
+    });
+}
+
+/// A sale far from its plan, with the Base pocket covering it: the payout waits for the
+/// watcher's order, as before the plan flow, and nothing is read.
+#[test]
+fn a_sale_far_from_its_plan_waits_without_it() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let id = open_planned(&planned(
+            token(),
+            TokenAmount::from(5_000_000_u64),
+            &plan_order(usdc(2), usdc(1)),
+        ));
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(2_500_000_u64)));
+        fake.out.set(Some(TokenAmount::from(2_500_000_u64)));
+        assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert_eq!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Waiting
+        );
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("scale")));
+    });
+}
+
+/// A plan whose order deadline is under a minute away when the amount is known: it waits.
+#[test]
+fn a_plan_whose_order_deadline_is_too_close_waits_without_it() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let order = plan_order(ckusdc_payout(), usdc(1));
+        let id = open_planned(&planned(ckusdc(), usdc(100), &order));
+        let late = || Timestamp::from_secs(541).unwrap();
+        assert_eq!(
+            block_on(drive(&Fake::default(), id, late, &open_pool)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Waiting
+        );
+    });
+}
+
+/// The scaler refusing the amount, a read that failed, or a rewritten route that is another
+/// swap: the payout waits for the watcher's order.
+#[test]
+fn a_refused_failed_or_tampered_scaler_answer_waits_without_the_plan() {
+    use alloy_sol_types::SolCall;
+    let mut tampered = types::swapic::swapCall::abi_decode(&scaled_route(501_650_000)).unwrap();
+    tampered.execution.desc.dstReceiver = alloy_primitives::Address::repeat_byte(0xbd);
+    for answer in [
+        Err("the scaler refused the amount".to_string()),
+        Err("the scaler's read: Unreachable".to_string()),
+        Ok(tampered.abi_encode()),
+    ] {
+        on_fresh_memory(move || {
+            crate::storage::init();
+            pool_with(usdc(600));
+            let id = open_planned(&planned(
+                ckusdc(),
+                TokenAmount::from(PAYS_501_65),
+                &swap_plan(),
+            ));
+            let fake = Fake::default();
+            *fake.scaled.borrow_mut() = Some(answer);
+            assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+            assert_eq!(
+                pool_store::payout(id).unwrap().status,
+                PayoutStatus::Waiting
+            );
+        });
+    }
+}
+
+/// A plan whose first step asks more than the payout once it is known (the premium rose
+/// between the opening and the sale) could only revert: the payout is undone at once, all its
+/// ckUSDC back.
+#[test]
+fn a_plan_whose_first_minimum_is_above_the_payout_undoes_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        // the plan asks exactly what 100 ckUSDC pays at 10 bps
+        let order = plan_order(ckusdc_payout(), ckusdc_payout());
+        let id = open_planned(&planned(ckusdc(), usdc(100), &order));
+        let mut settings = ledger().settings.unwrap();
+        settings.premium_bps = 20;
+        record_at(PoolStep::SettingsSet { settings }, at(11)).unwrap();
+        let fake = Fake::default();
+        assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+        let payout = pool_store::payout(id).unwrap();
+        assert!(matches!(payout.status, PayoutStatus::Undone(why) if why.contains("first step")));
+        let transfers: Vec<_> = fake.transfers.borrow().values().copied().collect();
+        assert_eq!(
+            transfers,
+            vec![(
+                ckusdc(),
+                account(6),
+                usdc(100).checked_sub(TokenAmount::from(FEE)).unwrap()
+            )]
+        );
     });
 }

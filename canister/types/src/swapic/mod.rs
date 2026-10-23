@@ -141,6 +141,10 @@ sol! {
     }
     function swap(KyberExecution execution) external payable returns (uint256 returnAmount, uint256 gasUsed);
 
+    /// KyberSwap's InputScalingHelper: router calldata built for one input amount, rewritten
+    /// to `newAmount` (the deployed Runner's `IScaler`).
+    function getScaledInputData(bytes inputData, uint256 newAmount) external view returns (bool isSuccess, bytes data);
+
     /// USDC's EIP-3009 pull, as the payer signs it for the 3009 door: the nonce is the
     /// order id.
     struct ReceiveWithAuthorization {
@@ -1124,6 +1128,35 @@ pub const KYBER_ROUTER: EvmAddress = EvmAddress::new([
     0xb6, 0x63, 0x37, 0xb5,
 ]);
 
+/// KyberSwap's InputScalingHelper (`0x2f577A41BeC1BE1152AeEA12e73b7391d15f655D` on Base,
+/// Arbitrum and Ethereum): what rewrites a KyberSwap route built for one amount to another.
+pub const KYBER_SCALER: EvmAddress = EvmAddress::new([
+    0x2f, 0x57, 0x7a, 0x41, 0xbe, 0xc1, 0xbe, 0x11, 0x52, 0xae, 0xea, 0x12, 0xe7, 0x3b, 0x73, 0x91,
+    0xd1, 0x5f, 0x65, 0x5d,
+]);
+
+/// `getScaledInputData(route, amount)`: a KyberSwap route rewritten for `amount`.
+pub fn scale_calldata(route: &[u8], amount: U256) -> Vec<u8> {
+    getScaledInputDataCall {
+        inputData: route.to_vec().into(),
+        newAmount: amount,
+    }
+    .abi_encode()
+}
+
+/// What KyberSwap's InputScalingHelper answered: the route rewritten, or `None` for its
+/// refusal (`isSuccess` false). Err for an answer that is not its return.
+pub fn scaled_route(answer: &[u8]) -> Result<Option<Vec<u8>>, NotScaled> {
+    let returned =
+        getScaledInputDataCall::abi_decode_returns_validate(answer).map_err(|_| NotScaled)?;
+    Ok(returned.isSuccess.then(|| returned.data.to_vec()))
+}
+
+/// A scaler's answer this canister cannot read.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("the scaler's answer does not decode")]
+pub struct NotScaled;
+
 /// KyberSwap's executor, at one address on every chain the quoter routes on: the one
 /// `callTarget` a swap may hand its input to. Should KyberSwap move it, gasless swaps are
 /// refused until this follows.
@@ -1148,6 +1181,10 @@ pub struct KyberSwap {
     pub dst_receiver: EvmAddress,
     /// Whether the swap carries a permit of its own.
     pub permit: bool,
+    /// What it sells, all of it (`desc.amount`).
+    pub amount: U256,
+    /// The least it buys (`desc.minReturnAmount`).
+    pub min_return: U256,
 }
 
 /// A step to KyberSwap's `swap` this canister cannot read.
@@ -1176,6 +1213,8 @@ impl KyberSwap {
             fee_receivers: desc.feeReceivers.into_iter().map(evm).collect(),
             dst_receiver: evm(desc.dstReceiver),
             permit: !desc.permit.is_empty(),
+            amount: desc.amount,
+            min_return: desc.minReturnAmount,
         }
     }
 }
