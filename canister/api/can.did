@@ -1374,14 +1374,15 @@ service : (InitArg) -> {
   // Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
   // human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
   // started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
-  // `Retry`: back to its payout with fresh attempts, a started one with its own dedup instant
-  // within 23 hours of it, else a fresh one. `Refund`: refused while the pool is closed, for a
-  // sanctioned or zero payer, and for a payout whose ICPSwap leg moved money; what arrived is
-  // held as an orphan under its transfer's key and the canister signs
-  // `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
-  // signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`. Before a
-  // refund, or a retry past 23 hours, the controller checks the payout's transfer never went
-  // out.
+  // `Retry`: back to its payout with fresh attempts; a started one keeps its own dedup pair
+  // and is retried only with an hour of the ledger's deduplication (23 hours) left, so a
+  // transfer that landed is answered `Duplicate` and recorded paid once; past that it is
+  // refused, and the controller reads the ledger. `Refund`: only for a deposit whose payout never started (a
+  // started one's transfer may have landed), refused while the pool is closed and for a
+  // sanctioned or zero payer; what arrived is held as an orphan under its transfer's key and
+  // the canister signs `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept
+  // for its gas. A signature that fails answers `Unavailable`, the orphan held for
+  // `resolve_orphan`.
   resolve_deposit : (blob, DepositResolution) -> (Result_9);
   // Controller-only, refused while halted: a stuck move sent on from where it stands
   // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
@@ -1402,8 +1403,12 @@ service : (InitArg) -> {
   // was lost, past the ledger's deduplication window (23 hours after it started; the canister
   // stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
   // `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
-  // ckUSDC ledger block, and its shares are minted at the pool's price now. `NotPulled`: it
-  // never landed, and it is dropped, its room freed.
+  // ckUSDC ledger block; the canister reads the block (`get_transactions`, on the ledger or
+  // its archive) and mints the stake's shares at the pool's price now only when it is the
+  // stake's own pull (from its account to the canister's, by the canister, its amount, its op
+  // id as the memo, its start as `created_at_time`), one block for one stake; a ledger not
+  // read answers `Unavailable`, to be asked again. `NotPulled`: it never landed, and it is
+  // dropped, its room freed.
   resolve_stake : (blob, StakeResolution) -> (Result_9);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
