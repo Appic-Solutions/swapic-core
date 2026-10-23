@@ -527,16 +527,20 @@ impl PoolLedger {
                 base.reserved = sat_sub(base.reserved, fee);
                 lines.fees_base = sat_add(lines.fees_base, fee);
                 ledger.owed = sat_sub(ledger.owed, payout.owed());
-                // the swap is done: its ckUSDC is the pool's now
-                let held = payout.icp_hold();
-                let icp = &mut ledger.pockets.icp;
-                icp.reserved = sat_sub(icp.reserved, held);
-                icp.free = sat_add(icp.free, held);
+                // the swap is done: its ckUSDC is the pool's now, freed once (a payout whose
+                // ckUSDC went free before never frees it again)
+                if !payout.icp_released.0 {
+                    let held = payout.icp_hold();
+                    let icp = &mut ledger.pockets.icp;
+                    icp.reserved = sat_sub(icp.reserved, held);
+                    icp.free = sat_add(icp.free, held);
+                }
                 lines.open.remove(id);
                 payout.status = PayoutStatus::Paid;
                 payout.base_reserved = false;
-                payout.icp_released =
-                    crate::pool::payout::Flag(payout.is_icp_swap() && payout.received.is_some());
+                payout.icp_released = crate::pool::payout::Flag(
+                    payout.icp_released.0 || (payout.is_icp_swap() && payout.received.is_some()),
+                );
                 payout.tx_hash = Some(*tx_hash);
                 payout.paid_block = Some(*block);
                 payout.intent = *intent;

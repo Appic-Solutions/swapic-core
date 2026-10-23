@@ -726,3 +726,37 @@ fn an_icp_swap_reopened_by_an_eco_refund_is_undone_from_the_free_ckusdc() {
     assert_eq!(after.owed, before.owed);
     assert_eq!(after.lines().fees_icp, TokenAmount::ZERO);
 }
+
+/// The review's double release (2026-10-23, `PayoutPaid`): an ICP swap whose ckUSDC went
+/// free to the pool once never frees it again, so a payout paid a second time (as one reopened
+/// by an Eco refund was) adds nothing to the free ckUSDC.
+#[test]
+fn a_paid_payout_releases_its_ckusdc_once() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x4d, 1);
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount: TokenAmount::from(100_000_000_u64 - 60_000),
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(7))).unwrap();
+    // as a payout paid once stands: its ckUSDC free already
+    let hold = pool.payouts[&id].icp_hold();
+    let icp = &mut pool.ledger.pockets.icp;
+    icp.reserved = icp.reserved.checked_sub(hold).unwrap();
+    icp.free = icp.free.checked_add(hold).unwrap();
+    pool.payouts.get_mut(&id).unwrap().icp_released = crate::pool::payout::Flag(true);
+    let icp = pool.ledger.pockets.icp;
+    pool.step(PoolStep::PayoutPaid {
+        id,
+        tx_hash: TxHash::new([0x77; 32]),
+        block: BlockNumber::new(31),
+        intent: None,
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets.icp, icp);
+    assert!(pool.payouts[&id].icp_released.0);
+}
