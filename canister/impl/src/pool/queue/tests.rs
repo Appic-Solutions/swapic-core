@@ -82,7 +82,7 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
             now,
             in_flight,
             Waits {
-                fill: Duration::from_secs(FILL_MARGIN_S),
+                fill: Duration::from_secs(crate::agreed::FILL_MARGIN_S),
                 ran: Duration::ZERO,
             },
         )
@@ -134,11 +134,19 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
     let after_s = 2_000 + crate::pool::eco::MAX_ROUTE_LIFE_S;
     assert_eq!(fill_read_after(&delivering), after_s);
     assert_eq!(
-        decide(&delivering, secs(after_s + FILL_MARGIN_S - 1), false),
+        decide(
+            &delivering,
+            secs(after_s + crate::agreed::FILL_MARGIN_S - 1),
+            false
+        ),
         Next::Wait
     );
     assert_eq!(
-        decide(&delivering, secs(after_s + FILL_MARGIN_S), false),
+        decide(
+            &delivering,
+            secs(after_s + crate::agreed::FILL_MARGIN_S),
+            false
+        ),
         Next::ReadFill {
             chain: ChainId::BASE,
             intent: [2; 32],
@@ -599,7 +607,7 @@ fn a_reverted_order_is_read_only_once_the_agreed_block_can_be_past_its_revert() 
     reverted.terms.dst_chain = ChainId::ARBITRUM;
     let waits = Waits {
         fill: Duration::from_secs(10_000),
-        ran: fill_wait(ChainId::BASE, 1),
+        ran: crate::agreed::fill_wait(ChainId::BASE, 1),
     };
     let undo = Next::Undo {
         why: REVERTED.to_string(),
@@ -635,7 +643,7 @@ fn the_pass_never_reads_a_reverted_order_before_its_wait() {
             secs(1_000),
         )
         .unwrap();
-        let wait = fill_wait(ChainId::BASE, base_depth()).as_secs();
+        let wait = crate::agreed::fill_wait(ChainId::BASE, base_depth()).as_secs();
         let reads = Reads::ran(false);
         let fake = Fake::default();
         block_on(pass_with(
@@ -807,8 +815,10 @@ fn delivering_withdrawal() -> u64 {
 #[test]
 fn a_fill_read_filled_delivers_and_unfilled_undoes() {
     let after = || {
-        Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
-            .unwrap()
+        Timestamp::from_secs(
+            900 + 3_600 + crate::agreed::fill_wait(ChainId::BASE, base_depth()).as_secs(),
+        )
+        .unwrap()
     };
     on_fresh_memory(move || {
         crate::storage::init();
@@ -860,8 +870,10 @@ fn a_fill_read_too_early_or_unread_waits() {
         ));
         assert!(reads.fills.borrow().is_empty());
         let late = || {
-            Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
-                .unwrap()
+            Timestamp::from_secs(
+                900 + 3_600 + crate::agreed::fill_wait(ChainId::BASE, base_depth()).as_secs(),
+            )
+            .unwrap()
         };
         // an unread answer is asked again next pass; a read too early, after one wait
         for answer in [
@@ -944,8 +956,10 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
         .unwrap();
         let reads = Reads::fill(Ok(Fill::Cancelled));
         let after = || {
-            Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
-                .unwrap()
+            Timestamp::from_secs(
+                900 + 3_600 + crate::agreed::fill_wait(ChainId::BASE, base_depth()).as_secs(),
+            )
+            .unwrap()
         };
         block_on(pass_with(&fake, &reads, after, &open_pool));
         assert_eq!(
@@ -1249,10 +1263,13 @@ fn a_plan_its_decision_refuses_is_never_refitted() {
 #[test]
 fn a_fill_is_read_once_the_agreed_block_can_be_past_its_deadline() {
     // Base, crediting at one block: (16 + 1) x 2 s + 60 s
-    let wait = fill_wait(ChainId::BASE, 1);
+    let wait = crate::agreed::fill_wait(ChainId::BASE, 1);
     assert_eq!(wait, Duration::from_secs(94));
     // Ethereum at 12 blocks: (16 + 12) x 12 s + 60 s
-    assert_eq!(fill_wait(ChainId::ETHEREUM, 12), Duration::from_secs(396));
+    assert_eq!(
+        crate::agreed::fill_wait(ChainId::ETHEREUM, 12),
+        Duration::from_secs(396)
+    );
     let settings = PayoutSettings::default();
     let mut delivering = payout_in(PayoutStatus::Delivering, secs(10_000));
     delivering.intent = Some([2; 32]);
@@ -1284,7 +1301,7 @@ fn a_fill_read_too_early_is_not_asked_again_within_one_wait() {
     on_fresh_memory(|| {
         crate::storage::init();
         let id = delivering_withdrawal();
-        let wait = fill_wait(ChainId::BASE, base_depth()).as_secs();
+        let wait = crate::agreed::fill_wait(ChainId::BASE, base_depth()).as_secs();
         let first = 900 + 3_600 + wait;
         let reads = Reads::fill(Err(crate::agreed::FillRead::TooEarly));
         block_on(pass_with(

@@ -35,25 +35,9 @@ use types::pool::payout::{EvmPayout, PayoutKind, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
 use types::{BlockNumber, ChainId, Timestamp};
 
-/// The minute an Eco intent's fill read waits beyond the blocks the agreed block lags by.
-pub const FILL_MARGIN_S: u64 = 60;
-
-/// How long after a time the pass waits before it reads `chain` for a block past it (the
-/// review, 2026-10-23): the block every node agrees on is the head rounded down to
-/// `HEAD_GRAIN` blocks less the chain's crediting `depth` (`agreed`), so `(16 + depth)`
-/// blocks of the chain's at the most, and a minute.
-pub fn fill_wait(chain: ChainId, depth: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(
-        crate::rpc::HEAD_GRAIN
-            .saturating_add(depth)
-            .saturating_mul(chain.block_seconds())
-            .saturating_add(FILL_MARGIN_S),
-    )
-}
-
-/// How long after a time the pass waits before it reads a chain for a block past it
-/// ([`fill_wait`]): the payout's destination for its Eco intent's fill, the pool chain for
-/// whether its reverted order ran.
+/// How long after a time the pass waits before it reads a chain for a block past it (the one
+/// rule, [`crate::agreed::fill_wait`]): the payout's destination for its Eco intent's fill,
+/// the pool chain for whether its reverted order ran.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Waits {
     pub fill: std::time::Duration,
@@ -248,19 +232,21 @@ pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
 /// Why a payout whose Eco intent never filled is undone.
 pub const UNFILLED: &str = "its Eco intent was not filled";
 
-/// The time a delivering payout's Eco intent can last be filled: its route's deadline, read
-/// from the order it pinned; else the latest any route the canister signs may run to.
+/// The time a delivering payout's Eco intent can last be filled: the one rule for a pinned
+/// order's ([`crate::pool::eco::fill_read_after`]); with no order pinned, the latest any route
+/// the canister signs may run to past the payout's own deadline.
 pub fn fill_read_after(payout: &EvmPayout) -> u64 {
-    let pinned = payout.order.as_ref();
-    pinned
-        .and_then(|pinned| crate::pool::rebalance::drive::eco_route_deadline(&pinned.order))
-        .unwrap_or_else(|| {
-            pinned
-                .map_or(payout.terms.deadline.as_secs().get(), |pinned| {
-                    pinned.deadline_s
-                })
+    payout.order.as_ref().map_or_else(
+        || {
+            payout
+                .terms
+                .deadline
+                .as_secs()
+                .get()
                 .saturating_add(crate::pool::eco::MAX_ROUTE_LIFE_S)
-        })
+        },
+        crate::pool::eco::fill_read_after,
+    )
 }
 
 /// The chain reads the pass makes before it undoes a payout that was signed, so a test hands
@@ -351,15 +337,10 @@ pub async fn pass_with(
         return acted;
     };
     let open: Vec<u64> = pool_store::ledger().lines().open.into_iter().collect();
-    let config = crate::storage::config::get();
-    let wait_for = |chain: ChainId| {
-        let depth = crate::tx::credit_confirmations(&config, chain).map_or(0, |depth| depth.get());
-        fill_wait(chain, depth)
-    };
     // a reverted order's `used` is read on the pool chain, whatever the payout pays on
-    let ran = config
+    let ran = crate::storage::config::get()
         .pool_chain
-        .map_or(std::time::Duration::ZERO, wait_for);
+        .map_or(std::time::Duration::ZERO, crate::agreed::fill_wait_on);
     for id in open {
         let Some(payout) = pool_store::payout(id) else {
             continue;
@@ -369,7 +350,7 @@ pub async fn pass_with(
             continue;
         };
         let waits = Waits {
-            fill: wait_for(payout.terms.dst_chain),
+            fill: crate::agreed::fill_wait_on(payout.terms.dst_chain),
             ran,
         };
         match next(&payout, &settings, now, in_flight(id), waits) {
