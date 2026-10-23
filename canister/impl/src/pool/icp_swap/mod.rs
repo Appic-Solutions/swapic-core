@@ -33,7 +33,7 @@ mod tests;
 
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
-use crate::pool::pay::{self, AmountIn};
+use crate::pool::pay::{self, refused, AmountIn};
 use crate::pool::payout::{call_stop, open, Busy, Ledgers, Leg, Stop};
 use crate::pool::plan::{Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
@@ -118,10 +118,6 @@ pub fn request_of(
     })
 }
 
-fn screened(principal: Principal, sanctioned: &impl Fn(&Address) -> bool) -> bool {
-    crate::pool::principal_sanctioned(principal, sanctioned)
-}
-
 /// The payout terms a canister may sign for, whoever asks: a chain it signs on, a token and a
 /// minimum, and a recipient that is neither nobody, the canister, nor one of Swapic's own
 /// contracts there.
@@ -177,10 +173,6 @@ pub struct Opening {
     pub plan: PinnedOrder,
 }
 
-fn refused(why: impl Into<String>) -> PoolError {
-    PoolError::NotAllowed(why.into())
-}
-
 /// Every rule a swap meets before anything is recorded, in the interface's order: the pool's
 /// and the payouts' settings, the pool open for swaps, a listed token, a slippage of at most
 /// 500 bps, no sanctioned party, a deadline 5 minutes to 1 hour away; then the plan: an
@@ -225,7 +217,9 @@ pub fn check<S: Store>(
             "the slippage must be at most {MAX_SLIPPAGE_BPS} bps"
         )));
     }
-    if screened(request.caller, &sanctioned) || screened(request.refund_to.owner, &sanctioned) {
+    if pool::principal_sanctioned(request.caller, &sanctioned)
+        || pool::principal_sanctioned(request.refund_to.owner, &sanctioned)
+    {
         return Err(PoolError::Sanctioned(
             "a party to the swap is sanctioned".to_string(),
         ));
@@ -328,7 +322,7 @@ pub fn check<S: Store>(
         now.as_secs().get(),
         |party| match party {
             Party::Evm(address) => sanctioned(&Address::from(*address)),
-            Party::Icp(principal) => screened(*principal, &sanctioned),
+            Party::Icp(principal) => pool::principal_sanctioned(*principal, &sanctioned),
         },
         AmountIn::NotKnownYet,
     )?;

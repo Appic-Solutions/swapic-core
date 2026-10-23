@@ -54,7 +54,8 @@ pub struct Payer<'a> {
     pub eco_prover: Option<EvmAddress>,
 }
 
-fn refused(why: impl Into<String>) -> PoolError {
+/// A refusal of an order or a plan, with why.
+pub(crate) fn refused(why: impl Into<String>) -> PoolError {
     PoolError::NotAllowed(why.into())
 }
 

@@ -74,14 +74,10 @@ impl WithdrawRequest {
     }
 }
 
-fn screen_principal(principal: Principal, sanctioned: &impl Fn(&Address) -> bool) -> bool {
-    crate::pool::principal_sanctioned(principal, sanctioned)
-}
-
 fn screen_account(account: &PoolAccount, sanctioned: &impl Fn(&Address) -> bool) -> bool {
     match account {
         PoolAccount::Evm(address) => sanctioned(&Address::from(*address)),
-        PoolAccount::Icp(account) => screen_principal(account.owner, sanctioned),
+        PoolAccount::Icp(account) => crate::pool::principal_sanctioned(account.owner, sanctioned),
     }
 }
 
@@ -102,7 +98,8 @@ pub fn check_stake<S: Store>(
             "the amount must be above zero".to_string(),
         ));
     }
-    if screen_principal(request.caller, &sanctioned) || screen_account(&request.owner, &sanctioned)
+    if crate::pool::principal_sanctioned(request.caller, &sanctioned)
+        || screen_account(&request.owner, &sanctioned)
     {
         return Err(PoolError::Sanctioned(
             "a party to the stake is sanctioned".to_string(),
@@ -152,8 +149,8 @@ pub fn plan_withdrawal<S: Store>(
     closed: Option<String>,
     sanctioned: impl Fn(&Address) -> bool,
 ) -> Result<WithdrawalPlan, PoolError> {
-    if screen_principal(request.caller, &sanctioned)
-        || screen_principal(request.to.owner, &sanctioned)
+    if crate::pool::principal_sanctioned(request.caller, &sanctioned)
+        || crate::pool::principal_sanctioned(request.to.owner, &sanctioned)
     {
         return Err(PoolError::Sanctioned(
             "a party to the withdrawal is sanctioned".to_string(),
