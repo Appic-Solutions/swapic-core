@@ -205,14 +205,77 @@ mod refunds_proven {
     struct Portal(Result<Fill, String>);
 
     impl FillReads for Portal {
-        async fn fill(&self, chain: ChainId, _intent: [u8; 32]) -> Result<Fill, String> {
+        async fn fill(
+            &self,
+            chain: ChainId,
+            _intent: [u8; 32],
+            route_deadline: u64,
+        ) -> Result<Fill, String> {
             assert_eq!(
                 chain,
                 ChainId::ETHEREUM,
                 "a move to ICP is filled on Ethereum"
             );
+            assert_eq!(
+                route_deadline, ROUTE_DEADLINE,
+                "read past the deadline of the route the move's order published"
+            );
             self.0.clone()
         }
+    }
+
+    /// The last instant the move's Eco route may be filled.
+    const ROUTE_DEADLINE: u64 = 1_800_001_800;
+
+    /// The move's order: one `publishAndFund` delivering USDC on Ethereum, its route's
+    /// deadline [`ROUTE_DEADLINE`].
+    fn eco_order() -> Vec<u8> {
+        use alloy_primitives::{Address, FixedBytes, U256};
+        use alloy_sol_types::SolCall;
+        use types::swapic::{publishAndFundCall, EcoReward, EcoTokenAmount, Order, Payout, Step};
+        let usdc = Address::repeat_byte(0x11);
+        let route = types::swapic::deliver_route(
+            [0x5a; 32],
+            ROUTE_DEADLINE,
+            types::EvmAddress::new([0xec; 20]),
+            types::EvmAddress::new([0x11; 20]),
+            types::EvmAddress::new([0x36; 20]),
+            U256::ZERO,
+        );
+        let publish = publishAndFundCall {
+            destination: 1,
+            route: route.into(),
+            reward: EcoReward {
+                deadline: ROUTE_DEADLINE + 7 * 24 * 3_600,
+                creator: Address::repeat_byte(0x36),
+                prover: Address::repeat_byte(0xec),
+                nativeAmount: U256::ZERO,
+                tokens: vec![EcoTokenAmount {
+                    token: usdc,
+                    amount: U256::ZERO,
+                }],
+            },
+            allowPartial: false,
+        };
+        types::swapic::encode_order(&Order {
+            r#ref: FixedBytes([0x85; 32]),
+            payer: Address::repeat_byte(0x36),
+            tokenIn: usdc,
+            amountIn: U256::from(1_000_000_000_u64),
+            deadline: U256::from(1_800_001_200_u64),
+            steps: vec![Step {
+                target: Address::repeat_byte(0xec),
+                data: publish.abi_encode().into(),
+                token: usdc,
+                min: U256::ZERO,
+                writes: vec![],
+            }],
+            payout: Payout {
+                token: Address::ZERO,
+                recipient: Address::ZERO,
+                minOut: U256::ZERO,
+            },
+        })
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -240,9 +303,13 @@ mod refunds_proven {
         );
         let at = |n: u64| Timestamp::from_secs(1_800_000_000 + n).unwrap();
         let fee = TokenAmount::from(100_000_u64);
+        assert_eq!(
+            crate::pool::rebalance::drive::eco_route_deadline(&eco_order()),
+            Some(ROUTE_DEADLINE)
+        );
         let order = PinnedOrder {
             order_id: [0x85; 32],
-            order: vec![],
+            order: eco_order(),
             gas_limit: 300_000,
             deadline_s: 1_800_003_600,
         };

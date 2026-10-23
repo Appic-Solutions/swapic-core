@@ -216,3 +216,192 @@ fn the_rpc_door_refuses_a_stranger() {
     assert!(matches!(answer, Err(TestRpcError::Guard(_))), "{answer:?}");
     assert!(pic.get_canister_http().is_empty());
 }
+
+/// M-03: the reads that decide money alone are made by every node of the subnet and agreed
+/// on. Each node's answer goes through the canister's transform (a node's provider writes
+/// its own headers and fields, and heads a moment apart are rounded to one), every node
+/// reads at one block named by the agreed head, never `latest`, and an answer the nodes do
+/// not agree on is no answer at all.
+mod agreed {
+    use super::*;
+    use crate::settlement_suite::tests::test_pool::base_chain;
+    use pocket_ic::common::rest::{CanisterHttpHeader, CanisterHttpRequest};
+
+    const PORTAL: &str = "0xEC000769A73b70e16f361a442292500b3BCf4A85";
+    /// Heads every node of the subnet sees a block or so apart: all round down to this.
+    const HEAD: u64 = 0x1ec5_5b90;
+    /// Base's depth in this config.
+    const DEPTH: u64 = 2;
+
+    fn agreed_config() -> Config {
+        Config {
+            confirmations: BTreeMap::from([(BASE, DEPTH)]),
+            evm_chains: BTreeMap::from([(BASE, base_chain())]),
+            eco_portal: Some(PORTAL.to_string()),
+            ..with_base_rpc()
+        }
+    }
+
+    fn nodes(pic: &PocketIc, canister: Principal) -> usize {
+        let subnet = pic.get_subnet(canister).expect("the canister has a subnet");
+        pic.topology().subnet_configs[&subnet].node_ids.len()
+    }
+
+    fn word(last: u8) -> String {
+        format!("0x{}{last:02x}", "00".repeat(31))
+    }
+
+    /// The one pending outcall, its calls' methods and params.
+    fn pending(pic: &PocketIc) -> (CanisterHttpRequest, Value) {
+        let pending = pic.get_canister_http();
+        assert_eq!(pending.len(), 1, "one outcall at a time");
+        let body = serde_json::from_slice(&pending[0].body).expect("the body is json");
+        (pending[0].clone(), body)
+    }
+
+    /// Answers `request` with `bodies[i]` from node i, each with a header of its own.
+    fn answer_each(pic: &PocketIc, request: &CanisterHttpRequest, bodies: Vec<Value>) {
+        let mut responses = bodies.into_iter().enumerate().map(|(node, body)| {
+            CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                status: 200,
+                headers: vec![CanisterHttpHeader {
+                    name: "x-request-id".to_string(),
+                    value: format!("node {node}"),
+                }],
+                body: body.to_string().into_bytes(),
+            })
+        });
+        let response = responses.next().expect("one node at least");
+        pic.mock_canister_http_response(MockCanisterHttpResponse {
+            subnet_id: request.subnet_id,
+            request_id: request.request_id,
+            response,
+            additional_responses: responses.collect(),
+        });
+        for _ in 0..6 {
+            pic.tick();
+        }
+    }
+
+    /// Every node's head, a block apart: the transform rounds them to [`HEAD`].
+    fn answer_heads(pic: &PocketIc, n: usize) {
+        let (request, body) = pending(pic);
+        assert_eq!(body[0]["method"], "eth_blockNumber");
+        let heads = (0..n as u64)
+            .map(|node| json!([{"jsonrpc": "2.0", "id": 0, "result": format!("0x{:x}", HEAD + 1 + node)}]))
+            .collect();
+        answer_each(pic, &request, heads);
+    }
+
+    fn submit(
+        pic: &PocketIc,
+        canister: Principal,
+        admin: Principal,
+        method: &str,
+        arg: Vec<u8>,
+    ) -> pocket_ic::common::rest::RawMessageId {
+        let id = pic
+            .submit_call(canister, admin, method, arg)
+            .expect("the door accepts the call");
+        pic.tick();
+        pic.tick();
+        id
+    }
+
+    fn ran(
+        pic: &PocketIc,
+        canister: Principal,
+        admin: Principal,
+        used: impl Fn(usize) -> u8,
+    ) -> Result<bool, String> {
+        let n = nodes(pic, canister);
+        let call = submit(
+            pic,
+            canister,
+            admin,
+            "test_agreed_ran",
+            encode_args((BASE, vec![0x85_u8; 32])).unwrap(),
+        );
+        answer_heads(pic, n);
+        let (request, body) = pending(pic);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["method"], "eth_call");
+        assert_eq!(
+            body[0]["params"][1],
+            json!(format!("0x{:x}", HEAD - DEPTH)),
+            "every node reads at the block the depth below the agreed head, never latest"
+        );
+        let answers = (0..n)
+            .map(|node| json!([{"jsonrpc": "2.0", "id": 0, "result": word(used(node)), "node": node}]))
+            .collect();
+        answer_each(pic, &request, answers);
+        candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap()
+    }
+
+    #[test]
+    fn swapics_used_is_read_by_every_node_at_one_block_and_agreed() {
+        let (pic, canister, admin) = setup();
+        set_config(&pic, canister, admin, &agreed_config()).unwrap();
+        assert_eq!(ran(&pic, canister, admin, |_| 1), Ok(true));
+        assert_eq!(ran(&pic, canister, admin, |_| 0), Ok(false));
+        // the nodes disagree (a provider or a node lies): no answer, asked again later
+        let split = ran(&pic, canister, admin, |node| u8::from(node % 2 == 0));
+        assert!(
+            matches!(&split, Err(why) if why.contains("Unreachable")),
+            "the system refuses an outcall its nodes do not agree on: {split:?}"
+        );
+    }
+
+    fn fill(
+        pic: &PocketIc,
+        canister: Principal,
+        admin: Principal,
+        timestamp: u64,
+        after_s: u64,
+    ) -> Result<(String, u64), String> {
+        let n = nodes(pic, canister);
+        let call = submit(
+            pic,
+            canister,
+            admin,
+            "test_agreed_fill",
+            encode_args((BASE, vec![0x84_u8; 32], after_s)).unwrap(),
+        );
+        answer_heads(pic, n);
+        let (request, body) = pending(pic);
+        let block = json!(format!("0x{:x}", HEAD - DEPTH));
+        assert_eq!(body[0]["method"], "eth_getBlockByNumber");
+        assert_eq!(body[0]["params"], json!([block, false]));
+        assert_eq!(body[1]["method"], "eth_call");
+        assert_eq!(body[1]["params"][1], block);
+        let answers = (0..n)
+            .map(|node| {
+                json!([
+                    {"jsonrpc": "2.0", "id": 0, "result": {
+                        "number": block, "hash": format!("0x{}", "ab".repeat(32)),
+                        "timestamp": format!("0x{timestamp:x}"), "miner": format!("node {node}"),
+                    }},
+                    {"jsonrpc": "2.0", "id": 1, "result": word(0)},
+                ])
+            })
+            .collect();
+        answer_each(pic, &request, answers);
+        candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap()
+    }
+
+    /// L-03: "not filled" only at an agreed block past the route's deadline.
+    #[test]
+    fn an_eco_fill_is_read_by_every_node_at_a_block_past_the_deadline() {
+        let (pic, canister, admin) = setup();
+        set_config(&pic, canister, admin, &agreed_config()).unwrap();
+        let deadline = 1_800_000_000;
+        assert_eq!(
+            fill(&pic, canister, admin, deadline + 2, deadline),
+            Ok(("Open".to_string(), HEAD - DEPTH))
+        );
+        assert_eq!(
+            fill(&pic, canister, admin, deadline, deadline),
+            Err("TooEarly".to_string())
+        );
+    }
+}

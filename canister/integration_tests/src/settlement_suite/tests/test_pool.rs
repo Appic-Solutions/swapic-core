@@ -638,7 +638,7 @@ fn an_icp_shortfall_closes_the_pool_and_reopening_clears_it() {
 }
 
 /// Base as the pool pays on it: Swapic, the Runner, USDC, and the pool's gas rows.
-fn base_chain() -> settlement_api::types::config::EvmChainConfig {
+pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
     use settlement_api::types::config::{ActionAmounts, ActionGas, EvmChainConfig};
     let amounts = |value: u64| ActionAmounts {
         relay_cctp: Nat::from(value),

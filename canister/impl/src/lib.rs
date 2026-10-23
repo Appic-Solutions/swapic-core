@@ -1,3 +1,4 @@
+pub mod agreed;
 pub mod books;
 pub mod cctp;
 pub mod deposits;

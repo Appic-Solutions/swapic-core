@@ -173,7 +173,8 @@ pub async fn rescue(order_id: Vec<u8>) -> Result<u64, String> {
         .evm_chains
         .get(rescue.destination)
         .ok_or_else(|| format!("chain {} signs nothing", rescue.destination))?;
-    match crate::pool::eco::fill(rescue.destination, rescue.intent).await? {
+    let deadline = eco::route_deadline(&rescue.route).ok_or("the route does not read")?;
+    match crate::pool::eco::fill(rescue.destination, rescue.intent, deadline).await? {
         Fill::Open => {}
         Fill::Cancelled => return Err("the intent was cancelled already".to_string()),
         Fill::Filled => return Err("the intent was filled: nothing to rescue".to_string()),

@@ -12,12 +12,12 @@
 //! - at its deadline a payout not signed is undone: an ICP swap refunds what it pulled on ICP,
 //!   a withdrawal mints its shares back. One that was ever signed is undone only once its
 //!   transaction is closed at the crediting depth and Swapic says its order never ran
-//!   (`used(id)` false): a reorg that turned a revert into a payment is never paid twice.
+//!   (`used(id)` false, read by every node, `agreed::ran`): a reorg that turned a revert into
+//!   a payment is never paid twice.
 
 #[cfg(test)]
 mod tests;
 
-use crate::evm_reads::{self, Simulated};
 use crate::pool::payout::{Busy, Ledgers, Stop, DEDUP_WINDOW};
 use crate::pool::{icp_swap, log};
 use crate::state::Store;
@@ -26,7 +26,7 @@ use crate::storage::pool as pool_store;
 use types::events::TxPurpose;
 use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
-use types::{EvmAddress, Timestamp};
+use types::Timestamp;
 
 /// What the pass does with one payout now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,24 +135,13 @@ fn in_flight(id: u64) -> bool {
         || crate::storage::outbox::find(purpose).is_some()
 }
 
-/// Whether Swapic says the order `id` ran, read at the pool chain's head: None when it
-/// cannot be read now.
-async fn ran(order_id: [u8; 32]) -> Option<bool> {
-    let config = crate::storage::config::get();
-    let chain_id = config.pool_chain?;
-    let swapic = config.evm_chains.get(chain_id)?.swapic;
-    let canister: EvmAddress = crate::storage::ecdsa_address::get()?;
-    match evm_reads::eth_call(
-        chain_id,
-        canister,
-        swapic,
-        &types::swapic::used_calldata(order_id),
-    )
-    .await
-    {
-        Ok(Simulated::Returned(bytes)) if bytes.len() == 32 => Some(bytes[31] == 1),
-        _ => None,
-    }
+/// Whether Swapic on the pool chain says the order `id` ran (M-03: read by every node, at
+/// an agreed block); Err when it cannot be read now.
+async fn ran(order_id: [u8; 32]) -> Result<bool, String> {
+    let chain = crate::storage::config::get()
+        .pool_chain
+        .ok_or("no pool chain is configured")?;
+    crate::agreed::ran(chain, order_id).await
 }
 
 fn record(step: PoolStep, now: Timestamp) -> bool {
@@ -221,14 +210,14 @@ pub async fn pass(
                 };
                 // a reorg may have turned the revert into a payment: then it never runs again
                 match ran(pinned.order_id).await {
-                    Some(false) => {}
-                    Some(true) => {
+                    Ok(false) => {}
+                    Ok(true) => {
                         log(&format!(
                             "ALERT: the pool payout {id}'s reverted order ran after all; it waits for a human"
                         ));
                         continue;
                     }
-                    None => continue,
+                    Err(_) => continue,
                 }
                 let Some(order) = types::swapic::decode_order(&pinned.order) else {
                     continue;
@@ -247,14 +236,14 @@ pub async fn pass(
                         continue;
                     };
                     match ran(pinned.order_id).await {
-                        Some(false) => {}
-                        Some(true) => {
+                        Ok(false) => {}
+                        Ok(true) => {
                             log(&format!(
                                 "ALERT: the pool payout {id}'s order ran after its revert; it is not undone, for a human"
                             ));
                             continue;
                         }
-                        None => continue,
+                        Err(_) => continue,
                     }
                 }
                 let now = clock();

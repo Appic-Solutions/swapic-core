@@ -438,22 +438,6 @@ fn own_order(
     Ok((MoveRoute::Own { max_fee, fast }, pinned))
 }
 
-/// Whether Swapic on `chain` says the order ran, read at the head: None when it cannot be
-/// read now.
-async fn ran(chain: ChainId, order_id: [u8; 32]) -> Option<bool> {
-    let config = config::get();
-    let swapic = config.evm_chains.get(chain)?.swapic;
-    let canister = crate::storage::ecdsa_address::get()?;
-    match crate::evm_reads::eth_call(chain, canister, swapic, &swapic::used_calldata(order_id))
-        .await
-    {
-        Ok(crate::evm_reads::Simulated::Returned(bytes)) if bytes.len() == 32 => {
-            Some(bytes[31] == 1)
-        }
-        _ => None,
-    }
-}
-
 thread_local! {
     // Heap by necessity, and only a clock: when each Eco move to Base was last looked for on
     // the Portals. An upgrade loses it, which costs one read more.
@@ -505,7 +489,12 @@ async fn unfilled(item: &Move, ctx: &Ctx) -> Result<(), String> {
     let pool_chain = config::get()
         .pool_chain
         .ok_or("no pool chain is configured")?;
-    let fill = crate::pool::eco::fill(pool_chain, intent).await?;
+    let deadline = item
+        .order
+        .as_ref()
+        .and_then(|order| eco_route_deadline(&order.order))
+        .ok_or("its order's route deadline does not read")?;
+    let fill = crate::pool::eco::fill(pool_chain, intent, deadline).await?;
     let reward = crate::pool::eco::reward_status(ChainId::ETHEREUM, intent).await?;
     let waited = ctx.now.saturating_duration_since(item.since) >= STUCK_AFTER;
     match unfilled_next(fill, reward, waited) {
@@ -562,9 +551,9 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
     gas_in_hand(chain, GasAction::PoolMove).await?;
     if again {
-        match ran(chain, pinned.order_id).await {
-            Some(false) => {}
-            Some(true) => {
+        match crate::agreed::ran(chain, pinned.order_id).await {
+            Ok(false) => {}
+            Ok(true) => {
                 return record(
                     PoolStep::MoveStuck {
                         id: item.id,
@@ -573,7 +562,7 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
                     pool::now(),
                 )
             }
-            None => return Err("Swapic's record of the order was not read".to_string()),
+            Err(why) => return Err(format!("Swapic's record of the order was not read: {why}")),
         }
         if let Some(reason) = pool::pool_closed() {
             return Err(format!("the pool is closed: {reason}"));

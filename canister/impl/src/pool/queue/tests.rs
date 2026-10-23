@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 use types::pool::payout::{IcpSwapTerms, PayoutKind, PayoutTerms, PinnedOrder, Undo};
 use types::pool::{IcpAccount, PoolAccount};
-use types::{ChainId, TokenAmount};
+use types::{ChainId, EvmAddress, TokenAmount};
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);

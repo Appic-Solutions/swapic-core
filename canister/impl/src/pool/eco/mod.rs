@@ -1,12 +1,14 @@
 //! Eco intents the canister signs or relies on (P11e): every intent the canister funds (a
 //! payout's onward intent, a move's proposed route) names Eco's configured prover and
 //! Portal, and short deadlines; and the reads of Eco's Portal the canister makes itself
-//! before it trusts a refund or rescues an unfilled intent: the destination's `claimants`, the
-//! source's `getRewardStatus`.
+//! before it trusts a refund or rescues an unfilled intent: the destination's `claimants`
+//! (read by every node, at a block past the route's deadline: M-03, L-03), the source's
+//! `getRewardStatus`.
 
 #[cfg(test)]
 mod tests;
 
+use crate::agreed::{self, FillRead};
 use crate::evm_reads::{self, Simulated};
 use types::eco::{self, Fill};
 use types::swapic::EcoIntent;
@@ -60,16 +62,18 @@ fn word_of(answer: Simulated) -> Result<[u8; 32], String> {
     }
 }
 
-/// What `chain`'s Portal says of `intent`'s fill, read at its head.
-pub async fn fill(chain: ChainId, intent: [u8; 32]) -> Result<Fill, String> {
-    let config = crate::storage::config::get();
-    let portal = config.eco_portal.ok_or("no Eco Portal is configured")?;
-    let canister = crate::storage::ecdsa_address::get().ok_or("no canister address yet")?;
-    let answer = evm_reads::eth_call(chain, canister, portal, &eco::claimants_calldata(intent))
-        .await
-        // the kind only: an outcall's text can carry the provider's url and key
-        .map_err(|error| format!("the fill read: {:?}", error.kind()))?;
-    Ok(eco::fill_of(word_of(answer)?))
+/// What `chain`'s Portal says of `intent`'s fill, read by every node at a block whose time
+/// is past the intent's `route_deadline` (no fill can come after it): Err while no agreed
+/// block is, or when it was not read.
+pub async fn fill(chain: ChainId, intent: [u8; 32], route_deadline: u64) -> Result<Fill, String> {
+    match agreed::fill_after(chain, intent, route_deadline).await {
+        Ok((fill, _)) => Ok(fill),
+        Err(FillRead::TooEarly) => {
+            Err("no block the nodes agree on is past the route's deadline yet".to_string())
+        }
+        // the kind only, as the read says it: an outcall's text can carry the url and key
+        Err(FillRead::Unread(why)) => Err(format!("the fill read: {why}")),
+    }
 }
 
 /// What `chain`'s Portal says of `intent`'s reward: 3 once refunded to its creator.

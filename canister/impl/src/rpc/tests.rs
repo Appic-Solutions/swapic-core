@@ -302,3 +302,162 @@ fn an_answer_over_its_cap_is_refused_by_name() {
         }
     );
 }
+
+/// M-03: a read that decides money is made by every node and agreed on through the
+/// canister's own transform, which is told what to keep of each call; it is priced
+/// pay-as-you-go like every outcall. Any other shape is refused where the call is made.
+#[test]
+fn a_read_that_decides_money_is_made_by_every_node_through_the_transform() {
+    let canister = Principal::from_slice(&[7; 10]);
+    let request = post_agreed(
+        &url(),
+        b"[]".to_vec(),
+        4_096,
+        &[Keep::Header, Keep::Whole],
+        canister,
+    );
+    assert_eq!(request.is_replicated, Some(true));
+    assert_eq!(request.pricing_version, Some(PRICING_VERSION_PAY_AS_YOU_GO));
+    let transform = request.transform.clone().expect("a transform");
+    assert_eq!(transform.function.0.method, AGREED_TRANSFORM);
+    assert_eq!(transform.function.0.principal, canister);
+    assert_eq!(transform.context, vec![2, 0]);
+    assert_eq!(request.max_response_bytes, Some(4_096));
+    assert_outcall_policy(&request);
+    assert_outcall_policy(&post(&url(), b"{}".to_vec(), 2_048));
+    // replicated with no transform, or one node through it: neither is a shape the canister
+    // sends
+    for broken in [
+        HttpRequest {
+            transform: None,
+            ..request.clone()
+        },
+        HttpRequest {
+            is_replicated: Some(false),
+            ..request
+        },
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_outcall_policy(&broken)).is_err());
+    }
+}
+
+/// Two providers' answers to the same agreed batch, written differently (replies out of
+/// order, fields a provider adds, another key order) reduce to the same bytes: only what
+/// the canister reads is kept, so honest nodes agree.
+#[test]
+fn every_nodes_answer_reduces_to_what_the_canister_reads() {
+    let keep = [Keep::Receipt, Keep::Header, Keep::Whole, Keep::Head];
+    let log = |extra: bool| {
+        let mut log = json!({
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "topics": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],
+            "data": "0x01",
+            "logIndex": "0xc",
+            "removed": false,
+            "blockTimestamp": "0x6ad5e897",
+        });
+        if extra {
+            log["transactionIndex"] = json!("0x6");
+            log["blockHash"] = json!("0xdd");
+        }
+        log
+    };
+    let first = json!([
+        {"jsonrpc": "2.0", "id": 0, "result": {
+            "transactionHash": "0xec", "blockNumber": "0x1ec55b96", "status": "0x1",
+            "logs": [log(false)], "gasUsed": "0x59991",
+        }},
+        {"jsonrpc": "2.0", "id": 1, "result": {
+            "number": "0x10", "hash": "0xab", "timestamp": "0x6ad5e897", "miner": "0x00",
+        }},
+        {"jsonrpc": "2.0", "id": 2, "result": "0x01"},
+        {"jsonrpc": "2.0", "id": 3, "result": "0x1ec55b9f"},
+    ]);
+    let second = json!([
+        {"id": 3, "jsonrpc": "2.0", "result": "0x1ec55b91"},
+        {"id": 2, "result": "0x01", "jsonrpc": "2.0"},
+        {"jsonrpc": "2.0", "id": 1, "result": {
+            "timestamp": "0x6ad5e897", "number": "0x10", "hash": "0xab", "size": "0x99",
+        }},
+        {"jsonrpc": "2.0", "id": 0, "result": {
+            "status": "0x1", "logs": [log(true)], "blockNumber": "0x1ec55b96",
+            "transactionHash": "0xec", "effectiveGasPrice": "0x1",
+        }},
+    ]);
+    let kept = agreed_body(first.to_string().as_bytes(), &keep);
+    assert_eq!(kept, agreed_body(second.to_string().as_bytes(), &keep));
+    let read = parse_batch(&kept, &["r", "h", "w", "head"]).unwrap();
+    let receipt = &read[0];
+    assert_eq!(receipt["logs"][0], log(false));
+    assert_eq!(receipt.get("gasUsed"), None);
+    assert_eq!(
+        read[1],
+        json!({"number": "0x10", "hash": "0xab", "timestamp": "0x6ad5e897"})
+    );
+    assert_eq!(read[2], json!("0x01"));
+    // two heads a few blocks apart agree once rounded down to the grain
+    assert_eq!(
+        read[3],
+        json!(format!(
+            "0x{:x}",
+            0x1ec5_5b9f_u64 - 0x1ec5_5b9f_u64 % HEAD_GRAIN
+        ))
+    );
+    // an error keeps its code and message only
+    let refused = json!([{"jsonrpc": "2.0", "id": 0, "error": {
+        "code": -32000, "message": "header not found", "data": "a node's own words"
+    }}]);
+    assert_eq!(
+        parse_batch(
+            &agreed_body(refused.to_string().as_bytes(), &[Keep::Whole]),
+            &["eth_call"]
+        ),
+        Err(RpcError::Rpc {
+            method: "eth_call".to_string(),
+            message: "header not found".to_string()
+        })
+    );
+    // a body that is no batch is left as it is
+    assert_eq!(agreed_body(b"not json", &keep), b"not json".to_vec());
+}
+
+/// What the transform answers: the status, never a header (a provider's date and request id
+/// differ on every node), and no body for an answer that is not a 2xx.
+#[test]
+fn the_transform_drops_headers_and_a_failures_body() {
+    let headers = vec![HttpHeader {
+        name: "date".to_string(),
+        value: "now".to_string(),
+    }];
+    let ok = agreed_response(
+        HttpResponse {
+            status: candid::Nat::from(200_u32),
+            headers: headers.clone(),
+            body: br#"[{"jsonrpc":"2.0","id":0,"result":"0x1"}]"#.to_vec(),
+        },
+        &[Keep::Whole as u8],
+    );
+    assert!(ok.headers.is_empty());
+    assert_eq!(parse_batch(&ok.body, &["a"]), Ok(vec![json!("0x1")]));
+    let failed = agreed_response(
+        HttpResponse {
+            status: candid::Nat::from(429_u32),
+            headers,
+            body: b"rate limited, request id 1234".to_vec(),
+        },
+        &[9],
+    );
+    assert_eq!(failed.status, candid::Nat::from(429_u32));
+    assert!(failed.body.is_empty() && failed.headers.is_empty());
+}
+
+/// Every node makes the call, so the reservation covers the replicated price, and never
+/// less than the one-node reservation for the same request.
+#[test]
+fn an_agreed_read_reserves_the_replicated_price() {
+    let n = MAX_SUBNET_NODES;
+    let replicated = (3_000_000 + 60_000 * n) * n + 400 * n * 1_000 + 800 * n * 16_384;
+    assert!(cycles_for_agreed(1_000, 16_384) >= replicated);
+    assert!(cycles_for_agreed(1_000, 16_384) >= cycles_for(1_000, 16_384));
+    assert!(cycles_for_agreed(1_000, 32_768) > cycles_for_agreed(1_000, 16_384));
+}
