@@ -519,15 +519,15 @@ type IcpSwapTerms = record {
   // ckUSDC or a listed ICP token.
   token_in : principal;
   plan : PayoutPlan;
+  // At most 500: half of it is the sale's on ICP, the rest the plan's own swap.
+  slippage_bps : nat16;
   from_subaccount : opt blob;
   // Default: the caller's account.
   refund_to : opt IcpAccount;
-  // Pulled with `icrc2_transfer_from` from the caller's account.
-  amount_in : nat;
   // 5 minutes to 1 hour ahead: after it nothing is signed and the swap is undone.
   deadline_ns : nat64;
-  // At most 500: half of it is the sale's on ICP, the rest the plan's own swap.
-  slippage_bps : nat16;
+  // Pulled with `icrc2_transfer_from` from the caller's account.
+  amount_in : nat;
 };
 type IcpTokenEntry = record { ledger : principal; icpswap_pool : principal };
 // What an install starts from: the whole config and both service roles, so a canister is
@@ -614,13 +614,16 @@ type PayoutSettings = record {
 };
 type PayoutStatus = variant {
   Queued;
+  // Its refund is on its way, with why: a revert, an Eco intent never filled, or its
+  // deadline (nothing is signed for it again).
+  Refunding : text;
   Failed : text;
+  // Its order ran on Base and published an Eco intent: paid once the intent's fill is read.
+  Delivering;
   Paid;
   Pulling;
   Swapping;
   Undone : text;
-  Refunding : text;
-  Delivering;
   Waiting;
   Signed : nat64;
 };
@@ -646,10 +649,10 @@ type PayoutView = record {
   planned : opt nat;
   order_id : opt blob;
   tx_hash : opt blob;
-  // The ckUSDC the swap made on ICP, once known.
-  received : opt nat;
   // The exact USDC the payout order must spend on Base.
   amount : opt nat;
+  // The ckUSDC the swap made on ICP, once known.
+  received : opt nat;
 };
 type PayoutWaiting = record {
   id : nat64;
