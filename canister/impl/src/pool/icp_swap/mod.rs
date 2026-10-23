@@ -477,9 +477,7 @@ pub async fn drive(
             match crate::pool::plan::fit(ledgers, &payout, clock()).await {
                 Fit::Sign(fitted) => return Ok(open(guard).is_ok().then_some(*fitted)),
                 Fit::Wait(why) => {
-                    pool::log(&format!(
-                        "the pool payout {id} waits for an order: its plan {why}"
-                    ));
+                    pool::log(&format!("the pool payout {id} waits for an order: {why}"));
                     return Ok(None);
                 }
                 // it could only revert: the user's ckUSDC back at once
