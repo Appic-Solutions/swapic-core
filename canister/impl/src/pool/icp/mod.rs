@@ -75,10 +75,7 @@ impl WithdrawRequest {
 }
 
 fn screen_principal(principal: Principal, sanctioned: &impl Fn(&Address) -> bool) -> bool {
-    principal
-        .to_text()
-        .parse::<Address>()
-        .is_ok_and(|address| sanctioned(&address))
+    crate::pool::principal_sanctioned(principal, sanctioned)
 }
 
 fn screen_account(account: &PoolAccount, sanctioned: &impl Fn(&Address) -> bool) -> bool {
