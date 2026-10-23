@@ -23,8 +23,8 @@
 //! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
 //! the ref the order carries; the canister recomputes the ref and credits the transfer whose
 //! proof carries it, checking the terms on what arrived: the parties not sanctioned, the
-//! pool open, a swap within the per-swap cap with its ICP fees at least its path's own
-//! ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at least `min_out`;
+//! pool open, a swap (with no cap: the per-swap cap is the quoter's) with its ICP fees at
+//! least its path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at least `min_out`;
 //! a stake within the TVL cap. Terms it does not take hold the transfer for a controller,
 //! with the terms and the payer. One deposit per ref: a second arrival under a credited ref
 //! is held. A transfer whose proof fails for good is held with its payer when known. A

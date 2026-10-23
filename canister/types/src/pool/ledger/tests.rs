@@ -205,17 +205,18 @@ pub(crate) fn funded(icp: TokenAmount) -> Pool {
     pool
 }
 
-/// P11d (2026-10-21): the terms are checked at the arrival, on what arrived; no premium
-/// floor, the ICP fees at least the path's own ckUSDC fees.
+/// P11d (2026-10-21): the terms are checked at the arrival, on what arrived; the ICP fees
+/// at least the path's own ckUSDC fees. No cap on an EVM to ICP deposit (2026-10-23): the
+/// per-swap cap is the quoter's own.
 #[test]
-fn an_arrival_above_a_cap_or_below_its_icp_fees_is_refused() {
+fn an_arrival_below_its_icp_fees_is_refused_and_none_above_a_cap() {
     let pool = funded(usdc(5_000));
     let good = swap(1, usdc(100), usdc(1));
     assert_eq!(check_arrival(&pool.ledger, &good), Ok(()));
-    // above the per-swap cap
+    // above the settings' per-swap cap: taken
     assert_eq!(
         check_arrival(&pool.ledger, &swap(1, usdc(1_001), usdc(2))),
-        Err(RegisterRefusal::AboveSwapCap { cap: usdc(1_000) })
+        Ok(())
     );
     // the premium at arrival (P11e): at least 90% of 10 bps of what arrived, $100 here,
     // so 90,000 at the least
@@ -1046,8 +1047,9 @@ fn a_step_round_trips_through_its_bytes() {
     }
 }
 
-/// Review fix: the caps are measured on what arrived, not on what was registered. A swap that
-/// arrives above the per-swap cap, or a stake that arrives past the TVL cap, is no credit.
+/// Review fix: the caps are measured on what arrived, not on what was registered: a stake
+/// that arrives past the TVL cap is no credit, and a swap has no cap on the canister
+/// (2026-10-23).
 /// Jeff's hold rule: a swap the ICP pocket cannot cover yet is credited all the same, its
 /// payout owed and queued, first in first out; it starts (and holds) once the free ckUSDC
 /// covers it, and a withdrawal waits behind it.
@@ -1072,9 +1074,11 @@ fn an_arrival_is_measured_on_what_arrived() {
     let mut pool = funded(usdc(300));
     let first = register(&mut pool, swap(1, usdc(100), usdc(1)));
     let second = register(&mut pool, swap(2, usdc(100), usdc(1)));
-    assert_eq!(
-        pool.step(arrived(first, 9, usdc(1_001))),
-        Err(PoolStepError::DoesNotFit("above the per-swap cap"))
+    assert!(
+        pool.ledger
+            .arrival_fits(&pool.deposits[&first], usdc(1_001))
+            .is_ok(),
+        "a swap above the settings' per-swap cap fits"
     );
     // 400 arrives: a payout of 399 and its fee, more than the 300 free, credited and queued
     pool.step(arrived(first, 9, usdc(400))).unwrap();

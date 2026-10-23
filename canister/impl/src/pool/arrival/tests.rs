@@ -469,8 +469,9 @@ fn a_receipt_not_deep_enough_is_not_credited() {
 }
 
 /// Terms the pool does not take hold the transfer for a controller, with the terms and the
-/// payer the proof shows: above the per-swap cap (measured on what arrived), ICP fees below
-/// the path's own, the pool closed, a sanctioned party. Nothing is registered.
+/// payer the proof shows: ICP fees below the path's own, the pool closed, a sanctioned
+/// party. Nothing is registered. A swap above the settings' per-swap cap is no such term
+/// (2026-10-23: no cap on an EVM to ICP deposit): it is credited.
 #[test]
 fn terms_the_pool_does_not_take_hold_the_transfer() {
     on_fresh_memory(|| {
@@ -490,18 +491,11 @@ fn terms_the_pool_does_not_take_hold_the_transfer() {
                 other => panic!("not held: {other:?}"),
             }
         };
-        let why = held(&found, &judge(Some(&swap)));
-        assert!(why.contains("above the per-swap cap"), "{why}");
-        assert!(why.contains("held with its terms: swap to"), "{why}");
-        assert!(deposit(&the_ref(2)).is_none());
         assert!(matches!(
-            last_step(),
-            PoolStep::Unattributed {
-                src_payer: None,
-                r#ref: None,
-                ..
-            }
+            &record(&found, &judge(Some(&swap)), now).mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
         ));
+        assert_eq!(deposit(&the_ref(2)).unwrap().status, DepositStatus::Arrived);
         // the ICP fees below the path's own ckUSDC fee
         let mut cheap = swap.clone();
         cheap.terms.icp_fees = TokenAmount::from(FEE - 1);

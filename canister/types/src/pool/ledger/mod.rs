@@ -434,7 +434,8 @@ impl PoolLedger {
     }
 
     /// Whether `amount` arriving for `deposit` fits the pool, measured on what arrived: a
-    /// swap within the per-swap cap, a stake within the TVL cap. Answers what a swap's payout
+    /// stake within the TVL cap; a swap has no cap on the canister (2026-10-23: the per-swap
+    /// cap is the quoter's own). Answers what a swap's payout
     /// holds once it starts (P11d: the user pays every fee): everything that arrived but the
     /// premium, its payout and its own ICP fees, out of which its path's ledger fees are
     /// paid. A payout the ICP pocket cannot cover yet is queued, never refused.
@@ -446,9 +447,6 @@ impl PoolLedger {
         let settings = self.settings.as_ref().ok_or("the pool has no settings")?;
         match deposit.terms.kind {
             DepositKind::Swap { .. } => {
-                if amount > settings.per_swap_cap {
-                    return Err("above the per-swap cap");
-                }
                 let budget = amount
                     .checked_sub(deposit.terms.premium)
                     .ok_or("below the premium")?;
@@ -1499,8 +1497,8 @@ pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<T
 
 /// Every rule a deposit's terms meet at its arrival (P11d, 2026-10-21: no registration),
 /// `terms.min_usdc` being what arrived, read off the ledger: the fees' own rules, then for a
-/// swap the pool open for swaps, the token listed, the per-swap cap, the ICP fees at least
-/// the path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at
+/// swap the pool open for swaps, the token listed (no cap: the per-swap cap is the
+/// quoter's), the ICP fees at least the path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at
 /// least the recipient's minimum; for a stake the rebalancing share's floor and the TVL cap.
 /// A payout the ICP pocket cannot cover yet is queued, never refused.
 pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), RegisterRefusal> {
@@ -1518,11 +1516,6 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
             }
             if !settings.is_listed(token_out) {
                 return Err(RegisterRefusal::TokenNotListed(token_out));
-            }
-            if terms.min_usdc > settings.per_swap_cap {
-                return Err(RegisterRefusal::AboveSwapCap {
-                    cap: settings.per_swap_cap,
-                });
             }
             // the premium at arrival (P11e): at least 90% of the settings' share of what
             // arrived, the quoter pricing it on the most a route delivers
