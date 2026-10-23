@@ -1209,28 +1209,39 @@ impl FillReads for LivePortal {
     }
 }
 
-/// The destination of the intent a refund names, and its route's deadline where its pinned
-/// order reads: a paid payout's chain, or Ethereum for an open Base to ICP move's (its Eco
-/// route delivers there). None for an intent neither took.
+/// The destination of the intent a refund names, and the time its fill is read past: a
+/// paid payout's chain, read past what the queue reads its fill past
+/// (`queue::fill_read_after`, one rule for both, so a payout found unfilled is always matched
+/// by its refund), or Ethereum for an open Base to ICP move's (its Eco route delivers
+/// there), read past its route's deadline, or its order's deadline and the longest route the
+/// canister signs when the route does not parse. None for an intent neither took.
 pub fn refund_destination<S: Store>(
     state: &State<S>,
     intent: &[u8; 32],
 ) -> Option<(ChainId, Option<u64>)> {
-    let deadline = |order: Option<&types::pool::PinnedOrder>| {
-        crate::pool::rebalance::drive::eco_route_deadline(&order?.order)
-    };
     if let Some(id) = state.store().payout_by_intent(&PoolRef::new(*intent)) {
-        return state
-            .store()
-            .pool_payout(id)
-            .map(|payout| (payout.terms.dst_chain, deadline(payout.order.as_ref())));
+        return state.store().pool_payout(id).map(|payout| {
+            (
+                payout.terms.dst_chain,
+                Some(crate::pool::queue::fill_read_after(&payout)),
+            )
+        });
     }
     crate::pool::rebalance::open_moves(state)
         .into_iter()
         .find(|item| {
             item.intent == Some(*intent) && item.direction == types::pool::MoveDirection::BaseToIcp
         })
-        .map(|item| (ChainId::ETHEREUM, deadline(item.order.as_ref())))
+        .map(|item| {
+            let after = item.order.as_ref().map(|pinned| {
+                crate::pool::rebalance::drive::eco_route_deadline(&pinned.order).unwrap_or(
+                    pinned
+                        .deadline_s
+                        .saturating_add(crate::pool::eco::MAX_ROUTE_LIFE_S),
+                )
+            });
+            (ChainId::ETHEREUM, after)
+        })
 }
 
 /// An Eco refund reopens a payout or a move only once the canister read the intent's
@@ -1253,7 +1264,7 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
                 continue;
             };
             known = true;
-            // the pinned order never changes: a deadline that does not read never will
+            // only a move that pinned no order has no time to read past, and never will
             let Some(deadline) = deadline else {
                 unreadable = true;
                 continue;
@@ -1276,8 +1287,8 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
         } else if unreadable && !filled {
             Proof::Orphan {
                 payer: None,
-                why: "an Eco refund of an intent whose route deadline does not read from its \
-                      order: held for a human"
+                why: "an Eco refund of a move's intent whose move pinned no order: held for a \
+                      human"
                     .to_string(),
             }
         } else {
