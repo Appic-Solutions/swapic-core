@@ -12,8 +12,9 @@
 //!
 //! A deposit's payout stopped on ICP (`DepositStatus::PayoutFailed`) and an ICP stake whose
 //! pull can no longer be asked are not payouts from the Base pocket, keyed by a ref and an op
-//! id: this door does not take them.
+//! id: [`deposit`] (`resolve_deposit`) and [`stake`] (`resolve_stake`) resolve them.
 
+pub mod deposit;
 pub mod stake;
 #[cfg(test)]
 mod tests;

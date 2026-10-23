@@ -1619,7 +1619,7 @@ pub fn fail(id: PoolRef, why: String, now: Timestamp) {
     };
     if stopped {
         crate::pool::log(&format!(
-            "ALERT: the pool payout {id} stopped for a human after its tenth failure: {why}"
+            "ALERT: the pool payout {id} stopped for a human after its tenth failure (resolve_deposit): {why}"
         ));
     }
 }

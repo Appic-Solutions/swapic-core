@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use types::config::GasAction;
 use types::events::TxPurpose;
 use types::pool::{orphan_key, CreditKey, Orphan, PoolStep};
-use types::{Address, TokenAmount, Wei};
+use types::{Address, EvmAddress, GasAmount, TokenAmount, Wei};
 
 /// An orphan as `pool_orphans` lists it, its key the credit key's 48 bytes.
 pub fn view(key: &CreditKey, orphan: &Orphan) -> OrphanView {
@@ -99,46 +99,95 @@ pub async fn resolve(
             .map_err(|error| PoolError::NotAllowed(error.to_string())),
         OrphanAction::Refund { to } => {
             let to = evm_address("to", &to)?;
-            if sanctioned(&Address::from(to)) {
-                return Err(PoolError::Sanctioned(
-                    "the refund's address is sanctioned".to_string(),
-                ));
-            }
-            // the refund is an outflow: the pool's guard first
-            crate::pool::require_pool_open()?;
-            let settings = crate::storage::pool::ledger()
-                .lines()
-                .settings
-                .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
-            let sent = refund_amount(&orphan, settings.min_network_fee).ok_or_else(|| {
-                PoolError::NotAllowed(
-                    "the network fee takes all of the orphan: book it instead".to_string(),
-                )
-            })?;
-            let config = crate::storage::config::get();
-            let chain = config
-                .evm_chains
-                .get(key.chain)
-                .ok_or_else(|| PoolError::Closed(format!("chain {} signs nothing", key.chain)))?;
-            let gas_limit = chain
-                .gas_limit
-                .get(GasAction::PoolTransfer)
-                .ok_or_else(|| {
-                    PoolError::NotAllowed("the chain has no pool_transfer gas row".to_string())
-                })?;
-            tx::create_and_send_with(
-                TxPurpose::PoolTransfer(orphan_key(&key)),
-                key.chain,
-                chain.usdc,
-                Wei::ZERO,
-                types::swapic::transfer_calldata(to, U256::from_be_bytes(sent.to_be_bytes())),
-                gas_limit,
-                GasAction::PoolTransfer,
-                Some(Detail::PoolTransfer { key, to, sent }),
-            )
+            send(refund_call(
+                key,
+                &orphan,
+                to,
+                sanctioned,
+                crate::pool::require_pool_open,
+            )?)
             .await
-            .map(drop)
-            .map_err(|error| PoolError::Unavailable(error.to_string()))
         }
     }
+}
+
+/// An orphan's refund with every check made: what [`send`] signs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refund {
+    pub key: CreditKey,
+    pub to: EvmAddress,
+    /// The orphan less the least network fee, which pays the transfer's gas.
+    pub sent: TokenAmount,
+    /// The chain's USDC, the transfer's target.
+    pub usdc: EvmAddress,
+    pub gas_limit: GasAmount,
+}
+
+/// The refund of `orphan` under `key` to `to`, every check made before anything is recorded:
+/// the address not sanctioned, the pool's guard (`open`: the refund is an outflow), the
+/// network fee leaving something of it, the chain signing and its gas row.
+pub fn refund_call(
+    key: CreditKey,
+    orphan: &Orphan,
+    to: EvmAddress,
+    sanctioned: impl Fn(&Address) -> bool,
+    open: impl Fn() -> Result<(), PoolError>,
+) -> Result<Refund, PoolError> {
+    if sanctioned(&Address::from(to)) {
+        return Err(PoolError::Sanctioned(
+            "the refund's address is sanctioned".to_string(),
+        ));
+    }
+    open()?;
+    let settings = crate::storage::pool::ledger()
+        .lines()
+        .settings
+        .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
+    let sent = refund_amount(orphan, settings.min_network_fee).ok_or_else(|| {
+        PoolError::NotAllowed(
+            "the network fee takes all of the orphan: book it instead".to_string(),
+        )
+    })?;
+    let config = crate::storage::config::get();
+    let chain = config
+        .evm_chains
+        .get(key.chain)
+        .ok_or_else(|| PoolError::Closed(format!("chain {} signs nothing", key.chain)))?;
+    let gas_limit = chain
+        .gas_limit
+        .get(GasAction::PoolTransfer)
+        .ok_or_else(|| {
+            PoolError::NotAllowed("the chain has no pool_transfer gas row".to_string())
+        })?;
+    Ok(Refund {
+        key,
+        to,
+        sent,
+        usdc: chain.usdc,
+        gas_limit,
+    })
+}
+
+/// Signs `refund`: `USDC.transfer(to, sent)` on its chain, recorded `OrphanRefundSigned`.
+pub async fn send(refund: Refund) -> Result<(), PoolError> {
+    let Refund {
+        key,
+        to,
+        sent,
+        usdc,
+        gas_limit,
+    } = refund;
+    tx::create_and_send_with(
+        TxPurpose::PoolTransfer(orphan_key(&key)),
+        key.chain,
+        usdc,
+        Wei::ZERO,
+        types::swapic::transfer_calldata(to, U256::from_be_bytes(sent.to_be_bytes())),
+        gas_limit,
+        GasAction::PoolTransfer,
+        Some(Detail::PoolTransfer { key, to, sent }),
+    )
+    .await
+    .map(drop)
+    .map_err(|error| PoolError::Unavailable(error.to_string()))
 }

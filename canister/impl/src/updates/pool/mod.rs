@@ -5,10 +5,10 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutResolution,
-    PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings,
-    StakeIcpArgs, StakeIcpOk, StakeResolution, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs,
-    WithdrawIcpOk,
+    DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk,
+    PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError,
+    PoolSettings, StakeIcpArgs, StakeIcpOk, StakeResolution, SwapFromIcpOk, WithdrawEvmOk,
+    WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -159,6 +159,45 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
         resolution,
         pool::now(),
     )
+}
+
+/// Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
+/// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
+/// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
+/// `Retry`: back to its payout with fresh attempts, a started one with its own dedup instant
+/// within 23 hours of it, else a fresh one. `Refund`: refused while the pool is closed, for a
+/// sanctioned or zero payer, and for a payout whose ICPSwap leg moved money; what arrived is
+/// held as an orphan under its transfer's key and the canister signs
+/// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
+/// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`. Before a
+/// refund, or a retry past 23 hours, the controller checks the payout's transfer never went
+/// out.
+#[update]
+pub async fn resolve_deposit(
+    r#ref: Vec<u8>,
+    resolution: DepositResolution,
+) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    let r#ref = <[u8; 32]>::try_from(r#ref.as_slice())
+        .map(types::hash::PoolRef::new)
+        .map_err(|_| PoolError::NotAllowed("a deposit's ref is its 32 bytes".to_string()))?;
+    let refund = pool::resolve::deposit::resolve(
+        is_halted(),
+        ic_cdk::api::is_controller(&caller),
+        r#ref,
+        resolution,
+        pool::now(),
+        is_sanctioned,
+        pool::require_pool_open,
+    )?;
+    let Some(refund) = refund else {
+        return Ok(());
+    };
+    pool::orphans::send(refund).await.map_err(|error| {
+        PoolError::Unavailable(format!(
+            "its refund was not signed, its USDC held as an orphan for resolve_orphan: {error:?}"
+        ))
+    })
 }
 
 /// Controller-only, refused while halted (Jeff, 2026-10-24): an ICP stake whose pull's answer

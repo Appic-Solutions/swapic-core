@@ -158,6 +158,14 @@ pub enum PoolDepositStatus {
     Refunded,
 }
 
+/// A controller's answer to a deposit held for a human (`resolve_deposit`): back to its
+/// payout with fresh attempts, or what arrived back to its payer on Base.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepositResolution {
+    Retry,
+    Refund,
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PoolDepositView {
     pub r#ref: Vec<u8>,
