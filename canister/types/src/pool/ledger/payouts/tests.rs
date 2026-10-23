@@ -1592,3 +1592,51 @@ fn only_a_stopped_payout_is_resolved_and_only_a_signed_one_marked_paid() {
         Err(PoolStepError::Terms(_))
     ));
 }
+
+/// CR-08's payouts held for a human before they started are deposits paid on ICP, which
+/// `resolve_payout` never reaches. A payout from the Base pocket is stopped only once it
+/// started (its pull out, its legs, its undo, its revert), never queued, known or waiting;
+/// one stopped before its amount was known booked nothing, and its refund leaves every line
+/// exactly as it was.
+#[test]
+fn a_base_payout_stopped_before_its_amount_is_known_resolves_with_every_line_as_it_was() {
+    use crate::pool::payout::PayoutResolution::Refund;
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x62, 1);
+    // never stopped while known, queued or waiting
+    let (kind, undo) = withdrawal(&pool, usdc(1_000), 41);
+    let PayoutKind::Withdrawal(w) = kind else {
+        unreachable!()
+    };
+    let known = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id: known,
+        amount: w.payout_amount().unwrap(),
+        received: None,
+    })
+    .unwrap();
+    assert!(pool.step(stopped(known)).is_err());
+    pool.step(PoolStep::PayoutQueued { id: known }).unwrap();
+    assert!(pool.step(stopped(known)).is_err());
+    pool.step(PoolStep::PayoutUndone {
+        id: known,
+        why: "past its deadline".to_string(),
+        block: None,
+    })
+    .unwrap();
+    // an ICP swap stopped with its pull's outcome unknown: nothing booked
+    let before = pool.ledger.clone();
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    pool.step(stopped(id)).unwrap();
+    pool.step(resolved(id, Refund)).unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: crate::pool::payout::REFUNDED.to_string(),
+        block: Some(17),
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.lines().queue_len, 0);
+    assert_eq!(pool.ledger.lines().fees_icp, before.lines().fees_icp);
+}
