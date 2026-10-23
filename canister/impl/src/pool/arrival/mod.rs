@@ -1260,14 +1260,10 @@ pub fn refund_destination<S: Store>(
             item.intent == Some(*intent) && item.direction == types::pool::MoveDirection::BaseToIcp
         })
         .map(|item| {
-            let after = item.order.as_ref().map(|pinned| {
-                crate::pool::rebalance::drive::eco_route_deadline(&pinned.order).unwrap_or(
-                    pinned
-                        .deadline_s
-                        .saturating_add(crate::pool::eco::MAX_ROUTE_LIFE_S),
-                )
-            });
-            (ChainId::ETHEREUM, after)
+            (
+                ChainId::ETHEREUM,
+                item.order.as_ref().map(crate::pool::eco::fill_read_after),
+            )
         })
 }
 

@@ -66,6 +66,14 @@ fn word_of(answer: Simulated) -> Result<[u8; 32], String> {
     }
 }
 
+/// When the Eco intent `pinned` publishes can last be filled: its route's deadline, or, when
+/// the route does not parse, its order's deadline and the longest route the canister signs.
+/// The one rule the payouts' queue and a move's refund read a fill past.
+pub fn fill_read_after(pinned: &types::pool::PinnedOrder) -> u64 {
+    crate::pool::rebalance::drive::eco_route_deadline(&pinned.order)
+        .unwrap_or_else(|| pinned.deadline_s.saturating_add(MAX_ROUTE_LIFE_S))
+}
+
 /// What `chain`'s Portal says of `intent`'s fill, read by every node at a block whose time
 /// is past the intent's `route_deadline` (no fill can come after it): Err while no agreed
 /// block is, or when it was not read.

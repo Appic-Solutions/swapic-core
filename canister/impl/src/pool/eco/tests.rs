@@ -100,3 +100,19 @@ fn a_reward_back_within_the_hour_of_the_route_is_refused() {
         Ok(())
     );
 }
+
+/// The last review (item 4): one rule for when a pinned order's Eco intent can last be
+/// filled, shared by the payouts' queue and a move's refund: its route's deadline, or, when
+/// the route does not parse, its order's deadline and the longest route the canister signs.
+#[test]
+fn a_pinned_orders_fill_is_read_past_its_route_or_its_longest_route() {
+    let pinned = |order: Vec<u8>| types::pool::PinnedOrder {
+        order_id: [1; 32],
+        order,
+        gas_limit: 300_000,
+        deadline_s: 900,
+    };
+    let route = crate::storage::pool::tests::eco_order(1_800);
+    assert_eq!(fill_read_after(&pinned(route)), 1_800);
+    assert_eq!(fill_read_after(&pinned(vec![7; 8])), 900 + MAX_ROUTE_LIFE_S);
+}
