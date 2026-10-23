@@ -195,8 +195,12 @@ fn in_flight(id: u64) -> bool {
 pub const REVERTED: &str = "its transaction reverted";
 
 /// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): never
-/// signed, tries left, and it can still fit: its payout within the plan's window, the plan's
-/// order deadline at least `ORDER_MARGIN_S` ahead.
+/// signed, tries left, and the plan's own decision before any read ([`plan::decide`]) says it
+/// can still fit, or could only revert (the fit then undoes it). A plan that waits whatever
+/// the time (not an Order, swapping twice, its payout outside the window, its order deadline
+/// too close) is left to the watcher's order.
+///
+/// [`plan::decide`]: crate::pool::plan::decide
 pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
     let (PayoutKind::IcpSwap(terms), Some(plan), Some(amount)) =
         (payout.kind, payout.plan.as_ref(), payout.amount)
@@ -208,12 +212,10 @@ pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
     };
     payout.order.is_none()
         && payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
-        && types::pool::plan::fits(planned, amount)
-        && plan.deadline_s
-            >= now
-                .as_secs()
-                .get()
-                .saturating_add(crate::pool::pay::ORDER_MARGIN_S)
+        && !matches!(
+            crate::pool::plan::decide(plan, planned, amount, now.as_secs().get()),
+            Err(crate::pool::plan::Fit::Wait(_))
+        )
 }
 
 /// Why a payout whose Eco intent never filled is undone.

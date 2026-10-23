@@ -1034,25 +1034,52 @@ fn the_pass_finishes_a_withdrawals_undo() {
     );
 }
 
-/// The review (2026-10-23): a planned payout whose plan waited is tried again by the pass
-/// while it can still fit (within the window, its order's deadline ahead) and has tries left;
-/// otherwise it waits for the watcher's order as before.
-#[test]
-fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
-    let settings = PayoutSettings::default();
+/// A plan of `steps` for 100 USDC paying USDC out on Base, its order deadline 2,000 s.
+fn plan_of(steps: Vec<types::swapic::Step>) -> PinnedOrder {
+    use alloy_primitives::{FixedBytes, U256};
+    use types::swapic::{addr, Order, Payout};
+    let usdc_base = addr(EvmAddress::new([0x83; 20]));
+    let order = Order {
+        r#ref: FixedBytes([0x61; 32]),
+        payer: addr(EvmAddress::new([0x36; 20])),
+        tokenIn: usdc_base,
+        amountIn: U256::from(100_000_000_u64),
+        deadline: U256::from(2_000_u64),
+        steps,
+        payout: Payout {
+            token: usdc_base,
+            recipient: addr(staker()),
+            minOut: U256::from(1_000_000_u64),
+        },
+    };
+    PinnedOrder {
+        order_id: [3; 32],
+        order: types::swapic::encode_order(&order),
+        gas_limit: 300_000,
+        deadline_s: 2_000,
+    }
+}
+
+/// A planned payout of 101 USDC waiting, `plan` its plan for 100, one try spent.
+fn planned_with(plan: PinnedOrder) -> EvmPayout {
     let mut planned = payout_in(PayoutStatus::Waiting, secs(10_000));
     if let PayoutKind::IcpSwap(terms) = &mut planned.kind {
         terms.planned = Some(usdc(100));
         terms.slippage_bps = Some(100);
     }
     planned.amount = Some(usdc(101));
-    planned.plan = Some(PinnedOrder {
-        order_id: [3; 32],
-        order: vec![3],
-        gas_limit: 300_000,
-        deadline_s: 2_000,
-    });
+    planned.plan = Some(plan);
     planned.fit_tries = Some(1);
+    planned
+}
+
+/// The review (2026-10-23): a planned payout whose plan waited is tried again by the pass
+/// while it can still fit (within the window, its order's deadline ahead) and has tries left;
+/// otherwise it waits for the watcher's order as before.
+#[test]
+fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
+    let settings = PayoutSettings::default();
+    let planned = planned_with(plan_of(vec![]));
     let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false, Duration::ZERO);
     assert_eq!(decide(&planned, secs(60)), Next::Fit);
     // its tries spent
@@ -1069,6 +1096,34 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
     let mut signed = planned.clone();
     signed.order = Some(planned.plan.clone().unwrap());
     assert_eq!(decide(&signed, secs(60)), Next::Wait);
+}
+
+/// The review (2026-10-24): the pass refits a plan only when the plan's own pure decision
+/// says it can still fit. A plan that is not an Order, or that swaps twice, never fits: it
+/// is not refitted (no scaler read, no try), and waits for the watcher's order. One that
+/// could only revert is refitted, so the fit undoes it.
+#[test]
+fn a_plan_its_decision_refuses_is_never_refitted() {
+    let settings = PayoutSettings::default();
+    let decide = |payout: &EvmPayout| next(payout, &settings, secs(60), false, Duration::ZERO);
+    let mut garbled = plan_of(vec![]);
+    garbled.order = vec![3];
+    assert_eq!(decide(&planned_with(garbled)), Next::Wait);
+    let swap = types::swapic::Step {
+        target: types::swapic::addr(types::swapic::KYBER_ROUTER),
+        data: types::swapic::KYBER_SWAP.to_vec().into(),
+        token: types::swapic::addr(EvmAddress::new([0x83; 20])),
+        min: alloy_primitives::U256::from(1_u64),
+        writes: vec![],
+    };
+    assert_eq!(
+        decide(&planned_with(plan_of(vec![swap.clone(), swap.clone()]))),
+        Next::Wait
+    );
+    // its first step asks more than the payout: refitted, and undone by the fit
+    let mut greedy = swap;
+    greedy.min = alloy_primitives::U256::from(102_000_000_u64);
+    assert_eq!(decide(&planned_with(plan_of(vec![greedy]))), Next::Fit);
 }
 
 /// The review (2026-10-23): an Eco intent's fill is read only once the block every node
