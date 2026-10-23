@@ -16,8 +16,13 @@ use serde_json::{json, Value};
 use types::eco::{self, Fill};
 use types::{BlockNumber, ChainId, EvmAddress};
 
-/// The most one agreed answer of a call and a header may be.
+/// The most one agreed answer of a call may be.
 const MAX_ANSWER_BYTES: u64 = 16_384;
+
+/// The most one agreed answer of a block's header and a call may be: a header comes with
+/// every transaction hash of its block (and Ethereum's withdrawals), tens of kilobytes on a
+/// busy Base or Ethereum block, which the transform then drops.
+pub const MAX_BLOCK_ANSWER_BYTES: u64 = 256 * 1024;
 
 /// Why `claimants` was not read past the time asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,7 +167,7 @@ pub async fn fill_after(
             Keep::Whole,
         ),
     ];
-    let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_ANSWER_BYTES)
+    let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_BLOCK_ANSWER_BYTES)
         .await
         .map_err(|error| FillRead::Unread(format!("the Portal: {:?}", error.kind())))?;
     let mut answers = answers.into_iter();
