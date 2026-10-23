@@ -18,7 +18,7 @@ fn staker() -> EvmAddress {
 fn stopped_withdrawal() -> u64 {
     let id = waiting_withdrawal(staker());
     sign_payout(id, 0, 9);
-    record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+    record_at(PoolStep::PayoutReverted { id, block: None }, at(10)).unwrap();
     record_at(
         PoolStep::PayoutStopped {
             id,

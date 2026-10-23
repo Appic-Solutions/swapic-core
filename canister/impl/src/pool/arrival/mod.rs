@@ -1053,12 +1053,18 @@ fn unavailable(error: RpcError) -> PoolError {
     PoolError::Unavailable(format!("the read failed: {:?}", error.kind()))
 }
 
-/// The receipt every node agreed on in `answers` (`[receipt, header]`, read beside the head
-/// `head` one node named), pure: a receipt of `tx`, and a header of that very block, which
-/// every node saw. A head no node agrees is a block is no depth: asked again.
+/// How far below the one node's head the block every node reads beside a receipt stands: a
+/// block that new may not be at every node's provider yet, and nodes that disagree on it
+/// fail the read. The depth is still counted from the head itself.
+pub const HEADER_BEHIND: u64 = 2;
+
+/// The receipt every node agreed on in `answers` (`[receipt, header]`, read beside the block
+/// `named` a little below the head one node read), pure: a receipt of `tx`, and a header of
+/// that very block, which every node saw. A head no node agrees is near a block is no depth:
+/// asked again.
 pub fn agreed_receipt(
     tx: TxHash,
-    head: BlockNumber,
+    named: BlockNumber,
     answers: Vec<Result<Value, RpcError>>,
 ) -> Result<Receipt, PoolError> {
     let mut answers = answers.into_iter();
@@ -1078,7 +1084,7 @@ pub fn agreed_receipt(
     let receipt = Receipt::parse(&receipt)
         .filter(|receipt| receipt.tx == tx)
         .ok_or_else(|| PoolError::BadArrival("the receipt does not read".to_string()))?;
-    if crate::agreed::Header::parse(&header).map(|header| header.number) != Some(head) {
+    if crate::agreed::Header::parse(&header).map(|header| header.number) != Some(named) {
         return Err(PoolError::Unavailable(
             "the head is not a block every node sees yet".to_string(),
         ));
@@ -1088,7 +1094,8 @@ pub fn agreed_receipt(
 
 /// The pool chain's receipt of `tx` at the crediting depth, read by every node and agreed on
 /// (M-03): one node reads the head, which only names the block every node reads beside the
-/// receipt, so a head no node sees is no depth, and a lower one only waits.
+/// receipt ([`HEADER_BEHIND`] below it), so a head no node sees near a block is no depth, and
+/// a lower one only waits.
 pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
     let head = rpc::rpc_batch(
         chain.chain,
@@ -1101,6 +1108,7 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
     .and_then(Value::as_str)
     .and_then(parse_block_number)
     .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
+    let named = BlockNumber::new(head.get().saturating_sub(HEADER_BEHIND));
     let calls = [
         (
             "eth_getTransactionReceipt",
@@ -1109,14 +1117,14 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
         ),
         (
             "eth_getBlockByNumber",
-            json!([format!("0x{:x}", head.get()), false]),
+            json!([format!("0x{:x}", named.get()), false]),
             Keep::Header,
         ),
     ];
     let answers = rpc::rpc_batch_agreed(chain.chain, &calls, MAX_RECEIPT_BYTES)
         .await
         .map_err(unavailable)?;
-    let receipt = agreed_receipt(tx, head, answers)?;
+    let receipt = agreed_receipt(tx, named, answers)?;
     let largest = receipt
         .transfers_to(chain)
         .into_iter()
@@ -1209,28 +1217,39 @@ impl FillReads for LivePortal {
     }
 }
 
-/// The destination of the intent a refund names, and its route's deadline where its pinned
-/// order reads: a paid payout's chain, or Ethereum for an open Base to ICP move's (its Eco
-/// route delivers there). None for an intent neither took.
+/// The destination of the intent a refund names, and the time its fill is read past: a
+/// paid payout's chain, read past what the queue reads its fill past
+/// (`queue::fill_read_after`, one rule for both, so a payout found unfilled is always matched
+/// by its refund), or Ethereum for an open Base to ICP move's (its Eco route delivers
+/// there), read past its route's deadline, or its order's deadline and the longest route the
+/// canister signs when the route does not parse. None for an intent neither took.
 pub fn refund_destination<S: Store>(
     state: &State<S>,
     intent: &[u8; 32],
 ) -> Option<(ChainId, Option<u64>)> {
-    let deadline = |order: Option<&types::pool::PinnedOrder>| {
-        crate::pool::rebalance::drive::eco_route_deadline(&order?.order)
-    };
     if let Some(id) = state.store().payout_by_intent(&PoolRef::new(*intent)) {
-        return state
-            .store()
-            .pool_payout(id)
-            .map(|payout| (payout.terms.dst_chain, deadline(payout.order.as_ref())));
+        return state.store().pool_payout(id).map(|payout| {
+            (
+                payout.terms.dst_chain,
+                Some(crate::pool::queue::fill_read_after(&payout)),
+            )
+        });
     }
     crate::pool::rebalance::open_moves(state)
         .into_iter()
         .find(|item| {
             item.intent == Some(*intent) && item.direction == types::pool::MoveDirection::BaseToIcp
         })
-        .map(|item| (ChainId::ETHEREUM, deadline(item.order.as_ref())))
+        .map(|item| {
+            let after = item.order.as_ref().map(|pinned| {
+                crate::pool::rebalance::drive::eco_route_deadline(&pinned.order).unwrap_or(
+                    pinned
+                        .deadline_s
+                        .saturating_add(crate::pool::eco::MAX_ROUTE_LIFE_S),
+                )
+            });
+            (ChainId::ETHEREUM, after)
+        })
 }
 
 /// An Eco refund reopens a payout or a move only once the canister read the intent's
@@ -1253,7 +1272,7 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
                 continue;
             };
             known = true;
-            // the pinned order never changes: a deadline that does not read never will
+            // only a move that pinned no order has no time to read past, and never will
             let Some(deadline) = deadline else {
                 unreadable = true;
                 continue;
@@ -1276,8 +1295,8 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
         } else if unreadable && !filled {
             Proof::Orphan {
                 payer: None,
-                why: "an Eco refund of an intent whose route deadline does not read from its \
-                      order: held for a human"
+                why: "an Eco refund of a move's intent whose move pinned no order: held for a \
+                      human"
                     .to_string(),
             }
         } else {

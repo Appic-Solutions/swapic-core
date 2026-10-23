@@ -14,7 +14,7 @@ use crate::rpc::{self, hex0x, parse_block_number, Keep, RpcError};
 use crate::storage::config;
 use serde_json::{json, Value};
 use types::eco::{self, Fill};
-use types::{BlockNumber, ChainId, EvmAddress};
+use types::{BlockDepth, BlockNumber, ChainId, EvmAddress};
 
 /// The most one agreed answer of a call may be.
 const MAX_ANSWER_BYTES: u64 = 16_384;
@@ -70,9 +70,9 @@ fn word(answer: Result<Value, RpcError>) -> Result<[u8; 32], String> {
     <[u8; 32]>::try_from(bytes).map_err(|_| "the call answered no word".to_string())
 }
 
-/// The block every node reads at: the crediting depth (a block no reorg is expected to take
-/// back) below the head the nodes agreed on.
-async fn agreed_block(chain: ChainId) -> Result<BlockNumber, String> {
+/// The head the nodes agreed on, rounded down to [`rpc::HEAD_GRAIN`], and the chain's
+/// crediting depth (how far below it a block no reorg is expected to take back stands).
+async fn agreed_head(chain: ChainId) -> Result<(BlockNumber, BlockDepth), String> {
     let depth = crate::tx::credit_confirmations(&config::get(), chain)
         .map_err(|_| format!("chain {chain} has no depth configured"))?;
     let mut answers = rpc::rpc_batch_agreed(
@@ -89,9 +89,27 @@ async fn agreed_block(chain: ChainId) -> Result<BlockNumber, String> {
         .and_then(Value::as_str)
         .and_then(parse_block_number)
         .ok_or("the head does not read")?;
-    Ok(BlockNumber::new(
-        head.get().saturating_sub(depth.get().max(1)),
-    ))
+    Ok((head, depth))
+}
+
+/// The block every node reads at: the crediting depth below the agreed head.
+async fn agreed_block(chain: ChainId) -> Result<BlockNumber, String> {
+    let (head, depth) = agreed_head(chain).await?;
+    Ok(deep_below(head, depth))
+}
+
+fn deep_below(head: BlockNumber, depth: BlockDepth) -> BlockNumber {
+    BlockNumber::new(head.get().saturating_sub(depth.get().max(1)))
+}
+
+/// The block `used` is read at, pure: the crediting depth below the agreed head, and never
+/// before `after`, the block the transaction reverted in. A block before it says nothing of
+/// what the transaction did, whatever it answers: None until a block that late is agreed on
+/// (the head is rounded down, so the deep block can trail the transaction by more than the
+/// depth).
+pub fn read_block(head: BlockNumber, depth: BlockDepth, after: BlockNumber) -> Option<BlockNumber> {
+    let deep = deep_below(head, depth);
+    (deep >= after).then_some(deep)
 }
 
 /// Whether Swapic's `used(order_id)` answer says the order ran.
@@ -103,17 +121,21 @@ pub fn ran_of(word: [u8; 32]) -> Result<bool, String> {
     }
 }
 
-/// Whether Swapic on `chain` ran `order_id`: every node reads it at one agreed block at
-/// least the crediting depth below the head (never `latest`), through a transform keeping
-/// only the word. Err: not read now, ask again. Replaces `queue::ran` and
-/// `rebalance::drive::ran`.
-pub async fn ran(chain: ChainId, order_id: [u8; 32]) -> Result<bool, String> {
+/// Whether Swapic on `chain` ran `order_id`, whose transaction reverted in block `after`:
+/// every node reads it at one agreed block at least the crediting depth below the head and
+/// at or after `after` (never `latest`), through a transform keeping only the word. Err: not
+/// read now (no agreed block that late yet, or no agreement), ask again. Replaces
+/// `queue::ran` and `rebalance::drive::ran`.
+pub async fn ran(chain: ChainId, order_id: [u8; 32], after: BlockNumber) -> Result<bool, String> {
     let swapic = config::get()
         .evm_chains
         .get(chain)
         .map(|evm| evm.swapic)
         .ok_or_else(|| format!("Swapic is not configured on chain {chain}"))?;
-    let block = agreed_block(chain).await?;
+    let (head, depth) = agreed_head(chain).await?;
+    let block = read_block(head, depth, after).ok_or_else(|| {
+        format!("not yet: no agreed block at the crediting depth is at or past block {after}")
+    })?;
     let calls = [(
         "eth_call",
         call(swapic, &types::swapic::used_calldata(order_id), block),

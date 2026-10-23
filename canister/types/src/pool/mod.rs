@@ -1583,6 +1583,9 @@ pub enum PoolStep {
     PayoutReverted {
         #[n(0)]
         id: u64,
+        /// The block its transaction reverted in: `Swapic.used` is read at it or after.
+        #[n(1)]
+        block: Option<BlockNumber>,
     },
     /// Its undo began: an ICP refund is about to be asked, nothing is signed for it again.
     #[n(31)]
@@ -1842,6 +1845,9 @@ pub enum PoolStep {
     MoveReverted {
         #[n(0)]
         id: u64,
+        /// The block its transaction reverted in: `Swapic.used` is read at it or after.
+        #[n(1)]
+        block: Option<BlockNumber>,
     },
     /// ICP to Base: the ck minter's withdrawal is about to be asked, its ckUSDC in flight from
     /// now; `created_at` dedups its approvals.

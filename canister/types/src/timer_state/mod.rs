@@ -14,8 +14,14 @@ use minicbor::{Decode, Encode};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// The most reports a minute from every caller but the watcher, together.
-pub const PER_MINUTE: usize = 10;
+/// The most reports a minute from every caller but the watcher, together: each costs a read
+/// every node makes (M-03), so strangers cannot drain the canister's cycles with them. Users
+/// report only while the watcher is down, and the canister's own read of Base credits
+/// anyway.
+pub const PER_MINUTE: usize = 2;
+
+/// The most reports an hour from every caller but the watcher, together.
+pub const PER_HOUR: usize = 20;
 
 /// The most attempts an hour at one `base_tx` from every caller but the watcher.
 pub const PER_TX_PER_HOUR: usize = 3;
@@ -23,7 +29,7 @@ pub const PER_TX_PER_HOUR: usize = 3;
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3_600);
 
-/// The arrival reports let through: the last minute's, and each `base_tx`'s last hour's.
+/// The arrival reports let through: the last hour's, and each `base_tx`'s last hour's.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Limiter {
     #[n(0)]
@@ -37,14 +43,19 @@ impl Limiter {
     /// for nothing.
     pub fn admit(&mut self, tx: TxHash, now: Timestamp) -> Result<(), String> {
         let within = |at: &Timestamp, span: Duration| now.saturating_duration_since(*at) < span;
-        self.recent.retain(|at| within(at, MINUTE));
+        self.recent.retain(|at| within(at, HOUR));
         self.by_tx.retain(|_, attempts| {
             attempts.retain(|at| within(at, HOUR));
             !attempts.is_empty()
         });
-        if self.recent.len() >= PER_MINUTE {
+        if self.recent.iter().filter(|at| within(at, MINUTE)).count() >= PER_MINUTE {
             return Err(format!(
                 "at most {PER_MINUTE} arrival reports a minute are read for callers other than the watcher: ask again later"
+            ));
+        }
+        if self.recent.len() >= PER_HOUR {
+            return Err(format!(
+                "at most {PER_HOUR} arrival reports an hour are read for callers other than the watcher: ask again later"
             ));
         }
         let attempts = self.by_tx.get(&tx).map_or(0, Vec::len);

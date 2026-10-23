@@ -1143,16 +1143,25 @@ fn an_agreed_receipt_stands_beside_the_head_every_node_sees() {
     ));
 }
 
-/// M-04: a refund the scan cannot prove holds its cursor, so a refund that can never be
-/// proven (its payout's pinned order names no route deadline to read past) is held for a
-/// human at once, with no read, and never stalls the scan.
+/// Review of the merged canister (item 3): a refund whose payout's pinned order names no route
+/// deadline that parses is read past the same time the queue reads that payout's fill (its
+/// order's deadline and the longest route the canister signs), never held for a human for
+/// it: the payout's `PayoutUnfilled` is always matched by its refund, and its reclaim never
+/// stays pending.
 #[test]
-fn a_refund_whose_deadline_never_reads_is_held_for_a_human() {
+fn a_refund_whose_route_does_not_parse_is_read_as_the_queue_reads_it() {
     use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
-    struct NoRead;
-    impl FillReads for NoRead {
-        async fn fill(&self, _: ChainId, _: [u8; 32], _: u64) -> Result<types::eco::Fill, String> {
-            panic!("nothing to read past")
+    struct Portal;
+    impl FillReads for Portal {
+        async fn fill(
+            &self,
+            _: ChainId,
+            _: [u8; 32],
+            route_deadline: u64,
+        ) -> Result<types::eco::Fill, String> {
+            // `sign_payout` pins an order of deadline 900 whose bytes are no order
+            assert_eq!(route_deadline, 900 + crate::pool::eco::MAX_ROUTE_LIFE_S);
+            Ok(types::eco::Fill::Open)
         }
     }
     on_fresh_memory(|| {
@@ -1189,15 +1198,22 @@ fn a_refund_whose_deadline_never_reads_is_held_for_a_human() {
             },
         }];
         use std::future::Future;
-        let mut future = std::pin::pin!(prove_refunds(found, &NoRead));
+        let mut future = std::pin::pin!(prove_refunds(found, &Portal));
         let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
         let std::task::Poll::Ready(proven) = future.as_mut().poll(context) else {
             panic!("nothing waits");
         };
-        assert!(
-            matches!(&proven[0].proof, Proof::Orphan { why, .. } if why.contains("deadline")),
-            "{:?}",
-            proven[0].proof
+        assert_eq!(
+            proven[0].proof,
+            Proof::Refund {
+                intents: vec![intent]
+            }
+        );
+        let payout = crate::storage::pool::payout(id).unwrap();
+        assert_eq!(
+            crate::pool::queue::fill_read_after(&payout),
+            900 + crate::pool::eco::MAX_ROUTE_LIFE_S,
+            "the queue reads it past the same time"
         );
     });
 }

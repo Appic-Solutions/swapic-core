@@ -57,3 +57,16 @@ fn stored_settings_that_do_not_decode_or_parse_are_never_the_defaults() {
         assert!(std::panic::catch_unwind(get).is_err());
     });
 }
+
+/// Review of the merged canister (item 5): a read of the parsed settings parses the stored
+/// ones once.
+#[test]
+fn a_read_parses_the_stored_settings_once() {
+    on_fresh_memory(|| {
+        init();
+        assert_eq!(set(Wire::default()), Ok(()));
+        PARSES.with(|parses| parses.set(0));
+        let _ = get();
+        assert_eq!(PARSES.with(|parses| parses.get()), 1);
+    });
+}

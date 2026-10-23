@@ -1202,7 +1202,10 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
         tx_hash: TxHash::new([0x64; 32]),
         raw_tx: vec![0x02, 0x01],
     });
-    world.plant(PoolStep::PayoutReverted { id });
+    world.plant(PoolStep::PayoutReverted {
+        id,
+        block: Some(BlockNumber::new(1)),
+    });
     let before = world.balance(staker());
     // the payout timer: every node reads Swapic's `used` at one agreed block
     world.pic.advance_time(Duration::from_secs(61));
@@ -1289,7 +1292,10 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
         tx_hash: TxHash::new([0x66; 32]),
         raw_tx: vec![0x02, 0x01],
     });
-    world.plant(PoolStep::PayoutReverted { id });
+    world.plant(PoolStep::PayoutReverted {
+        id,
+        block: Some(BlockNumber::new(1)),
+    });
     world.pic.advance_time(Duration::from_secs(61));
     let head = world.next_outcall(&["eth_blockNumber"]);
     world.reply(&head, serde_json::json!("0x1ec55b90"), true);
@@ -1433,7 +1439,7 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
             body: serde_json::json!([
                 {"jsonrpc": "2.0", "id": 0, "result": receipt},
                 {"jsonrpc": "2.0", "id": 1, "result": {
-                    "number": "0x100", "hash": format!("0x{}", "cd".repeat(32)), "timestamp": "0x6ad5e897",
+                    "number": "0xfe", "hash": format!("0x{}", "cd".repeat(32)), "timestamp": "0x6ad5e897",
                 }},
             ])
             .to_string()
@@ -1481,7 +1487,8 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
             body[0]["params"],
             serde_json::json!([format!("0x{}", "ab".repeat(32))])
         );
-        assert_eq!(body[1]["params"], serde_json::json!(["0x100", false]));
+        // two blocks below the one node's head: a block every node's provider has
+        assert_eq!(body[1]["params"], serde_json::json!(["0xfe", false]));
         let mut answers = (0..nodes).map(|node| {
             answer(if lies(node) {
                 made_up.clone()

@@ -168,7 +168,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::MoveBurned { id, .. } | PoolStep::MoveReverted { id } => {
+            PoolStep::MoveBurned { id, .. } | PoolStep::MoveReverted { id, .. } => {
                 let item = move_of(*id)?;
                 if !matches!(item.status, MoveStatus::Signed(_)) {
                     return Err(not_from(step.name(), &item));
@@ -457,8 +457,9 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            PoolStep::MoveReverted { id } => {
+            PoolStep::MoveReverted { id, block } => {
                 let mut item = lookup.pool_move(*id)?;
+                item.reverted_block = *block;
                 match (item.direction, item.landed.is_some()) {
                     // its first order: nothing left the Base pocket
                     (MoveDirection::BaseToIcp, false) => {

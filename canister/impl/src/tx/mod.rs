@@ -1124,7 +1124,10 @@ async fn decide(
                         intent: eco_intent,
                     }
                 } else {
-                    types::pool::PoolStep::MoveReverted { id }
+                    types::pool::PoolStep::MoveReverted {
+                        id,
+                        block: Some(block),
+                    }
                 };
                 let appended = match crate::storage::pool::record_at(step, now) {
                     Ok(_) => true,
@@ -1147,7 +1150,10 @@ async fn decide(
                         intent: eco_intent,
                     }
                 } else {
-                    types::pool::PoolStep::PayoutReverted { id }
+                    types::pool::PoolStep::PayoutReverted {
+                        id,
+                        block: Some(block),
+                    }
                 };
                 let appended = match crate::storage::pool::record_at(step, now) {
                     Ok(_) => true,

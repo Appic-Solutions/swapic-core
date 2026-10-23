@@ -334,6 +334,10 @@ pub struct EvmPayout {
     /// past the route's deadline yet): not read again within one wait.
     #[n(23)]
     pub fill_early_at: Option<Timestamp>,
+    /// The block its transaction last reverted in: whether its order ran is read at it or
+    /// after, never before (a reorg could have turned that revert into a payment).
+    #[n(24)]
+    pub reverted_block: Option<BlockNumber>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -404,6 +408,7 @@ impl EvmPayout {
             plan: None,
             fit_tries: None,
             fill_early_at: None,
+            reverted_block: None,
         }
     }
 

@@ -8,16 +8,30 @@ fn tx(byte: u8) -> TxHash {
     TxHash::new([byte; 32])
 }
 
+/// Review of the merged canister (item 2): every report costs a read all the nodes make, so
+/// the callers other than the watcher, together, are held to two a minute and twenty an hour.
 #[test]
-fn ten_reports_a_minute_in_total_then_none_until_the_minute_passes() {
+fn two_reports_a_minute_and_twenty_an_hour_in_total() {
     let mut limiter = Limiter::default();
-    for byte in 0..10 {
-        assert_eq!(limiter.admit(tx(byte), at(u64::from(byte))), Ok(()));
+    assert_eq!(limiter.admit(tx(0), at(0)), Ok(()));
+    assert_eq!(limiter.admit(tx(1), at(1)), Ok(()));
+    assert!(
+        limiter.admit(tx(2), at(30)).is_err(),
+        "a third in the minute"
+    );
+    // a minute on: two more, and so on until twenty in the hour
+    for minute in 1..10 {
+        for byte in 0..2 {
+            let n = 2 * minute + byte;
+            assert_eq!(limiter.admit(tx(n as u8), at(60 * minute + byte)), Ok(()));
+        }
     }
-    assert!(limiter.admit(tx(20), at(30)).is_err());
-    // the first went out of the minute: one more
-    assert_eq!(limiter.admit(tx(20), at(60)), Ok(()));
-    assert!(limiter.admit(tx(21), at(60)).is_err());
+    assert!(
+        limiter.admit(tx(99), at(60 * 10)).is_err(),
+        "the twenty-first in the hour"
+    );
+    // an hour after the first, room again
+    assert_eq!(limiter.admit(tx(99), at(3_600)), Ok(()));
 }
 
 #[test]
@@ -42,8 +56,8 @@ fn a_refused_report_counts_for_nothing() {
     for _ in 0..20 {
         assert!(limiter.admit(tx(1), at(300)).is_err());
     }
-    // the refusals took nothing of the minute's ten
-    for byte in 2..12 {
+    // the refusals took nothing of the minute's two
+    for byte in 2..4 {
         assert_eq!(limiter.admit(tx(byte), at(300)), Ok(()));
     }
 }

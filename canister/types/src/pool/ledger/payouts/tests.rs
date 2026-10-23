@@ -728,7 +728,8 @@ fn a_payout_is_signed_once() {
     .unwrap();
     pool.step(PoolStep::PayoutWaiting { id }).unwrap();
     pool.step(signed(id, order(8))).unwrap();
-    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    pool.step(PoolStep::PayoutReverted { id, block: None })
+        .unwrap();
     assert_eq!(status(&pool, id), PayoutStatus::Reverted);
     for order in [order(8), order(9)] {
         assert!(matches!(
@@ -757,7 +758,8 @@ fn a_reverted_icp_swap_is_undone_once_and_every_line_returns() {
     .unwrap();
     pool.step(PoolStep::PayoutWaiting { id }).unwrap();
     pool.step(signed(id, order(10))).unwrap();
-    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    pool.step(PoolStep::PayoutReverted { id, block: None })
+        .unwrap();
     let why = || "its transaction reverted".to_string();
     pool.step(PoolStep::PayoutUndoing { id, why: why() })
         .unwrap();
@@ -806,7 +808,8 @@ fn a_reverted_withdrawal_is_reminted_once() {
     .unwrap();
     pool.step(PoolStep::PayoutWaiting { id }).unwrap();
     pool.step(signed(id, order(11))).unwrap();
-    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    pool.step(PoolStep::PayoutReverted { id, block: None })
+        .unwrap();
     let undone = || PoolStep::PayoutUndone {
         id,
         why: "its transaction reverted".to_string(),
@@ -1443,7 +1446,8 @@ fn stopped_after_its_revert(pool: &mut Pool, withdrawing: bool) -> u64 {
     .unwrap();
     pool.step(PoolStep::PayoutWaiting { id }).unwrap();
     pool.step(signed(id, order(30))).unwrap();
-    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    pool.step(PoolStep::PayoutReverted { id, block: None })
+        .unwrap();
     pool.step(stopped(id)).unwrap();
     id
 }
