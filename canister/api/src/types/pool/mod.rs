@@ -90,6 +90,8 @@ pub enum PoolError {
     /// No registration under this ref.
     Unknown,
     Expired,
+    /// No longer answered (2026-10-23): the canister enforces no per swap cap; kept, the wire
+    /// being append-only.
     AboveSwapCap {
         cap: Nat,
     },
@@ -186,6 +188,7 @@ pub struct PoolStateView {
     pub total_assets: Nat,
     pub total_shares: Nat,
     pub tvl_cap: Nat,
+    /// The quoter's per swap cap, as the canister stores it: enforced nowhere by the canister.
     pub per_swap_cap: Nat,
     pub premium_bps: u16,
 }
@@ -206,7 +209,8 @@ pub struct IcpTokenEntry {
 pub struct PoolSettings {
     /// Micro USDC, launch 10_000_000_000 ($10,000).
     pub tvl_cap: Nat,
-    /// Micro USDC, launch 1_000_000_000 ($1,000).
+    /// Micro USDC, launch 1_000_000_000 ($1,000): the quoter's per swap cap, which the
+    /// canister stores and shows but enforces nowhere (2026-10-23).
     pub per_swap_cap: Nat,
     /// Launch 10.
     pub premium_bps: u16,

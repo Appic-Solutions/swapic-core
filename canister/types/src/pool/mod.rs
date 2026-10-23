@@ -376,7 +376,11 @@ pub struct PoolSettings {
     /// The most the pool holds, micro USDC.
     #[n(0)]
     pub tvl_cap: TokenAmount,
-    /// The most one swap may move, micro USDC.
+    /// The most one swap may move, micro USDC: the QUOTER's cap, which the canister only
+    /// stores and shows (`pool_state`). Since the final review round (2026-10-23) the canister
+    /// enforces it nowhere: an ICP swap to EVM opens while the Base pocket can pay it, an EVM to
+    /// ICP deposit is credited whatever its size. Kept, as its wire field and the old
+    /// `AboveSwapCap` refusal are: append-only.
     #[n(1)]
     pub per_swap_cap: TokenAmount,
     /// The least premium of a fast swap, of its `min_usdc`.

@@ -736,6 +736,8 @@ type PoolError = variant {
   Closed : text;
   AlreadyCredited;
   AboveTvlCap : record { cap : nat; would_be : nat };
+  // No longer answered (2026-10-23): the canister enforces no per swap cap; kept, the wire
+  // being append-only.
   AboveSwapCap : record { cap : nat };
   // The ref is registered already.
   Known;
@@ -757,7 +759,8 @@ type PoolError = variant {
 };
 type PoolRail = variant { Eco; Cctp; SameChain };
 type PoolSettings = record {
-  // Micro USDC, launch 1_000_000_000 ($1,000).
+  // Micro USDC, launch 1_000_000_000 ($1,000): the quoter's per swap cap, which the
+  // canister stores and shows but enforces nowhere (2026-10-23).
   per_swap_cap : nat;
   ckusdc_ledger : principal;
   // Launch 10.
@@ -779,6 +782,7 @@ type PoolSettings = record {
 };
 type PoolStateView = record {
   icp : PocketView;
+  // The quoter's per swap cap, as the canister stores it: enforced nowhere by the canister.
   per_swap_cap : nat;
   base : PocketView;
   open : bool;

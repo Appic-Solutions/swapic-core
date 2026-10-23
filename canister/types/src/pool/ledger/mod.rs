@@ -272,6 +272,7 @@ pub enum RegisterRefusal {
     Known,
     #[error("{0}")]
     NotAllowed(String),
+    /// No longer answered (2026-10-23): the canister enforces no per swap cap, the quoter's.
     #[error("above the per-swap cap of {cap}")]
     AboveSwapCap { cap: TokenAmount },
     #[error("the pool would hold {would_be}, above its cap of {cap}")]
