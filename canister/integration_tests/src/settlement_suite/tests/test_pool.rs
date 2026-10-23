@@ -1207,8 +1207,10 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
         block: Some(BlockNumber::new(1)),
     });
     let before = world.balance(staker());
-    // the payout timer: every node reads Swapic's `used` at one agreed block
-    world.pic.advance_time(Duration::from_secs(61));
+    // the payout timer: every node reads Swapic's `used` at one agreed block, once one can be
+    // past the revert, (16 + 1) of Base's 2 s blocks and a minute after it (the review,
+    // 2026-10-24)
+    world.pic.advance_time(Duration::from_secs(95));
     let head = world.next_outcall(&["eth_blockNumber"]);
     world.reply(&head, serde_json::json!("0x1ec55b90"), true);
     let used = world.next_outcall(&["eth_call"]);
@@ -1296,7 +1298,9 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
         id,
         block: Some(BlockNumber::new(1)),
     });
-    world.pic.advance_time(Duration::from_secs(61));
+    // read once an agreed block can be past the revert: (16 + 1) of Base's 2 s blocks and a
+    // minute after it
+    world.pic.advance_time(Duration::from_secs(95));
     let head = world.next_outcall(&["eth_blockNumber"]);
     world.reply(&head, serde_json::json!("0x1ec55b90"), true);
     let used = world.next_outcall(&["eth_call"]);
