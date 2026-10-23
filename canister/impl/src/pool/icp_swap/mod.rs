@@ -517,8 +517,7 @@ async fn try_plan(
         }
     };
     pool::log(&format!("the pool payout {id} waits for an order: {why}"));
-    // counted, at most `MAX_FIT_TRIES` in all: a refused line only means none is left
-    let _ = pool_store::record_at(PoolStep::PayoutFitWaited { id, why }, clock());
+    crate::pool::plan::count_try(id, why, clock());
     Ok(Tried::Waits)
 }
 

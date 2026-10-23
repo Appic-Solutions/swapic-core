@@ -124,6 +124,18 @@ pub struct Fitted {
     pub pinned: PinnedOrder,
 }
 
+/// Counts a try of payout `id`'s plan that waits, with why: at most `MAX_FIT_TRIES` in all,
+/// so a refused line (logged) only means none is left, or the payout moved on.
+pub fn count_try(id: u64, why: String, now: Timestamp) {
+    if let Err(error) =
+        crate::storage::pool::record_at(types::pool::PoolStep::PayoutFitWaited { id, why }, now)
+    {
+        crate::pool::log(&format!(
+            "the pool payout {id}'s try of its plan was not counted: {error}"
+        ));
+    }
+}
+
 /// Signs the plan fitted for payout `id`, its caller holding the payout (the door's drive,
 /// the pass): a refusal (a halt, the gas rule, a stale reading) leaves it waiting for the
 /// watcher's order, logged. Answers whether it was signed.
