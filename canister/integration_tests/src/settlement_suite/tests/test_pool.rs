@@ -1718,7 +1718,7 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
     };
     assert!(matches!(resolve(staker()), Err(PoolError::NotAllowed(_))));
     assert_eq!(resolve(world.admin), Ok(()));
-    assert!(world.pool_account(staker()).shares > Nat::from(0_u8));
+    assert_ne!(world.pool_account(staker()).shares, Nat::from(0_u8));
     assert_eq!(resolve(world.admin), Err(PoolError::Unknown));
     assert!(world.replay_matches());
 }
