@@ -48,6 +48,8 @@ fn arbitrum() -> SourceChain {
         chain: ChainId::ARBITRUM,
         swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
         eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
+        usdc: address("0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
+        runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
     }
 }
 
@@ -667,6 +669,8 @@ fn a_cctp_or_same_chain_arrival_ignores_its_source() {
         chain: ChainId::BASE,
         swapic: base().swapic,
         eco_portal: base().eco_portal,
+        usdc: base().usdc,
+        runner: base().runner,
     };
     for raw in [cctp(the_ref(2)), same_chain(the_ref(1))] {
         let receipt = parse(&raw);
@@ -913,5 +917,144 @@ fn an_eco_refund_of_a_paid_payout_reopens_it() {
             recorded.outcomes.as_slice(),
             [PoolArrivalOutcome::Unattributed { .. }]
         ));
+    });
+}
+
+/// A stranger, Mallory, who pays from her own address.
+fn stranger() -> EvmAddress {
+    address("0x00000000000000000000000000000000000bad01")
+}
+
+/// The Eco source `source` (the user's, from `eco`) as the stranger's own transaction would
+/// show it: her own order under her own ref, and the user's intent beside it.
+fn strangers_order(mut source: Value, r#ref: PoolRef) -> Value {
+    let started = log_at(&mut source, "0xe");
+    set_topic(started, 2, r#ref.into_bytes());
+    set_topic(started, 3, stranger().to_word());
+    source
+}
+
+/// What the stranger's transaction on another chain shows, at its least (H-02): her own
+/// zero-amount order under her own ref, and the user's `IntentPublished` copied byte for byte
+/// (the intent's hash commits no source chain), never funded.
+fn copied_intent(source: &Value, r#ref: PoolRef) -> Value {
+    let mut copy = strangers_order(source.clone(), r#ref);
+    let keep: Vec<Value> = ["0xe", "0x11"]
+        .iter()
+        .map(|index| log_at(&mut copy, index).clone())
+        .collect();
+    copy["logs"] = Value::Array(keep);
+    copy
+}
+
+/// H-02: a stranger who copies the user's Eco intent beside her own order and reports the
+/// user's Base fill first is credited nothing, and leaves the transfer for the user's own
+/// report, which credits it on the user's terms.
+#[test]
+fn a_copied_intent_beside_a_strangers_order_is_no_deposit() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let (users, strangers) = (given(3), given(4));
+        let (fill, source) = eco(users.r#ref);
+        let now = Timestamp::from_secs(block_time(&fill) + 5).unwrap();
+        let fill = parse(&fill);
+        let count = event_count();
+        let copy = parse(&copied_intent(&source, strangers.r#ref));
+        let found = find(&fill, Some((&copy, &arbitrum())), &base()).unwrap();
+        assert!(
+            matches!(found[0].proof, Proof::Unproven { .. }),
+            "{:?}",
+            found[0].proof
+        );
+        let recorded = record(&found, &judge(Some(&strangers)), now);
+        assert!(recorded.outcomes.is_empty());
+        assert_eq!(event_count(), count, "nothing written for the stranger");
+        assert!(!crate::storage::pool::credited(&found[0].credit));
+        assert!(deposit(&strangers.r#ref).is_none());
+        // the user's own report credits the transfer on the user's terms
+        let found = find(&fill, Some((&parse(&source), &arbitrum())), &base()).unwrap();
+        assert!(matches!(
+            &record(&found, &judge(Some(&users)), now).mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+        assert_eq!(deposit(&users.r#ref).unwrap().terms.src_payer, payer());
+    });
+}
+
+/// H-02, each binding on its own: the matched intent's creator is the order's payer (the
+/// whole funded shape of the user's transaction with only the order the stranger's), and its
+/// funding, by the source Runner and in full, is in the same transaction.
+#[test]
+fn an_eco_deposit_binds_its_intent_to_its_order() {
+    let (fill, source) = eco(the_ref(3));
+    let fill = parse(&fill);
+    let unproven = |source: &Value| {
+        let found = find(&fill, Some((&parse(source), &arbitrum())), &base()).unwrap();
+        matches!(found[0].proof, Proof::Unproven { .. })
+    };
+    assert!(!unproven(&source), "the real shape proves its deposit");
+    assert!(
+        unproven(&strangers_order(source.clone(), the_ref(4))),
+        "the intent's creator is not the order's payer"
+    );
+    let mut unfunded = source.clone();
+    unfunded["logs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|log| log["logIndex"] != "0x13");
+    assert!(unproven(&unfunded), "nothing funded the intent");
+    let mut by_another = source.clone();
+    let funded = log_at(&mut by_another, "0x13");
+    let mut data = data_of(funded);
+    data[32..64].copy_from_slice(&stranger().to_word());
+    set_data(funded, &data);
+    assert!(
+        unproven(&by_another),
+        "someone other than the Runner funded it"
+    );
+    let mut in_part = source.clone();
+    let funded = log_at(&mut in_part, "0x13");
+    let mut data = data_of(funded);
+    data[64..96].copy_from_slice(&[0; 32]);
+    set_data(funded, &data);
+    assert!(unproven(&in_part), "the intent was funded in part only");
+    // the user's whole transaction, named as published on a chain whose USDC is another
+    // token: a copy there rewards in a token that is not that chain's USDC
+    let elsewhere = SourceChain {
+        chain: ChainId::new(10),
+        usdc: address("0x0b2c639c533813f4aa9d7837caf62653d097ff85"),
+        ..arbitrum()
+    };
+    let found = find(&fill, Some((&parse(&source), &elsewhere)), &base()).unwrap();
+    assert!(
+        matches!(found[0].proof, Proof::Unproven { .. }),
+        "the reward is not the source chain's USDC"
+    );
+}
+
+/// H-02: an intent the canister created, beside its own order, is a rebalance move's fill and
+/// never a deposit, even under terms whose ref its order carries; with no open move to take
+/// it, it is held for a controller.
+#[test]
+fn an_intent_the_canister_created_is_a_moves_never_a_deposit() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let given = given(3);
+        let (fill, mut source) = eco(given.r#ref);
+        let now = Timestamp::from_secs(block_time(&fill) + 5).unwrap();
+        set_topic(log_at(&mut source, "0xe"), 3, canister().to_word());
+        set_topic(log_at(&mut source, "0x11"), 2, canister().to_word());
+        let fill = parse(&fill);
+        let found = find(&fill, Some((&parse(&source), &arbitrum())), &base()).unwrap();
+        assert_eq!(found[0].proof, Proof::Move { r#ref: given.r#ref });
+        let recorded = record(&found, &judge(Some(&given)), now);
+        assert!(!recorded.carried);
+        assert!(matches!(
+            &recorded.outcomes[..],
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("canister created")
+        ));
+        assert!(deposit(&given.r#ref).is_none());
     });
 }

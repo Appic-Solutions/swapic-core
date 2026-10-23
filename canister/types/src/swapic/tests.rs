@@ -605,4 +605,9 @@ fn the_arrival_topics_are_the_chains_own() {
         hex(topics::intent_fulfilled()),
         "c471de166a60c0b81727dfa2f57d4fc3ad1b45b057c1f034b7058365613bde8d"
     );
+    // the Arbitrum Portal's funding log, 0x13
+    assert_eq!(
+        hex(topics::intent_funded()),
+        "c1ed05721d27ad6b2555d61388ac393b120f5cc0e6009e53230e02c68e60064a"
+    );
 }

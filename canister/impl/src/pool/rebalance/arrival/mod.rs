@@ -35,7 +35,7 @@ use types::{ChainId, TxHash};
 pub fn step_for<S: Store>(state: &State<S>, found: &Found) -> Option<PoolStep> {
     let open = super::open_moves(state);
     match &found.proof {
-        Proof::Deposit { r#ref, .. } => {
+        Proof::Deposit { r#ref, .. } | Proof::Move { r#ref } => {
             let item = open.into_iter().find(|item| {
                 item.direction == MoveDirection::IcpToBase && move_ref(item.id) == *r#ref
             })?;
@@ -72,7 +72,7 @@ pub fn step_for<S: Store>(state: &State<S>, found: &Found) -> Option<PoolStep> {
 /// yet, or less than all it may carry). Kept out of the deposits' rule, so the move's own
 /// arrival never becomes an orphan before its move closes.
 pub fn waits_for_its_move<S: Store>(state: &State<S>, found: &Found) -> bool {
-    let Proof::Deposit { r#ref, .. } = &found.proof else {
+    let (Proof::Deposit { r#ref, .. } | Proof::Move { r#ref }) = &found.proof else {
         return false;
     };
     super::open_moves(state)
@@ -124,8 +124,7 @@ pub async fn note(
     let mut credited_already = false;
     for one in &found {
         if read_state(|state| state.store().is_pool_credited(&one.credit)) {
-            credited_already |=
-                matches!(&one.proof, Proof::Deposit { r#ref, .. } if *r#ref == move_ref(id));
+            credited_already |= matches!(&one.proof, Proof::Deposit { r#ref, .. } | Proof::Move { r#ref } if *r#ref == move_ref(id));
             continue;
         }
         let Some(step) = read_state(|state| step_for(state, one)) else {

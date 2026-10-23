@@ -13,7 +13,11 @@
 //! - Eco: the Portal's `IntentFulfilled(intentHash)` on Base, and on the source chain (one
 //!   more read) the Portal's `IntentPublished(intentHash)` whose route is
 //!   `USDC.transfer(canister, value)` into the pool chain, beside Swapic's one
-//!   `OrderStarted(ref)`.
+//!   `OrderStarted(ref, payer)`. The intent's hash commits no source chain, so a copy of it
+//!   may be published anywhere (H-02): it is the order's only when its creator is the
+//!   order's payer, its reward the source chain's USDC, and the source Runner funded it in
+//!   full in the same transaction. An intent the canister created is a move's, never a
+//!   deposit.
 //!
 //! No registration (P11d, Jeff 2026-10-21): the canister learns of a deposit only when its
 //! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
@@ -115,6 +119,10 @@ pub struct SourceChain {
     pub chain: ChainId,
     pub swapic: EvmAddress,
     pub eco_portal: Option<EvmAddress>,
+    /// The chain's USDC: an intent's reward.
+    pub usdc: EvmAddress,
+    /// The chain's Runner: an order's funder of its intent.
+    pub runner: EvmAddress,
 }
 
 /// One log as a receipt carries it.
@@ -285,6 +293,9 @@ pub enum Proof {
         r#ref: PoolRef,
         payer: Option<EvmAddress>,
     },
+    /// An Eco fill of an intent the canister created beside its own order under `r#ref`: a
+    /// rebalance move's arrival, never a deposit (H-02).
+    Move { r#ref: PoolRef },
     /// No deposit, for good: kept unattributed.
     Orphan {
         payer: Option<EvmAddress>,
@@ -592,29 +603,60 @@ fn eco(
     if !source.success {
         return unproven("the source transaction reverted");
     }
-    let delivers_here = source
+    let delivering: Vec<swapic::PublishedIntent> = source
         .logs
         .iter()
         .filter(|log| log.is(portal, topics::intent_published()))
         .filter_map(|log| swapic::read_intent_published(&log.topics, &log.data))
         .filter(|intent| fulfilled.contains(&intent.intent_hash))
         .filter(|intent| intent.destination == chain.chain.get())
-        .any(|intent| {
+        .filter(|intent| {
             swapic::route_delivery(&intent.route).is_some_and(|(token, to, value)| {
                 token == chain.usdc
                     && to == chain.canister
                     && TokenAmount::from_be_bytes(value.to_be_bytes()) == amount
             })
-        });
-    if !delivers_here {
+        })
+        .collect();
+    if delivering.is_empty() {
         return unproven("no intent the source published delivers this transfer to the canister");
     }
-    match orders.as_slice() {
-        [(r#ref, payer)] => Ok(Proof::Deposit {
+    let [(r#ref, payer)] = orders.as_slice() else {
+        return unproven("the source transaction holds no single order");
+    };
+    let Some(payer) = *payer else {
+        return unproven("the source order's payer does not read");
+    };
+    // H-02: the intent's hash commits no source chain, so anyone may publish a copy of it
+    // beside an order of their own on any chain Swapic runs on. It is this order's only when
+    // its creator is the order's payer (who alone starts an order under that name, as rule 19
+    // binds them), its reward this chain's USDC, and this chain's Runner funded it in full in
+    // this very transaction
+    let funded = |intent: &[u8; 32]| {
+        source
+            .logs
+            .iter()
+            .filter(|log| log.is(portal, topics::intent_funded()))
+            .filter_map(|log| swapic::read_intent_funded(&log.topics, &log.data))
+            .any(|(hash, funder, complete)| hash == *intent && funder == at.runner && complete)
+    };
+    let bound = delivering.iter().find(|intent| {
+        intent.creator == payer
+            && intent.reward_native.is_zero()
+            && matches!(intent.reward_tokens.as_slice(), [(token, _)] if *token == at.usdc)
+            && funded(&intent.intent_hash)
+    });
+    match bound {
+        // the canister's own order: a move's arrival
+        Some(intent) if intent.creator == chain.canister => Ok(Proof::Move { r#ref: *r#ref }),
+        Some(_) => Ok(Proof::Deposit {
             r#ref: *r#ref,
-            payer: *payer,
+            payer: Some(payer),
         }),
-        _ => unproven("the source transaction holds no single order"),
+        None => unproven(
+            "the intent that delivers this transfer is not the source order's: not its payer's, \
+             not rewarded in the chain's USDC, or not funded in full by its Runner",
+        ),
     }
 }
 
@@ -777,6 +819,15 @@ pub fn steps_for<S: Store>(
         }
         Proof::Orphan { payer, why } if !credited => return Ok(vec![orphan(*payer, why.clone())]),
         Proof::Orphan { .. } => return Ok(Vec::new()),
+        // a move's fill no open move takes: never a deposit's, held for a controller
+        Proof::Move { .. } if !credited => {
+            return Ok(vec![orphan(
+                None,
+                "an Eco fill of an intent the canister created, which no open move takes"
+                    .to_string(),
+            )])
+        }
+        Proof::Move { .. } => return Ok(Vec::new()),
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
         Proof::Refund { .. } if credited => return Ok(Vec::new()),
         Proof::Refund { intents } => {
@@ -1156,17 +1207,15 @@ pub async fn read_found(
     let source = if needs_source(&base, &chain) {
         let (src_chain, src_tx) = source
             .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
-        let swapic = config::get()
-            .evm_chains
-            .get(src_chain)
-            .ok_or_else(|| {
-                PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
-            })?
-            .swapic;
+        let evm = config::get().evm_chains.get(src_chain).ok_or_else(|| {
+            PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
+        })?;
         let at = SourceChain {
             chain: src_chain,
-            swapic,
+            swapic: evm.swapic,
             eco_portal: config::get().eco_portal,
+            usdc: evm.usdc,
+            runner: evm.runner,
         };
         Some((read_source(src_chain, src_tx).await?, at))
     } else {
@@ -1193,17 +1242,15 @@ pub async fn read_and_record(
     let source = if needs_source(&base, &chain) {
         let (src_chain, src_tx) = source
             .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
-        let swapic = config::get()
-            .evm_chains
-            .get(src_chain)
-            .ok_or_else(|| {
-                PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
-            })?
-            .swapic;
+        let evm = config::get().evm_chains.get(src_chain).ok_or_else(|| {
+            PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
+        })?;
         let at = SourceChain {
             chain: src_chain,
-            swapic,
+            swapic: evm.swapic,
             eco_portal: config::get().eco_portal,
+            usdc: evm.usdc,
+            runner: evm.runner,
         };
         Some((read_source(src_chain, src_tx).await?, at))
     } else {

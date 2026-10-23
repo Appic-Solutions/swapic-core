@@ -89,6 +89,9 @@ sol! {
     /// Eco Portal 2.12's refund of an unfilled intent's reward to its creator (the services'
     /// `onchain::eco`, read off its bytecode): the hash in the data, the refundee a topic.
     event IntentRefunded(bytes32 intentHash, address indexed refundee);
+    /// Eco Portal 2.12's funding of an intent's reward (a real Arbitrum receipt's log 0x13,
+    /// `impl/src/pool/arrival/samples`): who funded it, and whether in full.
+    event IntentFunded(bytes32 intentHash, address funder, bool complete);
 
     /// Eco Portal 2.12's intent, as the quoter writes it into a `publishAndFund` step.
     struct EcoCall { address target; bytes data; uint256 value; }
@@ -310,6 +313,10 @@ pub mod topics {
 
     pub fn intent_refunded() -> [u8; 32] {
         IntentRefunded::SIGNATURE_HASH.0
+    }
+
+    pub fn intent_funded() -> [u8; 32] {
+        IntentFunded::SIGNATURE_HASH.0
     }
 }
 
@@ -602,6 +609,22 @@ pub fn read_intent_refunded(topics: &[[u8; 32]], data: &[u8]) -> Option<([u8; 32
     )
     .ok()?;
     Some((event.intentHash.0, evm(event.refundee)))
+}
+
+/// The funded intent's hash, its funder and whether it was funded in full, from an
+/// `IntentFunded` log; None for a log that is not one.
+pub fn read_intent_funded(
+    topics: &[[u8; 32]],
+    data: &[u8],
+) -> Option<([u8; 32], EvmAddress, bool)> {
+    use alloy_sol_types::SolEvent;
+    let event = IntentFunded::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()?;
+    Some((event.intentHash.0, evm(event.funder), event.complete))
 }
 
 /// `token.allowance(owner, spender)`.
