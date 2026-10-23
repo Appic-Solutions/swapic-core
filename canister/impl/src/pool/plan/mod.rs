@@ -135,6 +135,13 @@ pub fn decide(
 ) -> Result<(Order, Option<usize>), Fit> {
     let mut order = swapic::decode_order(&plan.order)
         .ok_or_else(|| Fit::Wait("the plan is not abi.encode of an Order".to_string()))?;
+    // a plan that could only revert undoes the payout, whatever else it says
+    let first = plan::first_minimum(&order);
+    if first > amount {
+        return Err(Fit::Undo(format!(
+            "the plan's first step asks {first}, above the payout's {amount}"
+        )));
+    }
     if !plan::fits(planned, amount) {
         return Err(Fit::Wait(format!(
             "the payout {amount} is more than 5% from the plan's {planned}"
@@ -144,12 +151,6 @@ pub fn decide(
         return Err(Fit::Wait(
             "the plan's order deadline is too close".to_string(),
         ));
-    }
-    let first = plan::first_minimum(&order);
-    if first > amount {
-        return Err(Fit::Undo(format!(
-            "the plan's first step asks {first}, above the payout's {amount}"
-        )));
     }
     let swaps: Vec<usize> = (0..order.steps.len())
         .filter(|at| swapic::selector_of(&order.steps[*at]) == Some(KYBER_SWAP))

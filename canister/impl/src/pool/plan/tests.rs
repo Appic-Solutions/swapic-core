@@ -194,3 +194,14 @@ fn a_scaler_answer_is_read_up_to_its_route_and_no_more() {
     let answer = answer(501_650_000);
     assert!(2 * answer.len() as u64 + 256 < scaled_cap(&route()));
 }
+
+/// The review (2026-10-23): a first step asking more than the payout could only revert, so
+/// it undoes the payout at once, even when the payout is also outside the window.
+#[test]
+fn a_first_minimum_above_the_payout_undoes_even_outside_the_window() {
+    let planned = amount(500_000_000);
+    assert!(matches!(
+        decide(&plan(490_000_001, 1_000), planned, amount(470_000_000), 100),
+        Err(Fit::Undo(_))
+    ));
+}
