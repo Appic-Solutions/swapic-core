@@ -1785,3 +1785,34 @@ fn a_stake_whose_pull_was_lost_is_resolved_once() {
     assert_eq!(pool.ledger.pockets.icp, icp);
     assert_eq!(pool.ledger.total_shares, total);
 }
+
+/// A stake held for a human after its mint kept failing, retried: back to `Arrived` to mint
+/// again, never queued (a stake takes nothing of the ICP pocket), still owed until it mints.
+#[test]
+fn a_held_stake_retried_mints_again() {
+    let mut pool = funded(usdc(1_000));
+    let staked = register(&mut pool, stake(4, usdc(50), TokenAmount::ZERO));
+    pool.step(PoolStep::Arrived {
+        r#ref: staked,
+        credit: credit(4),
+        amount: usdc(50),
+        block: BlockNumber::new(11),
+    })
+    .unwrap();
+    hold(&mut pool, staked);
+    let owed = pool.ledger.owed;
+    pool.step(resolved(staked, DepositResolution::Retry, None))
+        .unwrap();
+    assert_eq!(pool.deposits[&staked].status, DepositStatus::Arrived);
+    assert_eq!(pool.deposits[&staked].payout.failures, 0);
+    assert!(pool.ledger.queue.0.is_empty());
+    assert_eq!(pool.ledger.owed, owed);
+    let shares = pool.ledger.mint_now(usdc(50)).unwrap();
+    pool.step(PoolStep::Minted {
+        r#ref: staked,
+        owner: PoolAccount::Icp(recipient(4)),
+        shares,
+    })
+    .unwrap();
+    assert_eq!(pool.deposits[&staked].status, DepositStatus::Paid);
+}
