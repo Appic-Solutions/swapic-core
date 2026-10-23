@@ -132,7 +132,12 @@ mod stuck_moves {
             .unwrap();
             // three hours on, no ckUSDC: it stops for a controller
             let item = item(id).unwrap();
-            let step = next(&item, at(5 + 3 * 3_600), false);
+            let step = next(
+                &item,
+                at(5 + 3 * 3_600),
+                false,
+                std::time::Duration::from_secs(300),
+            );
             let Next::Stuck(why) = step else {
                 panic!("not stopped: {step:?}");
             };
@@ -186,7 +191,8 @@ mod stuck_moves {
                 .unwrap();
             }
             let item = item(id).unwrap();
-            let Next::Stuck(why) = next(&item, at(10), false) else {
+            let Next::Stuck(why) = next(&item, at(10), false, std::time::Duration::from_secs(300))
+            else {
                 panic!("not stopped after its reverts");
             };
             record_at(PoolStep::MoveStuck { id, why }, at(10)).unwrap();
@@ -213,7 +219,10 @@ mod stuck_moves {
             assert_eq!(item.stuck, None);
             // the order it pinned, signed again once Swapic says it did not run
             assert_eq!(item.order, Some(pinned()));
-            assert_eq!(next(&item, at(12), false), Next::Sign { again: true });
+            assert_eq!(
+                next(&item, at(12), false, std::time::Duration::from_secs(300)),
+                Next::Sign { again: true }
+            );
             // written off: out of the assets
             resolve(
                 false,

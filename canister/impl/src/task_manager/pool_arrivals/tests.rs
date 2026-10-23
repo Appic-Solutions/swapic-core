@@ -467,7 +467,9 @@ fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
             carrying: vec![refund],
             ..FakeBase::default()
         };
-        let first = block_on(backup(&base, &chain, || at(10))).unwrap();
+        // an hour past the route's deadline: its fill can be read
+        let late = |secs: u64| Timestamp::from_secs(1_800_003_600 + secs).unwrap();
+        let first = block_on(backup(&base, &chain, || late(0))).unwrap();
         assert_eq!(first.receipts, 1);
         assert!(
             first.cursor.is_none_or(
@@ -479,7 +481,7 @@ fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
         assert_eq!(payout(id).unwrap().reclaim, None, "nothing credited yet");
         // the fill reads now: the next pass reads the refund again and credits it once
         *base.fill.borrow_mut() = Some(Ok(types::eco::Fill::Open));
-        let second = block_on(backup(&base, &chain, || at(11))).unwrap();
+        let second = block_on(backup(&base, &chain, || late(1))).unwrap();
         assert_eq!(second.receipts, 1, "the refund is read again");
         let refunded = payout(id).unwrap();
         assert_eq!(refunded.status, PayoutStatus::Unfilled);

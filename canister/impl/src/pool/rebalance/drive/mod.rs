@@ -164,10 +164,6 @@ pub enum Next {
     Stuck(String),
 }
 
-/// How long past an Eco route's deadline its fill is first looked for on the Portal: a fill
-/// in its last block is seen first.
-pub const UNFILLED_MARGIN_S: u64 = 300;
-
 /// The fill deadline of the Eco intent `order` (`abi.encode(Order)`) publishes, if it
 /// publishes one.
 pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
@@ -180,8 +176,9 @@ pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
 }
 
 /// The step `item` takes at `now`, pure. `in_flight`: a transaction of it is being signed
-/// or is out.
-pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
+/// or is out; `fill_wait`: how long past an Eco route's deadline its fill is first looked for
+/// on the pool chain (`agreed::fill_wait`, the payouts' own rule).
+pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -> Next {
     if item.stuck.is_some() || item.status.is_final() || in_flight {
         return Next::Wait;
     }
@@ -246,7 +243,7 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
                 .and_then(|order| eco_route_deadline(&order.order));
             match deadline {
                 Some(deadline)
-                    if now.as_secs().get() > deadline.saturating_add(UNFILLED_MARGIN_S) =>
+                    if now.as_secs().get() > deadline.saturating_add(fill_wait.as_secs()) =>
                 {
                     Next::Unfilled
                 }
@@ -290,7 +287,10 @@ pub async fn drive(now: Timestamp) {
             continue;
         };
         let now = now.max(pool::now());
-        let step = next(&item, now, in_flight(item.id));
+        let fill_wait = config::get()
+            .pool_chain
+            .map_or(Duration::ZERO, crate::agreed::fill_wait_on);
+        let step = next(&item, now, in_flight(item.id), fill_wait);
         if step == Next::Wait {
             continue;
         }

@@ -411,7 +411,7 @@ pub async fn backup(
             continue;
         };
         // an Eco refund only once its intent's destination shows it never filled (P11e)
-        let found = crate::pool::arrival::prove_refunds(found, reads).await;
+        let found = crate::pool::arrival::prove_refunds(found, reads, clock()).await;
         if require_not_halted().is_err() {
             return Ok(report);
         }

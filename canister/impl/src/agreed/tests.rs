@@ -108,3 +108,20 @@ fn swapics_used_is_read_only_at_or_after_the_transactions_block() {
     assert_eq!(read_block(at(1_005), depth, at(1_000)), Some(at(1_000)));
     assert_eq!(read_block(at(1_040), depth, at(1_000)), Some(at(1_035)));
 }
+
+/// The last review (item 3): one rule for how long after a time a read for a block past it
+/// waits, whatever reads it (a payout's fill, a move's, a refund's proof): the agreed block
+/// trails the head by the grain and the crediting depth, so that many of the chain's blocks,
+/// and a minute.
+#[test]
+fn a_read_past_a_time_waits_the_grain_and_the_depth_in_the_chains_blocks() {
+    use std::time::Duration;
+    assert_eq!(
+        fill_wait(ChainId::BASE, 1),
+        Duration::from_secs((16 + 1) * 2 + 60)
+    );
+    assert_eq!(
+        fill_wait(ChainId::ETHEREUM, 12),
+        Duration::from_secs((16 + 12) * 12 + 60)
+    );
+}

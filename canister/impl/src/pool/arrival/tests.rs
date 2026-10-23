@@ -1198,7 +1198,8 @@ fn a_refund_whose_route_does_not_parse_is_read_as_the_queue_reads_it() {
             },
         }];
         use std::future::Future;
-        let mut future = std::pin::pin!(prove_refunds(found, &Portal));
+        let late = Timestamp::from_secs(900 + crate::pool::eco::MAX_ROUTE_LIFE_S + 3_600).unwrap();
+        let mut future = std::pin::pin!(prove_refunds(found, &Portal, late));
         let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
         let std::task::Poll::Ready(proven) = future.as_mut().poll(context) else {
             panic!("nothing waits");

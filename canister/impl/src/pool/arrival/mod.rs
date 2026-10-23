@@ -1277,7 +1277,11 @@ pub fn refund_destination<S: Store>(
 /// L-03), or cancelled. A refund of an intent the destination shows filled is
 /// held for a human; one whose fill was not read waits for a read that comes back. A refund
 /// that names no intent a payout or a move took is left to the fold's own rule.
-pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec<Found> {
+pub async fn prove_refunds(
+    mut found: Vec<Found>,
+    reads: &impl FillReads,
+    now: Timestamp,
+) -> Vec<Found> {
     for one in found.iter_mut() {
         let Proof::Refund { intents } = &one.proof else {
             continue;
@@ -1296,6 +1300,13 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
                 unreadable = true;
                 continue;
             };
+            // read only once a block every node agrees on can be past the deadline, the
+            // payouts' own rule (`agreed::fill_wait`): before it the read is too early
+            let ready = deadline.saturating_add(crate::agreed::fill_wait_on(destination).as_secs());
+            if now.as_secs().get() < ready {
+                unread = Some(format!("too early: its fill is read from {ready}"));
+                continue;
+            }
             match reads.fill(destination, intent, deadline).await {
                 Ok(types::eco::Fill::Open | types::eco::Fill::Cancelled) => proven.push(intent),
                 Ok(types::eco::Fill::Filled) => filled = true,
@@ -1360,7 +1371,7 @@ pub async fn read_found(
         &chain,
     )
     .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
-    Ok(prove_refunds(found, &LivePortal).await)
+    Ok(prove_refunds(found, &LivePortal, pool::now()).await)
 }
 
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival), proves every
