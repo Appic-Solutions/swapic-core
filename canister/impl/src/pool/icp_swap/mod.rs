@@ -387,7 +387,7 @@ pub async fn swap_from_icp(
         )
         .await
         {
-            crate::pool::plan::sign_fitted(&busy, id, fitted).await;
+            crate::pool::plan::sign_fitted(&busy, id, fitted, now).await;
         }
     }
     match pool_store::payout(id) {

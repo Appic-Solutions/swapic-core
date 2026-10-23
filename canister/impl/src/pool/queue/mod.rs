@@ -343,7 +343,7 @@ pub async fn pass_with(
                     acted += 1;
                     // a planned swap whose amount this drive learnt: its plan, fitted
                     if let Some(fitted) = fitted {
-                        crate::pool::plan::sign_fitted(&_busy, id, fitted).await;
+                        crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
                     }
                 }
                 Err(Stop::Retry(why)) | Err(Stop::Append(why)) => {
@@ -355,7 +355,7 @@ pub async fn pass_with(
             Next::Fit => match icp_swap::refit(ledgers, id, clock, guard).await {
                 Ok(Some(fitted)) => {
                     acted += 1;
-                    crate::pool::plan::sign_fitted(&_busy, id, fitted).await;
+                    crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
                 }
                 Ok(None) => {}
                 Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),

@@ -1271,3 +1271,41 @@ fn a_plan_whose_scaler_read_failed_is_tried_again_and_fits() {
         );
     });
 }
+
+/// The review (2026-10-24): a plan that fits but whose signature is refused (a halt, the gas
+/// rule, a stale reading) counts as a try, so the pass refits it at most `MAX_FIT_TRIES`
+/// times, each with its scaler read, then leaves it to the watcher's relist.
+#[test]
+fn a_fitted_plan_whose_signature_is_refused_counts_a_try() {
+    use types::pool::payout::MAX_FIT_TRIES;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let order = plan_order(ckusdc_payout(), usdc(1));
+        let id = open_planned(&planned(ckusdc(), usdc(100), &order));
+        let fake = Fake::default();
+        crate::storage::halt::set_halted(true);
+        let busy = Busy::take(evm_payout_ref(id).into_bytes()).unwrap();
+        let fitted = block_on(drive(&fake, id, clock, &open_pool))
+            .unwrap()
+            .expect("the plan fits");
+        assert!(!block_on(crate::pool::plan::sign_fitted(
+            &busy, id, fitted, clock
+        )));
+        assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
+        for tries in 2..=MAX_FIT_TRIES {
+            let fitted = block_on(refit(&fake, id, clock, &open_pool))
+                .unwrap()
+                .expect("the plan fits");
+            assert!(!block_on(crate::pool::plan::sign_fitted(
+                &busy, id, fitted, clock
+            )));
+            assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(tries));
+        }
+        // its tries spent: never refitted again, the watcher's order it waits for
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+        assert!(!crate::pool::queue::refittable(&payout, clock()));
+        assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+    });
+}
