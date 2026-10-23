@@ -31,7 +31,7 @@ use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use types::eco::Fill;
 use types::events::TxPurpose;
-use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus};
+use types::pool::payout::{EvmPayout, PayoutKind, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
 use types::{BlockNumber, ChainId, Timestamp};
 
@@ -48,6 +48,8 @@ pub enum Next {
     Drive,
     /// Listed again: it waited `order_wait` with no order.
     Relist,
+    /// A planned swap's plan tried again: an earlier try waited.
+    Fit,
     /// Undone; `checked`: it was signed once, so only once its transaction is closed for good
     /// and Swapic says its order never ran.
     Undo { why: String, checked: bool },
@@ -93,6 +95,7 @@ pub fn next(
             why: "past its deadline".to_string(),
             checked: payout.order.is_some(),
         },
+        PayoutStatus::Waiting if refittable(payout, now) => Next::Fit,
         PayoutStatus::Waiting => {
             let since = payout.waiting_since.unwrap_or(payout.opened_at);
             if now.saturating_duration_since(since) >= settings.order_wait {
@@ -168,6 +171,28 @@ fn in_flight(id: u64) -> bool {
 
 /// Why a reverted payout is undone.
 pub const REVERTED: &str = "its transaction reverted";
+
+/// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): never
+/// signed, tries left, and it can still fit: its payout within the plan's window, the plan's
+/// order deadline at least `ORDER_MARGIN_S` ahead.
+pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
+    let (PayoutKind::IcpSwap(terms), Some(plan), Some(amount)) =
+        (payout.kind, payout.plan.as_ref(), payout.amount)
+    else {
+        return false;
+    };
+    let Some(planned) = terms.planned else {
+        return false;
+    };
+    payout.order.is_none()
+        && payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
+        && types::pool::plan::fits(planned, amount)
+        && plan.deadline_s
+            >= now
+                .as_secs()
+                .get()
+                .saturating_add(crate::pool::pay::ORDER_MARGIN_S)
+}
 
 /// Why a payout whose Eco intent never filled is undone.
 pub const UNFILLED: &str = "its Eco intent was not filled";
@@ -298,6 +323,14 @@ pub async fn pass_with(
                 Err(stop) => log(&format!("the pool payout {id} stopped: {stop:?}")),
             },
             Next::Relist => acted += usize::from(record(PoolStep::PayoutRelisted { id }, now)),
+            Next::Fit => match icp_swap::refit(ledgers, id, clock, guard).await {
+                Ok(Some(fitted)) => {
+                    acted += 1;
+                    crate::pool::plan::sign_fitted(&_busy, id, fitted).await;
+                }
+                Ok(None) => {}
+                Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
+            },
             Next::Stop(why) => {
                 log(&format!("the pool payout {id}: {why}"));
                 acted += usize::from(record(PoolStep::PayoutStopped { id, why }, now));

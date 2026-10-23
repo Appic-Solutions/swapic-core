@@ -1510,3 +1510,72 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
         "{split:?}"
     );
 }
+
+/// The review (2026-10-23): a scaler read that fails once does not give up the fast path.
+/// The swap answers `Waiting`; the payout timer tries the plan again, the scaler answers, and
+/// the canister signs the rewritten plan itself.
+#[test]
+fn a_plan_whose_scaler_read_failed_once_is_signed_by_the_next_pass() {
+    use pocket_ic::common::rest::{
+        CanisterHttpReject, CanisterHttpResponse, MockCanisterHttpResponse,
+    };
+    use settlement_api::types::pool::{PayoutStatus, PayoutView, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
+    let deadline_s = world.now().as_secs().get() + 600;
+    let terms = swap_terms(
+        &world,
+        PAYS_501_65,
+        kyber_plan(canister_address, deadline_s),
+        900_000,
+    );
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(terms).unwrap(),
+        )
+        .expect("submitted");
+    // the scaler's read fails
+    let request = world.next_outcall(&["eth_call"]);
+    world
+        .pic
+        .mock_canister_http_response(MockCanisterHttpResponse {
+            subnet_id: request.subnet_id,
+            request_id: request.request_id,
+            response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+                reject_code: 2,
+                message: "the provider is unreachable".to_string(),
+            }),
+            additional_responses: vec![],
+        });
+    let raw = world.pic.await_call(call).expect("the swap answers");
+    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    // the payout timer tries the plan again: the read answers this time
+    world.pic.advance_time(Duration::from_secs(61));
+    world.push_reading();
+    let request = world.next_outcall(&["eth_call"]);
+    world.reply(
+        &request,
+        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+        false,
+    );
+    world.settle();
+    let view: Option<PayoutView> = query(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "payout",
+        encode_one(swapped.id).unwrap(),
+    );
+    assert!(matches!(
+        view.expect("the payout is there").status,
+        PayoutStatus::Signed(_)
+    ));
+    assert!(world.replay_matches());
+}

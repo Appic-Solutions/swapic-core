@@ -1213,3 +1213,61 @@ fn a_plan_whose_first_minimum_is_above_the_payout_undoes_at_once() {
         );
     });
 }
+
+/// The review (2026-10-23): a scaler read that failed once does not give up the fast path.
+/// The try is counted in the payout, the plan is tried again, and fits; after the last try,
+/// no read is made any more.
+#[test]
+fn a_plan_whose_scaler_read_failed_is_tried_again_and_fits() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(600));
+        let id = open_planned(&planned(
+            ckusdc(),
+            TokenAmount::from(PAYS_501_65),
+            &swap_plan(),
+        ));
+        let fake = Fake::default();
+        *fake.scaled.borrow_mut() = Some(Err("the scaler's read: Unreachable".to_string()));
+        assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
+        // tried again: the read answers now
+        *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
+        let fitted = block_on(refit(&fake, id, clock, &open_pool))
+            .unwrap()
+            .expect("the plan fits");
+        assert_eq!(
+            fitted.order.amountIn,
+            alloy_primitives::U256::from(501_650_000_u64)
+        );
+        assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
+        // two more failed tries: the last; then nothing is read any more
+        *fake.scaled.borrow_mut() = Some(Err("the scaler's read: Unreachable".to_string()));
+        for _ in 0..2 {
+            assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+        }
+        assert_eq!(
+            pool_store::payout(id).unwrap().fit_tries,
+            Some(types::pool::payout::MAX_FIT_TRIES)
+        );
+        let reads = fake
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call.starts_with("scale"))
+            .count();
+        assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert_eq!(
+            fake.calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with("scale"))
+                .count(),
+            reads
+        );
+        assert_eq!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Waiting
+        );
+    });
+}

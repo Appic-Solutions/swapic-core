@@ -812,6 +812,7 @@ impl PoolLedger {
             | PoolStep::PayoutDelivered { .. }
             | PoolStep::PayoutUnfilled { .. }
             | PoolStep::PayoutResolved { .. }
+            | PoolStep::PayoutFitWaited { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }
@@ -1287,6 +1288,7 @@ impl PoolLedger {
             | PoolStep::PayoutDelivered { .. }
             | PoolStep::PayoutUnfilled { .. }
             | PoolStep::PayoutResolved { .. }
+            | PoolStep::PayoutFitWaited { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }

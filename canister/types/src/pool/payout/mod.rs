@@ -200,6 +200,10 @@ pub enum PayoutStatus {
     Unfilled,
 }
 
+/// The most times a planned swap's plan is tried before its payout is left to the watcher's
+/// order (2026-10-23): a scaler read that failed once does not give up the fast path.
+pub const MAX_FIT_TRIES: u8 = 3;
+
 /// Why a payout a controller refunded is undone.
 pub const REFUNDED: &str = "refunded by a controller";
 
@@ -322,6 +326,10 @@ pub struct EvmPayout {
     /// A planned ICP swap's payout plan as the user handed it in (`amountIn` = `planned`).
     #[n(21)]
     pub plan: Option<PinnedOrder>,
+    /// How many times its plan was tried and waited (a failed scaler read, a refused check),
+    /// at most [`MAX_FIT_TRIES`]: none, never.
+    #[n(22)]
+    pub fit_tries: Option<u8>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -390,6 +398,7 @@ impl EvmPayout {
             icp_released: Flag(false),
             reclaim: None,
             plan: None,
+            fit_tries: None,
         }
     }
 

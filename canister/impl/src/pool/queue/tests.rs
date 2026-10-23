@@ -977,3 +977,40 @@ fn the_pass_finishes_a_withdrawals_undo() {
         }
     );
 }
+
+/// The review (2026-10-23): a planned payout whose plan waited is tried again by the pass
+/// while it can still fit (within the window, its order's deadline ahead) and has tries left;
+/// otherwise it waits for the watcher's order as before.
+#[test]
+fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
+    let settings = PayoutSettings::default();
+    let mut planned = payout_in(PayoutStatus::Waiting, secs(10_000));
+    if let PayoutKind::IcpSwap(terms) = &mut planned.kind {
+        terms.planned = Some(usdc(100));
+        terms.slippage_bps = Some(100);
+    }
+    planned.amount = Some(usdc(101));
+    planned.plan = Some(PinnedOrder {
+        order_id: [3; 32],
+        order: vec![3],
+        gas_limit: 300_000,
+        deadline_s: 2_000,
+    });
+    planned.fit_tries = Some(1);
+    let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false);
+    assert_eq!(decide(&planned, secs(60)), Next::Fit);
+    // its tries spent
+    let mut spent = planned.clone();
+    spent.fit_tries = Some(types::pool::payout::MAX_FIT_TRIES);
+    assert_eq!(decide(&spent, secs(60)), Next::Wait);
+    // outside the window
+    let mut far = planned.clone();
+    far.amount = Some(usdc(106));
+    assert_eq!(decide(&far, secs(60)), Next::Wait);
+    // its order's deadline under a minute away
+    assert_eq!(decide(&planned, secs(1_941)), Next::Relist);
+    // signed once: never tried again
+    let mut signed = planned.clone();
+    signed.order = Some(planned.plan.clone().unwrap());
+    assert_eq!(decide(&signed, secs(60)), Next::Wait);
+}

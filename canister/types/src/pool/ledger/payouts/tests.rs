@@ -1668,3 +1668,52 @@ fn a_planned_open_refused_reports_the_free_line_it_checked() {
         Err(PoolStepError::BaseShort { free: reported, .. }) if reported == free
     ));
 }
+
+fn fit_waited(id: u64) -> PoolStep {
+    PoolStep::PayoutFitWaited {
+        id,
+        why: "the scaler's read: Unreachable".to_string(),
+    }
+}
+
+/// The review (2026-10-23): a planned payout's plan is tried at most three times in all,
+/// each try that waits counted in the payout; only while it waits with its plan, never
+/// signed; and a try moves no line.
+#[test]
+fn a_plan_is_tried_at_most_three_times() {
+    let token = candid::Principal::from_slice(&[0x31; 10]);
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x64, 1);
+    let id = open_planned(
+        &mut pool,
+        planned_swap(token, usdc(1), usdc(10)),
+        plan_for(usdc(10)),
+    )
+    .unwrap();
+    // not before it waits
+    assert!(pool.step(fit_waited(id)).is_err());
+    let received = usdc(10);
+    let amount = crate::pool::plan::payout_of(
+        pool.ledger.settings.as_ref().unwrap(),
+        received,
+        TokenAmount::from(50_000_u32),
+    )
+    .unwrap();
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(received),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    let before = pool.ledger.clone();
+    for tries in 1..=crate::pool::payout::MAX_FIT_TRIES {
+        pool.step(fit_waited(id)).unwrap();
+        assert_eq!(pool.payouts[&id].fit_tries, Some(tries));
+    }
+    assert!(pool.step(fit_waited(id)).is_err());
+    assert_eq!(pool.ledger, before);
+    // a payout with no plan is never tried
+    let (kind, undo) = withdrawal(&pool, usdc(1_000), 61);
+    let other = open(&mut pool, kind, undo);
+    assert!(pool.step(fit_waited(other)).is_err());
+}

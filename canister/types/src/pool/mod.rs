@@ -1736,6 +1736,16 @@ pub enum PoolStep {
         #[n(2)]
         refund_at: Option<Timestamp>,
     },
+    /// A planned swap's plan was tried and waits, with why (a scaler read that failed, a
+    /// check that refused it): tried again while it can still fit, at most
+    /// `MAX_FIT_TRIES` times in all.
+    #[n(46)]
+    PayoutFitWaited {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -2026,6 +2036,7 @@ impl PoolStep {
             PoolStep::PayoutDelivered { .. } => "PayoutDelivered",
             PoolStep::PayoutUnfilled { .. } => "PayoutUnfilled",
             PoolStep::PayoutResolved { .. } => "PayoutResolved",
+            PoolStep::PayoutFitWaited { .. } => "PayoutFitWaited",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",

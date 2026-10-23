@@ -386,6 +386,19 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            // a planned swap's try that waits: while it waits with its plan, never signed, at
+            // most `MAX_FIT_TRIES` times
+            PoolStep::PayoutFitWaited { id, .. } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Waiting
+                    || payout.plan.is_none()
+                    || payout.order.is_some()
+                    || payout.fit_tries.unwrap_or(0) >= crate::pool::payout::MAX_FIT_TRIES
+                {
+                    return Err(not_from("PayoutFitWaited", &payout));
+                }
+                Ok(())
+            }
             // its Eco intent read past the route's deadline: filled, or never
             PoolStep::PayoutDelivered { id, .. } | PoolStep::PayoutUnfilled { id, .. } => {
                 let payout = payout_of(*id)?;
@@ -738,6 +751,12 @@ impl PoolLedger {
             PoolStep::PayoutDelivered { id, .. } => {
                 let mut payout = lookup.payout(*id)?;
                 paid(&mut ledger, &mut lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            // counted, nothing moves
+            PoolStep::PayoutFitWaited { id, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.fit_tries = Some(payout.fit_tries.unwrap_or(0).saturating_add(1));
                 effects.payout = Some(payout);
             }
             // back on its undo, its refund under the door's instant; or paid, from where a

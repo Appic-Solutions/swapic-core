@@ -458,20 +458,14 @@ pub async fn drive(
             placed = true;
             continue;
         }
-        // a planned swap placed by this drive: its plan fitted to its exact amount, once
+        // a planned swap placed by this drive: its plan fitted to its exact amount (a try
+        // that waits is counted; the pass tries again while it can still fit)
         if placed && payout.status == PayoutStatus::Waiting && is_planned(&payout) {
             placed = false;
-            match crate::pool::plan::fit(ledgers, &payout, clock()).await {
-                Fit::Sign(fitted) => return Ok(open(guard).is_ok().then_some(*fitted)),
-                Fit::Wait(why) => {
-                    pool::log(&format!("the pool payout {id} waits for an order: {why}"));
-                    return Ok(None);
-                }
-                // it could only revert: the user's ckUSDC back at once
-                Fit::Undo(why) => {
-                    undo(id, why, clock())?;
-                    continue;
-                }
+            match try_plan(ledgers, &payout, clock, guard).await? {
+                Tried::Sign(fitted) => return Ok(Some(*fitted)),
+                Tried::Waits => return Ok(None),
+                Tried::Undone => continue,
             }
         }
         if !payout.is_icp_swap() {
@@ -491,6 +485,67 @@ pub async fn drive(
 
 fn is_planned(payout: &EvmPayout) -> bool {
     matches!(payout.kind, PayoutKind::IcpSwap(terms) if terms.is_planned())
+}
+
+/// What one try of a waiting planned swap's plan did.
+enum Tried {
+    /// It fits: the order to sign.
+    Sign(Box<Fitted>),
+    /// It waits, the try counted.
+    Waits,
+    /// It could only revert: its undo began.
+    Undone,
+}
+
+/// One try of `payout`'s plan: fitted (the pool's guard open), or the try counted with why
+/// it waits, or the undo begun of a plan that could only revert.
+async fn try_plan(
+    reads: &impl PlanReads,
+    payout: &EvmPayout,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> Result<Tried, Stop> {
+    let id = payout.id;
+    let why = match crate::pool::plan::fit(reads, payout, clock()).await {
+        Fit::Sign(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(fitted)),
+        Fit::Sign(_) => "the pool is closed".to_string(),
+        Fit::Wait(why) => why,
+        // the user's ckUSDC back at once
+        Fit::Undo(why) => {
+            undo(id, why, clock())?;
+            return Ok(Tried::Undone);
+        }
+    };
+    pool::log(&format!("the pool payout {id} waits for an order: {why}"));
+    // counted, at most `MAX_FIT_TRIES` in all: a refused line only means none is left
+    let _ = pool_store::record_at(PoolStep::PayoutFitWaited { id, why }, clock());
+    Ok(Tried::Waits)
+}
+
+/// A waiting planned swap's plan tried again (the pass, after a try that waited): the order
+/// to sign if it fits now, its refund at once if it could only revert, nothing once its tries
+/// are spent or it was signed.
+pub async fn refit(
+    ledgers: &(impl Ledgers + PlanReads),
+    id: u64,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> Result<Option<Fitted>, Stop> {
+    let Some(payout) = pool_store::payout(id) else {
+        return Ok(None);
+    };
+    if payout.status != PayoutStatus::Waiting
+        || !is_planned(&payout)
+        || payout.order.is_some()
+        || payout.fit_tries.unwrap_or(0) >= types::pool::payout::MAX_FIT_TRIES
+    {
+        return Ok(None);
+    }
+    match try_plan(ledgers, &payout, clock, guard).await? {
+        Tried::Sign(fitted) => Ok(Some(*fitted)),
+        Tried::Waits => Ok(None),
+        Tried::Undone => drive(ledgers, id, clock, guard).await,
+    }
 }
 
 /// Why a planned swap the Base pocket cannot pay any more is undone.

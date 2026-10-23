@@ -638,7 +638,59 @@ fn samples() -> Vec<Sample> {
     ));
     all.extend(deposit_tier_samples());
     all.extend(timer_state_samples());
+    all.extend(fit_retry_samples());
     all
+}
+
+/// A planned payout's tries of its plan (2026-10-23): the payout counting them, and the line
+/// of a try that waits.
+fn fit_retry_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, PayoutKind, PayoutTerms, Undo};
+    use crate::pool::{EvmWithdrawal, PoolAccount, PoolStep, Shares};
+    let staker = crate::evm::EvmAddress::new([0xf3; 20]);
+    let mut payout = EvmPayout::new(
+        1_601,
+        PayoutKind::Withdrawal(EvmWithdrawal {
+            staker,
+            usdc: TokenAmount::from(1_602_000_000_u64),
+            max_shares: Shares::new(1_603 << 64),
+            rebalance_share: TokenAmount::from(1_604_u64),
+            network_fee: TokenAmount::from(1_605_u64),
+            nonce: 1_606,
+            burned: Shares::new(1_607 << 64),
+        }),
+        PayoutTerms {
+            dst_chain: ChainId::BASE,
+            recipient: staker,
+            token_out: crate::evm::EvmAddress::new([0xf4; 20]),
+            min_out: TokenAmount::from(1_608_u64),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_001_609),
+        },
+        Undo::Remint {
+            owner: PoolAccount::Evm(staker),
+            shares: Shares::new(1_607 << 64),
+        },
+        Timestamp::from_nanos(1_800_000_000_000_001_610),
+    );
+    payout.fit_tries = Some(2);
+    vec![
+        sample("payout counting its plan's tries", payout),
+        sample(
+            "payout plan tried and waiting",
+            Event::seal(
+                EventIndex::new(16_000),
+                Timestamp::from_nanos(1_800_000_000_000_001_611),
+                EventHash::new([0xf5; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::PayoutFitWaited {
+                        id: 1_601,
+                        why: "the scaler's read: Unreachable".to_string(),
+                    },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// A controller's answer to a payout stopped for a human (`resolve_payout`, 2026-10-23).
@@ -2239,6 +2291,7 @@ fn payout_samples() -> Vec<Sample> {
         icp_released: crate::pool::payout::Flag(false),
         reclaim: None,
         plan: None,
+        fit_tries: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
