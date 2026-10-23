@@ -1640,3 +1640,31 @@ fn a_base_payout_stopped_before_its_amount_is_known_resolves_with_every_line_as_
     assert_eq!(pool.ledger.lines().queue_len, 0);
     assert_eq!(pool.ledger.lines().fees_icp, before.lines().fees_icp);
 }
+
+/// The review (2026-10-23): a planned opening refused for the Base pocket reports the line it
+/// checked, the pocket's free USDC, not what is left of it behind the queue.
+#[test]
+fn a_planned_open_refused_reports_the_free_line_it_checked() {
+    let token = candid::Principal::from_slice(&[0x31; 10]);
+    let pool = with_base(funded(usdc(1_000)), usdc(100), 0x63, 1);
+    let mut pool = with_icp_for_staker(pool, usdc(3_000));
+    // a withdrawal the pocket cannot cover queues
+    let (kind, undo) = withdrawal(&pool, usdc(1_000), 51);
+    let PayoutKind::Withdrawal(w) = kind else {
+        unreachable!()
+    };
+    let queued = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id: queued,
+        amount: w.payout_amount().unwrap(),
+        received: None,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutQueued { id: queued }).unwrap();
+    assert!(pool.ledger.lines().queued > TokenAmount::ZERO);
+    let free = pool.ledger.pockets.base.free;
+    assert!(matches!(
+        open_planned(&mut pool, planned_swap(token, usdc(1), usdc(10)), plan_for(usdc(10))),
+        Err(PoolStepError::BaseShort { free: reported, .. }) if reported == free
+    ));
+}

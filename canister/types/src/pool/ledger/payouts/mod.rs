@@ -128,7 +128,7 @@ impl PoolLedger {
         }
         if self.lines().queue_len > 0 || need > self.pockets.base.free {
             return Err(PoolStepError::BaseShort {
-                free: self.base_available(),
+                free: self.pockets.base.free,
                 need,
             });
         }
