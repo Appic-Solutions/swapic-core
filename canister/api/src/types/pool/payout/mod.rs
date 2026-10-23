@@ -92,6 +92,15 @@ pub enum PayoutStatus {
     Failed(String),
 }
 
+/// A controller's answer to a payout stopped for a human (`resolve_payout`): its money back to
+/// its user (an ICP swap's refund, a withdrawal's shares minted back), or its signed order
+/// found paid.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayoutResolution {
+    Refund,
+    MarkPaid,
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PayoutView {
     pub id: u64,

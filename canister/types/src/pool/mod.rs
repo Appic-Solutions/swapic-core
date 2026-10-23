@@ -22,8 +22,8 @@ pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 
 pub use payout::{
     evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse,
-    Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutSettings, PayoutSettingsError,
-    PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
+    Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutResolution, PayoutSettings,
+    PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
 };
 
 pub use rebalance::{
@@ -1688,6 +1688,19 @@ pub enum PoolStep {
         #[n(1)]
         block: BlockNumber,
     },
+    /// A controller resolved a payout stopped for a human (`resolve_payout`): `Refund` puts
+    /// it back on its undo (an ICP swap's refund asked next, under `refund_at`, the dedup
+    /// instant the door chose; a withdrawal's shares minted back with `PayoutUndone` next, in
+    /// the same call), `MarkPaid` books its paid line, once.
+    #[n(45)]
+    PayoutResolved {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        resolution: PayoutResolution,
+        #[n(2)]
+        refund_at: Option<Timestamp>,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -1977,6 +1990,7 @@ impl PoolStep {
             PoolStep::PayoutRefunded { .. } => "PayoutRefunded",
             PoolStep::PayoutDelivered { .. } => "PayoutDelivered",
             PoolStep::PayoutUnfilled { .. } => "PayoutUnfilled",
+            PoolStep::PayoutResolved { .. } => "PayoutResolved",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
@@ -2081,6 +2095,7 @@ impl PoolStep {
                 | PoolStep::PayoutUndone { .. }
                 | PoolStep::PayoutRefunded { .. }
                 | PoolStep::PayoutUnfilled { .. }
+                | PoolStep::PayoutResolved { .. }
                 | PoolStep::Minted { .. }
         )
     }

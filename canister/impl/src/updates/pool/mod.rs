@@ -5,9 +5,9 @@ use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 pub use settlement_api::types::pool::{
-    EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutSettings,
-    PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings, StakeIcpArgs,
-    StakeIcpOk, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
+    EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutResolution,
+    PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings,
+    StakeIcpArgs, StakeIcpOk, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -139,6 +139,23 @@ pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolErr
 #[update]
 pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolError> {
     pool::icp_swap::swap_from_icp(terms, is_sanctioned).await
+}
+
+/// Controller-only, refused while halted (Jeff, 2026-10-23): a payout stopped for a human
+/// (`Failed`), resolved once. `Refund`: back on its undo, an ICP swap's refund asked next (all
+/// its ckUSDC less one ledger fee, or its token), a withdrawal's shares minted back at once;
+/// the controller checked no refund went out before. `MarkPaid`: its signed order ran after
+/// all, and its paid line is booked.
+#[update]
+pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    pool::resolve::resolve(
+        is_halted(),
+        ic_cdk::api::is_controller(&caller),
+        id,
+        resolution,
+        pool::now(),
+    )
 }
 
 /// Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's

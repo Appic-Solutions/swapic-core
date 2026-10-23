@@ -75,6 +75,11 @@ pub fn next(
         PayoutStatus::Opened if now.saturating_duration_since(payout.opened_at) >= DEDUP_WINDOW => {
             Next::Stop("ALERT: the pull's outcome can no longer be asked for".to_string())
         }
+        // a withdrawal's undo needs no ledger: its shares come back at once
+        PayoutStatus::Undoing(why) if !payout.is_icp_swap() => Next::Undo {
+            why: why.clone(),
+            checked: false,
+        },
         PayoutStatus::Opened | PayoutStatus::Swapping | PayoutStatus::Undoing(_) => Next::Drive,
         // the place in the queue is the serve's to change; the deadline undoes it
         PayoutStatus::Known | PayoutStatus::Queued if late => Next::Undo {

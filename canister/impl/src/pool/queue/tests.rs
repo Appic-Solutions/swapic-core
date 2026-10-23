@@ -855,3 +855,125 @@ fn the_split_and_the_books_leave_an_eco_payouts_usdc_in_flight_out() {
         assert_eq!(left_out(), signed, "unfilled");
     });
 }
+
+/// `resolve_payout` (2026-10-23): an ICP swap stopped for a human (its order ran after its
+/// revert, as `used` read it), refunded by a controller: the pass asks its refund at once, all
+/// its ckUSDC less the ledger's fee, under the pool's guard, and it is undone once.
+#[test]
+fn a_stopped_icp_swap_a_controller_refunds_is_refunded_by_the_pass() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+            at(1),
+        )
+        .unwrap();
+        record_at(
+            PoolStep::SettingsSet {
+                settings: types::pool::PoolSettings {
+                    open_for_swaps: true,
+                    ledger_fees: vec![types::pool::LedgerFee {
+                        ledger: ckusdc(),
+                        fee: TokenAmount::from(FEE),
+                    }],
+                    ..types::pool::PoolSettings::default()
+                },
+            },
+            at(1),
+        )
+        .unwrap();
+        base_stake(staker(), usdc(500), 0x7b, 1);
+        let before = ledger();
+        let id = ledger().lines().next_id;
+        let swap = IcpSwapTerms {
+            token_in: ckusdc(),
+            amount_in: usdc(100),
+            from: account(5),
+            min_usdc: usdc(100),
+            premium: usdc(1),
+            network_fee: TokenAmount::from(50_000_u32),
+            refund_to: account(6),
+            slippage_bps: None,
+            planned: None,
+        };
+        record_at(
+            PoolStep::PayoutOpened {
+                id,
+                kind: Box::new(PayoutKind::IcpSwap(swap)),
+                terms: terms(at(1_000_000_000_000)),
+                undo: Undo::Refund { to: account(6) },
+                plan: None,
+            },
+            at(2),
+        )
+        .unwrap();
+        let fake = Fake::default();
+        block_on(icp_swap::drive(&fake, id, || at(3), &open_pool)).unwrap();
+        sign_payout(id, 0, 9);
+        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        // the pass reads `used` true: stopped for a human, its lines held
+        block_on(pass_with(&fake, &Reads::ran(true), || at(11), &open_pool));
+        assert!(matches!(
+            payout(id).unwrap().status,
+            PayoutStatus::Failed(_)
+        ));
+        // a pool closed meanwhile pays nothing: the refund waits for the guard
+        crate::pool::resolve::resolve(
+            false,
+            true,
+            id,
+            settlement_api::types::pool::PayoutResolution::Refund,
+            at(12),
+        )
+        .unwrap();
+        let closed = || Err("closed".to_string());
+        block_on(pass_with(&fake, &Reads::unread(), || at(13), &closed));
+        assert!(fake.transfers.borrow().is_empty());
+        block_on(pass_with(&fake, &Reads::unread(), || at(14), &open_pool));
+        assert_eq!(
+            *fake.transfers.borrow(),
+            vec![(
+                ckusdc(),
+                account(6),
+                usdc(100).checked_sub(TokenAmount::from(FEE)).unwrap()
+            )]
+        );
+        assert_eq!(
+            payout(id).unwrap().status,
+            PayoutStatus::Undone(types::pool::payout::REFUNDED.to_string())
+        );
+        let after = ledger();
+        assert_eq!(after.pockets, before.pockets);
+        assert_eq!(after.owed, before.owed);
+        assert_eq!(after.lines().fees_icp, TokenAmount::ZERO);
+        // once
+        block_on(pass_with(&fake, &Reads::unread(), || at(15), &open_pool));
+        assert_eq!(fake.transfers.borrow().len(), 1);
+    });
+}
+
+/// A withdrawal whose undo began (a controller's refund whose remint did not land in its own
+/// call) is minted back by the pass: no ledger is asked.
+#[test]
+fn the_pass_finishes_a_withdrawals_undo() {
+    let mut withdrawal = payout_in(PayoutStatus::Undoing("refunded".to_string()), secs(10_000));
+    withdrawal.kind = PayoutKind::Withdrawal(types::pool::EvmWithdrawal {
+        staker: staker(),
+        usdc: usdc(10),
+        max_shares: types::pool::Shares::new(1),
+        rebalance_share: TokenAmount::ZERO,
+        network_fee: TokenAmount::ZERO,
+        nonce: 1,
+        burned: types::pool::Shares::new(1),
+    });
+    assert_eq!(
+        next(&withdrawal, &PayoutSettings::default(), secs(1), false),
+        Next::Undo {
+            why: "refunded".to_string(),
+            checked: false
+        }
+    );
+}

@@ -593,6 +593,10 @@ type Outcome = variant { Failed; Confirmed };
 // `pay_payout`'s answer: the signed transaction's id in `signed_txs`.
 type PayPayoutOk = record { tx_id : nat64 };
 type PayoutKind = variant { IcpSwap; Withdrawal };
+// A controller's answer to a payout stopped for a human (`resolve_payout`): its money back to
+// its user (an ICP swap's refund, a withdrawal's shares minted back), or its signed order
+// found paid.
+type PayoutResolution = variant { MarkPaid; Refund };
 // The payout plan (2026-10-23): the quoter's ready-made Swapic order for the expected
 // payout (its `amountIn`), as `abi.encode(order)`, and the gas it is signed with, as
 // `pay_payout` takes them. Its one delivery names the chain, the recipient, the token and
@@ -1351,6 +1355,12 @@ service : (InitArg) -> {
   // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
   // never ran asked again; a wait read again), or written off with why (`Lost`).
   resolve_move : (nat64, MoveResolution) -> (Result_9);
+  // Controller-only, refused while halted (Jeff, 2026-10-23): a payout stopped for a human
+  // (`Failed`), resolved once. `Refund`: back on its undo, an ICP swap's refund asked next (all
+  // its ckUSDC less one ledger fee, or its token), a withdrawal's shares minted back at once;
+  // the controller checked no refund went out before. `MarkPaid`: its signed order ran after
+  // all, and its paid line is booked.
+  resolve_payout : (nat64, PayoutResolution) -> (Result_9);
   // Controller-only, refused while halted (Jeff, 2026-10-19: orphans are ALWAYS held for a
   // controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
   // once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the

@@ -19,6 +19,9 @@
 //!   payout again.
 //! - Undone: everything released, an ICP swap's ckUSDC out with its refund, a withdrawal's
 //!   shares minted back.
+//! - Resolved (a controller, `resolve_payout`, 2026-10-23): a payout stopped for a human is
+//!   put back on its undo (`Refund`), or its signed order found paid (`MarkPaid`): the paid
+//!   line, from where a reverted payout's USDC sits (reserved again), once.
 
 #[cfg(test)]
 mod tests;
@@ -26,8 +29,8 @@ mod tests;
 use super::{credit_shares, sat_add, sat_sub, PoolEffects, PoolLedger, PoolLookup, PoolStepError};
 use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::payout::{
-    EvmPayout, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutStatus, PinnedOrder, Reclaim,
-    Undo,
+    EvmPayout, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutResolution, PayoutStatus,
+    PinnedOrder, Reclaim, Undo,
 };
 use crate::pool::plan;
 use crate::pool::{PoolAccount, PoolStep, ShareLine, Shares};
@@ -334,6 +337,52 @@ impl PoolLedger {
                 let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
                 if amount > self.pockets.base.reserved {
                     return Err(PoolStepError::Overflow);
+                }
+                Ok(())
+            }
+            // a controller's answer to a payout stopped for a human: its money back, or its
+            // signed order found paid (never one whose Eco intent was read unfilled), once
+            PoolStep::PayoutResolved { id, resolution, .. } => {
+                let payout = payout_of(*id)?;
+                if !matches!(payout.status, PayoutStatus::Failed(_)) {
+                    return Err(not_from("PayoutResolved", &payout));
+                }
+                match resolution {
+                    PayoutResolution::Refund => {
+                        if let Undo::Remint { shares, .. } = payout.undo {
+                            self.total_shares
+                                .checked_add(shares)
+                                .ok_or(PoolStepError::Overflow)?;
+                        }
+                        if payout.icp_released.0 && payout.icp_hold() > self.pockets.icp.free {
+                            return Err(PoolStepError::PocketShort {
+                                free: self.pockets.icp.free,
+                                need: payout.icp_hold(),
+                            });
+                        }
+                    }
+                    PayoutResolution::MarkPaid => {
+                        if payout.order.is_none() || !payout.base_reserved {
+                            return Err(PoolStepError::Terms(
+                                "only a payout whose order was signed, its USDC reserved, can have paid",
+                            ));
+                        }
+                        if payout.reclaim.is_some() {
+                            return Err(PoolStepError::Terms(
+                                "an Eco intent read unfilled was never delivered",
+                            ));
+                        }
+                        let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
+                        let hold = amount
+                            .checked_add(payout.base_fee.unwrap_or(TokenAmount::ZERO))
+                            .ok_or(PoolStepError::Overflow)?;
+                        if hold > self.pockets.base.reserved
+                            || (!payout.icp_released.0
+                                && payout.icp_hold() > self.pockets.icp.reserved)
+                        {
+                            return Err(PoolStepError::Overflow);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -689,6 +738,38 @@ impl PoolLedger {
             PoolStep::PayoutDelivered { id, .. } => {
                 let mut payout = lookup.payout(*id)?;
                 paid(&mut ledger, &mut lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            // back on its undo, its refund under the door's instant; or paid, from where a
+            // reverted payout's USDC sits (reserved again)
+            PoolStep::PayoutResolved {
+                id,
+                resolution,
+                refund_at,
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                match resolution {
+                    PayoutResolution::Refund => {
+                        if payout.icp_released.0 {
+                            let held = payout.icp_hold();
+                            let icp = &mut ledger.pockets.icp;
+                            icp.free = sat_sub(icp.free, held);
+                            icp.reserved = sat_add(icp.reserved, held);
+                            payout.icp_released = crate::pool::payout::Flag(false);
+                        }
+                        payout.status =
+                            PayoutStatus::Undoing(crate::pool::payout::REFUNDED.to_string());
+                        payout.undoing_at = refund_at.or(payout.undoing_at).or(Some(at));
+                        lines.open.insert(*id);
+                    }
+                    PayoutResolution::MarkPaid => {
+                        let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
+                        let base = &mut ledger.pockets.base;
+                        base.reserved = sat_sub(base.reserved, amount);
+                        base.in_flight = sat_add(base.in_flight, amount);
+                        paid(&mut ledger, &mut lines, &mut payout, id);
+                    }
+                }
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutUnfilled { id, .. } => {

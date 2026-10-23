@@ -200,6 +200,22 @@ pub enum PayoutStatus {
     Unfilled,
 }
 
+/// Why a payout a controller refunded is undone.
+pub const REFUNDED: &str = "refunded by a controller";
+
+/// What a controller decided for a payout stopped for a human (`resolve_payout`, Jeff
+/// 2026-10-23): its money back to its user, or its money found delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PayoutResolution {
+    /// Undone: an ICP swap's refund (all it made less one ledger fee, `refund_of`), a
+    /// withdrawal's shares minted back.
+    #[n(0)]
+    Refund,
+    /// Paid: its signed order ran after all, and the paid line is booked, once.
+    #[n(1)]
+    MarkPaid,
+}
+
 /// Where the Base pocket's USDC of an unfilled Eco intent stands: owed back by Eco (in the
 /// Base pocket's `in_flight`), or credited back, once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]

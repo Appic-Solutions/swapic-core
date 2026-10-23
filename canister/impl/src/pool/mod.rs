@@ -16,6 +16,7 @@ pub mod plan;
 pub mod queue;
 pub mod rebalance;
 pub mod report_guard;
+pub mod resolve;
 pub mod settings;
 pub mod withdraw;
 

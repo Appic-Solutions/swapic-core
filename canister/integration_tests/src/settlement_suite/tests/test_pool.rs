@@ -1234,3 +1234,106 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
     let _ = order_id;
     assert!(world.replay_matches());
 }
+
+/// `resolve_payout` (2026-10-23): a payout stopped for a human (its reverted order ran after
+/// all, as every node read Swapic's `used`) held its lines for good. A controller refunds it:
+/// the user's ckUSDC comes back at once, all of it less one ledger fee, once; a stranger may
+/// not resolve it.
+#[test]
+fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
+    use settlement_api::types::pool::{PayoutResolution, PayoutStatus, PayoutView, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.approve(staker(), usdc(100) + FEE);
+    let payout = usdc(100) - 100_000 - 50_000;
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = usdc_plan(canister_address, payout, deadline_s);
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
+    );
+    let id = swapped.expect("the swap is opened").id;
+    let created = types::EventType::TxCreated {
+        purpose: types::events::TxPurpose::PoolPayout(id),
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        to: base_chain().swapic.parse().unwrap(),
+        value: types::Wei::ZERO,
+        data: vec![0x01],
+        gas_limit: types::GasAmount::from(400_000_u64),
+        max_fee: types::WeiPerGas::new(2_000_000_000),
+        max_priority_fee: types::WeiPerGas::new(100_000_000),
+        action: Some(types::config::GasAction::PoolPayout),
+    };
+    append(
+        &world.pic,
+        world.canister,
+        world.admin,
+        &EventType::from(created),
+    )
+    .expect("the nonce is handed out");
+    world.plant(PoolStep::PayoutSigned {
+        id,
+        order: types::pool::PinnedOrder {
+            order_id: [0x65; 32],
+            order: plan,
+            gas_limit: 400_000,
+            deadline_s,
+        },
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        tx_hash: TxHash::new([0x66; 32]),
+        raw_tx: vec![0x02, 0x01],
+    });
+    world.plant(PoolStep::PayoutReverted { id });
+    world.pic.advance_time(Duration::from_secs(61));
+    let head = world.next_outcall(&["eth_blockNumber"]);
+    world.reply(&head, serde_json::json!("0x1ec55b90"), true);
+    let used = world.next_outcall(&["eth_call"]);
+    // Swapic says the order ran after all: a human's
+    world.reply(
+        &used,
+        serde_json::json!(format!("0x{}01", "00".repeat(31))),
+        true,
+    );
+    world.settle();
+    let status = |world: &World| {
+        let view: Option<PayoutView> = query(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "payout",
+            encode_one(id).unwrap(),
+        );
+        view.expect("the payout is there").status
+    };
+    assert!(matches!(status(&world), PayoutStatus::Failed(_)));
+    let before = world.balance(staker());
+    let resolve = |sender: Principal| -> Result<(), PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            sender,
+            "resolve_payout",
+            candid::encode_args((id, PayoutResolution::Refund)).unwrap(),
+        )
+    };
+    assert!(matches!(resolve(staker()), Err(PoolError::NotAllowed(_))));
+    assert_eq!(resolve(world.admin), Ok(()));
+    world.settle();
+    assert_eq!(
+        status(&world),
+        PayoutStatus::Undone("refunded by a controller".to_string())
+    );
+    let refunded = before + Nat::from(usdc(100) - FEE);
+    assert_eq!(world.balance(staker()), refunded);
+    assert!(matches!(
+        resolve(world.admin),
+        Err(PoolError::NotAllowed(_))
+    ));
+    world.next_tick();
+    assert_eq!(world.balance(staker()), refunded);
+    assert!(world.replay_matches());
+}

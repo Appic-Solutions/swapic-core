@@ -1400,3 +1400,195 @@ fn a_planned_open_needs_the_base_pocket_and_five_percent() {
         matches!(pool_short, Err(PoolStepError::BaseShort { need, .. }) if need == TokenAmount::from(99_850_000_u64))
     );
 }
+
+fn resolved(id: u64, resolution: crate::pool::payout::PayoutResolution) -> PoolStep {
+    PoolStep::PayoutResolved {
+        id,
+        resolution,
+        refund_at: Some(Timestamp::from_nanos(5)),
+    }
+}
+
+fn stopped(id: u64) -> PoolStep {
+    PoolStep::PayoutStopped {
+        id,
+        why: "ALERT: a human's".to_string(),
+    }
+}
+
+/// A payout signed, reverted, then stopped for a human (its order ran after all): a
+/// withdrawal of 1,000 USDC, or an ICP swap of 100 ckUSDC.
+fn stopped_after_its_revert(pool: &mut Pool, withdrawing: bool) -> u64 {
+    let (kind, undo, amount, received) = if withdrawing {
+        let (kind, undo) = withdrawal(pool, usdc(1_000), 31);
+        let PayoutKind::Withdrawal(w) = kind else {
+            unreachable!()
+        };
+        (kind, undo, w.payout_amount().unwrap(), None)
+    } else {
+        let (kind, undo) = icp_swap(usdc(100));
+        (
+            kind,
+            undo,
+            TokenAmount::from(100_000_000_u64 - 60_000),
+            Some(usdc(100)),
+        )
+    };
+    let id = open(pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(30))).unwrap();
+    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    pool.step(stopped(id)).unwrap();
+    id
+}
+
+/// The review's finding (`resolve_payout`, Jeff 2026-10-23): a payout stopped for a human
+/// was locked for good. A controller marks it paid (its order ran after all): its lines end
+/// exactly where a paid payout's do, once.
+#[test]
+fn a_stopped_payout_marked_paid_books_its_paid_line_once() {
+    use crate::pool::payout::PayoutResolution::MarkPaid;
+    for withdrawing in [false, true] {
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x5e, 1);
+        let id = stopped_after_its_revert(&mut pool, withdrawing);
+        // where the same payout paid at once would end
+        let mut straight = with_base(funded(usdc(1_000)), usdc(5_000), 0x5e, 1);
+        let other = {
+            let (kind, undo, amount, received) = if withdrawing {
+                let (kind, undo) = withdrawal(&straight, usdc(1_000), 31);
+                let PayoutKind::Withdrawal(w) = kind else {
+                    unreachable!()
+                };
+                (kind, undo, w.payout_amount().unwrap(), None)
+            } else {
+                let (kind, undo) = icp_swap(usdc(100));
+                (
+                    kind,
+                    undo,
+                    TokenAmount::from(100_000_000_u64 - 60_000),
+                    Some(usdc(100)),
+                )
+            };
+            let id = open(&mut straight, kind, undo);
+            straight
+                .step(PoolStep::PayoutAmountKnown {
+                    id,
+                    amount,
+                    received,
+                })
+                .unwrap();
+            straight.step(PoolStep::PayoutWaiting { id }).unwrap();
+            straight.step(signed(id, order(30))).unwrap();
+            straight.step(paid(id, None)).unwrap();
+            id
+        };
+        assert_eq!(other, id);
+        pool.step(resolved(id, MarkPaid)).unwrap();
+        assert_eq!(status(&pool, id), PayoutStatus::Paid, "{withdrawing}");
+        assert_eq!(pool.ledger.pockets, straight.ledger.pockets);
+        assert_eq!(pool.ledger.owed, straight.ledger.owed);
+        assert_eq!(
+            pool.ledger.lines().fees_base,
+            straight.ledger.lines().fees_base
+        );
+        assert_eq!(
+            pool.ledger.lines().fees_icp,
+            straight.ledger.lines().fees_icp
+        );
+        assert!(pool.ledger.lines().open.is_empty());
+        // once
+        assert!(pool.step(resolved(id, MarkPaid)).is_err());
+        assert!(pool
+            .step(resolved(id, crate::pool::payout::PayoutResolution::Refund))
+            .is_err());
+    }
+}
+
+/// A controller refunds a stopped ICP swap: it is back on its undo, its refund asked next
+/// under the instant the door chose; its undo then leaves every line where it was.
+#[test]
+fn a_stopped_icp_swap_refunded_goes_back_on_its_undo() {
+    use crate::pool::payout::PayoutResolution::Refund;
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x5f, 1);
+    let before = pool.ledger.clone();
+    let id = stopped_after_its_revert(&mut pool, false);
+    assert!(pool.ledger.lines().open.is_empty());
+    pool.step(resolved(id, Refund)).unwrap();
+    assert!(matches!(status(&pool, id), PayoutStatus::Undoing(_)));
+    assert_eq!(pool.payouts[&id].undoing_at, Some(Timestamp::from_nanos(5)));
+    assert!(pool.ledger.lines().open.contains(&id));
+    assert!(pool.step(resolved(id, Refund)).is_err());
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: "refunded by a controller".to_string(),
+        block: Some(16),
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.lines().fees_icp, TokenAmount::ZERO);
+}
+
+/// A controller refunds a stopped withdrawal: its shares are minted back with its undo.
+#[test]
+fn a_stopped_withdrawal_refunded_is_reminted() {
+    use crate::pool::payout::PayoutResolution::Refund;
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x60, 1);
+    let before = pool.ledger.clone();
+    let shares = pool.shares_of_evm(staker());
+    let id = stopped_after_its_revert(&mut pool, true);
+    pool.step(resolved(id, Refund)).unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: "refunded by a controller".to_string(),
+        block: None,
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.total_shares, before.total_shares);
+    assert_eq!(pool.shares_of_evm(staker()), shares);
+}
+
+/// Only a payout stopped for a human is resolved; only one whose order was signed, and whose
+/// Eco intent was not read unfilled, can be marked paid.
+#[test]
+fn only_a_stopped_payout_is_resolved_and_only_a_signed_one_marked_paid() {
+    use crate::pool::payout::PayoutResolution::{MarkPaid, Refund};
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x61, 1);
+    // waiting, not stopped
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    for resolution in [Refund, MarkPaid] {
+        assert!(matches!(
+            pool.step(resolved(id, resolution)),
+            Err(PoolStepError::PayoutNotFrom { .. })
+        ));
+    }
+    // stopped before its amount was known: never signed, nothing paid
+    pool.step(stopped(id)).unwrap();
+    assert!(matches!(
+        pool.step(resolved(id, MarkPaid)),
+        Err(PoolStepError::Terms(_))
+    ));
+    pool.step(resolved(id, Refund)).unwrap();
+    // an unfilled Eco payout whose refund stopped: its money was never delivered
+    let id = delivering(&mut pool, false);
+    pool.step(unfilled(id)).unwrap();
+    pool.step(PoolStep::PayoutUndoing {
+        id,
+        why: "unfilled".to_string(),
+    })
+    .unwrap();
+    pool.step(stopped(id)).unwrap();
+    assert!(matches!(
+        pool.step(resolved(id, MarkPaid)),
+        Err(PoolStepError::Terms(_))
+    ));
+}

@@ -626,7 +626,47 @@ fn samples() -> Vec<Sample> {
     all.extend(returned_move_samples());
     all.extend(eco_payout_samples());
     all.extend(planned_swap_samples());
+    all.extend(resolved_payout_samples());
     all
+}
+
+/// A controller's answer to a payout stopped for a human (`resolve_payout`, 2026-10-23).
+fn resolved_payout_samples() -> Vec<Sample> {
+    use crate::pool::payout::PayoutResolution;
+    use crate::pool::PoolStep;
+    let steps = [
+        (
+            "payout resolved, refunded",
+            PoolStep::PayoutResolved {
+                id: 1_401,
+                resolution: PayoutResolution::Refund,
+                refund_at: Some(Timestamp::from_nanos(1_800_000_000_000_001_402)),
+            },
+        ),
+        (
+            "payout resolved, marked paid",
+            PoolStep::PayoutResolved {
+                id: 1_403,
+                resolution: PayoutResolution::MarkPaid,
+                refund_at: None,
+            },
+        ),
+    ];
+    (0_u64..)
+        .zip(steps)
+        .map(|(i, (name, step))| {
+            sample(
+                name,
+                Event::seal(
+                    EventIndex::new(14_000 + i),
+                    Timestamp::from_nanos(1_800_000_000_000_001_404 + i),
+                    EventHash::new([0xf1; 32]),
+                    crate::events::EventType::Pool { step },
+                )
+                .expect("every sample has a preimage"),
+            )
+        })
+        .collect()
 }
 
 /// An ICP swap opened with a payout plan (2026-10-23): its terms, the payout holding its
