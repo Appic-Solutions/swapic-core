@@ -58,18 +58,35 @@ pub struct IcpSwapTerms {
     /// The caller's account the token is pulled from (`icrc2_transfer_from`).
     #[n(2)]
     pub from: IcpAccount,
-    /// The least ckUSDC the route's ICPSwap legs must give (`amount_in` for ckUSDC).
+    /// The least ckUSDC the route's ICPSwap legs must give (`amount_in` for ckUSDC). A
+    /// planned swap's is the sale floor the canister set.
     #[n(3)]
     pub min_usdc: TokenAmount,
-    /// Micro USDC the pool keeps.
+    /// Micro USDC the pool keeps. Zero for a planned swap: its premium is the settings'
+    /// share of what its sale made, taken when the amount is known.
     #[n(4)]
     pub premium: TokenAmount,
-    /// Micro USDC the canister keeps for the payout's gas.
+    /// Micro USDC the canister keeps for the payout's gas: a planned swap's is the payouts'
+    /// flat floor, the CCTP one for a plan that burns.
     #[n(5)]
     pub network_fee: TokenAmount,
     /// Where an undone swap's money goes back to.
     #[n(6)]
     pub refund_to: IcpAccount,
+    /// The payout plan flow (2026-10-23): the user's slippage, at most 500 bps, half of it
+    /// the sale's. None: a swap opened before the plan flow.
+    #[n(7)]
+    pub slippage_bps: Option<u16>,
+    /// The plan's `amountIn`: the payout the quoter built it for.
+    #[n(8)]
+    pub planned: Option<TokenAmount>,
+}
+
+impl IcpSwapTerms {
+    /// Whether the swap was opened with a payout plan.
+    pub fn is_planned(&self) -> bool {
+        self.planned.is_some()
+    }
 }
 
 /// An EVM staker's withdrawal, as the staker signed it, with the shares it burned.
@@ -286,6 +303,9 @@ pub struct EvmPayout {
     /// pending until Eco's refund is credited, once.
     #[n(20)]
     pub reclaim: Option<Reclaim>,
+    /// A planned ICP swap's payout plan as the user handed it in (`amountIn` = `planned`).
+    #[n(21)]
+    pub plan: Option<PinnedOrder>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -353,6 +373,7 @@ impl EvmPayout {
             undoing_at: None,
             icp_released: Flag(false),
             reclaim: None,
+            plan: None,
         }
     }
 

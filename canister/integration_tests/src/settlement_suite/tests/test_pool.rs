@@ -684,15 +684,34 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
     }
 }
 
-/// P11b Task 3: an ICP user swaps 100 ckUSDC to USDC on Base through the pool. The canister
-/// pulls it on the user's approval (the user pays the pull's fee), knows the exact amount at
-/// once, and the payout waits for its order with `100 - premium - network fee` reserved on
-/// Base. A stake planted on Base covers it.
-#[test]
-fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() {
-    use settlement_api::types::pool::{
-        IcpSwapTerms, PayoutSettings, PayoutStatus, PayoutTerms, PayoutView, SwapFromIcpOk,
-    };
+/// The payout plan (2026-10-23): a plan for `payout`, USDC on Base paid to `to` at least 1
+/// USDC, no step, paid by the canister at `canister`.
+fn usdc_plan(canister: types::EvmAddress, payout: u64, deadline_s: u64) -> Vec<u8> {
+    use alloy_primitives::{FixedBytes, U256};
+    use types::swapic::{addr, encode_order, Order, Payout};
+    let base_usdc: types::EvmAddress = base_chain().usdc.parse().unwrap();
+    let to: types::EvmAddress = "0x2222222222222222222222222222222222222222"
+        .parse()
+        .unwrap();
+    encode_order(&Order {
+        r#ref: FixedBytes([0x61; 32]),
+        payer: addr(canister),
+        tokenIn: addr(base_usdc),
+        amountIn: U256::from(payout),
+        deadline: U256::from(deadline_s),
+        steps: vec![],
+        payout: Payout {
+            token: addr(base_usdc),
+            recipient: addr(to),
+            minOut: U256::from(usdc(1)),
+        },
+    })
+}
+
+/// A world whose Base pocket holds 500 USDC staked from Base and the payout settings, its
+/// canister's EVM address derived: what an ICP swap to EVM needs.
+fn swap_world() -> (World, types::EvmAddress) {
+    use settlement_api::types::pool::PayoutSettings;
     let world = world_with(
         usdc(1_000),
         Config {
@@ -701,6 +720,11 @@ fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() 
             ..init_arg().config
         },
     );
+    let address =
+        crate::client::settlement::derive_evm_address(&world.pic, world.canister, world.admin)
+            .expect("the test key derives an address")
+            .parse()
+            .expect("an EVM address");
     world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
     // the Base pocket: 500 USDC staked from Base, arrived and minted at the pool's price
     let owner = types::pool::PoolAccount::Evm(
@@ -758,33 +782,56 @@ fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() 
     );
     assert_eq!(set, Ok(()));
     world.books_checked();
-    world.approve(staker(), usdc(100) + FEE);
-    let deadline = world.now().checked_add(Duration::from_secs(900)).unwrap();
-    let terms = IcpSwapTerms {
+    (world, address)
+}
+
+/// The swap's arguments: 100 ckUSDC with `plan`, 100 bps of slippage, its deadline 15
+/// minutes away.
+fn swap_terms(world: &World, plan: Vec<u8>) -> settlement_api::types::pool::IcpSwapTerms {
+    use settlement_api::types::pool::{IcpSwapTerms, PayoutPlan};
+    IcpSwapTerms {
         token_in: world.ledger,
         amount_in: Nat::from(usdc(100)),
         from_subaccount: None,
-        min_usdc: Nat::from(usdc(100)),
-        premium: Nat::from(usdc(1)),
-        network_fee: Nat::from(50_000_u32),
-        payout: PayoutTerms {
-            dst_chain: BASE,
-            recipient: "0x2222222222222222222222222222222222222222".to_string(),
-            token_out: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
-            min_out: Nat::from(usdc(98)),
-            deadline_ns: deadline.as_nanos(),
-        },
         refund_to: None,
-    };
+        slippage_bps: 100,
+        deadline_ns: world
+            .now()
+            .checked_add(Duration::from_secs(900))
+            .unwrap()
+            .as_nanos(),
+        plan: PayoutPlan {
+            order: plan,
+            gas_limit: 400_000,
+        },
+    }
+}
+
+/// The payout plan (2026-10-23): an ICP user swaps 100 ckUSDC to USDC on Base with the
+/// quoter's plan for its payout. The canister pulls it on the user's approval (the user pays
+/// the pull's fee), takes the premium from the 100 it made, and the payout waits for its
+/// order with `100 - premium - network fee` reserved on Base.
+#[test]
+fn an_icp_user_swaps_ckusdc_to_evm_with_a_plan_and_the_payout_waits_with_its_exact_amount() {
+    use settlement_api::types::pool::{PayoutStatus, PayoutView, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.approve(staker(), usdc(100) + FEE);
+    let payout = usdc(100) - 100_000 - 50_000;
+    let deadline_s = world.now().as_secs().get() + 600;
     let canister_before = world.balance(world.canister);
     let swapped: Result<SwapFromIcpOk, PoolError> = update(
         &world.pic,
         world.canister,
         staker(),
         "swap_from_icp",
-        encode_one(terms).unwrap(),
+        encode_one(swap_terms(
+            &world,
+            usdc_plan(canister_address, payout, deadline_s),
+        ))
+        .unwrap(),
     );
-    let id = swapped.expect("the swap is opened").id;
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Waiting);
     // pulled: the canister holds 100 more, the user paid 100, its approval's fee and the
     // pull's
     assert_eq!(world.balance(world.canister), canister_before + usdc(100));
@@ -797,12 +844,14 @@ fn an_icp_user_swaps_ckusdc_to_evm_and_the_payout_waits_with_its_exact_amount() 
         world.canister,
         world.admin,
         "payout",
-        encode_one(id).unwrap(),
+        encode_one(swapped.id).unwrap(),
     );
     let view = view.expect("the payout is there");
     assert_eq!(view.status, PayoutStatus::Waiting);
-    assert_eq!(view.amount, Some(Nat::from(usdc(100) - usdc(1) - 50_000)));
+    assert_eq!(view.amount, Some(Nat::from(payout)));
+    assert_eq!(view.received, Some(Nat::from(usdc(100))));
+    assert_eq!(view.planned, Some(Nat::from(payout)));
     let state = world.state();
-    assert_eq!(state.base.reserved, Nat::from(usdc(100) - usdc(1) - 50_000));
+    assert_eq!(state.base.reserved, Nat::from(payout));
     assert!(world.replay_matches());
 }

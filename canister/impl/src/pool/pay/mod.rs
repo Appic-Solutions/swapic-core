@@ -58,7 +58,18 @@ fn refused(why: impl Into<String>) -> PoolError {
     PoolError::NotAllowed(why.into())
 }
 
-/// Every check of an order handed over for `payout`, pure: answers the order to pin.
+/// What an order's `amountIn` is held to: the payout's exact amount, or nothing yet at a
+/// planned swap's opening (2026-10-23), where every other rule holds and the fit checks it
+/// again once the amount is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmountIn {
+    Exact,
+    NotKnownYet,
+}
+
+/// Every check of an order handed over for `payout`, pure: answers the order to pin. One
+/// validator for the watcher's order, a planned swap's plan at its opening, and the plan
+/// fitted to the amount the sale made.
 #[allow(clippy::too_many_arguments)]
 pub fn check_order(
     payout: &EvmPayout,
@@ -69,10 +80,16 @@ pub fn check_order(
     settings: &PayoutSettings,
     now_s: u64,
     sanctioned: impl Fn(&Party) -> bool,
+    amount_in: AmountIn,
 ) -> Result<PinnedOrder, PoolError> {
-    let amount = payout
-        .amount
-        .ok_or_else(|| refused("the payout's amount is not known"))?;
+    let amount = match (amount_in, payout.amount) {
+        (AmountIn::Exact, Some(amount)) => Some(amount),
+        (AmountIn::Exact, None) => return Err(refused("the payout's amount is not known")),
+        (AmountIn::NotKnownYet, None) => None,
+        (AmountIn::NotKnownYet, Some(_)) => {
+            return Err(refused("the payout's amount is known already"))
+        }
+    };
     let chain_id = payer.chains.chain_id;
     let order_id = swapic::order_id(order, chain_id, payer.swapic).into_bytes();
     if payout.order.is_some() {
@@ -84,11 +101,15 @@ pub fn check_order(
     if swapic::evm(order.tokenIn) != payer.usdc {
         return Err(refused("the order does not pay in the pool chain's USDC"));
     }
-    if order.amountIn != U256::from_be_bytes(amount.to_be_bytes()) {
-        return Err(refused(format!(
-            "the order spends {}, not the payout's {amount}",
-            order.amountIn
-        )));
+    match amount {
+        Some(amount) if order.amountIn != U256::from_be_bytes(amount.to_be_bytes()) => {
+            return Err(refused(format!(
+                "the order spends {}, not the payout's {amount}",
+                order.amountIn
+            )));
+        }
+        None if order.amountIn.is_zero() => return Err(refused("the order spends nothing")),
+        _ => {}
     }
     let plan = read_plan(order, &payer.chains).map_err(|error| refused(error.to_string()))?;
     if !plan.fees.is_empty() {
@@ -235,16 +256,13 @@ pub async fn pay_payout(id: u64, order_bytes: Vec<u8>, gas_limit: u64) -> Result
     sign(id, &order, pinned).await
 }
 
-/// The checks of an order for payout `id` against the config and the fold as they are now.
-pub fn checked(
-    id: u64,
-    order: &Order,
-    order_bytes: &[u8],
-    gas_limit: u64,
+/// Where the canister signs a payout from, read off `config`: the pool chain, its Swapic and
+/// its USDC, and Eco's configured prover.
+pub fn payer_of(
+    config: &types::Config,
     canister: EvmAddress,
-    now: Timestamp,
-) -> Result<PinnedOrder, PoolError> {
-    let config = crate::storage::config::get();
+    eco_prover: Option<EvmAddress>,
+) -> Result<Payer<'_>, PoolError> {
     let chain_id = config
         .pool_chain
         .ok_or_else(|| PoolError::Closed("no pool chain is configured".to_string()))?;
@@ -252,12 +270,7 @@ pub fn checked(
         .evm_chains
         .get(chain_id)
         .ok_or_else(|| PoolError::Closed(format!("the pool chain {chain_id} signs nothing")))?;
-    let payout = pool_store::payout(id).ok_or(PoolError::Unknown)?;
-    let settings = pool_store::ledger()
-        .lines()
-        .settings
-        .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
-    let payer = Payer {
+    Ok(Payer {
         chains: Chains {
             chain_id,
             evm_chains: &config.evm_chains,
@@ -267,10 +280,44 @@ pub fn checked(
         },
         swapic: chain.swapic,
         usdc: chain.usdc,
-        eco_prover: crate::storage::flow_settings::get().eco_prover,
-    };
+        eco_prover,
+    })
+}
+
+/// The checks of an order for payout `id` against the config and the fold as they are now.
+pub fn checked(
+    id: u64,
+    order: &Order,
+    order_bytes: &[u8],
+    gas_limit: u64,
+    canister: EvmAddress,
+    now: Timestamp,
+) -> Result<PinnedOrder, PoolError> {
+    let payout = pool_store::payout(id).ok_or(PoolError::Unknown)?;
+    checked_payout(&payout, order, order_bytes, gas_limit, canister, now)
+}
+
+/// The checks of an order for `payout`, its amount known, against the config as it is now.
+pub fn checked_payout(
+    payout: &EvmPayout,
+    order: &Order,
+    order_bytes: &[u8],
+    gas_limit: u64,
+    canister: EvmAddress,
+    now: Timestamp,
+) -> Result<PinnedOrder, PoolError> {
+    let config = crate::storage::config::get();
+    let settings = pool_store::ledger()
+        .lines()
+        .settings
+        .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
+    let payer = payer_of(
+        &config,
+        canister,
+        crate::storage::flow_settings::get().eco_prover,
+    )?;
     check_order(
-        &payout,
+        payout,
         order,
         order_bytes,
         gas_limit,
@@ -278,6 +325,7 @@ pub fn checked(
         &settings,
         now.as_secs().get(),
         |party| sanctioned_party(std::slice::from_ref(party)).is_some(),
+        AmountIn::Exact,
     )
 }
 

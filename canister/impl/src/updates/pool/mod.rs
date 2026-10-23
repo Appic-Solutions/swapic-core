@@ -129,16 +129,16 @@ pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolErr
 /// Any caller, refused while halted, while the pool is closed, and for a sanctioned party: an
 /// ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister) to any token on an EVM
-/// chain. The token reaches ckUSDC through its route (at least `min_usdc`, held after the
-/// last leg's withdrawal, or it is refunded to `refund_to`); the payout from the Base pocket
-/// is the ckUSDC less `premium` and `network_fee`, paid by `pay_payout` with an order built at
-/// that exact amount, waiting in the queue while the Base pocket is short. Answers the
-/// payout's id; a pull the ledger refused answers its refusal.
+/// chain, with the quoter's payout plan (the order for the payout it expects, its gas) and
+/// one slippage of at most 500 bps; the recipient, token, chain and least out are the plan's.
+/// Opened only while the Base pocket can pay it. The token reaches ckUSDC through its route
+/// (at least the sale floor, half the slippage below what the plan needs, or it is refunded
+/// to `refund_to`); the payout from the Base pocket is the ckUSDC less the pool's premium on
+/// it and the flat network fee, paid with an order built at that exact amount. Answers the
+/// payout's id and where it stands; a pull the ledger refused answers its refusal.
 #[update]
 pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolError> {
-    pool::icp_swap::swap_from_icp(terms, is_sanctioned)
-        .await
-        .map(|id| SwapFromIcpOk { id })
+    pool::icp_swap::swap_from_icp(terms, is_sanctioned).await
 }
 
 /// Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's

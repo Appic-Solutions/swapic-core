@@ -135,11 +135,13 @@ fn icp_swap_terms_and_withdrawals_cross_the_wire() {
         token_in: Principal::from_slice(&[1; 10]),
         amount_in: Nat::from(1_000_000_u64),
         from_subaccount: None,
-        min_usdc: Nat::from(1_000_000_u64),
-        premium: Nat::from(10_000_u64),
-        network_fee: Nat::from(50_000_u64),
-        payout: terms(),
         refund_to: None,
+        slippage_bps: 100,
+        deadline_ns: 1_800_000_000_000_000_000,
+        plan: PayoutPlan {
+            order: vec![0x0a; 64],
+            gas_limit: 400_000,
+        },
     };
     let bytes = Encode!(&swap).unwrap();
     assert_eq!(Decode!(&bytes, IcpSwapTerms).unwrap(), swap);

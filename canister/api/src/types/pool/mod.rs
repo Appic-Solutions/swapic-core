@@ -13,8 +13,8 @@ pub use rebalance::{MoveDirection, MoveResolution, MoveStatus, MoveView, Rebalan
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutesView};
 
 pub use payout::{
-    EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutSettings, PayoutStatus, PayoutTerms, PayoutView,
-    PayoutWaiting,
+    EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutPlan, PayoutSettings, PayoutStatus, PayoutTerms,
+    PayoutView, PayoutWaiting,
 };
 
 use candid::{CandidType, Nat, Principal};
@@ -242,10 +242,12 @@ pub struct WithdrawIcpArgs {
     pub to: IcpAccount,
 }
 
-/// `swap_from_icp`'s answer: the payout's id (`payout(id)` tells where it stands).
+/// `swap_from_icp`'s answer: the payout's id, and where it stands as the call returns
+/// (`Signed` when its plan fitted; `Waiting` when it waits for an order).
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SwapFromIcpOk {
     pub id: u64,
+    pub status: PayoutStatus,
 }
 
 /// `withdraw_evm`'s answer: the payout's id and the shares burned.

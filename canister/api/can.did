@@ -518,18 +518,16 @@ type IcpRoutesView = record {
 type IcpSwapTerms = record {
   // ckUSDC or a listed ICP token.
   token_in : principal;
-  // Micro USDC, at least the pool's premium floor.
-  premium : nat;
-  // The least ckUSDC the ICPSwap leg must give (`amount_in` for ckUSDC).
-  min_usdc : nat;
+  plan : PayoutPlan;
   from_subaccount : opt blob;
   // Default: the caller's account.
   refund_to : opt IcpAccount;
   // Pulled with `icrc2_transfer_from` from the caller's account.
   amount_in : nat;
-  // Micro USDC, at least `payout_settings.min_network_fee`.
-  network_fee : nat;
-  payout : PayoutTerms;
+  // 5 minutes to 1 hour ahead: after it nothing is signed and the swap is undone.
+  deadline_ns : nat64;
+  // At most 500: half of it is the sale's on ICP, the rest the plan's own swap.
+  slippage_bps : nat16;
 };
 type IcpTokenEntry = record { ledger : principal; icpswap_pool : principal };
 // What an install starts from: the whole config and both service roles, so a canister is
@@ -595,6 +593,11 @@ type Outcome = variant { Failed; Confirmed };
 // `pay_payout`'s answer: the signed transaction's id in `signed_txs`.
 type PayPayoutOk = record { tx_id : nat64 };
 type PayoutKind = variant { IcpSwap; Withdrawal };
+// The payout plan (2026-10-23): the quoter's ready-made Swapic order for the expected
+// payout (its `amountIn`), as `abi.encode(order)`, and the gas it is signed with, as
+// `pay_payout` takes them. Its one delivery names the chain, the recipient, the token and
+// the least out.
+type PayoutPlan = record { order : blob; gas_limit : nat64 };
 type PayoutSettings = record {
   // Micro USDC, the least a payout's network fee may be.
   min_network_fee : nat;
@@ -639,8 +642,12 @@ type PayoutView = record {
   status : PayoutStatus;
   terms : PayoutTerms;
   kind : PayoutKind;
+  // The plan's amount (`amountIn`), for a swap opened with a plan.
+  planned : opt nat;
   order_id : opt blob;
   tx_hash : opt blob;
+  // The ckUSDC the swap made on ICP, once known.
+  received : opt nat;
   // The exact USDC the payout order must spend on Base.
   amount : opt nat;
 };
@@ -1012,8 +1019,9 @@ type Swap = record {
   last_leg : opt Leg;
   last_attempt : opt nat32;
 };
-// `swap_from_icp`'s answer: the payout's id (`payout(id)` tells where it stands).
-type SwapFromIcpOk = record { id : nat64 };
+// `swap_from_icp`'s answer: the payout's id, and where it stands as the call returns
+// (`Signed` when its plan fitted; `Waiting` when it waits for an order).
+type SwapFromIcpOk = record { id : nat64; status : PayoutStatus };
 // Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
 type SwapStatus = variant {
   PaidInStable;
@@ -1405,11 +1413,13 @@ service : (InitArg) -> {
   // Any caller, refused while halted, while the pool is closed, and for a sanctioned party: an
   // ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
   // `icrc2_transfer_from` on the caller's approval of the canister) to any token on an EVM
-  // chain. The token reaches ckUSDC through its route (at least `min_usdc`, held after the
-  // last leg's withdrawal, or it is refunded to `refund_to`); the payout from the Base pocket
-  // is the ckUSDC less `premium` and `network_fee`, paid by `pay_payout` with an order built at
-  // that exact amount, waiting in the queue while the Base pocket is short. Answers the
-  // payout's id; a pull the ledger refused answers its refusal.
+  // chain, with the quoter's payout plan (the order for the payout it expects, its gas) and
+  // one slippage of at most 500 bps; the recipient, token, chain and least out are the plan's.
+  // Opened only while the Base pocket can pay it. The token reaches ckUSDC through its route
+  // (at least the sale floor, half the slippage below what the plan needs, or it is refunded
+  // to `refund_to`); the payout from the Base pocket is the ckUSDC less the pool's premium on
+  // it and the flat network fee, paid with an order built at that exact amount. Answers the
+  // payout's id and where it stands; a pull the ledger refused answers its refusal.
   swap_from_icp : (IcpSwapTerms) -> (Result_19);
   verify_chain : () -> (bool) query;
   verify_replay : () -> (bool) query;

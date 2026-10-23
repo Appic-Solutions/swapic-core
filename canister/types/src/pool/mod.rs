@@ -13,6 +13,7 @@ mod tests;
 
 pub mod ledger;
 pub mod payout;
+pub mod plan;
 pub mod rebalance;
 pub mod routes;
 pub mod withdrawal;
@@ -1479,6 +1480,9 @@ pub enum PoolStep {
         terms: PayoutTerms,
         #[n(3)]
         undo: Undo,
+        /// A planned ICP swap's payout plan as the user handed it in (2026-10-23), boxed.
+        #[n(4)]
+        plan: Option<Box<PinnedOrder>>,
     },
     /// The payout's exact amount is known: what its order spends on Base. An ICP swap's
     /// ckUSDC (`received`) is held on ICP until it is paid, its network fee on the ICP fee

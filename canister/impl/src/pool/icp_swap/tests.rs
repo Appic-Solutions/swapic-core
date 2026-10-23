@@ -125,10 +125,17 @@ fn pool_with(base: TokenAmount) {
     }
 }
 
-fn request(token_in: Principal, amount_in: TokenAmount, min_usdc: TokenAmount) -> SwapRequest {
+/// A swap opened before the plan flow, as its log would hold it: its user's own premium and
+/// least ckUSDC, recorded straight into the fold (no door opens one any more).
+#[derive(Clone, Copy)]
+struct Legacy {
+    terms: IcpSwapTerms,
+    payout: PayoutTerms,
+}
+
+fn request(token_in: Principal, amount_in: TokenAmount, min_usdc: TokenAmount) -> Legacy {
     let from = account(5);
-    SwapRequest {
-        caller: from.owner,
+    Legacy {
         terms: IcpSwapTerms {
             token_in,
             amount_in,
@@ -137,6 +144,8 @@ fn request(token_in: Principal, amount_in: TokenAmount, min_usdc: TokenAmount) -
             premium: usdc(1),
             network_fee: TokenAmount::from(50_000_u32),
             refund_to: account(6),
+            slippage_bps: None,
+            planned: None,
         },
         payout: PayoutTerms {
             dst_chain: ChainId::ARBITRUM,
@@ -150,20 +159,7 @@ fn request(token_in: Principal, amount_in: TokenAmount, min_usdc: TokenAmount) -
     }
 }
 
-fn checked(request: &SwapRequest) -> Result<RoutePath, PoolError> {
-    read_state(|state| {
-        check(
-            state,
-            &config(),
-            request,
-            at(10),
-            Some(EvmAddress::new([0x36; 20])),
-            |_| false,
-        )
-    })
-}
-
-fn open(request: &SwapRequest) -> u64 {
+fn open(request: &Legacy) -> u64 {
     let id = ledger().lines().next_id;
     record_at(
         PoolStep::PayoutOpened {
@@ -173,6 +169,7 @@ fn open(request: &SwapRequest) -> u64 {
             undo: Undo::Refund {
                 to: request.terms.refund_to,
             },
+            plan: None,
         },
         at(10),
     )
@@ -298,111 +295,6 @@ impl Ledgers for Fake {
     ) -> Result<(), CallError> {
         Ok(())
     }
-}
-
-#[test]
-fn each_refusal_comes_before_anything_is_recorded() {
-    on_fresh_memory(|| {
-        crate::storage::init();
-        // no settings at all
-        let good = request(ckusdc(), usdc(100), usdc(100));
-        assert!(matches!(checked(&good), Err(PoolError::Closed(_))));
-        pool_with(usdc(500));
-        assert_eq!(checked(&good), Ok(RoutePath::Ckusdc));
-        let with = |change: &dyn Fn(&mut SwapRequest)| {
-            let mut request = good.clone();
-            change(&mut request);
-            checked(&request)
-        };
-        assert_eq!(
-            with(&|r| r.terms.token_in = Principal::from_slice(&[0x99; 10])),
-            Err(PoolError::TokenNotListed(Principal::from_slice(
-                &[0x99; 10]
-            )))
-        );
-        assert!(matches!(
-            with(&|r| r.terms.min_usdc = usdc(99)),
-            Err(PoolError::NotAllowed(_))
-        ));
-        // the premium is exactly 10 bps of min_usdc (P11d: no floor; every ICP fee is the
-        // user's, out of what is pulled)
-        assert_eq!(
-            with(&|r| r.terms.premium = TokenAmount::from(99_999_u32)),
-            Err(PoolError::PremiumTooLow {
-                least: candid::Nat::from(100_000_u32)
-            })
-        );
-        assert!(matches!(
-            with(&|r| r.terms.network_fee = TokenAmount::from(49_999_u32)),
-            Err(PoolError::NotAllowed(_))
-        ));
-        assert!(matches!(
-            with(&|r| {
-                r.terms.amount_in = usdc(1_001);
-                r.terms.min_usdc = usdc(1_001);
-                r.terms.premium = usdc(2);
-            }),
-            Err(PoolError::AboveSwapCap { .. })
-        ));
-        assert_eq!(
-            with(&|r| r.payout.deadline = at(10)
-                .checked_add(MIN_DEADLINE)
-                .unwrap()
-                .checked_sub(Duration::from_nanos(1))
-                .unwrap()),
-            Err(PoolError::Expired)
-        );
-        assert!(matches!(
-            with(&|r| r.payout.dst_chain = ChainId::new(10)),
-            Err(PoolError::NotAllowed(_))
-        ));
-        // never the canister, nor one of Swapic's own contracts
-        assert!(matches!(
-            with(&|r| r.payout.recipient = EvmAddress::new([0x36; 20])),
-            Err(PoolError::NotAllowed(_))
-        ));
-        assert!(matches!(
-            with(&|r| r.payout.recipient = swapic()),
-            Err(PoolError::NotAllowed(_))
-        ));
-        let sanctioned = read_state(|state| {
-            check(state, &config(), &good, at(10), None, |address| {
-                *address == Address::from(recipient())
-            })
-        });
-        assert!(matches!(sanctioned, Err(PoolError::Sanctioned(_))));
-        let caller = good.caller.to_text();
-        let sanctioned = read_state(|state| {
-            check(state, &config(), &good, at(10), None, |address| {
-                address.as_str() == caller
-            })
-        });
-        assert!(matches!(sanctioned, Err(PoolError::Sanctioned(_))));
-        // a token's route: no fee floor either, 10 bps of its 2 USDC
-        let direct = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
-        assert_eq!(
-            checked(&SwapRequest {
-                terms: IcpSwapTerms {
-                    premium: TokenAmount::from(1_999_u32),
-                    ..direct.terms
-                },
-                ..direct.clone()
-            }),
-            Err(PoolError::PremiumTooLow {
-                least: candid::Nat::from(2_000_u32)
-            })
-        );
-        assert!(matches!(
-            checked(&SwapRequest {
-                terms: IcpSwapTerms {
-                    premium: TokenAmount::from(2_000_u32),
-                    ..direct.terms
-                },
-                ..direct
-            }),
-            Ok(RoutePath::Direct { .. })
-        ));
-    });
 }
 
 /// ckUSDC in: pulled with the payout's dedup pair, the amount exactly the ckUSDC less the
@@ -621,14 +513,7 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
         )
         .unwrap();
         let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
-        // two legs: still 10 bps of min_usdc at the least, no fee floor
-        request.terms.premium = TokenAmount::from(1_999_u32);
-        assert!(matches!(
-            checked(&request),
-            Err(PoolError::PremiumTooLow { .. })
-        ));
         request.terms.premium = TokenAmount::from(8 * FEE);
-        assert!(matches!(checked(&request), Ok(RoutePath::ViaIcp { .. })));
         let id = open(&request);
         let fake = Fake::default();
         fake.quotes
@@ -666,5 +551,373 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
         let legs = payout.legs.unwrap();
         assert!(legs.swap.out.is_some());
         assert!(legs.second.unwrap().out.is_some());
+    });
+}
+
+fn canister() -> EvmAddress {
+    EvmAddress::new([0x36; 20])
+}
+
+/// The pool chain's USDC in `config()`.
+fn base_usdc() -> EvmAddress {
+    EvmAddress::new([0x24; 20])
+}
+
+/// A payout plan for `planned`: USDC on Base paid out to `recipient()`, at least `min_out`,
+/// no step, the order's deadline 600 s.
+fn plan_order(planned: TokenAmount, min_out: TokenAmount) -> types::swapic::Order {
+    use alloy_primitives::{FixedBytes, U256};
+    use types::swapic::{addr, Order, Payout};
+    Order {
+        r#ref: FixedBytes([0x61; 32]),
+        payer: addr(canister()),
+        tokenIn: addr(base_usdc()),
+        amountIn: U256::from_be_bytes(planned.to_be_bytes()),
+        deadline: U256::from(600_u64),
+        steps: vec![],
+        payout: Payout {
+            token: addr(base_usdc()),
+            recipient: addr(recipient()),
+            minOut: U256::from_be_bytes(min_out.to_be_bytes()),
+        },
+    }
+}
+
+/// A planned swap of `amount_in` of `token_in` with `order` as its plan, 100 bps of
+/// slippage, its deadline 15 minutes away.
+fn planned(
+    token_in: Principal,
+    amount_in: TokenAmount,
+    order: &types::swapic::Order,
+) -> SwapRequest {
+    SwapRequest {
+        caller: account(5).owner,
+        token_in,
+        amount_in,
+        from: account(5),
+        refund_to: account(6),
+        slippage_bps: 100,
+        deadline: at(10).checked_add(Duration::from_secs(900)).unwrap(),
+        plan: types::swapic::encode_order(order),
+        gas_limit: 400_000,
+    }
+}
+
+fn opened_with(
+    request: &SwapRequest,
+    canister: Option<EvmAddress>,
+    sanctioned: impl Fn(&Address) -> bool,
+) -> Result<Opening, PoolError> {
+    read_state(|state| {
+        check(
+            state,
+            &config(),
+            request,
+            at(10),
+            canister,
+            None,
+            sanctioned,
+        )
+    })
+}
+
+fn opened(request: &SwapRequest) -> Result<Opening, PoolError> {
+    opened_with(request, Some(canister()), |_| false)
+}
+
+/// Opens `request` as `swap_from_icp` does: its checks, then its line.
+fn open_planned(request: &SwapRequest) -> u64 {
+    let opening = opened(request).unwrap();
+    let id = ledger().lines().next_id;
+    record_at(
+        PoolStep::PayoutOpened {
+            id,
+            kind: Box::new(PayoutKind::IcpSwap(opening.terms)),
+            terms: opening.payout,
+            undo: Undo::Refund {
+                to: opening.terms.refund_to,
+            },
+            plan: Some(Box::new(opening.plan)),
+        },
+        at(10),
+    )
+    .unwrap();
+    id
+}
+
+/// What 100 ckUSDC pays at the launch settings: less 10 bps and 5 cents.
+fn ckusdc_payout() -> TokenAmount {
+    TokenAmount::from(99_850_000_u64)
+}
+
+/// Every rule `swap_from_icp` checks, before anything is recorded: the plan read, the
+/// terms its delivery makes, the window, the first minimum, the Base pocket.
+#[test]
+fn each_refusal_comes_before_anything_is_recorded() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let order = plan_order(ckusdc_payout(), usdc(1));
+        let good = planned(ckusdc(), usdc(100), &order);
+        // no settings at all
+        assert!(matches!(opened(&good), Err(PoolError::Closed(_))));
+        pool_with(usdc(500));
+        assert_eq!(opened(&good).unwrap().path, RoutePath::Ckusdc);
+        let with = |change: &dyn Fn(&mut SwapRequest)| {
+            let mut request = good.clone();
+            change(&mut request);
+            opened(&request)
+        };
+        let plan = |order: types::swapic::Order| types::swapic::encode_order(&order);
+        let refused =
+            |answer: Result<Opening, PoolError>| matches!(answer, Err(PoolError::NotAllowed(_)));
+        assert_eq!(
+            with(&|r| r.token_in = Principal::from_slice(&[0x99; 10])),
+            Err(PoolError::TokenNotListed(Principal::from_slice(
+                &[0x99; 10]
+            )))
+        );
+        assert!(refused(with(&|r| r.amount_in = TokenAmount::ZERO)));
+        assert!(refused(with(&|r| r.slippage_bps = 501)));
+        assert_eq!(
+            with(&|r| r.deadline = at(10)
+                .checked_add(MIN_DEADLINE)
+                .unwrap()
+                .checked_sub(Duration::from_nanos(1))
+                .unwrap()),
+            Err(PoolError::Expired)
+        );
+        assert!(refused(with(&|r| r.deadline = at(10)
+            .checked_add(MAX_DEADLINE)
+            .unwrap()
+            .checked_add(Duration::from_nanos(1))
+            .unwrap())));
+        assert!(refused(with(&|r| r.plan = vec![0x0a; 96])));
+        // its delivery: never one of Swapic's own contracts, nor the canister
+        let to = |recipient: EvmAddress| {
+            let mut order = order.clone();
+            order.payout.recipient = types::swapic::addr(recipient);
+            plan(order)
+        };
+        assert!(refused(with(&|r| r.plan = to(swapic()))));
+        assert!(refused(with(&|r| r.plan = to(canister()))));
+        // the payer is the canister; the order's deadline within the payout's
+        let mut stranger = order.clone();
+        stranger.payer = types::swapic::addr(recipient());
+        assert!(refused(with(&|r| r.plan = plan(stranger.clone()))));
+        let mut late = order.clone();
+        late.deadline = alloy_primitives::U256::from(901_u64);
+        assert!(refused(with(&|r| r.plan = plan(late.clone()))));
+        // a ckUSDC swap's exact payout more than 5% from the plan, either way
+        for amount in [94_000_000_u64, 106_000_000] {
+            let far = plan_order(TokenAmount::from(amount), usdc(1));
+            assert!(refused(with(&|r| r.plan = plan(far.clone()))), "{amount}");
+        }
+        // a first minimum above what the swap pays
+        let greedy = plan_order(ckusdc_payout(), usdc(100));
+        assert!(refused(with(&|r| r.plan = plan(greedy.clone()))));
+        // no canister address yet
+        assert!(matches!(
+            opened_with(&good, None, |_| false),
+            Err(PoolError::Unavailable(_))
+        ));
+        // sanctioned: the recipient, the caller
+        assert!(matches!(
+            opened_with(&good, Some(canister()), |address| *address
+                == Address::from(recipient())),
+            Err(PoolError::Sanctioned(_))
+        ));
+        let caller = good.caller.to_text();
+        assert!(matches!(
+            opened_with(&good, Some(canister()), |address| address.as_str()
+                == caller),
+            Err(PoolError::Sanctioned(_))
+        ));
+        // nothing was recorded
+        assert_eq!(ledger().lines().next_id, 0);
+        assert!(ledger().lines().open.is_empty());
+    });
+}
+
+/// The Base pocket must pay the plan and 5% (and a ckUSDC swap's own payout) behind an empty
+/// queue, else nothing is opened.
+#[test]
+fn a_swap_the_base_pocket_cannot_pay_is_refused_at_open() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(104));
+        // 99.85 and 5% is 104.84...: refused
+        let request = planned(ckusdc(), usdc(100), &plan_order(ckusdc_payout(), usdc(1)));
+        assert!(matches!(
+            opened(&request),
+            Err(PoolError::NotAllowed(why)) if why.contains("Base pocket")
+        ));
+    });
+}
+
+/// The payout's terms are the plan's own delivery, the deadline the user's; the swap's least
+/// ckUSDC, premium and fee are the canister's.
+#[test]
+fn the_payout_terms_are_read_from_the_plan() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let order = plan_order(ckusdc_payout(), usdc(1));
+        let request = planned(ckusdc(), usdc(100), &order);
+        let opening = opened(&request).unwrap();
+        assert_eq!(
+            opening.payout,
+            PayoutTerms {
+                dst_chain: ChainId::BASE,
+                recipient: recipient(),
+                token_out: base_usdc(),
+                min_out: usdc(1),
+                deadline: request.deadline,
+            }
+        );
+        assert_eq!(opening.terms.min_usdc, usdc(100));
+        assert_eq!(opening.terms.premium, TokenAmount::ZERO);
+        assert_eq!(opening.terms.network_fee, TokenAmount::from(50_000_u32));
+        assert_eq!(opening.terms.planned, Some(ckusdc_payout()));
+        assert_eq!(opening.terms.slippage_bps, Some(100));
+        assert_eq!(opening.plan.order, types::swapic::encode_order(&order));
+        assert_eq!(opening.plan.gas_limit, 400_000);
+        assert_eq!(opening.plan.deadline_s, 600);
+    });
+}
+
+/// A plan paying the canister a fee step is refused: the canister pays itself nothing.
+#[test]
+fn a_plan_with_a_fee_step_is_refused() {
+    use alloy_sol_types::SolCall;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let mut order = plan_order(ckusdc_payout(), usdc(1));
+        order.steps.push(types::swapic::Step {
+            target: types::swapic::addr(base_usdc()),
+            data: types::swapic::transferCall {
+                to: types::swapic::addr(canister()),
+                amount: alloy_primitives::U256::from(1_000_u64),
+            }
+            .abi_encode()
+            .into(),
+            token: alloy_primitives::Address::ZERO,
+            min: alloy_primitives::U256::ZERO,
+            writes: vec![],
+        });
+        assert!(matches!(
+            opened(&planned(ckusdc(), usdc(100), &order)),
+            Err(PoolError::NotAllowed(why)) if why.contains("fee step")
+        ));
+    });
+}
+
+/// M-01: no per swap cap on the canister any more; only what the Base pocket can pay.
+#[test]
+fn a_swap_above_the_old_per_swap_cap_opens() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(2_000));
+        let cap = ledger().settings.unwrap().per_swap_cap;
+        assert!(usdc(1_500) > cap);
+        let payout = TokenAmount::from(1_498_450_000_u64);
+        let request = planned(ckusdc(), usdc(1_500), &plan_order(payout, usdc(1)));
+        assert!(opened(&request).is_ok());
+    });
+}
+
+/// A planned ckUSDC swap: pulled, its premium the settings' share of the 100 it made, its
+/// payout waiting with exactly that amount.
+#[test]
+fn a_planned_ckusdc_swap_waits_with_the_premium_from_its_amount() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let id = open_planned(&planned(
+            ckusdc(),
+            usdc(100),
+            &plan_order(ckusdc_payout(), usdc(1)),
+        ));
+        let fake = Fake::default();
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+        assert_eq!(payout.amount, Some(ckusdc_payout()));
+        assert_eq!(payout.received, Some(usdc(100)));
+        assert!(payout.plan.is_some());
+    });
+}
+
+/// A planned swap never queues: one the Base pocket cannot pay any more by the time its
+/// amount is known (another payout took it meanwhile) is undone at once, all its ckUSDC back.
+#[test]
+fn a_planned_swap_the_base_pocket_cannot_pay_any_more_is_undone_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let id = open_planned(&planned(
+            ckusdc(),
+            usdc(100),
+            &plan_order(ckusdc_payout(), usdc(1)),
+        ));
+        // an older swap takes the Base pocket meanwhile
+        let mut other = request(ckusdc(), usdc(450), usdc(450));
+        other.terms.premium = usdc(1);
+        let other = open(&other);
+        block_on(drive(&Fake::default(), other, clock, &open_pool)).unwrap();
+        assert_eq!(
+            pool_store::payout(other).unwrap().status,
+            PayoutStatus::Waiting
+        );
+        let fake = Fake::default();
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Undone(BASE_SHORT.to_string()));
+        let transfers: Vec<_> = fake.transfers.borrow().values().copied().collect();
+        assert_eq!(
+            transfers,
+            vec![(
+                ckusdc(),
+                account(6),
+                usdc(100).checked_sub(TokenAmount::from(FEE)).unwrap()
+            )]
+        );
+        assert_eq!(ledger().lines().queue_len, 0);
+    });
+}
+
+/// A planned token swap: its sale's floor is the ckUSDC the plan needs less half the
+/// slippage, and its premium the settings' share of what the sale made.
+#[test]
+fn a_planned_token_sale_has_half_the_slippage_as_its_floor() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let request = planned(
+            token(),
+            TokenAmount::from(5_000_000_u64),
+            &plan_order(usdc(2), usdc(1)),
+        );
+        let opening = opened(&request).unwrap();
+        // 2.05 / 0.999 is 2,052,053; less 50 bps, rounded up
+        assert_eq!(opening.terms.min_usdc, TokenAmount::from(2_041_793_u64));
+        let id = open_planned(&request);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(2_100_000_u64)));
+        fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                "pull token 5000000".to_string(),
+                "quote 4998000".to_string(),
+                "approve 4999000".to_string(),
+                "swap 4998000 at least 2051793".to_string(),
+            ]
+        );
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.received, Some(TokenAmount::from(2_090_000_u64)));
+        assert_eq!(payout.amount, Some(TokenAmount::from(2_037_910_u64)));
+        assert_eq!(payout.status, PayoutStatus::Waiting);
     });
 }

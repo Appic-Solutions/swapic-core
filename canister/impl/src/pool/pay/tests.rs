@@ -202,6 +202,7 @@ fn check_with(
         settings,
         deadline_of(order) - 600,
         sanctioned,
+        AmountIn::Exact,
     )
 }
 
@@ -301,6 +302,7 @@ fn a_hostile_order_is_refused() {
         &PayoutSettings::default(),
         deadline_of(&order) - ORDER_MARGIN_S + 1,
         nobody,
+        AmountIn::Exact,
     )
     .is_err());
     // and the real one passes
@@ -488,6 +490,7 @@ fn one_payout_is_signed_once_at_a_time_and_never_again() {
                     owner: PoolAccount::Evm(staker),
                     shares: burned,
                 },
+                plan: None,
             },
             PoolStep::PayoutAmountKnown {
                 id: 0,
@@ -560,7 +563,69 @@ fn a_payout_intent_of_another_prover_is_refused() {
             &PayoutSettings::default(),
             deadline_of(&theirs) - 600,
             nobody,
+            AmountIn::Exact,
         ),
         Err(PoolError::NotAllowed(why)) if why.contains("no Eco prover")
     ));
+}
+
+/// One validator (2026-10-23): a planned swap's plan at its opening, its amount not known
+/// yet, meets every rule a payout order meets once its amount is known, but the amount; so
+/// an order refused for any other reason is refused alike in both modes.
+#[test]
+fn check_order_refuses_alike_whether_the_amount_is_known_or_not() {
+    let world = World::new();
+    let order = same_chain();
+    let terms = terms_of(&order, &world);
+    let known = waiting(&order, terms);
+    let opening = EvmPayout {
+        amount: None,
+        status: PayoutStatus::Opened,
+        base_reserved: false,
+        ..known.clone()
+    };
+    let in_mode = |payout: &EvmPayout, order: &Order, gas: u64, mode: AmountIn| {
+        check_order(
+            payout,
+            order,
+            &swapic::encode_order(order),
+            gas,
+            &world.payer(),
+            &PayoutSettings::default(),
+            deadline_of(order) - 600,
+            nobody,
+            mode,
+        )
+    };
+    let alike = |order: &Order, gas: u64, why: &str| {
+        let exact = in_mode(&known, order, gas, AmountIn::Exact);
+        let not_yet = in_mode(&opening, order, gas, AmountIn::NotKnownYet);
+        assert!(exact.is_err(), "{why}");
+        assert_eq!(exact, not_yet, "{why}");
+    };
+    let mut other = order.clone();
+    other.payout.recipient = swapic::addr(address("0x2222222222222222222222222222222222222222"));
+    alike(&other, 900_000, "another recipient");
+    let mut smaller = order.clone();
+    smaller.payout.minOut -= U256::from(1);
+    alike(&smaller, 900_000, "a smaller minimum");
+    let mut payer = order.clone();
+    payer.payer = swapic::addr(address("0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"));
+    alike(&payer, 900_000, "another payer");
+    let mut token_in = order.clone();
+    token_in.tokenIn = swapic::addr(NATIVE);
+    alike(&token_in, 900_000, "another token in");
+    alike(&order, 2_000_001, "a gas limit above the cap");
+    alike(&order, 20_999, "a gas limit below any transaction's");
+    // the amount alone: refused once known, not before
+    let mut larger = order.clone();
+    larger.amountIn += U256::from(1);
+    assert!(in_mode(&known, &larger, 900_000, AmountIn::Exact).is_err());
+    assert!(in_mode(&opening, &larger, 900_000, AmountIn::NotKnownYet).is_ok());
+    // and the real order passes both
+    assert!(in_mode(&known, &order, 900_000, AmountIn::Exact).is_ok());
+    assert!(in_mode(&opening, &order, 900_000, AmountIn::NotKnownYet).is_ok());
+    // a mode that does not match the payout is refused
+    assert!(in_mode(&known, &order, 900_000, AmountIn::NotKnownYet).is_err());
+    assert!(in_mode(&opening, &order, 900_000, AmountIn::Exact).is_err());
 }

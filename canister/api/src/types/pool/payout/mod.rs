@@ -26,6 +26,16 @@ pub struct PayoutTerms {
     pub deadline_ns: u64,
 }
 
+/// The payout plan (2026-10-23): the quoter's ready-made Swapic order for the expected
+/// payout (its `amountIn`), as `abi.encode(order)`, and the gas it is signed with, as
+/// `pay_payout` takes them. Its one delivery names the chain, the recipient, the token and
+/// the least out.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PayoutPlan {
+    pub order: Vec<u8>,
+    pub gas_limit: u64,
+}
+
 /// An ICP user's swap to an EVM token through the pool.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IcpSwapTerms {
@@ -34,15 +44,13 @@ pub struct IcpSwapTerms {
     /// Pulled with `icrc2_transfer_from` from the caller's account.
     pub amount_in: Nat,
     pub from_subaccount: Option<Vec<u8>>,
-    /// The least ckUSDC the ICPSwap leg must give (`amount_in` for ckUSDC).
-    pub min_usdc: Nat,
-    /// Micro USDC, at least the pool's premium floor.
-    pub premium: Nat,
-    /// Micro USDC, at least `payout_settings.min_network_fee`.
-    pub network_fee: Nat,
-    pub payout: PayoutTerms,
     /// Default: the caller's account.
     pub refund_to: Option<IcpAccount>,
+    /// At most 500: half of it is the sale's on ICP, the rest the plan's own swap.
+    pub slippage_bps: u16,
+    /// 5 minutes to 1 hour ahead: after it nothing is signed and the swap is undone.
+    pub deadline_ns: u64,
+    pub plan: PayoutPlan,
 }
 
 /// An EVM staker's withdrawal, signed by the staker (EIP-712).
@@ -94,6 +102,10 @@ pub struct PayoutView {
     pub status: PayoutStatus,
     pub order_id: Option<Vec<u8>>,
     pub tx_hash: Option<Vec<u8>>,
+    /// The ckUSDC the swap made on ICP, once known.
+    pub received: Option<Nat>,
+    /// The plan's amount (`amountIn`), for a swap opened with a plan.
+    pub planned: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -195,6 +207,11 @@ impl From<&domain::EvmPayout> for PayoutView {
             status: (&payout.status).into(),
             order_id: payout.order.as_ref().map(|order| order.order_id.to_vec()),
             tx_hash: payout.tx_hash.map(|hash| hash.into_bytes().to_vec()),
+            received: payout.received.map(nat),
+            planned: match payout.kind {
+                domain::PayoutKind::IcpSwap(terms) => terms.planned.map(nat),
+                domain::PayoutKind::Withdrawal(_) => None,
+            },
         }
     }
 }

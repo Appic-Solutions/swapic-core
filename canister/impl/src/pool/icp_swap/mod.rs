@@ -1,14 +1,19 @@
-//! `swap_from_icp` (spec 3.2, the fixed interface sections 3b and 4): an ICP user swaps
-//! ckUSDC or a listed ICP token to any token on an EVM chain through the pool. The canister
-//! pulls what the user approved, brings a token to ckUSDC through its route's leg or legs
-//! (directly, or through ICP), and only then knows the exact ckUSDC `u`: the payout from the
-//! Base pocket is `u - premium - network_fee`, its order built at that exact amount (P13b)
-//! and signed by `pay_payout`.
+//! `swap_from_icp` (spec 3.2, the fixed interface sections 3b and 4; the payout plan of the
+//! final review fixes, 2026-10-23): an ICP user swaps ckUSDC or a listed ICP token to any
+//! token on an EVM chain through the pool, handing in the quoter's ready-made order for the
+//! payout it expects (the payout plan, its `amountIn` the planned payout) and one slippage.
+//! The recipient, the token, the chain and the least out are read from the plan, which goes
+//! through the same checks as any payout order (`pay::check_order`, its amount not known
+//! yet). The canister pulls what the user approved, brings a token to ckUSDC through its
+//! route's leg or legs, at least the sale floor (half the slippage below what the plan
+//! needs), and only then knows the exact ckUSDC `u`: the payout from the Base pocket is `u`
+//! less the settings' premium on it and the payouts' flat network fee. No per swap cap: a
+//! swap opens only while the Base pocket can pay it.
 //!
 //! Each line before the call it guards:
-//! - `PayoutOpened` with the undo account and the pull's dedup pair (the payout's own
-//!   instant, memo its ref), then `icrc2_transfer_from`: refused, nothing moved, the payout is
-//!   undone; an answer lost, asked again by the payout timer with the same pair.
+//! - `PayoutOpened` with the plan, the undo account and the pull's dedup pair (the payout's
+//!   own instant, memo its ref), then `icrc2_transfer_from`: refused, nothing moved, the
+//!   payout is undone; an answer lost, asked again by the payout timer with the same pair.
 //! - `PayoutPulled` with the legs' path; each leg recorded before its call
 //!   ([`crate::pool::legs`]). `min_usdc` is the ckUSDC the canister holds after the last
 //!   leg's output is withdrawn (one ckUSDC fee, interface section 4): a leg that cannot give
@@ -16,38 +21,59 @@
 //!   whose second leg cannot swaps the ICP back into the token first; a way back that fails
 //!   stops for a human).
 //! - `PayoutAmountKnown`, then `PayoutWaiting` (the Base pocket covers it behind an empty
-//!   queue) or `PayoutQueued`.
+//!   queue). A planned swap never queues: one the Base pocket cannot pay any more is undone
+//!   at once, its ckUSDC refunded; one opened before the plan flow is queued.
 
 #[cfg(test)]
 mod tests;
 
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
+use crate::pool::pay::{self, AmountIn};
 use crate::pool::payout::{call_stop, open, Ledgers, Leg, Stop};
 use crate::pool::{self, now};
+use crate::relay::{read_plan, Party};
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use alloy_primitives::keccak256;
 use candid::Principal;
-use settlement_api::types::pool::{nat, PoolError};
+use settlement_api::types::pool::{PoolError, SwapFromIcpOk};
 use std::time::Duration;
-use types::pool::payout::{EvmPayout, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms, Undo};
+use types::config::GasAction;
+use types::pool::payout::{
+    EvmPayout, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+};
+use types::pool::plan::{self, MAX_SLIPPAGE_BPS};
 use types::pool::{
-    evm_payout_ref, premium_share, IcpAccount, PayoutAttempt, PayoutPath, PoolStep, PrincipalBytes,
-    RoutePath, LEG_BACK, LEG_SECOND,
+    evm_payout_ref, IcpAccount, PayoutAttempt, PayoutPath, PoolStep, PrincipalBytes, RoutePath,
+    LEG_BACK, LEG_SECOND,
 };
 use types::{Address, EvmAddress, Timestamp, TokenAmount};
 
 /// The least time a payout's deadline must be ahead of its opening.
 pub const MIN_DEADLINE: Duration = Duration::from_secs(300);
 
+/// The most time a payout's deadline may be ahead of its opening (Jeff-delegated, 2026-10-23).
+pub const MAX_DEADLINE: Duration = Duration::from_secs(3_600);
+
+/// The most bytes a payout plan may have.
+pub const MAX_PLAN_BYTES: usize = 16 * 1_024;
+
 /// The swap as its caller asks it, read off the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SwapRequest {
     pub caller: Principal,
-    pub terms: IcpSwapTerms,
-    pub payout: PayoutTerms,
+    pub token_in: Principal,
+    pub amount_in: TokenAmount,
+    /// The caller's account the token is pulled from.
+    pub from: IcpAccount,
+    pub refund_to: IcpAccount,
+    pub slippage_bps: u16,
+    pub deadline: Timestamp,
+    /// The payout plan: `abi.encode` of the order, and its gas.
+    pub plan: Vec<u8>,
+    pub gas_limit: u64,
 }
 
 /// The wire terms as the domain takes them: the caller's account at `from_subaccount` is
@@ -69,18 +95,21 @@ pub fn request_of(
         Some(account) => account.try_into()?,
         None => from,
     };
+    if args.plan.order.len() > MAX_PLAN_BYTES {
+        return Err(PoolError::NotAllowed(format!(
+            "a payout plan is at most {MAX_PLAN_BYTES} bytes"
+        )));
+    }
     Ok(SwapRequest {
         caller,
-        terms: IcpSwapTerms {
-            token_in: args.token_in,
-            amount_in: amount("amount_in", &args.amount_in)?,
-            from,
-            min_usdc: amount("min_usdc", &args.min_usdc)?,
-            premium: amount("premium", &args.premium)?,
-            network_fee: amount("network_fee", &args.network_fee)?,
-            refund_to,
-        },
-        payout: args.payout.try_into()?,
+        token_in: args.token_in,
+        amount_in: amount("amount_in", &args.amount_in)?,
+        from,
+        refund_to,
+        slippage_bps: args.slippage_bps,
+        deadline: Timestamp::from_nanos(args.deadline_ns),
+        plan: args.plan.order,
+        gas_limit: args.plan.gas_limit,
     })
 }
 
@@ -135,26 +164,47 @@ pub fn check_payout_terms(
     Ok(())
 }
 
+/// A swap that met every rule: what `PayoutOpened` records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opening {
+    /// The token's path into ckUSDC.
+    pub path: RoutePath,
+    pub terms: IcpSwapTerms,
+    /// Read from the plan's one delivery, the deadline the user's.
+    pub payout: PayoutTerms,
+    pub plan: PinnedOrder,
+}
+
+fn refused(why: impl Into<String>) -> PoolError {
+    PoolError::NotAllowed(why.into())
+}
+
 /// Every rule a swap meets before anything is recorded, in the interface's order: the pool's
-/// and the payouts' settings, the pool open for swaps, a listed token, no sanctioned party,
-/// the premium's floor (per ICPSwap leg of its route), the network fee's floor, the per swap
-/// cap, a deadline at least five minutes away, and payout terms the canister signs for.
-/// Answers the token's path.
+/// and the payouts' settings, the pool open for swaps, a listed token, a slippage of at most
+/// 500 bps, no sanctioned party, a deadline 5 minutes to 1 hour away; then the plan: an
+/// order, its one delivery the payout's terms (a chain the canister pays on, a recipient
+/// none of its own), the network fee its rail takes, the sale floor (half the slippage below
+/// what the plan's amount needs; a ckUSDC swap sells nothing, its payout exact and within 5%
+/// of the plan), the plan's first minimum within what the floor pays, the Base pocket able
+/// to pay it behind an empty queue (the plan and 5%, and a ckUSDC swap's own payout), and
+/// the plan through the payout orders' own checks, its amount not known yet.
+#[allow(clippy::too_many_arguments)]
 pub fn check<S: Store>(
     state: &State<S>,
     config: &types::Config,
     request: &SwapRequest,
     now: Timestamp,
     canister: Option<EvmAddress>,
+    eco_prover: Option<EvmAddress>,
     sanctioned: impl Fn(&Address) -> bool,
-) -> Result<RoutePath, PoolError> {
+) -> Result<Opening, PoolError> {
     let ledger = state.pool();
     let settings = ledger
         .settings
         .as_ref()
         .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
-    let payouts = ledger
-        .lines()
+    let lines = ledger.lines();
+    let payouts = lines
         .settings
         .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
     if !settings.open_for_swaps {
@@ -162,88 +212,168 @@ pub fn check<S: Store>(
             "the pool is not open for swaps".to_string(),
         ));
     }
-    let terms = &request.terms;
     let path = settings
-        .path_of(terms.token_in)
-        .ok_or(PoolError::TokenNotListed(terms.token_in))?;
-    if terms.amount_in == TokenAmount::ZERO || terms.min_usdc == TokenAmount::ZERO {
-        return Err(PoolError::NotAllowed(
-            "amount_in and min_usdc must be above zero".to_string(),
-        ));
+        .path_of(request.token_in)
+        .ok_or(PoolError::TokenNotListed(request.token_in))?;
+    if request.amount_in == TokenAmount::ZERO {
+        return Err(refused("amount_in must be above zero"));
     }
-    if path == RoutePath::Ckusdc && terms.min_usdc != terms.amount_in {
-        return Err(PoolError::NotAllowed(
-            "min_usdc of a ckUSDC swap is its amount_in".to_string(),
-        ));
+    if request.slippage_bps > MAX_SLIPPAGE_BPS {
+        return Err(refused(format!(
+            "the slippage must be at most {MAX_SLIPPAGE_BPS} bps"
+        )));
     }
-    if screened(request.caller, &sanctioned) || screened(terms.refund_to.owner, &sanctioned) {
+    if screened(request.caller, &sanctioned) || screened(request.refund_to.owner, &sanctioned) {
         return Err(PoolError::Sanctioned(
             "a party to the swap is sanctioned".to_string(),
         ));
     }
-    // no premium floor (P11d): exactly the settings' share of min_usdc; every ICP fee of
-    // the way in is the user's, out of what was pulled
-    let least = premium_share(settings, terms.min_usdc)
-        .ok_or_else(|| PoolError::NotAllowed("min_usdc is too large".to_string()))?;
-    if terms.premium < least {
-        return Err(PoolError::PremiumTooLow { least: nat(least) });
-    }
-    if terms.network_fee < payouts.min_network_fee {
-        return Err(PoolError::NotAllowed(format!(
-            "the network fee must be at least {}",
-            payouts.min_network_fee
-        )));
-    }
-    if terms.min_usdc > settings.per_swap_cap {
-        return Err(PoolError::AboveSwapCap {
-            cap: nat(settings.per_swap_cap),
-        });
-    }
-    let fees = terms
-        .premium
-        .checked_add(terms.network_fee)
-        .unwrap_or(TokenAmount::MAX);
-    if fees >= terms.min_usdc {
-        return Err(PoolError::NotAllowed(
-            "the premium and the network fee take all of min_usdc".to_string(),
-        ));
-    }
-    let earliest = now
-        .checked_add(MIN_DEADLINE)
-        .unwrap_or(Timestamp::from_nanos(u64::MAX));
-    if request.payout.deadline < earliest {
+    let after = |wait: Duration| {
+        now.checked_add(wait)
+            .unwrap_or(Timestamp::from_nanos(u64::MAX))
+    };
+    if request.deadline < after(MIN_DEADLINE) {
         return Err(PoolError::Expired);
     }
-    check_payout_terms(config, &request.payout, canister, &sanctioned)?;
-    Ok(path)
+    if request.deadline > after(MAX_DEADLINE) {
+        return Err(refused("the deadline is more than an hour away"));
+    }
+    let order = types::swapic::decode_order(&request.plan)
+        .ok_or_else(|| refused("the payout plan is not abi.encode of an Order"))?;
+    let canister = canister.ok_or_else(|| {
+        PoolError::Unavailable("the canister's address is not derived yet".to_string())
+    })?;
+    let payer = pay::payer_of(config, canister, eco_prover)?;
+    let read =
+        read_plan(&order, &payer.chains).map_err(|error| refused(format!("the plan {error}")))?;
+    let delivery = read
+        .delivery
+        .ok_or_else(|| refused("the plan has no single delivery the canister reads"))?;
+    let payout = PayoutTerms {
+        dst_chain: delivery.chain,
+        recipient: delivery.recipient,
+        token_out: delivery.token,
+        min_out: delivery.min_out,
+        deadline: request.deadline,
+    };
+    check_payout_terms(config, &payout, Some(canister), &sanctioned)?;
+    // the flat floor of the rail the plan takes (Jeff-delegated): the canister reads no gas
+    // price in USDC of its own
+    let network_fee = if read.action == GasAction::RelayCctp {
+        payouts
+            .cctp_min_network_fee
+            .ok_or_else(|| refused("no CCTP payout is signed: its least network fee is unset"))?
+    } else {
+        payouts.min_network_fee
+    };
+    let planned = TokenAmount::from_be_bytes(order.amountIn.to_be_bytes::<32>());
+    let too_large = || refused("the plan's amount is too large");
+    let floor = if path == RoutePath::Ckusdc {
+        request.amount_in
+    } else {
+        let expected =
+            plan::expected_received(settings, planned, network_fee).ok_or_else(too_large)?;
+        plan::sale_floor(expected, request.slippage_bps).ok_or_else(too_large)?
+    };
+    // what the swap pays at its floor: a ckUSDC swap's exact payout
+    let least = plan::payout_of(settings, floor, network_fee)
+        .ok_or_else(|| refused("the premium and the network fee take all of the swap"))?;
+    if path == RoutePath::Ckusdc && !plan::fits(planned, least) {
+        return Err(refused(format!(
+            "the plan is built for {planned}, the swap pays {least}: more than 5% apart"
+        )));
+    }
+    let first = plan::first_minimum(&order);
+    if first > least {
+        return Err(refused(format!(
+            "the plan's first step asks {first}, above the {least} the swap pays at its floor"
+        )));
+    }
+    let mut need = plan::open_cover(planned).ok_or_else(too_large)?;
+    if path == RoutePath::Ckusdc {
+        need = need.max(least);
+    }
+    if lines.queue_len > 0 || need > ledger.pockets.base.free {
+        return Err(refused(format!("the Base pocket cannot pay {need} now")));
+    }
+    let terms = IcpSwapTerms {
+        token_in: request.token_in,
+        amount_in: request.amount_in,
+        from: request.from,
+        min_usdc: floor,
+        premium: TokenAmount::ZERO,
+        network_fee,
+        refund_to: request.refund_to,
+        slippage_bps: Some(request.slippage_bps),
+        planned: Some(planned),
+    };
+    let prospective = EvmPayout::new(
+        lines.next_id,
+        PayoutKind::IcpSwap(terms),
+        payout,
+        Undo::Refund {
+            to: request.refund_to,
+        },
+        now,
+    );
+    let pinned = pay::check_order(
+        &prospective,
+        &order,
+        &request.plan,
+        request.gas_limit,
+        &payer,
+        &payouts,
+        now.as_secs().get(),
+        |party| match party {
+            Party::Evm(address) => sanctioned(&Address::from(*address)),
+            Party::Icp(principal) => screened(*principal, &sanctioned),
+        },
+        AmountIn::NotKnownYet,
+    )?;
+    Ok(Opening {
+        path,
+        terms,
+        payout,
+        plan: pinned,
+    })
 }
 
-/// `swap_from_icp`'s body: the payout's id. A pull the ledger refused answers its refusal
-/// (nothing moved, the payout undone); anything else answers the id, and `payout(id)` tells
-/// where it stands (a pull whose answer was lost, or a leg still running, continues on the
-/// canister's payout timer).
+/// `swap_from_icp`'s body: the payout's id and where it stands. A pull the ledger refused
+/// answers its refusal (nothing moved, the payout undone); anything else answers the id, and
+/// `payout(id)` tells where it stands (a pull whose answer was lost, or a leg still running,
+/// continues on the canister's payout timer).
 pub async fn swap_from_icp(
     args: settlement_api::types::pool::IcpSwapTerms,
     sanctioned: impl Fn(&Address) -> bool,
-) -> Result<u64, PoolError> {
+) -> Result<SwapFromIcpOk, PoolError> {
     pool::require_running()?;
     pool::require_pool_open()?;
     let request = request_of(ic_cdk::api::caller(), args)?;
     let config = crate::storage::config::get();
     let canister = crate::storage::ecdsa_address::get();
+    let eco_prover = crate::storage::flow_settings::get().eco_prover;
     let at = now();
-    let id = read_state(|state| -> Result<u64, PoolError> {
-        check(state, &config, &request, at, canister, &sanctioned)?;
-        Ok(state.pool().lines().next_id)
+    let (id, opening) = read_state(|state| -> Result<(u64, Opening), PoolError> {
+        let opening = check(
+            state,
+            &config,
+            &request,
+            at,
+            canister,
+            eco_prover,
+            &sanctioned,
+        )?;
+        Ok((state.pool().lines().next_id, opening))
     })?;
     pool_store::record_at(
         PoolStep::PayoutOpened {
             id,
-            kind: Box::new(PayoutKind::IcpSwap(request.terms)),
-            terms: request.payout,
+            kind: Box::new(PayoutKind::IcpSwap(opening.terms)),
+            terms: opening.payout,
             undo: Undo::Refund {
-                to: request.terms.refund_to,
+                to: opening.terms.refund_to,
             },
+            plan: Some(Box::new(opening.plan)),
         },
         at,
     )
@@ -265,7 +395,11 @@ pub async fn swap_from_icp(
             icp_block: None,
             ..
         }) => Err(PoolError::Ledger(why)),
-        _ => Ok(id),
+        Some(payout) => Ok(SwapFromIcpOk {
+            id,
+            status: (&payout.status).into(),
+        }),
+        None => Err(PoolError::Unknown),
     }
 }
 
@@ -313,9 +447,11 @@ pub async fn drive(
         let Some(payout) = pool_store::payout(id) else {
             return Ok(());
         };
-        // a payout whose amount is known takes its place, whatever it is
+        // a payout whose amount is known takes its place, whatever it is: a planned swap the
+        // Base pocket cannot pay any more is undone, its refund next
         if payout.status == PayoutStatus::Known {
-            return place(id, clock());
+            place(id, clock())?;
+            continue;
         }
         if !payout.is_icp_swap() {
             return Ok(());
@@ -323,7 +459,6 @@ pub async fn drive(
         match &payout.status {
             PayoutStatus::Opened => pull(ledgers, &payout, clock).await?,
             PayoutStatus::Swapping => swap(ledgers, &payout, clock, guard).await?,
-            PayoutStatus::Known => return place(id, clock()),
             PayoutStatus::Undoing(_) => return refund(ledgers, &payout, clock, guard).await,
             _ => return Ok(()),
         }
@@ -331,7 +466,11 @@ pub async fn drive(
     Ok(())
 }
 
-/// Waiting when the Base pocket covers it behind an empty queue, else queued.
+/// Why a planned swap the Base pocket cannot pay any more is undone.
+pub const BASE_SHORT: &str = "the Base pocket cannot pay it now";
+
+/// Waiting when the Base pocket covers it behind an empty queue; else a planned swap is
+/// undone at once (it never queues, 2026-10-23), and any other payout queued.
 pub fn place(id: u64, now: Timestamp) -> Result<(), Stop> {
     let ledger = pool_store::ledger();
     let Some(payout) = pool_store::payout(id) else {
@@ -340,6 +479,8 @@ pub fn place(id: u64, now: Timestamp) -> Result<(), Stop> {
     let covered = ledger.lines().queue_len == 0 && payout.base_hold() <= ledger.pockets.base.free;
     if covered {
         record(PoolStep::PayoutWaiting { id }, now)
+    } else if matches!(payout.kind, PayoutKind::IcpSwap(terms) if terms.is_planned()) {
+        undo(id, BASE_SHORT.to_string(), now)
     } else {
         record(PoolStep::PayoutQueued { id }, now)
     }
@@ -444,10 +585,15 @@ async fn swap(
         .fee_of(ckusdc)
         .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
     let known = |received: TokenAmount| -> Result<(), Stop> {
-        let amount = received
-            .checked_sub(terms.premium)
-            .and_then(|left| left.checked_sub(terms.network_fee))
-            .ok_or_else(|| Stop::Failed("the ckUSDC does not cover the fees".to_string()))?;
+        // a planned swap's premium is the settings' share of what it made (2026-10-23)
+        let amount = if terms.is_planned() {
+            plan::payout_of(&settings, received, terms.network_fee)
+        } else {
+            received
+                .checked_sub(terms.premium)
+                .and_then(|left| left.checked_sub(terms.network_fee))
+        }
+        .ok_or_else(|| Stop::Failed("the ckUSDC does not cover the fees".to_string()))?;
         record(
             PoolStep::PayoutAmountKnown {
                 id: payout.id,

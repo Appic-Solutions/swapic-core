@@ -133,6 +133,8 @@ fn icp_swap(min_usdc: TokenAmount) -> (PayoutKind, Undo) {
         premium: TokenAmount::from(10_000_u32),
         network_fee: TokenAmount::from(50_000_u32),
         refund_to: recipient(6),
+        slippage_bps: None,
+        planned: None,
     };
     (
         PayoutKind::IcpSwap(swap),
@@ -147,6 +149,7 @@ fn open(pool: &mut Pool, kind: PayoutKind, undo: Undo) -> u64 {
         kind: Box::new(kind),
         terms: terms(),
         undo,
+        plan: None,
     })
     .unwrap();
     id
@@ -306,6 +309,7 @@ fn a_withdrawal_is_refused_on_a_used_nonce_a_small_burn_or_a_burn_above_its_cap(
         kind: Box::new(kind),
         terms: terms(),
         undo,
+        plan: None,
     };
     assert_eq!(
         pool.step(step(kind, undo)),
@@ -346,6 +350,7 @@ fn a_withdrawal_is_refused_on_a_used_nonce_a_small_burn_or_a_burn_above_its_cap(
             kind: Box::new(kind),
             terms: terms(),
             undo,
+            plan: None,
         }),
         Err(PoolStepError::PayoutId { expected: id })
     );
@@ -1196,4 +1201,202 @@ fn an_eco_payout_paid_moves_no_line() {
         pool.step(paid(id, Some([0xa0; 32]))).unwrap();
         assert_eq!(pool.ledger, before);
     }
+}
+
+/// A plan for `planned`: a same-chain order paying USDC out on Base, as `abi.encode`.
+fn plan_for(planned: TokenAmount) -> PinnedOrder {
+    use crate::swapic::{addr, encode_order, Order, Payout};
+    let usdc = EvmAddress::new([0x83; 20]);
+    let order = Order {
+        r#ref: alloy_primitives::FixedBytes([0x61; 32]),
+        payer: addr(EvmAddress::new([0x36; 20])),
+        tokenIn: addr(usdc),
+        amountIn: alloy_primitives::U256::from_be_bytes(planned.to_be_bytes()),
+        deadline: alloy_primitives::U256::from(1_800_000_000_u64),
+        steps: vec![],
+        payout: Payout {
+            token: addr(usdc),
+            recipient: addr(payer()),
+            minOut: alloy_primitives::U256::from(1_u8),
+        },
+    };
+    PinnedOrder {
+        order_id: [0x62; 32],
+        order: encode_order(&order),
+        gas_limit: 300_000,
+        deadline_s: 1_800_000_000,
+    }
+}
+
+/// A planned swap of `token_in`, its floor `min_usdc`, for `planned`, 100 bps of slippage.
+fn planned_swap(
+    token_in: candid::Principal,
+    min_usdc: TokenAmount,
+    planned: TokenAmount,
+) -> IcpSwapTerms {
+    IcpSwapTerms {
+        token_in,
+        amount_in: usdc(100),
+        from: recipient(5),
+        min_usdc,
+        premium: TokenAmount::ZERO,
+        network_fee: TokenAmount::from(50_000_u32),
+        refund_to: recipient(6),
+        slippage_bps: Some(100),
+        planned: Some(planned),
+    }
+}
+
+fn open_planned(
+    pool: &mut Pool,
+    swap: IcpSwapTerms,
+    plan: PinnedOrder,
+) -> Result<u64, PoolStepError> {
+    let id = pool.ledger.lines().next_id;
+    pool.step(PoolStep::PayoutOpened {
+        id,
+        kind: Box::new(PayoutKind::IcpSwap(swap)),
+        terms: terms(),
+        undo: Undo::Refund { to: swap.refund_to },
+        plan: Some(Box::new(plan)),
+    })?;
+    Ok(id)
+}
+
+/// M-01, fixed by the payout plan: a planned swap's premium is the settings' share of what
+/// its sale really made, whatever amount the plan named, and its payout is what is left.
+#[test]
+fn a_planned_amount_takes_the_premium_from_what_the_sale_made() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x59, 1);
+    let token = candid::Principal::from_slice(&[0x31; 10]);
+    // a plan for 1 USDC, a sale that made 5,000
+    let swap = planned_swap(token, usdc(1), usdc(1));
+    let id = open_planned(&mut pool, swap, plan_for(usdc(1))).unwrap();
+    let premium = TokenAmount::from(5_000_000_u64);
+    let amount = usdc(5_000)
+        .checked_sub(premium)
+        .and_then(|left| left.checked_sub(TokenAmount::from(50_000_u32)))
+        .unwrap();
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(usdc(5_000)),
+    })
+    .unwrap();
+    assert_eq!(pool.payouts[&id].plan, Some(plan_for(usdc(1))));
+    assert_eq!(pool.ledger.owed, amount);
+}
+
+/// The planned amount with any other premium, the user's fixed one included, is refused.
+#[test]
+fn a_planned_amount_with_another_premium_is_refused() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x5a, 1);
+    let token = candid::Principal::from_slice(&[0x31; 10]);
+    let id = open_planned(
+        &mut pool,
+        planned_swap(token, usdc(1), usdc(1)),
+        plan_for(usdc(1)),
+    )
+    .unwrap();
+    for premium in [0_u64, 1_000, 4_999_999, 5_000_001] {
+        let amount = usdc(5_000)
+            .checked_sub(TokenAmount::from(premium))
+            .and_then(|left| left.checked_sub(TokenAmount::from(50_000_u32)))
+            .unwrap();
+        assert!(matches!(
+            pool.step(PoolStep::PayoutAmountKnown {
+                id,
+                amount,
+                received: Some(usdc(5_000)),
+            }),
+            Err(PoolStepError::Terms(_))
+        ));
+    }
+    // and a premium the opening named is refused there
+    let swap = IcpSwapTerms {
+        premium: usdc(1),
+        ..planned_swap(token, usdc(2), usdc(1))
+    };
+    assert!(matches!(
+        open_planned(&mut pool, swap, plan_for(usdc(1))),
+        Err(PoolStepError::Terms(_))
+    ));
+}
+
+/// A planned swap opens only while the Base pocket can pay it behind an empty queue: the
+/// plan's amount and 5%, and a ckUSDC swap's own payout too; its plan, slippage and planned
+/// amount come together and agree.
+#[test]
+fn a_planned_open_needs_the_base_pocket_and_five_percent() {
+    let token = candid::Principal::from_slice(&[0x31; 10]);
+    let mut pool = with_base(funded(usdc(1_000)), usdc(100), 0x5b, 1);
+    let free = pool.ledger.pockets.base.free;
+    assert_eq!(free, usdc(100));
+    // 100 USDC and 5% is 105: refused; 95.23 and 5% fits
+    assert!(matches!(
+        open_planned(
+            &mut pool,
+            planned_swap(token, usdc(1), usdc(100)),
+            plan_for(usdc(100))
+        ),
+        Err(PoolStepError::BaseShort { .. })
+    ));
+    let fits = TokenAmount::from(95_238_095_u64);
+    open_planned(
+        &mut pool,
+        planned_swap(token, usdc(1), fits),
+        plan_for(fits),
+    )
+    .unwrap();
+    // a plan whose order spends another amount, a slippage above 500 bps, a plan alone
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x5c, 1);
+    assert!(matches!(
+        open_planned(
+            &mut pool,
+            planned_swap(token, usdc(1), usdc(10)),
+            plan_for(usdc(11))
+        ),
+        Err(PoolStepError::Terms(_))
+    ));
+    let steep = IcpSwapTerms {
+        slippage_bps: Some(501),
+        ..planned_swap(token, usdc(1), usdc(10))
+    };
+    assert!(matches!(
+        open_planned(&mut pool, steep, plan_for(usdc(10))),
+        Err(PoolStepError::Terms(_))
+    ));
+    let unplanned = IcpSwapTerms {
+        planned: None,
+        slippage_bps: None,
+        premium: usdc(1),
+        ..planned_swap(token, usdc(10), usdc(10))
+    };
+    assert_eq!(
+        open_planned(&mut pool, unplanned, plan_for(usdc(10))),
+        Err(PoolStepError::Mismatch)
+    );
+    // ckUSDC: its own payout (100 less 10 bps and the fee) must be covered too, and its
+    // least ckUSDC is all of it
+    let ckusdc = super::super::tests::settings().ckusdc_ledger;
+    let mut pool = with_base(
+        funded(usdc(1_000)),
+        TokenAmount::from(99_000_000_u64),
+        0x5d,
+        1,
+    );
+    assert!(matches!(
+        open_planned(
+            &mut pool,
+            planned_swap(ckusdc, usdc(99), usdc(90)),
+            plan_for(usdc(90))
+        ),
+        Err(PoolStepError::Terms(_))
+    ));
+    let ckusdc_swap = planned_swap(ckusdc, usdc(100), usdc(90));
+    // 90 and 5% is 94.5, under the 99 free; but the payout is 99.85
+    let pool_short = open_planned(&mut pool, ckusdc_swap, plan_for(usdc(90)));
+    assert!(
+        matches!(pool_short, Err(PoolStepError::BaseShort { need, .. }) if need == TokenAmount::from(99_850_000_u64))
+    );
 }

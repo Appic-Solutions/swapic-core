@@ -625,7 +625,73 @@ fn samples() -> Vec<Sample> {
     all.extend(rescue_samples());
     all.extend(returned_move_samples());
     all.extend(eco_payout_samples());
+    all.extend(planned_swap_samples());
     all
+}
+
+/// An ICP swap opened with a payout plan (2026-10-23): its terms, the payout holding its
+/// plan, and its opening line.
+fn planned_swap_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, IcpSwapTerms, PayoutKind, PayoutTerms, PinnedOrder};
+    use crate::pool::{IcpAccount, PoolStep, Undo};
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    let account = |byte: u8| IcpAccount {
+        owner: principal(byte),
+        subaccount: Some([byte; 32]),
+    };
+    let swap = IcpSwapTerms {
+        token_in: principal(0xe1),
+        amount_in: TokenAmount::from(1_301_000_000_u64),
+        from: account(0xe2),
+        min_usdc: TokenAmount::from(1_302_000_000_u64),
+        premium: TokenAmount::ZERO,
+        network_fee: TokenAmount::from(1_303_000_u64),
+        refund_to: account(0xe3),
+        slippage_bps: Some(1_304),
+        planned: Some(TokenAmount::from(1_305_000_000_u64)),
+    };
+    let terms = PayoutTerms {
+        dst_chain: ChainId::BASE,
+        recipient: crate::evm::EvmAddress::new([0xe4; 20]),
+        token_out: crate::evm::EvmAddress::new([0xe5; 20]),
+        min_out: TokenAmount::from(1_306_u64),
+        deadline: Timestamp::from_nanos(1_800_000_000_000_001_307),
+    };
+    let plan = PinnedOrder {
+        order_id: [0xe6; 32],
+        order: vec![0xe7; 13],
+        gas_limit: 1_308_000,
+        deadline_s: 1_800_001_309,
+    };
+    let undo = Undo::Refund { to: swap.refund_to };
+    let mut payout = EvmPayout::new(
+        1_310,
+        PayoutKind::IcpSwap(swap),
+        terms,
+        undo,
+        Timestamp::from_nanos(1_800_000_000_000_001_311),
+    );
+    payout.plan = Some(plan.clone());
+    let opened = PoolStep::PayoutOpened {
+        id: 1_310,
+        kind: Box::new(PayoutKind::IcpSwap(swap)),
+        terms,
+        undo,
+        plan: Some(Box::new(plan)),
+    };
+    vec![
+        sample("payout of a planned ICP swap", payout),
+        sample(
+            "planned ICP swap opened",
+            Event::seal(
+                EventIndex::new(13_000),
+                Timestamp::from_nanos(1_800_000_000_000_001_312),
+                EventHash::new([0xe8; 32]),
+                crate::events::EventType::Pool { step: opened },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// A payout signed once (2026-10-23): reverted, delivering into an Eco intent, and unfilled
@@ -1482,6 +1548,8 @@ fn queue_samples() -> Vec<Sample> {
             premium: TokenAmount::from(603_000_u64),
             network_fee: TokenAmount::from(604_000_u64),
             refund_to: account,
+            slippage_bps: None,
+            planned: None,
         }),
         PayoutTerms {
             dst_chain: ChainId::ARBITRUM,
@@ -1555,6 +1623,8 @@ fn icp_swap_samples() -> Vec<Sample> {
             owner: principal(0x63),
             subaccount: Some([0x64; 32]),
         },
+        slippage_bps: None,
+        planned: None,
     };
     let attempt = PayoutAttempt {
         created_at: Timestamp::from_nanos(1_800_000_000_000_000_501),
@@ -2018,6 +2088,8 @@ fn payout_samples() -> Vec<Sample> {
             owner: principal(0xd6),
             subaccount: None,
         },
+        slippage_bps: None,
+        planned: None,
     };
     let order = PinnedOrder {
         order_id: [0xd7; 32],
@@ -2049,6 +2121,7 @@ fn payout_samples() -> Vec<Sample> {
         undoing_at: None,
         icp_released: crate::pool::payout::Flag(false),
         reclaim: None,
+        plan: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
@@ -2105,6 +2178,7 @@ fn payout_samples() -> Vec<Sample> {
                 kind: Box::new(PayoutKind::IcpSwap(swap)),
                 terms,
                 undo: Undo::Refund { to: swap.refund_to },
+                plan: None,
             },
         ),
         (
@@ -2114,6 +2188,7 @@ fn payout_samples() -> Vec<Sample> {
                 kind: Box::new(PayoutKind::Withdrawal(withdrawal)),
                 terms,
                 undo: withdrawn.undo,
+                plan: None,
             },
         ),
         (

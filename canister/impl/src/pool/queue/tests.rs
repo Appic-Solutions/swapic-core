@@ -52,6 +52,8 @@ fn payout_in(status: PayoutStatus, deadline: Timestamp) -> EvmPayout {
             premium: usdc(1),
             network_fee: TokenAmount::from(50_000_u32),
             refund_to: account(6),
+            slippage_bps: None,
+            planned: None,
         }),
         terms(deadline),
         Undo::Refund { to: account(6) },
@@ -211,6 +213,7 @@ fn the_queue_is_served_in_order_when_the_pocket_refills() {
                         owner: PoolAccount::Evm(staker()),
                         shares: w.burned,
                     },
+                    plan: None,
                 },
                 PoolStep::PayoutAmountKnown {
                     id: next_id,
@@ -360,6 +363,8 @@ fn an_undo_at_the_deadline_is_exact() {
             premium: usdc(1),
             network_fee: TokenAmount::from(50_000_u32),
             refund_to: account(6),
+            slippage_bps: None,
+            planned: None,
         };
         record_at(
             PoolStep::PayoutOpened {
@@ -367,6 +372,7 @@ fn an_undo_at_the_deadline_is_exact() {
                 kind: Box::new(PayoutKind::IcpSwap(swap)),
                 terms: terms(deadline),
                 undo: Undo::Refund { to: account(6) },
+                plan: None,
             },
             at(2),
         )
@@ -483,6 +489,7 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
                 owner: PoolAccount::Evm(staker),
                 shares: burned,
             },
+            plan: None,
         },
         PoolStep::PayoutAmountKnown {
             id,
@@ -731,6 +738,8 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
             premium: usdc(1),
             network_fee: TokenAmount::from(50_000_u32),
             refund_to: account(6),
+            slippage_bps: None,
+            planned: None,
         };
         record_at(
             PoolStep::PayoutOpened {
@@ -738,6 +747,7 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
                 kind: Box::new(PayoutKind::IcpSwap(swap)),
                 terms: terms(at(1_000_000_000_000)),
                 undo: Undo::Refund { to: account(6) },
+                plan: None,
             },
             at(2),
         )

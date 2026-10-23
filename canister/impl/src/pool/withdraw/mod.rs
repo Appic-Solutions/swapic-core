@@ -185,6 +185,7 @@ pub fn record(planned: Planned, terms: types::pool::PayoutTerms, now: Timestamp)
                 owner,
                 shares: withdrawal.burned,
             },
+            plan: None,
         },
         now,
     )

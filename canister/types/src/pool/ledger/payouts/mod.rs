@@ -26,8 +26,10 @@ mod tests;
 use super::{credit_shares, sat_add, sat_sub, PoolEffects, PoolLedger, PoolLookup, PoolStepError};
 use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::payout::{
-    EvmPayout, NonceUse, PayoutKind, PayoutLines, PayoutStatus, Reclaim, Undo,
+    EvmPayout, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutStatus, PinnedOrder, Reclaim,
+    Undo,
 };
+use crate::pool::plan;
 use crate::pool::{PoolAccount, PoolStep, ShareLine, Shares};
 
 fn status_of(payout: &EvmPayout) -> String {
@@ -74,6 +76,62 @@ fn unfilled(ledger: &mut PoolLedger, payout: &mut EvmPayout) {
 }
 
 impl PoolLedger {
+    /// A planned ICP swap's opening (2026-10-23): its plan, its slippage and the plan's
+    /// amount together; a slippage of at most 500 bps; a plan that is an order of exactly
+    /// that amount; a premium taken only once the amount is known; a ckUSDC swap's least
+    /// ckUSDC all of it; and the Base pocket able to pay it behind an empty queue: the plan's
+    /// amount and 5%, and a ckUSDC swap's own payout, exact already. A swap with none of the
+    /// three opened before the plan flow.
+    fn admits_plan(
+        &self,
+        swap: &IcpSwapTerms,
+        plan: Option<&PinnedOrder>,
+    ) -> Result<(), PoolStepError> {
+        let (plan, slippage, planned) = match (plan, swap.slippage_bps, swap.planned) {
+            (None, None, None) => return Ok(()),
+            (Some(plan), Some(slippage), Some(planned)) => (plan, slippage, planned),
+            _ => return Err(PoolStepError::Mismatch),
+        };
+        if slippage > plan::MAX_SLIPPAGE_BPS {
+            return Err(PoolStepError::Terms("a slippage above 500 bps"));
+        }
+        if planned == TokenAmount::ZERO {
+            return Err(PoolStepError::Zero("planned"));
+        }
+        let order = crate::swapic::decode_order(&plan.order).ok_or(PoolStepError::Terms(
+            "the plan is not abi.encode of an order",
+        ))?;
+        if TokenAmount::from_be_bytes(order.amountIn.to_be_bytes::<32>()) != planned {
+            return Err(PoolStepError::Terms(
+                "the plan's order spends another amount",
+            ));
+        }
+        if swap.premium != TokenAmount::ZERO {
+            return Err(PoolStepError::Terms(
+                "a planned swap's premium is taken once its amount is known",
+            ));
+        }
+        let settings = self.settings()?;
+        let mut need = plan::open_cover(planned).ok_or(PoolStepError::Overflow)?;
+        if swap.token_in == settings.ckusdc_ledger {
+            if swap.min_usdc != swap.amount_in {
+                return Err(PoolStepError::Terms(
+                    "a ckUSDC swap's least ckUSDC is all of it",
+                ));
+            }
+            let payout = plan::payout_of(settings, swap.amount_in, swap.network_fee)
+                .ok_or(PoolStepError::Terms("the fees take all of the swap"))?;
+            need = need.max(payout);
+        }
+        if self.lines().queue_len > 0 || need > self.pockets.base.free {
+            return Err(PoolStepError::BaseShort {
+                free: self.base_available(),
+                need,
+            });
+        }
+        Ok(())
+    }
+
     /// What the Base pocket's free USDC covers behind the queue.
     pub fn base_available(&self) -> TokenAmount {
         sat_sub(self.pockets.base.free, self.lines().queued)
@@ -98,6 +156,7 @@ impl PoolLedger {
                 kind,
                 terms,
                 undo,
+                plan,
             } => {
                 self.settings()?;
                 lines.settings.ok_or(PoolStepError::NoPayoutSettings)?;
@@ -126,8 +185,12 @@ impl PoolLedger {
                         if *undo != (Undo::Refund { to: swap.refund_to }) {
                             return Err(PoolStepError::Mismatch);
                         }
+                        self.admits_plan(swap, plan.as_deref())?;
                     }
                     PayoutKind::Withdrawal(withdrawal) => {
+                        if plan.is_some() {
+                            return Err(PoolStepError::Mismatch);
+                        }
                         withdrawal.payout_amount().ok_or(PoolStepError::Terms(
                             "the rebalancing share and the network fee take all of the withdrawal",
                         ))?;
@@ -193,9 +256,14 @@ impl PoolLedger {
                         if *received < swap.min_usdc {
                             return Err(PoolStepError::Terms("the ckUSDC is below min_usdc"));
                         }
-                        let expected = received
-                            .checked_sub(swap.premium)
-                            .and_then(|left| left.checked_sub(swap.network_fee));
+                        // a planned swap's premium is the settings' share of what it made
+                        let expected = if swap.is_planned() {
+                            plan::payout_of(self.settings()?, *received, swap.network_fee)
+                        } else {
+                            received
+                                .checked_sub(swap.premium)
+                                .and_then(|left| left.checked_sub(swap.network_fee))
+                        };
                         if expected != Some(*amount) {
                             return Err(PoolStepError::Terms(
                                 "the amount is not the ckUSDC less the premium and the network fee",
@@ -505,6 +573,7 @@ impl PoolLedger {
                 kind,
                 terms,
                 undo,
+                plan,
             } => {
                 lines.next_id = id.saturating_add(1);
                 lines.open.insert(*id);
@@ -524,7 +593,9 @@ impl PoolLedger {
                         nonce: withdrawal.nonce,
                     });
                 }
-                effects.payout = Some(EvmPayout::new(*id, **kind, *terms, *undo, at));
+                let mut payout = EvmPayout::new(*id, **kind, *terms, *undo, at);
+                payout.plan = plan.as_deref().cloned();
+                effects.payout = Some(payout);
             }
             PoolStep::PayoutAmountKnown {
                 id,

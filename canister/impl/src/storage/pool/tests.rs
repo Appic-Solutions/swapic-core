@@ -364,6 +364,7 @@ fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
                     owner: PoolAccount::Evm(staker),
                     shares: burned,
                 },
+                plan: None,
             },
             PoolStep::PayoutAmountKnown {
                 id: 0,
@@ -501,6 +502,7 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
                 owner: PoolAccount::Evm(staker),
                 shares: burned,
             },
+            plan: None,
         },
         PoolStep::PayoutAmountKnown {
             id,
