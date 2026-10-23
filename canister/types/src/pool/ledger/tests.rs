@@ -1254,10 +1254,11 @@ fn the_icp_fees_floor_is_the_paths_own_ckusdc_fees() {
 
 /// Review fix (head of line): the queue stays first in first out, its head's need of the ICP
 /// pocket is read off the ledger (what P11c's urgent rebalance moves), with when it became
-/// the head; and a queued payout never fails for a human, so it never blocks the queue for
-/// good.
+/// the head. A head waiting for the pocket is never failed (its drive answers that it is
+/// queued); one whose drive fails before it starts is counted (CR-08), and stays the head
+/// until the usual attempts.
 #[test]
-fn the_queues_head_has_its_need_and_its_wait_and_never_fails() {
+fn the_queues_head_has_its_need_and_its_wait() {
     let mut pool = funded(usdc(100));
     let first = register(&mut pool, swap(1, usdc(300), usdc(1)));
     let second = register(&mut pool, swap(2, usdc(50), usdc(1)));
@@ -1285,13 +1286,14 @@ fn the_queues_head_has_its_need_and_its_wait_and_never_fails() {
     .unwrap();
     // the head's wait does not move for what queues behind it
     assert_eq!(pool.ledger.head_since, Some(Timestamp::from_nanos(1)));
-    assert_eq!(
-        pool.step(PoolStep::AttemptFailed {
-            r#ref: first,
-            why: "no settings".into()
-        }),
-        Err(PoolStepError::Terms("a queued payout has not started"))
-    );
+    pool.step(PoolStep::AttemptFailed {
+        r#ref: first,
+        why: "no ckUSDC fee was read".into(),
+    })
+    .unwrap();
+    assert_eq!(pool.deposits[&first].payout.failures, 1);
+    assert_eq!(pool.ledger.queue.head().map(|(head, _)| head), Some(first));
+    assert_eq!(pool.ledger.head_since, Some(Timestamp::from_nanos(1)));
 }
 
 /// The cursor rule: the canister's read of Base stands at a block or at a log inside one,
@@ -1457,4 +1459,52 @@ fn a_transfer_awaiting_its_terms_is_claimed_once() {
     assert_eq!(pool.orphans[&credit(2)].status, OrphanStatus::Held);
     assert_eq!(pool.orphans[&credit(2)].why, "the pool is closed");
     assert_eq!(pool.ledger.unattributed, usdc(100));
+}
+
+/// CR-08: a queued payout whose drive fails before it starts (its amount cannot cover its
+/// path's fees, a fee never read) is counted like a started one and, at the usual attempts,
+/// held for a human: it leaves the queue, so the payouts behind it go on. Nothing it holds
+/// moves: still owed, never reserved.
+#[test]
+fn a_queued_payout_that_never_starts_is_held_for_a_human_and_frees_the_queue() {
+    let arrived = |r#ref, credit_log, amount| PoolStep::Arrived {
+        r#ref,
+        credit: credit(credit_log),
+        amount,
+        block: BlockNumber::new(10),
+    };
+    let mut pool = funded(usdc(300));
+    let first = register(&mut pool, swap(1, usdc(100), usdc(1)));
+    let second = register(&mut pool, swap(2, usdc(100), usdc(1)));
+    pool.step(arrived(first, 9, usdc(400))).unwrap();
+    pool.step(arrived(second, 10, usdc(100))).unwrap();
+    assert_eq!(pool.ledger.queue.head().map(|(head, _)| head), Some(first));
+    let (owed, icp) = (pool.ledger.owed, pool.ledger.pockets.icp);
+    let failed = || PoolStep::AttemptFailed {
+        r#ref: first,
+        why: "the amount does not cover the fees".to_string(),
+    };
+    for _ in 1..MAX_PAYOUT_ATTEMPTS {
+        pool.step(failed()).unwrap();
+        assert_eq!(pool.ledger.queue.head().map(|(head, _)| head), Some(first));
+    }
+    pool.step(failed()).unwrap();
+    assert!(matches!(
+        pool.deposits[&first].status,
+        DepositStatus::PayoutFailed(_)
+    ));
+    assert_eq!(
+        pool.ledger.queue.head().map(|(head, _)| head),
+        Some(second),
+        "the payout behind it is the head now"
+    );
+    assert_eq!(pool.ledger.owed, owed, "still owed to its user");
+    assert_eq!(
+        pool.ledger.pockets.icp, icp,
+        "nothing reserved, nothing moved"
+    );
+    assert!(
+        pool.step(failed()).is_err(),
+        "a payout held for a human is done"
+    );
 }

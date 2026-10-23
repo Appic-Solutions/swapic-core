@@ -673,9 +673,10 @@ impl PoolLedger {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
-                // a queued payout has not started: it waits, and never fails for a human
+                // a queued payout whose drive fails before it starts is counted too, and held
+                // for a human at the usual attempts: it never blocks the queue (CR-08)
                 if self.queue.0.iter().any(|(queued, _)| queued == r#ref) {
-                    return Err(PoolStepError::Terms("a queued payout has not started"));
+                    return Ok(());
                 }
                 if !target.in_payout() {
                     return Err(PoolStepError::Terms("only a payout in progress fails"));
@@ -1125,6 +1126,13 @@ impl PoolLedger {
                 if stopped {
                     if let Some((_, deposit)) = deposit_out.as_mut() {
                         deposit.status = DepositStatus::PayoutFailed(why);
+                    }
+                    // one that never started leaves the queue, so the payouts behind it go
+                    // on; what it holds stays owed and was never reserved (CR-08)
+                    let head = ledger.queue.head().map(|(head, _)| head);
+                    ledger.queue.0.retain(|(queued, _)| queued != r#ref);
+                    if head == Some(*r#ref) {
+                        ledger.head_since = (!ledger.queue.0.is_empty()).then_some(at);
                     }
                 }
             }
