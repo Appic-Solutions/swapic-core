@@ -15,6 +15,12 @@ fn post_upgrade() {
     // that already required `TxCreated` before `TxSigned`, and the head check below is the
     // only compatibility check an upgrade makes.
     storage::init();
+    // the two cells that hold candid: the roles trap above on bytes that do not decode,
+    // and the flow settings here on bytes that do not decode or parse under this build's
+    // rules. Neither is ever read as the defaults after an upgrade (L-08)
+    if let Err(error) = storage::flow_settings::check() {
+        ic_cdk::trap(&format!("upgrade refused: {error}"));
+    }
     // a fold out of step with its log would take the upgrade and then refuse every append,
     // so the upgrade traps instead, and a trap here leaves the old wasm running
     if let Err(error) = events::ensure_fold_in_step() {

@@ -13,6 +13,9 @@ pub mod replay_cursor;
 pub mod roles;
 pub mod sanctions;
 
+#[cfg(test)]
+mod tests;
+
 use crate::state::pending_quotes;
 
 /// Touches every stable structure in an update context, so their headers are written here
