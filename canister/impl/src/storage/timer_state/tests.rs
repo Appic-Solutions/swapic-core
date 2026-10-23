@@ -17,10 +17,8 @@ fn the_timers_memory_is_kept_in_stable_memory() {
         let kept = get();
         assert_eq!(kept.reports.recent, vec![now]);
         assert_eq!(kept.unfilled_reads.get(&7), Some(&now));
-        // the guard counts what the cell holds: the minute's ten are spent across calls
-        for byte in 2..11 {
-            update(|state| state.reports.admit(TxHash::new([byte; 32]), now)).unwrap();
-        }
+        // the guard counts what the cell holds: the minute's two are spent across calls
+        update(|state| state.reports.admit(TxHash::new([2; 32]), now)).unwrap();
         assert!(update(|state| state.reports.admit(TxHash::new([20; 32]), now)).is_err());
     });
 }
