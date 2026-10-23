@@ -305,6 +305,10 @@ pub enum Proof {
     /// Not proven by what this report read (an Eco transfer the given source does not
     /// explain): left uncredited, for the report that brings its own source.
     Unproven { why: String },
+    /// An Eco refund read too early: no block every node agrees on can be past its intent's
+    /// route deadline before `from` (seconds). Left uncredited, and read again then: a
+    /// wait, not a failure (the review, 2026-10-24).
+    TooEarly { from: u64 },
     /// Eco's Portal refunded the canister, the creator, the reward of these unfilled intents
     /// in this transaction: a paid payout's whose intent is one of them, and whose amount this
     /// transfer is, takes it back.
@@ -808,6 +812,7 @@ pub fn steps_for<S: Store>(
     };
     let (r#ref, payer) = match &found.proof {
         Proof::Unproven { why } => return Err(why.clone()),
+        Proof::TooEarly { from } => return Err(format!("too early: its fill is read from {from}")),
         _ if credited
             && !state
                 .store()
@@ -1284,6 +1289,7 @@ pub async fn prove_refunds(
         };
         let mut proven = Vec::new();
         let (mut known, mut filled, mut unread, mut unreadable) = (false, false, None, false);
+        let mut early: Option<u64> = None;
         for intent in intents.clone() {
             let Some((destination, deadline)) =
                 read_state(|state| refund_destination(state, &intent))
@@ -1300,7 +1306,7 @@ pub async fn prove_refunds(
             // payouts' own rule (`agreed::fill_wait`): before it the read is too early
             let ready = deadline.saturating_add(crate::agreed::fill_wait_on(destination).as_secs());
             if now.as_secs().get() < ready {
-                unread = Some(format!("too early: its fill is read from {ready}"));
+                early = Some(early.map_or(ready, |earlier| earlier.max(ready)));
                 continue;
             }
             match reads.fill(destination, intent, deadline).await {
@@ -1318,6 +1324,8 @@ pub async fn prove_refunds(
             Proof::Unproven {
                 why: format!("an Eco refund whose intent's fill was not read: {why}"),
             }
+        } else if let (Some(from), false) = (early, filled) {
+            Proof::TooEarly { from }
         } else if unreadable && !filled {
             Proof::Orphan {
                 payer: None,

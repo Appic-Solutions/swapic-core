@@ -245,8 +245,9 @@ mod refunds_proven {
                 &Portal(Err("read".to_string())),
                 early,
             ));
+            // a quiet wait for its time, no alert (the review, 2026-10-24)
             assert!(
-                matches!(&proven[0].proof, Proof::Unproven { why } if why.contains("too early")),
+                matches!(&proven[0].proof, Proof::TooEarly { from } if *from > ROUTE_DEADLINE),
                 "{:?}",
                 proven[0].proof
             );

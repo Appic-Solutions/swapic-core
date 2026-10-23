@@ -507,3 +507,40 @@ fn a_transfer_under_ten_cents_is_dust() {
         assert_eq!(report.receipts, 1, "only the ten cents is read");
     });
 }
+
+/// The review (2026-10-24): the read of Base stops before a transaction whose Eco refund is
+/// not proven yet, so it is read again and credited once proven. One whose fill was read too
+/// early (no agreed block can be past its route's deadline yet) waits for its time quietly;
+/// only one whose read failed is an ALERT.
+#[test]
+fn a_refund_read_too_early_holds_the_cursor_with_no_alert() {
+    let found = |proof: Proof| {
+        vec![crate::pool::arrival::Found {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([0x41; 32]),
+                log_index: 1,
+            },
+            amount: usdc(5),
+            block: BlockNumber::new(40),
+            at: None,
+            proof,
+            rail: types::pool::PoolRail::Eco,
+        }]
+    };
+    assert_eq!(
+        holds_back(&found(Proof::TooEarly { from: 1_800 })),
+        (true, None)
+    );
+    let (held, why) = holds_back(&found(Proof::Unproven {
+        why: "the read failed".to_string(),
+    }));
+    assert!(held);
+    assert!(why.is_some_and(|why| why.contains("the read failed")));
+    assert_eq!(
+        holds_back(&found(Proof::Refund {
+            intents: vec![[1; 32]]
+        })),
+        (false, None)
+    );
+}

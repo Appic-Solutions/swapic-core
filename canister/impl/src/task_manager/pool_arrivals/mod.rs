@@ -339,6 +339,20 @@ impl PassReport {
     }
 }
 
+/// Whether the read of Base stops before a transaction, for what its transfers' proofs say,
+/// and the alert's reason: a transfer not proven yet is read again next pass (an ALERT); an
+/// Eco refund read too early waits for its time with no alert (the review, 2026-10-24).
+pub fn holds_back(found: &[arrival::Found]) -> (bool, Option<String>) {
+    let unproven = found.iter().find_map(|one| match &one.proof {
+        Proof::Unproven { why } => Some(why.clone()),
+        _ => None,
+    });
+    let early = found
+        .iter()
+        .any(|one| matches!(one.proof, Proof::TooEarly { .. }));
+    (unproven.is_some() || early, unproven)
+}
+
 /// One pass over the blocks after the cursor, read through `reads`.
 pub async fn backup(
     reads: &impl BaseReads,
@@ -417,14 +431,14 @@ pub async fn backup(
         }
         // a refund whose fill was not read is read again next pass, like a receipt that
         // failed: the cursor stops before it, and the rest of it is credited now (M-04)
-        if let Some(why) = found.iter().find_map(|one| match &one.proof {
-            Proof::Unproven { why } => Some(why),
-            _ => None,
-        }) {
+        let (held, why) = holds_back(&found);
+        if let Some(why) = why {
             report.alert(format!(
                 "ALERT: a transfer in {tx} is not proven yet ({why}); the canister's read of \
                  Base stops before it and asks again"
             ));
+        }
+        if held {
             failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
         }
         // a step the fold refuses is noted, and read: only a read that failed for now holds
