@@ -9,8 +9,8 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 ///     its payee, which is why this door needs no front-run defence at all;
 ///   - both time bounds strict, `block.timestamp > validAfter` and
 ///     `block.timestamp < validBefore`, so equality on either side reverts.
-/// The fee is off by default and exists only to prove the vault reports the
-/// measured balance delta rather than the requested amount.
+/// The fee is off by default; when on, the token delivers less than the
+/// requested amount, so a test can see the measured balance delta.
 contract AuthorizationToken is ERC20Permit {
     /// keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32 public constant RECEIVE_WITH_AUTHORIZATION_TYPEHASH =
