@@ -81,6 +81,9 @@ sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
     /// The Runner paid a same-chain order's payout.
     event PaidOut(bytes32 indexed id, address indexed recipient, address token, uint256 amount);
+    /// CCTP v2's `MessageTransmitterV2` sent a message: the burn as the source chain emits
+    /// it, before the attestation service fills in its nonce, finality and fee.
+    event MessageSent(bytes message);
     /// CCTP v2's `MessageTransmitterV2` received a message.
     event MessageReceived(address indexed caller, uint32 sourceDomain, bytes32 indexed nonce, bytes32 sender, uint32 indexed finalityThresholdExecuted, bytes messageBody);
     /// Eco Portal 2.12's intent events (the services' `onchain::eco`, read off its bytecode).
@@ -236,6 +239,18 @@ pub fn read_message_received(topics: &[[u8; 32]], data: &[u8]) -> Option<Receive
     })
 }
 
+/// The message a `MessageSent` log carries, None for a log that is not one.
+pub fn read_message_sent(topics: &[[u8; 32]], data: &[u8]) -> Option<Vec<u8>> {
+    use alloy_sol_types::SolEvent;
+    MessageSent::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()
+    .map(|event| event.message.to_vec())
+}
+
 /// The one delivery an Eco Deliver route makes, `token.transfer(to, amount)`: the token, the
 /// recipient and the amount. None for every other route (a fill, more than one call or
 /// token, any ether).
@@ -305,6 +320,10 @@ pub mod topics {
 
     pub fn message_received() -> [u8; 32] {
         MessageReceived::SIGNATURE_HASH.0
+    }
+
+    pub fn message_sent() -> [u8; 32] {
+        MessageSent::SIGNATURE_HASH.0
     }
 
     pub fn intent_published() -> [u8; 32] {

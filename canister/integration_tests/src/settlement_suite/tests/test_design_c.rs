@@ -4,8 +4,9 @@
 //! canister's own address. The order is the quoter's real fork order (a gasless USDC to
 //! CCTP Swap from Arbitrum), its burn re-targeted to Base and its deadlines sealed from
 //! this instance's clock, as the quoter seals them; the message is Circle's real one, re-made
-//! as that burn. The only outcalls are the outbox's sends and receipt reads, answered
-//! here: the canister simulates nothing of its own.
+//! as that burn. The only outcalls are the outbox's sends and receipt reads and the
+//! canister's read of a finish's source transaction (M-06), answered here: the canister
+//! simulates nothing of its own.
 
 use crate::client::pocket::{query, update};
 use crate::client::settlement::{derive_evm_address, push_chain_data};
@@ -456,12 +457,11 @@ fn a_gasless_order_and_its_arrival_are_signed_for_the_watcher() {
     let (finish_args, message, attestation, stored) = finish_for(&envelope);
     assert_eq!(message.len(), 696);
     push(&pic, canister, BASE);
-    let finish_id: u64 = update::<Result<u64, String>>(
+    let finish_id = finish(
         &pic,
         canister,
-        watcher(),
-        "finish_cctp",
         finish_args.clone(),
+        &source_receipt(&message, canister_address, 166_275),
     )
     .expect("the arrival is completed");
     let again: Result<u64, String> = update(&pic, canister, watcher(), "finish_cctp", finish_args);
@@ -571,14 +571,13 @@ fn a_finished_arrival_answers_its_id_whatever_came_after() {
     let (pic, canister, admin) = setup();
     let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
     let (_, _, _, envelope) = relay_for(address(&mine), now_s(&pic));
-    let (finish_args, _, _, _) = finish_for(&envelope);
+    let (finish_args, message, _, _) = finish_for(&envelope);
     push(&pic, canister, BASE);
-    let finish_id: u64 = update::<Result<u64, String>>(
+    let finish_id = finish(
         &pic,
         canister,
-        watcher(),
-        "finish_cctp",
         finish_args.clone(),
+        &source_receipt(&message, address(&mine), 166_275),
     )
     .expect("the arrival is completed");
 
@@ -701,19 +700,17 @@ fn a_call_with_no_reading_refuses_a_stale_one_and_a_carried_reading_prices_it() 
     assert!(relayed.is_ok(), "{relayed:?}");
 
     let (finish_args, message, attestation, stored) = finish_for(&envelope);
-    let refused: Result<u64, String> =
-        update(&pic, canister, watcher(), "finish_cctp", finish_args);
+    let receipt = source_receipt(&message, address(&mine), 166_275);
+    let refused = finish(&pic, canister, finish_args, &receipt);
     assert!(stale(&refused), "{refused:?}");
     let recipe = Recipe {
         target: swapic::evm(stored.target).to_string(),
         data: stored.data.to_vec(),
         scaler: Some(swapic::evm(stored.scaler).to_string()),
     };
-    let finished: Result<u64, String> = update(
+    let finished = finish(
         &pic,
         canister,
-        watcher(),
-        "finish_cctp",
         encode_args((
             BASE,
             message,
@@ -724,6 +721,129 @@ fn a_call_with_no_reading_refuses_a_stale_one_and_a_carried_reading_prices_it() 
             Some(reading),
         ))
         .unwrap(),
+        &receipt,
     );
     assert!(finished.is_ok(), "{finished:?}");
+}
+
+/// The source transaction a finish names, as the canister reads it (M-06): Arbitrum's, where
+/// the Runner paid the canister `fee` (none for zero) and the transmitter sent `message` as
+/// the chain emits it (its nonce, finality executed, fee executed and expiration block
+/// blank: the attestation service fills them in).
+fn source_receipt(message: &[u8], canister: EvmAddress, fee: u64) -> Value {
+    use alloy_sol_types::SolEvent;
+    let mut emitted = BurnMessage::parse(message).unwrap();
+    emitted.nonce = [0; 32];
+    emitted.finality_threshold_executed = 0;
+    emitted.body.fee_executed = types::TokenAmount::ZERO;
+    emitted.body.expiration_block = types::BlockNumber::new(0);
+    let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
+    let mut logs = vec![];
+    if fee > 0 {
+        logs.push(json!({
+            "address": ARB_USDC,
+            "topics": [
+                format!("0x{}", hex::encode(swapic::topics::transfer())),
+                word(address(RUNNER)),
+                word(canister),
+            ],
+            "data": format!("0x{fee:064x}"),
+            "logIndex": "0x1",
+            "removed": false,
+        }));
+    }
+    let sent = swapic::MessageSent {
+        message: emitted.encode().into(),
+    };
+    logs.push(json!({
+        "address": TRANSMITTER,
+        "topics": [format!("0x{}", hex::encode(swapic::topics::message_sent()))],
+        "data": format!("0x{}", hex::encode(sent.encode_data())),
+        "logIndex": "0x4",
+        "removed": false,
+    }));
+    json!({
+        "transactionHash": format!("0x{}", "5c".repeat(32)),
+        "blockNumber": "0x1000",
+        "status": "0x1",
+        "logs": logs,
+    })
+}
+
+/// `finish_cctp` with `args`, the canister's read of the source transaction answered with
+/// `receipt` when it asks.
+fn finish(
+    pic: &PocketIc,
+    canister: Principal,
+    args: Vec<u8>,
+    receipt: &Value,
+) -> Result<u64, String> {
+    let call = pic
+        .submit_call(canister, watcher(), "finish_cctp", args)
+        .expect("the door takes the call");
+    let source = json!([format!("0x{}", "5c".repeat(32))]);
+    for _ in 0..30 {
+        pic.tick();
+        let read = pic.get_canister_http().into_iter().find(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            body[0]["method"] == "eth_getTransactionReceipt" && body[0]["params"] == source
+        });
+        if let Some(request) = read {
+            pic.mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: json!([{"jsonrpc": "2.0", "id": 0, "result": receipt}])
+                        .to_string()
+                        .into_bytes(),
+                }),
+                additional_responses: vec![],
+            });
+            break;
+        }
+    }
+    candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap()
+}
+
+/// M-06: the canister reads a finish's source transaction itself and finishes only a message
+/// that transaction sent, from a transaction whose Runner paid the canister its fee: the
+/// watcher's word is not enough.
+#[test]
+fn a_finish_is_signed_only_from_a_source_that_sent_it_and_paid_its_fee() {
+    let (pic, canister, admin) = setup();
+    let mine = address(&derive_evm_address(&pic, canister, admin).expect("the test key derives"));
+    let (_, _, _, envelope) = relay_for(mine, now_s(&pic));
+    let (finish_args, message, _, _) = finish_for(&envelope);
+    push(&pic, canister, BASE);
+    let unpaid = finish(
+        &pic,
+        canister,
+        finish_args.clone(),
+        &source_receipt(&message, mine, 0),
+    );
+    assert!(
+        unpaid.as_ref().is_err_and(|why| why.contains("fee")),
+        "{unpaid:?}"
+    );
+    let mut other = BurnMessage::parse(&message).unwrap();
+    other.body.amount = types::TokenAmount::from(1_u32);
+    let elsewhere = finish(
+        &pic,
+        canister,
+        finish_args.clone(),
+        &source_receipt(&other.encode(), mine, 166_275),
+    );
+    assert!(
+        elsewhere.as_ref().is_err_and(|why| why.contains("message")),
+        "{elsewhere:?}"
+    );
+    let paid = finish(
+        &pic,
+        canister,
+        finish_args,
+        &source_receipt(&message, mine, 166_275),
+    );
+    assert!(paid.is_ok(), "{paid:?}");
 }

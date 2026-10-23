@@ -119,10 +119,7 @@ pub fn request_of(
 }
 
 fn screened(principal: Principal, sanctioned: &impl Fn(&Address) -> bool) -> bool {
-    principal
-        .to_text()
-        .parse::<Address>()
-        .map_or(true, |text| sanctioned(&text))
+    crate::pool::principal_sanctioned(principal, sanctioned)
 }
 
 /// The payout terms a canister may sign for, whoever asks: a chain it signs on, a token and a

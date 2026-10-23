@@ -13,6 +13,10 @@ pub mod pool;
 pub mod replay_cursor;
 pub mod roles;
 pub mod sanctions;
+pub mod timer_state;
+
+#[cfg(test)]
+mod tests;
 
 use crate::state::pending_quotes;
 
@@ -32,6 +36,7 @@ pub fn init() {
     sanctions::init();
     inflight::init();
     flow_settings::init();
+    timer_state::init();
     callers::init();
 }
 

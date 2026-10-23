@@ -1,6 +1,8 @@
 //! The flows' settings: the routers, the ck canisters, the ICPSwap pools a quote may name,
 //! and the windows. Stored as their candid bytes in one stable cell, set by a controller,
-//! and read in their parsed form.
+//! and read in their parsed form. Stored bytes that no longer decode or parse are never read
+//! as the defaults (L-08): `post_upgrade` traps on them, keeping the wasm that wrote them,
+//! and a read traps. Their layout is pinned by `impl/golden/candid_cells_v1.txt` (C-11).
 
 #[cfg(test)]
 mod tests;
@@ -102,19 +104,41 @@ pub fn init() {
     SETTINGS.with(|_| ());
 }
 
-/// The wire settings as a controller set them, or the defaults.
-pub fn get_wire() -> Wire {
+/// [`parse`], for the golden test of the stored bytes.
+#[cfg(test)]
+pub(crate) fn parse_for_tests(wire: &Wire) -> Result<FlowSettings, String> {
+    parse(wire)
+}
+
+/// The stored settings, decoded and parsed: None for a cell never written (the defaults),
+/// and the refusal for bytes that no longer decode or parse.
+fn stored() -> Result<Option<Wire>, String> {
     let bytes = SETTINGS.with(|cell| cell.borrow().get().clone());
     if bytes.is_empty() {
-        return Wire::default();
+        return Ok(None);
     }
-    Decode!(&bytes, Wire).unwrap_or_default()
+    let wire = Decode!(&bytes, Wire)
+        .map_err(|e| format!("the stored flow settings do not decode: {e}"))?;
+    parse(&wire).map_err(|e| format!("the stored flow settings do not parse: {e}"))?;
+    Ok(Some(wire))
+}
+
+/// Whether the stored settings decode and parse under this build: what an upgrade checks
+/// before it takes this wasm.
+pub fn check() -> Result<(), String> {
+    stored().map(drop)
+}
+
+/// The wire settings as a controller set them, or the defaults when none were.
+pub fn get_wire() -> Wire {
+    stored()
+        .expect("BUG: the stored flow settings are checked at every upgrade")
+        .unwrap_or_default()
 }
 
 /// The parsed settings.
 pub fn get() -> FlowSettings {
-    parse(&get_wire())
-        .unwrap_or_else(|_| parse(&Wire::default()).expect("BUG: the default flow settings parse"))
+    parse(&get_wire()).expect("BUG: the stored flow settings are checked at every upgrade")
 }
 
 /// Validates and stores `wire`. The caller does the authorization.

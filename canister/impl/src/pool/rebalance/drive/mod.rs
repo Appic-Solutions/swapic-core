@@ -359,17 +359,27 @@ fn order_chain(item: &Move, pool_chain: ChainId) -> ChainId {
     cost::chains(item.direction, pool_chain).0
 }
 
-/// Decides the route: the cheapest proposal taken in the window (never for an urgent move),
-/// or the canister's own, built here and pinned.
+/// The proposal `item` takes at `now`, pure: the cheapest one taken in the window, never for
+/// an urgent move, and only while its order is still more than [`SIGN_MARGIN_S`] from its
+/// deadline: one that close would only stop the move as stuck at its first signature
+/// (CR-07), so the canister's own route is taken instead.
+pub fn proposal_to_take(item: &Move, now: Timestamp) -> Option<&types::pool::Proposal> {
+    let proposal = item.proposal.as_ref().filter(|_| !item.urgent)?;
+    (proposal.order.deadline_s > now.as_secs().get().saturating_add(SIGN_MARGIN_S))
+        .then_some(proposal)
+}
+
+/// Decides the route: the proposal to take (`proposal_to_take`), or the canister's own,
+/// built here and pinned.
 async fn route(item: &Move, now: Timestamp) -> Result<(), String> {
     let setup = setup().await?;
     let (_, dst) = cost::chains(item.direction, setup.pool_chain);
-    let (route, order) = match (&item.proposal, item.urgent) {
-        (Some(proposal), false) => (
+    let (route, order) = match proposal_to_take(item, now) {
+        Some(proposal) => (
             MoveRoute::Proposed { fee: proposal.fee },
             proposal.order.clone(),
         ),
-        _ => own_order(item, &setup, now)?,
+        None => own_order(item, &setup, now)?,
     };
     // a Base to ICP move by Eco is filled on Ethereum: its fill is looked for from here
     let scan_from = (item.direction == MoveDirection::BaseToIcp && route.is_eco())
@@ -438,20 +448,14 @@ fn own_order(
     Ok((MoveRoute::Own { max_fee, fast }, pinned))
 }
 
-thread_local! {
-    // Heap by necessity, and only a clock: when each Eco move to Base was last looked for on
-    // the Portals. An upgrade loses it, which costs one read more.
-    static UNFILLED_READS: std::cell::RefCell<std::collections::BTreeMap<u64, Timestamp>> =
-        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
-}
-
 /// How often an Eco move to Base past its deadline is looked for on the Portals.
 pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
 
-/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`].
+/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
+/// kept in stable memory (C-09).
 fn unfilled_due(id: u64, now: Timestamp) -> bool {
-    UNFILLED_READS.with(|reads| {
-        let mut reads = reads.borrow_mut();
+    crate::storage::timer_state::update(|state| {
+        let reads = &mut state.unfilled_reads;
         let due = reads
             .get(&id)
             .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);

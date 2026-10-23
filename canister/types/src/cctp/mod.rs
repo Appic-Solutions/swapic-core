@@ -123,6 +123,19 @@ pub fn arrival_id(message: &BurnMessage) -> [u8; 32] {
 }
 
 impl BurnMessage {
+    /// Whether this attested message is `emitted`, the message the source chain's
+    /// transmitter sent: every field the burn determined is the same, and only the four the
+    /// attestation service fills in may differ (the nonce, the finality it was attested at,
+    /// the fee executed and the expiration block).
+    pub fn attests(&self, emitted: &BurnMessage) -> bool {
+        let mut filled = emitted.clone();
+        filled.nonce = self.nonce;
+        filled.finality_threshold_executed = self.finality_threshold_executed;
+        filled.body.fee_executed = self.body.fee_executed;
+        filled.body.expiration_block = self.body.expiration_block;
+        filled == *self
+    }
+
     /// The message `bytes` carry, if they are a version 1 message with a version 1 burn
     /// body.
     pub fn parse(bytes: &[u8]) -> Result<Self, MessageError> {

@@ -80,6 +80,28 @@ pub async fn fill(chain: ChainId, intent: [u8; 32], route_deadline: u64) -> Resu
     }
 }
 
+/// The one Eco intent `logs` show `portal` published, of `creator` when one is named: None
+/// for none, and for two, which name no one intent. The one reader of a published intent
+/// the rescue and the outbox share (CR-17); an `IntentPublished` another contract logs is
+/// none.
+pub fn published_intent(
+    logs: &[crate::pool::arrival::Log],
+    portal: EvmAddress,
+    creator: Option<EvmAddress>,
+) -> Option<types::swapic::PublishedIntent> {
+    let mut intents = logs
+        .iter()
+        .filter(|log| {
+            log.address == portal
+                && log.topics.first() == Some(&types::swapic::topics::intent_published())
+        })
+        .filter_map(|log| types::swapic::read_intent_published(&log.topics, &log.data))
+        .filter(|intent| creator.is_none_or(|creator| intent.creator == creator));
+    let intent = intents.next()?;
+    // two would name no one intent
+    intents.next().is_none().then_some(intent)
+}
+
 /// What `chain`'s Portal says of `intent`'s reward: 3 once refunded to its creator.
 pub async fn reward_status(chain: ChainId, intent: [u8; 32]) -> Result<u8, String> {
     let config = crate::storage::config::get();

@@ -10,6 +10,8 @@ fn wire() -> WireSettings {
         icp_tokens: vec![],
         arrival_backup_s: 300,
         pool_open_for_swaps: false,
+        large_deposit_usdc: None,
+        large_deposit_confirmations: None,
     }
 }
 

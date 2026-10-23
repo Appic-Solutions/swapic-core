@@ -404,9 +404,11 @@ pub fn path_amount(amount: TokenAmount, path: PayoutPath, fee: TokenAmount) -> O
 }
 
 /// What an ICPSwap leg took from the canister's ckUSDC account so far: every approval's fee,
-/// and once begun, the swap's deposit (its amount in, `swap_in`, and the pool's pull's fee),
-/// or what the deposit cost in the end once undone. A leg from before approvals were counted
-/// gave one once begun.
+/// and once begun, the swap's deposit (its amount in and the pool's pull's fee), or what the
+/// deposit cost in the end once undone. The deposit is the one the leg recorded at its begin,
+/// which an approval asked again made one fee less than the amount it was handed (CR-09);
+/// `swap_in` only for a leg from before that amount was recorded. A leg from before
+/// approvals were counted gave one once begun.
 fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> Option<TokenAmount> {
     let approvals = swap.approvals.unwrap_or(u32::from(swap.begun));
     let approved = fee.checked_mul(approvals)?;
@@ -415,7 +417,7 @@ fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> O
     }
     let deposit = match swap.undone {
         Some(cost) => cost,
-        None => swap_in.or(swap.amount_in)?.checked_add(fee)?,
+        None => swap.amount_in.or(swap_in)?.checked_add(fee)?,
     };
     approved.checked_add(deposit)
 }
@@ -1636,12 +1638,6 @@ pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy)
     drive_with(ledgers, clock, &guard).await
 }
 
-thread_local! {
-    // Heap by necessity, and only for the log: the queue's head already alerted on, so a
-    // head that waits raises one line and not one per drive. An upgrade may repeat it once.
-    static ALERTED_HEAD: std::cell::Cell<Option<PoolRef>> = const { std::cell::Cell::new(None) };
-}
-
 /// One line for ops when the queue's head has waited longer than one books interval for
 /// the ICP pocket to cover it: what P11c's urgent rebalance is for.
 fn alert_if_waited(now: Timestamp) {
@@ -1652,12 +1648,15 @@ fn alert_if_waited(now: Timestamp) {
         return;
     };
     let interval = crate::storage::config::get().books_check_interval.0;
-    if now.saturating_duration_since(since) <= interval
-        || ALERTED_HEAD.with(|alerted| alerted.get()) == Some(head)
-    {
+    if now.saturating_duration_since(since) <= interval {
         return;
     }
-    ALERTED_HEAD.with(|alerted| alerted.set(Some(head)));
+    // the head already alerted on is kept in stable memory (C-09): one line per head, an
+    // upgrade included
+    if crate::storage::timer_state::get().alerted_head == Some(head) {
+        return;
+    }
+    crate::storage::timer_state::update(|state| state.alerted_head = Some(head));
     crate::pool::log(&format!(
         "ALERT: the pool payout {head} has waited {:?} for the ICP pocket, which is {need} short",
         now.saturating_duration_since(since)

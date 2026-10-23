@@ -489,10 +489,12 @@ fn the_bytes_broadcast_are_the_bytes_the_log_recorded() {
     );
 }
 
-/// A transaction nobody has mined goes out again unchanged: the same bytes, no new
-/// signature, and no new line in the log.
+/// A transaction nobody has mined for 30 seconds goes out again replaced: the stuck window
+/// is the rebroadcast window (L-02, Jeff's call: speed over one more signature), so what
+/// goes out is the one replacement at the same nonce and a higher fee, its one line in the
+/// log, and no nonce more.
 #[test]
-fn a_missing_receipt_rebroadcasts_the_same_bytes_with_no_new_signature() {
+fn a_missing_receipt_for_thirty_seconds_goes_out_replaced_at_the_same_nonce() {
     let (pic, canister, admin) = setup_with_swaps(1);
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
@@ -521,20 +523,39 @@ fn a_missing_receipt_rebroadcasts_the_same_bytes_with_no_new_signature() {
         .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
         .collect();
     assert_eq!(sends.len(), 1, "the transaction went out again");
+    let replaced = of_kind(events(&pic, canister), is_replaced);
+    assert_eq!(replaced.len(), 1, "one replacement");
+    let EventType::TxReplaced {
+        chain_id,
+        nonce,
+        max_fee_wei_per_gas,
+        raw_tx,
+        ..
+    } = replaced[0].clone()
+    else {
+        unreachable!()
+    };
+    assert_eq!((chain_id, nonce), (BASE, 0), "the same nonce");
+    assert!(max_fee_wei_per_gas > 2_100_000_000_u64, "at a higher fee");
     assert_eq!(
         params(sends[0], 0),
-        json!([format!("0x{}", hex::encode(&signed[0]))]),
-        "the same bytes"
+        json!([format!("0x{}", hex::encode(&raw_tx))]),
+        "the replacement's recorded bytes"
     );
     assert_eq!(
         tx_signed(&events(&pic, canister)),
         signed,
-        "a rebroadcast signs nothing"
+        "the first signature stands"
     );
     assert_eq!(
         events(&pic, canister).len(),
-        before,
-        "a rebroadcast writes nothing to the log"
+        before + 1,
+        "one line: the replacement"
+    );
+    assert_eq!(
+        tx_created(&events(&pic, canister)),
+        vec![(BASE, 0)],
+        "a replacement allocates no nonce"
     );
 }
 
@@ -1576,7 +1597,8 @@ fn a_chunk_whose_answer_does_not_come_back_whole_is_read_one_entry_at_a_time() {
     );
 
     // and it is not left silent: past the rebroadcast window its receipt is asked for
-    // again, and when that cannot be read either its bytes go out again
+    // again, and when that cannot be read either it goes out again, replaced at its own
+    // nonce (the stuck window is the rebroadcast window, L-02)
     advance(&pic, canister, Duration::from_secs(30));
     let pending = pic.get_canister_http();
     assert_eq!(pending.len(), 1, "the third is still watched");
@@ -1592,11 +1614,17 @@ fn a_chunk_whose_answer_does_not_come_back_whole_is_read_one_entry_at_a_time() {
         .filter(|request| methods(request).contains(&"eth_sendRawTransaction".to_string()))
         .collect();
     assert_eq!(sends.len(), 1, "the unread entry is pushed again");
+    let replaced = of_kind(events(&pic, canister), is_replaced);
+    let [EventType::TxReplaced { nonce, raw_tx, .. }] = replaced.as_slice() else {
+        panic!("one replacement: {replaced:?}");
+    };
+    assert_ne!(raw_tx, &signed[2], "a replacement, not the first bytes");
     assert_eq!(
         params(sends[0], 0),
-        json!([format!("0x{}", hex::encode(&signed[2]))]),
+        json!([format!("0x{}", hex::encode(raw_tx))]),
         "with the bytes the log recorded for it"
     );
+    assert_eq!(*nonce, 2, "at the third's own nonce");
 }
 
 /// A halted canister rests. The pass it had armed runs once, finds work it may not do, and

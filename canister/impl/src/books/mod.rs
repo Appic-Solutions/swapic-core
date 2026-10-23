@@ -56,6 +56,8 @@ pub struct FeePath {
     pub usdc: EvmAddress,
     pub runner: EvmAddress,
     pub canister: EvmAddress,
+    /// Eco's Portal, which publishes the intents a receipt carries.
+    pub eco_portal: Option<EvmAddress>,
 }
 
 /// The network fee an order paid the canister in a receipt (design C, abi.md 6.1): every

@@ -973,3 +973,49 @@ fn a_reimbursed_move_returns_to_the_icp_pocket_and_a_retried_call_books_its_appr
         usdc(3_500).checked_sub(fee).unwrap()
     );
 }
+
+/// L-11: an Eco move to ICP stopped as stuck after its hours, then refunded unfilled days
+/// later, is routed again on its own: the refund clears the stuck mark, so no controller's
+/// retry is needed.
+#[test]
+fn a_refunded_eco_move_is_no_longer_stuck() {
+    let mut world = World::new();
+    let id = world.open(MoveDirection::BaseToIcp, usdc(1_000), false);
+    let fee = TokenAmount::from(100_000_u64);
+    world
+        .step(PoolStep::MoveProposed {
+            id,
+            order: order(4),
+            fee,
+        })
+        .unwrap();
+    world
+        .step(PoolStep::MoveRouted {
+            id,
+            route: MoveRoute::Proposed { fee },
+            order: order(4),
+            scan_from: Some(BlockNumber::new(23_000_000)),
+        })
+        .unwrap();
+    world.step(signed(id, ChainId::BASE)).unwrap();
+    world.step(burned(id, Some([0x91; 32]))).unwrap();
+    world
+        .step(PoolStep::MoveStuck {
+            id,
+            why: "no Eco fill or ckUSDC arrived".to_string(),
+        })
+        .unwrap();
+    assert!(world.item(id).stuck.is_some());
+    world
+        .step(PoolStep::MoveRefunded {
+            id,
+            credit: key(0x92),
+            amount: usdc(1_000),
+            block: BlockNumber::new(50),
+        })
+        .unwrap();
+    let item = world.item(id);
+    assert_eq!(item.stuck, None);
+    assert_eq!(item.status, MoveStatus::Open);
+    assert!(item.routable());
+}

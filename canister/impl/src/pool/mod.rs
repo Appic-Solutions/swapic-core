@@ -106,6 +106,19 @@ pub fn state_view(ledger: &PoolLedger, closed: Option<String>) -> PoolStateView 
     }
 }
 
+/// Whether `principal` is sanctioned, as the sanctions set keys it (its text): the one screen
+/// of a principal the ICP doors share (`swap_from_icp`, `stake_icp`, `withdraw_icp`, CR-11).
+/// Fails closed: a principal whose text the set cannot key is screened as sanctioned.
+pub fn principal_sanctioned(
+    principal: candid::Principal,
+    sanctioned: &impl Fn(&types::Address) -> bool,
+) -> bool {
+    principal
+        .to_text()
+        .parse::<types::Address>()
+        .map_or(true, |text| sanctioned(&text))
+}
+
 /// What `owned` shares are worth in the pool now.
 pub fn value_of(ledger: &PoolLedger, owned: Shares) -> types::TokenAmount {
     Shares::value_of(owned, ledger.total_assets(), ledger.total_shares)

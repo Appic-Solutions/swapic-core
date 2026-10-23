@@ -75,10 +75,7 @@ impl WithdrawRequest {
 }
 
 fn screen_principal(principal: Principal, sanctioned: &impl Fn(&Address) -> bool) -> bool {
-    principal
-        .to_text()
-        .parse::<Address>()
-        .is_ok_and(|address| sanctioned(&address))
+    crate::pool::principal_sanctioned(principal, sanctioned)
 }
 
 fn screen_account(account: &PoolAccount, sanctioned: &impl Fn(&Address) -> bool) -> bool {
@@ -441,15 +438,15 @@ pub fn icp_expected<S: Store>(
 
 /// The ICP pocket's balance check: nothing before the pool has settings.
 pub async fn check_icp_pocket(tolerance: TokenAmount) {
-    let settings = pool_store::ledger().settings;
-    let before = read_state(icp_lines);
-    let answer = match &settings {
-        Some(settings) => Some(
-            ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None))
-                .await,
-        ),
-        None => None,
+    // before the pool has settings there is no pocket to check and nothing to say, every
+    // interval: no line in the permanent log (L-01)
+    let Some(settings) = pool_store::ledger().settings else {
+        return;
     };
+    let before = read_state(icp_lines);
+    let answer = Some(
+        ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None)).await,
+    );
     // the lines read again after the await: the lower of the two is expected
     let after = read_state(icp_lines);
     let step = check_step(answer, before, after, tolerance);
@@ -457,10 +454,7 @@ pub async fn check_icp_pocket(tolerance: TokenAmount) {
         log(&line);
     }
     if let Err(error) = pool_store::record(step) {
-        // before the pool has settings there is nothing to say, every interval
-        if settings.is_some() {
-            log(&format!("the ICP pocket's check was not recorded: {error}"));
-        }
+        log(&format!("the ICP pocket's check was not recorded: {error}"));
     }
 }
 

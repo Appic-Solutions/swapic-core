@@ -518,6 +518,11 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
 
 /// Payout `id` signed at `nonce` on Base with order `byte`: its creation and its record.
 pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
+    sign_payout_with(id, nonce, byte, vec![byte; 8])
+}
+
+/// [`sign_payout`] with `order` as the order's bytes.
+pub(crate) fn sign_payout_with(id: u64, nonce: u64, byte: u8, order: Vec<u8>) -> types::EventIndex {
     crate::storage::events::append_event_at(created(TxPurpose::PoolPayout(id), nonce), at(3))
         .unwrap();
     record_at(
@@ -525,7 +530,7 @@ pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
             id,
             order: types::pool::PinnedOrder {
                 order_id: [byte; 32],
-                order: vec![byte; 8],
+                order,
                 gas_limit: 300_000,
                 deadline_s: 900,
             },
@@ -537,4 +542,55 @@ pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
         at(3),
     )
     .unwrap()
+}
+
+/// An order publishing one Eco intent, a USDC delivery on Ethereum, whose route can last be
+/// filled at `route_deadline`: what a pinned order reads an intent's deadline from.
+pub(crate) fn eco_order(route_deadline: u64) -> Vec<u8> {
+    use alloy_primitives::{Address, FixedBytes, U256};
+    use alloy_sol_types::SolCall;
+    use types::swapic::{publishAndFundCall, EcoReward, EcoTokenAmount, Order, Payout, Step};
+    let usdc = Address::repeat_byte(0x11);
+    let route = types::swapic::deliver_route(
+        [0x5a; 32],
+        route_deadline,
+        types::EvmAddress::new([0xec; 20]),
+        types::EvmAddress::new([0x11; 20]),
+        types::EvmAddress::new([0x36; 20]),
+        U256::ZERO,
+    );
+    let publish = publishAndFundCall {
+        destination: 1,
+        route: route.into(),
+        reward: EcoReward {
+            deadline: route_deadline + 7 * 24 * 3_600,
+            creator: Address::repeat_byte(0x36),
+            prover: Address::repeat_byte(0xec),
+            nativeAmount: U256::ZERO,
+            tokens: vec![EcoTokenAmount {
+                token: usdc,
+                amount: U256::ZERO,
+            }],
+        },
+        allowPartial: false,
+    };
+    types::swapic::encode_order(&Order {
+        r#ref: FixedBytes([0x85; 32]),
+        payer: Address::repeat_byte(0x36),
+        tokenIn: usdc,
+        amountIn: U256::from(1_000_000_000_u64),
+        deadline: U256::from(route_deadline.saturating_sub(600)),
+        steps: vec![Step {
+            target: Address::repeat_byte(0xec),
+            data: publish.abi_encode().into(),
+            token: usdc,
+            min: U256::ZERO,
+            writes: vec![],
+        }],
+        payout: Payout {
+            token: Address::ZERO,
+            recipient: Address::ZERO,
+            minOut: U256::ZERO,
+        },
+    })
 }

@@ -445,6 +445,7 @@ fn the_fee_step_is_the_books_and_the_payout_is_the_pools() {
         usdc: base().usdc,
         runner: base().runner,
         canister: canister(),
+        eco_portal: None,
     };
     assert_eq!(crate::books::network_fee_in(&receipt, path), fee_value);
     // a receipt of the fee step alone is the books', and no arrival
@@ -460,17 +461,57 @@ fn a_receipt_not_deep_enough_is_not_credited() {
     on_fresh_memory(|| {
         crate::storage::init();
         let block = BlockNumber::new(52_823_000);
-        assert_eq!(deep_enough(block, block, ChainId::BASE), Ok(()));
+        let small = TokenAmount::from(1_000_000_u32);
+        assert_eq!(deep_enough(block, block, ChainId::BASE, small), Ok(()));
         assert_eq!(
-            deep_enough(block, BlockNumber::new(block.get() - 1), ChainId::BASE),
+            deep_enough(
+                block,
+                BlockNumber::new(block.get() - 1),
+                ChainId::BASE,
+                small
+            ),
             Err(PoolError::NotDeep { needed: 1, have: 0 })
         );
     });
 }
 
+/// 2026-10-23: a deposit up to $1,000 is credited after one Base block, a bigger one only
+/// six blocks deep (the settings' defaults), or as deep as the settings say. Not deep yet
+/// is asked again (the scan's cursor stops before it), never refused for good.
+#[test]
+fn a_large_deposit_waits_its_own_depth() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let block = BlockNumber::new(52_823_000);
+        let head = |deep: u64| BlockNumber::new(block.get() + deep - 1);
+        let deep = |depth: u64, largest: u64| {
+            deep_enough(block, head(depth), ChainId::BASE, usdc(largest))
+        };
+        assert_eq!(deep(1, 1_000), Ok(()));
+        assert_eq!(
+            deep(1, 1_001),
+            Err(PoolError::NotDeep { needed: 6, have: 1 })
+        );
+        assert_eq!(
+            deep(5, 1_001),
+            Err(PoolError::NotDeep { needed: 6, have: 5 })
+        );
+        assert_eq!(deep(6, 1_001), Ok(()));
+        let mut settings = ledger().settings.unwrap();
+        settings.large_deposit_usdc = Some(usdc(100));
+        settings.large_deposit_confirmations = Some(3);
+        record_at(PoolStep::SettingsSet { settings }, at(2)).unwrap();
+        assert_eq!(deep(1, 100), Ok(()));
+        assert_eq!(deep(2, 101), Err(PoolError::NotDeep { needed: 3, have: 2 }));
+        assert_eq!(deep(3, 101), Ok(()));
+    });
+}
+
 /// Terms the pool does not take hold the transfer for a controller, with the terms and the
-/// payer the proof shows: above the per-swap cap (measured on what arrived), ICP fees below
-/// the path's own, the pool closed, a sanctioned party. Nothing is registered.
+/// payer the proof shows: ICP fees below the path's own, the pool closed, a sanctioned
+/// party. Nothing is registered. A swap above the settings' per-swap cap is no such term
+/// (2026-10-23: no cap on an EVM to ICP deposit): it is credited.
 #[test]
 fn terms_the_pool_does_not_take_hold_the_transfer() {
     on_fresh_memory(|| {
@@ -490,18 +531,11 @@ fn terms_the_pool_does_not_take_hold_the_transfer() {
                 other => panic!("not held: {other:?}"),
             }
         };
-        let why = held(&found, &judge(Some(&swap)));
-        assert!(why.contains("above the per-swap cap"), "{why}");
-        assert!(why.contains("held with its terms: swap to"), "{why}");
-        assert!(deposit(&the_ref(2)).is_none());
         assert!(matches!(
-            last_step(),
-            PoolStep::Unattributed {
-                src_payer: None,
-                r#ref: None,
-                ..
-            }
+            &record(&found, &judge(Some(&swap)), now).mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
         ));
+        assert_eq!(deposit(&the_ref(2)).unwrap().status, DepositStatus::Arrived);
         // the ICP fees below the path's own ckUSDC fee
         let mut cheap = swap.clone();
         cheap.terms.icp_fees = TokenAmount::from(FEE - 1);
@@ -1069,5 +1103,101 @@ fn an_intent_the_canister_created_is_a_moves_never_a_deposit() {
             [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("canister created")
         ));
         assert!(deposit(&given.r#ref).is_none());
+    });
+}
+
+/// M-03: the receipt every node agreed on is taken only beside a header of the very block
+/// one node named as the head: a head no node sees as a block is no depth, and asked again;
+/// no receipt yet is asked again; another transaction's receipt never reads.
+#[test]
+fn an_agreed_receipt_stands_beside_the_head_every_node_sees() {
+    let raw = same_chain(the_ref(1));
+    let tx = parse(&raw).tx;
+    let head = BlockNumber::new(0x100);
+    let header = |number: &str| {
+        Ok(serde_json::json!({"number": number, "hash": "0xab", "timestamp": "0x6ad5e897"}))
+    };
+    assert_eq!(
+        agreed_receipt(tx, head, vec![Ok(raw.clone()), header("0x100")]),
+        Ok(parse(&raw))
+    );
+    for (receipt, header) in [
+        (Ok(raw.clone()), Ok(Value::Null)),
+        (Ok(raw.clone()), header("0x101")),
+        (Ok(Value::Null), header("0x100")),
+        (
+            Err(RpcError::Unreachable {
+                reason: crate::rpc::Summary::of("no consensus"),
+            }),
+            header("0x100"),
+        ),
+    ] {
+        assert!(matches!(
+            agreed_receipt(tx, head, vec![receipt, header]),
+            Err(PoolError::Unavailable(_))
+        ));
+    }
+    assert!(matches!(
+        agreed_receipt(TxHash::new([9; 32]), head, vec![Ok(raw), header("0x100")]),
+        Err(PoolError::BadArrival(_))
+    ));
+}
+
+/// M-04: a refund the scan cannot prove holds its cursor, so a refund that can never be
+/// proven (its payout's pinned order names no route deadline to read past) is held for a
+/// human at once, with no read, and never stalls the scan.
+#[test]
+fn a_refund_whose_deadline_never_reads_is_held_for_a_human() {
+    use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
+    struct NoRead;
+    impl FillReads for NoRead {
+        async fn fill(&self, _: ChainId, _: [u8; 32], _: u64) -> Result<types::eco::Fill, String> {
+            panic!("nothing to read past")
+        }
+    }
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+        );
+        sign_payout(id, 0, 7);
+        let intent = [0x1e; 32];
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([7; 32]),
+                block: BlockNumber::new(30),
+                intent: Some(intent),
+            },
+            at(4),
+        )
+        .unwrap();
+        let found = vec![Found {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([9; 32]),
+                log_index: 3,
+            },
+            amount: TokenAmount::from(1_u32),
+            block: BlockNumber::new(40),
+            at: None,
+            rail: PoolRail::Eco,
+            proof: Proof::Refund {
+                intents: vec![intent],
+            },
+        }];
+        use std::future::Future;
+        let mut future = std::pin::pin!(prove_refunds(found, &NoRead));
+        let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(proven) = future.as_mut().poll(context) else {
+            panic!("nothing waits");
+        };
+        assert!(
+            matches!(&proven[0].proof, Proof::Orphan { why, .. } if why.contains("deadline")),
+            "{:?}",
+            proven[0].proof
+        );
     });
 }

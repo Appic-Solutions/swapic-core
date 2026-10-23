@@ -374,12 +374,20 @@ mod agreed {
         assert_eq!(body[0]["params"], json!([block, false]));
         assert_eq!(body[1]["method"], "eth_call");
         assert_eq!(body[1]["params"][1], block);
+        assert!(
+            request.max_response_bytes >= Some(256 * 1024),
+            "a busy block's header fits: {:?}",
+            request.max_response_bytes
+        );
+        // a busy block's header carries every transaction hash, far past 16 KB
+        let hashes: Vec<String> = (0..600_u32).map(|n| format!("0x{n:064x}")).collect();
         let answers = (0..n)
             .map(|node| {
                 json!([
                     {"jsonrpc": "2.0", "id": 0, "result": {
                         "number": block, "hash": format!("0x{}", "ab".repeat(32)),
                         "timestamp": format!("0x{timestamp:x}"), "miner": format!("node {node}"),
+                        "transactions": hashes,
                     }},
                     {"jsonrpc": "2.0", "id": 1, "result": word(0)},
                 ])

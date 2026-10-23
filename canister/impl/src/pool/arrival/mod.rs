@@ -23,15 +23,16 @@
 //! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
 //! the ref the order carries; the canister recomputes the ref and credits the transfer whose
 //! proof carries it, checking the terms on what arrived: the parties not sanctioned, the
-//! pool open, a swap within the per-swap cap with its ICP fees at least its path's own
-//! ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at least `min_out`;
+//! pool open, a swap (with no cap: the per-swap cap is the quoter's) with its ICP fees at
+//! least its path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at least `min_out`;
 //! a stake within the TVL cap. Terms it does not take hold the transfer for a controller,
 //! with the terms and the payer. One deposit per ref: a second arrival under a credited ref
 //! is held. A transfer whose proof fails for good is held with its payer when known. A
 //! deposit's transfer found without its terms (the canister's own read of Base) waits 24
 //! hours for them on the unattributed line, then is held for a controller. Every step of
 //! one call is appended in the message that checks it, after the last read, so the same
-//! transfer reported twice is credited once.
+//! transfer reported twice is credited once. Every receipt a proof reads is read by every
+//! node of the subnet and agreed on (M-03): no one provider or node makes up a deposit.
 
 #[cfg(test)]
 mod tests;
@@ -39,7 +40,7 @@ mod tests;
 use crate::cctp::parse_address;
 use crate::ecdsa;
 use crate::pool;
-use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
+use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, Keep, RpcError};
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::{config, pool as pool_store};
@@ -1052,22 +1053,20 @@ fn unavailable(error: RpcError) -> PoolError {
     PoolError::Unavailable(format!("the read failed: {:?}", error.kind()))
 }
 
-/// The pool chain's receipt of `tx` and its head, in one outcall, the receipt at the
-/// crediting depth.
-pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
-    let calls = [
-        ("eth_getTransactionReceipt", json!([hex0x(tx.as_ref())])),
-        ("eth_blockNumber", json!([])),
-    ];
-    let answers = rpc::rpc_batch_each(chain.chain, &calls, MAX_RECEIPT_BYTES)
-        .await
-        .map_err(unavailable)?;
+/// The receipt every node agreed on in `answers` (`[receipt, header]`, read beside the head
+/// `head` one node named), pure: a receipt of `tx`, and a header of that very block, which
+/// every node saw. A head no node agrees is a block is no depth: asked again.
+pub fn agreed_receipt(
+    tx: TxHash,
+    head: BlockNumber,
+    answers: Vec<Result<Value, RpcError>>,
+) -> Result<Receipt, PoolError> {
     let mut answers = answers.into_iter();
     let receipt = answers
         .next()
         .ok_or_else(|| PoolError::Unavailable("no receipt answer".to_string()))?
         .map_err(unavailable)?;
-    let head = answers
+    let header = answers
         .next()
         .ok_or_else(|| PoolError::Unavailable("no head answer".to_string()))?
         .map_err(unavailable)?;
@@ -1079,18 +1078,73 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
     let receipt = Receipt::parse(&receipt)
         .filter(|receipt| receipt.tx == tx)
         .ok_or_else(|| PoolError::BadArrival("the receipt does not read".to_string()))?;
-    let head = head
-        .as_str()
-        .and_then(parse_block_number)
-        .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
-    deep_enough(receipt.block, head, chain.chain)?;
+    if crate::agreed::Header::parse(&header).map(|header| header.number) != Some(head) {
+        return Err(PoolError::Unavailable(
+            "the head is not a block every node sees yet".to_string(),
+        ));
+    }
     Ok(receipt)
 }
 
-/// The receipt at `block` is at the pool chain's crediting depth under `head`.
-pub fn deep_enough(block: BlockNumber, head: BlockNumber, chain: ChainId) -> Result<(), PoolError> {
-    let needed = crate::tx::credit_confirmations(&config::get(), chain)
+/// The pool chain's receipt of `tx` at the crediting depth, read by every node and agreed on
+/// (M-03): one node reads the head, which only names the block every node reads beside the
+/// receipt, so a head no node sees is no depth, and a lower one only waits.
+pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
+    let head = rpc::rpc_batch(
+        chain.chain,
+        &[("eth_blockNumber", json!([]))],
+        rpc::MAX_BLOCK_NUMBER_BYTES,
+    )
+    .await
+    .map_err(unavailable)?
+    .first()
+    .and_then(Value::as_str)
+    .and_then(parse_block_number)
+    .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
+    let calls = [
+        (
+            "eth_getTransactionReceipt",
+            json!([hex0x(tx.as_ref())]),
+            Keep::Receipt,
+        ),
+        (
+            "eth_getBlockByNumber",
+            json!([format!("0x{:x}", head.get()), false]),
+            Keep::Header,
+        ),
+    ];
+    let answers = rpc::rpc_batch_agreed(chain.chain, &calls, MAX_RECEIPT_BYTES)
+        .await
+        .map_err(unavailable)?;
+    let receipt = agreed_receipt(tx, head, answers)?;
+    let largest = receipt
+        .transfers_to(chain)
+        .into_iter()
+        .map(|(_, _, amount)| amount)
+        .max()
+        .unwrap_or(TokenAmount::ZERO);
+    deep_enough(receipt.block, head, chain.chain, largest)?;
+    Ok(receipt)
+}
+
+/// The receipt at `block` is at the pool chain's crediting depth under `head`, or, when its
+/// largest transfer to the canister (`largest`) is a large deposit, at the large deposits'
+/// depth (2026-10-23): not deep yet is asked again, never refused for good.
+pub fn deep_enough(
+    block: BlockNumber,
+    head: BlockNumber,
+    chain: ChainId,
+    largest: TokenAmount,
+) -> Result<(), PoolError> {
+    let depth = crate::tx::credit_confirmations(&config::get(), chain)
         .map_err(|_| PoolError::Closed("the pool chain has no depth configured".to_string()))?;
+    let needed = match pool_store::ledger()
+        .settings
+        .map(|settings| settings.large_deposit())
+    {
+        Some((above, large)) if largest > above => large.max(depth),
+        _ => depth,
+    };
     if types::tx::is_confirmed(block, head, needed) {
         return Ok(());
     }
@@ -1104,10 +1158,14 @@ pub fn deep_enough(block: BlockNumber, head: BlockNumber, chain: ChainId) -> Res
     })
 }
 
-/// The source chain's receipt of `tx`, in one outcall.
+/// The source chain's receipt of `tx`, read by every node and agreed on (M-03).
 pub(crate) async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
-    let calls = [("eth_getTransactionReceipt", json!([hex0x(tx.as_ref())]))];
-    let mut answers = rpc::rpc_batch_each(chain, &calls, MAX_RECEIPT_BYTES)
+    let calls = [(
+        "eth_getTransactionReceipt",
+        json!([hex0x(tx.as_ref())]),
+        Keep::Receipt,
+    )];
+    let mut answers = rpc::rpc_batch_agreed(chain, &calls, MAX_RECEIPT_BYTES)
         .await
         .map_err(unavailable)?;
     let receipt = answers
@@ -1187,7 +1245,7 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
             continue;
         };
         let mut proven = Vec::new();
-        let (mut known, mut filled, mut unread) = (false, false, None);
+        let (mut known, mut filled, mut unread, mut unreadable) = (false, false, None, false);
         for intent in intents.clone() {
             let Some((destination, deadline)) =
                 read_state(|state| refund_destination(state, &intent))
@@ -1195,8 +1253,9 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
                 continue;
             };
             known = true;
+            // the pinned order never changes: a deadline that does not read never will
             let Some(deadline) = deadline else {
-                unread = Some("its route's deadline does not read from its order".to_string());
+                unreadable = true;
                 continue;
             };
             match reads.fill(destination, intent, deadline).await {
@@ -1213,6 +1272,13 @@ pub async fn prove_refunds(mut found: Vec<Found>, reads: &impl FillReads) -> Vec
         } else if let (Some(why), false) = (unread, filled) {
             Proof::Unproven {
                 why: format!("an Eco refund whose intent's fill was not read: {why}"),
+            }
+        } else if unreadable && !filled {
+            Proof::Orphan {
+                payer: None,
+                why: "an Eco refund of an intent whose route deadline does not read from its \
+                      order: held for a human"
+                    .to_string(),
             }
         } else {
             Proof::Orphan {
@@ -1266,32 +1332,7 @@ pub async fn read_and_record(
     source: Option<(ChainId, TxHash)>,
     given: Option<&Given>,
 ) -> Result<Recorded, PoolError> {
-    let chain = pool_chain().await?;
-    let base = read_base(&chain, base_tx).await?;
-    let source = if needs_source(&base, &chain) {
-        let (src_chain, src_tx) = source
-            .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
-        let evm = config::get().evm_chains.get(src_chain).ok_or_else(|| {
-            PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
-        })?;
-        let at = SourceChain {
-            chain: src_chain,
-            swapic: evm.swapic,
-            eco_portal: config::get().eco_portal,
-            usdc: evm.usdc,
-            runner: evm.runner,
-        };
-        Some((read_source(src_chain, src_tx).await?, at))
-    } else {
-        None
-    };
-    let found = find(
-        &base,
-        source.as_ref().map(|(receipt, at)| (receipt, at)),
-        &chain,
-    )
-    .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
-    let found = prove_refunds(found, &LivePortal).await;
+    let found = read_found(base_tx, source).await?;
     // after the last read: the credited set, the pool's guard and the append are in this
     // one message
     pool::require_running()?;

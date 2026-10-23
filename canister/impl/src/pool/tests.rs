@@ -33,3 +33,14 @@ fn the_state_of_an_empty_pool() {
     assert!(view.open);
     assert_eq!(view.closed_reason, None);
 }
+
+/// CR-11: the ICP doors screen a principal one way: by its text, as the sanctions set keys
+/// it.
+#[test]
+fn every_icp_door_screens_a_principal_one_way() {
+    let listed = candid::Principal::from_slice(&[7; 10]);
+    let clean = candid::Principal::from_slice(&[8; 10]);
+    let set = |address: &types::Address| address.as_str() == listed.to_text();
+    assert!(principal_sanctioned(listed, &set));
+    assert!(!principal_sanctioned(clean, &set));
+}
