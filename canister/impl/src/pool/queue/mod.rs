@@ -104,6 +104,10 @@ pub fn next(
         PayoutStatus::Known => Next::Drive,
         PayoutStatus::Queued => Next::Wait,
         PayoutStatus::Waiting if in_flight => Next::Wait,
+        // old semantics: a reverted payout waiting with its order pinned, to be signed again,
+        // is undone only once Swapic says that order never ran. hfisl's real log (2,310
+        // events, read 2026-10-22) holds no Pool event, so no such state exists on the
+        // deployed canister: no migration
         PayoutStatus::Waiting if late => Next::Undo {
             why: "past its deadline".to_string(),
             checked: payout.order.is_some(),

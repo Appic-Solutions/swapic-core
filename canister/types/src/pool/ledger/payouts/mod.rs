@@ -22,6 +22,13 @@
 //! - Resolved (a controller, `resolve_payout`, 2026-10-23): a payout stopped for a human is
 //!   put back on its undo (`Refund`), or its signed order found paid (`MarkPaid`): the paid
 //!   line, from where a reverted payout's USDC sits (reserved again), once.
+//!
+//! Old semantics the fold still reads (before the payout plan flow, 2026-10-23): an ICP swap
+//! opened with its user's own premium and least ckUSDC (no plan); a reverted payout waiting
+//! with its order pinned to be signed again; a `Paid` payout with an Eco intent, which an Eco
+//! refund reopened, its ckUSDC released (`icp_released`). hfisl's real log (2,310 events,
+//! read 2026-10-22) holds no Pool event, so no such state exists on the deployed canister: no
+//! migration. Each place is marked "old semantics".
 
 #[cfg(test)]
 mod tests;
@@ -91,6 +98,7 @@ impl PoolLedger {
         plan: Option<&PinnedOrder>,
     ) -> Result<(), PoolStepError> {
         let (plan, slippage, planned) = match (plan, swap.slippage_bps, swap.planned) {
+            // old semantics: a swap opened before the plan flow (see the module's note)
             (None, None, None) => return Ok(()),
             (Some(plan), Some(slippage), Some(planned)) => (plan, slippage, planned),
             _ => return Err(PoolStepError::Mismatch),
@@ -259,7 +267,8 @@ impl PoolLedger {
                         if *received < swap.min_usdc {
                             return Err(PoolStepError::Terms("the ckUSDC is below min_usdc"));
                         }
-                        // a planned swap's premium is the settings' share of what it made
+                        // a planned swap's premium is the settings' share of what it made; old
+                        // semantics: an unplanned one's is its user's own (the module's note)
                         let expected = if swap.is_planned() {
                             plan::payout_of(self.settings()?, *received, swap.network_fee)
                         } else {
@@ -471,6 +480,8 @@ impl PoolLedger {
                 id, credit, amount, ..
             } => {
                 let payout = payout_of(*id)?;
+                // old semantics: a `Paid` payout with an intent is never reopened now; its
+                // refund is held as an orphan (the module's note)
                 let owed_back = payout.status == PayoutStatus::Delivering
                     && payout.reclaim.is_none()
                     || payout.reclaim == Some(Reclaim::Pending);
@@ -558,8 +569,8 @@ impl PoolLedger {
                 ) {
                     return Err(not_from("PayoutUndoing", &payout));
                 }
-                // an ICP swap paid once and reopened by an Eco refund: its refund is held back
-                // out of the free ckUSDC before it is asked, never after
+                // old semantics (the module's note): an ICP swap paid once and reopened by an
+                // Eco refund: its refund is held back out of the free ckUSDC before it is asked
                 if payout.icp_released.0 && payout.icp_hold() > self.pockets.icp.free {
                     return Err(PoolStepError::PocketShort {
                         free: self.pockets.icp.free,
@@ -589,7 +600,8 @@ impl PoolLedger {
                         .checked_add(shares)
                         .ok_or(PoolStepError::Overflow)?;
                 }
-                // an ICP swap paid once, then refunded by Eco: its ckUSDC is the free one
+                // old semantics (the module's note): an ICP swap paid once, then reopened by
+                // Eco's refund: its ckUSDC is the free one
                 if payout.icp_released.0 && payout.icp_hold() > self.pockets.icp.free {
                     return Err(PoolStepError::PocketShort {
                         free: self.pockets.icp.free,
