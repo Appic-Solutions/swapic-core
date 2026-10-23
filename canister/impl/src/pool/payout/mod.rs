@@ -404,9 +404,11 @@ pub fn path_amount(amount: TokenAmount, path: PayoutPath, fee: TokenAmount) -> O
 }
 
 /// What an ICPSwap leg took from the canister's ckUSDC account so far: every approval's fee,
-/// and once begun, the swap's deposit (its amount in, `swap_in`, and the pool's pull's fee),
-/// or what the deposit cost in the end once undone. A leg from before approvals were counted
-/// gave one once begun.
+/// and once begun, the swap's deposit (its amount in and the pool's pull's fee), or what the
+/// deposit cost in the end once undone. The deposit is the one the leg recorded at its begin,
+/// which an approval asked again made one fee less than the amount it was handed (CR-09);
+/// `swap_in` only for a leg from before that amount was recorded. A leg from before
+/// approvals were counted gave one once begun.
 fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> Option<TokenAmount> {
     let approvals = swap.approvals.unwrap_or(u32::from(swap.begun));
     let approved = fee.checked_mul(approvals)?;
@@ -415,7 +417,7 @@ fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> O
     }
     let deposit = match swap.undone {
         Some(cost) => cost,
-        None => swap_in.or(swap.amount_in)?.checked_add(fee)?,
+        None => swap.amount_in.or(swap_in)?.checked_add(fee)?,
     };
     approved.checked_add(deposit)
 }

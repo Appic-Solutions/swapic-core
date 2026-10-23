@@ -1015,7 +1015,10 @@ fn a_refused_taker_never_releases_a_busy_payout() {
 }
 
 /// Review fix 9: every approval's fee is the payout's: a leg approved, then stopped by the
-/// pool's guard, approves again on the next drive, and both fees are in what it spent.
+/// pool's guard, approves again on the next drive, and both fees are in what it spent. The
+/// second approval's fee came out of what the leg deposited (P11e), so what the payout spent
+/// is what left the account: the deposit the leg recorded, not the amount it was handed
+/// (CR-09), the user's 99 in all.
 #[test]
 fn every_approval_is_counted_in_what_the_payout_spent() {
     on_fresh_memory(|| {
@@ -1040,12 +1043,14 @@ fn every_approval_is_counted_in_what_the_payout_spent() {
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         let paid = deposit(&r#ref).unwrap();
         assert_eq!(paid.payout.swap.approvals, Some(2));
-        // the user's 99 (its swap, the pool's pull, one approval) and the approval asked
-        // again, the one fee past the user's budget
+        // its two approvals, the pool's pull and the deposit it recorded, one fee less for
+        // the approval asked again
+        let leg = paid.payout.swap;
         assert_eq!(
             paid.paid.unwrap().spent,
-            usdc(99).checked_add(fees(1)).unwrap()
+            leg.amount_in.unwrap().checked_add(fees(3)).unwrap()
         );
+        assert_eq!(paid.paid.unwrap().spent, usdc(99));
     });
 }
 
