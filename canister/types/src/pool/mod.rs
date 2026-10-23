@@ -782,6 +782,41 @@ pub enum DepositStatus {
     Expired,
     #[n(6)]
     PayoutFailed(#[n(0)] String),
+    /// A controller sent what arrived back to its payer on Base (`resolve_deposit`, Jeff
+    /// 2026-10-24): its arrival is an orphan held under its transfer's key, refunded from
+    /// there.
+    #[n(7)]
+    Refunded,
+}
+
+/// What a controller decided for a deposit held for a human (`resolve_deposit`, Jeff
+/// 2026-10-24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum DepositResolution {
+    /// Back to its payout with fresh attempts: a started one paying again, one that never
+    /// started queued again at the back, a stake minting again.
+    #[n(0)]
+    Retry,
+    /// What arrived back to its payer on Base, through the orphan refund path.
+    #[n(1)]
+    Refund,
+}
+
+/// What a controller found of an ICP stake whose pull's answer was lost past the ledger's
+/// deduplication window (`resolve_stake`, Jeff 2026-10-24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum StakeResolution {
+    /// The pull landed in ledger `block`: its `shares`, priced when resolved, are minted.
+    #[n(0)]
+    Pulled {
+        #[n(0)]
+        block: u64,
+        #[n(1)]
+        shares: Shares,
+    },
+    /// It never landed: dropped, its room freed.
+    #[n(1)]
+    NotPulled,
 }
 
 /// One USDC transfer to the canister, as a chain logged it: the key it is credited under,
@@ -997,6 +1032,15 @@ pub struct PayoutProgress {
 }
 
 impl PayoutProgress {
+    /// Whether any ICPSwap leg of it moved money on ICP: approved (a fee spent), begun, or
+    /// answered. A ckUSDC transfer moves nothing the progress can tell.
+    pub fn moved_on_icp(&self) -> bool {
+        [Some(self.swap), self.second, self.back]
+            .into_iter()
+            .flatten()
+            .any(|leg| leg.begun || leg.approvals.unwrap_or(0) > 0 || leg.out.is_some())
+    }
+
     /// The leg a swap step names.
     pub fn leg(&self, leg: Option<u8>) -> SwapLeg {
         match leg {
@@ -1015,6 +1059,9 @@ impl PayoutProgress {
         }
     }
 }
+
+/// Why a held deposit's arrival is an orphan: a controller refunds it to its payer.
+pub const DEPOSIT_REFUNDED: &str = "a held deposit a controller refunds to its payer";
 
 /// A deposit as the fold holds it: its terms and how far it got.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -1050,6 +1097,22 @@ impl Registered {
             payout: PayoutProgress::default(),
             held: None,
         }
+    }
+
+    /// The orphan what arrived becomes when a controller refunds it (`resolve_deposit`):
+    /// held under its transfer's key for its payer. None before it arrived.
+    pub fn refund_orphan(&self) -> Option<(CreditKey, Orphan)> {
+        let arrival = self.arrived?;
+        Some((
+            arrival.credit,
+            Orphan {
+                amount: arrival.amount,
+                block: arrival.block,
+                payer: Some(self.terms.src_payer),
+                why: DEPOSIT_REFUNDED.to_string(),
+                status: OrphanStatus::Held,
+            },
+        ))
     }
 
     /// What the deposit's payout takes of the ICP pocket: nothing before it arrived, its
@@ -1760,6 +1823,28 @@ pub enum PoolStep {
         #[n(0)]
         id: u64,
     },
+    /// A controller resolved a deposit held for a human (`resolve_deposit`): `Retry` puts it
+    /// back on its payout with fresh attempts (a started one's dedup instant `retry_at`, the
+    /// door's: its own while a ledger still deduplicates it, else the resolution's); `Refund`
+    /// holds what arrived as an orphan under its transfer's key, for its payer, once.
+    #[n(48)]
+    DepositResolved {
+        #[n(0)]
+        r#ref: PoolRef,
+        #[n(1)]
+        resolution: DepositResolution,
+        #[n(2)]
+        retry_at: Option<Timestamp>,
+    },
+    /// A controller resolved an ICP stake whose pull's answer was lost past the ledger's
+    /// deduplication window (`resolve_stake`), once.
+    #[n(49)]
+    StakeResolved {
+        #[n(0)]
+        id: PoolOpId,
+        #[n(1)]
+        resolution: StakeResolution,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -2055,6 +2140,8 @@ impl PoolStep {
             PoolStep::PayoutResolved { .. } => "PayoutResolved",
             PoolStep::PayoutFitWaited { .. } => "PayoutFitWaited",
             PoolStep::PayoutFillEarly { .. } => "PayoutFillEarly",
+            PoolStep::DepositResolved { .. } => "DepositResolved",
+            PoolStep::StakeResolved { .. } => "StakeResolved",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
@@ -2161,6 +2248,8 @@ impl PoolStep {
                 | PoolStep::PayoutUnfilled { .. }
                 | PoolStep::PayoutResolved { .. }
                 | PoolStep::Minted { .. }
+                // a deposit retried pays again; one refunded frees ckUSDC for the queue
+                | PoolStep::DepositResolved { .. }
         )
     }
 }

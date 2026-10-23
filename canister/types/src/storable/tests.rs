@@ -642,7 +642,113 @@ fn samples() -> Vec<Sample> {
     all.extend(fill_early_samples());
     all.extend(reverted_block_samples());
     all.extend(reverted_at_samples());
+    all.extend(held_resolution_samples());
     all
+}
+
+/// A controller's doors for what is held for a human (Jeff, 2026-10-24): a deposit refunded,
+/// the lines of a deposit retried and refunded, and of an ICP stake whose pull was lost.
+fn held_resolution_samples() -> Vec<Sample> {
+    use crate::hash::{PoolOpId, PoolRef};
+    use crate::pool::{
+        Arrival, CreditKey, DepositKind, DepositResolution, DepositStatus, IcpAccount,
+        PayoutProgress, PoolRail, PoolStep, Registered, Registration, Shares, StakeResolution,
+    };
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    let deposit = Registered {
+        terms: Registration {
+            kind: DepositKind::Swap {
+                recipient: IcpAccount {
+                    owner: principal(0xd1),
+                    subaccount: None,
+                },
+                token_out: principal(0xd2),
+                min_out: 0x1_901,
+            },
+            min_usdc: TokenAmount::from(1_902_000_000_u64),
+            premium: TokenAmount::from(1_903_u32),
+            rebalance_share: TokenAmount::ZERO,
+            src_chain: ChainId::ARBITRUM,
+            src_payer: crate::evm::EvmAddress::new([0xd3; 20]),
+            rail: PoolRail::Cctp,
+            expires_at: Timestamp::from_nanos(1_800_000_000_000_001_904),
+            salt: [0xd4; 32],
+            icp_fees: Some(TokenAmount::from(1_905_u32)),
+        },
+        status: DepositStatus::Refunded,
+        arrived: Some(Arrival {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: crate::hash::TxHash::new([0xd5; 32]),
+                log_index: 1_906,
+            },
+            amount: TokenAmount::from(1_907_000_000_u64),
+            block: BlockNumber::new(1_908),
+        }),
+        paid: None,
+        minted: None,
+        payout: PayoutProgress::default(),
+        held: Some(TokenAmount::ZERO),
+    };
+    let line = |index: u64, step: PoolStep| {
+        Event::seal(
+            EventIndex::new(index),
+            Timestamp::from_nanos(1_800_000_000_000_001_909),
+            EventHash::new([0xd6; 32]),
+            crate::events::EventType::Pool { step },
+        )
+        .expect("every sample has a preimage")
+    };
+    let r#ref = PoolRef::new([0xd7; 32]);
+    let id = PoolOpId::new([0xd8; 32]);
+    vec![
+        sample("deposit refunded to its payer", deposit),
+        sample(
+            "deposit retried, its dedup instant",
+            line(
+                19_000,
+                PoolStep::DepositResolved {
+                    r#ref,
+                    resolution: DepositResolution::Retry,
+                    retry_at: Some(Timestamp::from_nanos(1_800_000_000_000_001_910)),
+                },
+            ),
+        ),
+        sample(
+            "deposit refunded",
+            line(
+                19_001,
+                PoolStep::DepositResolved {
+                    r#ref,
+                    resolution: DepositResolution::Refund,
+                    retry_at: None,
+                },
+            ),
+        ),
+        sample(
+            "stake found pulled",
+            line(
+                19_002,
+                PoolStep::StakeResolved {
+                    id,
+                    resolution: StakeResolution::Pulled {
+                        block: 1_911,
+                        shares: Shares::new(1_912 << 64),
+                    },
+                },
+            ),
+        ),
+        sample(
+            "stake found not pulled",
+            line(
+                19_003,
+                PoolStep::StakeResolved {
+                    id,
+                    resolution: StakeResolution::NotPulled,
+                },
+            ),
+        ),
+    ]
 }
 
 /// When a payout's revert was recorded (the review, 2026-10-24): the payout carrying it.

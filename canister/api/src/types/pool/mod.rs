@@ -153,6 +153,9 @@ pub enum PoolDepositStatus {
     Unattributed,
     Expired,
     PayoutFailed(String),
+    /// A controller sent what arrived back to its payer on Base (`resolve_deposit`): an
+    /// orphan under its transfer's key (`pool_orphans`) until its refund is signed.
+    Refunded,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -483,6 +486,7 @@ impl From<domain::DepositStatus> for PoolDepositStatus {
             domain::DepositStatus::Unattributed => Self::Unattributed,
             domain::DepositStatus::Expired => Self::Expired,
             domain::DepositStatus::PayoutFailed(why) => Self::PayoutFailed(why),
+            domain::DepositStatus::Refunded => Self::Refunded,
         }
     }
 }

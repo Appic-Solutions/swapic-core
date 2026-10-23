@@ -1508,3 +1508,280 @@ fn a_queued_payout_that_never_starts_is_held_for_a_human_and_frees_the_queue() {
         "a payout held for a human is done"
     );
 }
+
+/// A swap of 100 USDC (premium 1) arrived for `byte`, started, and held for a human after
+/// its tenth failure.
+fn held_started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
+    let r#ref = register(pool, swap(byte, usdc(100), usdc(1)));
+    pool.step(PoolStep::Arrived {
+        r#ref,
+        credit: credit(log),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
+        },
+    })
+    .unwrap();
+    hold(pool, r#ref);
+    r#ref
+}
+
+/// Fails `r#ref`'s payout until it is held for a human.
+fn hold(pool: &mut Pool, r#ref: PoolRef) {
+    for n in 1..=MAX_PAYOUT_ATTEMPTS {
+        pool.step(PoolStep::AttemptFailed {
+            r#ref,
+            why: format!("try {n}"),
+        })
+        .unwrap();
+    }
+    assert!(matches!(
+        pool.deposits[&r#ref].status,
+        DepositStatus::PayoutFailed(_)
+    ));
+}
+
+fn resolved(r#ref: PoolRef, resolution: DepositResolution, retry_at: Option<u64>) -> PoolStep {
+    PoolStep::DepositResolved {
+        r#ref,
+        resolution,
+        retry_at: retry_at.map(Timestamp::from_nanos),
+    }
+}
+
+/// Jeff (2026-10-24), `resolve_deposit`'s `Retry`: a deposit held for a human goes back to
+/// its payout with fresh attempts. A started one is paying again (its dedup instant the
+/// door's), still held; one that never started (CR-08) is queued again, at the back. Once.
+#[test]
+fn a_held_deposit_retried_goes_back_to_its_payout_with_fresh_attempts() {
+    let mut pool = funded(usdc(1_000));
+    let started = held_started(&mut pool, 1, 1);
+    let (owed, icp) = (pool.ledger.owed, pool.ledger.pockets.icp);
+    // the instant is a started payout's only
+    pool.step(resolved(started, DepositResolution::Retry, Some(7)))
+        .unwrap();
+    let deposit = &pool.deposits[&started];
+    assert_eq!(deposit.status, DepositStatus::Paying);
+    assert_eq!(deposit.payout.failures, 0);
+    assert_eq!(deposit.payout.failed, None);
+    assert_eq!(
+        deposit.payout.attempt.unwrap().created_at,
+        Timestamp::from_nanos(7)
+    );
+    assert_eq!((pool.ledger.owed, pool.ledger.pockets.icp), (owed, icp));
+    assert!(pool.ledger.paying.contains(&started));
+    // resolved once; its payout fails again as before
+    assert!(pool
+        .step(resolved(started, DepositResolution::Retry, None))
+        .is_err());
+    pool.step(PoolStep::AttemptFailed {
+        r#ref: started,
+        why: "again".into(),
+    })
+    .unwrap();
+
+    // CR-08: never started, held; another deposit queued behind it meanwhile
+    let never = register(&mut pool, swap(2, usdc(100), usdc(1)));
+    let behind = register(&mut pool, swap(3, usdc(100), usdc(1)));
+    for (r#ref, log) in [(never, 2), (behind, 3)] {
+        pool.step(PoolStep::Arrived {
+            r#ref,
+            credit: credit(log),
+            amount: usdc(100),
+            block: BlockNumber::new(10),
+        })
+        .unwrap();
+    }
+    hold(&mut pool, never);
+    assert!(pool
+        .step(resolved(never, DepositResolution::Retry, Some(7)))
+        .is_err());
+    let icp = pool.ledger.pockets.icp;
+    pool.step(resolved(never, DepositResolution::Retry, None))
+        .unwrap();
+    assert_eq!(pool.deposits[&never].status, DepositStatus::Arrived);
+    assert_eq!(pool.deposits[&never].payout.failures, 0);
+    let queued: Vec<PoolRef> = pool.ledger.queue.0.iter().map(|(r, _)| *r).collect();
+    assert_eq!(queued, vec![behind, never], "at the back");
+    assert_eq!(pool.ledger.pockets.icp, icp, "nothing reserved");
+}
+
+/// `resolve_deposit`'s `Refund`: what arrived goes back to its payer on Base through the
+/// orphan refund path. The deposit is done (`Refunded`), owed nothing and out of `paying`;
+/// a started one's hold is free again on ICP; its arrival leaves the Base pocket's free
+/// line for the unattributed line, an orphan held under its transfer's key, so the Base
+/// balance's books do not move. Stakers give back only the premium they had booked.
+#[test]
+fn a_held_deposit_refunded_is_an_orphan_held_for_its_payer() {
+    let mut pool = funded(usdc(1_000));
+    let started = held_started(&mut pool, 1, 1);
+    let (base_held, assets, owed) = (
+        pool.ledger.base_held(),
+        pool.ledger.total_assets(),
+        pool.ledger.owed,
+    );
+    let icp = pool.ledger.pockets.icp;
+    let held = pool.deposits[&started].held();
+    // a refund carries no dedup instant
+    assert!(pool
+        .step(resolved(started, DepositResolution::Refund, Some(7)))
+        .is_err());
+    pool.step(resolved(started, DepositResolution::Refund, None))
+        .unwrap();
+    let deposit = &pool.deposits[&started];
+    assert_eq!(deposit.status, DepositStatus::Refunded);
+    assert!(!pool.ledger.paying.contains(&started));
+    assert_eq!(pool.ledger.owed, owed.checked_sub(held).unwrap());
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        icp.reserved.checked_sub(held).unwrap()
+    );
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        icp.free.checked_add(held).unwrap()
+    );
+    assert_eq!(pool.ledger.base_held(), base_held);
+    assert_eq!(pool.ledger.unattributed, usdc(100));
+    assert_eq!(
+        pool.ledger.total_assets(),
+        assets.checked_sub(usdc(1)).unwrap()
+    );
+    let orphan = &pool.orphans[&credit(1)];
+    assert_eq!(orphan.amount, usdc(100));
+    assert_eq!(orphan.payer, Some(payer()));
+    assert_eq!(orphan.status, crate::pool::OrphanStatus::Held);
+    assert!(pool
+        .step(resolved(started, DepositResolution::Refund, None))
+        .is_err());
+
+    // a stake held for a human: all of it back, the stakers' assets unchanged
+    let staked = register(&mut pool, stake(4, usdc(50), TokenAmount::ZERO));
+    pool.step(PoolStep::Arrived {
+        r#ref: staked,
+        credit: credit(4),
+        amount: usdc(50),
+        block: BlockNumber::new(11),
+    })
+    .unwrap();
+    hold(&mut pool, staked);
+    let assets = pool.ledger.total_assets();
+    pool.step(resolved(staked, DepositResolution::Refund, None))
+        .unwrap();
+    assert_eq!(pool.ledger.total_assets(), assets);
+    assert_eq!(pool.orphans[&credit(4)].amount, usdc(50));
+}
+
+/// A refund is refused when it could pay twice or burn: a payout whose ICPSwap leg began or
+/// was approved (money moved on ICP), a payer that is the zero address, a Base pocket whose
+/// free USDC no longer covers what arrived.
+#[test]
+fn a_held_deposit_is_refunded_only_when_nothing_moved_and_someone_paid() {
+    let mut pool = funded(usdc(1_000));
+    let approved = held_started(&mut pool, 1, 1);
+    let mut deposit = pool.deposits[&approved].clone();
+    deposit.payout.swap.approvals = Some(1);
+    pool.deposits.insert(approved, deposit);
+    assert!(pool
+        .step(resolved(approved, DepositResolution::Refund, None))
+        .is_err());
+    let begun = held_started(&mut pool, 2, 2);
+    let mut deposit = pool.deposits[&begun].clone();
+    deposit.payout.swap.begun = true;
+    pool.deposits.insert(begun, deposit);
+    assert!(pool
+        .step(resolved(begun, DepositResolution::Refund, None))
+        .is_err());
+    let nobody = held_started(&mut pool, 3, 3);
+    let mut deposit = pool.deposits[&nobody].clone();
+    deposit.terms.src_payer = EvmAddress::ZERO;
+    pool.deposits.insert(nobody, deposit);
+    assert!(pool
+        .step(resolved(nobody, DepositResolution::Refund, None))
+        .is_err());
+    let short = held_started(&mut pool, 4, 4);
+    pool.ledger.pockets.base.free = usdc(99);
+    assert!(pool
+        .step(resolved(short, DepositResolution::Refund, None))
+        .is_err());
+    // each may still be retried
+    pool.step(resolved(short, DepositResolution::Retry, None))
+        .unwrap();
+}
+
+/// `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost past the
+/// ledger's deduplication window. `Pulled` (a controller saw the ledger block) mints its
+/// shares and books its ckUSDC free on ICP; `NotPulled` drops it and frees its room. Once.
+#[test]
+fn a_stake_whose_pull_was_lost_is_resolved_once() {
+    let mut pool = funded(usdc(1_000));
+    let start = |pool: &mut Pool, byte: u8| {
+        let id = PoolOpId::new([byte; 32]);
+        pool.step(PoolStep::StakeStarted {
+            id,
+            owner: PoolAccount::Icp(recipient(byte)),
+            from: recipient(byte),
+            amount: usdc(10),
+            created_at: Timestamp::from_nanos(2),
+        })
+        .unwrap();
+        id
+    };
+    let pulled = start(&mut pool, 7);
+    let (room, icp, total) = (
+        pool.ledger.stake_room,
+        pool.ledger.pockets.icp,
+        pool.ledger.total_shares,
+    );
+    let shares = pool.ledger.mint_now(usdc(10)).unwrap();
+    assert!(pool
+        .step(PoolStep::StakeResolved {
+            id: pulled,
+            resolution: StakeResolution::Pulled {
+                block: 9,
+                shares: Shares::ZERO
+            },
+        })
+        .is_err());
+    let step = PoolStep::StakeResolved {
+        id: pulled,
+        resolution: StakeResolution::Pulled { block: 9, shares },
+    };
+    pool.step(step.clone()).unwrap();
+    assert!(!pool.ledger.pending.contains_key(&pulled));
+    assert_eq!(pool.ledger.stake_room, room.checked_sub(usdc(10)).unwrap());
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        icp.free.checked_add(usdc(10)).unwrap()
+    );
+    assert_eq!(pool.ledger.total_shares, total.checked_add(shares).unwrap());
+    assert_eq!(
+        pool.shares_of(&PoolAccount::Icp(recipient(7)).key()),
+        shares
+    );
+    assert!(pool.step(step).is_err(), "once");
+
+    let dropped = start(&mut pool, 8);
+    let (room, icp, total) = (
+        pool.ledger.stake_room,
+        pool.ledger.pockets.icp,
+        pool.ledger.total_shares,
+    );
+    pool.step(PoolStep::StakeResolved {
+        id: dropped,
+        resolution: StakeResolution::NotPulled,
+    })
+    .unwrap();
+    assert!(!pool.ledger.pending.contains_key(&dropped));
+    assert_eq!(pool.ledger.stake_room, room.checked_sub(usdc(10)).unwrap());
+    assert_eq!(pool.ledger.pockets.icp, icp);
+    assert_eq!(pool.ledger.total_shares, total);
+}
