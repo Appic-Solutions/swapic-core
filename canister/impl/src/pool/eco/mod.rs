@@ -20,10 +20,14 @@ pub const MAX_ROUTE_LIFE_S: u64 = 3_600;
 /// The latest an unfilled intent's reward may come back: Eco's own week, and a day.
 pub const MAX_REWARD_LIFE_S: u64 = 8 * 24 * 3_600;
 
+/// The least an intent's reward may come back after its route can last be filled (L-03):
+/// a refund in the seconds the two chains' clocks disagree could meet a fill.
+pub const MIN_REFUND_GAP_S: u64 = 3_600;
+
 /// The rules an intent the canister funds meets, pure: Eco's configured prover (any other
 /// could pay the reward to whoever it says) and Portal (where its fill is proven), a route
 /// that may be filled once the order runs and within the hour, a reward that comes back
-/// after the route and within Eco's week.
+/// an hour or more after the route and within Eco's week.
 pub fn check_intent(
     intent: &EcoIntent,
     portal: Option<EvmAddress>,
@@ -44,7 +48,7 @@ pub fn check_intent(
     {
         return Err("the intent's route deadline is not short".to_string());
     }
-    if intent.reward_deadline < intent.route_deadline
+    if intent.reward_deadline < intent.route_deadline.saturating_add(MIN_REFUND_GAP_S)
         || intent.reward_deadline > now_s.saturating_add(MAX_REWARD_LIFE_S)
     {
         return Err("the intent's refund comes too late".to_string());

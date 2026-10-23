@@ -79,3 +79,24 @@ fn another_prover_portal_or_a_long_deadline_is_refused() {
         Err("no Eco prover is configured".to_string())
     );
 }
+
+/// L-03: an intent whose reward comes back less than an hour after its route can last be
+/// filled is refused, so a refund never meets a fill in the seconds two chains' clocks
+/// disagree; an hour on the dot passes.
+#[test]
+fn a_reward_back_within_the_hour_of_the_route_is_refused() {
+    let route_deadline = intent().route_deadline;
+    let why = checked(&EcoIntent {
+        reward_deadline: route_deadline + MIN_REFUND_GAP_S - 1,
+        ..intent()
+    })
+    .unwrap_err();
+    assert!(why.contains("refund comes"), "{why}");
+    assert_eq!(
+        checked(&EcoIntent {
+            reward_deadline: route_deadline + MIN_REFUND_GAP_S,
+            ..intent()
+        }),
+        Ok(())
+    );
+}
