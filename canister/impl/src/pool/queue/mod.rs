@@ -51,6 +51,15 @@ pub fn fill_wait(chain: ChainId, depth: u64) -> std::time::Duration {
     )
 }
 
+/// How long after a time the pass waits before it reads a chain for a block past it
+/// ([`fill_wait`]): the payout's destination for its Eco intent's fill, the pool chain for
+/// whether its reverted order ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Waits {
+    pub fill: std::time::Duration,
+    pub ran: std::time::Duration,
+}
+
 /// What the pass does with one payout now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Next {
@@ -76,13 +85,13 @@ pub enum Next {
 }
 
 /// The pass's decision for `payout` at `now`, pure: `in_flight` says a transaction for it is
-/// still being signed or is in the outbox; `fill_wait` is its destination's [`fill_wait`].
+/// still being signed or is in the outbox; `waits` are its chains' [`Waits`].
 pub fn next(
     payout: &EvmPayout,
     settings: &PayoutSettings,
     now: Timestamp,
     in_flight: bool,
-    fill_wait: std::time::Duration,
+    waits: Waits,
 ) -> Next {
     let late = now >= payout.terms.deadline;
     match &payout.status {
@@ -128,6 +137,15 @@ pub fn next(
         PayoutStatus::Reverted if payout.reverted_block.is_none() => {
             Next::Stop(NO_REVERT_BLOCK.to_string())
         }
+        // whether its order ran is read once an agreed block can be at or past its revert
+        // (the review, 2026-10-24: not asked every pass before that)
+        PayoutStatus::Reverted
+            if payout.reverted_at.is_some_and(|at| {
+                now.saturating_duration_since(at) < waits.ran
+            }) =>
+        {
+            Next::Wait
+        }
         PayoutStatus::Reverted => Next::Undo {
             why: REVERTED.to_string(),
             checked: true,
@@ -137,7 +155,7 @@ pub fn next(
         PayoutStatus::Delivering => {
             let after_s = fill_read_after(payout);
             let now_s = now.as_secs().get();
-            let wait = fill_wait.as_secs();
+            let wait = waits.fill.as_secs();
             let ready = now_s >= after_s.saturating_add(wait)
                 && payout
                     .fill_early_at
@@ -338,6 +356,8 @@ pub async fn pass_with(
         let depth = crate::tx::credit_confirmations(&config, chain).map_or(0, |depth| depth.get());
         fill_wait(chain, depth)
     };
+    // a reverted order's `used` is read on the pool chain, whatever the payout pays on
+    let ran = config.pool_chain.map_or(std::time::Duration::ZERO, wait_for);
     for id in open {
         let Some(payout) = pool_store::payout(id) else {
             continue;
@@ -346,8 +366,11 @@ pub async fn pass_with(
         let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
             continue;
         };
-        let wait = wait_for(payout.terms.dst_chain);
-        match next(&payout, &settings, now, in_flight(id), wait) {
+        let waits = Waits {
+            fill: wait_for(payout.terms.dst_chain),
+            ran,
+        };
+        match next(&payout, &settings, now, in_flight(id), waits) {
             Next::Wait => {}
             Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
                 Ok(fitted) => {

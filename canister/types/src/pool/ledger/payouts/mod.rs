@@ -826,6 +826,7 @@ impl PoolLedger {
             PoolStep::PayoutReverted { id, block } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.reverted_block = *block;
+                payout.reverted_at = Some(at);
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
                 let base = &mut ledger.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, amount);

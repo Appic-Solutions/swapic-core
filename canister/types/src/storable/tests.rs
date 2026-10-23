@@ -641,7 +641,43 @@ fn samples() -> Vec<Sample> {
     all.extend(fit_retry_samples());
     all.extend(fill_early_samples());
     all.extend(reverted_block_samples());
+    all.extend(reverted_at_samples());
     all
+}
+
+/// When a payout's revert was recorded (the review, 2026-10-24): the payout carrying it.
+fn reverted_at_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, PayoutKind, PayoutStatus, PayoutTerms, Undo};
+    use crate::pool::{EvmWithdrawal, PoolAccount, Shares};
+    let staker = crate::evm::EvmAddress::new([0xe3; 20]);
+    let mut payout = EvmPayout::new(
+        1_801,
+        PayoutKind::Withdrawal(EvmWithdrawal {
+            staker,
+            usdc: TokenAmount::from(1_802_000_000_u64),
+            max_shares: Shares::new(1_803 << 64),
+            rebalance_share: TokenAmount::from(1_804_u64),
+            network_fee: TokenAmount::from(1_805_u64),
+            nonce: 1_806,
+            burned: Shares::new(1_807 << 64),
+        }),
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            recipient: staker,
+            token_out: crate::evm::EvmAddress::new([0xe4; 20]),
+            min_out: TokenAmount::from(1_808_u64),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_001_809),
+        },
+        Undo::Remint {
+            owner: PoolAccount::Evm(staker),
+            shares: Shares::new(1_807 << 64),
+        },
+        Timestamp::from_nanos(1_800_000_000_000_001_810),
+    );
+    payout.status = PayoutStatus::Reverted;
+    payout.reverted_block = Some(BlockNumber::new(1_811));
+    payout.reverted_at = Some(Timestamp::from_nanos(1_800_000_000_000_001_812));
+    vec![sample("payout reverted, when it was recorded", payout)]
 }
 
 /// The block a payout's or a move's transaction reverted in (review of the merged canister,
@@ -2438,6 +2474,7 @@ fn payout_samples() -> Vec<Sample> {
         fit_tries: None,
         fill_early_at: None,
         reverted_block: None,
+        reverted_at: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),

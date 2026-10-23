@@ -338,6 +338,11 @@ pub struct EvmPayout {
     /// after, never before (a reorg could have turned that revert into a payment).
     #[n(24)]
     pub reverted_block: Option<BlockNumber>,
+    /// When the canister recorded its last revert: whether its order ran is first read one
+    /// agreed block's wait on the pool chain after it (no agreed block is at or past the
+    /// revert's before). None on a revert recorded before it was, read at once.
+    #[n(25)]
+    pub reverted_at: Option<Timestamp>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -409,6 +414,7 @@ impl EvmPayout {
             fit_tries: None,
             fill_early_at: None,
             reverted_block: None,
+            reverted_at: None,
         }
     }
 

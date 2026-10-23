@@ -81,7 +81,10 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
             &settings,
             now,
             in_flight,
-            Duration::from_secs(FILL_MARGIN_S),
+            Waits {
+                fill: Duration::from_secs(FILL_MARGIN_S),
+                ran: Duration::ZERO,
+            },
         )
     };
     // queued: waits, and is undone at its deadline
@@ -553,7 +556,7 @@ fn a_revert_in_no_recorded_block_stops_for_a_human_once() {
         deadline_s: 2_000,
     });
     assert!(matches!(
-        next(&reverted, &settings, secs(60), false, Duration::ZERO),
+        next(&reverted, &settings, secs(60), false, Waits::default()),
         Next::Stop(why) if why.starts_with("ALERT")
     ));
     on_fresh_memory(|| {
@@ -573,6 +576,74 @@ fn a_revert_in_no_recorded_block_stops_for_a_human_once() {
         block_on(pass_with(&fake, &reads, || at(12), &open_pool));
         assert!(reads.asked.borrow().is_empty());
         assert_eq!(shares_of(&owner), before);
+    });
+}
+
+/// The review (2026-10-24): whether a reverted order ran is first read one agreed block's
+/// wait on the pool chain after its revert was recorded (no agreed block can be at or past
+/// the revert's before), whatever chain the payout pays on; a revert recorded before its
+/// time was is read at once.
+#[test]
+fn a_reverted_order_is_read_only_once_the_agreed_block_can_be_past_its_revert() {
+    let settings = PayoutSettings::default();
+    let mut reverted = payout_in(PayoutStatus::Reverted, secs(10_000));
+    reverted.order = Some(PinnedOrder {
+        order_id: [1; 32],
+        order: vec![1],
+        gas_limit: 300_000,
+        deadline_s: 2_000,
+    });
+    reverted.reverted_block = Some(BlockNumber::new(500));
+    reverted.reverted_at = Some(secs(1_000));
+    // paid on Arbitrum: the pool chain's wait counts, not the destination's
+    reverted.terms.dst_chain = ChainId::ARBITRUM;
+    let waits = Waits {
+        fill: Duration::from_secs(10_000),
+        ran: fill_wait(ChainId::BASE, 1),
+    };
+    let undo = Next::Undo {
+        why: REVERTED.to_string(),
+        checked: true,
+    };
+    assert_eq!(next(&reverted, &settings, secs(1_093), false, waits), Next::Wait);
+    assert_eq!(next(&reverted, &settings, secs(1_094), false, waits), undo);
+    let mut legacy = reverted.clone();
+    legacy.reverted_at = None;
+    assert_eq!(next(&legacy, &settings, secs(60), false, waits), undo);
+}
+
+/// The pass asks nothing of a reverted order before its wait on the pool chain, and asks
+/// once at it.
+#[test]
+fn the_pass_never_reads_a_reverted_order_before_its_wait() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        crate::storage::config::test_set(types::Config {
+            pool_chain: Some(ChainId::BASE),
+            ..crate::storage::config::get()
+        });
+        let id = waiting_withdrawal(staker());
+        sign_payout(id, 0, 9);
+        record_at(
+            PoolStep::PayoutReverted {
+                id,
+                block: Some(BlockNumber::new(500)),
+            },
+            secs(1_000),
+        )
+        .unwrap();
+        let wait = fill_wait(ChainId::BASE, base_depth()).as_secs();
+        let reads = Reads::ran(false);
+        let fake = Fake::default();
+        block_on(pass_with(&fake, &reads, || secs(1_000 + wait - 1), &open_pool));
+        assert!(reads.asked.borrow().is_empty());
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Reverted);
+        block_on(pass_with(&fake, &reads, || secs(1_000 + wait), &open_pool));
+        assert_eq!(reads.asked.borrow().len(), 1);
+        assert_eq!(
+            payout(id).unwrap().status,
+            PayoutStatus::Undone(REVERTED.to_string())
+        );
     });
 }
 
@@ -1062,7 +1133,7 @@ fn the_pass_finishes_a_withdrawals_undo() {
             &PayoutSettings::default(),
             secs(1),
             false,
-            Duration::ZERO
+            Waits::default()
         ),
         Next::Undo {
             why: "refunded".to_string(),
@@ -1117,7 +1188,7 @@ fn planned_with(plan: PinnedOrder) -> EvmPayout {
 fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
     let settings = PayoutSettings::default();
     let planned = planned_with(plan_of(vec![]));
-    let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false, Duration::ZERO);
+    let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false, Waits::default());
     assert_eq!(decide(&planned, secs(60)), Next::Fit);
     // its tries spent
     let mut spent = planned.clone();
@@ -1142,7 +1213,7 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
 #[test]
 fn a_plan_its_decision_refuses_is_never_refitted() {
     let settings = PayoutSettings::default();
-    let decide = |payout: &EvmPayout| next(payout, &settings, secs(60), false, Duration::ZERO);
+    let decide = |payout: &EvmPayout| next(payout, &settings, secs(60), false, Waits::default());
     let mut garbled = plan_of(vec![]);
     garbled.order = vec![3];
     assert_eq!(decide(&planned_with(garbled)), Next::Wait);
@@ -1178,7 +1249,12 @@ fn a_fill_is_read_once_the_agreed_block_can_be_past_its_deadline() {
     let mut delivering = payout_in(PayoutStatus::Delivering, secs(10_000));
     delivering.intent = Some([2; 32]);
     let after_s = fill_read_after(&delivering);
-    let decide = |payout: &EvmPayout, now_s: u64| next(payout, &settings, secs(now_s), false, wait);
+    let waits = Waits {
+        fill: wait,
+        ran: Duration::ZERO,
+    };
+    let decide =
+        |payout: &EvmPayout, now_s: u64| next(payout, &settings, secs(now_s), false, waits);
     assert_eq!(decide(&delivering, after_s + 93), Next::Wait);
     assert!(matches!(
         decide(&delivering, after_s + 94),
