@@ -4,16 +4,13 @@ use ic_cdk::post_upgrade;
 
 #[post_upgrade]
 fn post_upgrade() {
-    // stable memory is the state, so nothing is rebuilt and nothing is migrated, and the
-    // touch writes the header of any structure this wasm adds. `golden/storage_v1.txt` pins
-    // the layouts, but only from this wasm on: the previously deployed wasm stored
-    // candid-encoded envelopes, which these types do not read, so a canister running it
-    // cannot take this upgrade. It traps on the check below and keeps the wasm it has, which
-    // is the right outcome; this build wants a fresh install. For the same reason the
-    // transition rules need no replay path for a log written before the chain layer: no
-    // deployed canister holds one, so every log this wasm ever folds was written by rules
-    // that already required `TxCreated` before `TxSigned`, and the head check below is the
-    // only compatibility check an upgrade makes.
+    // an upgrade is the only path a running canister takes to a new build: it is never
+    // reinstalled, because its stable memory (the log, the signed transactions, the nonces,
+    // the pool) is the state. So nothing is rebuilt and nothing is migrated here, and the
+    // touch writes the header of any structure this wasm adds. Every stored layout is
+    // append-only and pinned by `types/golden/storage_v1.txt` (minicbor) and
+    // `impl/golden/candid_cells_v1.txt` (the two candid cells); a stored value this build
+    // cannot read traps below, and a trap keeps the wasm the canister runs.
     storage::init();
     // the two cells that hold candid: the roles trap above on bytes that do not decode,
     // and the flow settings here on bytes that do not decode or parse under this build's
