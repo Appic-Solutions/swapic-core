@@ -31,7 +31,7 @@ use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use types::eco::Fill;
 use types::events::TxPurpose;
-use types::pool::payout::{EvmPayout, PayoutKind, PayoutSettings, PayoutStatus};
+use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
 use types::{BlockNumber, ChainId, Timestamp};
 
@@ -213,19 +213,11 @@ pub const NO_REVERT_BLOCK: &str =
 ///
 /// [`plan::decide`]: crate::pool::plan::decide
 pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
-    let (PayoutKind::IcpSwap(terms), Some(plan), Some(amount)) =
-        (payout.kind, payout.plan.as_ref(), payout.amount)
-    else {
-        return false;
-    };
-    let Some(planned) = terms.planned else {
-        return false;
-    };
     payout.order.is_none()
         && payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
-        && !matches!(
-            crate::pool::plan::decide(plan, planned, amount, now.as_secs().get()),
-            Err(crate::pool::plan::Fit::Wait(_))
+        && matches!(
+            crate::pool::plan::decide_payout(payout, now.as_secs().get()),
+            Some(Ok(_) | Err(crate::pool::plan::Fit::Undo(_)))
         )
 }
 

@@ -499,9 +499,10 @@ enum Tried {
     Undone,
 }
 
-/// One try of `payout`'s plan, the pool's guard read first (the review, 2026-10-24: a closed
-/// pool reads no scaler and spends no try): fitted, or the try counted with why it waits, or
-/// the undo begun of a plan that could only revert.
+/// One try of `payout`'s plan (the review, 2026-10-24): a plan that could only revert is
+/// undone at once whatever the pool's guard (an undo pays nothing on Base; its refund on ICP
+/// is guarded like the deadline undo's); else the guard is read before any read, so a closed
+/// pool reads no scaler and spends no try. Fitted, or the try counted with why it waits.
 async fn try_plan(
     reads: &impl PlanReads,
     payout: &EvmPayout,
@@ -509,6 +510,12 @@ async fn try_plan(
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Tried, Stop> {
     let id = payout.id;
+    if let Some(Err(Fit::Undo(why))) =
+        crate::pool::plan::decide_payout(payout, clock().as_secs().get())
+    {
+        undo(id, why, clock())?;
+        return Ok(Tried::Undone);
+    }
     if open(guard).is_err() {
         return Ok(Tried::Closed);
     }

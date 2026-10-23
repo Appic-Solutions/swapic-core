@@ -197,6 +197,20 @@ pub fn decide(
     Ok((order, swaps.first().copied()))
 }
 
+/// [`decide`] for `payout`, its plan, planned amount and amount read off it: none for a
+/// payout with no plan or no amount yet.
+pub fn decide_payout(
+    payout: &EvmPayout,
+    now_s: u64,
+) -> Option<Result<(Order, Option<usize>), Fit>> {
+    let (Some(plan), PayoutKind::IcpSwap(terms), Some(amount)) =
+        (payout.plan.as_ref(), payout.kind, payout.amount)
+    else {
+        return None;
+    };
+    Some(decide(plan, terms.planned?, amount, now_s))
+}
+
 /// The plan's KyberSwap `step` rewritten to `route` for `amount`, pure: the same swap but for
 /// its amounts (the same tokens, executor and receivers, no fee, no permit), selling all of
 /// `amount`, for at least its old minimum scaled to it (rounded down, as the scaler rounds).
@@ -244,17 +258,13 @@ pub fn rescaled(step: &Step, route: Vec<u8>, amount: TokenAmount) -> Result<Step
 /// Fits `payout`'s plan to its exact amount at `now`: the scaler read (once, for a KyberSwap
 /// step), the rewritten step's checks, then every check of a payout order.
 pub async fn fit(reads: &impl PlanReads, payout: &EvmPayout, now: Timestamp) -> Fit {
-    let (Some(plan), PayoutKind::IcpSwap(terms), Some(amount)) =
-        (payout.plan.as_ref(), payout.kind, payout.amount)
-    else {
+    let (Some(plan), Some(amount)) = (payout.plan.as_ref(), payout.amount) else {
         return Fit::Wait("the payout has no plan".to_string());
     };
-    let Some(planned) = terms.planned else {
-        return Fit::Wait("the payout has no plan".to_string());
-    };
-    let (mut order, swap) = match decide(plan, planned, amount, now.as_secs().get()) {
-        Ok(decided) => decided,
-        Err(fit) => return fit,
+    let (mut order, swap) = match decide_payout(payout, now.as_secs().get()) {
+        Some(Ok(decided)) => decided,
+        Some(Err(fit)) => return fit,
+        None => return Fit::Wait("the payout has no plan".to_string()),
     };
     if let Some(at) = swap {
         let route = match reads.scaled(&order.steps[at].data, amount).await {

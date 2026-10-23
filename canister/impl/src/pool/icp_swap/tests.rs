@@ -1346,3 +1346,37 @@ fn a_plan_is_not_fitted_while_the_pool_is_closed() {
             .is_some());
     });
 }
+
+/// The review (2026-10-24): a plan that could only revert is undone whatever the pool's
+/// guard (an undo pays nothing on Base), as the deadline undoes a payout: it never waits for
+/// the pool to open. Its refund on ICP waits for the guard, as every refund does.
+#[test]
+fn a_plan_that_could_only_revert_is_undone_while_the_pool_is_closed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let order = plan_order(ckusdc_payout(), ckusdc_payout());
+        let id = open_planned(&planned(ckusdc(), usdc(100), &order));
+        let mut settings = ledger().settings.unwrap();
+        settings.premium_bps = 20;
+        record_at(PoolStep::SettingsSet { settings }, at(11)).unwrap();
+        let closed = || Err("the pool is closed".to_string());
+        let fake = Fake::default();
+        assert!(matches!(
+            block_on(drive(&fake, id, clock, &closed)),
+            Err(Stop::Retry(why)) if why.contains("closed")
+        ));
+        let payout = pool_store::payout(id).unwrap();
+        assert!(
+            matches!(&payout.status, PayoutStatus::Undoing(why) if why.contains("first step")),
+            "{:?}",
+            payout.status
+        );
+        // open, its refund goes out
+        assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert!(matches!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Undone(_)
+        ));
+    });
+}
