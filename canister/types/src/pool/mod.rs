@@ -1746,6 +1746,13 @@ pub enum PoolStep {
         #[n(1)]
         why: String,
     },
+    /// A delivering payout's Eco intent's fill was read too early: no block every node
+    /// agreed on was past the route's deadline yet. Not read again within one wait.
+    #[n(47)]
+    PayoutFillEarly {
+        #[n(0)]
+        id: u64,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -2037,6 +2044,7 @@ impl PoolStep {
             PoolStep::PayoutUnfilled { .. } => "PayoutUnfilled",
             PoolStep::PayoutResolved { .. } => "PayoutResolved",
             PoolStep::PayoutFitWaited { .. } => "PayoutFitWaited",
+            PoolStep::PayoutFillEarly { .. } => "PayoutFillEarly",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",

@@ -25,6 +25,21 @@ impl ChainId {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// The seconds a block takes, at the most, on the chains the canister knows (rounded up);
+    /// twelve, Ethereum's, on any other. What waits for a block past a time reads: too long
+    /// only delays a read, never makes it wrong.
+    pub const fn block_seconds(self) -> u64 {
+        match self.0 {
+            // Optimism, Polygon, Base, Avalanche, Linea
+            10 | 137 | 8453 | 43114 | 59144 => 2,
+            // BSC
+            56 => 3,
+            // Arbitrum's quarter seconds
+            42161 => 1,
+            _ => 12,
+        }
+    }
 }
 
 impl fmt::Display for ChainId {

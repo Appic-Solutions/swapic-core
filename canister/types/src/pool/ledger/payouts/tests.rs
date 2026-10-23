@@ -1717,3 +1717,24 @@ fn a_plan_is_tried_at_most_three_times() {
     let other = open(&mut pool, kind, undo);
     assert!(pool.step(fit_waited(other)).is_err());
 }
+
+/// The review (2026-10-23): a fill read too early is noted on the delivering payout only;
+/// nothing moves.
+#[test]
+fn a_fill_read_too_early_is_noted_on_a_delivering_payout_only() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x65, 1);
+    let id = delivering(&mut pool, false);
+    let before = pool.ledger.clone();
+    pool.step(PoolStep::PayoutFillEarly { id }).unwrap();
+    assert_eq!(
+        pool.payouts[&id].fill_early_at,
+        Some(Timestamp::from_nanos(1))
+    );
+    assert_eq!(pool.ledger, before);
+    pool.step(PoolStep::PayoutDelivered {
+        id,
+        block: BlockNumber::new(35),
+    })
+    .unwrap();
+    assert!(pool.step(PoolStep::PayoutFillEarly { id }).is_err());
+}

@@ -35,9 +35,21 @@ use types::pool::payout::{EvmPayout, PayoutKind, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
 use types::{BlockNumber, ChainId, Timestamp};
 
-/// How long after an Eco intent's route deadline its fill is read: the agreed block lags the
-/// head by the crediting depth and a little more.
+/// The minute an Eco intent's fill read waits beyond the blocks the agreed block lags by.
 pub const FILL_MARGIN_S: u64 = 60;
+
+/// How long after a time the pass waits before it reads `chain` for a block past it (the
+/// review, 2026-10-23): the block every node agrees on is the head rounded down to
+/// `HEAD_GRAIN` blocks less the chain's crediting `depth` (`agreed`), so `(16 + depth)`
+/// blocks of the chain's at the most, and a minute.
+pub fn fill_wait(chain: ChainId, depth: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        crate::rpc::HEAD_GRAIN
+            .saturating_add(depth)
+            .saturating_mul(chain.block_seconds())
+            .saturating_add(FILL_MARGIN_S),
+    )
+}
 
 /// What the pass does with one payout now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,12 +76,13 @@ pub enum Next {
 }
 
 /// The pass's decision for `payout` at `now`, pure: `in_flight` says a transaction for it is
-/// still being signed or is in the outbox.
+/// still being signed or is in the outbox; `fill_wait` is its destination's [`fill_wait`].
 pub fn next(
     payout: &EvmPayout,
     settings: &PayoutSettings,
     now: Timestamp,
     in_flight: bool,
+    fill_wait: std::time::Duration,
 ) -> Next {
     let late = now >= payout.terms.deadline;
     match &payout.status {
@@ -110,17 +123,22 @@ pub fn next(
             why: REVERTED.to_string(),
             checked: true,
         },
-        // its Eco intent's fill, read once its route can no longer be filled
+        // its Eco intent's fill, read once the agreed block can be past the route's deadline,
+        // and not again within one wait of a read too early
         PayoutStatus::Delivering => {
             let after_s = fill_read_after(payout);
+            let now_s = now.as_secs().get();
+            let wait = fill_wait.as_secs();
+            let ready = now_s >= after_s.saturating_add(wait)
+                && payout
+                    .fill_early_at
+                    .is_none_or(|early| now_s >= early.as_secs().get().saturating_add(wait));
             match payout.intent {
-                Some(intent) if now.as_secs().get() >= after_s.saturating_add(FILL_MARGIN_S) => {
-                    Next::ReadFill {
-                        chain: payout.terms.dst_chain,
-                        intent,
-                        after_s,
-                    }
-                }
+                Some(intent) if ready => Next::ReadFill {
+                    chain: payout.terms.dst_chain,
+                    intent,
+                    after_s,
+                },
                 _ => Next::Wait,
             }
         }
@@ -299,6 +317,11 @@ pub async fn pass_with(
         return acted;
     };
     let open: Vec<u64> = pool_store::ledger().lines().open.into_iter().collect();
+    let config = crate::storage::config::get();
+    let wait_for = |chain: ChainId| {
+        let depth = crate::tx::credit_confirmations(&config, chain).map_or(0, |depth| depth.get());
+        fill_wait(chain, depth)
+    };
     for id in open {
         let Some(payout) = pool_store::payout(id) else {
             continue;
@@ -307,7 +330,8 @@ pub async fn pass_with(
         let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
             continue;
         };
-        match next(&payout, &settings, now, in_flight(id)) {
+        let wait = wait_for(payout.terms.dst_chain);
+        match next(&payout, &settings, now, in_flight(id), wait) {
             Next::Wait => {}
             Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
                 Ok(fitted) => {
@@ -353,8 +377,12 @@ pub async fn pass_with(
                         let _ = icp_swap::drive(ledgers, id, clock, guard).await;
                     }
                 }
-                // asked again next pass
-                Err(_) => {}
+                // too early: noted, not asked again within one wait
+                Err(crate::agreed::FillRead::TooEarly) => {
+                    acted += usize::from(record(PoolStep::PayoutFillEarly { id }, clock()))
+                }
+                // not read: asked again next pass
+                Err(crate::agreed::FillRead::Unread(_)) => {}
             },
             Next::Undo { why, checked } => {
                 if checked {

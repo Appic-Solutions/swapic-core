@@ -32,3 +32,15 @@ fn stored_chain_ids_sort_numerically() {
         assert_eq!(ChainId::from_bytes(id.to_bytes()), id);
     }
 }
+
+/// What a wait for a block past a time reads: Ethereum's twelve seconds on a chain the
+/// canister does not know, never less than a known chain's own.
+#[test]
+fn a_chain_names_the_seconds_its_block_takes_at_the_most() {
+    assert_eq!(ChainId::ETHEREUM.block_seconds(), 12);
+    assert_eq!(ChainId::BASE.block_seconds(), 2);
+    assert_eq!(ChainId::ARBITRUM.block_seconds(), 1);
+    assert_eq!(ChainId::BSC.block_seconds(), 3);
+    assert_eq!(ChainId::POLYGON.block_seconds(), 2);
+    assert_eq!(ChainId::new(999_999).block_seconds(), 12);
+}

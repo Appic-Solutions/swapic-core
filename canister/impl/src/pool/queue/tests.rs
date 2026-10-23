@@ -75,7 +75,15 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
     let deadline = secs(10_000);
     let before = secs(1_000);
     let past = secs(10_000);
-    let decide = |payout: &EvmPayout, now, in_flight| next(payout, &settings, now, in_flight);
+    let decide = |payout: &EvmPayout, now, in_flight| {
+        next(
+            payout,
+            &settings,
+            now,
+            in_flight,
+            Duration::from_secs(FILL_MARGIN_S),
+        )
+    };
     // queued: waits, and is undone at its deadline
     let queued = payout_in(PayoutStatus::Queued, deadline);
     assert_eq!(decide(&queued, before, false), Next::Wait);
@@ -657,7 +665,10 @@ fn delivering_withdrawal() -> u64 {
 /// read, it waits for the next pass.
 #[test]
 fn a_fill_read_filled_delivers_and_unfilled_undoes() {
-    let after = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+    let after = || {
+        Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
+            .unwrap()
+    };
     on_fresh_memory(move || {
         crate::storage::init();
         let id = delivering_withdrawal();
@@ -707,10 +718,14 @@ fn a_fill_read_too_early_or_unread_waits() {
             &open_pool,
         ));
         assert!(reads.fills.borrow().is_empty());
-        let late = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+        let late = || {
+            Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
+                .unwrap()
+        };
+        // an unread answer is asked again next pass; a read too early, after one wait
         for answer in [
-            crate::agreed::FillRead::TooEarly,
             crate::agreed::FillRead::Unread("no agreement".to_string()),
+            crate::agreed::FillRead::TooEarly,
         ] {
             let reads = Reads::fill(Err(answer));
             block_on(pass_with(&Fake::default(), &reads, late, &open_pool));
@@ -787,7 +802,10 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
         )
         .unwrap();
         let reads = Reads::fill(Ok(Fill::Cancelled));
-        let after = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+        let after = || {
+            Timestamp::from_secs(900 + 3_600 + fill_wait(ChainId::BASE, base_depth()).as_secs())
+                .unwrap()
+        };
         block_on(pass_with(&fake, &reads, after, &open_pool));
         assert_eq!(
             *fake.transfers.borrow(),
@@ -970,7 +988,13 @@ fn the_pass_finishes_a_withdrawals_undo() {
         burned: types::pool::Shares::new(1),
     });
     assert_eq!(
-        next(&withdrawal, &PayoutSettings::default(), secs(1), false),
+        next(
+            &withdrawal,
+            &PayoutSettings::default(),
+            secs(1),
+            false,
+            Duration::ZERO
+        ),
         Next::Undo {
             why: "refunded".to_string(),
             checked: false
@@ -997,7 +1021,7 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
         deadline_s: 2_000,
     });
     planned.fit_tries = Some(1);
-    let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false);
+    let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false, Duration::ZERO);
     assert_eq!(decide(&planned, secs(60)), Next::Fit);
     // its tries spent
     let mut spent = planned.clone();
@@ -1013,4 +1037,75 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
     let mut signed = planned.clone();
     signed.order = Some(planned.plan.clone().unwrap());
     assert_eq!(decide(&signed, secs(60)), Next::Wait);
+}
+
+/// The review (2026-10-23): an Eco intent's fill is read only once the block every node
+/// agrees on can be past the route's deadline (the head rounded down to 16 blocks, less the
+/// destination's crediting depth, and a minute); after a read too early, not again within one
+/// such wait.
+#[test]
+fn a_fill_is_read_once_the_agreed_block_can_be_past_its_deadline() {
+    // Base, crediting at one block: (16 + 1) x 2 s + 60 s
+    let wait = fill_wait(ChainId::BASE, 1);
+    assert_eq!(wait, Duration::from_secs(94));
+    // Ethereum at 12 blocks: (16 + 12) x 12 s + 60 s
+    assert_eq!(fill_wait(ChainId::ETHEREUM, 12), Duration::from_secs(396));
+    let settings = PayoutSettings::default();
+    let mut delivering = payout_in(PayoutStatus::Delivering, secs(10_000));
+    delivering.intent = Some([2; 32]);
+    let after_s = fill_read_after(&delivering);
+    let decide = |payout: &EvmPayout, now_s: u64| next(payout, &settings, secs(now_s), false, wait);
+    assert_eq!(decide(&delivering, after_s + 93), Next::Wait);
+    assert!(matches!(
+        decide(&delivering, after_s + 94),
+        Next::ReadFill { .. }
+    ));
+    // read too early at some instant: not again within one wait
+    let early = after_s + 200;
+    delivering.fill_early_at = Some(secs(early));
+    assert_eq!(decide(&delivering, early + 93), Next::Wait);
+    assert!(matches!(
+        decide(&delivering, early + 94),
+        Next::ReadFill { .. }
+    ));
+}
+
+/// A fill read too early is noted, and the next pass within one wait asks nothing.
+#[test]
+fn a_fill_read_too_early_is_not_asked_again_within_one_wait() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = delivering_withdrawal();
+        let wait = fill_wait(ChainId::BASE, base_depth()).as_secs();
+        let first = 900 + 3_600 + wait;
+        let reads = Reads::fill(Err(crate::agreed::FillRead::TooEarly));
+        block_on(pass_with(
+            &Fake::default(),
+            &reads,
+            || secs(first),
+            &open_pool,
+        ));
+        assert_eq!(reads.fills.borrow().len(), 1);
+        assert_eq!(payout(id).unwrap().fill_early_at, Some(secs(first)));
+        block_on(pass_with(
+            &Fake::default(),
+            &reads,
+            || secs(first + wait - 1),
+            &open_pool,
+        ));
+        assert_eq!(reads.fills.borrow().len(), 1);
+        block_on(pass_with(
+            &Fake::default(),
+            &reads,
+            || secs(first + wait),
+            &open_pool,
+        ));
+        assert_eq!(reads.fills.borrow().len(), 2);
+    });
+}
+
+/// Base's crediting depth in the default config.
+fn base_depth() -> u64 {
+    crate::tx::credit_confirmations(&crate::storage::config::get(), ChainId::BASE)
+        .map_or(0, |depth| depth.get())
 }

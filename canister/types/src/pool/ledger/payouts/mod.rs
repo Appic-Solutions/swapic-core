@@ -399,6 +399,14 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            // a delivering payout's fill read too early
+            PoolStep::PayoutFillEarly { id } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Delivering {
+                    return Err(not_from("PayoutFillEarly", &payout));
+                }
+                Ok(())
+            }
             // its Eco intent read past the route's deadline: filled, or never
             PoolStep::PayoutDelivered { id, .. } | PoolStep::PayoutUnfilled { id, .. } => {
                 let payout = payout_of(*id)?;
@@ -751,6 +759,12 @@ impl PoolLedger {
             PoolStep::PayoutDelivered { id, .. } => {
                 let mut payout = lookup.payout(*id)?;
                 paid(&mut ledger, &mut lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            // noted, nothing moves
+            PoolStep::PayoutFillEarly { id } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.fill_early_at = Some(at);
                 effects.payout = Some(payout);
             }
             // counted, nothing moves

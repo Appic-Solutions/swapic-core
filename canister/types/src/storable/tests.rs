@@ -639,7 +639,57 @@ fn samples() -> Vec<Sample> {
     all.extend(deposit_tier_samples());
     all.extend(timer_state_samples());
     all.extend(fit_retry_samples());
+    all.extend(fill_early_samples());
     all
+}
+
+/// A delivering payout's fill read too early (2026-10-23): the payout noting it, and its line.
+fn fill_early_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, PayoutKind, PayoutStatus, PayoutTerms, Undo};
+    use crate::pool::{EvmWithdrawal, PoolAccount, PoolStep, Shares};
+    let staker = crate::evm::EvmAddress::new([0xf6; 20]);
+    let mut payout = EvmPayout::new(
+        1_701,
+        PayoutKind::Withdrawal(EvmWithdrawal {
+            staker,
+            usdc: TokenAmount::from(1_702_000_000_u64),
+            max_shares: Shares::new(1_703 << 64),
+            rebalance_share: TokenAmount::from(1_704_u64),
+            network_fee: TokenAmount::from(1_705_u64),
+            nonce: 1_706,
+            burned: Shares::new(1_707 << 64),
+        }),
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            recipient: staker,
+            token_out: crate::evm::EvmAddress::new([0xf7; 20]),
+            min_out: TokenAmount::from(1_708_u64),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_001_709),
+        },
+        Undo::Remint {
+            owner: PoolAccount::Evm(staker),
+            shares: Shares::new(1_707 << 64),
+        },
+        Timestamp::from_nanos(1_800_000_000_000_001_710),
+    );
+    payout.status = PayoutStatus::Delivering;
+    payout.intent = Some([0xf8; 32]);
+    payout.fill_early_at = Some(Timestamp::from_nanos(1_800_000_000_000_001_711));
+    vec![
+        sample("payout delivering, its fill read too early", payout),
+        sample(
+            "payout fill read too early",
+            Event::seal(
+                EventIndex::new(17_000),
+                Timestamp::from_nanos(1_800_000_000_000_001_712),
+                EventHash::new([0xf9; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::PayoutFillEarly { id: 1_701 },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// A planned payout's tries of its plan (2026-10-23): the payout counting them, and the line
@@ -2292,6 +2342,7 @@ fn payout_samples() -> Vec<Sample> {
         reclaim: None,
         plan: None,
         fit_tries: None,
+        fill_early_at: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),

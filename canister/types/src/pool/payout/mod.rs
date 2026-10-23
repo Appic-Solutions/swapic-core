@@ -330,6 +330,10 @@ pub struct EvmPayout {
     /// at most [`MAX_FIT_TRIES`]: none, never.
     #[n(22)]
     pub fit_tries: Option<u8>,
+    /// When its Eco intent's fill was last read too early (no block every node agreed on was
+    /// past the route's deadline yet): not read again within one wait.
+    #[n(23)]
+    pub fill_early_at: Option<Timestamp>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -399,6 +403,7 @@ impl EvmPayout {
             reclaim: None,
             plan: None,
             fit_tries: None,
+            fill_early_at: None,
         }
     }
 
