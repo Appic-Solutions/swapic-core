@@ -49,6 +49,7 @@ fn the_network_fee_is_the_fee_steps_transfer() {
         usdc: EvmAddress::new([0x83; 20]),
         runner: EvmAddress::new([0xd9; 20]),
         canister: EvmAddress::new([0xca; 20]),
+        eco_portal: None,
     };
     let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
     let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
@@ -421,6 +422,7 @@ fn a_fee_step_and_a_pool_arrival_in_one_receipt_are_each_expected_once() {
             usdc: EvmAddress::new([0x83; 20]),
             runner: EvmAddress::new([0x7e; 20]),
             canister: EvmAddress::new([0x36; 20]),
+            eco_portal: None,
         };
         let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
         let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));

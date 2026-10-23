@@ -6,6 +6,7 @@ use super::*;
 use crate::pool::arrival::Log;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use alloy_sol_types::SolEvent;
+use types::swapic;
 use types::BlockNumber;
 
 fn sample(key: &str) -> Vec<u8> {

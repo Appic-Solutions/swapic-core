@@ -971,6 +971,7 @@ async fn read_receipts(
             usdc: chain.usdc,
             runner: chain.runner,
             canister,
+            eco_portal: config::get().eco_portal,
         });
     landed(entries, &answers, fee_path).ok_or(Unread::NoHead)
 }
@@ -1005,7 +1006,7 @@ fn landed(
                         network_fee: fee_path.map_or(types::TokenAmount::ZERO, |path| {
                             crate::books::network_fee_in(value, path)
                         }),
-                        eco_intent: fee_path.and_then(|path| eco_intent_in(value, path.canister)),
+                        eco_intent: fee_path.and_then(|path| eco_intent_in(value, &path)),
                         ..receipt
                     })
                 }),
@@ -1546,16 +1547,15 @@ struct Receipt {
     eco_intent: Option<[u8; 32]>,
 }
 
-/// The hash of the one Eco intent `receipt` published whose reward's creator is `canister`,
-/// if it published one.
-fn eco_intent_in(receipt: &Value, canister: EvmAddress) -> Option<[u8; 32]> {
-    let mut intents = crate::pool::arrival::logs_of(receipt)
-        .into_iter()
-        .filter_map(|log| types::swapic::read_intent_published(&log.topics, &log.data))
-        .filter(|intent| intent.creator == canister);
-    let intent = intents.next()?;
-    // two would name no one intent
-    intents.next().is_none().then_some(intent.intent_hash)
+/// The hash of the one Eco intent Eco's Portal published in `receipt` whose reward's creator
+/// is the canister, if it published one (CR-17: the reader the rescue shares).
+fn eco_intent_in(receipt: &Value, path: &crate::books::FeePath) -> Option<[u8; 32]> {
+    crate::pool::eco::published_intent(
+        &crate::pool::arrival::logs_of(receipt),
+        path.eco_portal?,
+        Some(path.canister),
+    )
+    .map(|intent| intent.intent_hash)
 }
 
 /// Why a provider's answer is not a receipt this entry may be decided on.

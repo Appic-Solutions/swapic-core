@@ -1293,3 +1293,58 @@ fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
         assert_eq!(books.fee_income, types::TokenAmount::ZERO);
     });
 }
+
+/// CR-17: a pool payout's Eco intent is the one Eco's Portal published with the canister as
+/// its creator, read by the one reader the rescue shares: an `IntentPublished` that any
+/// other contract the order calls logs, naming the canister, is no intent of the payout's.
+#[test]
+fn a_payouts_intent_is_the_one_ecos_portal_published() {
+    let mut receipt: Value = serde_json::from_str::<Value>(include_str!(
+        "../pool/arrival/samples/eco_source_arbitrum.json"
+    ))
+    .unwrap()["receipt"]
+        .clone();
+    let canister: EvmAddress = "0x36D34038F04990a58c068e08eD9754e2E3D9bA53"
+        .parse()
+        .unwrap();
+    let portal: EvmAddress = "0xEC000769A73b70e16f361a442292500b3BCf4A85"
+        .parse()
+        .unwrap();
+    let published = receipt["logs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|log| log["logIndex"] == "0x11")
+        .unwrap();
+    // the sample's creator is its user: the canister's own payout names the canister
+    published["topics"][2] = json!(hex0x(&canister.to_word()));
+    let intent = parse_hash32(Some(&published["topics"][1])).unwrap();
+    let path = |eco_portal| crate::books::FeePath {
+        usdc: "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+            .parse()
+            .unwrap(),
+        runner: "0x7e345acab79102ac9588c60b9358ec4d79438eee"
+            .parse()
+            .unwrap(),
+        canister,
+        eco_portal,
+    };
+    assert_eq!(eco_intent_in(&receipt, &path(Some(portal))), Some(intent));
+    assert_eq!(
+        eco_intent_in(&receipt, &path(None)),
+        None,
+        "no Portal, no intent"
+    );
+    let elsewhere = receipt["logs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|log| log["logIndex"] == "0x11")
+        .unwrap();
+    elsewhere["address"] = json!("0x00000000000000000000000000000000000bad01");
+    assert_eq!(
+        eco_intent_in(&receipt, &path(Some(portal))),
+        None,
+        "logged by another contract"
+    );
+}

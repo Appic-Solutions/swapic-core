@@ -25,7 +25,7 @@ use types::eco::{self, Fill, Reward};
 use types::events::TxPurpose;
 use types::hash::{PoolRef, QuoteHash};
 use types::pool::MoveDirection;
-use types::swapic::{self, PublishedIntent};
+use types::swapic::PublishedIntent;
 use types::{ChainId, EvmAddress, Timestamp, TxHash, Wei};
 
 /// How long past the route's deadline a rescue waits: a fill in the last block before it is
@@ -77,14 +77,7 @@ pub fn source_of<S: Store>(state: &State<S>, order_id: [u8; 32]) -> Option<(Chai
 
 /// The intent `receipt` published on Eco's Portal, if it published one.
 pub fn published(receipt: &Receipt, portal: EvmAddress) -> Option<PublishedIntent> {
-    let mut intents = receipt
-        .logs
-        .iter()
-        .filter(|log| log.address == portal)
-        .filter_map(|log| swapic::read_intent_published(&log.topics, &log.data));
-    let intent = intents.next()?;
-    // two would name no one intent
-    intents.next().is_none().then_some(intent)
+    crate::pool::eco::published_intent(&receipt.logs, portal, None)
 }
 
 /// What a rescue signs: where, the intent, and the call less the proof's fee.

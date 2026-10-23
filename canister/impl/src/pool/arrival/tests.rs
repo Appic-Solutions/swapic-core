@@ -445,6 +445,7 @@ fn the_fee_step_is_the_books_and_the_payout_is_the_pools() {
         usdc: base().usdc,
         runner: base().runner,
         canister: canister(),
+        eco_portal: None,
     };
     assert_eq!(crate::books::network_fee_in(&receipt, path), fee_value);
     // a receipt of the fee step alone is the books', and no arrival
