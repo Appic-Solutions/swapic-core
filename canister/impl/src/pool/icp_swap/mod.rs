@@ -516,7 +516,9 @@ async fn try_plan(
         Fit::Sign(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(fitted)),
         // closed during the read: tried again once it opens, not counted
         Fit::Sign(_) => {
-            pool::log(&format!("the pool payout {id}'s plan waits: the pool closed"));
+            pool::log(&format!(
+                "the pool payout {id}'s plan waits: the pool closed"
+            ));
             return Ok(Tried::Closed);
         }
         Fit::Wait(why) => why,

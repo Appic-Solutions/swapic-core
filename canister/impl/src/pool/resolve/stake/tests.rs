@@ -87,7 +87,10 @@ fn a_lost_stake_is_minted_or_dropped_once() {
             Ok(())
         );
         assert_eq!(shares_of(&PoolAccount::Icp(account(7))), shares);
-        assert_eq!(ledger().pockets.icp.free, free.checked_add(usdc(10)).unwrap());
+        assert_eq!(
+            ledger().pockets.icp.free,
+            free.checked_add(usdc(10)).unwrap()
+        );
         assert_eq!(
             resolve(
                 false,

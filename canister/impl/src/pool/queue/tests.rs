@@ -605,7 +605,10 @@ fn a_reverted_order_is_read_only_once_the_agreed_block_can_be_past_its_revert() 
         why: REVERTED.to_string(),
         checked: true,
     };
-    assert_eq!(next(&reverted, &settings, secs(1_093), false, waits), Next::Wait);
+    assert_eq!(
+        next(&reverted, &settings, secs(1_093), false, waits),
+        Next::Wait
+    );
     assert_eq!(next(&reverted, &settings, secs(1_094), false, waits), undo);
     let mut legacy = reverted.clone();
     legacy.reverted_at = None;
@@ -635,7 +638,12 @@ fn the_pass_never_reads_a_reverted_order_before_its_wait() {
         let wait = fill_wait(ChainId::BASE, base_depth()).as_secs();
         let reads = Reads::ran(false);
         let fake = Fake::default();
-        block_on(pass_with(&fake, &reads, || secs(1_000 + wait - 1), &open_pool));
+        block_on(pass_with(
+            &fake,
+            &reads,
+            || secs(1_000 + wait - 1),
+            &open_pool,
+        ));
         assert!(reads.asked.borrow().is_empty());
         assert_eq!(payout(id).unwrap().status, PayoutStatus::Reverted);
         block_on(pass_with(&fake, &reads, || secs(1_000 + wait), &open_pool));

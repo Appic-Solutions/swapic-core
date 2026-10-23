@@ -16,10 +16,9 @@ mod payouts;
 mod rebalance;
 
 use super::{
-    Arrival, DepositKind, DepositResolution, DepositStatus, IcpCheck, PayoutPath,
-    PayoutProgress, PayoutQueue, PendingOp, Pockets, PoolAccount, PoolSettings,
-    PoolSettingsError, PoolStep, Registered, Registration, ShareLine, Shares, StakeResolution,
-    UnseenArrival,
+    Arrival, DepositKind, DepositResolution, DepositStatus, IcpCheck, PayoutPath, PayoutProgress,
+    PayoutQueue, PendingOp, Pockets, PoolAccount, PoolSettings, PoolSettingsError, PoolStep,
+    Registered, Registration, ShareLine, Shares, StakeResolution, UnseenArrival,
 };
 use crate::chain::ChainId;
 use crate::hash::{OwnerKey, PoolOpId, PoolRef};
@@ -762,9 +761,7 @@ impl PoolLedger {
                     DepositResolution::Retry => Ok(()),
                     DepositResolution::Refund => {
                         if retry_at.is_some() {
-                            return Err(PoolStepError::Terms(
-                                "a refund carries no dedup instant",
-                            ));
+                            return Err(PoolStepError::Terms("a refund carries no dedup instant"));
                         }
                         let (credit, orphan) = deposit
                             .refund_orphan()
@@ -1167,21 +1164,23 @@ impl PoolLedger {
                 ledger.book_stake(*amount, *shares);
                 shares_out = Some(credit_shares(lookup, owner, *shares));
             }
-            PoolStep::StakeResolved { id, resolution } => match (ledger.pending.remove(id), resolution) {
-                // the pull landed: booked as `StakedIcp` books it
-                (
-                    Some(PendingOp::Stake { owner, amount, .. }),
-                    StakeResolution::Pulled { shares, .. },
-                ) => {
-                    ledger.book_stake(amount, *shares);
-                    shares_out = Some(credit_shares(lookup, &owner, *shares));
+            PoolStep::StakeResolved { id, resolution } => {
+                match (ledger.pending.remove(id), resolution) {
+                    // the pull landed: booked as `StakedIcp` books it
+                    (
+                        Some(PendingOp::Stake { owner, amount, .. }),
+                        StakeResolution::Pulled { shares, .. },
+                    ) => {
+                        ledger.book_stake(amount, *shares);
+                        shares_out = Some(credit_shares(lookup, &owner, *shares));
+                    }
+                    // it never landed: dropped as `StakeFailed` drops it
+                    (Some(PendingOp::Stake { amount, .. }), StakeResolution::NotPulled) => {
+                        ledger.stake_room = sat_sub(ledger.stake_room, amount);
+                    }
+                    _ => {}
                 }
-                // it never landed: dropped as `StakeFailed` drops it
-                (Some(PendingOp::Stake { amount, .. }), StakeResolution::NotPulled) => {
-                    ledger.stake_room = sat_sub(ledger.stake_room, amount);
-                }
-                _ => {}
-            },
+            }
             PoolStep::DepositResolved {
                 r#ref,
                 resolution,

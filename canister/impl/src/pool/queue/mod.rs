@@ -140,9 +140,9 @@ pub fn next(
         // whether its order ran is read once an agreed block can be at or past its revert
         // (the review, 2026-10-24: not asked every pass before that)
         PayoutStatus::Reverted
-            if payout.reverted_at.is_some_and(|at| {
-                now.saturating_duration_since(at) < waits.ran
-            }) =>
+            if payout
+                .reverted_at
+                .is_some_and(|at| now.saturating_duration_since(at) < waits.ran) =>
         {
             Next::Wait
         }
@@ -357,7 +357,9 @@ pub async fn pass_with(
         fill_wait(chain, depth)
     };
     // a reverted order's `used` is read on the pool chain, whatever the payout pays on
-    let ran = config.pool_chain.map_or(std::time::Duration::ZERO, wait_for);
+    let ran = config
+        .pool_chain
+        .map_or(std::time::Duration::ZERO, wait_for);
     for id in open {
         let Some(payout) = pool_store::payout(id) else {
             continue;
