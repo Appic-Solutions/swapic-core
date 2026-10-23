@@ -461,11 +461,9 @@ pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
 /// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
 /// kept in stable memory (C-09); the last reads of moves no longer open are dropped.
 fn unfilled_due(id: u64, now: Timestamp) -> bool {
-    let open: std::collections::BTreeSet<u64> = read_state(super::open_moves)
-        .into_iter()
-        .map(|item| item.id)
-        .chain(std::iter::once(id))
-        .collect();
+    // the open moves' ids as the ledger holds them: no move is read for them
+    let mut open = read_state(|state| state.pool().moves().open);
+    open.insert(id);
     crate::storage::timer_state::update(|state| {
         let reads = &mut state.unfilled_reads;
         reads.retain(|move_id, _| open.contains(move_id));
