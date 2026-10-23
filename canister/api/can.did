@@ -616,6 +616,7 @@ type PayoutStatus = variant {
   Pulling;
   Swapping;
   Undone : text;
+  Refunding : text;
   Waiting;
   Signed : nat64;
 };

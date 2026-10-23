@@ -260,16 +260,6 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
     assert_eq!(status(&pool, id), PayoutStatus::Signed(0));
     assert_eq!(pool.ledger.pockets.base.reserved, w.network_fee);
     assert_eq!(pool.ledger.pockets.base.in_flight, amount);
-    // a revert puts it back to waiting, its order pinned: only that order is signed again
-    pool.step(PoolStep::PayoutReverted { id }).unwrap();
-    assert_eq!(status(&pool, id), PayoutStatus::Waiting);
-    assert_eq!(pool.ledger.pockets.base.reserved, hold);
-    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
-    assert!(matches!(
-        pool.step(signed(id, order(2))),
-        Err(PoolStepError::Terms(_))
-    ));
-    pool.step(signed(id, order(1))).unwrap();
     // signed once: a second signature is refused
     assert!(matches!(
         pool.step(signed(id, order(1))),
@@ -759,4 +749,120 @@ fn a_paid_payout_releases_its_ckusdc_once() {
     .unwrap();
     assert_eq!(pool.ledger.pockets.icp, icp);
     assert!(pool.payouts[&id].icp_released.0);
+}
+
+fn paid(id: u64, intent: Option<[u8; 32]>) -> PoolStep {
+    PoolStep::PayoutPaid {
+        id,
+        tx_hash: TxHash::new([0x77; 32]),
+        block: BlockNumber::new(30),
+        intent,
+    }
+}
+
+/// Item 6 of the final review fixes: a payout is signed once. A revert never brings it back
+/// to waiting for a signature, its pinned order included.
+#[test]
+fn a_payout_is_signed_once() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x4e, 1);
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount: TokenAmount::from(100_000_000_u64 - 60_000),
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(8))).unwrap();
+    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Reverted);
+    for order in [order(8), order(9)] {
+        assert!(matches!(
+            pool.step(signed(id, order)),
+            Err(PoolStepError::PayoutNotFrom { .. })
+        ));
+    }
+    // nor does it wait for an order again
+    assert!(pool.step(PoolStep::PayoutWaiting { id }).is_err());
+    assert!(pool.step(PoolStep::PayoutRelisted { id }).is_err());
+}
+
+/// A reverted ICP swap is undone once: its refund begins, its USDC goes back to the Base
+/// pocket's free line, its ckUSDC leaves with the refund, and every line ends where it was.
+#[test]
+fn a_reverted_icp_swap_is_undone_once_and_every_line_returns() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x4f, 1);
+    let before = pool.ledger.clone();
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount: TokenAmount::from(100_000_000_u64 - 60_000),
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(10))).unwrap();
+    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    let why = || "its transaction reverted".to_string();
+    pool.step(PoolStep::PayoutUndoing { id, why: why() })
+        .unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: why(),
+        block: Some(12),
+    })
+    .unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Undone(why()));
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.total_assets(), before.total_assets());
+    assert_eq!(pool.ledger.lines().fees_icp, TokenAmount::ZERO);
+    assert!(pool.ledger.lines().open.is_empty());
+    // undone once: nothing more
+    assert!(pool
+        .step(PoolStep::PayoutUndoing { id, why: why() })
+        .is_err());
+    assert!(pool
+        .step(PoolStep::PayoutUndone {
+            id,
+            why: why(),
+            block: Some(13),
+        })
+        .is_err());
+    assert!(pool.step(paid(id, None)).is_err());
+}
+
+/// A reverted withdrawal mints back exactly the shares it burned, once.
+#[test]
+fn a_reverted_withdrawal_is_reminted_once() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x50, 1);
+    let before = pool.ledger.clone();
+    let shares = pool.shares_of_evm(staker());
+    let (kind, undo) = withdrawal(&pool, usdc(1_000), 11);
+    let PayoutKind::Withdrawal(w) = kind else {
+        unreachable!()
+    };
+    let id = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount: w.payout_amount().unwrap(),
+        received: None,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(11))).unwrap();
+    pool.step(PoolStep::PayoutReverted { id }).unwrap();
+    let undone = || PoolStep::PayoutUndone {
+        id,
+        why: "its transaction reverted".to_string(),
+        block: None,
+    };
+    pool.step(undone()).unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.total_shares, before.total_shares);
+    assert_eq!(pool.shares_of_evm(staker()), shares);
+    assert!(pool.step(undone()).is_err());
 }

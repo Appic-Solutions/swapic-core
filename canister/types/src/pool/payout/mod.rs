@@ -4,7 +4,7 @@
 //!
 //! A payout is opened with what undoes it, learns its exact amount, waits in a first in first
 //! out queue while the Base pocket cannot cover it, then waits for an order, is signed once
-//! (a retry after a revert signs the SAME order), and is paid or undone. Pure: the rules are
+//! (never again: a revert undoes it, 2026-10-23), and is paid or undone. Pure: the rules are
 //! the pool ledger's (`admits`, `apply`); this module holds the records and their policy.
 //!
 //! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a new
@@ -168,6 +168,10 @@ pub enum PayoutStatus {
     /// Stopped for a human.
     #[n(9)]
     Failed(#[n(0)] String),
+    /// Its transaction reverted at depth (2026-10-23): undone once the outbox let it go at
+    /// the crediting depth and Swapic says its order never ran. Never signed again.
+    #[n(10)]
+    Reverted,
 }
 
 impl PayoutStatus {
@@ -180,7 +184,8 @@ impl PayoutStatus {
     }
 }
 
-/// The order a payout was signed with, kept so a retry after a revert signs the same one.
+/// The order a payout was signed with, kept for what reads it after: the undo's `used` read,
+/// an Eco rescue, the canister's own CCTP finish.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct PinnedOrder {
     #[cbor(n(0), with = "minicbor::bytes")]

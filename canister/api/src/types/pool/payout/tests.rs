@@ -104,8 +104,18 @@ fn a_payout_view_says_what_the_payout_spends_and_where_it_stands() {
     assert_eq!(Decode!(&bytes, PayoutView).unwrap(), view);
     let waiting = PayoutWaiting::of(&payout).unwrap();
     assert_eq!(waiting.amount, Nat::from(4_949_000_u64));
-    // an undo that began reads as undone: nothing is signed for it again
+    // an undo that began, or a revert, reads as refunding: nothing is signed for it again
     payout.status = domain::PayoutStatus::Undoing("past its deadline".to_string());
+    assert_eq!(
+        PayoutStatus::from(&payout.status),
+        PayoutStatus::Refunding("past its deadline".to_string())
+    );
+    payout.status = domain::PayoutStatus::Reverted;
+    assert_eq!(
+        PayoutStatus::from(&payout.status),
+        PayoutStatus::Refunding("its transaction reverted".to_string())
+    );
+    payout.status = domain::PayoutStatus::Undone("past its deadline".to_string());
     assert_eq!(
         PayoutStatus::from(&payout.status),
         PayoutStatus::Undone("past its deadline".to_string())

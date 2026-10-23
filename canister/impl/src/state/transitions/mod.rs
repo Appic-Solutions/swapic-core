@@ -384,13 +384,16 @@ impl<S: Store> State<S> {
             // a cancel names no swap, so `quote_hash()` answered none and this function
             // returned before the match
             TxPurpose::Cancel(_) => return Ok(()),
-            // a payout is signed only while it waits with its USDC reserved
+            // a payout is signed only while it waits with its USDC reserved, and only once
             TxPurpose::PoolPayout(id) => {
                 let payout = self
                     .store()
                     .pool_payout(*id)
                     .ok_or(types::pool::PoolStepError::UnknownPayout(*id))?;
-                if payout.status != types::pool::PayoutStatus::Waiting || !payout.base_reserved {
+                if payout.status != types::pool::PayoutStatus::Waiting
+                    || !payout.base_reserved
+                    || payout.order.is_some()
+                {
                     return Err(types::pool::PoolStepError::PayoutNotFrom {
                         step: "TxCreated",
                         id: *id,

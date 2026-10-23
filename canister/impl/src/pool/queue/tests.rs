@@ -92,24 +92,26 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
     // signed: never undone, whatever the clock
     let signed = payout_in(PayoutStatus::Signed(7), deadline);
     assert_eq!(decide(&signed, past, false), Next::Wait);
-    // reverted, its order pinned: signed again while the order's deadline is ahead; undone
-    // past the payout's only once Swapic says it never ran
-    let mut reverted = payout_in(PayoutStatus::Waiting, deadline);
+    // reverted, its order pinned: never signed again; undone at once, whatever the clock,
+    // only once Swapic says it never ran
+    let mut reverted = payout_in(PayoutStatus::Reverted, deadline);
     reverted.order = Some(PinnedOrder {
         order_id: [1; 32],
         order: vec![1],
         gas_limit: 300_000,
         deadline_s: 2_000,
     });
-    assert_eq!(decide(&reverted, before, false), Next::Resign);
-    assert_eq!(decide(&reverted, secs(1_941), false), Next::Wait);
-    assert!(matches!(
-        decide(&reverted, past, false),
-        Next::Undo { checked: true, .. }
-    ));
-    // a transaction still being signed or in the outbox: nothing
-    assert_eq!(decide(&reverted, before, true), Next::Wait);
-    assert_eq!(decide(&reverted, past, true), Next::Wait);
+    for now in [before, past] {
+        assert_eq!(
+            decide(&reverted, now, false),
+            Next::Undo {
+                why: REVERTED.to_string(),
+                checked: true
+            }
+        );
+        // its transaction still in the outbox (until the crediting depth): nothing
+        assert_eq!(decide(&reverted, now, true), Next::Wait);
+    }
     // an ICP swap on its way is driven; one whose pull is too old to ask again stops
     let opened = payout_in(PayoutStatus::Opened, deadline);
     assert_eq!(decide(&opened, before, false), Next::Drive);
@@ -391,11 +393,10 @@ fn a_withdrawal_is_reminted_at_its_deadline_and_a_signed_one_is_not_undone() {
             payout(id).unwrap().status,
             PayoutStatus::Signed(_)
         ));
-        // reverted with its order pinned, the revert not yet closed for good: ran() cannot be
-        // read off the canister, so nothing is undone
+        // reverted with its order pinned, Swapic's `used` not read: nothing is undone
         record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
-        block_on(pass(&fake, || deadline, &open_pool));
-        assert_eq!(payout(id).unwrap().status, PayoutStatus::Waiting);
+        block_on(pass_with(&fake, &Reads::unread(), || deadline, &open_pool));
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Reverted);
         assert_eq!(shares_of(&owner), shares_now);
         // a withdrawal never signed is undone at its deadline: exactly its shares back
         let other = staker_two();
@@ -406,7 +407,7 @@ fn a_withdrawal_is_reminted_at_its_deadline_and_a_signed_one_is_not_undone() {
         };
         let owner_two = PoolAccount::Evm(other);
         let before = shares_of(&owner_two);
-        block_on(pass(&fake, || deadline, &open_pool));
+        block_on(pass_with(&fake, &Reads::unread(), || deadline, &open_pool));
         assert!(matches!(
             payout(second).unwrap().status,
             PayoutStatus::Undone(_)
@@ -466,4 +467,90 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
     icp_swap::place(id, at(11)).unwrap();
     let _ = Duration::ZERO;
     id
+}
+
+/// What the fake chains answer: Swapic's `used` for every order.
+struct Reads {
+    ran: Result<bool, String>,
+    asked: RefCell<Vec<[u8; 32]>>,
+}
+
+impl Reads {
+    fn ran(ran: bool) -> Self {
+        Self {
+            ran: Ok(ran),
+            asked: RefCell::default(),
+        }
+    }
+
+    fn unread() -> Self {
+        Self {
+            ran: Err("not read".to_string()),
+            asked: RefCell::default(),
+        }
+    }
+}
+
+impl ChainReads for Reads {
+    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String> {
+        self.asked.borrow_mut().push(order_id);
+        self.ran.clone()
+    }
+}
+
+/// Item 6 of the final review fixes: a reverted payout is never signed again. Once Swapic
+/// says its order never ran it is undone at once, a withdrawal minted back exactly the
+/// shares it burned, before its deadline; a second pass does nothing more.
+#[test]
+fn a_reverted_payout_is_undone_once_final_and_unused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(staker());
+        let owner = PoolAccount::Evm(staker());
+        let burned = match payout(id).unwrap().undo {
+            Undo::Remint { shares, .. } => shares,
+            Undo::Refund { .. } => unreachable!(),
+        };
+        let before = shares_of(&owner);
+        sign_payout(id, 0, 9);
+        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        let reads = Reads::ran(false);
+        let fake = Fake::default();
+        block_on(pass_with(&fake, &reads, || at(11), &open_pool));
+        assert_eq!(*reads.asked.borrow(), vec![[9; 32]]);
+        assert_eq!(
+            payout(id).unwrap().status,
+            PayoutStatus::Undone(REVERTED.to_string())
+        );
+        assert_eq!(shares_of(&owner), before.checked_add(burned).unwrap());
+        // nothing signed, nothing undone twice
+        assert!(read_state(|state| state.unsigned_nonces()).is_empty());
+        block_on(pass_with(&fake, &reads, || at(12), &open_pool));
+        assert_eq!(shares_of(&owner), before.checked_add(burned).unwrap());
+        assert_eq!(reads.asked.borrow().len(), 1);
+    });
+}
+
+/// A reverted order Swapic says ran after all (a reorg turned it round) stops its payout for
+/// a human, once: nothing is undone, and it is not read again.
+#[test]
+fn an_order_that_ran_after_its_revert_stops_for_a_human() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(staker());
+        let owner = PoolAccount::Evm(staker());
+        let before = shares_of(&owner);
+        sign_payout(id, 0, 9);
+        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        let reads = Reads::ran(true);
+        let fake = Fake::default();
+        block_on(pass_with(&fake, &reads, || at(11), &open_pool));
+        assert!(matches!(
+            payout(id).unwrap().status,
+            PayoutStatus::Failed(why) if why.starts_with("ALERT")
+        ));
+        assert_eq!(shares_of(&owner), before);
+        block_on(pass_with(&fake, &reads, || at(12), &open_pool));
+        assert_eq!(reads.asked.borrow().len(), 1);
+    });
 }

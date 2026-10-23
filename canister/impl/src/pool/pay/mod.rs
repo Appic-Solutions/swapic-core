@@ -15,8 +15,8 @@
 //! on their chain (a CCTP Deliver: what the burn is given less the most Circle may keep); its
 //! deadline is at least 60 s away and at most the payout's; no party is sanctioned; the gas
 //! limit is at most `max_payout_gas`.
-//! A payout signed once answers its transaction's id; a retry after a revert signs only the
-//! order it pinned (the same id: Swapic's `used` refuses a second run of it).
+//! A payout signed once answers its transaction's id, and is never signed again: a revert
+//! undoes it (2026-10-23).
 
 #[cfg(test)]
 mod tests;
@@ -75,12 +75,8 @@ pub fn check_order(
         .ok_or_else(|| refused("the payout's amount is not known"))?;
     let chain_id = payer.chains.chain_id;
     let order_id = swapic::order_id(order, chain_id, payer.swapic).into_bytes();
-    if let Some(pinned) = &payout.order {
-        if pinned.order_id != order_id {
-            return Err(refused(
-                "a payout retried after a revert signs the order it pinned",
-            ));
-        }
+    if payout.order.is_some() {
+        return Err(refused("a payout is signed once"));
     }
     if swapic::evm(order.payer) != payer.chains.canister {
         return Err(refused("the order's payer is not the canister"));

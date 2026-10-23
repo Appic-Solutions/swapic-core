@@ -5,15 +5,15 @@
 //!   same pull, within the ledger's deduplication window), its legs, an undo's refund;
 //! - the queue is served first in first out: its head waits the moment the Base pocket's free
 //!   USDC covers it, and nothing behind it moves ahead of it;
-//! - a waiting payout signed once and reverted is signed again with the order it pinned (the
-//!   same id, so a reorg that brings back the first can never pay twice), while that order's
-//!   deadline is ahead; one that waited `order_wait` with no order is listed again, at the
-//!   back of `payouts_waiting`;
+//! - a waiting payout that waited `order_wait` with no order is listed again, at the back of
+//!   `payouts_waiting`;
 //! - at its deadline a payout not signed is undone: an ICP swap refunds what it pulled on ICP,
-//!   a withdrawal mints its shares back. One that was ever signed is undone only once its
-//!   transaction is closed at the crediting depth and Swapic says its order never ran
-//!   (`used(id)` false, read by every node, `agreed::ran`): a reorg that turned a revert into
-//!   a payment is never paid twice.
+//!   a withdrawal mints its shares back;
+//! - a payout is signed once (2026-10-23): one whose transaction reverted is undone the same
+//!   way, at once, but only once its transaction is closed at the crediting depth and Swapic
+//!   says its order never ran (`used(id)` false, read by every node, `agreed::ran`), so a
+//!   reorg that turned the revert into a payment is never paid twice; an order that ran after
+//!   all stops the payout for a human.
 
 #[cfg(test)]
 mod tests;
@@ -37,10 +37,8 @@ pub enum Next {
     Drive,
     /// Listed again: it waited `order_wait` with no order.
     Relist,
-    /// Signed again with the order it pinned, once Swapic says that order never ran.
-    Resign,
-    /// Undone at its deadline; `checked`: it was signed once, so only once its transaction
-    /// is closed for good and Swapic says its order never ran.
+    /// Undone; `checked`: it was signed once, so only once its transaction is closed for good
+    /// and Swapic says its order never ran.
     Undo { why: String, checked: bool },
     /// Stopped for a human.
     Stop(String),
@@ -73,27 +71,19 @@ pub fn next(
             why: "past its deadline".to_string(),
             checked: payout.order.is_some(),
         },
-        PayoutStatus::Waiting => match &payout.order {
-            // reverted: the same order again while it can still land
-            Some(pinned) => {
-                let ahead = now
-                    .as_secs()
-                    .get()
-                    .saturating_add(crate::pool::pay::ORDER_MARGIN_S);
-                if pinned.deadline_s >= ahead {
-                    Next::Resign
-                } else {
-                    Next::Wait
-                }
+        PayoutStatus::Waiting => {
+            let since = payout.waiting_since.unwrap_or(payout.opened_at);
+            if now.saturating_duration_since(since) >= settings.order_wait {
+                Next::Relist
+            } else {
+                Next::Wait
             }
-            None => {
-                let since = payout.waiting_since.unwrap_or(payout.opened_at);
-                if now.saturating_duration_since(since) >= settings.order_wait {
-                    Next::Relist
-                } else {
-                    Next::Wait
-                }
-            }
+        }
+        // reverted: undone at once, its transaction closed for good and its order unused
+        PayoutStatus::Reverted if in_flight => Next::Wait,
+        PayoutStatus::Reverted => Next::Undo {
+            why: REVERTED.to_string(),
+            checked: true,
         },
         // signed: never undone until its transaction is closed
         PayoutStatus::Signed(_)
@@ -135,13 +125,27 @@ fn in_flight(id: u64) -> bool {
         || crate::storage::outbox::find(purpose).is_some()
 }
 
-/// Whether Swapic on the pool chain says the order `id` ran (M-03: read by every node, at
-/// an agreed block); Err when it cannot be read now.
-async fn ran(order_id: [u8; 32]) -> Result<bool, String> {
-    let chain = crate::storage::config::get()
-        .pool_chain
-        .ok_or("no pool chain is configured")?;
-    crate::agreed::ran(chain, order_id).await
+/// Why a reverted payout is undone.
+pub const REVERTED: &str = "its transaction reverted";
+
+/// The chain reads the pass makes before it undoes a payout that was signed, so a test hands
+/// in a fake.
+#[allow(async_fn_in_trait)]
+pub trait ChainReads {
+    /// Whether Swapic on the pool chain says the order ran; Err when it cannot be read now.
+    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String>;
+}
+
+/// The chains themselves, read by every node at an agreed block (M-03).
+pub struct LiveReads;
+
+impl ChainReads for LiveReads {
+    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String> {
+        let chain = crate::storage::config::get()
+            .pool_chain
+            .ok_or("no pool chain is configured")?;
+        crate::agreed::ran(chain, order_id).await
+    }
 }
 
 fn record(step: PoolStep, now: Timestamp) -> bool {
@@ -171,9 +175,21 @@ fn undo(payout: &EvmPayout, why: String, now: Timestamp) -> bool {
     }
 }
 
-/// One pass over the Base payouts: answers how many it acted on.
+/// One pass over the Base payouts, reading the chains themselves: answers how many it acted
+/// on.
 pub async fn pass(
     ledgers: &impl Ledgers,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> usize {
+    pass_with(ledgers, &LiveReads, clock, guard).await
+}
+
+/// One pass over the Base payouts, with `reads` for the chain reads: answers how many it
+/// acted on.
+pub async fn pass_with(
+    ledgers: &impl Ledgers,
+    reads: &impl ChainReads,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
@@ -204,43 +220,19 @@ pub async fn pass(
                 log(&format!("the pool payout {id}: {why}"));
                 acted += usize::from(record(PoolStep::PayoutStopped { id, why }, now));
             }
-            Next::Resign => {
-                let Some(pinned) = payout.order.clone() else {
-                    continue;
-                };
-                // a reorg may have turned the revert into a payment: then it never runs again
-                match ran(pinned.order_id).await {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        log(&format!(
-                            "ALERT: the pool payout {id}'s reverted order ran after all; it waits for a human"
-                        ));
-                        continue;
-                    }
-                    Err(_) => continue,
-                }
-                let Some(order) = types::swapic::decode_order(&pinned.order) else {
-                    continue;
-                };
-                drop(_busy);
-                match crate::pool::pay::sign(id, &order, pinned).await {
-                    Ok(_) => acted += 1,
-                    Err(error) => log(&format!(
-                        "the pool payout {id} was not signed again: {error:?}"
-                    )),
-                }
-            }
             Next::Undo { why, checked } => {
                 if checked {
                     let Some(pinned) = payout.order.clone() else {
                         continue;
                     };
-                    match ran(pinned.order_id).await {
+                    // a reorg may have turned the revert into a payment: a human's, once
+                    match reads.ran(pinned.order_id).await {
                         Ok(false) => {}
                         Ok(true) => {
-                            log(&format!(
-                                "ALERT: the pool payout {id}'s order ran after its revert; it is not undone, for a human"
-                            ));
+                            let why = "ALERT: its order ran after its revert; it is not undone, for a human".to_string();
+                            log(&format!("the pool payout {id}: {why}"));
+                            acted +=
+                                usize::from(record(PoolStep::PayoutStopped { id, why }, clock()));
                             continue;
                         }
                         Err(_) => continue,

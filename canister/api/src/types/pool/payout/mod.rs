@@ -75,6 +75,9 @@ pub enum PayoutStatus {
     Waiting,
     Signed(u64),
     Paid,
+    /// Its refund is on its way, with why: a revert, or its deadline (nothing is signed for it
+    /// again).
+    Refunding(String),
     Undone(String),
     Failed(String),
 }
@@ -156,7 +159,8 @@ impl From<&domain::PayoutKind> for PayoutKind {
 impl From<&domain::PayoutStatus> for PayoutStatus {
     /// A payout opened is pulling (an ICP swap's pull is out); one whose amount was just
     /// learnt is still swapping until the same message queues it or lets it wait; one whose
-    /// undo began is undone (nothing is signed for it again).
+    /// transaction reverted, or whose undo began, is refunding (nothing is signed for it
+    /// again).
     fn from(status: &domain::PayoutStatus) -> Self {
         match status {
             domain::PayoutStatus::Opened => Self::Pulling,
@@ -165,9 +169,11 @@ impl From<&domain::PayoutStatus> for PayoutStatus {
             domain::PayoutStatus::Waiting => Self::Waiting,
             domain::PayoutStatus::Signed(tx_id) => Self::Signed(*tx_id),
             domain::PayoutStatus::Paid => Self::Paid,
-            domain::PayoutStatus::Undoing(why) | domain::PayoutStatus::Undone(why) => {
-                Self::Undone(why.clone())
+            domain::PayoutStatus::Reverted => {
+                Self::Refunding("its transaction reverted".to_string())
             }
+            domain::PayoutStatus::Undoing(why) => Self::Refunding(why.clone()),
+            domain::PayoutStatus::Undone(why) => Self::Undone(why.clone()),
             domain::PayoutStatus::Failed(why) => Self::Failed(why.clone()),
         }
     }

@@ -7,7 +7,9 @@
 //!   it); an ICP swap's ckUSDC is held in `icp.reserved` but its network fee, which goes to
 //!   the ICP fee line.
 //! - Queued / Waiting: first in first out; Waiting reserves the Base hold (`free -> reserved`).
-//! - Signed: the order's amount `reserved -> in_flight`. Reverted: back to `reserved`.
+//! - Signed: the order's amount `reserved -> in_flight`, once: a payout is never signed
+//!   again (2026-10-23). Reverted: back to `reserved`, undone once Swapic says its order
+//!   never ran.
 //! - Paid: `in_flight` out, a withdrawal's fee to the Base fee line, an ICP swap's ckUSDC
 //!   freed to the pool, `owed` down.
 //! - Undone: everything released, an ICP swap's ckUSDC out with its refund, a withdrawal's
@@ -205,18 +207,15 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            // a payout waiting is signed once; a retry after a revert signs the order it pinned
-            PoolStep::PayoutSigned { id, order, .. } => {
+            // a payout waiting is signed once (2026-10-23): a revert undoes it, never signs it
+            // again, its pinned order included
+            PoolStep::PayoutSigned { id, .. } => {
                 let payout = payout_of(*id)?;
-                if payout.status != PayoutStatus::Waiting || !payout.base_reserved {
+                if payout.status != PayoutStatus::Waiting
+                    || !payout.base_reserved
+                    || payout.order.is_some()
+                {
                     return Err(not_from("PayoutSigned", &payout));
-                }
-                if let Some(pinned) = &payout.order {
-                    if pinned.order_id != order.order_id {
-                        return Err(PoolStepError::Terms(
-                            "a payout retried after a revert signs the order it pinned",
-                        ));
-                    }
                 }
                 let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
                 if amount > self.pockets.base.reserved {
@@ -246,12 +245,16 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            // what happened to its money is not known: only before it waits for an order
+            // what happened to its money is not known: before it waits for an order, or a
+            // reverted order Swapic says ran after all
             PoolStep::PayoutStopped { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(
                     payout.status,
-                    PayoutStatus::Opened | PayoutStatus::Swapping | PayoutStatus::Undoing(_)
+                    PayoutStatus::Opened
+                        | PayoutStatus::Swapping
+                        | PayoutStatus::Undoing(_)
+                        | PayoutStatus::Reverted
                 ) {
                     return Err(not_from("PayoutStopped", &payout));
                 }
@@ -345,6 +348,7 @@ impl PoolLedger {
                         | PayoutStatus::Known
                         | PayoutStatus::Queued
                         | PayoutStatus::Waiting
+                        | PayoutStatus::Reverted
                 ) {
                     return Err(not_from("PayoutUndoing", &payout));
                 }
@@ -358,7 +362,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            // never once signed: a signed payout waits for its transaction's end
+            // a signed payout waits for its transaction's end: undone only once it reverted
             PoolStep::PayoutUndone { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(
@@ -369,6 +373,7 @@ impl PoolLedger {
                         | PayoutStatus::Queued
                         | PayoutStatus::Waiting
                         | PayoutStatus::Undoing(_)
+                        | PayoutStatus::Reverted
                 ) {
                     return Err(not_from("PayoutUndone", &payout));
                 }
@@ -547,14 +552,14 @@ impl PoolLedger {
                 effects.intent = intent.map(|intent| (intent, *id));
                 effects.payout = Some(payout);
             }
+            // back to reserved, for its undo: never signed again
             PoolStep::PayoutReverted { id } => {
                 let mut payout = lookup.payout(*id)?;
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
                 let base = &mut ledger.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, amount);
                 base.reserved = sat_add(base.reserved, amount);
-                payout.status = PayoutStatus::Waiting;
-                payout.waiting_since = Some(at);
+                payout.status = PayoutStatus::Reverted;
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutPulled { id, block, attempt } => {

@@ -1534,7 +1534,8 @@ pub enum PoolStep {
         #[cbor(n(3), with = "minicbor::bytes")]
         intent: Option<[u8; 32]>,
     },
-    /// Its transaction reverted at depth: it waits again, its order pinned.
+    /// Its transaction reverted at depth: its USDC reserved again for its undo, which comes
+    /// once Swapic says its order never ran; never signed again (2026-10-23).
     #[n(30)]
     PayoutReverted {
         #[n(0)]

@@ -1234,14 +1234,13 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
 }
 
 /// P11b: a pool payout's transaction closes with the payout's own line: paid (with the Eco
-/// intent its receipt published), or reverted, back to waiting with its order pinned; no
-/// fee is booked for it.
+/// intent its receipt published), or reverted, its order pinned and never signed again
+/// (2026-10-23); no fee is booked for it.
 #[test]
 fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
     use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
     use types::pool::PayoutStatus;
-    on_fresh_memory(|| {
-        crate::storage::init();
+    let closed = |landed: Receipt| {
         let staker = "0x1111111111111111111111111111111111111111"
             .parse()
             .unwrap();
@@ -1253,34 +1252,39 @@ fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
             ..entry_with(0, 1)
         };
         outbox::put(entry.clone());
-        let decided = |landed: Receipt| {
-            poll_once(decide(
-                &entry,
-                ChainId::BASE,
-                Some(landed),
-                BlockNumber::new(105),
-                BlockDepth::new(1),
-                BlockDepth::new(1),
-                at(1_000),
-            ))
-        };
-        let reverted = Receipt {
+        let decided = poll_once(decide(
+            &entry,
+            ChainId::BASE,
+            Some(landed),
+            BlockNumber::new(105),
+            BlockDepth::new(1),
+            BlockDepth::new(1),
+            at(1_000),
+        ));
+        assert_eq!(decided, 1);
+        crate::storage::pool::payout(id).unwrap()
+    };
+    on_fresh_memory(move || {
+        crate::storage::init();
+        let payout = closed(Receipt {
             success: false,
             ..receipt_at(100)
-        };
-        assert_eq!(decided(reverted), 1);
-        let payout = crate::storage::pool::payout(id).unwrap();
-        assert_eq!(payout.status, PayoutStatus::Waiting);
+        });
+        assert_eq!(payout.status, PayoutStatus::Reverted);
         assert!(payout.order.is_some(), "its order pinned");
-        // signed again with that order, then paid
-        sign_payout(id, 1, 7);
-        let paid = Receipt {
+        // never signed again
+        assert!(crate::storage::events::append_event_at(
+            crate::storage::pool::tests::created(TxPurpose::PoolPayout(payout.id), 1),
+            at(1_001),
+        )
+        .is_err());
+    });
+    on_fresh_memory(move || {
+        crate::storage::init();
+        let payout = closed(Receipt {
             eco_intent: Some([0x5e; 32]),
             ..receipt_at(101)
-        };
-        outbox::put(entry.clone());
-        assert_eq!(decided(paid), 1);
-        let payout = crate::storage::pool::payout(id).unwrap();
+        });
         assert_eq!(payout.status, PayoutStatus::Paid);
         assert_eq!(payout.intent, Some([0x5e; 32]));
         assert_eq!(payout.paid_block, Some(BlockNumber::new(101)));

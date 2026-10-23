@@ -419,30 +419,30 @@ fn a_cctp_payout_order_passes_the_checks() {
     ));
 }
 
-/// Review Focus 2: after a revert the payout signs only the order it pinned (the same id).
+/// Item 6 of the final review fixes: a payout that pinned an order once is signed with no
+/// order again, its own included.
 #[test]
-fn a_reverted_payout_signs_only_its_pinned_order() {
+fn a_payout_that_pinned_an_order_signs_none_again() {
     let world = World::new();
     let order = same_chain();
     let terms = terms_of(&order, &world);
     let mut payout = waiting(&order, terms);
     let pinned = check(&payout, &order, &world, 900_000, nobody).unwrap();
     payout.order = Some(pinned);
-    // the same order again: accepted
-    assert!(check(&payout, &order, &world, 900_000, nobody).is_ok());
-    // a new order for the same payout, a fresh ref and so a fresh id: refused
     let mut fresh = order.clone();
     fresh.r#ref = alloy_primitives::FixedBytes([0x99; 32]);
-    assert!(matches!(
-        check(&payout, &fresh, &world, 900_000, nobody),
-        Err(PoolError::NotAllowed(why)) if why.contains("pinned")
-    ));
+    for order in [order, fresh] {
+        assert!(matches!(
+            check(&payout, &order, &world, 900_000, nobody),
+            Err(PoolError::NotAllowed(why)) if why.contains("signed once")
+        ));
+    }
 }
 
 /// Review Focus 2 in the fold: two signatures racing for one payout, a call after it signed,
-/// and a revert retried with the same order only.
+/// and a revert that is never signed again.
 #[test]
-fn one_payout_is_signed_once_at_a_time_and_retried_with_its_order() {
+fn one_payout_is_signed_once_at_a_time_and_never_again() {
     use crate::storage::events::append_event_at;
     use crate::storage::on_fresh_memory;
     use crate::storage::pool::tests::{at, base_stake, created, funded_pool, usdc};
@@ -520,14 +520,13 @@ fn one_payout_is_signed_once_at_a_time_and_retried_with_its_order() {
         // signed: a call after it answers the first transaction's id
         assert_eq!(signable(0), Ok(Some(index.get())));
         assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(5)).is_err());
-        // reverted: it waits again with its order pinned, and is signed only with that order
+        // reverted: its order stays pinned, and nothing is signed for it again
         record_at(PoolStep::PayoutReverted { id: 0 }, at(6)).unwrap();
-        assert_eq!(stored(0).unwrap().status, PayoutStatus::Waiting);
+        assert_eq!(stored(0).unwrap().status, PayoutStatus::Reverted);
         assert_eq!(stored(0).unwrap().order, Some(order(1)));
-        append_event_at(created(TxPurpose::PoolPayout(0), 1), at(7)).unwrap();
-        assert!(record_at(signed(1, 2), at(8)).is_err());
-        let again = record_at(signed(1, 1), at(8)).unwrap();
-        assert_eq!(signable(0), Ok(Some(again.get())));
+        assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(7)).is_err());
+        assert!(record_at(signed(1, 1), at(8)).is_err());
+        assert!(matches!(signable(0), Err(PoolError::NotAllowed(_))));
         assert!(crate::storage::events::verify_replay());
     });
 }
