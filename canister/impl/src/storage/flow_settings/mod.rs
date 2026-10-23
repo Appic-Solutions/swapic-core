@@ -42,7 +42,15 @@ pub struct FlowSettings {
     pub eco_prover: Option<EvmAddress>,
 }
 
+#[cfg(test)]
+thread_local! {
+    // how many times the settings were parsed, for the test that a read parses once
+    pub(crate) static PARSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn parse(wire: &Wire) -> Result<FlowSettings, String> {
+    #[cfg(test)]
+    PARSES.with(|parses| parses.set(parses.get() + 1));
     // the ICP flows sign router ABI v2's `swapFor`, which a design C Swapic does not
     // have: on, they would sign it to a v3 Swapic. Refused here, so neither a write nor a
     // stored setting can turn them on before they move to ABI v3 (P11)
@@ -110,17 +118,21 @@ pub(crate) fn parse_for_tests(wire: &Wire) -> Result<FlowSettings, String> {
     parse(wire)
 }
 
-/// The stored settings, decoded and parsed: None for a cell never written (the defaults),
-/// and the refusal for bytes that no longer decode or parse.
-fn stored() -> Result<Option<Wire>, String> {
+/// The stored settings, decoded and parsed once: None for a cell never written (the
+/// defaults), and the refusal for bytes that no longer decode or parse.
+fn stored() -> Result<Option<(Wire, FlowSettings)>, String> {
     let bytes = SETTINGS.with(|cell| cell.borrow().get().clone());
     if bytes.is_empty() {
         return Ok(None);
     }
     let wire = Decode!(&bytes, Wire)
         .map_err(|e| format!("the stored flow settings do not decode: {e}"))?;
-    parse(&wire).map_err(|e| format!("the stored flow settings do not parse: {e}"))?;
-    Ok(Some(wire))
+    let parsed = parse(&wire).map_err(|e| format!("the stored flow settings do not parse: {e}"))?;
+    Ok(Some((wire, parsed)))
+}
+
+fn stored_checked() -> Option<(Wire, FlowSettings)> {
+    stored().expect("BUG: the stored flow settings are checked at every upgrade")
 }
 
 /// Whether the stored settings decode and parse under this build: what an upgrade checks
@@ -131,14 +143,15 @@ pub fn check() -> Result<(), String> {
 
 /// The wire settings as a controller set them, or the defaults when none were.
 pub fn get_wire() -> Wire {
-    stored()
-        .expect("BUG: the stored flow settings are checked at every upgrade")
-        .unwrap_or_default()
+    stored_checked().map(|(wire, _)| wire).unwrap_or_default()
 }
 
-/// The parsed settings.
+/// The parsed settings, or the defaults' when none were set.
 pub fn get() -> FlowSettings {
-    parse(&get_wire()).expect("BUG: the stored flow settings are checked at every upgrade")
+    match stored_checked() {
+        Some((_, parsed)) => parsed,
+        None => parse(&Wire::default()).expect("BUG: the default flow settings parse"),
+    }
 }
 
 /// Validates and stores `wire`. The caller does the authorization.
