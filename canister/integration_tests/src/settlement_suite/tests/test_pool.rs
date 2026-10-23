@@ -1590,3 +1590,135 @@ fn a_plan_whose_scaler_read_failed_once_is_signed_by_the_next_pass() {
     ));
     assert!(world.replay_matches());
 }
+
+#[derive(CandidType)]
+struct TransferArg {
+    from_subaccount: Option<Vec<u8>>,
+    to: Account,
+    amount: Nat,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+impl World {
+    /// `from` sends `amount` of ckUSDC to `to`: the ledger block it landed in.
+    fn transfer(&self, from: Principal, to: Principal, amount: u64) -> u64 {
+        let args = TransferArg {
+            from_subaccount: None,
+            to: account(to),
+            amount: Nat::from(amount),
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        };
+        let raw = self
+            .pic
+            .update_call(
+                self.ledger,
+                from,
+                "icrc1_transfer",
+                encode_one(args).unwrap(),
+            )
+            .expect("the ledger answers");
+        let landed: Result<Nat, candid::Reserved> = candid::decode_one(&raw).unwrap();
+        let block = landed.expect("the transfer lands");
+        u64::try_from(block.0).expect("a block number fits")
+    }
+}
+
+/// `resolve_deposit` (Jeff, 2026-10-24): a deposit whose payout is held for a human (a queued
+/// one that failed ten times before it started, CR-08) is never paid by the canister. A
+/// controller retries it: queued again, it is paid once the ICP pocket covers it, once; a
+/// stranger may not resolve it.
+#[test]
+fn a_held_deposit_a_controller_retries_is_paid_once() {
+    use settlement_api::types::pool::DepositResolution;
+    let world = world(usdc(1_000));
+    // nothing staked on ICP yet: the arrival waits in the queue
+    let r#ref = world.arrive(ckusdc_swap(world.ledger), 3);
+    world.settle();
+    for n in 1..=10 {
+        world.plant(PoolStep::AttemptFailed {
+            r#ref,
+            why: format!("try {n}"),
+        });
+    }
+    assert!(matches!(
+        world.deposit(r#ref).status,
+        PoolDepositStatus::PayoutFailed(_)
+    ));
+    world.plant_stake(world.admin, usdc(1_000), 1);
+    world.next_tick();
+    assert_eq!(
+        world.balance(recipient()),
+        Nat::from(0_u8),
+        "held, not paid"
+    );
+    let resolve = |sender: Principal| -> Result<(), PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            sender,
+            "resolve_deposit",
+            candid::encode_args((r#ref.into_bytes().to_vec(), DepositResolution::Retry)).unwrap(),
+        )
+    };
+    assert!(matches!(resolve(staker()), Err(PoolError::NotAllowed(_))));
+    assert_eq!(resolve(world.admin), Ok(()));
+    world.settle();
+    assert_eq!(world.deposit(r#ref).status, PoolDepositStatus::Paid);
+    assert_eq!(world.balance(recipient()), Nat::from(usdc(99) - FEE));
+    assert!(matches!(
+        resolve(world.admin),
+        Err(PoolError::NotAllowed(_))
+    ));
+    world.next_tick();
+    assert_eq!(world.balance(recipient()), Nat::from(usdc(99) - FEE));
+    assert!(world.replay_matches());
+}
+
+/// `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost past the
+/// ledger's deduplication window is never asked again. A controller who saw its pull land
+/// resolves it, and its shares are minted, once; a stranger may not.
+#[test]
+fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
+    use settlement_api::types::pool::StakeResolution;
+    let world = world(usdc(1_000));
+    world.plant_stake(world.admin, usdc(1_000), u128::from(usdc(1_000)));
+    // the pull landed: the staker's 100 ckUSDC are the canister's
+    let block = world.transfer(staker(), world.canister, usdc(100));
+    let id = PoolOpId::new([0xa7; 32]);
+    let window = Duration::from_secs(23 * 3_600 + 1);
+    let owner = types::pool::PoolAccount::Icp(IcpAccount {
+        owner: staker(),
+        subaccount: None,
+    });
+    world.plant(PoolStep::StakeStarted {
+        id,
+        owner,
+        from: IcpAccount {
+            owner: staker(),
+            subaccount: None,
+        },
+        amount: TokenAmount::from(usdc(100)),
+        created_at: Timestamp::from_nanos(world.now().as_nanos() - window.as_nanos() as u64),
+    });
+    world.next_tick();
+    assert_eq!(world.pool_account(staker()).shares, Nat::from(0_u8));
+    let resolve = |sender: Principal| -> Result<(), PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            sender,
+            "resolve_stake",
+            candid::encode_args((id.into_bytes().to_vec(), StakeResolution::Pulled { block }))
+                .unwrap(),
+        )
+    };
+    assert!(matches!(resolve(staker()), Err(PoolError::NotAllowed(_))));
+    assert_eq!(resolve(world.admin), Ok(()));
+    assert!(world.pool_account(staker()).shares > Nat::from(0_u8));
+    assert_eq!(resolve(world.admin), Err(PoolError::Unknown));
+    assert!(world.replay_matches());
+}
