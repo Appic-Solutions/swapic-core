@@ -320,7 +320,7 @@ mod agreed {
             canister,
             admin,
             "test_agreed_ran",
-            encode_args((BASE, vec![0x85_u8; 32])).unwrap(),
+            encode_args((BASE, vec![0x85_u8; 32], HEAD - DEPTH)).unwrap(),
         );
         answer_heads(pic, n);
         let (request, body) = pending(pic);
@@ -344,6 +344,26 @@ mod agreed {
         set_config(&pic, canister, admin, &agreed_config()).unwrap();
         assert_eq!(ran(&pic, canister, admin, |_| 1), Ok(true));
         assert_eq!(ran(&pic, canister, admin, |_| 0), Ok(false));
+        // the transaction reverted in a block after the deep one the agreed head names: not
+        // read at all yet, never answered from a block before it (review item 1)
+        let call = submit(
+            &pic,
+            canister,
+            admin,
+            "test_agreed_ran",
+            encode_args((BASE, vec![0x85_u8; 32], HEAD - DEPTH + 11)).unwrap(),
+        );
+        answer_heads(&pic, nodes(&pic, canister));
+        let early: Result<bool, String> =
+            candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap();
+        assert!(
+            matches!(&early, Err(why) if why.contains("not yet")),
+            "{early:?}"
+        );
+        assert!(
+            pic.get_canister_http().is_empty(),
+            "no read of a block too early"
+        );
         // the nodes disagree (a provider or a node lies): no answer, asked again later
         let split = ran(&pic, canister, admin, |node| u8::from(node % 2 == 0));
         assert!(

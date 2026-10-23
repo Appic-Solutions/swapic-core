@@ -322,6 +322,10 @@ pub struct EvmPayout {
     /// A planned ICP swap's payout plan as the user handed it in (`amountIn` = `planned`).
     #[n(21)]
     pub plan: Option<PinnedOrder>,
+    /// The block its transaction last reverted in: whether its order ran is read at it or
+    /// after, never before (a reorg could have turned that revert into a payment).
+    #[n(22)]
+    pub reverted_block: Option<BlockNumber>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -390,6 +394,7 @@ impl EvmPayout {
             icp_released: Flag(false),
             reclaim: None,
             plan: None,
+            reverted_block: None,
         }
     }
 

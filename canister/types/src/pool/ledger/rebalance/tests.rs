@@ -404,7 +404,12 @@ fn a_refused_minter_call_and_a_reverted_first_order_put_the_amount_back() {
         })
         .unwrap();
     world.step(signed(down, ChainId::BASE)).unwrap();
-    world.step(PoolStep::MoveReverted { id: down }).unwrap();
+    world
+        .step(PoolStep::MoveReverted {
+            id: down,
+            block: None,
+        })
+        .unwrap();
     let base = world.ledger().pockets.base;
     assert_eq!(
         (base.reserved, base.in_flight),
@@ -791,7 +796,7 @@ fn every_move_step_round_trips_and_is_named() {
         },
         signed(1, ChainId::ETHEREUM),
         burned(1, Some([8; 32])),
-        PoolStep::MoveReverted { id: 1 },
+        PoolStep::MoveReverted { id: 1, block: None },
         PoolStep::MoveWithdrawing {
             id: 1,
             created_at: Timestamp::from_nanos(9),

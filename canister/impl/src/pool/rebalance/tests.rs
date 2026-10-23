@@ -176,7 +176,7 @@ mod stuck_moves {
             let id = routed_move();
             for nonce in 0..u64::from(MAX_REVERTS) {
                 signed(id, nonce, 4 + nonce);
-                record_at(PoolStep::MoveReverted { id }, at(4 + nonce)).unwrap();
+                record_at(PoolStep::MoveReverted { id, block: None }, at(4 + nonce)).unwrap();
             }
             let item = item(id).unwrap();
             let Next::Stuck(why) = next(&item, at(10), false) else {

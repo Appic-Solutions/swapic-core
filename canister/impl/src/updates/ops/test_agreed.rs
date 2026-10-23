@@ -11,9 +11,14 @@ fn word(name: &str, bytes: &[u8]) -> Result<[u8; 32], String> {
 /// Test-only, controller-only door onto [`agreed::ran`], so the integration suite can answer
 /// every node's outcall itself.
 #[ic_cdk::update]
-pub async fn test_agreed_ran(chain_id: u64, order_id: Vec<u8>) -> Result<bool, String> {
+pub async fn test_agreed_ran(chain_id: u64, order_id: Vec<u8>, after: u64) -> Result<bool, String> {
     require_controller().map_err(|error| format!("{error:?}"))?;
-    agreed::ran(ChainId::new(chain_id), word("order_id", &order_id)?).await
+    agreed::ran(
+        ChainId::new(chain_id),
+        word("order_id", &order_id)?,
+        types::BlockNumber::new(after),
+    )
+    .await
 }
 
 /// Test-only, controller-only door onto [`agreed::fill_after`]: the fill and its block, or

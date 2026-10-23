@@ -448,7 +448,14 @@ fn a_withdrawal_is_reminted_at_its_deadline_and_a_signed_one_is_not_undone() {
             PayoutStatus::Signed(_)
         ));
         // reverted with its order pinned, Swapic's `used` not read: nothing is undone
-        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        record_at(
+            PoolStep::PayoutReverted {
+                id,
+                block: Some(BlockNumber::new(500)),
+            },
+            at(10),
+        )
+        .unwrap();
         block_on(pass_with(&fake, &Reads::unread(), || deadline, &open_pool));
         assert_eq!(payout(id).unwrap().status, PayoutStatus::Reverted);
         assert_eq!(shares_of(&owner), shares_now);
@@ -528,7 +535,7 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
 /// fill.
 struct Reads {
     ran: Result<bool, String>,
-    asked: RefCell<Vec<[u8; 32]>>,
+    asked: RefCell<Vec<([u8; 32], BlockNumber)>>,
     fill: Result<(Fill, BlockNumber), crate::agreed::FillRead>,
     fills: RefCell<Vec<(ChainId, [u8; 32], u64)>>,
 }
@@ -559,8 +566,8 @@ impl Reads {
 }
 
 impl ChainReads for Reads {
-    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String> {
-        self.asked.borrow_mut().push(order_id);
+    async fn ran(&self, order_id: [u8; 32], after: BlockNumber) -> Result<bool, String> {
+        self.asked.borrow_mut().push((order_id, after));
         self.ran.clone()
     }
 
@@ -590,11 +597,22 @@ fn a_reverted_payout_is_undone_once_final_and_unused() {
         };
         let before = shares_of(&owner);
         sign_payout(id, 0, 9);
-        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        record_at(
+            PoolStep::PayoutReverted {
+                id,
+                block: Some(BlockNumber::new(500)),
+            },
+            at(10),
+        )
+        .unwrap();
         let reads = Reads::ran(false);
         let fake = Fake::default();
         block_on(pass_with(&fake, &reads, || at(11), &open_pool));
-        assert_eq!(*reads.asked.borrow(), vec![[9; 32]]);
+        // asked at or after the block its transaction reverted in (review item 1)
+        assert_eq!(
+            *reads.asked.borrow(),
+            vec![([9; 32], BlockNumber::new(500))]
+        );
         assert_eq!(
             payout(id).unwrap().status,
             PayoutStatus::Undone(REVERTED.to_string())
@@ -618,7 +636,14 @@ fn an_order_that_ran_after_its_revert_stops_for_a_human() {
         let owner = PoolAccount::Evm(staker());
         let before = shares_of(&owner);
         sign_payout(id, 0, 9);
-        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        record_at(
+            PoolStep::PayoutReverted {
+                id,
+                block: Some(BlockNumber::new(500)),
+            },
+            at(10),
+        )
+        .unwrap();
         let reads = Reads::ran(true);
         let fake = Fake::default();
         block_on(pass_with(&fake, &reads, || at(11), &open_pool));
@@ -913,7 +938,14 @@ fn a_stopped_icp_swap_a_controller_refunds_is_refunded_by_the_pass() {
         let fake = Fake::default();
         block_on(icp_swap::drive(&fake, id, || at(3), &open_pool)).unwrap();
         sign_payout(id, 0, 9);
-        record_at(PoolStep::PayoutReverted { id }, at(10)).unwrap();
+        record_at(
+            PoolStep::PayoutReverted {
+                id,
+                block: Some(BlockNumber::new(500)),
+            },
+            at(10),
+        )
+        .unwrap();
         // the pass reads `used` true: stopped for a human, its lines held
         block_on(pass_with(&fake, &Reads::ran(true), || at(11), &open_pool));
         assert!(matches!(

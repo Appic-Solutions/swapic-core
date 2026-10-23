@@ -638,7 +638,94 @@ fn samples() -> Vec<Sample> {
     ));
     all.extend(deposit_tier_samples());
     all.extend(timer_state_samples());
+    all.extend(reverted_block_samples());
     all
+}
+
+/// The block a payout's or a move's transaction reverted in (review of the merged canister,
+/// item 1): their lines and their records carrying it.
+fn reverted_block_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, PayoutKind, PayoutTerms, Undo};
+    use crate::pool::{IcpAccount, Move, MoveDirection, PoolStep};
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    let mut payout = EvmPayout::new(
+        1_601,
+        PayoutKind::IcpSwap(crate::pool::payout::IcpSwapTerms {
+            token_in: principal(0xf3),
+            amount_in: TokenAmount::from(1_602_u32),
+            from: IcpAccount {
+                owner: principal(0xf4),
+                subaccount: None,
+            },
+            min_usdc: TokenAmount::from(1_603_u32),
+            premium: TokenAmount::ZERO,
+            network_fee: TokenAmount::from(1_604_u32),
+            refund_to: IcpAccount {
+                owner: principal(0xf5),
+                subaccount: None,
+            },
+            slippage_bps: None,
+            planned: None,
+        }),
+        PayoutTerms {
+            dst_chain: ChainId::BASE,
+            recipient: crate::evm::EvmAddress::new([0xf6; 20]),
+            token_out: crate::evm::EvmAddress::new([0xf7; 20]),
+            min_out: TokenAmount::from(1_605_u32),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_001_606),
+        },
+        Undo::Refund {
+            to: IcpAccount {
+                owner: principal(0xf5),
+                subaccount: None,
+            },
+        },
+        Timestamp::from_nanos(1_800_000_000_000_001_607),
+    );
+    payout.reverted_block = Some(BlockNumber::new(1_608));
+    let mut item = Move::opened(
+        1_609,
+        MoveDirection::BaseToIcp,
+        TokenAmount::from(1_610_u32),
+        false,
+        Timestamp::from_nanos(1_800_000_000_000_001_611),
+        None,
+        TokenAmount::ZERO,
+    );
+    item.reverted_block = Some(BlockNumber::new(1_612));
+    let line = |index: u64, step: PoolStep| {
+        Event::seal(
+            EventIndex::new(index),
+            Timestamp::from_nanos(1_800_000_000_000_001_613),
+            EventHash::new([0xf8; 32]),
+            crate::events::EventType::Pool { step },
+        )
+        .expect("every sample has a preimage")
+    };
+    vec![
+        sample("payout with its reverted block", payout),
+        sample("move with its reverted block", item),
+        sample(
+            "payout reverted in its block",
+            line(
+                16_000,
+                PoolStep::PayoutReverted {
+                    id: 1_601,
+                    block: Some(BlockNumber::new(1_608)),
+                },
+            ),
+        ),
+        sample(
+            "move reverted in its block",
+            line(
+                16_001,
+                PoolStep::MoveReverted {
+                    id: 1_609,
+                    block: Some(BlockNumber::new(1_612)),
+                },
+            ),
+        ),
+    ]
 }
 
 /// A controller's answer to a payout stopped for a human (`resolve_payout`, 2026-10-23).
@@ -1153,6 +1240,7 @@ fn rebalance_samples() -> Vec<Sample> {
         scan_from: Some(BlockNumber::new(23_000_924)),
         // absent, so this sample's bytes stay the ones the golden pins
         reverts: None,
+        reverted_block: None,
     };
     let item_with_reverts = item.clone();
     let own = Move {
@@ -1233,7 +1321,13 @@ fn rebalance_samples() -> Vec<Sample> {
                 intent: Some([0x9b; 32]),
             },
         ),
-        ("move reverted", PoolStep::MoveReverted { id: 946 }),
+        (
+            "move reverted",
+            PoolStep::MoveReverted {
+                id: 946,
+                block: None,
+            },
+        ),
         (
             "move withdrawing",
             PoolStep::MoveWithdrawing {
@@ -2239,6 +2333,7 @@ fn payout_samples() -> Vec<Sample> {
         icp_released: crate::pool::payout::Flag(false),
         reclaim: None,
         plan: None,
+        reverted_block: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
@@ -2338,7 +2433,13 @@ fn payout_samples() -> Vec<Sample> {
                 intent: Some([0xfb; 32]),
             },
         ),
-        ("pool payout reverted", PoolStep::PayoutReverted { id: 255 }),
+        (
+            "pool payout reverted",
+            PoolStep::PayoutReverted {
+                id: 255,
+                block: None,
+            },
+        ),
         (
             "pool payout undoing",
             PoolStep::PayoutUndoing {

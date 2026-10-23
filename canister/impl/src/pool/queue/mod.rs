@@ -191,8 +191,9 @@ pub fn fill_read_after(payout: &EvmPayout) -> u64 {
 /// in a fake.
 #[allow(async_fn_in_trait)]
 pub trait ChainReads {
-    /// Whether Swapic on the pool chain says the order ran; Err when it cannot be read now.
-    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String>;
+    /// Whether Swapic on the pool chain says the order ran, read at or after `after`, the
+    /// block its transaction reverted in; Err when it cannot be read now.
+    async fn ran(&self, order_id: [u8; 32], after: BlockNumber) -> Result<bool, String>;
     /// An Eco intent's fill on `chain` at a block whose time is past `after_s`, and that
     /// block.
     async fn fill_after(
@@ -207,11 +208,11 @@ pub trait ChainReads {
 pub struct LiveReads;
 
 impl ChainReads for LiveReads {
-    async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String> {
+    async fn ran(&self, order_id: [u8; 32], after: BlockNumber) -> Result<bool, String> {
         let chain = crate::storage::config::get()
             .pool_chain
             .ok_or("no pool chain is configured")?;
-        crate::agreed::ran(chain, order_id).await
+        crate::agreed::ran(chain, order_id, after).await
     }
 
     async fn fill_after(
@@ -335,8 +336,21 @@ pub async fn pass_with(
                     let Some(pinned) = payout.order.clone() else {
                         continue;
                     };
+                    // read at or after the block its transaction reverted in: an older one
+                    // says nothing of it (review item 1). A pinned order that never reverted
+                    // never reached a block, so any block reads it
+                    let after = match (&payout.status, payout.reverted_block) {
+                        (_, Some(block)) => block,
+                        (PayoutStatus::Reverted, None) => {
+                            log(&format!(
+                                "the pool payout {id} reverted in no recorded block: it waits for a human"
+                            ));
+                            continue;
+                        }
+                        (_, None) => BlockNumber::new(0),
+                    };
                     // a reorg may have turned the revert into a payment: a human's, once
-                    match reads.ran(pinned.order_id).await {
+                    match reads.ran(pinned.order_id, after).await {
                         Ok(false) => {}
                         Ok(true) => {
                             let why = "ALERT: its order ran after its revert; it is not undone, for a human".to_string();

@@ -411,6 +411,10 @@ pub struct Move {
     /// How many times its order reverted: none before the first.
     #[n(22)]
     pub reverts: Option<u32>,
+    /// The block its transaction last reverted in: whether its order ran is read at it or
+    /// after.
+    #[n(23)]
+    pub reverted_block: Option<BlockNumber>,
 }
 
 crate::storable_as_cbor!(Move);
@@ -450,6 +454,7 @@ impl Move {
             since: opened_at,
             scan_from: None,
             reverts: None,
+            reverted_block: None,
         }
     }
 

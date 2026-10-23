@@ -524,7 +524,7 @@ fn one_payout_is_signed_once_at_a_time_and_never_again() {
         assert_eq!(signable(0), Ok(Some(index.get())));
         assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(5)).is_err());
         // reverted: its order stays pinned, and nothing is signed for it again
-        record_at(PoolStep::PayoutReverted { id: 0 }, at(6)).unwrap();
+        record_at(PoolStep::PayoutReverted { id: 0, block: None }, at(6)).unwrap();
         assert_eq!(stored(0).unwrap().status, PayoutStatus::Reverted);
         assert_eq!(stored(0).unwrap().order, Some(order(1)));
         assert!(append_event_at(created(TxPurpose::PoolPayout(0), 1), at(7)).is_err());

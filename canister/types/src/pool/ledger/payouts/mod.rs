@@ -399,7 +399,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::PayoutPaid { id, .. } | PoolStep::PayoutReverted { id } => {
+            PoolStep::PayoutPaid { id, .. } | PoolStep::PayoutReverted { id, .. } => {
                 let payout = payout_of(*id)?;
                 if !matches!(payout.status, PayoutStatus::Signed(_)) {
                     return Err(not_from(step.name(), &payout));
@@ -778,8 +778,9 @@ impl PoolLedger {
                 effects.payout = Some(payout);
             }
             // back to reserved, for its undo: never signed again
-            PoolStep::PayoutReverted { id } => {
+            PoolStep::PayoutReverted { id, block } => {
                 let mut payout = lookup.payout(*id)?;
+                payout.reverted_block = *block;
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
                 let base = &mut ledger.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, amount);

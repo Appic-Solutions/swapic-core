@@ -555,7 +555,10 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
     gas_in_hand(chain, GasAction::PoolMove).await?;
     if again {
-        match crate::agreed::ran(chain, pinned.order_id).await {
+        let after = item
+            .reverted_block
+            .ok_or("its order reverted in no recorded block")?;
+        match crate::agreed::ran(chain, pinned.order_id, after).await {
             Ok(false) => {}
             Ok(true) => {
                 return record(

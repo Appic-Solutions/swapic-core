@@ -1202,7 +1202,10 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
         tx_hash: TxHash::new([0x64; 32]),
         raw_tx: vec![0x02, 0x01],
     });
-    world.plant(PoolStep::PayoutReverted { id });
+    world.plant(PoolStep::PayoutReverted {
+        id,
+        block: Some(BlockNumber::new(1)),
+    });
     let before = world.balance(staker());
     // the payout timer: every node reads Swapic's `used` at one agreed block
     world.pic.advance_time(Duration::from_secs(61));
@@ -1289,7 +1292,10 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
         tx_hash: TxHash::new([0x66; 32]),
         raw_tx: vec![0x02, 0x01],
     });
-    world.plant(PoolStep::PayoutReverted { id });
+    world.plant(PoolStep::PayoutReverted {
+        id,
+        block: Some(BlockNumber::new(1)),
+    });
     world.pic.advance_time(Duration::from_secs(61));
     let head = world.next_outcall(&["eth_blockNumber"]);
     world.reply(&head, serde_json::json!("0x1ec55b90"), true);

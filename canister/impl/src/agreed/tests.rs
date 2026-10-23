@@ -92,3 +92,19 @@ fn an_agreed_call_names_its_block() {
     assert_eq!(params[0].get("from"), None);
     assert_eq!(params[0]["data"], json!("0x0102"));
 }
+
+/// Review of the merged canister (item 1): `used` is read at a block at or after the reverted
+/// transaction's own block and at least the crediting depth below the agreed head. The head
+/// rounded down to sixteen blocks can name a block before the transaction (as low as eleven
+/// blocks before it): there `used` is false whatever the transaction did, so no answer is
+/// given until a block that late is agreed on.
+#[test]
+fn swapics_used_is_read_only_at_or_after_the_transactions_block() {
+    let depth = types::BlockDepth::new(5);
+    let at = BlockNumber::new;
+    // the transaction at 1_000; an agreed head rounded down to 1_001 - 5 = 996, eleven below
+    // the transaction's block plus its depth
+    assert_eq!(read_block(at(1_001), depth, at(1_000)), None);
+    assert_eq!(read_block(at(1_005), depth, at(1_000)), Some(at(1_000)));
+    assert_eq!(read_block(at(1_040), depth, at(1_000)), Some(at(1_035)));
+}
