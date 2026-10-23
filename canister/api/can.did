@@ -761,11 +761,17 @@ type PoolSettings = record {
   // Micro USDC, launch 10_000_000_000 ($10,000).
   tvl_cap : nat;
   icp_tokens : vec IcpTokenEntry;
+  // The pool chain's blocks a large deposit waits. Absent: 6.
+  large_deposit_confirmations : opt nat64;
   // Off until a controller opens the pool for swaps.
   pool_open_for_swaps : bool;
   // The canister's own Base read, its backup of the reports (default 300). (P11d drops
   // the registrations' knobs: `deposit_grace_s`, `max_open_per_payer`, `max_held_bps`.)
   arrival_backup_s : nat64;
+  // Micro USDC: a deposit whose one transfer is above this waits
+  // `large_deposit_confirmations` blocks before it is credited. Absent: 1_000_000_000
+  // ($1,000).
+  large_deposit_usdc : opt nat;
 };
 type PoolStateView = record {
   icp : PocketView;
