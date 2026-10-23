@@ -1198,7 +1198,8 @@ fn a_refund_whose_route_does_not_parse_is_read_as_the_queue_reads_it() {
             },
         }];
         use std::future::Future;
-        let mut future = std::pin::pin!(prove_refunds(found, &Portal));
+        let late = Timestamp::from_secs(900 + crate::pool::eco::MAX_ROUTE_LIFE_S + 3_600).unwrap();
+        let mut future = std::pin::pin!(prove_refunds(found, &Portal, late));
         let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
         let std::task::Poll::Ready(proven) = future.as_mut().poll(context) else {
             panic!("nothing waits");
@@ -1214,6 +1215,77 @@ fn a_refund_whose_route_does_not_parse_is_read_as_the_queue_reads_it() {
             crate::pool::queue::fill_read_after(&payout),
             900 + crate::pool::eco::MAX_ROUTE_LIFE_S,
             "the queue reads it past the same time"
+        );
+    });
+}
+
+/// The last review (item 1): the depth is counted from the block every node agreed exists,
+/// one below the one node's head, never from that head itself. A node that claims a head two
+/// blocks past the real one names a block no node sees, and is refused; one block past, it
+/// names the real head, and the receipt is judged on the real chain's depth: a head a node
+/// lies about gains no depth.
+#[test]
+fn a_head_a_node_lies_about_gains_no_depth() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        // the sample's 1 USDC is a large deposit here: it waits 6 blocks
+        let mut settings = ledger().settings.unwrap();
+        settings.large_deposit_usdc = Some(TokenAmount::from(500_000_u32));
+        record_at(PoolStep::SettingsSet { settings }, at(2)).unwrap();
+        let raw = same_chain(the_ref(1));
+        let receipt = parse(&raw);
+        // the real chain: four blocks from the receipt's own
+        let real = BlockNumber::new(receipt.block.get() + 3);
+        // what every node answers for block `n`: a header up to the real head, none past it
+        let nodes_see = |n: BlockNumber| {
+            Ok(if n <= real {
+                serde_json::json!({"number": format!("0x{:x}", n.get()), "hash": "0xab", "timestamp": "0x6ad5e897"})
+            } else {
+                Value::Null
+            })
+        };
+        let judged = |claimed: u64| {
+            let claimed = BlockNumber::new(claimed);
+            let named = named_block(claimed);
+            based(
+                receipt.tx,
+                claimed,
+                vec![Ok(raw.clone()), nodes_see(named)],
+                &base(),
+            )
+        };
+        // two past the real head: the block it names is no block every node sees
+        assert!(matches!(
+            judged(real.get() + 2),
+            Err(PoolError::Unavailable(_))
+        ));
+        // one past: judged on the real head, 4 of the 6 blocks
+        assert_eq!(
+            judged(real.get() + 1),
+            Err(PoolError::NotDeep { needed: 6, have: 4 })
+        );
+        // the honest head: one block below it, 3 of the 6
+        assert_eq!(
+            judged(real.get()),
+            Err(PoolError::NotDeep { needed: 6, have: 3 })
+        );
+        // two blocks more of the real chain, and an honest node: deep
+        let deeper = BlockNumber::new(real.get() + 3);
+        let named = named_block(deeper);
+        assert_eq!(
+            based(
+                receipt.tx,
+                deeper,
+                vec![
+                    Ok(raw.clone()),
+                    Ok(
+                        serde_json::json!({"number": format!("0x{:x}", named.get()), "hash": "0xab", "timestamp": "0x6ad5e897"})
+                    )
+                ],
+                &base(),
+            ),
+            Ok(receipt)
         );
     });
 }

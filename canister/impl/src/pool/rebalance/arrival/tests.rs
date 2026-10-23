@@ -227,6 +227,32 @@ mod refunds_proven {
     /// The last instant the move's Eco route may be filled.
     const ROUTE_DEADLINE: u64 = 1_800_001_800;
 
+    /// An hour past the route's deadline: an agreed block past it can be read.
+    fn late() -> Timestamp {
+        Timestamp::from_secs(ROUTE_DEADLINE + 3_600).unwrap()
+    }
+
+    /// The last review (item 3): a refund's proof reads the Portal only once a block every
+    /// node agrees on can be past the route's deadline (`agreed::fill_wait`, the payouts'
+    /// own rule); before it, it is too early and nothing is read.
+    #[test]
+    fn a_refund_is_not_read_before_an_agreed_block_can_be_past_its_deadline() {
+        on_fresh_memory(|| {
+            eco_move();
+            let early = Timestamp::from_secs(ROUTE_DEADLINE + 10).unwrap();
+            let proven = block_on(prove_refunds(
+                refund(INTENT),
+                &Portal(Err("read".to_string())),
+                early,
+            ));
+            assert!(
+                matches!(&proven[0].proof, Proof::Unproven { why } if why.contains("too early")),
+                "{:?}",
+                proven[0].proof
+            );
+        });
+    }
+
     /// The move's order: one `publishAndFund` delivering USDC on Ethereum, its route's
     /// deadline [`ROUTE_DEADLINE`].
     fn eco_order() -> Vec<u8> {
@@ -330,7 +356,7 @@ mod refunds_proven {
         on_fresh_memory(|| {
             eco_move();
             for fill in [Fill::Open, Fill::Cancelled] {
-                let proven = block_on(prove_refunds(refund(INTENT), &Portal(Ok(fill))));
+                let proven = block_on(prove_refunds(refund(INTENT), &Portal(Ok(fill)), late()));
                 assert_eq!(
                     proven[0].proof,
                     Proof::Refund {
@@ -349,7 +375,11 @@ mod refunds_proven {
     fn a_refund_of_a_filled_intent_is_held_and_an_unread_one_waits() {
         on_fresh_memory(|| {
             eco_move();
-            let filled = block_on(prove_refunds(refund(INTENT), &Portal(Ok(Fill::Filled))));
+            let filled = block_on(prove_refunds(
+                refund(INTENT),
+                &Portal(Ok(Fill::Filled)),
+                late(),
+            ));
             assert!(
                 matches!(&filled[0].proof, Proof::Orphan { why, .. } if why.contains("filled"))
             );
@@ -357,12 +387,14 @@ mod refunds_proven {
             let unread = block_on(prove_refunds(
                 refund(INTENT),
                 &Portal(Err("the read failed".to_string())),
+                late(),
             ));
             assert!(matches!(&unread[0].proof, Proof::Unproven { .. }));
             // an intent no payout or move took: left to the fold's own rule, no read made
             let theirs = block_on(prove_refunds(
                 refund([0x87; 32]),
                 &Portal(Err("never read".to_string())),
+                late(),
             ));
             assert_eq!(
                 theirs[0].proof,

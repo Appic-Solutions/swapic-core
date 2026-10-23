@@ -10,6 +10,10 @@ use std::cell::RefCell;
 use types::events::TxPurpose;
 use types::pool::RebalanceSettings;
 
+/// The wait past an Eco route's deadline before its fill is read, where a test does not look
+/// at it.
+const FILL_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn at(secs: u64) -> Timestamp {
     Timestamp::from_secs(1_800_000_000 + secs).unwrap()
 }
@@ -31,21 +35,21 @@ fn item(direction: MoveDirection, status: MoveStatus) -> Move {
 #[test]
 fn a_move_to_icp_is_routed_when_its_window_ends_and_an_urgent_one_at_once() {
     let open = item(MoveDirection::BaseToIcp, MoveStatus::Open);
-    assert_eq!(next(&open, at(30), false), Next::Wait);
-    assert_eq!(next(&open, at(60), false), Next::Route);
+    assert_eq!(next(&open, at(30), false, FILL_WAIT), Next::Wait);
+    assert_eq!(next(&open, at(60), false, FILL_WAIT), Next::Route);
     let urgent = Move {
         urgent: true,
         window_ends: None,
         ..open.clone()
     };
-    assert_eq!(next(&urgent, at(0), false), Next::Route);
+    assert_eq!(next(&urgent, at(0), false, FILL_WAIT), Next::Route);
     // stuck, final or with a transaction out: nothing
     let stuck = Move {
         stuck: Some("a test".to_string()),
         ..open.clone()
     };
-    assert_eq!(next(&stuck, at(90), false), Next::Wait);
-    assert_eq!(next(&open, at(90), true), Next::Wait);
+    assert_eq!(next(&stuck, at(90), false, FILL_WAIT), Next::Wait);
+    assert_eq!(next(&open, at(90), true, FILL_WAIT), Next::Wait);
 }
 
 #[test]
@@ -54,20 +58,23 @@ fn a_move_to_base_asks_the_minter_then_reads_its_landing_then_takes_its_window()
         window_ends: None,
         ..item(MoveDirection::IcpToBase, MoveStatus::Open)
     };
-    assert_eq!(next(&open, at(0), false), Next::Withdraw);
+    assert_eq!(next(&open, at(0), false, FILL_WAIT), Next::Withdraw);
     // a minter's call whose answer was lost: a controller reads the minter
     let withdrawing = Move {
         status: MoveStatus::Withdrawing,
         ..open.clone()
     };
-    assert!(matches!(next(&withdrawing, at(0), false), Next::Stuck(_)));
+    assert!(matches!(
+        next(&withdrawing, at(0), false, FILL_WAIT),
+        Next::Stuck(_)
+    ));
     let withdrawn = Move {
         status: MoveStatus::Withdrawn,
         ..open.clone()
     };
-    assert_eq!(next(&withdrawn, at(600), false), Next::Landing);
+    assert_eq!(next(&withdrawn, at(600), false, FILL_WAIT), Next::Landing);
     assert!(matches!(
-        next(&withdrawn, at(3 * 3_600), false),
+        next(&withdrawn, at(3 * 3_600), false, FILL_WAIT),
         Next::Stuck(_)
     ));
     let landed = Move {
@@ -76,8 +83,8 @@ fn a_move_to_base_asks_the_minter_then_reads_its_landing_then_takes_its_window()
         since: at(1_200),
         ..open
     };
-    assert_eq!(next(&landed, at(1_230), false), Next::Wait);
-    assert_eq!(next(&landed, at(1_260), false), Next::Route);
+    assert_eq!(next(&landed, at(1_230), false, FILL_WAIT), Next::Wait);
+    assert_eq!(next(&landed, at(1_260), false, FILL_WAIT), Next::Route);
 }
 
 #[test]
@@ -89,14 +96,33 @@ fn a_routed_move_signs_its_pinned_order_again_only_within_its_deadline_and_rever
         gas_limit: 300_000,
         deadline_s: at(3_600).as_secs().get(),
     });
-    assert_eq!(next(&routed, at(0), false), Next::Sign { again: false });
+    assert_eq!(
+        next(&routed, at(0), false, FILL_WAIT),
+        Next::Sign { again: false }
+    );
     routed.tx_hash = Some(TxHash::new([2; 32]));
     routed.reverts = Some(1);
-    assert_eq!(next(&routed, at(0), false), Next::Sign { again: true });
+    // the last review (item 2): a revert that carries no block can never be read at or after
+    // it, so the move is held for a human at once, never looped to its deadline
+    assert!(matches!(
+        next(&routed, at(0), false, FILL_WAIT),
+        Next::Stuck(why) if why.contains("no recorded block")
+    ));
+    routed.reverted_block = Some(BlockNumber::new(500));
+    assert_eq!(
+        next(&routed, at(0), false, FILL_WAIT),
+        Next::Sign { again: true }
+    );
     routed.reverts = Some(MAX_REVERTS);
-    assert!(matches!(next(&routed, at(0), false), Next::Stuck(_)));
+    assert!(matches!(
+        next(&routed, at(0), false, FILL_WAIT),
+        Next::Stuck(_)
+    ));
     routed.reverts = Some(1);
-    assert!(matches!(next(&routed, at(3_500), false), Next::Stuck(_)));
+    assert!(matches!(
+        next(&routed, at(3_500), false, FILL_WAIT),
+        Next::Stuck(_)
+    ));
 }
 
 #[test]
@@ -106,33 +132,39 @@ fn a_burned_move_to_icp_sweeps_or_looks_for_its_eco_fill() {
         max_fee: TokenAmount::ZERO,
         fast: false,
     });
-    assert_eq!(next(&own, at(600), false), Next::Sweep);
-    assert!(matches!(next(&own, at(3 * 3_600), false), Next::Stuck(_)));
+    assert_eq!(next(&own, at(600), false, FILL_WAIT), Next::Sweep);
+    assert!(matches!(
+        next(&own, at(3 * 3_600), false, FILL_WAIT),
+        Next::Stuck(_)
+    ));
     let mut eco = own.clone();
     eco.route = Some(MoveRoute::Proposed {
         fee: TokenAmount::from(100_u64),
     });
-    assert_eq!(next(&eco, at(60), false), Next::Fill);
+    assert_eq!(next(&eco, at(60), false, FILL_WAIT), Next::Fill);
     eco.landed = Some(types::pool::Landing {
         tx: TxHash::new([3; 32]),
         block: BlockNumber::new(1),
         amount: usdc(499),
     });
-    assert_eq!(next(&eco, at(60), false), Next::Sweep);
+    assert_eq!(next(&eco, at(60), false, FILL_WAIT), Next::Sweep);
     let landed = Move {
         status: MoveStatus::Landed,
         ..eco.clone()
     };
-    assert_eq!(next(&landed, at(60), false), Next::Deposit);
+    assert_eq!(next(&landed, at(60), false, FILL_WAIT), Next::Deposit);
     let sweeping = Move {
         status: MoveStatus::Sweeping,
         ..eco
     };
-    assert_eq!(next(&sweeping, at(60), false), Next::Resweep);
+    assert_eq!(next(&sweeping, at(60), false, FILL_WAIT), Next::Resweep);
     // a move to Base waits on Base for the watcher's report, and stops after hours
     let up = item(MoveDirection::IcpToBase, MoveStatus::Burned);
-    assert_eq!(next(&up, at(600), false), Next::Wait);
-    assert!(matches!(next(&up, at(3 * 3_600), false), Next::Stuck(_)));
+    assert_eq!(next(&up, at(600), false, FILL_WAIT), Next::Wait);
+    assert!(matches!(
+        next(&up, at(3 * 3_600), false, FILL_WAIT),
+        Next::Stuck(_)
+    ));
 }
 
 #[test]
@@ -555,14 +587,21 @@ fn an_eco_move_to_base_past_its_deadline_is_looked_for_on_the_portals() {
         deadline_s: deadline,
     });
     let at_secs = |secs: u64| Timestamp::from_secs(secs).unwrap();
-    assert_eq!(next(&item, at_secs(deadline), false), Next::Wait);
+    // the last review (item 3): looked for once a block every node agrees on can be past
+    // the deadline on Base, the payouts' own rule (`agreed::fill_wait`)
+    let wait = crate::agreed::fill_wait(ChainId::BASE, 1);
+    assert_eq!(next(&item, at_secs(deadline), false, wait), Next::Wait);
     assert_eq!(
-        next(&item, at_secs(deadline + UNFILLED_MARGIN_S + 1), false),
+        next(&item, at_secs(deadline + wait.as_secs()), false, wait),
+        Next::Wait
+    );
+    assert_eq!(
+        next(&item, at_secs(deadline + wait.as_secs() + 1), false, wait),
         Next::Unfilled
     );
     // never stopped for hours of waiting: its USDC is somewhere the Portals tell
     assert_eq!(
-        next(&item, at_secs(deadline + 10 * 3_600), false),
+        next(&item, at_secs(deadline + 10 * 3_600), false, wait),
         Next::Unfilled
     );
 }
@@ -642,6 +681,7 @@ fn the_unfilled_reads_of_closed_moves_are_dropped() {
         crate::storage::init();
         crate::storage::timer_state::update(|state| {
             state.unfilled_reads.insert(4_242, at(0));
+            ((), true)
         });
         assert!(unfilled_due(7, at(1)));
         let reads = crate::storage::timer_state::get().unfilled_reads;

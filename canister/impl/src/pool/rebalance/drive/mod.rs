@@ -164,10 +164,6 @@ pub enum Next {
     Stuck(String),
 }
 
-/// How long past an Eco route's deadline its fill is first looked for on the Portal: a fill
-/// in its last block is seen first.
-pub const UNFILLED_MARGIN_S: u64 = 300;
-
 /// The fill deadline of the Eco intent `order` (`abi.encode(Order)`) publishes, if it
 /// publishes one.
 pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
@@ -180,8 +176,9 @@ pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
 }
 
 /// The step `item` takes at `now`, pure. `in_flight`: a transaction of it is being signed
-/// or is out.
-pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
+/// or is out; `fill_wait`: how long past an Eco route's deadline its fill is first looked for
+/// on the pool chain (`agreed::fill_wait`, the payouts' own rule).
+pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -> Next {
     if item.stuck.is_some() || item.status.is_final() || in_flight {
         return Next::Wait;
     }
@@ -216,9 +213,16 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
             if now.as_secs().get().saturating_add(SIGN_MARGIN_S) >= deadline {
                 return Next::Stuck("its order's deadline passed before it ran".to_string());
             }
-            Next::Sign {
-                again: item.tx_hash.is_some(),
+            let again = item.tx_hash.is_some();
+            // whether a reverted order ran is read only at or after the block it reverted
+            // in: a revert that carries none can never be read, so a human decides at once
+            if again && item.reverted_block.is_none() {
+                return Next::Stuck(
+                    "its order reverted in no recorded block: whether it ran cannot be read"
+                        .to_string(),
+                );
             }
+            Next::Sign { again }
         }
         (MoveDirection::BaseToIcp, MoveStatus::Burned) if waited => Next::Stuck(if eco {
             "no Eco fill or ckUSDC arrived".to_string()
@@ -239,7 +243,7 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
                 .and_then(|order| eco_route_deadline(&order.order));
             match deadline {
                 Some(deadline)
-                    if now.as_secs().get() > deadline.saturating_add(UNFILLED_MARGIN_S) =>
+                    if now.as_secs().get() > deadline.saturating_add(fill_wait.as_secs()) =>
                 {
                     Next::Unfilled
                 }
@@ -283,7 +287,10 @@ pub async fn drive(now: Timestamp) {
             continue;
         };
         let now = now.max(pool::now());
-        let step = next(&item, now, in_flight(item.id));
+        let fill_wait = config::get()
+            .pool_chain
+            .map_or(Duration::ZERO, crate::agreed::fill_wait_on);
+        let step = next(&item, now, in_flight(item.id), fill_wait);
         if step == Next::Wait {
             continue;
         }
@@ -454,21 +461,21 @@ pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
 /// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
 /// kept in stable memory (C-09); the last reads of moves no longer open are dropped.
 fn unfilled_due(id: u64, now: Timestamp) -> bool {
-    let open: std::collections::BTreeSet<u64> = read_state(super::open_moves)
-        .into_iter()
-        .map(|item| item.id)
-        .chain(std::iter::once(id))
-        .collect();
+    // the open moves' ids as the ledger holds them: no move is read for them
+    let mut open = read_state(|state| state.pool().moves().open);
+    open.insert(id);
     crate::storage::timer_state::update(|state| {
         let reads = &mut state.unfilled_reads;
+        let kept = reads.len();
         reads.retain(|move_id, _| open.contains(move_id));
+        let dropped = reads.len() != kept;
         let due = reads
             .get(&id)
             .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);
         if due {
             reads.insert(id, now);
         }
-        due
+        (due, due || dropped)
     })
 }
 
@@ -561,6 +568,7 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
     gas_in_hand(chain, GasAction::PoolMove).await?;
     if again {
+        // `next` holds a revert with no block for a human before it is signed again
         let after = item
             .reverted_block
             .ok_or("its order reverted in no recorded block")?;

@@ -148,6 +148,31 @@ pub async fn ran(chain: ChainId, order_id: [u8; 32], after: BlockNumber) -> Resu
     ran_of(word(answer)?)
 }
 
+/// How long after a time a read of `chain` for a block past it waits, its crediting `depth`
+/// given: the block every node agrees on is the head rounded down to [`rpc::HEAD_GRAIN`]
+/// blocks less the depth, so `(HEAD_GRAIN + depth)` of the chain's blocks at the most, and a
+/// minute. The one rule for every read past a deadline: a payout's fill, a move's, a
+/// refund's proof.
+pub fn fill_wait(chain: ChainId, depth: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        rpc::HEAD_GRAIN
+            .saturating_add(depth)
+            .saturating_mul(chain.block_seconds())
+            .saturating_add(FILL_MARGIN_S),
+    )
+}
+
+/// [`fill_wait`] at `chain`'s configured crediting depth (none configured: no depth).
+pub fn fill_wait_on(chain: ChainId) -> std::time::Duration {
+    let depth =
+        crate::tx::credit_confirmations(&config::get(), chain).map_or(0, |depth| depth.get());
+    fill_wait(chain, depth)
+}
+
+/// What [`fill_wait`] adds for a fill read in the last block before its deadline to be seen
+/// first.
+pub const FILL_MARGIN_S: u64 = 60;
+
 /// What an agreed header and `claimants` answer say past `after_s`, pure: the fill and its
 /// block once the block is past the time, `TooEarly` before it.
 pub fn fill_of(
