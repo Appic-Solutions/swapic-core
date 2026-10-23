@@ -1736,3 +1736,128 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
     assert_eq!(resolve(world.admin, block), Err(PoolError::Unknown));
     assert!(world.replay_matches());
 }
+
+#[derive(CandidType)]
+struct TransferArg {
+    from_subaccount: Option<Vec<u8>>,
+    to: Account,
+    amount: Nat,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+impl World {
+    /// The canister's own transfer of `amount` to `to`, its memo and `created_at_time`
+    /// given, as a payout makes it: the ledger block it landed in.
+    fn transfer_as_canister(&self, to: Principal, amount: u64, memo: [u8; 32], at: u64) -> u64 {
+        let args = TransferArg {
+            from_subaccount: None,
+            to: account(to),
+            amount: Nat::from(amount),
+            fee: None,
+            memo: Some(memo.to_vec()),
+            created_at_time: Some(at),
+        };
+        let raw = self
+            .pic
+            .update_call(
+                self.ledger,
+                self.canister,
+                "icrc1_transfer",
+                encode_one(args).unwrap(),
+            )
+            .expect("the ledger answers");
+        let landed: Result<Nat, candid::Reserved> = candid::decode_one(&raw).unwrap();
+        let block = landed.expect("the transfer lands");
+        u64::try_from(block.0).expect("a block number fits")
+    }
+}
+
+/// `resolve_deposit`'s `MarkPaid` (the review, 2026-10-24): a started payout held for a human
+/// whose transfer landed after all (its answer lost) is not refunded; a controller names the
+/// block, the canister reads it on the ckUSDC ledger itself and books the deposit paid only
+/// on exactly the payout's transfer, once.
+#[test]
+fn a_held_deposit_whose_transfer_landed_is_marked_paid_once() {
+    use settlement_api::types::pool::DepositResolution;
+    use types::pool::{PayoutAttempt, PayoutPath, PrincipalBytes};
+    let world = world(usdc(1_000));
+    world.plant_stake(world.admin, usdc(1_000), 1);
+    // paused: the canister drives no payout while its history is planted
+    let paused: Result<(), String> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_pool_paused",
+        encode_one(true).unwrap(),
+    );
+    assert_eq!(paused, Ok(()));
+    let r#ref = world.arrive(ckusdc_swap(world.ledger), 4);
+    let created_at = world.now();
+    let sent = usdc(99) - FEE;
+    world.plant(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at,
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Ckusdc,
+            amount: Some(TokenAmount::from(sent)),
+            token: Some(PrincipalBytes(world.ledger)),
+        },
+    });
+    world.plant(PoolStep::TransferAsked {
+        r#ref,
+        token: PrincipalBytes(world.ledger),
+        amount: TokenAmount::from(sent),
+        spent: TokenAmount::from(usdc(99)),
+    });
+    for n in 1..=10 {
+        world.plant(PoolStep::AttemptFailed {
+            r#ref,
+            why: format!("try {n}"),
+        });
+    }
+    assert!(matches!(
+        world.deposit(r#ref).status,
+        PoolDepositStatus::PayoutFailed(_)
+    ));
+    // it landed after all: the canister's own transfer, as the payout asked it
+    let block =
+        world.transfer_as_canister(recipient(), sent, r#ref.into_bytes(), created_at.as_nanos());
+    let resolve = |sender: Principal, resolution: DepositResolution| -> Result<(), PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            sender,
+            "resolve_deposit",
+            candid::encode_args((r#ref.into_bytes().to_vec(), resolution)).unwrap(),
+        )
+    };
+    assert!(matches!(
+        resolve(world.admin, DepositResolution::Refund),
+        Err(PoolError::NotAllowed(_))
+    ));
+    // the ledger's first block is its mint: not the payout's transfer
+    assert!(matches!(
+        resolve(world.admin, DepositResolution::MarkPaid { block: 0 }),
+        Err(PoolError::NotAllowed(_))
+    ));
+    assert!(matches!(
+        resolve(staker(), DepositResolution::MarkPaid { block }),
+        Err(PoolError::NotAllowed(_))
+    ));
+    assert_eq!(
+        resolve(world.admin, DepositResolution::MarkPaid { block }),
+        Ok(())
+    );
+    let view = world.deposit(r#ref);
+    assert_eq!(view.status, PoolDepositStatus::Paid);
+    assert_eq!(view.paid, Some(Nat::from(sent)));
+    assert_eq!(world.balance(recipient()), Nat::from(sent));
+    assert!(matches!(
+        resolve(world.admin, DepositResolution::MarkPaid { block }),
+        Err(PoolError::NotAllowed(_))
+    ));
+    assert!(world.replay_matches());
+}
