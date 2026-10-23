@@ -464,7 +464,7 @@ pub async fn drive(
             placed = false;
             match try_plan(ledgers, &payout, clock, guard).await? {
                 Tried::Sign(fitted) => return Ok(Some(*fitted)),
-                Tried::Waits => return Ok(None),
+                Tried::Waits | Tried::Closed => return Ok(None),
                 Tried::Undone => continue,
             }
         }
@@ -493,12 +493,15 @@ enum Tried {
     Sign(Box<Fitted>),
     /// It waits, the try counted.
     Waits,
+    /// The pool is closed: nothing tried, nothing counted.
+    Closed,
     /// It could only revert: its undo began.
     Undone,
 }
 
-/// One try of `payout`'s plan: fitted (the pool's guard open), or the try counted with why
-/// it waits, or the undo begun of a plan that could only revert.
+/// One try of `payout`'s plan, the pool's guard read first (the review, 2026-10-24: a closed
+/// pool reads no scaler and spends no try): fitted, or the try counted with why it waits, or
+/// the undo begun of a plan that could only revert.
 async fn try_plan(
     reads: &impl PlanReads,
     payout: &EvmPayout,
@@ -506,9 +509,16 @@ async fn try_plan(
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Tried, Stop> {
     let id = payout.id;
+    if open(guard).is_err() {
+        return Ok(Tried::Closed);
+    }
     let why = match crate::pool::plan::fit(reads, payout, clock()).await {
         Fit::Sign(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(fitted)),
-        Fit::Sign(_) => "the pool is closed".to_string(),
+        // closed during the read: tried again once it opens, not counted
+        Fit::Sign(_) => {
+            pool::log(&format!("the pool payout {id}'s plan waits: the pool closed"));
+            return Ok(Tried::Closed);
+        }
         Fit::Wait(why) => why,
         // the user's ckUSDC back at once
         Fit::Undo(why) => {
@@ -542,7 +552,7 @@ pub async fn refit(
     }
     match try_plan(ledgers, &payout, clock, guard).await? {
         Tried::Sign(fitted) => Ok(Some(*fitted)),
-        Tried::Waits => Ok(None),
+        Tried::Waits | Tried::Closed => Ok(None),
         Tried::Undone => drive(ledgers, id, clock, guard).await,
     }
 }

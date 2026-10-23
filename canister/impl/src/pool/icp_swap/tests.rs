@@ -1309,3 +1309,40 @@ fn a_fitted_plan_whose_signature_is_refused_counts_a_try() {
         assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
     });
 }
+
+/// The review (2026-10-24): the pool's guard is read before a plan is fitted. While the pool
+/// is closed no scaler is read and no try is spent; once it opens, the plan fits.
+#[test]
+fn a_plan_is_not_fitted_while_the_pool_is_closed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(600));
+        let id = open_planned(&planned(
+            ckusdc(),
+            TokenAmount::from(PAYS_501_65),
+            &swap_plan(),
+        ));
+        let fake = Fake::default();
+        *fake.scaled.borrow_mut() = Some(Err("the scaler's read: Unreachable".to_string()));
+        assert_eq!(block_on(drive(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
+        let reads = || {
+            fake.calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with("scale"))
+                .count()
+        };
+        let before = reads();
+        *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
+        let closed = || Err("the pool is closed".to_string());
+        for _ in 0..5 {
+            assert_eq!(block_on(refit(&fake, id, clock, &closed)).unwrap(), None);
+        }
+        assert_eq!(reads(), before);
+        assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
+        assert!(block_on(refit(&fake, id, clock, &open_pool))
+            .unwrap()
+            .is_some());
+    });
+}
