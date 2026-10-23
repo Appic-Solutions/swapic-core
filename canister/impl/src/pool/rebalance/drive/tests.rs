@@ -92,6 +92,13 @@ fn a_routed_move_signs_its_pinned_order_again_only_within_its_deadline_and_rever
     assert_eq!(next(&routed, at(0), false), Next::Sign { again: false });
     routed.tx_hash = Some(TxHash::new([2; 32]));
     routed.reverts = Some(1);
+    // the last review (item 2): a revert that carries no block can never be read at or after
+    // it, so the move is held for a human at once, never looped to its deadline
+    assert!(matches!(
+        next(&routed, at(0), false),
+        Next::Stuck(why) if why.contains("no recorded block")
+    ));
+    routed.reverted_block = Some(BlockNumber::new(500));
     assert_eq!(next(&routed, at(0), false), Next::Sign { again: true });
     routed.reverts = Some(MAX_REVERTS);
     assert!(matches!(next(&routed, at(0), false), Next::Stuck(_)));

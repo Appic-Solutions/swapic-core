@@ -216,9 +216,16 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool) -> Next {
             if now.as_secs().get().saturating_add(SIGN_MARGIN_S) >= deadline {
                 return Next::Stuck("its order's deadline passed before it ran".to_string());
             }
-            Next::Sign {
-                again: item.tx_hash.is_some(),
+            let again = item.tx_hash.is_some();
+            // whether a reverted order ran is read only at or after the block it reverted
+            // in: a revert that carries none can never be read, so a human decides at once
+            if again && item.reverted_block.is_none() {
+                return Next::Stuck(
+                    "its order reverted in no recorded block: whether it ran cannot be read"
+                        .to_string(),
+                );
             }
+            Next::Sign { again }
         }
         (MoveDirection::BaseToIcp, MoveStatus::Burned) if waited => Next::Stuck(if eco {
             "no Eco fill or ckUSDC arrived".to_string()
@@ -561,6 +568,7 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
     let pinned = item.order.clone().ok_or("the move pinned no order")?;
     gas_in_hand(chain, GasAction::PoolMove).await?;
     if again {
+        // `next` holds a revert with no block for a human before it is signed again
         let after = item
             .reverted_block
             .ok_or("its order reverted in no recorded block")?;
