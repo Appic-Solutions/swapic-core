@@ -111,6 +111,7 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
         gas_limit: 300_000,
         deadline_s: 2_000,
     });
+    reverted.reverted_block = Some(BlockNumber::new(500));
     for now in [before, past] {
         assert_eq!(
             decide(&reverted, now, false),
@@ -537,6 +538,42 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
     icp_swap::place(id, at(11)).unwrap();
     let _ = Duration::ZERO;
     id
+}
+
+/// The review (2026-10-24): a reverted payout with no block recorded for its revert cannot
+/// be read at or after it, so it stops for a human at once, once: no read, no log every pass.
+#[test]
+fn a_revert_in_no_recorded_block_stops_for_a_human_once() {
+    let settings = PayoutSettings::default();
+    let mut reverted = payout_in(PayoutStatus::Reverted, secs(10_000));
+    reverted.order = Some(PinnedOrder {
+        order_id: [1; 32],
+        order: vec![1],
+        gas_limit: 300_000,
+        deadline_s: 2_000,
+    });
+    assert!(matches!(
+        next(&reverted, &settings, secs(60), false, Duration::ZERO),
+        Next::Stop(why) if why.starts_with("ALERT")
+    ));
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(staker());
+        let owner = PoolAccount::Evm(staker());
+        let before = shares_of(&owner);
+        sign_payout(id, 0, 9);
+        record_at(PoolStep::PayoutReverted { id, block: None }, at(10)).unwrap();
+        let reads = Reads::ran(false);
+        let fake = Fake::default();
+        block_on(pass_with(&fake, &reads, || at(11), &open_pool));
+        assert!(matches!(
+            payout(id).unwrap().status,
+            PayoutStatus::Failed(why) if why.starts_with("ALERT")
+        ));
+        block_on(pass_with(&fake, &reads, || at(12), &open_pool));
+        assert!(reads.asked.borrow().is_empty());
+        assert_eq!(shares_of(&owner), before);
+    });
 }
 
 /// What the fake chains answer: Swapic's `used` for every order, and every Eco intent's

@@ -123,6 +123,11 @@ pub fn next(
         }
         // reverted: undone at once, its transaction closed for good and its order unused
         PayoutStatus::Reverted if in_flight => Next::Wait,
+        // no block recorded for its revert: nothing can be read at or after it, a human's
+        // (the review, 2026-10-24: once, not a log line every pass)
+        PayoutStatus::Reverted if payout.reverted_block.is_none() => {
+            Next::Stop(NO_REVERT_BLOCK.to_string())
+        }
         PayoutStatus::Reverted => Next::Undo {
             why: REVERTED.to_string(),
             checked: true,
@@ -193,6 +198,10 @@ fn in_flight(id: u64) -> bool {
 
 /// Why a reverted payout is undone.
 pub const REVERTED: &str = "its transaction reverted";
+
+/// Why a reverted payout with no block recorded for its revert stops for a human.
+pub const NO_REVERT_BLOCK: &str =
+    "ALERT: its transaction reverted in no recorded block, so whether its order ran cannot be read";
 
 /// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): never
 /// signed, tries left, and the plan's own decision before any read ([`plan::decide`]) says it
@@ -398,17 +407,9 @@ pub async fn pass_with(
                     };
                     // read at or after the block its transaction reverted in: an older one
                     // says nothing of it (review item 1). A pinned order that never reverted
-                    // never reached a block, so any block reads it
-                    let after = match (&payout.status, payout.reverted_block) {
-                        (_, Some(block)) => block,
-                        (PayoutStatus::Reverted, None) => {
-                            log(&format!(
-                                "the pool payout {id} reverted in no recorded block: it waits for a human"
-                            ));
-                            continue;
-                        }
-                        (_, None) => BlockNumber::new(0),
-                    };
+                    // never reached a block, so any block reads it; a revert in no recorded
+                    // block stopped in `next`
+                    let after = payout.reverted_block.unwrap_or(BlockNumber::new(0));
                     // a reorg may have turned the revert into a payment: a human's, once
                     match reads.ran(pinned.order_id, after).await {
                         Ok(false) => {}
