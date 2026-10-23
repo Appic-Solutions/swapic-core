@@ -289,14 +289,7 @@ pub async fn pass_with(
                     acted += 1;
                     // a planned swap whose amount this drive learnt: its plan, fitted
                     if let Some(fitted) = fitted {
-                        if let Err(error) =
-                            crate::pool::pay::sign_held(&_busy, id, &fitted.order, fitted.pinned)
-                                .await
-                        {
-                            log(&format!(
-                                "the pool payout {id}'s plan was not signed ({error:?}): it waits for an order"
-                            ));
-                        }
+                        crate::pool::plan::sign_fitted(&_busy, id, fitted).await;
                     }
                 }
                 Err(Stop::Retry(why)) | Err(Stop::Append(why)) => {

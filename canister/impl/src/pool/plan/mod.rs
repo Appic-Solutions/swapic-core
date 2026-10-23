@@ -124,6 +124,21 @@ pub struct Fitted {
     pub pinned: PinnedOrder,
 }
 
+/// Signs the plan fitted for payout `id`, its caller holding the payout (the door's drive,
+/// the pass): a refusal (a halt, the gas rule, a stale reading) leaves it waiting for the
+/// watcher's order, logged. Answers whether it was signed.
+pub async fn sign_fitted(held: &crate::pool::payout::Busy, id: u64, fitted: Fitted) -> bool {
+    match pay::sign_held(held, id, &fitted.order, fitted.pinned).await {
+        Ok(_) => true,
+        Err(error) => {
+            crate::pool::log(&format!(
+                "the pool payout {id}'s plan was not signed ({error:?}): it waits for an order"
+            ));
+            false
+        }
+    }
+}
+
 /// What a plan says of a payout of `amount` at `now_s`, before any read, pure: the order with
 /// that amount in and the place of its KyberSwap step, if it has one; or why it waits, or is
 /// undone.

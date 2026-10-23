@@ -393,11 +393,7 @@ pub async fn swap_from_icp(
         )
         .await
         {
-            if let Err(error) = pay::sign_held(&busy, id, &fitted.order, fitted.pinned).await {
-                pool::log(&format!(
-                    "the pool payout {id}'s plan was not signed ({error:?}): it waits for an order"
-                ));
-            }
+            crate::pool::plan::sign_fitted(&busy, id, fitted).await;
         }
     }
     match pool_store::payout(id) {
