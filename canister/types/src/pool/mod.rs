@@ -793,11 +793,12 @@ pub enum DepositStatus {
 /// 2026-10-24).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum DepositResolution {
-    /// Back to its payout with fresh attempts: a started one paying again, one that never
-    /// started queued again at the back, a stake minting again.
+    /// Back to its payout with fresh attempts: a started one paying again with its own dedup
+    /// pair, one that never started queued again at the back, a stake minting again.
     #[n(0)]
     Retry,
-    /// What arrived back to its payer on Base, through the orphan refund path.
+    /// What arrived back to its payer on Base, through the orphan refund path: only for a
+    /// deposit whose payout never started (nothing went out on ICP).
     #[n(1)]
     Refund,
 }
@@ -1032,15 +1033,6 @@ pub struct PayoutProgress {
 }
 
 impl PayoutProgress {
-    /// Whether any ICPSwap leg of it moved money on ICP: approved (a fee spent), begun, or
-    /// answered. A ckUSDC transfer moves nothing the progress can tell.
-    pub fn moved_on_icp(&self) -> bool {
-        [Some(self.swap), self.second, self.back]
-            .into_iter()
-            .flatten()
-            .any(|leg| leg.begun || leg.approvals.unwrap_or(0) > 0 || leg.out.is_some())
-    }
-
     /// The leg a swap step names.
     pub fn leg(&self, leg: Option<u8>) -> SwapLeg {
         match leg {
@@ -1824,9 +1816,10 @@ pub enum PoolStep {
         id: u64,
     },
     /// A controller resolved a deposit held for a human (`resolve_deposit`): `Retry` puts it
-    /// back on its payout with fresh attempts (a started one's dedup instant `retry_at`, the
-    /// door's: its own while a ledger still deduplicates it, else the resolution's); `Refund`
-    /// holds what arrived as an orphan under its transfer's key, for its payer, once.
+    /// back on its payout with fresh attempts, a started one with its own dedup pair;
+    /// `Refund`, of one that never started, holds what arrived as an orphan under its
+    /// transfer's key, for its payer, once. `retry_at` is always none (the review,
+    /// 2026-10-24: a payout keeps its own dedup instant), kept for the line's layout.
     #[n(48)]
     DepositResolved {
         #[n(0)]

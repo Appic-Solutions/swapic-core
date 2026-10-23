@@ -148,10 +148,12 @@ fn only_a_controller_resolves_and_only_a_held_deposit() {
     });
 }
 
-/// `Retry`: a started payout pays again with its own dedup instant while the ledger still
-/// deduplicates it, else a fresh one; one that never started (CR-08) is queued again.
+/// `Retry` (the review, 2026-10-24): a started payout pays again with its own dedup pair,
+/// and only while the ledger still deduplicates it, so a transfer that landed is answered
+/// `Duplicate` and recorded paid once; past that, the controller reads the ledger. One that
+/// never started (CR-08) is queued again whenever.
 #[test]
-fn a_retried_deposit_keeps_its_dedup_instant_inside_the_window() {
+fn a_started_deposit_is_retried_only_while_the_ledger_deduplicates_it() {
     on_fresh_memory(|| {
         crate::storage::init();
         pool();
@@ -173,26 +175,29 @@ fn a_retried_deposit_keeps_its_dedup_instant_inside_the_window() {
         assert_eq!(attempt.created_at, at(5));
         let late = held(2, true);
         let past = at(5).checked_add(DEDUP_WINDOW).unwrap();
-        assert_eq!(retry(late, past), Ok(None));
-        let attempt = deposit(&late).unwrap().payout.attempt.unwrap();
-        assert_eq!(attempt.created_at, past);
+        assert!(matches!(
+            retry(late, past),
+            Err(PoolError::NotAllowed(why)) if why.contains("read the ledger")
+        ));
+        assert!(matches!(status(late), DepositStatus::PayoutFailed(_)));
         let never = held(3, false);
-        assert_eq!(retry(never, at(7)), Ok(None));
+        assert_eq!(retry(never, past), Ok(None));
         assert_eq!(status(never), DepositStatus::Arrived);
         assert!(ledger().queue.0.iter().any(|(queued, _)| *queued == never));
     });
 }
 
-/// `Refund`: every refusal before anything is recorded (a sanctioned payer, a closed pool);
-/// then what arrived is an orphan held for its payer, and the transfer to sign is all of it
-/// less the least network fee, to the payer, on Base's USDC.
+/// `Refund`: a started payout is never refunded on Base (its transfer may have landed, its
+/// answer lost). For one that never started, every refusal comes before anything is
+/// recorded (a sanctioned payer, a closed pool); then what arrived is an orphan held for its
+/// payer, and the transfer to sign is all of it less the least network fee, to the payer,
+/// on Base's USDC.
 #[test]
 fn a_refunded_deposit_is_an_orphan_and_its_transfer_is_checked_first() {
     on_fresh_memory(|| {
         crate::storage::init();
         pool();
-        let r#ref = held(1, true);
-        let refund = |sanctioned: bool, open: fn() -> Result<(), PoolError>| {
+        let refund = |r#ref, sanctioned: bool, open: fn() -> Result<(), PoolError>| {
             resolve(
                 false,
                 true,
@@ -203,11 +208,25 @@ fn a_refunded_deposit_is_an_orphan_and_its_transfer_is_checked_first() {
                 open,
             )
         };
-        assert!(matches!(refund(true, open), Err(PoolError::Sanctioned(_))));
-        assert!(matches!(refund(false, closed), Err(PoolError::Closed(_))));
+        let started = held(1, true);
+        assert!(matches!(
+            refund(started, false, open),
+            Err(PoolError::NotAllowed(why)) if why.contains("never refunded")
+        ));
+        let r#ref = held(2, false);
+        assert!(matches!(
+            refund(r#ref, true, open),
+            Err(PoolError::Sanctioned(_))
+        ));
+        assert!(matches!(
+            refund(r#ref, false, closed),
+            Err(PoolError::Closed(_))
+        ));
         assert!(matches!(status(r#ref), DepositStatus::PayoutFailed(_)));
-        let call = refund(false, open).unwrap().expect("a transfer to sign");
-        assert_eq!(call.key, credit(1));
+        let call = refund(r#ref, false, open)
+            .unwrap()
+            .expect("a transfer to sign");
+        assert_eq!(call.key, credit(2));
         assert_eq!(call.to, payer());
         assert_eq!(call.usdc, base_usdc());
         assert_eq!(
@@ -220,6 +239,9 @@ fn a_refunded_deposit_is_an_orphan_and_its_transfer_is_checked_first() {
         let orphans = crate::pool::orphans::held(at(7));
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].payer, Some(payer().to_string()));
-        assert!(matches!(refund(false, open), Err(PoolError::NotAllowed(_))));
+        assert!(matches!(
+            refund(r#ref, false, open),
+            Err(PoolError::NotAllowed(_))
+        ));
     });
 }

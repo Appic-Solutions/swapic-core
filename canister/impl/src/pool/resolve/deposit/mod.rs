@@ -1,20 +1,20 @@
 //! `resolve_deposit` (Jeff, 2026-10-24): an EVM to ICP deposit whose payout is held for a
 //! human (`DepositStatus::PayoutFailed`): a started payout after its tenth failure, a queued
 //! one that never started (CR-08), a stake whose mint kept failing. Its lines stayed held,
-//! since nothing led out of it. A controller, having looked at the ledgers, resolves it once:
+//! since nothing led out of it. A controller resolves it once:
 //!
 //! - `Retry`: back to its payout with fresh attempts. A started one pays again with its own
-//!   dedup instant while the ledger still deduplicates it (a transfer whose answer was lost,
-//!   and that went out, is then the same transfer), else with the resolution's; one that never
-//!   started is queued again, at the back; a stake mints again.
-//! - `Refund`: what arrived goes back to its payer on Base, less the least network fee,
+//!   dedup pair, and only while the ledger still deduplicates it: a transfer that landed, its
+//!   answer lost, is then answered `Duplicate` and recorded paid, once. Past that window the
+//!   canister cannot tell, and the controller reads the ledger. One that never started is
+//!   queued again, at the back; a stake mints again.
+//! - `Refund`: only for a deposit whose payout never started (nothing went out on ICP; a
+//!   started one's transfer may have landed, so it is never refunded on Base, the review,
+//!   2026-10-24). What arrived goes back to its payer on Base, less the least network fee,
 //!   through the orphan refund path, behind the pool's guard: its arrival is an orphan held
 //!   under its transfer's key, and the canister signs `USDC.transfer(payer, amount - fee)`. A
-//!   signature that fails leaves the orphan held, for `resolve_orphan`. A payout whose ICPSwap
-//!   leg moved money is never refunded whole, and a deposit with no payer is not refunded.
-//!
-//! The canister cannot tell a ckUSDC transfer whose answer was lost: before a `Refund`, or a
-//! `Retry` past the window, the controller checks no transfer of the payout went out.
+//!   signature that fails leaves the orphan held, for `resolve_orphan`. A deposit with no
+//!   payer is not refunded.
 
 #[cfg(test)]
 mod tests;
@@ -27,14 +27,10 @@ use types::hash::PoolRef;
 use types::pool::{DepositResolution, DepositStatus, PoolStep};
 use types::{Address, EvmAddress, Timestamp};
 
-/// The dedup instant a started payout is retried with: its attempt's own while a ledger
-/// still deduplicates it, else `now`.
-pub fn retry_at(attempt_at: Timestamp, now: Timestamp) -> Timestamp {
-    if now.saturating_duration_since(attempt_at) < DEDUP_WINDOW {
-        attempt_at
-    } else {
-        now
-    }
+/// Whether a ledger still deduplicates a transfer of a payout started at `attempt_at`, at
+/// `now`: a retry with its own dedup pair is then answered `Duplicate` if it landed.
+pub fn deduplicated(attempt_at: Timestamp, now: Timestamp) -> bool {
+    now.saturating_duration_since(attempt_at) < DEDUP_WINDOW
 }
 
 fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {
@@ -73,21 +69,33 @@ pub fn resolve(
         .ok_or_else(|| PoolError::Unavailable("the deposit is being driven now".to_string()))?;
     match resolution {
         WireResolution::Retry => {
-            let retry_at = deposit
-                .payout
-                .attempt
-                .map(|attempt| retry_at(attempt.created_at, now));
+            if let Some(attempt) = deposit.payout.attempt {
+                if !deduplicated(attempt.created_at, now) {
+                    return Err(PoolError::NotAllowed(format!(
+                        "the ledger no longer deduplicates its payout's transfer (memo its ref, \
+                         created_at_time {}): read the ledger for it before anything",
+                        attempt.created_at.as_nanos()
+                    )));
+                }
+            }
             record(
                 PoolStep::DepositResolved {
                     r#ref,
                     resolution: DepositResolution::Retry,
-                    retry_at,
+                    retry_at: None,
                 },
                 now,
             )?;
             Ok(None)
         }
         WireResolution::Refund => {
+            if deposit.payout.attempt.is_some() {
+                return Err(PoolError::NotAllowed(
+                    "a started payout is never refunded on Base: its transfer may have \
+                     landed; retry it while the ledger deduplicates it, else read the ledger"
+                        .to_string(),
+                ));
+            }
             let (key, orphan) = deposit
                 .refund_orphan()
                 .ok_or_else(|| PoolError::NotAllowed("nothing arrived".to_string()))?;
@@ -95,11 +103,6 @@ pub fn resolve(
             if payer == EvmAddress::ZERO {
                 return Err(PoolError::NotAllowed(
                     "the deposit has no payer to refund".to_string(),
-                ));
-            }
-            if deposit.payout.moved_on_icp() {
-                return Err(PoolError::NotAllowed(
-                    "its payout moved money on ICP: it is not refunded whole".to_string(),
                 ));
             }
             let refund = orphans::refund_call(key, &orphan, payer, sanctioned, open)?;

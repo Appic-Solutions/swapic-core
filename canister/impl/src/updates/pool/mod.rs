@@ -164,14 +164,15 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
 /// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
 /// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
-/// `Retry`: back to its payout with fresh attempts, a started one with its own dedup instant
-/// within 23 hours of it, else a fresh one. `Refund`: refused while the pool is closed, for a
-/// sanctioned or zero payer, and for a payout whose ICPSwap leg moved money; what arrived is
-/// held as an orphan under its transfer's key and the canister signs
-/// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
-/// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`. Before a
-/// refund, or a retry past 23 hours, the controller checks the payout's transfer never went
-/// out.
+/// `Retry`: back to its payout with fresh attempts; a started one keeps its own dedup pair
+/// and is retried only while the ledger still deduplicates it (23 hours), so a transfer that
+/// landed is answered `Duplicate` and recorded paid once; past that it is refused, and the
+/// controller reads the ledger. `Refund`: only for a deposit whose payout never started (a
+/// started one's transfer may have landed), refused while the pool is closed and for a
+/// sanctioned or zero payer; what arrived is held as an orphan under its transfer's key and
+/// the canister signs `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept
+/// for its gas. A signature that fails answers `Unavailable`, the orphan held for
+/// `resolve_orphan`.
 #[update]
 pub async fn resolve_deposit(
     r#ref: Vec<u8>,

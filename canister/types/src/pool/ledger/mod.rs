@@ -751,17 +751,21 @@ impl PoolLedger {
                 if !matches!(deposit.status, DepositStatus::PayoutFailed(_)) {
                     return Err(not_from("DepositResolved", &deposit.status));
                 }
-                let started = deposit.payout.attempt.is_some();
+                // a payout keeps its own dedup pair (the review, 2026-10-24)
+                if retry_at.is_some() {
+                    return Err(PoolStepError::Terms(
+                        "a resolution keeps its payout's own dedup instant",
+                    ));
+                }
                 match resolution {
-                    DepositResolution::Retry if retry_at.is_some() && !started => {
-                        Err(PoolStepError::Terms(
-                            "only a started payout's retry carries its dedup instant",
-                        ))
-                    }
                     DepositResolution::Retry => Ok(()),
                     DepositResolution::Refund => {
-                        if retry_at.is_some() {
-                            return Err(PoolStepError::Terms("a refund carries no dedup instant"));
+                        // a started payout's transfer may have landed, its answer lost: it is
+                        // only ever retried, so the ledger tells (the review, 2026-10-24)
+                        if deposit.payout.attempt.is_some() {
+                            return Err(PoolStepError::Terms(
+                                "a started payout is never refunded on Base",
+                            ));
                         }
                         let (credit, orphan) = deposit
                             .refund_orphan()
@@ -769,15 +773,7 @@ impl PoolLedger {
                         if deposit.terms.src_payer == crate::evm::EvmAddress::ZERO {
                             return Err(PoolStepError::Terms("the deposit has no payer to refund"));
                         }
-                        // what moved on ICP is spent: a refund of all of it could pay twice
-                        if deposit.payout.moved_on_icp() {
-                            return Err(PoolStepError::Terms(
-                                "its payout moved money on ICP: it is not refunded whole",
-                            ));
-                        }
-                        if orphan.amount > self.pockets.base.free
-                            || (started && deposit.held() > self.pockets.icp.reserved)
-                        {
+                        if orphan.amount > self.pockets.base.free {
                             return Err(PoolStepError::Overflow);
                         }
                         if lookup.orphan(&credit).is_some_and(|known| {
@@ -1182,22 +1178,16 @@ impl PoolLedger {
                 }
             }
             PoolStep::DepositResolved {
-                r#ref,
-                resolution,
-                retry_at,
+                r#ref, resolution, ..
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     match resolution {
                         DepositResolution::Retry => {
                             deposit.payout.failures = 0;
                             deposit.payout.failed = None;
-                            match deposit.payout.attempt.as_mut() {
-                                Some(attempt) => {
-                                    if let Some(retry_at) = retry_at {
-                                        attempt.created_at = *retry_at;
-                                    }
-                                    deposit.status = DepositStatus::Paying;
-                                }
+                            match deposit.payout.attempt {
+                                // paying again, with its own dedup pair
+                                Some(_) => deposit.status = DepositStatus::Paying,
                                 // never started (CR-08): queued again, at the back
                                 None => {
                                     deposit.status = DepositStatus::Arrived;
@@ -1211,14 +1201,9 @@ impl PoolLedger {
                             }
                         }
                         DepositResolution::Refund => {
+                            // never started: nothing of it was held on ICP
                             ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
                             ledger.paying.remove(r#ref);
-                            if deposit.payout.attempt.is_some() {
-                                let held = deposit.held();
-                                let icp = &mut ledger.pockets.icp;
-                                icp.reserved = sat_sub(icp.reserved, held);
-                                icp.free = sat_add(icp.free, held);
-                            }
                             // out of the Base pocket's free line, onto the unattributed one:
                             // the Base balance's books stay where they were
                             if let Some((credit, orphan)) = deposit.refund_orphan() {
