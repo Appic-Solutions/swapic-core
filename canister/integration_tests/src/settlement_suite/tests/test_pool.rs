@@ -1439,7 +1439,7 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
             body: serde_json::json!([
                 {"jsonrpc": "2.0", "id": 0, "result": receipt},
                 {"jsonrpc": "2.0", "id": 1, "result": {
-                    "number": "0x100", "hash": format!("0x{}", "cd".repeat(32)), "timestamp": "0x6ad5e897",
+                    "number": "0xfe", "hash": format!("0x{}", "cd".repeat(32)), "timestamp": "0x6ad5e897",
                 }},
             ])
             .to_string()
@@ -1487,7 +1487,8 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
             body[0]["params"],
             serde_json::json!([format!("0x{}", "ab".repeat(32))])
         );
-        assert_eq!(body[1]["params"], serde_json::json!(["0x100", false]));
+        // two blocks below the one node's head: a block every node's provider has
+        assert_eq!(body[1]["params"], serde_json::json!(["0xfe", false]));
         let mut answers = (0..nodes).map(|node| {
             answer(if lies(node) {
                 made_up.clone()
