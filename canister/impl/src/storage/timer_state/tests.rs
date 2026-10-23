@@ -22,3 +22,16 @@ fn the_timers_memory_is_kept_in_stable_memory() {
         assert!(update(|state| state.reports.admit(TxHash::new([20; 32]), now)).is_err());
     });
 }
+
+/// Review of the merged canister (item 6): the cell is written only when the state changed.
+#[test]
+fn the_cell_is_written_only_when_the_state_changes() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        WRITES.with(|writes| writes.set(0));
+        update(|state| state.alerted_head.is_some());
+        assert_eq!(WRITES.with(|writes| writes.get()), 0, "nothing changed");
+        update(|state| state.unfilled_reads.insert(1, Timestamp::from_nanos(1)));
+        assert_eq!(WRITES.with(|writes| writes.get()), 1);
+    });
+}

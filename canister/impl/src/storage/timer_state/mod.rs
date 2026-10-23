@@ -16,6 +16,12 @@ thread_local! {
     );
 }
 
+#[cfg(test)]
+thread_local! {
+    // how many times the cell was written, for the test that an unchanged state is not
+    pub(crate) static WRITES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// On a fresh install writes the empty state, in an update context.
 pub fn init() {
     STATE.with(|_| ());
@@ -25,10 +31,16 @@ pub fn get() -> TimerState {
     STATE.with(|cell| cell.borrow().get().clone())
 }
 
-/// `f` on the stored state, which is written back.
+/// `f` on the stored state, which is written back only when `f` changed it.
 pub fn update<R>(f: impl FnOnce(&mut TimerState) -> R) -> R {
-    let mut state = get();
+    let before = get();
+    let mut state = before.clone();
     let answer = f(&mut state);
+    if state == before {
+        return answer;
+    }
+    #[cfg(test)]
+    WRITES.with(|writes| writes.set(writes.get() + 1));
     STATE.with(|cell| {
         cell.borrow_mut()
             .set(state)

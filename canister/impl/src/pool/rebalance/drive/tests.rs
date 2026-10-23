@@ -633,3 +633,18 @@ fn a_proposal_too_close_to_its_deadline_is_passed_over() {
     };
     assert_eq!(proposal_to_take(&urgent, now), None);
 }
+
+/// Review of the merged canister (item 6): the Portals' last reads of moves no longer open
+/// are dropped, so the remembered reads never grow past the open moves.
+#[test]
+fn the_unfilled_reads_of_closed_moves_are_dropped() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        crate::storage::timer_state::update(|state| {
+            state.unfilled_reads.insert(4_242, at(0));
+        });
+        assert!(unfilled_due(7, at(1)));
+        let reads = crate::storage::timer_state::get().unfilled_reads;
+        assert!(!reads.contains_key(&4_242), "no move 4242 is open");
+    });
+}
