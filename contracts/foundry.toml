@@ -13,6 +13,12 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 
+# The fork tests run on Cancun chains (Base, Arbitrum, Ethereum): KyberSwap's executor uses
+# an opcode Shanghai lacks. `FOUNDRY_PROFILE=fork forge test --match-path 'test/fork/*'`.
+# The deployed contracts stay compiled for Shanghai (the default profile) (C-05).
+[profile.fork]
+evm_version = "cancun"
+
 [invariant]
 runs = 256
 depth = 50
