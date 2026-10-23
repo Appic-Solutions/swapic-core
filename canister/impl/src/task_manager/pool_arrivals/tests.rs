@@ -486,3 +486,22 @@ fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
         assert_eq!(refunded.reclaim, Some(Reclaim::Credited));
     });
 }
+
+/// L-15: the canister's dust floor is the services' ten cents (no pool route delivers less):
+/// a stranger's five cents is never worth a receipt's read, and never an orphan for a human.
+#[test]
+fn a_transfer_under_ten_cents_is_dust() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let base = FakeBase {
+            logs: vec![
+                transfer(1, 150, 0, 50_000),
+                transfer(2, 151, 0, 99_999),
+                transfer(3, 152, 0, 100_000),
+            ],
+            ..FakeBase::default()
+        };
+        let report = pass(&base);
+        assert_eq!(report.receipts, 1, "only the ten cents is read");
+    });
+}

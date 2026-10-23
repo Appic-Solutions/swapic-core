@@ -57,9 +57,10 @@ pub const MAX_RECEIPTS_PER_PASS: usize = 20;
 /// The most transfers one pass considers.
 pub const MAX_TRANSFERS_PER_PASS: usize = 1_000;
 
-/// Below this (one cent of USDC) a transfer is dust: no registration's money, and never
-/// worth a receipt's read.
-pub const DUST: u64 = 10_000;
+/// Below this (ten cents of USDC, the services' own floor: no pool route delivers less) a
+/// transfer is dust: no deposit's money, and never worth a receipt's read or an orphan a
+/// human must clear (L-15).
+pub const DUST: u64 = 100_000;
 
 thread_local! {
     // Heap by necessity: whether a pass is out right now. Two passes from one cursor would
