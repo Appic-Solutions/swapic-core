@@ -1592,8 +1592,9 @@ fn a_plan_whose_scaler_read_failed_once_is_signed_by_the_next_pass() {
 }
 
 #[derive(CandidType)]
-struct TransferArg {
-    from_subaccount: Option<Vec<u8>>,
+struct TransferFromArgs {
+    spender_subaccount: Option<Vec<u8>>,
+    from: Account,
     to: Account,
     amount: Nat,
     fee: Option<Nat>,
@@ -1602,27 +1603,30 @@ struct TransferArg {
 }
 
 impl World {
-    /// `from` sends `amount` of ckUSDC to `to`: the ledger block it landed in.
-    fn transfer(&self, from: Principal, to: Principal, amount: u64) -> u64 {
-        let args = TransferArg {
-            from_subaccount: None,
-            to: account(to),
+    /// The canister's own pull of `amount` from `from`, as `pull_stake` asks it (its memo and
+    /// `created_at_time` given): the ledger block it landed in.
+    fn pull_as_canister(&self, from: Principal, amount: u64, memo: [u8; 32], at: u64) -> u64 {
+        self.approve(from, amount + FEE);
+        let args = TransferFromArgs {
+            spender_subaccount: None,
+            from: account(from),
+            to: account(self.canister),
             amount: Nat::from(amount),
             fee: None,
-            memo: None,
-            created_at_time: None,
+            memo: Some(memo.to_vec()),
+            created_at_time: Some(at),
         };
         let raw = self
             .pic
             .update_call(
                 self.ledger,
-                from,
-                "icrc1_transfer",
+                self.canister,
+                "icrc2_transfer_from",
                 encode_one(args).unwrap(),
             )
             .expect("the ledger answers");
         let landed: Result<Nat, candid::Reserved> = candid::decode_one(&raw).unwrap();
-        let block = landed.expect("the transfer lands");
+        let block = landed.expect("the pull lands");
         u64::try_from(block.0).expect("a block number fits")
     }
 }
@@ -1679,17 +1683,17 @@ fn a_held_deposit_a_controller_retries_is_paid_once() {
 }
 
 /// `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost past the
-/// ledger's deduplication window is never asked again. A controller who saw its pull land
-/// resolves it, and its shares are minted, once; a stranger may not.
+/// ledger's deduplication window is never asked again. A controller names the block its
+/// pull landed in; the canister reads it on the ledger and mints the stake's shares only on
+/// its own pull, once (the review, 2026-10-24); a stranger may not resolve it.
 #[test]
 fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
     use settlement_api::types::pool::StakeResolution;
     let world = world(usdc(1_000));
     world.plant_stake(world.admin, usdc(1_000), u128::from(usdc(1_000)));
-    // the pull landed: the staker's 100 ckUSDC are the canister's
-    let block = world.transfer(staker(), world.canister, usdc(100));
     let id = PoolOpId::new([0xa7; 32]);
     let window = Duration::from_secs(23 * 3_600 + 1);
+    let created_at = Timestamp::from_nanos(world.now().as_nanos() - window.as_nanos() as u64);
     let owner = types::pool::PoolAccount::Icp(IcpAccount {
         owner: staker(),
         subaccount: None,
@@ -1702,11 +1706,13 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
             subaccount: None,
         },
         amount: TokenAmount::from(usdc(100)),
-        created_at: Timestamp::from_nanos(world.now().as_nanos() - window.as_nanos() as u64),
+        created_at,
     });
+    // the pull landed: the staker's 100 ckUSDC are the canister's
+    let block = world.pull_as_canister(staker(), usdc(100), id.into_bytes(), created_at.as_nanos());
     world.next_tick();
     assert_eq!(world.pool_account(staker()).shares, Nat::from(0_u8));
-    let resolve = |sender: Principal| -> Result<(), PoolError> {
+    let resolve = |sender: Principal, block: u64| -> Result<(), PoolError> {
         update(
             &world.pic,
             world.canister,
@@ -1716,9 +1722,17 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
                 .unwrap(),
         )
     };
-    assert!(matches!(resolve(staker()), Err(PoolError::NotAllowed(_))));
-    assert_eq!(resolve(world.admin), Ok(()));
+    assert!(matches!(
+        resolve(staker(), block),
+        Err(PoolError::NotAllowed(_))
+    ));
+    // the ledger's first block is its mint to the canister: no pull of this stake
+    assert!(matches!(
+        resolve(world.admin, 0),
+        Err(PoolError::NotAllowed(_))
+    ));
+    assert_eq!(resolve(world.admin, block), Ok(()));
     assert_ne!(world.pool_account(staker()).shares, Nat::from(0_u8));
-    assert_eq!(resolve(world.admin), Err(PoolError::Unknown));
+    assert_eq!(resolve(world.admin, block), Err(PoolError::Unknown));
     assert!(world.replay_matches());
 }

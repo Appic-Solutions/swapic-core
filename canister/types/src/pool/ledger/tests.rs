@@ -1819,3 +1819,38 @@ fn a_held_stake_retried_mints_again() {
     .unwrap();
     assert_eq!(pool.deposits[&staked].status, DepositStatus::Paid);
 }
+
+/// The review (2026-10-24): one ckUSDC ledger block resolves one lost stake, so a block a
+/// controller named once is refused for any other.
+#[test]
+fn a_ledger_block_resolves_one_lost_stake() {
+    let mut pool = funded(usdc(1_000));
+    let start = |pool: &mut Pool, byte: u8| {
+        let id = PoolOpId::new([byte; 32]);
+        pool.step(PoolStep::StakeStarted {
+            id,
+            owner: PoolAccount::Icp(recipient(byte)),
+            from: recipient(byte),
+            amount: usdc(10),
+            created_at: Timestamp::from_nanos(2),
+        })
+        .unwrap();
+        id
+    };
+    let (first, second) = (start(&mut pool, 7), start(&mut pool, 8));
+    let pulled = |id, block, pool: &Pool| PoolStep::StakeResolved {
+        id,
+        resolution: StakeResolution::Pulled {
+            block,
+            shares: pool.ledger.mint_now(usdc(10)).unwrap(),
+        },
+    };
+    pool.step(pulled(first, 9, &pool)).unwrap();
+    assert!(pool.step(pulled(second, 9, &pool)).is_err());
+    assert!(pool.ledger.pending.contains_key(&second));
+    pool.step(pulled(second, 10, &pool)).unwrap();
+    assert_eq!(
+        pool.ledger.resolved_pulls,
+        Some([9_u64, 10].into_iter().collect())
+    );
+}

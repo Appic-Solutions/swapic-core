@@ -130,6 +130,90 @@ enum ApproveError {
     GenericError { error_code: Nat, message: String },
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct GetTransactionsRequest {
+    start: Nat,
+    length: Nat,
+}
+
+/// A transfer as an ICRC-1 ledger's `get_transactions` logs it, the fields the canister
+/// reads: an `icrc2_transfer_from` carries its spender.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LedgerTransfer {
+    pub from: Account,
+    pub to: Account,
+    pub amount: Nat,
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: Option<u64>,
+    pub spender: Option<Account>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct LedgerTransaction {
+    transfer: Option<LedgerTransfer>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct TransactionRange {
+    transactions: Vec<LedgerTransaction>,
+}
+
+candid::define_function!(ArchiveFn : (GetTransactionsRequest) -> (TransactionRange) query);
+
+#[derive(CandidType, Deserialize)]
+struct ArchivedRange {
+    start: Nat,
+    length: Nat,
+    callback: ArchiveFn,
+}
+
+#[derive(CandidType, Deserialize)]
+struct GetTransactionsResponse {
+    first_index: Nat,
+    transactions: Vec<LedgerTransaction>,
+    archived_transactions: Vec<ArchivedRange>,
+}
+
+/// The transfer in `ledger`'s block `block`, read with `get_transactions` on the ledger, or on
+/// the archive that holds it: none for no such block, or a block that is no transfer.
+pub async fn ledger_transfer_at(
+    ledger: Principal,
+    block: u64,
+) -> Result<Option<LedgerTransfer>, CallError> {
+    let request = || GetTransactionsRequest {
+        start: Nat::from(block),
+        length: Nat::from(1_u8),
+    };
+    let (answer,): (GetTransactionsResponse,) =
+        call(ledger, "get_transactions", (request(),)).await?;
+    let at = Nat::from(block);
+    if answer.first_index == at && !answer.transactions.is_empty() {
+        return Ok(answer
+            .transactions
+            .into_iter()
+            .next()
+            .and_then(|transaction| transaction.transfer));
+    }
+    let Some(range) = answer
+        .archived_transactions
+        .into_iter()
+        .find(|range| range.start <= at && at < range.start.clone() + range.length.clone())
+    else {
+        return Ok(None);
+    };
+    let (archived,): (TransactionRange,) = call(
+        range.callback.0.principal,
+        &range.callback.0.method,
+        (request(),),
+    )
+    .await?;
+    Ok(archived
+        .transactions
+        .into_iter()
+        .next()
+        .and_then(|transaction| transaction.transfer))
+}
+
 /// The deduplication key of one money call: the quote hash as the memo, and the instant
 /// its begun marker was sealed as `created_at_time`, so a retry is the same transfer.
 #[derive(Clone, Copy, Debug)]

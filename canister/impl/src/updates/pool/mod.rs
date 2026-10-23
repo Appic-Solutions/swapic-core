@@ -205,21 +205,28 @@ pub async fn resolve_deposit(
 /// was lost, past the ledger's deduplication window (23 hours after it started; the canister
 /// stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
 /// `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
-/// ckUSDC ledger block, and its shares are minted at the pool's price now. `NotPulled`: it
-/// never landed, and it is dropped, its room freed.
+/// ckUSDC ledger block; the canister reads the block (`get_transactions`, on the ledger or
+/// its archive) and mints the stake's shares at the pool's price now only when it is the
+/// stake's own pull (from its account to the canister's, by the canister, its amount, its op
+/// id as the memo, its start as `created_at_time`), one block for one stake; a ledger not
+/// read answers `Unavailable`, to be asked again. `NotPulled`: it never landed, and it is
+/// dropped, its room freed.
 #[update]
-pub fn resolve_stake(id: Vec<u8>, resolution: StakeResolution) -> Result<(), PoolError> {
+pub async fn resolve_stake(id: Vec<u8>, resolution: StakeResolution) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();
     let id = <[u8; 32]>::try_from(id.as_slice())
         .map(types::hash::PoolOpId::new)
         .map_err(|_| PoolError::NotAllowed("a stake's id is its 32 bytes".to_string()))?;
     pool::resolve::stake::resolve(
-        is_halted(),
+        is_halted,
         ic_cdk::api::is_controller(&caller),
+        ic_cdk::api::id(),
         id,
         resolution,
-        pool::now(),
+        pool::now,
+        &pool::payout::Live,
     )
+    .await
 }
 
 /// Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's

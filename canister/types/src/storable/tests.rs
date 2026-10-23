@@ -643,7 +643,20 @@ fn samples() -> Vec<Sample> {
     all.extend(reverted_block_samples());
     all.extend(reverted_at_samples());
     all.extend(held_resolution_samples());
+    all.extend(resolved_pull_samples());
     all
+}
+
+/// The ledger blocks controllers resolved lost stake pulls with (the review, 2026-10-24).
+fn resolved_pull_samples() -> Vec<Sample> {
+    use crate::pool::ledger::PoolLedger;
+    vec![sample(
+        "pool ledger with the blocks resolved stakes were pulled in",
+        PoolLedger {
+            resolved_pulls: Some([2_001_u64, 2_002].into_iter().collect()),
+            ..PoolLedger::default()
+        },
+    )]
 }
 
 /// A controller's doors for what is held for a human (Jeff, 2026-10-24): a deposit refunded,
@@ -2870,6 +2883,9 @@ fn pool_samples() -> Vec<Sample> {
         evm_changed: None,
         // absent, so this sample's bytes stay the ones the golden pins
         rebalance: None,
+        // absent, so this sample's bytes stay the ones the golden pins;
+        // `resolved_pull_samples` pins it
+        resolved_pulls: None,
     };
     let queued = PoolLedger {
         queue: crate::pool::PayoutQueue(vec![

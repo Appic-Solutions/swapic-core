@@ -136,6 +136,11 @@ pub struct PoolLedger {
     /// indices other plans add.
     #[n(40)]
     pub rebalance: Option<crate::pool::RebalanceLines>,
+    /// The ckUSDC ledger blocks controllers resolved lost ICP stake pulls with
+    /// (`resolve_stake`, the review, 2026-10-24): each resolves one stake. Absent until the
+    /// first.
+    #[n(41)]
+    pub resolved_pulls: Option<BTreeSet<u64>>,
 }
 
 /// What one step changes: the ledger, and the entries of the maps beside it.
@@ -736,6 +741,15 @@ impl PoolLedger {
                     StakeResolution::Pulled { shares, .. } if *shares == Shares::ZERO => {
                         Err(PoolStepError::Zero("shares"))
                     }
+                    // one ledger block resolves one stake
+                    StakeResolution::Pulled { block, .. }
+                        if self
+                            .resolved_pulls
+                            .as_ref()
+                            .is_some_and(|blocks| blocks.contains(block)) =>
+                    {
+                        Err(PoolStepError::Terms("a ledger block resolves one stake"))
+                    }
                     _ => Ok(()),
                 },
                 Some(_) => Err(PoolStepError::Mismatch),
@@ -1165,9 +1179,13 @@ impl PoolLedger {
                     // the pull landed: booked as `StakedIcp` books it
                     (
                         Some(PendingOp::Stake { owner, amount, .. }),
-                        StakeResolution::Pulled { shares, .. },
+                        StakeResolution::Pulled { block, shares },
                     ) => {
                         ledger.book_stake(amount, *shares);
+                        ledger
+                            .resolved_pulls
+                            .get_or_insert_with(BTreeSet::new)
+                            .insert(*block);
                         shares_out = Some(credit_shares(lookup, &owner, *shares));
                     }
                     // it never landed: dropped as `StakeFailed` drops it
