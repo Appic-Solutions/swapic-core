@@ -245,3 +245,35 @@ fn a_refunded_deposit_is_an_orphan_and_its_transfer_is_checked_first() {
         ));
     });
 }
+
+/// The review (2026-10-24): a started payout is retried only with an hour of the ledger's
+/// window left, for its next drive to land inside it.
+#[test]
+fn a_started_deposit_is_retried_only_with_an_hour_of_the_window_left() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let retry = |r#ref, now| {
+            resolve(
+                false,
+                true,
+                r#ref,
+                WireResolution::Retry,
+                now,
+                |_: &Address| false,
+                open,
+            )
+        };
+        let edge = at(5)
+            .checked_add(DEDUP_WINDOW - std::time::Duration::from_secs(3_600))
+            .unwrap();
+        let late = held(1, true);
+        assert!(matches!(
+            retry(late, edge),
+            Err(PoolError::NotAllowed(why)) if why.contains("read the ledger")
+        ));
+        let inside = held(2, true);
+        let before = Timestamp::from_nanos(edge.as_nanos() - 1);
+        assert_eq!(retry(inside, before), Ok(None));
+    });
+}

@@ -23,14 +23,21 @@ use crate::pool::orphans::{self, Refund};
 use crate::pool::payout::{Busy, DEDUP_WINDOW};
 use crate::storage::pool as pool_store;
 use settlement_api::types::pool::{DepositResolution as WireResolution, PoolError};
+use std::time::Duration;
 use types::hash::PoolRef;
 use types::pool::{DepositResolution, DepositStatus, PoolStep};
 use types::{Address, EvmAddress, Timestamp};
 
-/// Whether a ledger still deduplicates a transfer of a payout started at `attempt_at`, at
-/// `now`: a retry with its own dedup pair is then answered `Duplicate` if it landed.
+/// What of the ledger's window a retry must leave its next drive (the review, 2026-10-24).
+pub const RETRY_MARGIN: Duration = Duration::from_secs(3_600);
+
+/// Whether a ledger still deduplicates a transfer of a payout started at `attempt_at` after
+/// a retry at `now`, its next drive [`RETRY_MARGIN`] away at most: a transfer that landed is
+/// then answered `Duplicate`.
 pub fn deduplicated(attempt_at: Timestamp, now: Timestamp) -> bool {
-    now.saturating_duration_since(attempt_at) < DEDUP_WINDOW
+    now.saturating_duration_since(attempt_at)
+        .saturating_add(RETRY_MARGIN)
+        < DEDUP_WINDOW
 }
 
 fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {

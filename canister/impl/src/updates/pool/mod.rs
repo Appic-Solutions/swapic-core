@@ -165,9 +165,9 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
 /// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
 /// `Retry`: back to its payout with fresh attempts; a started one keeps its own dedup pair
-/// and is retried only while the ledger still deduplicates it (23 hours), so a transfer that
-/// landed is answered `Duplicate` and recorded paid once; past that it is refused, and the
-/// controller reads the ledger. `Refund`: only for a deposit whose payout never started (a
+/// and is retried only with an hour of the ledger's deduplication (23 hours) left, so a
+/// transfer that landed is answered `Duplicate` and recorded paid once; past that it is
+/// refused, and the controller reads the ledger. `Refund`: only for a deposit whose payout never started (a
 /// started one's transfer may have landed), refused while the pool is closed and for a
 /// sanctioned or zero payer; what arrived is held as an orphan under its transfer's key and
 /// the canister signs `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept
