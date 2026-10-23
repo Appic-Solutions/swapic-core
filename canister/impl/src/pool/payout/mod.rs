@@ -1656,7 +1656,10 @@ fn alert_if_waited(now: Timestamp) {
     if crate::storage::timer_state::get().alerted_head == Some(head) {
         return;
     }
-    crate::storage::timer_state::update(|state| state.alerted_head = Some(head));
+    crate::storage::timer_state::update(|state| {
+        state.alerted_head = Some(head);
+        ((), true)
+    });
     crate::pool::log(&format!(
         "ALERT: the pool payout {head} has waited {:?} for the ICP pocket, which is {need} short",
         now.saturating_duration_since(since)

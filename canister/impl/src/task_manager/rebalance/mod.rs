@@ -49,7 +49,7 @@ pub async fn tick() {
         if read {
             state.last_check = Some((now, ledger.pockets));
         }
-        read
+        (read, read)
     });
     if read {
         pool::rebalance::trigger::open_if_needed(now);

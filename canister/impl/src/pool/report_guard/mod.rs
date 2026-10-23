@@ -15,5 +15,11 @@ pub fn admit(base_tx: TxHash, now: Timestamp) -> Result<(), PoolError> {
     if roles::get().watcher == Some(ic_cdk::api::caller()) {
         return Ok(());
     }
-    timer_state::update(|state| state.reports.admit(base_tx, now)).map_err(PoolError::Unavailable)
+    // a refused report changed nothing worth writing: what it pruned is pruned again
+    timer_state::update(|state| {
+        let admitted = state.reports.admit(base_tx, now);
+        let changed = admitted.is_ok();
+        (admitted, changed)
+    })
+    .map_err(PoolError::Unavailable)
 }

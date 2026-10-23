@@ -466,14 +466,16 @@ fn unfilled_due(id: u64, now: Timestamp) -> bool {
     open.insert(id);
     crate::storage::timer_state::update(|state| {
         let reads = &mut state.unfilled_reads;
+        let kept = reads.len();
         reads.retain(|move_id, _| open.contains(move_id));
+        let dropped = reads.len() != kept;
         let due = reads
             .get(&id)
             .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);
         if due {
             reads.insert(id, now);
         }
-        due
+        (due, due || dropped)
     })
 }
 

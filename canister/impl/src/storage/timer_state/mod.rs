@@ -31,12 +31,12 @@ pub fn get() -> TimerState {
     STATE.with(|cell| cell.borrow().get().clone())
 }
 
-/// `f` on the stored state, which is written back only when `f` changed it.
-pub fn update<R>(f: impl FnOnce(&mut TimerState) -> R) -> R {
-    let before = get();
-    let mut state = before.clone();
-    let answer = f(&mut state);
-    if state == before {
+/// `f` on the stored state: it answers its result and whether it changed the state, and
+/// only then is the state written back.
+pub fn update<R>(f: impl FnOnce(&mut TimerState) -> (R, bool)) -> R {
+    let mut state = get();
+    let (answer, changed) = f(&mut state);
+    if !changed {
         return answer;
     }
     #[cfg(test)]

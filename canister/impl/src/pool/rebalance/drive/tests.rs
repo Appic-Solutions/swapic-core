@@ -681,6 +681,7 @@ fn the_unfilled_reads_of_closed_moves_are_dropped() {
         crate::storage::init();
         crate::storage::timer_state::update(|state| {
             state.unfilled_reads.insert(4_242, at(0));
+            ((), true)
         });
         assert!(unfilled_due(7, at(1)));
         let reads = crate::storage::timer_state::get().unfilled_reads;
