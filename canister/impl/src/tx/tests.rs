@@ -1285,7 +1285,8 @@ fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
             eco_intent: Some([0x5e; 32]),
             ..receipt_at(101)
         });
-        assert_eq!(payout.status, PayoutStatus::Paid);
+        // its Eco intent's fill is read later
+        assert_eq!(payout.status, PayoutStatus::Delivering);
         assert_eq!(payout.intent, Some([0x5e; 32]));
         assert_eq!(payout.paid_block, Some(BlockNumber::new(101)));
         let books = read_state(|state| state.book(&ChainId::BASE));

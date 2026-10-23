@@ -112,6 +112,34 @@ fn the_pass_decides_by_the_payouts_place_and_its_deadline() {
         // its transaction still in the outbox (until the crediting depth): nothing
         assert_eq!(decide(&reverted, now, true), Next::Wait);
     }
+    // delivering into an Eco intent: its fill read once its route can no longer be filled
+    // (an order that does not read: the latest any route may run, an hour after it)
+    let mut delivering = payout_in(PayoutStatus::Delivering, deadline);
+    delivering.intent = Some([2; 32]);
+    delivering.order = reverted.order.clone();
+    let after_s = 2_000 + crate::pool::eco::MAX_ROUTE_LIFE_S;
+    assert_eq!(fill_read_after(&delivering), after_s);
+    assert_eq!(
+        decide(&delivering, secs(after_s + FILL_MARGIN_S - 1), false),
+        Next::Wait
+    );
+    assert_eq!(
+        decide(&delivering, secs(after_s + FILL_MARGIN_S), false),
+        Next::ReadFill {
+            chain: ChainId::BASE,
+            intent: [2; 32],
+            after_s
+        }
+    );
+    // never filled: undone at once
+    let unfilled = payout_in(PayoutStatus::Unfilled, deadline);
+    assert_eq!(
+        decide(&unfilled, before, false),
+        Next::Undo {
+            why: UNFILLED.to_string(),
+            checked: false
+        }
+    );
     // an ICP swap on its way is driven; one whose pull is too old to ask again stops
     let opened = payout_in(PayoutStatus::Opened, deadline);
     assert_eq!(decide(&opened, before, false), Next::Drive);
@@ -469,17 +497,20 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
     id
 }
 
-/// What the fake chains answer: Swapic's `used` for every order.
+/// What the fake chains answer: Swapic's `used` for every order, and every Eco intent's
+/// fill.
 struct Reads {
     ran: Result<bool, String>,
     asked: RefCell<Vec<[u8; 32]>>,
+    fill: Result<(Fill, BlockNumber), crate::agreed::FillRead>,
+    fills: RefCell<Vec<(ChainId, [u8; 32], u64)>>,
 }
 
 impl Reads {
     fn ran(ran: bool) -> Self {
         Self {
             ran: Ok(ran),
-            asked: RefCell::default(),
+            ..Self::unread()
         }
     }
 
@@ -487,6 +518,15 @@ impl Reads {
         Self {
             ran: Err("not read".to_string()),
             asked: RefCell::default(),
+            fill: Err(crate::agreed::FillRead::Unread("not read".to_string())),
+            fills: RefCell::default(),
+        }
+    }
+
+    fn fill(fill: Result<Fill, crate::agreed::FillRead>) -> Self {
+        Self {
+            fill: fill.map(|fill| (fill, BlockNumber::new(77))),
+            ..Self::unread()
         }
     }
 }
@@ -495,6 +535,16 @@ impl ChainReads for Reads {
     async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String> {
         self.asked.borrow_mut().push(order_id);
         self.ran.clone()
+    }
+
+    async fn fill_after(
+        &self,
+        chain: ChainId,
+        intent: [u8; 32],
+        after_s: u64,
+    ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead> {
+        self.fills.borrow_mut().push((chain, intent, after_s));
+        self.fill.clone()
     }
 }
 
@@ -552,5 +602,226 @@ fn an_order_that_ran_after_its_revert_stops_for_a_human() {
         assert_eq!(shares_of(&owner), before);
         block_on(pass_with(&fake, &reads, || at(12), &open_pool));
         assert_eq!(reads.asked.borrow().len(), 1);
+    });
+}
+
+/// A withdrawal of 100 USDC paid on Base into an Eco intent, its order not one that reads:
+/// its fill is read after 900 + an hour (see `fill_read_after`).
+fn delivering_withdrawal() -> u64 {
+    let id = waiting_withdrawal(staker());
+    sign_payout(id, 0, 9);
+    record_at(
+        PoolStep::PayoutPaid {
+            id,
+            tx_hash: types::TxHash::new([9; 32]),
+            block: BlockNumber::new(30),
+            intent: Some([0x1e; 32]),
+        },
+        at(10),
+    )
+    .unwrap();
+    assert_eq!(payout(id).unwrap().status, PayoutStatus::Delivering);
+    id
+}
+
+/// Item 7 of the final review fixes: an Eco payout's fill is read once its route can no
+/// longer be filled. Read filled, it is paid; read unfilled, it is undone at once (a
+/// withdrawal's shares minted back) and its USDC is owed back by Eco; asked too early or not
+/// read, it waits for the next pass.
+#[test]
+fn a_fill_read_filled_delivers_and_unfilled_undoes() {
+    let after = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+    on_fresh_memory(move || {
+        crate::storage::init();
+        let id = delivering_withdrawal();
+        let reads = Reads::fill(Ok(Fill::Filled));
+        block_on(pass_with(&Fake::default(), &reads, after, &open_pool));
+        assert_eq!(
+            *reads.fills.borrow(),
+            vec![(ChainId::BASE, [0x1e; 32], 900 + 3_600)]
+        );
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Paid);
+        assert_eq!(ledger().pockets.base.in_flight, TokenAmount::ZERO);
+    });
+    on_fresh_memory(move || {
+        crate::storage::init();
+        let id = delivering_withdrawal();
+        let owner = PoolAccount::Evm(staker());
+        let burned = match payout(id).unwrap().undo {
+            Undo::Remint { shares, .. } => shares,
+            Undo::Refund { .. } => unreachable!(),
+        };
+        let before = shares_of(&owner);
+        let amount = payout(id).unwrap().amount.unwrap();
+        let reads = Reads::fill(Ok(Fill::Open));
+        block_on(pass_with(&Fake::default(), &reads, after, &open_pool));
+        let undone = payout(id).unwrap();
+        assert_eq!(undone.status, PayoutStatus::Undone(UNFILLED.to_string()));
+        assert_eq!(undone.reclaim, Some(types::pool::Reclaim::Pending));
+        assert_eq!(shares_of(&owner), before.checked_add(burned).unwrap());
+        assert_eq!(ledger().pockets.base.in_flight, amount);
+        // read once
+        block_on(pass_with(&Fake::default(), &reads, after, &open_pool));
+        assert_eq!(reads.fills.borrow().len(), 1);
+    });
+}
+
+#[test]
+fn a_fill_read_too_early_or_unread_waits() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = delivering_withdrawal();
+        // before its route's deadline: not even asked
+        let reads = Reads::fill(Ok(Fill::Open));
+        block_on(pass_with(
+            &Fake::default(),
+            &reads,
+            || Timestamp::from_secs(900 + 3_600).unwrap(),
+            &open_pool,
+        ));
+        assert!(reads.fills.borrow().is_empty());
+        let late = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+        for answer in [
+            crate::agreed::FillRead::TooEarly,
+            crate::agreed::FillRead::Unread("no agreement".to_string()),
+        ] {
+            let reads = Reads::fill(Err(answer));
+            block_on(pass_with(&Fake::default(), &reads, late, &open_pool));
+            assert_eq!(reads.fills.borrow().len(), 1);
+            assert_eq!(payout(id).unwrap().status, PayoutStatus::Delivering);
+        }
+    });
+}
+
+/// An ICP swap paid into an Eco intent that never filled: its user refunded at once, all its
+/// ckUSDC less the ledger's fee, with no Swapic fee.
+#[test]
+fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+            at(1),
+        )
+        .unwrap();
+        record_at(
+            PoolStep::SettingsSet {
+                settings: types::pool::PoolSettings {
+                    open_for_swaps: true,
+                    ledger_fees: vec![types::pool::LedgerFee {
+                        ledger: ckusdc(),
+                        fee: TokenAmount::from(FEE),
+                    }],
+                    ..types::pool::PoolSettings::default()
+                },
+            },
+            at(1),
+        )
+        .unwrap();
+        base_stake(staker(), usdc(500), 0x7a, 1);
+        let id = ledger().lines().next_id;
+        let swap = IcpSwapTerms {
+            token_in: ckusdc(),
+            amount_in: usdc(100),
+            from: account(5),
+            min_usdc: usdc(100),
+            premium: usdc(1),
+            network_fee: TokenAmount::from(50_000_u32),
+            refund_to: account(6),
+        };
+        record_at(
+            PoolStep::PayoutOpened {
+                id,
+                kind: Box::new(PayoutKind::IcpSwap(swap)),
+                terms: terms(at(1_000_000_000_000)),
+                undo: Undo::Refund { to: account(6) },
+            },
+            at(2),
+        )
+        .unwrap();
+        let fake = Fake::default();
+        block_on(icp_swap::drive(&fake, id, || at(3), &open_pool)).unwrap();
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Waiting);
+        sign_payout(id, 0, 9);
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: types::TxHash::new([9; 32]),
+                block: BlockNumber::new(30),
+                intent: Some([0x1f; 32]),
+            },
+            at(10),
+        )
+        .unwrap();
+        let reads = Reads::fill(Ok(Fill::Cancelled));
+        let after = || Timestamp::from_secs(900 + 3_600 + FILL_MARGIN_S).unwrap();
+        block_on(pass_with(&fake, &reads, after, &open_pool));
+        assert_eq!(
+            *fake.transfers.borrow(),
+            vec![(
+                ckusdc(),
+                account(6),
+                usdc(100).checked_sub(TokenAmount::from(FEE)).unwrap()
+            )]
+        );
+        let undone = payout(id).unwrap();
+        assert_eq!(undone.status, PayoutStatus::Undone(UNFILLED.to_string()));
+        assert_eq!(undone.reclaim, Some(types::pool::Reclaim::Pending));
+    });
+}
+
+/// The lead's check of the deferred Eco accounting: the rebalance split and the Base books
+/// leave a delivering or unfilled payout's USDC in flight out, exactly as they leave a signed
+/// one's out today.
+#[test]
+fn the_split_and_the_books_leave_an_eco_payouts_usdc_in_flight_out() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(staker());
+        sign_payout(id, 0, 9);
+        let left_out = || {
+            let ledger = ledger();
+            let base = ledger.pockets.base;
+            let (_, split) = crate::pool::rebalance::trigger::split(&ledger, &[]);
+            let held = base.free.checked_add(base.reserved).unwrap();
+            assert_eq!(
+                split,
+                i128::try_from(held.try_into_u128().unwrap()).unwrap()
+            );
+            assert_eq!(
+                ledger.base_held(),
+                held.checked_add(ledger.unattributed)
+                    .unwrap()
+                    .checked_add(ledger.lines().fees_base)
+                    .unwrap()
+            );
+            (split, ledger.base_held(), base.in_flight)
+        };
+        let signed = left_out();
+        assert!(signed.2 > TokenAmount::ZERO);
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: types::TxHash::new([9; 32]),
+                block: BlockNumber::new(30),
+                intent: Some([0x1e; 32]),
+            },
+            at(10),
+        )
+        .unwrap();
+        assert_eq!(left_out(), signed, "delivering");
+        record_at(
+            PoolStep::PayoutUnfilled {
+                id,
+                block: BlockNumber::new(31),
+            },
+            at(11),
+        )
+        .unwrap();
+        // the fee went back to free: in both lines alike; the USDC Eco owes back left out
+        assert_eq!(left_out(), signed, "unfilled");
     });
 }

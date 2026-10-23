@@ -115,6 +115,13 @@ fn a_payout_view_says_what_the_payout_spends_and_where_it_stands() {
         PayoutStatus::from(&payout.status),
         PayoutStatus::Refunding("its transaction reverted".to_string())
     );
+    payout.status = domain::PayoutStatus::Unfilled;
+    assert_eq!(
+        PayoutStatus::from(&payout.status),
+        PayoutStatus::Refunding("its Eco intent was not filled".to_string())
+    );
+    payout.status = domain::PayoutStatus::Delivering;
+    assert_eq!(PayoutStatus::from(&payout.status), PayoutStatus::Delivering);
     payout.status = domain::PayoutStatus::Undone("past its deadline".to_string());
     assert_eq!(
         PayoutStatus::from(&payout.status),

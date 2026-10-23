@@ -75,8 +75,10 @@ pub enum PayoutStatus {
     Waiting,
     Signed(u64),
     Paid,
-    /// Its refund is on its way, with why: a revert, or its deadline (nothing is signed for it
-    /// again).
+    /// Its order ran on Base and published an Eco intent: paid once the intent's fill is read.
+    Delivering,
+    /// Its refund is on its way, with why: a revert, an Eco intent never filled, or its
+    /// deadline (nothing is signed for it again).
     Refunding(String),
     Undone(String),
     Failed(String),
@@ -171,6 +173,10 @@ impl From<&domain::PayoutStatus> for PayoutStatus {
             domain::PayoutStatus::Paid => Self::Paid,
             domain::PayoutStatus::Reverted => {
                 Self::Refunding("its transaction reverted".to_string())
+            }
+            domain::PayoutStatus::Delivering => Self::Delivering,
+            domain::PayoutStatus::Unfilled => {
+                Self::Refunding("its Eco intent was not filled".to_string())
             }
             domain::PayoutStatus::Undoing(why) => Self::Refunding(why.clone()),
             domain::PayoutStatus::Undone(why) => Self::Undone(why.clone()),

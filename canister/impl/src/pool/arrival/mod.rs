@@ -831,15 +831,18 @@ pub fn steps_for<S: Store>(
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
         Proof::Refund { .. } if credited => return Ok(Vec::new()),
         Proof::Refund { intents } => {
-            // the paid payout whose intent was refunded, for exactly its amount
-            let paid = intents.iter().find_map(|intent| {
+            // the payout whose intent was refunded, for exactly its amount: one delivering
+            // (the refund proves its intent unfilled), or one whose USDC Eco still owes back.
+            // A paid payout's never: it is never paid again (2026-10-23)
+            let owed_back = intents.iter().find_map(|intent| {
                 let id = state.store().payout_by_intent(&PoolRef::new(*intent))?;
                 let payout = state.store().pool_payout(id)?;
-                (payout.status == types::pool::PayoutStatus::Paid
-                    && payout.amount == Some(found.amount))
-                .then_some(id)
+                let owes = (payout.status == types::pool::PayoutStatus::Delivering
+                    && payout.reclaim.is_none())
+                    || payout.reclaim == Some(types::pool::Reclaim::Pending);
+                (owes && payout.amount == Some(found.amount)).then_some(id)
             });
-            return Ok(vec![match paid {
+            return Ok(vec![match owed_back {
                 Some(id) => PoolStep::PayoutRefunded {
                     id,
                     credit: found.credit,
@@ -848,7 +851,8 @@ pub fn steps_for<S: Store>(
                 },
                 None => orphan(
                     None,
-                    "an Eco refund to the canister no paid payout of that amount takes".to_string(),
+                    "an Eco refund to the canister no payout owed back that amount takes"
+                        .to_string(),
                 ),
             }]);
         }

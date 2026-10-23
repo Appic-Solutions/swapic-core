@@ -455,6 +455,11 @@ fn an_icp_swap_holds_its_ckusdc_until_paid_and_its_premium_is_the_pools() {
         intent: Some([0x99; 32]),
     })
     .unwrap();
+    pool.step(PoolStep::PayoutDelivered {
+        id,
+        block: BlockNumber::new(31),
+    })
+    .unwrap();
     // the ckUSDC is the pool's free money now; the USDC left Base
     assert_eq!(pool.ledger.pockets.icp.reserved, TokenAmount::ZERO);
     assert_eq!(
@@ -649,74 +654,6 @@ fn a_stakes_rebalancing_share_meets_the_floor() {
     assert_eq!(check_arrival(&pool.ledger, &terms(0)), Ok(()));
 }
 
-/// An ICP swap paid, refunded by Eco and undone: its refund is held back out of the free
-/// ckUSDC when its undo begins (refused then if the pocket is short, before any refund is
-/// asked), and every line ends where it was before the swap.
-#[test]
-fn an_icp_swap_reopened_by_an_eco_refund_is_undone_from_the_free_ckusdc() {
-    use crate::pool::CreditKey;
-    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x4c, 1);
-    let before = pool.ledger.clone();
-    let (kind, undo) = icp_swap(usdc(100));
-    let id = open(&mut pool, kind, undo);
-    let amount = TokenAmount::from(100_000_000_u64 - 60_000);
-    pool.step(PoolStep::PayoutAmountKnown {
-        id,
-        amount,
-        received: Some(usdc(100)),
-    })
-    .unwrap();
-    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
-    pool.step(signed(id, order(6))).unwrap();
-    pool.step(PoolStep::PayoutPaid {
-        id,
-        tx_hash: TxHash::new([0x77; 32]),
-        block: BlockNumber::new(30),
-        intent: Some([0x9a; 32]),
-    })
-    .unwrap();
-    pool.step(PoolStep::PayoutRefunded {
-        id,
-        credit: CreditKey {
-            chain: ChainId::BASE,
-            tx: TxHash::new([0x9b; 32]),
-            log_index: 1,
-        },
-        amount,
-        block: BlockNumber::new(40),
-    })
-    .unwrap();
-    assert_eq!(status(&pool, id), PayoutStatus::Waiting);
-    // the free ckUSDC short of the refund: the undo does not begin
-    let free = pool.ledger.pockets.icp.free;
-    pool.ledger.pockets.icp.free = TokenAmount::ONE;
-    assert!(matches!(
-        pool.step(PoolStep::PayoutUndoing {
-            id,
-            why: "past its deadline".to_string(),
-        }),
-        Err(PoolStepError::PocketShort { .. })
-    ));
-    pool.ledger.pockets.icp.free = free;
-    pool.step(PoolStep::PayoutUndoing {
-        id,
-        why: "past its deadline".to_string(),
-    })
-    .unwrap();
-    pool.step(PoolStep::PayoutUndone {
-        id,
-        why: "past its deadline".to_string(),
-        block: Some(9),
-    })
-    .unwrap();
-    // the USDC went out and came back on Base, the ckUSDC came in and went back on ICP:
-    // every line where it was before the swap
-    let after = &pool.ledger;
-    assert_eq!(after.pockets, before.pockets);
-    assert_eq!(after.owed, before.owed);
-    assert_eq!(after.lines().fees_icp, TokenAmount::ZERO);
-}
-
 /// The review's double release (2026-10-23, `PayoutPaid`): an ICP swap whose ckUSDC went
 /// free to the pool once never frees it again, so a payout paid a second time (as one reopened
 /// by an Eco refund was) adds nothing to the free ckUSDC.
@@ -749,6 +686,17 @@ fn a_paid_payout_releases_its_ckusdc_once() {
     .unwrap();
     assert_eq!(pool.ledger.pockets.icp, icp);
     assert!(pool.payouts[&id].icp_released.0);
+    // nor once its Eco intent is read filled
+    let mut payout = pool.payouts[&id].clone();
+    payout.status = PayoutStatus::Delivering;
+    pool.payouts.insert(id, payout);
+    pool.ledger.pockets.base.in_flight = pool.payouts[&id].amount.unwrap();
+    pool.step(PoolStep::PayoutDelivered {
+        id,
+        block: BlockNumber::new(32),
+    })
+    .unwrap();
+    assert_eq!(pool.ledger.pockets.icp, icp);
 }
 
 fn paid(id: u64, intent: Option<[u8; 32]>) -> PoolStep {
@@ -865,4 +813,387 @@ fn a_reverted_withdrawal_is_reminted_once() {
     assert_eq!(pool.ledger.total_shares, before.total_shares);
     assert_eq!(pool.shares_of_evm(staker()), shares);
     assert!(pool.step(undone()).is_err());
+}
+
+/// `pool` with an ICP swap of 100 ckUSDC (or a withdrawal of 1,000 USDC) paid on Base into an
+/// Eco intent: its id.
+fn delivering(pool: &mut Pool, withdrawing: bool) -> u64 {
+    let (kind, undo, amount, received) = if withdrawing {
+        let (kind, undo) = withdrawal(pool, usdc(1_000), 21);
+        let PayoutKind::Withdrawal(w) = kind else {
+            unreachable!()
+        };
+        (kind, undo, w.payout_amount().unwrap(), None)
+    } else {
+        let (kind, undo) = icp_swap(usdc(100));
+        (
+            kind,
+            undo,
+            TokenAmount::from(100_000_000_u64 - 60_000),
+            Some(usdc(100)),
+        )
+    };
+    let id = open(pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(20))).unwrap();
+    pool.step(paid(id, Some([0xa0; 32]))).unwrap();
+    id
+}
+
+fn refunded(id: u64, amount: TokenAmount, log: u64) -> PoolStep {
+    PoolStep::PayoutRefunded {
+        id,
+        credit: crate::pool::CreditKey {
+            chain: ChainId::BASE,
+            tx: TxHash::new([0xa1; 32]),
+            log_index: log,
+        },
+        amount,
+        block: BlockNumber::new(40),
+    }
+}
+
+fn unfilled(id: u64) -> PoolStep {
+    PoolStep::PayoutUnfilled {
+        id,
+        block: BlockNumber::new(38),
+    }
+}
+
+/// Every step that would pay `id` again is refused.
+fn never_paid_again(pool: &mut Pool, id: u64) {
+    for step in [
+        PoolStep::PayoutWaiting { id },
+        PoolStep::PayoutRelisted { id },
+        signed(id, order(21)),
+        paid(id, None),
+        PoolStep::PayoutDelivered {
+            id,
+            block: BlockNumber::new(39),
+        },
+    ] {
+        assert!(pool.step(step).is_err(), "{id} paid again");
+    }
+}
+
+/// An Eco payout waits, all its lines as they were, until its intent's fill is read; read
+/// filled, it is paid then, exactly as a payout with no intent is at once.
+#[test]
+fn an_eco_payout_is_delivering_until_its_fill_is_read() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x51, 1);
+    let (kind, undo) = icp_swap(usdc(100));
+    let id = open(&mut pool, kind, undo);
+    let amount = TokenAmount::from(100_000_000_u64 - 60_000);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, order(22))).unwrap();
+    let signed_ledger = pool.ledger.clone();
+    pool.step(paid(id, Some([0xa2; 32]))).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Delivering);
+    assert_eq!(pool.ledger.pockets, signed_ledger.pockets);
+    assert_eq!(pool.ledger.owed, signed_ledger.owed);
+    assert!(pool.ledger.lines().open.contains(&id));
+    assert_eq!(pool.payouts[&id].intent, Some([0xa2; 32]));
+    // a second close is refused
+    assert!(pool.step(paid(id, Some([0xa2; 32]))).is_err());
+    pool.step(PoolStep::PayoutDelivered {
+        id,
+        block: BlockNumber::new(33),
+    })
+    .unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Paid);
+    let icp = pool.ledger.pockets.icp;
+    assert_eq!(icp.reserved, TokenAmount::ZERO);
+    assert_eq!(
+        icp.free,
+        signed_ledger
+            .pockets
+            .icp
+            .free
+            .checked_add(
+                usdc(100)
+                    .checked_sub(TokenAmount::from(50_000_u32))
+                    .unwrap()
+            )
+            .unwrap()
+    );
+    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
+    assert_eq!(pool.ledger.owed, TokenAmount::ZERO);
+    assert!(pool.ledger.lines().open.is_empty());
+    // paid: never unfilled, refunded or delivered again
+    assert!(pool.step(unfilled(id)).is_err());
+    assert!(pool.step(refunded(id, amount, 1)).is_err());
+    never_paid_again(&mut pool, id);
+}
+
+/// Item 7 of the final review fixes, read first: the intent read unfilled past its route
+/// deadline undoes the payout at once, the user refunded; Eco's refund then credits the Base
+/// pocket once, and nothing ever pays the payout again.
+#[test]
+fn an_unfilled_intent_refunds_the_user_then_eco_credits_the_pool_once() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x52, 1);
+    let before = pool.ledger.clone();
+    let id = delivering(&mut pool, false);
+    let amount = pool.payouts[&id].amount.unwrap();
+    pool.step(unfilled(id)).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Unfilled);
+    assert_eq!(
+        pool.payouts[&id].reclaim,
+        Some(crate::pool::payout::Reclaim::Pending)
+    );
+    // the USDC is owed back by Eco: in flight still
+    assert_eq!(pool.ledger.pockets.base.in_flight, amount);
+    assert!(pool.step(unfilled(id)).is_err());
+    never_paid_again(&mut pool, id);
+    let why = || "its Eco intent was not filled".to_string();
+    pool.step(PoolStep::PayoutUndoing { id, why: why() })
+        .unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: why(),
+        block: Some(14),
+    })
+    .unwrap();
+    never_paid_again(&mut pool, id);
+    // Eco's refund: credited once, to the Base pocket only
+    assert!(pool.step(refunded(id, usdc(1), 1)).is_err());
+    pool.step(refunded(id, amount, 1)).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Undone(why()));
+    assert_eq!(
+        pool.payouts[&id].reclaim,
+        Some(crate::pool::payout::Reclaim::Credited)
+    );
+    assert!(pool.step(refunded(id, amount, 2)).is_err());
+    never_paid_again(&mut pool, id);
+    // every line where it was before the swap
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.total_assets(), before.total_assets());
+    assert_eq!(pool.ledger.lines().fees_icp, TokenAmount::ZERO);
+    assert!(pool.ledger.lines().open.is_empty());
+}
+
+/// Item 7, Eco's refund reported first: the same one user refund and one pool credit.
+#[test]
+fn an_eco_refund_first_refunds_the_user_and_credits_the_pool_once() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x53, 1);
+    let before = pool.ledger.clone();
+    let id = delivering(&mut pool, false);
+    let amount = pool.payouts[&id].amount.unwrap();
+    pool.step(refunded(id, amount, 1)).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Unfilled);
+    assert_eq!(
+        pool.payouts[&id].reclaim,
+        Some(crate::pool::payout::Reclaim::Credited)
+    );
+    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
+    // its fill read later finds nothing to do; a second refund nothing to credit
+    assert!(pool.step(unfilled(id)).is_err());
+    assert!(pool.step(refunded(id, amount, 2)).is_err());
+    never_paid_again(&mut pool, id);
+    let why = || "its Eco intent was not filled".to_string();
+    pool.step(PoolStep::PayoutUndoing { id, why: why() })
+        .unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: why(),
+        block: Some(15),
+    })
+    .unwrap();
+    never_paid_again(&mut pool, id);
+    assert!(pool.step(refunded(id, amount, 3)).is_err());
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    assert_eq!(pool.ledger.total_assets(), before.total_assets());
+    assert_eq!(pool.ledger.lines().fees_icp, TokenAmount::ZERO);
+}
+
+/// Both orders of an unfilled intent end in the same ledger, an ICP swap's and a
+/// withdrawal's.
+#[test]
+fn both_orders_of_an_unfilled_intent_end_in_the_same_ledger() {
+    for withdrawing in [false, true] {
+        let end = |read_first: bool| {
+            let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x54, 1);
+            let id = delivering(&mut pool, withdrawing);
+            let amount = pool.payouts[&id].amount.unwrap();
+            let undo = |pool: &mut Pool| {
+                if !withdrawing {
+                    pool.step(PoolStep::PayoutUndoing {
+                        id,
+                        why: "unfilled".to_string(),
+                    })
+                    .unwrap();
+                }
+                pool.step(PoolStep::PayoutUndone {
+                    id,
+                    why: "unfilled".to_string(),
+                    block: None,
+                })
+                .unwrap();
+            };
+            if read_first {
+                pool.step(unfilled(id)).unwrap();
+                undo(&mut pool);
+                pool.step(refunded(id, amount, 1)).unwrap();
+            } else {
+                pool.step(refunded(id, amount, 1)).unwrap();
+                undo(&mut pool);
+            }
+            pool
+        };
+        let (first, second) = (end(true), end(false));
+        assert_eq!(first.ledger, second.ledger, "withdrawing: {withdrawing}");
+        assert_eq!(first.shares, second.shares);
+        assert_eq!(first.credited, second.credited);
+    }
+}
+
+/// An unfilled withdrawal mints back exactly its shares and the pool is credited once, in
+/// both orders; its network fee goes back to the Base pocket's free line.
+#[test]
+fn an_unfilled_withdrawal_is_reminted_and_the_pool_credited_once() {
+    for read_first in [true, false] {
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x55, 1);
+        let before = pool.ledger.clone();
+        let shares = pool.shares_of_evm(staker());
+        let id = delivering(&mut pool, true);
+        let amount = pool.payouts[&id].amount.unwrap();
+        if read_first {
+            pool.step(unfilled(id)).unwrap();
+        } else {
+            pool.step(refunded(id, amount, 1)).unwrap();
+        }
+        never_paid_again(&mut pool, id);
+        let undone = || PoolStep::PayoutUndone {
+            id,
+            why: "unfilled".to_string(),
+            block: None,
+        };
+        pool.step(undone()).unwrap();
+        assert!(pool.step(undone()).is_err());
+        if read_first {
+            pool.step(refunded(id, amount, 1)).unwrap();
+        }
+        assert!(pool.step(refunded(id, amount, 2)).is_err());
+        assert_eq!(
+            pool.ledger.pockets, before.pockets,
+            "read first: {read_first}"
+        );
+        assert_eq!(pool.ledger.owed, before.owed);
+        assert_eq!(pool.ledger.total_shares, before.total_shares);
+        assert_eq!(pool.ledger.lines().fees_base, TokenAmount::ZERO);
+        assert_eq!(pool.shares_of_evm(staker()), shares);
+    }
+}
+
+/// An unfilled payout whose user refund stopped for a human: Eco's refund still credits the
+/// Base pocket, once.
+#[test]
+fn the_eco_refund_of_a_payout_whose_refund_failed_still_credits_the_pool() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x56, 1);
+    let id = delivering(&mut pool, false);
+    let amount = pool.payouts[&id].amount.unwrap();
+    pool.step(unfilled(id)).unwrap();
+    pool.step(PoolStep::PayoutUndoing {
+        id,
+        why: "unfilled".to_string(),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutStopped {
+        id,
+        why: "ALERT: the refund was refused".to_string(),
+    })
+    .unwrap();
+    let free = pool.ledger.pockets.base.free;
+    pool.step(refunded(id, amount, 1)).unwrap();
+    assert_eq!(
+        pool.ledger.pockets.base.free,
+        free.checked_add(amount).unwrap()
+    );
+    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
+    assert!(matches!(status(&pool, id), PayoutStatus::Failed(_)));
+    assert!(pool.step(refunded(id, amount, 2)).is_err());
+}
+
+/// The lead's check of the deferred Eco accounting: the stakers' assets and the share price
+/// stay as they were at the signature through `Delivering`, `PayoutDelivered`,
+/// `PayoutUnfilled` and `PayoutRefunded`, in both orders, an ICP swap's and a withdrawal's.
+#[test]
+fn total_assets_and_the_share_price_hold_through_an_eco_payout() {
+    let price = |pool: &Pool| (pool.ledger.total_assets(), pool.ledger.total_shares);
+    for withdrawing in [false, true] {
+        // filled
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x57, 1);
+        let id = delivering(&mut pool, withdrawing);
+        // `PayoutPaid` of an Eco order moves no line (`an_eco_payout_paid_moves_no_line`):
+        // the price delivering is the signature's
+        let at_signature = price(&pool);
+        pool.step(PoolStep::PayoutDelivered {
+            id,
+            block: BlockNumber::new(34),
+        })
+        .unwrap();
+        assert_eq!(price(&pool), at_signature, "delivered");
+        // unfilled, read first, then refunded
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x57, 1);
+        let id = delivering(&mut pool, withdrawing);
+        let amount = pool.payouts[&id].amount.unwrap();
+        pool.step(unfilled(id)).unwrap();
+        assert_eq!(price(&pool), at_signature, "unfilled");
+        pool.step(refunded(id, amount, 1)).unwrap();
+        assert_eq!(price(&pool), at_signature, "refunded after");
+        // refunded first
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x57, 1);
+        let id = delivering(&mut pool, withdrawing);
+        pool.step(refunded(id, amount, 1)).unwrap();
+        assert_eq!(price(&pool), at_signature, "refunded first");
+    }
+}
+
+/// `PayoutPaid` of an Eco order moves no line: its ckUSDC, owed line, USDC in flight and a
+/// withdrawal's fee stay until its fill is read.
+#[test]
+fn an_eco_payout_paid_moves_no_line() {
+    for withdrawing in [false, true] {
+        let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x58, 1);
+        let (kind, undo, amount, received) = if withdrawing {
+            let (kind, undo) = withdrawal(&pool, usdc(1_000), 21);
+            let PayoutKind::Withdrawal(w) = kind else {
+                unreachable!()
+            };
+            (kind, undo, w.payout_amount().unwrap(), None)
+        } else {
+            let (kind, undo) = icp_swap(usdc(100));
+            (
+                kind,
+                undo,
+                TokenAmount::from(100_000_000_u64 - 60_000),
+                Some(usdc(100)),
+            )
+        };
+        let id = open(&mut pool, kind, undo);
+        pool.step(PoolStep::PayoutAmountKnown {
+            id,
+            amount,
+            received,
+        })
+        .unwrap();
+        pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+        pool.step(signed(id, order(20))).unwrap();
+        let before = pool.ledger.clone();
+        pool.step(paid(id, Some([0xa0; 32]))).unwrap();
+        assert_eq!(pool.ledger, before);
+    }
 }

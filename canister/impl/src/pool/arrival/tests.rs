@@ -822,10 +822,11 @@ fn a_receipt_too_large_is_refused_for_good() {
 /// P11b Task 6, on the real Eco fill on Base rewritten to a refund: the Portal's log that
 /// fulfilled the intent rewritten to `IntentRefunded(intentHash, refundee = the canister)`,
 /// its `IntentFulfilled` dropped (no one filled it), and the USDC transfer rewritten to pay
-/// the canister the payout's amount. A paid payout whose order published that intent takes
-/// it back and waits again for a new order; an unknown intent's refund is an orphan.
+/// the canister the payout's amount. A payout delivering into that intent is unfilled by it
+/// (undone next, never paid again) and its USDC credited back to the Base pocket, once; a
+/// second refund and an unknown intent's are orphans.
 #[test]
-fn an_eco_refund_of_a_paid_payout_reopens_it() {
+fn an_eco_refund_credits_a_delivering_payout_once() {
     use crate::storage::pool::tests::{sign_payout, waiting_withdrawal};
     use types::pool::PayoutStatus;
     on_fresh_memory(|| {
@@ -887,27 +888,39 @@ fn an_eco_refund_of_a_paid_payout_reopens_it() {
         );
         let recorded = record(&found, &Judge::without_terms(), at(5));
         assert!(recorded.not.is_empty() || !recorded.outcomes.is_empty());
-        let reopened = crate::storage::pool::payout(id).unwrap();
-        assert_eq!(reopened.status, PayoutStatus::Waiting);
-        assert_eq!(reopened.order, None, "a new order is allowed only now");
+        // the refund proves the intent unfilled: the payout is undone next, never paid
+        // again, and its USDC is back in the Base pocket's free line, once
+        let refunded = crate::storage::pool::payout(id).unwrap();
+        assert_eq!(refunded.status, PayoutStatus::Unfilled);
+        assert_eq!(refunded.reclaim, Some(types::pool::Reclaim::Credited));
         let after = ledger();
         let fee = paid.base_fee.unwrap();
         assert_eq!(
-            after.pockets.base.reserved,
+            after.pockets.base.free,
             before
                 .pockets
                 .base
-                .reserved
+                .free
                 .checked_add(amount)
                 .and_then(|sum| sum.checked_add(fee))
                 .unwrap()
         );
-        assert_eq!(after.lines().fees_base, TokenAmount::ZERO);
-        assert_eq!(after.owed, before.owed.checked_add(paid.owed()).unwrap());
+        assert_eq!(after.pockets.base.in_flight, TokenAmount::ZERO);
+        assert_eq!(after.owed, before.owed);
         // credited once
         assert!(record(&found, &Judge::without_terms(), at(6))
             .outcomes
             .is_empty());
+        // a second refund of the same amount for the same intent: nothing owed, kept for a
+        // human
+        let mut again = found.clone();
+        again[0].credit.tx = TxHash::new([0x3f; 32]);
+        assert!(matches!(
+            record(&again, &Judge::without_terms(), at(6))
+                .outcomes
+                .as_slice(),
+            [PoolArrivalOutcome::Unattributed { .. }]
+        ));
         // another intent's refund: no paid payout takes it, kept for a human
         let stranger = parse(&refund([0x2e; 32]));
         let mut found = find(&stranger, None, &base()).unwrap();

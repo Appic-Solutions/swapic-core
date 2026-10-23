@@ -172,6 +172,25 @@ pub enum PayoutStatus {
     /// the crediting depth and Swapic says its order never ran. Never signed again.
     #[n(10)]
     Reverted,
+    /// Its order ran on Base and published an Eco intent (2026-10-23): its ckUSDC, its owed
+    /// line, its USDC in flight and a withdrawal's fee stay as they were until the intent's
+    /// fill is read past its route deadline.
+    #[n(11)]
+    Delivering,
+    /// Its Eco intent never filled: undone next, at once; its USDC comes back from Eco
+    /// (`reclaim`).
+    #[n(12)]
+    Unfilled,
+}
+
+/// Where the Base pocket's USDC of an unfilled Eco intent stands: owed back by Eco (in the
+/// Base pocket's `in_flight`), or credited back, once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Reclaim {
+    #[n(0)]
+    Pending,
+    #[n(1)]
+    Credited,
 }
 
 impl PayoutStatus {
@@ -263,6 +282,10 @@ pub struct EvmPayout {
     /// refund reopened it takes the refund from the free ckUSDC.
     #[n(19)]
     pub icp_released: Flag,
+    /// What an unfilled Eco intent owes the Base pocket: its reward, the payout's `amount`,
+    /// pending until Eco's refund is credited, once.
+    #[n(20)]
+    pub reclaim: Option<Reclaim>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -329,6 +352,7 @@ impl EvmPayout {
             legs: None,
             undoing_at: None,
             icp_released: Flag(false),
+            reclaim: None,
         }
     }
 

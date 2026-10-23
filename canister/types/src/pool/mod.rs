@@ -22,7 +22,7 @@ pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
 pub use payout::{
     evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse,
     Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutSettings, PayoutSettingsError,
-    PayoutStatus, PayoutTerms, PinnedOrder, Undo,
+    PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
 };
 
 pub use rebalance::{
@@ -1664,6 +1664,26 @@ pub enum PoolStep {
         #[n(1)]
         refused: Option<String>,
     },
+    // The payout plan flow (2026-10-23): indices 43 to 59.
+    /// The Eco intent a payout's order published was filled, as its destination Portal shows
+    /// it at `block` (read by every node, past the route's deadline): the payout is paid.
+    #[n(43)]
+    PayoutDelivered {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        block: BlockNumber,
+    },
+    /// The Eco intent a payout's order published never filled, as its destination Portal
+    /// shows it at `block`, whose time is past the route's deadline (read by every node): the
+    /// payout is undone next, its USDC owed back by Eco.
+    #[n(44)]
+    PayoutUnfilled {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        block: BlockNumber,
+    },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
@@ -1951,6 +1971,8 @@ impl PoolStep {
             PoolStep::PayoutStopped { .. } => "PayoutStopped",
             PoolStep::PayoutRelisted { .. } => "PayoutRelisted",
             PoolStep::PayoutRefunded { .. } => "PayoutRefunded",
+            PoolStep::PayoutDelivered { .. } => "PayoutDelivered",
+            PoolStep::PayoutUnfilled { .. } => "PayoutUnfilled",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",
@@ -2054,6 +2076,7 @@ impl PoolStep {
                 | PoolStep::PayoutUndoing { .. }
                 | PoolStep::PayoutUndone { .. }
                 | PoolStep::PayoutRefunded { .. }
+                | PoolStep::PayoutUnfilled { .. }
                 | PoolStep::Minted { .. }
         )
     }

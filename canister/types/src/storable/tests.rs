@@ -624,7 +624,102 @@ fn samples() -> Vec<Sample> {
     all.extend(arrival_terms_samples());
     all.extend(rescue_samples());
     all.extend(returned_move_samples());
+    all.extend(eco_payout_samples());
     all
+}
+
+/// A payout signed once (2026-10-23): reverted, delivering into an Eco intent, and unfilled
+/// with its USDC owed back by Eco or credited back; the two lines of an Eco intent's fill.
+fn eco_payout_samples() -> Vec<Sample> {
+    use crate::pool::payout::{EvmPayout, Flag, PayoutKind, PayoutStatus, PayoutTerms, Reclaim};
+    use crate::pool::{EvmWithdrawal, PoolAccount, PoolStep, Shares, Undo};
+    let address = |byte: u8| crate::evm::EvmAddress::new([byte; 20]);
+    let withdrawal = EvmWithdrawal {
+        staker: address(0xd1),
+        usdc: TokenAmount::from(1_201_000_000_u64),
+        max_shares: Shares::new(1_202 << 64),
+        rebalance_share: TokenAmount::from(1_203_000_u64),
+        network_fee: TokenAmount::from(1_204_000_u64),
+        nonce: 1_205,
+        burned: Shares::new(1_206 << 64),
+    };
+    let mut payout = EvmPayout::new(
+        1_207,
+        PayoutKind::Withdrawal(withdrawal),
+        PayoutTerms {
+            dst_chain: ChainId::ARBITRUM,
+            recipient: address(0xd2),
+            token_out: address(0xd3),
+            min_out: TokenAmount::from(1_208_u64),
+            deadline: Timestamp::from_nanos(1_800_000_000_000_001_209),
+        },
+        Undo::Remint {
+            owner: PoolAccount::Evm(address(0xd1)),
+            shares: Shares::new(1_206 << 64),
+        },
+        Timestamp::from_nanos(1_800_000_000_000_001_210),
+    );
+    payout.amount = Some(TokenAmount::from(1_211_000_000_u64));
+    payout.base_fee = Some(TokenAmount::from(1_204_000_u64));
+    payout.tx_hash = Some(TxHash::new([0xd4; 32]));
+    payout.paid_block = Some(BlockNumber::new(37_001_212));
+    payout.intent = Some([0xd5; 32]);
+    payout.icp_released = Flag(false);
+    let reverted = EvmPayout {
+        status: PayoutStatus::Reverted,
+        intent: None,
+        paid_block: None,
+        ..payout.clone()
+    };
+    let delivering = EvmPayout {
+        status: PayoutStatus::Delivering,
+        ..payout.clone()
+    };
+    let unfilled = EvmPayout {
+        status: PayoutStatus::Unfilled,
+        reclaim: Some(Reclaim::Pending),
+        ..payout.clone()
+    };
+    let credited = EvmPayout {
+        status: PayoutStatus::Undone("its Eco intent was not filled".to_string()),
+        reclaim: Some(Reclaim::Credited),
+        ..payout
+    };
+    let steps = [
+        (
+            "payout delivered",
+            PoolStep::PayoutDelivered {
+                id: 1_213,
+                block: BlockNumber::new(37_001_214),
+            },
+        ),
+        (
+            "payout unfilled",
+            PoolStep::PayoutUnfilled {
+                id: 1_215,
+                block: BlockNumber::new(37_001_216),
+            },
+        ),
+    ];
+    let mut out = vec![
+        sample("payout reverted", reverted),
+        sample("payout delivering", delivering),
+        sample("payout unfilled, owed back", unfilled),
+        sample("payout undone, credited back", credited),
+    ];
+    out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
+        sample(
+            name,
+            Event::seal(
+                EventIndex::new(12_000 + i),
+                Timestamp::from_nanos(1_800_000_000_000_001_217 + i),
+                EventHash::new([0xd6; 32]),
+                crate::events::EventType::Pool { step },
+            )
+            .expect("every sample has a preimage"),
+        )
+    }));
+    out
 }
 
 /// A move's money back where it left (P11e): a move returned, an Eco move landed again, a
@@ -1953,6 +2048,7 @@ fn payout_samples() -> Vec<Sample> {
         legs: None,
         undoing_at: None,
         icp_released: crate::pool::payout::Flag(false),
+        reclaim: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),

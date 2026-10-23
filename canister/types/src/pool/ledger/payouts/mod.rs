@@ -11,7 +11,12 @@
 //!   again (2026-10-23). Reverted: back to `reserved`, undone once Swapic says its order
 //!   never ran.
 //! - Paid: `in_flight` out, a withdrawal's fee to the Base fee line, an ICP swap's ckUSDC
-//!   freed to the pool, `owed` down.
+//!   freed to the pool, `owed` down. An order that published an Eco intent (2026-10-23) is
+//!   Delivering at its close, every line as it was, until its fill is read past its route
+//!   deadline: Delivered is then the paid line; Unfilled keeps its USDC in `in_flight`, owed
+//!   back by Eco, a withdrawal's fee back to `free`, and the payout is undone next. Eco's
+//!   refund (Refunded) credits that USDC to `free` once, in either order, and never pays the
+//!   payout again.
 //! - Undone: everything released, an ICP swap's ckUSDC out with its refund, a withdrawal's
 //!   shares minted back.
 
@@ -20,11 +25,52 @@ mod tests;
 
 use super::{credit_shares, sat_add, sat_sub, PoolEffects, PoolLedger, PoolLookup, PoolStepError};
 use crate::numeric::{Timestamp, TokenAmount};
-use crate::pool::payout::{EvmPayout, NonceUse, PayoutKind, PayoutStatus, Undo};
+use crate::pool::payout::{
+    EvmPayout, NonceUse, PayoutKind, PayoutLines, PayoutStatus, Reclaim, Undo,
+};
 use crate::pool::{PoolAccount, PoolStep, ShareLine, Shares};
 
 fn status_of(payout: &EvmPayout) -> String {
     format!("{:?}", payout.status)
+}
+
+/// What a payout's paid line moves: its USDC out of the Base pocket's `in_flight`, a
+/// withdrawal's fee to the Base fee line, `owed` down, an ICP swap's ckUSDC freed to the pool
+/// once (a payout whose ckUSDC went free before never frees it again); and it is no longer
+/// open.
+fn paid(ledger: &mut PoolLedger, lines: &mut PayoutLines, payout: &mut EvmPayout, id: &u64) {
+    let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
+    let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+    let base = &mut ledger.pockets.base;
+    base.in_flight = sat_sub(base.in_flight, amount);
+    base.reserved = sat_sub(base.reserved, fee);
+    lines.fees_base = sat_add(lines.fees_base, fee);
+    ledger.owed = sat_sub(ledger.owed, payout.owed());
+    if !payout.icp_released.0 {
+        let held = payout.icp_hold();
+        let icp = &mut ledger.pockets.icp;
+        icp.reserved = sat_sub(icp.reserved, held);
+        icp.free = sat_add(icp.free, held);
+    }
+    lines.open.remove(id);
+    payout.status = PayoutStatus::Paid;
+    payout.base_reserved = false;
+    payout.icp_released = crate::pool::payout::Flag(
+        payout.icp_released.0 || (payout.is_icp_swap() && payout.received.is_some()),
+    );
+}
+
+/// An Eco intent never filled: the payout is undone next; its USDC stays in the Base
+/// pocket's `in_flight`, owed back by Eco; a withdrawal's fee goes back to `free`, as any
+/// undo gives it back.
+fn unfilled(ledger: &mut PoolLedger, payout: &mut EvmPayout) {
+    let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+    let base = &mut ledger.pockets.base;
+    base.reserved = sat_sub(base.reserved, fee);
+    base.free = sat_add(base.free, fee);
+    payout.base_reserved = false;
+    payout.status = PayoutStatus::Unfilled;
+    payout.reclaim = Some(Reclaim::Pending);
 }
 
 impl PoolLedger {
@@ -223,6 +269,19 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            // its Eco intent read past the route's deadline: filled, or never
+            PoolStep::PayoutDelivered { id, .. } | PoolStep::PayoutUnfilled { id, .. } => {
+                let payout = payout_of(*id)?;
+                if payout.status != PayoutStatus::Delivering || payout.reclaim.is_some() {
+                    return Err(not_from(step.name(), &payout));
+                }
+                let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
+                let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+                if amount > self.pockets.base.in_flight || fee > self.pockets.base.reserved {
+                    return Err(PoolStepError::Overflow);
+                }
+                Ok(())
+            }
             PoolStep::PayoutPaid { id, .. } | PoolStep::PayoutReverted { id } => {
                 let payout = payout_of(*id)?;
                 if !matches!(payout.status, PayoutStatus::Signed(_)) {
@@ -267,12 +326,17 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            // the refund of the intent the paid payout published, all of its reward
+            // Eco's refund of the intent the payout published, all of its reward: of a payout
+            // delivering (the refund proves the intent unfilled), or one whose USDC Eco still
+            // owes back; credited once, and never a payout paid again
             PoolStep::PayoutRefunded {
                 id, credit, amount, ..
             } => {
                 let payout = payout_of(*id)?;
-                if payout.status != PayoutStatus::Paid || payout.intent.is_none() {
+                let owed_back = payout.status == PayoutStatus::Delivering
+                    && payout.reclaim.is_none()
+                    || payout.reclaim == Some(Reclaim::Pending);
+                if !owed_back || payout.intent.is_none() {
                     return Err(not_from("PayoutRefunded", &payout));
                 }
                 if lookup.is_credited(credit) {
@@ -284,7 +348,10 @@ impl PoolLedger {
                     ));
                 }
                 let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
-                if fee > lines.fees_base {
+                if *amount > self.pockets.base.in_flight
+                    || (payout.status == PayoutStatus::Delivering
+                        && fee > self.pockets.base.reserved)
+                {
                     return Err(PoolStepError::Overflow);
                 }
                 Ok(())
@@ -349,6 +416,7 @@ impl PoolLedger {
                         | PayoutStatus::Queued
                         | PayoutStatus::Waiting
                         | PayoutStatus::Reverted
+                        | PayoutStatus::Unfilled
                 ) {
                     return Err(not_from("PayoutUndoing", &payout));
                 }
@@ -374,6 +442,7 @@ impl PoolLedger {
                         | PayoutStatus::Waiting
                         | PayoutStatus::Undoing(_)
                         | PayoutStatus::Reverted
+                        | PayoutStatus::Unfilled
                 ) {
                     return Err(not_from("PayoutUndone", &payout));
                 }
@@ -518,38 +587,42 @@ impl PoolLedger {
                 payout.tx_hash = Some(*tx_hash);
                 effects.payout = Some(payout);
             }
+            // an order that published an Eco intent: delivering, every line as it was until
+            // its fill is read
             PoolStep::PayoutPaid {
                 id,
                 tx_hash,
                 block,
-                intent,
+                intent: Some(intent),
             } => {
                 let mut payout = lookup.payout(*id)?;
-                let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
-                let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
-                let base = &mut ledger.pockets.base;
-                base.in_flight = sat_sub(base.in_flight, amount);
-                base.reserved = sat_sub(base.reserved, fee);
-                lines.fees_base = sat_add(lines.fees_base, fee);
-                ledger.owed = sat_sub(ledger.owed, payout.owed());
-                // the swap is done: its ckUSDC is the pool's now, freed once (a payout whose
-                // ckUSDC went free before never frees it again)
-                if !payout.icp_released.0 {
-                    let held = payout.icp_hold();
-                    let icp = &mut ledger.pockets.icp;
-                    icp.reserved = sat_sub(icp.reserved, held);
-                    icp.free = sat_add(icp.free, held);
-                }
-                lines.open.remove(id);
-                payout.status = PayoutStatus::Paid;
-                payout.base_reserved = false;
-                payout.icp_released = crate::pool::payout::Flag(
-                    payout.icp_released.0 || (payout.is_icp_swap() && payout.received.is_some()),
-                );
+                payout.status = PayoutStatus::Delivering;
                 payout.tx_hash = Some(*tx_hash);
                 payout.paid_block = Some(*block);
-                payout.intent = *intent;
-                effects.intent = intent.map(|intent| (intent, *id));
+                payout.intent = Some(*intent);
+                effects.intent = Some((*intent, *id));
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash,
+                block,
+                intent: None,
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.tx_hash = Some(*tx_hash);
+                payout.paid_block = Some(*block);
+                paid(&mut ledger, &mut lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutDelivered { id, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                paid(&mut ledger, &mut lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutUnfilled { id, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                unfilled(&mut ledger, &mut payout);
                 effects.payout = Some(payout);
             }
             // back to reserved, for its undo: never signed again
@@ -587,9 +660,8 @@ impl PoolLedger {
                 payout.waiting_since = Some(at);
                 effects.payout = Some(payout);
             }
-            // the reverse of its paid line: the USDC back reserved for it, its fee back from
-            // the fee line, owed again, and waiting for a new order (its intent can no longer
-            // be filled, so its pin is cleared)
+            // Eco's refund: its USDC back to the Base pocket's free line, once; a payout still
+            // delivering is unfilled by it (undone next). Never a payout paid again
             PoolStep::PayoutRefunded {
                 id,
                 credit,
@@ -597,23 +669,19 @@ impl PoolLedger {
                 block,
             } => {
                 let mut payout = lookup.payout(*id)?;
-                let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
-                lines.fees_base = sat_sub(lines.fees_base, fee);
+                if payout.status == PayoutStatus::Delivering {
+                    unfilled(&mut ledger, &mut payout);
+                }
                 let base = &mut ledger.pockets.base;
-                base.reserved = sat_add(base.reserved, sat_add(*amount, fee));
-                ledger.owed = sat_add(ledger.owed, payout.owed());
+                base.in_flight = sat_sub(base.in_flight, *amount);
+                base.free = sat_add(base.free, *amount);
                 ledger.unseen.push(crate::pool::UnseenArrival {
                     chain: credit.chain,
                     block: *block,
                     amount: *amount,
                 });
                 effects.credited = Some(*credit);
-                lines.open.insert(*id);
-                payout.status = PayoutStatus::Waiting;
-                payout.base_reserved = true;
-                payout.order = None;
-                payout.tx_hash = None;
-                payout.waiting_since = Some(at);
+                payout.reclaim = Some(Reclaim::Credited);
                 effects.payout = Some(payout);
             }
             // out of the pool's unattributed line: to the Base books' (the state moves the

@@ -13,7 +13,12 @@
 //!   way, at once, but only once its transaction is closed at the crediting depth and Swapic
 //!   says its order never ran (`used(id)` false, read by every node, `agreed::ran`), so a
 //!   reorg that turned the revert into a payment is never paid twice; an order that ran after
-//!   all stops the payout for a human.
+//!   all stops the payout for a human;
+//! - a payout whose order published an Eco intent is delivering until the intent's fill is
+//!   read, once, past its route deadline (every node at one block whose time is past it,
+//!   `agreed::fill_after`): filled, it is paid; never filled, it is undone at once, the
+//!   user refunded, while its USDC comes back from Eco later (`PayoutRefunded`, credited to
+//!   the Base pocket only).
 
 #[cfg(test)]
 mod tests;
@@ -23,10 +28,15 @@ use crate::pool::{icp_swap, log};
 use crate::state::Store;
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
+use types::eco::Fill;
 use types::events::TxPurpose;
 use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
-use types::Timestamp;
+use types::{BlockNumber, ChainId, Timestamp};
+
+/// How long after an Eco intent's route deadline its fill is read: the agreed block lags the
+/// head by the crediting depth and a little more.
+pub const FILL_MARGIN_S: u64 = 60;
 
 /// What the pass does with one payout now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +50,12 @@ pub enum Next {
     /// Undone; `checked`: it was signed once, so only once its transaction is closed for good
     /// and Swapic says its order never ran.
     Undo { why: String, checked: bool },
+    /// Its Eco intent's fill read on `chain`, at a block whose time is past `after_s`.
+    ReadFill {
+        chain: ChainId,
+        intent: [u8; 32],
+        after_s: u64,
+    },
     /// Stopped for a human.
     Stop(String),
 }
@@ -85,6 +101,25 @@ pub fn next(
             why: REVERTED.to_string(),
             checked: true,
         },
+        // its Eco intent's fill, read once its route can no longer be filled
+        PayoutStatus::Delivering => {
+            let after_s = fill_read_after(payout);
+            match payout.intent {
+                Some(intent) if now.as_secs().get() >= after_s.saturating_add(FILL_MARGIN_S) => {
+                    Next::ReadFill {
+                        chain: payout.terms.dst_chain,
+                        intent,
+                        after_s,
+                    }
+                }
+                _ => Next::Wait,
+            }
+        }
+        // never filled: the user's refund at once
+        PayoutStatus::Unfilled => Next::Undo {
+            why: UNFILLED.to_string(),
+            checked: false,
+        },
         // signed: never undone until its transaction is closed
         PayoutStatus::Signed(_)
         | PayoutStatus::Paid
@@ -128,12 +163,38 @@ fn in_flight(id: u64) -> bool {
 /// Why a reverted payout is undone.
 pub const REVERTED: &str = "its transaction reverted";
 
+/// Why a payout whose Eco intent never filled is undone.
+pub const UNFILLED: &str = "its Eco intent was not filled";
+
+/// The time a delivering payout's Eco intent can last be filled: its route's deadline, read
+/// from the order it pinned; else the latest any route the canister signs may run to.
+pub fn fill_read_after(payout: &EvmPayout) -> u64 {
+    let pinned = payout.order.as_ref();
+    pinned
+        .and_then(|pinned| crate::pool::rebalance::drive::eco_route_deadline(&pinned.order))
+        .unwrap_or_else(|| {
+            pinned
+                .map_or(payout.terms.deadline.as_secs().get(), |pinned| {
+                    pinned.deadline_s
+                })
+                .saturating_add(crate::pool::eco::MAX_ROUTE_LIFE_S)
+        })
+}
+
 /// The chain reads the pass makes before it undoes a payout that was signed, so a test hands
 /// in a fake.
 #[allow(async_fn_in_trait)]
 pub trait ChainReads {
     /// Whether Swapic on the pool chain says the order ran; Err when it cannot be read now.
     async fn ran(&self, order_id: [u8; 32]) -> Result<bool, String>;
+    /// An Eco intent's fill on `chain` at a block whose time is past `after_s`, and that
+    /// block.
+    async fn fill_after(
+        &self,
+        chain: ChainId,
+        intent: [u8; 32],
+        after_s: u64,
+    ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead>;
 }
 
 /// The chains themselves, read by every node at an agreed block (M-03).
@@ -145,6 +206,15 @@ impl ChainReads for LiveReads {
             .pool_chain
             .ok_or("no pool chain is configured")?;
         crate::agreed::ran(chain, order_id).await
+    }
+
+    async fn fill_after(
+        &self,
+        chain: ChainId,
+        intent: [u8; 32],
+        after_s: u64,
+    ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead> {
+        crate::agreed::fill_after(chain, intent, after_s).await
     }
 }
 
@@ -220,6 +290,27 @@ pub async fn pass_with(
                 log(&format!("the pool payout {id}: {why}"));
                 acted += usize::from(record(PoolStep::PayoutStopped { id, why }, now));
             }
+            Next::ReadFill {
+                chain,
+                intent,
+                after_s,
+            } => match reads.fill_after(chain, intent, after_s).await {
+                Ok((Fill::Filled, block)) => {
+                    acted += usize::from(record(PoolStep::PayoutDelivered { id, block }, clock()))
+                }
+                Ok((Fill::Open | Fill::Cancelled, block)) => {
+                    if !record(PoolStep::PayoutUnfilled { id, block }, clock()) {
+                        continue;
+                    }
+                    acted += 1;
+                    // the user's refund at once; Eco's refund credits the pool later
+                    if undo(&payout, UNFILLED.to_string(), clock()) && payout.is_icp_swap() {
+                        let _ = icp_swap::drive(ledgers, id, clock, guard).await;
+                    }
+                }
+                // asked again next pass
+                Err(_) => {}
+            },
             Next::Undo { why, checked } => {
                 if checked {
                     let Some(pinned) = payout.order.clone() else {
