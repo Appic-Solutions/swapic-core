@@ -134,6 +134,8 @@ fn settings_go_to_the_domain_and_back() {
         }],
         arrival_backup_s: 300,
         pool_open_for_swaps: true,
+        large_deposit_usdc: Some(Nat::from(1_000_000_000_u64)),
+        large_deposit_confirmations: Some(6),
     };
     let domain = types::pool::PoolSettings::try_from(wire.clone()).unwrap();
     assert_eq!(domain.arrival_backup, Duration::from_secs(300));
@@ -152,6 +154,44 @@ fn settings_go_to_the_domain_and_back() {
             pool_open_for_swaps: false,
             ..wire
         }
+    );
+}
+
+/// The deposit tiers (2026-10-23) are `opt` on the wire: a caller that sends the settings as
+/// they were before them still decodes, with no tier, and the canister answers the defaults
+/// it runs on.
+#[test]
+fn settings_sent_without_the_deposit_tiers_still_decode() {
+    #[derive(candid::CandidType)]
+    struct Before {
+        tvl_cap: Nat,
+        per_swap_cap: Nat,
+        premium_bps: u16,
+        ckusdc_ledger: Principal,
+        icp_tokens: Vec<IcpTokenEntry>,
+        arrival_backup_s: u64,
+        pool_open_for_swaps: bool,
+    }
+    let bytes = Encode!(&Before {
+        tvl_cap: Nat::from(10_000_000_000_u64),
+        per_swap_cap: Nat::from(1_000_000_000_u64),
+        premium_bps: 10,
+        ckusdc_ledger: ckusdc(),
+        icp_tokens: vec![],
+        arrival_backup_s: 300,
+        pool_open_for_swaps: false,
+    })
+    .unwrap();
+    let decoded = Decode!(&bytes, PoolSettings).unwrap();
+    assert_eq!(decoded.large_deposit_usdc, None);
+    assert_eq!(decoded.large_deposit_confirmations, None);
+    let domain = types::pool::PoolSettings::try_from(decoded).unwrap();
+    assert_eq!(
+        domain.large_deposit(),
+        (
+            types::pool::DEFAULT_LARGE_DEPOSIT_USDC,
+            types::BlockDepth::new(6)
+        )
     );
 }
 

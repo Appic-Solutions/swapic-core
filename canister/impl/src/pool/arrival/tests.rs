@@ -460,11 +460,50 @@ fn a_receipt_not_deep_enough_is_not_credited() {
     on_fresh_memory(|| {
         crate::storage::init();
         let block = BlockNumber::new(52_823_000);
-        assert_eq!(deep_enough(block, block, ChainId::BASE), Ok(()));
+        let small = TokenAmount::from(1_000_000_u32);
+        assert_eq!(deep_enough(block, block, ChainId::BASE, small), Ok(()));
         assert_eq!(
-            deep_enough(block, BlockNumber::new(block.get() - 1), ChainId::BASE),
+            deep_enough(
+                block,
+                BlockNumber::new(block.get() - 1),
+                ChainId::BASE,
+                small
+            ),
             Err(PoolError::NotDeep { needed: 1, have: 0 })
         );
+    });
+}
+
+/// 2026-10-23: a deposit up to $1,000 is credited after one Base block, a bigger one only
+/// six blocks deep (the settings' defaults), or as deep as the settings say. Not deep yet
+/// is asked again (the scan's cursor stops before it), never refused for good.
+#[test]
+fn a_large_deposit_waits_its_own_depth() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let block = BlockNumber::new(52_823_000);
+        let head = |deep: u64| BlockNumber::new(block.get() + deep - 1);
+        let deep = |depth: u64, largest: u64| {
+            deep_enough(block, head(depth), ChainId::BASE, usdc(largest))
+        };
+        assert_eq!(deep(1, 1_000), Ok(()));
+        assert_eq!(
+            deep(1, 1_001),
+            Err(PoolError::NotDeep { needed: 6, have: 1 })
+        );
+        assert_eq!(
+            deep(5, 1_001),
+            Err(PoolError::NotDeep { needed: 6, have: 5 })
+        );
+        assert_eq!(deep(6, 1_001), Ok(()));
+        let mut settings = ledger().settings.unwrap();
+        settings.large_deposit_usdc = Some(usdc(100));
+        settings.large_deposit_confirmations = Some(3);
+        record_at(PoolStep::SettingsSet { settings }, at(2)).unwrap();
+        assert_eq!(deep(1, 100), Ok(()));
+        assert_eq!(deep(2, 101), Err(PoolError::NotDeep { needed: 3, have: 2 }));
+        assert_eq!(deep(3, 101), Ok(()));
     });
 }
 

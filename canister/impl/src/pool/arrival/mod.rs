@@ -1117,14 +1117,34 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
         .await
         .map_err(unavailable)?;
     let receipt = agreed_receipt(tx, head, answers)?;
-    deep_enough(receipt.block, head, chain.chain)?;
+    let largest = receipt
+        .transfers_to(chain)
+        .into_iter()
+        .map(|(_, _, amount)| amount)
+        .max()
+        .unwrap_or(TokenAmount::ZERO);
+    deep_enough(receipt.block, head, chain.chain, largest)?;
     Ok(receipt)
 }
 
-/// The receipt at `block` is at the pool chain's crediting depth under `head`.
-pub fn deep_enough(block: BlockNumber, head: BlockNumber, chain: ChainId) -> Result<(), PoolError> {
-    let needed = crate::tx::credit_confirmations(&config::get(), chain)
+/// The receipt at `block` is at the pool chain's crediting depth under `head`, or, when its
+/// largest transfer to the canister (`largest`) is a large deposit, at the large deposits'
+/// depth (2026-10-23): not deep yet is asked again, never refused for good.
+pub fn deep_enough(
+    block: BlockNumber,
+    head: BlockNumber,
+    chain: ChainId,
+    largest: TokenAmount,
+) -> Result<(), PoolError> {
+    let depth = crate::tx::credit_confirmations(&config::get(), chain)
         .map_err(|_| PoolError::Closed("the pool chain has no depth configured".to_string()))?;
+    let needed = match pool_store::ledger()
+        .settings
+        .map(|settings| settings.large_deposit())
+    {
+        Some((above, large)) if largest > above => large.max(depth),
+        _ => depth,
+    };
     if types::tx::is_confirmed(block, head, needed) {
         return Ok(());
     }

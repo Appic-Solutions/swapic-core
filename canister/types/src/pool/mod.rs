@@ -408,7 +408,23 @@ pub struct PoolSettings {
     /// `icp_tokens` is the direct list it reads.
     #[n(11)]
     pub routes: Option<IcpRoutes>,
+    /// A deposit whose one transfer to the canister is above this, micro USDC, is credited
+    /// only once [`Self::large_deposit_confirmations`] deep; None:
+    /// [`DEFAULT_LARGE_DEPOSIT_USDC`] (2026-10-23).
+    #[n(12)]
+    pub large_deposit_usdc: Option<TokenAmount>,
+    /// The pool chain's blocks a large deposit waits before it is credited; None:
+    /// [`DEFAULT_LARGE_DEPOSIT_CONFIRMATIONS`].
+    #[n(13)]
+    pub large_deposit_confirmations: Option<u64>,
 }
+
+/// A deposit above this (1,000 USDC) waits more blocks before it is credited (a choice made
+/// on Jeff's behalf, 2026-10-23).
+pub const DEFAULT_LARGE_DEPOSIT_USDC: TokenAmount = TokenAmount::new(1_000_000_000);
+
+/// The pool chain's blocks a large deposit waits: six Base blocks, about twelve seconds.
+pub const DEFAULT_LARGE_DEPOSIT_CONFIRMATIONS: u64 = 6;
 
 /// The mainnet ckUSDC ledger.
 pub const CKUSDC_LEDGER: &str = "xevnm-gaaaa-aaaar-qafnq-cai";
@@ -429,6 +445,8 @@ impl Default for PoolSettings {
             open_for_swaps: false,
             ledger_fees: Vec::new(),
             routes: None,
+            large_deposit_usdc: None,
+            large_deposit_confirmations: None,
         }
     }
 }
@@ -486,6 +504,9 @@ impl PoolSettings {
         if self.arrival_backup.is_zero() {
             return Err(PoolSettingsError::Zero("arrival_backup_s"));
         }
+        if self.large_deposit_confirmations == Some(0) {
+            return Err(PoolSettingsError::Zero("large_deposit_confirmations"));
+        }
         let mut seen = std::collections::BTreeSet::new();
         for token in &self.icp_tokens {
             if !seen.insert(token.ledger) {
@@ -504,6 +525,19 @@ impl PoolSettings {
             routes.validate(self.ckusdc_ledger)?;
         }
         Ok(())
+    }
+
+    /// Above what one transfer is a large deposit, and how many blocks a large deposit
+    /// waits: the settings', or the defaults.
+    pub fn large_deposit(&self) -> (TokenAmount, crate::BlockDepth) {
+        (
+            self.large_deposit_usdc
+                .unwrap_or(DEFAULT_LARGE_DEPOSIT_USDC),
+            crate::BlockDepth::new(
+                self.large_deposit_confirmations
+                    .unwrap_or(DEFAULT_LARGE_DEPOSIT_CONFIRMATIONS),
+            ),
+        )
     }
 
     /// A fee was read for ckUSDC and for every listed token.

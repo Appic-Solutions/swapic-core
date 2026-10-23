@@ -217,6 +217,12 @@ pub struct PoolSettings {
     pub arrival_backup_s: u64,
     /// Off until a controller opens the pool for swaps.
     pub pool_open_for_swaps: bool,
+    /// Micro USDC: a deposit whose one transfer is above this waits
+    /// `large_deposit_confirmations` blocks before it is credited. Absent: 1_000_000_000
+    /// ($1,000).
+    pub large_deposit_usdc: Option<Nat>,
+    /// The pool chain's blocks a large deposit waits. Absent: 6.
+    pub large_deposit_confirmations: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -533,6 +539,12 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
             ledger_fees: Vec::new(),
             // the routes are `set_icp_routes`'s, kept across a change of the knobs
             routes: None,
+            large_deposit_usdc: settings
+                .large_deposit_usdc
+                .as_ref()
+                .map(|usdc| amount("large_deposit_usdc", usdc))
+                .transpose()?,
+            large_deposit_confirmations: settings.large_deposit_confirmations,
             // no registration (P11d): kept in the record at their defaults, read by nothing
             ..domain::PoolSettings::default()
         })
@@ -556,6 +568,8 @@ impl From<&domain::PoolSettings> for PoolSettings {
                 .collect(),
             arrival_backup_s: settings.arrival_backup.as_secs(),
             pool_open_for_swaps: settings.open_for_swaps,
+            large_deposit_usdc: Some(nat(settings.large_deposit().0)),
+            large_deposit_confirmations: Some(settings.large_deposit().1.get()),
         }
     }
 }

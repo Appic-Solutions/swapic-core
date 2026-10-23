@@ -626,7 +626,40 @@ fn samples() -> Vec<Sample> {
     all.extend(returned_move_samples());
     all.extend(eco_payout_samples());
     all.extend(planned_swap_samples());
+    all.extend(deposit_tier_samples());
     all
+}
+
+/// The deposit tiers (2026-10-23): settings with a large deposit's threshold and its
+/// confirmations, as the ledger holds them and as their line sets them.
+fn deposit_tier_samples() -> Vec<Sample> {
+    use crate::pool::{PoolLedger, PoolSettings, PoolStep};
+    let settings = PoolSettings {
+        large_deposit_usdc: Some(TokenAmount::from(1_401_000_000_u64)),
+        large_deposit_confirmations: Some(14),
+        ..PoolSettings::default()
+    };
+    vec![
+        sample(
+            "pool ledger with the deposit tiers",
+            PoolLedger {
+                settings: Some(settings.clone()),
+                ..PoolLedger::default()
+            },
+        ),
+        sample(
+            "pool settings set with the deposit tiers",
+            Event::seal(
+                EventIndex::new(14_000),
+                Timestamp::from_nanos(1_800_000_000_000_001_402),
+                EventHash::new([0xe9; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::SettingsSet { settings },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// An ICP swap opened with a payout plan (2026-10-23): its terms, the payout holding its
@@ -2318,6 +2351,10 @@ fn pool_samples() -> Vec<Sample> {
                 fee: TokenAmount::from(10_084_u32),
             }],
             routes: None,
+            // absent, so this sample's bytes stay exactly the ones the golden already pins;
+            // `deposit_tier_samples` pins them
+            large_deposit_usdc: None,
+            large_deposit_confirmations: None,
         }),
         pockets: Pockets {
             base: Pocket {

@@ -195,6 +195,8 @@ fn world_in(
         icp_tokens: vec![],
         arrival_backup_s: 300,
         pool_open_for_swaps: true,
+        large_deposit_usdc: None,
+        large_deposit_confirmations: None,
     };
     let set: Result<(), PoolError> = update(
         &world.pic,
