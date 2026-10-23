@@ -1312,32 +1312,7 @@ pub async fn read_and_record(
     source: Option<(ChainId, TxHash)>,
     given: Option<&Given>,
 ) -> Result<Recorded, PoolError> {
-    let chain = pool_chain().await?;
-    let base = read_base(&chain, base_tx).await?;
-    let source = if needs_source(&base, &chain) {
-        let (src_chain, src_tx) = source
-            .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
-        let evm = config::get().evm_chains.get(src_chain).ok_or_else(|| {
-            PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
-        })?;
-        let at = SourceChain {
-            chain: src_chain,
-            swapic: evm.swapic,
-            eco_portal: config::get().eco_portal,
-            usdc: evm.usdc,
-            runner: evm.runner,
-        };
-        Some((read_source(src_chain, src_tx).await?, at))
-    } else {
-        None
-    };
-    let found = find(
-        &base,
-        source.as_ref().map(|(receipt, at)| (receipt, at)),
-        &chain,
-    )
-    .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
-    let found = prove_refunds(found, &LivePortal).await;
+    let found = read_found(base_tx, source).await?;
     // after the last read: the credited set, the pool's guard and the append are in this
     // one message
     pool::require_running()?;
