@@ -601,3 +601,35 @@ fn a_reimbursed_withdrawal_returns_to_the_icp_pocket() {
         );
     });
 }
+
+/// CR-07: a proposal whose order would be past its signing margin by the time the move is
+/// signed is passed over for the canister's own route: taken, it would only stop the move as
+/// stuck at its first signature.
+#[test]
+fn a_proposal_too_close_to_its_deadline_is_passed_over() {
+    use types::pool::{PinnedOrder, Proposal};
+    let open = item(MoveDirection::BaseToIcp, MoveStatus::Open);
+    let now = at(60);
+    let proposed = |deadline_s: u64| Move {
+        proposal: Some(Proposal {
+            order: PinnedOrder {
+                order_id: [1; 32],
+                order: vec![1],
+                gas_limit: 300_000,
+                deadline_s,
+            },
+            fee: TokenAmount::from(100_000_u64),
+        }),
+        ..open.clone()
+    };
+    let in_time = proposed(now.as_secs().get() + SIGN_MARGIN_S + 1);
+    assert_eq!(proposal_to_take(&in_time, now), in_time.proposal.as_ref());
+    let too_late = proposed(now.as_secs().get() + SIGN_MARGIN_S);
+    assert_eq!(proposal_to_take(&too_late, now), None);
+    // an urgent move never takes a proposal
+    let urgent = Move {
+        urgent: true,
+        ..in_time.clone()
+    };
+    assert_eq!(proposal_to_take(&urgent, now), None);
+}

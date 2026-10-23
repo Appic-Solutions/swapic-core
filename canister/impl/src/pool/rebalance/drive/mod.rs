@@ -359,17 +359,27 @@ fn order_chain(item: &Move, pool_chain: ChainId) -> ChainId {
     cost::chains(item.direction, pool_chain).0
 }
 
-/// Decides the route: the cheapest proposal taken in the window (never for an urgent move),
-/// or the canister's own, built here and pinned.
+/// The proposal `item` takes at `now`, pure: the cheapest one taken in the window, never for
+/// an urgent move, and only while its order is still more than [`SIGN_MARGIN_S`] from its
+/// deadline: one that close would only stop the move as stuck at its first signature
+/// (CR-07), so the canister's own route is taken instead.
+pub fn proposal_to_take(item: &Move, now: Timestamp) -> Option<&types::pool::Proposal> {
+    let proposal = item.proposal.as_ref().filter(|_| !item.urgent)?;
+    (proposal.order.deadline_s > now.as_secs().get().saturating_add(SIGN_MARGIN_S))
+        .then_some(proposal)
+}
+
+/// Decides the route: the proposal to take (`proposal_to_take`), or the canister's own,
+/// built here and pinned.
 async fn route(item: &Move, now: Timestamp) -> Result<(), String> {
     let setup = setup().await?;
     let (_, dst) = cost::chains(item.direction, setup.pool_chain);
-    let (route, order) = match (&item.proposal, item.urgent) {
-        (Some(proposal), false) => (
+    let (route, order) = match proposal_to_take(item, now) {
+        Some(proposal) => (
             MoveRoute::Proposed { fee: proposal.fee },
             proposal.order.clone(),
         ),
-        _ => own_order(item, &setup, now)?,
+        None => own_order(item, &setup, now)?,
     };
     // a Base to ICP move by Eco is filled on Ethereum: its fill is looked for from here
     let scan_from = (item.direction == MoveDirection::BaseToIcp && route.is_eco())
