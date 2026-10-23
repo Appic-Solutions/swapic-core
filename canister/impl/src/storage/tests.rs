@@ -13,10 +13,13 @@ use std::borrow::Cow;
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/candid_cells_v1.txt");
 
+/// Asserts that golden bytes decode, and parse, to a sample.
+type DecodeCheck = Box<dyn Fn(&[u8])>;
+
 struct Sample {
     name: &'static str,
     bytes: Vec<u8>,
-    decodes_from: Box<dyn Fn(&[u8])>,
+    decodes_from: DecodeCheck,
 }
 
 fn roles(name: &'static str, roles: Roles) -> Sample {
