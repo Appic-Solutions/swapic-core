@@ -166,6 +166,25 @@ pub struct PoolEffects {
     pub moved: Option<crate::pool::Move>,
 }
 
+impl PoolEffects {
+    /// A step's effects before it changes any entry beside `ledger`.
+    fn of(ledger: PoolLedger) -> Self {
+        PoolEffects {
+            ledger,
+            deposit: None,
+            shares: None,
+            credited: None,
+            payout: None,
+            queued: None,
+            dequeued: None,
+            nonce: None,
+            intent: None,
+            orphan: None,
+            moved: None,
+        }
+    }
+}
+
 /// Why a pool step was refused.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PoolStepError {
@@ -1097,513 +1116,40 @@ impl PoolLedger {
             return effects;
         }
         let mut ledger = self;
-        let mut deposit_out = None;
-        let mut shares_out = None;
-        let mut credited = None;
-        let mut orphan_out = None;
+        let mut effects = PoolEffects::of(PoolLedger::default());
         match step {
-            // the routes are `IcpRoutesSet`'s: new knobs keep the routes set
-            PoolStep::SettingsSet { settings } => {
-                let routes = ledger
-                    .settings
-                    .as_ref()
-                    .and_then(|current| current.routes.clone());
-                let mut settings = settings.clone();
-                if settings.routes.is_none() {
-                    settings.routes = routes;
-                }
-                ledger.settings = Some(settings);
+            PoolStep::SettingsSet { .. }
+            | PoolStep::IcpRoutesSet { .. }
+            | PoolStep::IcpChecked { .. }
+            | PoolStep::IcpCheckFailed { .. }
+            | PoolStep::ScanCursor { .. } => ledger.apply_settings_and_reads(step, at),
+            PoolStep::Registered { .. }
+            | PoolStep::Expired { .. }
+            | PoolStep::Arrived { .. }
+            | PoolStep::Unattributed { .. } => ledger.apply_arrival(step, lookup, at, &mut effects),
+            PoolStep::PayoutStarted { .. }
+            | PoolStep::Paid { .. }
+            | PoolStep::Minted { .. }
+            | PoolStep::DepositResolved { .. } => {
+                ledger.apply_deposit_payout(step, lookup, at, &mut effects)
             }
+            PoolStep::FellBack { .. }
+            | PoolStep::TransferAsked { .. }
+            | PoolStep::TransferRefused { .. }
+            | PoolStep::TransferLost { .. }
+            | PoolStep::AttemptFailed { .. }
+            | PoolStep::SwapDeclined { .. }
+            | PoolStep::SwapBegun { .. }
+            | PoolStep::Swapped { .. }
+            | PoolStep::SwapApproved { .. }
+            | PoolStep::SwapUndone { .. } => ledger.apply_progress(step, lookup, at, &mut effects),
+            PoolStep::StakedIcp { .. }
+            | PoolStep::StakeResolved { .. }
+            | PoolStep::WithdrawnIcp { .. }
+            | PoolStep::StakeStarted { .. }
+            | PoolStep::StakeFailed { .. }
+            | PoolStep::WithdrawStarted { .. } => ledger.apply_icp_op(step, lookup, &mut effects),
             PoolStep::ApproveSigned { .. } => {}
-            PoolStep::IcpRoutesSet { routes } => {
-                if let Some(settings) = ledger.settings.as_mut() {
-                    settings.routes = Some(routes.clone());
-                }
-            }
-            PoolStep::Registered { r#ref, deposit } => {
-                ledger.open.insert(*r#ref);
-                for party in deposit.parties() {
-                    *ledger.open_by_party.entry(party).or_insert(0) += 1;
-                }
-                deposit_out = Some((*r#ref, Registered::new(deposit.clone())));
-            }
-            PoolStep::Expired { r#ref } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.close_open(r#ref, &deposit.terms);
-                    deposit.status = DepositStatus::Expired;
-                    deposit_out = Some((*r#ref, deposit));
-                }
-            }
-            PoolStep::Arrived {
-                r#ref,
-                credit,
-                amount,
-                block,
-            } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.close_open(r#ref, &deposit.terms);
-                    if deposit.terms.kind.is_swap() {
-                        // the money is real now: the payout and its fees are owed, and queued
-                        // first in first out until the pocket's free ckUSDC covers them
-                        if let Ok(held) = ledger.arrival_fits(&deposit, *amount) {
-                            deposit.held = Some(held);
-                            if ledger.queue.0.is_empty() {
-                                ledger.head_since = Some(at);
-                            }
-                            ledger.queue.0.push((*r#ref, held));
-                        }
-                    }
-                    ledger.paying.insert(*r#ref);
-                    deposit.status = DepositStatus::Arrived;
-                    deposit.arrived = Some(Arrival {
-                        credit: *credit,
-                        amount: *amount,
-                        block: *block,
-                    });
-                    ledger.owed = sat_add(ledger.owed, owed_line(&deposit));
-                    deposit_out = Some((*r#ref, deposit));
-                }
-                ledger.pockets.base.free = sat_add(ledger.pockets.base.free, *amount);
-                credited = Some(*credit);
-                match lookup
-                    .orphan(credit)
-                    .filter(|orphan| orphan.status == crate::pool::OrphanStatus::Claimed)
-                {
-                    // a transfer that awaited its terms: on the Base balance's books since
-                    // its own line, credited once
-                    Some(mut orphan) => {
-                        orphan.status = crate::pool::OrphanStatus::Credited;
-                        orphan_out = Some((*credit, orphan));
-                    }
-                    None => ledger.unseen.push(UnseenArrival {
-                        chain: credit.chain,
-                        block: *block,
-                        amount: *amount,
-                    }),
-                }
-            }
-            PoolStep::Unattributed {
-                credit,
-                amount,
-                block,
-                r#ref,
-                src_payer,
-                why,
-                awaiting_until,
-            } => {
-                // held for a controller, one at a time; a deposit's transfer found without
-                // its terms awaits them first
-                let status = match (awaiting_until, r#ref) {
-                    (Some(until), Some(r#ref)) => crate::pool::OrphanStatus::AwaitingTerms {
-                        r#ref: *r#ref,
-                        until: *until,
-                    },
-                    _ => crate::pool::OrphanStatus::Held,
-                };
-                orphan_out = Some((
-                    *credit,
-                    crate::pool::Orphan {
-                        amount: *amount,
-                        block: *block,
-                        payer: *src_payer,
-                        why: why.clone(),
-                        status,
-                    },
-                ));
-                ledger.unattributed = sat_add(ledger.unattributed, *amount);
-                ledger.unseen.push(UnseenArrival {
-                    chain: credit.chain,
-                    block: *block,
-                    amount: *amount,
-                });
-                credited = Some(*credit);
-                if let Some(r#ref) = r#ref {
-                    if let Some(mut deposit) = lookup.deposit(r#ref) {
-                        match deposit.status {
-                            DepositStatus::Registered => {
-                                ledger.close_open(r#ref, &deposit.terms);
-                                deposit.status = DepositStatus::Unattributed;
-                                deposit_out = Some((*r#ref, deposit));
-                            }
-                            DepositStatus::Expired => {
-                                deposit.status = DepositStatus::Unattributed;
-                                deposit_out = Some((*r#ref, deposit));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            // the hold: the head of the queue takes all it holds of the free ckUSDC
-            PoolStep::PayoutStarted { r#ref, attempt } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.queue.0.retain(|(queued, _)| queued != r#ref);
-                    // the next head waits from now
-                    ledger.head_since = (!ledger.queue.0.is_empty()).then_some(at);
-                    let held = deposit.held();
-                    let icp = &mut ledger.pockets.icp;
-                    icp.free = sat_sub(icp.free, held);
-                    icp.reserved = sat_add(icp.reserved, held);
-                    deposit.status = DepositStatus::Paying;
-                    deposit.payout.attempt = Some(*attempt);
-                    deposit_out = Some((*r#ref, deposit));
-                }
-            }
-            PoolStep::Paid {
-                r#ref,
-                token,
-                amount,
-                block,
-                spent,
-            } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    let paid = super::Paid {
-                        token: *token,
-                        amount: *amount,
-                        block: *block,
-                        spent: *spent,
-                    };
-                    ledger.book_paid(r#ref, &mut deposit, paid);
-                    deposit_out = Some((*r#ref, deposit));
-                }
-            }
-            PoolStep::FellBack {
-                r#ref,
-                why,
-                amount,
-                token,
-            } => {
-                let why = why.clone();
-                let (amount, token) = (*amount, *token);
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    if let Some(attempt) = payout.attempt.as_mut() {
-                        attempt.path = PayoutPath::Ckusdc;
-                        attempt.amount = amount;
-                        attempt.token = token;
-                    }
-                    payout.fell_back = Some(why);
-                });
-            }
-            PoolStep::Minted {
-                r#ref,
-                owner,
-                shares,
-            } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
-                    ledger.paying.remove(r#ref);
-                    ledger.total_shares = ledger
-                        .total_shares
-                        .checked_add(*shares)
-                        .unwrap_or(Shares::new(u128::MAX));
-                    shares_out = Some(credit_shares(lookup, owner, *shares));
-                    deposit.status = DepositStatus::Paid;
-                    deposit.minted = Some(*shares);
-                    deposit_out = Some((*r#ref, deposit));
-                }
-            }
-            PoolStep::StakedIcp {
-                id,
-                owner,
-                amount,
-                shares,
-                ..
-            } => {
-                ledger.pending.remove(id);
-                ledger.book_stake(*amount, *shares);
-                shares_out = Some(credit_shares(lookup, owner, *shares));
-            }
-            PoolStep::StakeResolved { id, resolution } => {
-                match (ledger.pending.remove(id), resolution) {
-                    // the pull landed: booked as `StakedIcp` books it
-                    (
-                        Some(PendingOp::Stake { owner, amount, .. }),
-                        StakeResolution::Pulled { block, shares },
-                    ) => {
-                        ledger.book_stake(amount, *shares);
-                        ledger
-                            .resolved_pulls
-                            .get_or_insert_with(BTreeSet::new)
-                            .insert(*block);
-                        shares_out = Some(credit_shares(lookup, &owner, *shares));
-                    }
-                    // it never landed: dropped as `StakeFailed` drops it
-                    (Some(PendingOp::Stake { amount, .. }), StakeResolution::NotPulled) => {
-                        ledger.stake_room = sat_sub(ledger.stake_room, amount);
-                    }
-                    _ => {}
-                }
-            }
-            PoolStep::DepositResolved {
-                r#ref,
-                resolution,
-                retry_at,
-            } => {
-                if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    match resolution {
-                        DepositResolution::Retry => {
-                            deposit.payout.failures = 0;
-                            deposit.payout.failed = None;
-                            match deposit.payout.attempt.as_mut() {
-                                // paying again: with its own dedup pair, or asked afresh at
-                                // the door's instant when nothing can land twice
-                                Some(attempt) => {
-                                    if let Some(retry_at) = retry_at {
-                                        attempt.created_at = *retry_at;
-                                    }
-                                    deposit.status = DepositStatus::Paying;
-                                }
-                                // never started (CR-08): queued again, at the back
-                                None => {
-                                    deposit.status = DepositStatus::Arrived;
-                                    if deposit.terms.kind.is_swap() {
-                                        if ledger.queue.0.is_empty() {
-                                            ledger.head_since = Some(at);
-                                        }
-                                        ledger.queue.0.push((*r#ref, deposit.held()));
-                                    }
-                                }
-                            }
-                        }
-                        // its transfer as asked, paid in `block`: as `Paid` books it
-                        DepositResolution::MarkPaid { block } => {
-                            if let Some(sent) = deposit.payout.sent {
-                                let paid = super::Paid {
-                                    token: sent.token.0,
-                                    amount: sent.amount,
-                                    block: *block,
-                                    spent: sent.spent,
-                                };
-                                ledger.book_paid(r#ref, &mut deposit, paid);
-                            }
-                        }
-                        DepositResolution::Refund => {
-                            ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
-                            ledger.paying.remove(r#ref);
-                            // started, nothing went out: its hold is free again on ICP
-                            if deposit.payout.attempt.is_some() {
-                                let held = deposit.held();
-                                let icp = &mut ledger.pockets.icp;
-                                icp.reserved = sat_sub(icp.reserved, held);
-                                icp.free = sat_add(icp.free, held);
-                            }
-                            // out of the Base pocket's free line, onto the unattributed one:
-                            // the Base balance's books stay where they were
-                            if let Some((credit, orphan)) = deposit.refund_orphan() {
-                                let base = &mut ledger.pockets.base;
-                                base.free = sat_sub(base.free, orphan.amount);
-                                ledger.unattributed = sat_add(ledger.unattributed, orphan.amount);
-                                orphan_out = Some((credit, orphan));
-                            }
-                            deposit.held = Some(TokenAmount::ZERO);
-                            deposit.status = DepositStatus::Refunded;
-                        }
-                    }
-                    deposit_out = Some((*r#ref, deposit));
-                }
-            }
-            PoolStep::WithdrawnIcp { id, spent, .. } => {
-                if let Some(PendingOp::Withdraw { usdc, .. }) = ledger.pending.remove(id) {
-                    ledger.owed = sat_sub(ledger.owed, usdc);
-                    ledger.spend_reserved(usdc, *spent);
-                }
-            }
-            PoolStep::TransferAsked {
-                r#ref,
-                token,
-                amount,
-                spent,
-            } => {
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    // an answer lost once is kept for good
-                    let lost = payout.sent.map_or(Default::default(), |sent| sent.lost);
-                    payout.sent = Some(super::Sent {
-                        token: *token,
-                        amount: *amount,
-                        spent: *spent,
-                        refused: false,
-                        lost,
-                    });
-                });
-            }
-            PoolStep::TransferRefused { r#ref } => {
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    if let Some(sent) = payout.sent.as_mut() {
-                        sent.refused = true;
-                    }
-                });
-            }
-            PoolStep::TransferLost { r#ref, held } => {
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    if let Some(sent) = payout.sent.as_mut() {
-                        sent.lost = crate::pool::payout::Flag(true);
-                    }
-                    // held for a human at once, as its tenth failure would
-                    if let Some(why) = held {
-                        payout.failed = Some(why.clone());
-                    }
-                });
-                if let (Some(why), Some((_, deposit))) = (held, deposit_out.as_mut()) {
-                    deposit.status = DepositStatus::PayoutFailed(why.clone());
-                }
-            }
-            PoolStep::AttemptFailed { r#ref, why } => {
-                let why = why.clone();
-                let mut stopped = false;
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    payout.failures = payout.failures.saturating_add(1);
-                    if payout.failures >= MAX_PAYOUT_ATTEMPTS {
-                        payout.failed = Some(why.clone());
-                        stopped = true;
-                    }
-                });
-                // a stopped payout stays in `paying`: it is still between its start and its
-                // record of payment, which the ICP pocket's check leaves out
-                if stopped {
-                    if let Some((_, deposit)) = deposit_out.as_mut() {
-                        deposit.status = DepositStatus::PayoutFailed(why);
-                    }
-                    // one that never started leaves the queue, so the payouts behind it go
-                    // on; what it holds stays owed and was never reserved (CR-08)
-                    let head = ledger.queue.head().map(|(head, _)| head);
-                    ledger.queue.0.retain(|(queued, _)| queued != r#ref);
-                    if head == Some(*r#ref) {
-                        ledger.head_since = (!ledger.queue.0.is_empty()).then_some(at);
-                    }
-                }
-            }
-            PoolStep::SwapDeclined { r#ref, leg, .. } => {
-                let leg = *leg;
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    let this = payout.leg_mut(leg);
-                    this.declined = this.declined.saturating_add(1);
-                });
-            }
-            PoolStep::SwapBegun {
-                r#ref,
-                before,
-                leg,
-                amount_in,
-            } => {
-                let (before, leg, amount_in) = (*before, *leg, *amount_in);
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    let this = payout.leg_mut(leg);
-                    this.begun = true;
-                    this.before = before;
-                    this.amount_in = amount_in;
-                });
-            }
-            PoolStep::Swapped {
-                r#ref,
-                out,
-                send,
-                leg,
-            } => {
-                let (out, send, leg) = (*out, *send, *leg);
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    let this = payout.leg_mut(leg);
-                    this.out = Some(out);
-                    this.send = send;
-                });
-            }
-            PoolStep::StakeStarted {
-                id,
-                owner,
-                from,
-                amount,
-                created_at,
-            } => {
-                ledger.stake_room = sat_add(ledger.stake_room, *amount);
-                ledger.pending.insert(
-                    *id,
-                    PendingOp::Stake {
-                        owner: *owner,
-                        from: *from,
-                        amount: *amount,
-                        created_at: *created_at,
-                    },
-                );
-            }
-            PoolStep::StakeFailed { id, .. } => {
-                if let Some(PendingOp::Stake { amount, .. }) = ledger.pending.remove(id) {
-                    ledger.stake_room = sat_sub(ledger.stake_room, amount);
-                }
-            }
-            PoolStep::WithdrawStarted {
-                id,
-                owner,
-                burned,
-                usdc,
-                to,
-                token_out,
-                min_out,
-                attempt,
-            } => {
-                let account = PoolAccount::Icp(*owner);
-                let line = ShareLine {
-                    account,
-                    shares: lookup
-                        .shares_of(&account.key())
-                        .checked_sub(*burned)
-                        .unwrap_or(Shares::ZERO),
-                };
-                shares_out = Some((account.key(), line));
-                ledger.total_shares = ledger
-                    .total_shares
-                    .checked_sub(*burned)
-                    .unwrap_or(Shares::ZERO);
-                let icp = &mut ledger.pockets.icp;
-                icp.free = sat_sub(icp.free, *usdc);
-                icp.reserved = sat_add(icp.reserved, *usdc);
-                ledger.owed = sat_add(ledger.owed, *usdc);
-                ledger.pending.insert(
-                    *id,
-                    PendingOp::Withdraw {
-                        owner: *owner,
-                        burned: *burned,
-                        usdc: *usdc,
-                        to: *to,
-                        token_out: *token_out,
-                        min_out: *min_out,
-                        payout: PayoutProgress {
-                            attempt: Some(*attempt),
-                            ..PayoutProgress::default()
-                        },
-                    },
-                );
-            }
-            PoolStep::SwapApproved { r#ref, leg } => {
-                let leg = *leg;
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    let this = payout.leg_mut(leg);
-                    this.approvals = Some(this.approvals.unwrap_or(0).saturating_add(1));
-                });
-            }
-            PoolStep::SwapUndone {
-                r#ref,
-                cost,
-                withdrawn,
-                leg,
-            } => {
-                let (cost, withdrawn, leg) = (*cost, *withdrawn, *leg);
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
-                    let this = payout.leg_mut(leg);
-                    this.undone = Some(cost);
-                    this.withdrawn = Some(withdrawn);
-                });
-            }
-            PoolStep::IcpChecked { check } => {
-                ledger.icp_check = Some(*check);
-                ledger.icp_checked_at = Some(at);
-                if check.shortfall {
-                    ledger.icp_shortfall_at = Some(at);
-                }
-            }
-            PoolStep::IcpCheckFailed { .. } => ledger.icp_failed_at = Some(at),
-            PoolStep::ScanCursor { block, log } => {
-                ledger.scan_cursor = Some(*block);
-                ledger.scan_log = *log;
-            }
             // `apply_payout` records these, and answered before this match
             PoolStep::PayoutSettingsSet { .. }
             | PoolStep::PayoutOpened { .. }
@@ -1651,19 +1197,570 @@ impl PoolLedger {
             // the state indexes it: nothing of the pool moves
             PoolStep::EcoRescueSigned { .. } => {}
         }
-        let payout = ledger.evm_changed.take();
-        PoolEffects {
-            ledger,
-            deposit: deposit_out,
-            shares: shares_out,
-            credited,
-            payout,
-            queued: None,
-            dequeued: None,
-            nonce: None,
-            intent: None,
-            orphan: orphan_out,
-            moved: None,
+        effects.payout = ledger.evm_changed.take();
+        effects.ledger = ledger;
+        effects
+    }
+
+    /// What the pool's knobs and its reads change: its settings and ICP routes, the ICP
+    /// pocket's balance check, the canister's read of Base.
+    fn apply_settings_and_reads(&mut self, step: &PoolStep, at: Timestamp) {
+        match step {
+            // the routes are `IcpRoutesSet`'s: new knobs keep the routes set
+            PoolStep::SettingsSet { settings } => {
+                let routes = self
+                    .settings
+                    .as_ref()
+                    .and_then(|current| current.routes.clone());
+                let mut settings = settings.clone();
+                if settings.routes.is_none() {
+                    settings.routes = routes;
+                }
+                self.settings = Some(settings);
+            }
+            PoolStep::IcpRoutesSet { routes } => {
+                if let Some(settings) = self.settings.as_mut() {
+                    settings.routes = Some(routes.clone());
+                }
+            }
+            PoolStep::IcpChecked { check } => {
+                self.icp_check = Some(*check);
+                self.icp_checked_at = Some(at);
+                if check.shortfall {
+                    self.icp_shortfall_at = Some(at);
+                }
+            }
+            PoolStep::IcpCheckFailed { .. } => self.icp_failed_at = Some(at),
+            PoolStep::ScanCursor { block, log } => {
+                self.scan_cursor = Some(*block);
+                self.scan_log = *log;
+            }
+            _ => {}
+        }
+    }
+
+    /// What a deposit's registration and its transfer's arrival change, or a transfer no
+    /// deposit takes.
+    fn apply_arrival(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        effects: &mut PoolEffects,
+    ) {
+        match step {
+            PoolStep::Registered { r#ref, deposit } => {
+                self.open.insert(*r#ref);
+                for party in deposit.parties() {
+                    *self.open_by_party.entry(party).or_insert(0) += 1;
+                }
+                effects.deposit = Some((*r#ref, Registered::new(deposit.clone())));
+            }
+            PoolStep::Expired { r#ref } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    self.close_open(r#ref, &deposit.terms);
+                    deposit.status = DepositStatus::Expired;
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+            }
+            PoolStep::Arrived {
+                r#ref,
+                credit,
+                amount,
+                block,
+            } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    self.close_open(r#ref, &deposit.terms);
+                    if deposit.terms.kind.is_swap() {
+                        // the money is real now: the payout and its fees are owed, and queued
+                        // first in first out until the pocket's free ckUSDC covers them
+                        if let Ok(held) = self.arrival_fits(&deposit, *amount) {
+                            deposit.held = Some(held);
+                            if self.queue.0.is_empty() {
+                                self.head_since = Some(at);
+                            }
+                            self.queue.0.push((*r#ref, held));
+                        }
+                    }
+                    self.paying.insert(*r#ref);
+                    deposit.status = DepositStatus::Arrived;
+                    deposit.arrived = Some(Arrival {
+                        credit: *credit,
+                        amount: *amount,
+                        block: *block,
+                    });
+                    self.owed = sat_add(self.owed, owed_line(&deposit));
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+                self.pockets.base.free = sat_add(self.pockets.base.free, *amount);
+                effects.credited = Some(*credit);
+                match lookup
+                    .orphan(credit)
+                    .filter(|orphan| orphan.status == crate::pool::OrphanStatus::Claimed)
+                {
+                    // a transfer that awaited its terms: on the Base balance's books since
+                    // its own line, credited once
+                    Some(mut orphan) => {
+                        orphan.status = crate::pool::OrphanStatus::Credited;
+                        effects.orphan = Some((*credit, orphan));
+                    }
+                    None => self.unseen.push(UnseenArrival {
+                        chain: credit.chain,
+                        block: *block,
+                        amount: *amount,
+                    }),
+                }
+            }
+            PoolStep::Unattributed {
+                credit,
+                amount,
+                block,
+                r#ref,
+                src_payer,
+                why,
+                awaiting_until,
+            } => {
+                // held for a controller, one at a time; a deposit's transfer found without
+                // its terms awaits them first
+                let status = match (awaiting_until, r#ref) {
+                    (Some(until), Some(r#ref)) => crate::pool::OrphanStatus::AwaitingTerms {
+                        r#ref: *r#ref,
+                        until: *until,
+                    },
+                    _ => crate::pool::OrphanStatus::Held,
+                };
+                effects.orphan = Some((
+                    *credit,
+                    crate::pool::Orphan {
+                        amount: *amount,
+                        block: *block,
+                        payer: *src_payer,
+                        why: why.clone(),
+                        status,
+                    },
+                ));
+                self.unattributed = sat_add(self.unattributed, *amount);
+                self.unseen.push(UnseenArrival {
+                    chain: credit.chain,
+                    block: *block,
+                    amount: *amount,
+                });
+                effects.credited = Some(*credit);
+                if let Some(r#ref) = r#ref {
+                    if let Some(mut deposit) = lookup.deposit(r#ref) {
+                        match deposit.status {
+                            DepositStatus::Registered => {
+                                self.close_open(r#ref, &deposit.terms);
+                                deposit.status = DepositStatus::Unattributed;
+                                effects.deposit = Some((*r#ref, deposit));
+                            }
+                            DepositStatus::Expired => {
+                                deposit.status = DepositStatus::Unattributed;
+                                effects.deposit = Some((*r#ref, deposit));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What an arrived deposit's end changes: a swap's payout started and paid, a stake's
+    /// shares minted, a controller's resolution of one held for a human.
+    fn apply_deposit_payout(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        effects: &mut PoolEffects,
+    ) {
+        match step {
+            // the hold: the head of the queue takes all it holds of the free ckUSDC
+            PoolStep::PayoutStarted { r#ref, attempt } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    self.queue.0.retain(|(queued, _)| queued != r#ref);
+                    // the next head waits from now
+                    self.head_since = (!self.queue.0.is_empty()).then_some(at);
+                    let held = deposit.held();
+                    let icp = &mut self.pockets.icp;
+                    icp.free = sat_sub(icp.free, held);
+                    icp.reserved = sat_add(icp.reserved, held);
+                    deposit.status = DepositStatus::Paying;
+                    deposit.payout.attempt = Some(*attempt);
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+            }
+            PoolStep::Paid {
+                r#ref,
+                token,
+                amount,
+                block,
+                spent,
+            } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    let paid = super::Paid {
+                        token: *token,
+                        amount: *amount,
+                        block: *block,
+                        spent: *spent,
+                    };
+                    self.book_paid(r#ref, &mut deposit, paid);
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+            }
+            PoolStep::Minted {
+                r#ref,
+                owner,
+                shares,
+            } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    self.owed = sat_sub(self.owed, owed_line(&deposit));
+                    self.paying.remove(r#ref);
+                    self.total_shares = self
+                        .total_shares
+                        .checked_add(*shares)
+                        .unwrap_or(Shares::new(u128::MAX));
+                    effects.shares = Some(credit_shares(lookup, owner, *shares));
+                    deposit.status = DepositStatus::Paid;
+                    deposit.minted = Some(*shares);
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+            }
+            PoolStep::DepositResolved {
+                r#ref,
+                resolution,
+                retry_at,
+            } => {
+                if let Some(mut deposit) = lookup.deposit(r#ref) {
+                    match resolution {
+                        DepositResolution::Retry => {
+                            deposit.payout.failures = 0;
+                            deposit.payout.failed = None;
+                            match deposit.payout.attempt.as_mut() {
+                                // paying again: with its own dedup pair, or asked afresh at
+                                // the door's instant when nothing can land twice
+                                Some(attempt) => {
+                                    if let Some(retry_at) = retry_at {
+                                        attempt.created_at = *retry_at;
+                                    }
+                                    deposit.status = DepositStatus::Paying;
+                                }
+                                // never started (CR-08): queued again, at the back
+                                None => {
+                                    deposit.status = DepositStatus::Arrived;
+                                    if deposit.terms.kind.is_swap() {
+                                        if self.queue.0.is_empty() {
+                                            self.head_since = Some(at);
+                                        }
+                                        self.queue.0.push((*r#ref, deposit.held()));
+                                    }
+                                }
+                            }
+                        }
+                        // its transfer as asked, paid in `block`: as `Paid` books it
+                        DepositResolution::MarkPaid { block } => {
+                            if let Some(sent) = deposit.payout.sent {
+                                let paid = super::Paid {
+                                    token: sent.token.0,
+                                    amount: sent.amount,
+                                    block: *block,
+                                    spent: sent.spent,
+                                };
+                                self.book_paid(r#ref, &mut deposit, paid);
+                            }
+                        }
+                        DepositResolution::Refund => {
+                            self.owed = sat_sub(self.owed, owed_line(&deposit));
+                            self.paying.remove(r#ref);
+                            // started, nothing went out: its hold is free again on ICP
+                            if deposit.payout.attempt.is_some() {
+                                let held = deposit.held();
+                                let icp = &mut self.pockets.icp;
+                                icp.reserved = sat_sub(icp.reserved, held);
+                                icp.free = sat_add(icp.free, held);
+                            }
+                            // out of the Base pocket's free line, onto the unattributed one:
+                            // the Base balance's books stay where they were
+                            if let Some((credit, orphan)) = deposit.refund_orphan() {
+                                let base = &mut self.pockets.base;
+                                base.free = sat_sub(base.free, orphan.amount);
+                                self.unattributed = sat_add(self.unattributed, orphan.amount);
+                                effects.orphan = Some((credit, orphan));
+                            }
+                            deposit.held = Some(TokenAmount::ZERO);
+                            deposit.status = DepositStatus::Refunded;
+                        }
+                    }
+                    effects.deposit = Some((*r#ref, deposit));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What a payout's progress changes (a deposit's, an ICP withdrawal's, or a Base payout's
+    /// ICP legs): its transfer, its ICPSwap legs, its failures.
+    fn apply_progress(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        effects: &mut PoolEffects,
+    ) {
+        match step {
+            PoolStep::FellBack {
+                r#ref,
+                why,
+                amount,
+                token,
+            } => {
+                let why = why.clone();
+                let (amount, token) = (*amount, *token);
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    if let Some(attempt) = payout.attempt.as_mut() {
+                        attempt.path = PayoutPath::Ckusdc;
+                        attempt.amount = amount;
+                        attempt.token = token;
+                    }
+                    payout.fell_back = Some(why);
+                });
+            }
+            PoolStep::TransferAsked {
+                r#ref,
+                token,
+                amount,
+                spent,
+            } => {
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    // an answer lost once is kept for good
+                    let lost = payout.sent.map_or(Default::default(), |sent| sent.lost);
+                    payout.sent = Some(super::Sent {
+                        token: *token,
+                        amount: *amount,
+                        spent: *spent,
+                        refused: false,
+                        lost,
+                    });
+                });
+            }
+            PoolStep::TransferRefused { r#ref } => {
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    if let Some(sent) = payout.sent.as_mut() {
+                        sent.refused = true;
+                    }
+                });
+            }
+            PoolStep::TransferLost { r#ref, held } => {
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    if let Some(sent) = payout.sent.as_mut() {
+                        sent.lost = crate::pool::payout::Flag(true);
+                    }
+                    // held for a human at once, as its tenth failure would
+                    if let Some(why) = held {
+                        payout.failed = Some(why.clone());
+                    }
+                });
+                if let (Some(why), Some((_, deposit))) = (held, effects.deposit.as_mut()) {
+                    deposit.status = DepositStatus::PayoutFailed(why.clone());
+                }
+            }
+            PoolStep::AttemptFailed { r#ref, why } => {
+                let why = why.clone();
+                let mut stopped = false;
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    payout.failures = payout.failures.saturating_add(1);
+                    if payout.failures >= MAX_PAYOUT_ATTEMPTS {
+                        payout.failed = Some(why.clone());
+                        stopped = true;
+                    }
+                });
+                // a stopped payout stays in `paying`: it is still between its start and its
+                // record of payment, which the ICP pocket's check leaves out
+                if stopped {
+                    if let Some((_, deposit)) = effects.deposit.as_mut() {
+                        deposit.status = DepositStatus::PayoutFailed(why);
+                    }
+                    // one that never started leaves the queue, so the payouts behind it go
+                    // on; what it holds stays owed and was never reserved (CR-08)
+                    let head = self.queue.head().map(|(head, _)| head);
+                    self.queue.0.retain(|(queued, _)| queued != r#ref);
+                    if head == Some(*r#ref) {
+                        self.head_since = (!self.queue.0.is_empty()).then_some(at);
+                    }
+                }
+            }
+            PoolStep::SwapDeclined { r#ref, leg, .. } => {
+                let leg = *leg;
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    let this = payout.leg_mut(leg);
+                    this.declined = this.declined.saturating_add(1);
+                });
+            }
+            PoolStep::SwapBegun {
+                r#ref,
+                before,
+                leg,
+                amount_in,
+            } => {
+                let (before, leg, amount_in) = (*before, *leg, *amount_in);
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    let this = payout.leg_mut(leg);
+                    this.begun = true;
+                    this.before = before;
+                    this.amount_in = amount_in;
+                });
+            }
+            PoolStep::Swapped {
+                r#ref,
+                out,
+                send,
+                leg,
+            } => {
+                let (out, send, leg) = (*out, *send, *leg);
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    let this = payout.leg_mut(leg);
+                    this.out = Some(out);
+                    this.send = send;
+                });
+            }
+            PoolStep::SwapApproved { r#ref, leg } => {
+                let leg = *leg;
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    let this = payout.leg_mut(leg);
+                    this.approvals = Some(this.approvals.unwrap_or(0).saturating_add(1));
+                });
+            }
+            PoolStep::SwapUndone {
+                r#ref,
+                cost,
+                withdrawn,
+                leg,
+            } => {
+                let (cost, withdrawn, leg) = (*cost, *withdrawn, *leg);
+                effects.deposit = self.with_payout(r#ref, lookup, |payout| {
+                    let this = payout.leg_mut(leg);
+                    this.undone = Some(cost);
+                    this.withdrawn = Some(withdrawn);
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// What an ICP stake's or an ICP withdrawal's own steps change.
+    fn apply_icp_op(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        effects: &mut PoolEffects,
+    ) {
+        match step {
+            PoolStep::StakedIcp {
+                id,
+                owner,
+                amount,
+                shares,
+                ..
+            } => {
+                self.pending.remove(id);
+                self.book_stake(*amount, *shares);
+                effects.shares = Some(credit_shares(lookup, owner, *shares));
+            }
+            PoolStep::StakeResolved { id, resolution } => {
+                match (self.pending.remove(id), resolution) {
+                    // the pull landed: booked as `StakedIcp` books it
+                    (
+                        Some(PendingOp::Stake { owner, amount, .. }),
+                        StakeResolution::Pulled { block, shares },
+                    ) => {
+                        self.book_stake(amount, *shares);
+                        self.resolved_pulls
+                            .get_or_insert_with(BTreeSet::new)
+                            .insert(*block);
+                        effects.shares = Some(credit_shares(lookup, &owner, *shares));
+                    }
+                    // it never landed: dropped as `StakeFailed` drops it
+                    (Some(PendingOp::Stake { amount, .. }), StakeResolution::NotPulled) => {
+                        self.stake_room = sat_sub(self.stake_room, amount);
+                    }
+                    _ => {}
+                }
+            }
+            PoolStep::WithdrawnIcp { id, spent, .. } => {
+                if let Some(PendingOp::Withdraw { usdc, .. }) = self.pending.remove(id) {
+                    self.owed = sat_sub(self.owed, usdc);
+                    self.spend_reserved(usdc, *spent);
+                }
+            }
+            PoolStep::StakeStarted {
+                id,
+                owner,
+                from,
+                amount,
+                created_at,
+            } => {
+                self.stake_room = sat_add(self.stake_room, *amount);
+                self.pending.insert(
+                    *id,
+                    PendingOp::Stake {
+                        owner: *owner,
+                        from: *from,
+                        amount: *amount,
+                        created_at: *created_at,
+                    },
+                );
+            }
+            PoolStep::StakeFailed { id, .. } => {
+                if let Some(PendingOp::Stake { amount, .. }) = self.pending.remove(id) {
+                    self.stake_room = sat_sub(self.stake_room, amount);
+                }
+            }
+            PoolStep::WithdrawStarted {
+                id,
+                owner,
+                burned,
+                usdc,
+                to,
+                token_out,
+                min_out,
+                attempt,
+            } => {
+                let account = PoolAccount::Icp(*owner);
+                let line = ShareLine {
+                    account,
+                    shares: lookup
+                        .shares_of(&account.key())
+                        .checked_sub(*burned)
+                        .unwrap_or(Shares::ZERO),
+                };
+                effects.shares = Some((account.key(), line));
+                self.total_shares = self
+                    .total_shares
+                    .checked_sub(*burned)
+                    .unwrap_or(Shares::ZERO);
+                let icp = &mut self.pockets.icp;
+                icp.free = sat_sub(icp.free, *usdc);
+                icp.reserved = sat_add(icp.reserved, *usdc);
+                self.owed = sat_add(self.owed, *usdc);
+                self.pending.insert(
+                    *id,
+                    PendingOp::Withdraw {
+                        owner: *owner,
+                        burned: *burned,
+                        usdc: *usdc,
+                        to: *to,
+                        token_out: *token_out,
+                        min_out: *min_out,
+                        payout: PayoutProgress {
+                            attempt: Some(*attempt),
+                            ..PayoutProgress::default()
+                        },
+                    },
+                );
+            }
+            _ => {}
         }
     }
 
