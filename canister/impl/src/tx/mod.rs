@@ -972,16 +972,18 @@ async fn read_receipts(
     let answers = rpc::rpc_batch_each(chain_id, &calls, cap)
         .await
         .map_err(|_| Unread::Rpc)?;
-    let fee_path = config::get()
-        .evm_chains
-        .get(chain_id)
-        .zip(crate::storage::ecdsa_address::get())
-        .map(|(chain, canister)| crate::books::FeePath {
-            usdc: chain.usdc,
-            runner: chain.runner,
-            canister,
-            eco_portal: config::get().eco_portal,
-        });
+    let fee_path = config::with(|config| {
+        config
+            .evm_chains
+            .get(chain_id)
+            .zip(crate::storage::ecdsa_address::get())
+            .map(|(chain, canister)| crate::books::FeePath {
+                usdc: chain.usdc,
+                runner: chain.runner,
+                canister,
+                eco_portal: config.eco_portal,
+            })
+    });
     landed(entries, &answers, fee_path).ok_or(Unread::NoHead)
 }
 

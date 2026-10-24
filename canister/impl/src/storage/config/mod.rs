@@ -34,6 +34,12 @@ pub fn get() -> Config {
     CONFIG.with(|c| c.borrow().get().clone())
 }
 
+/// `f` on the stored config with no copy of it made, for a hot path that reads a field or
+/// two; `f` writes no config.
+pub fn with<R>(f: impl FnOnce(&Config) -> R) -> R {
+    CONFIG.with(|c| f(c.borrow().get()))
+}
+
 /// The line a config write leaves in the world-readable log: compact JSON of the redacted
 /// wire view, so it reads in the field names and units ops set.
 pub fn change_json(config: &Config) -> String {

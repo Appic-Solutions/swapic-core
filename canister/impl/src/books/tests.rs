@@ -94,7 +94,7 @@ fn pool_config() -> types::Config {
 }
 
 fn status(halted: bool, now: Timestamp) -> Result<(), PoolClosed> {
-    read_state(|state| pool_status(state, &pool_config(), halted, now))
+    read_state(|state| pool_status(state, &state.pool(), &pool_config(), halted, now))
 }
 
 fn pool_step(paused: bool) -> EventType {
@@ -115,7 +115,13 @@ fn pool_pause_is_enforced() {
         assert_eq!(status(false, at_minute(2)), Ok(()));
         assert_eq!(status(true, at_minute(2)), Err(PoolClosed::Halted));
         assert_eq!(
-            read_state(|state| pool_status(state, &types::Config::default(), false, at_minute(2))),
+            read_state(|state| pool_status(
+                state,
+                &state.pool(),
+                &types::Config::default(),
+                false,
+                at_minute(2)
+            )),
             Err(PoolClosed::NoPoolChain)
         );
 

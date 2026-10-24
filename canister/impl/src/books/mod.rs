@@ -72,6 +72,7 @@ pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: T
 /// outflow calls first, which fails closed (`types::books::pool_open`).
 pub fn pool_status<S: Store>(
     state: &State<S>,
+    pool: &types::pool::PoolLedger,
     config: &types::Config,
     halted: bool,
     now: Timestamp,
@@ -87,7 +88,6 @@ pub fn pool_status<S: Store>(
     // the ICP pocket's own latch, cleared with the Base one when a controller reopens; and
     // its own staleness once the pool has settings, as the Base books': a read that fails
     // passes nothing
-    let pool = state.pool();
     if pool.icp_shortfall_at.is_some() {
         return Err(PoolClosed::IcpShortfall);
     }
@@ -107,8 +107,9 @@ pub fn pool_status<S: Store>(
 /// before the first check included. Every pool outflow calls it first.
 pub fn require_pool_open() -> Result<(), PoolClosed> {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let config = config::get();
-    read_state(|state| pool_status(state, &config, is_halted(), now))
+    config::with(|config| {
+        read_state(|state| pool_status(state, &state.pool(), config, is_halted(), now))
+    })
 }
 
 /// Records a balance check that could not read the balance: a failure is a line in the

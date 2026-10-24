@@ -1355,16 +1355,18 @@ pub async fn read_found(
     let source = if needs_source(&base, &chain) {
         let (src_chain, src_tx) = source
             .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
-        let evm = config::get().evm_chains.get(src_chain).ok_or_else(|| {
+        let at = config::with(|config| {
+            config.evm_chains.get(src_chain).map(|evm| SourceChain {
+                chain: src_chain,
+                swapic: evm.swapic,
+                eco_portal: config.eco_portal,
+                usdc: evm.usdc,
+                runner: evm.runner,
+            })
+        })
+        .ok_or_else(|| {
             PoolError::BadArrival("the source chain is not one Swapic runs on".to_string())
         })?;
-        let at = SourceChain {
-            chain: src_chain,
-            swapic: evm.swapic,
-            eco_portal: config::get().eco_portal,
-            usdc: evm.usdc,
-            runner: evm.runner,
-        };
         Some((read_source(src_chain, src_tx).await?, at))
     } else {
         None

@@ -281,9 +281,11 @@ pub async fn drive(now: Timestamp) {
             continue;
         };
         let now = now.max(pool::now());
-        let fill_wait = config::get()
-            .pool_chain
-            .map_or(Duration::ZERO, crate::agreed::fill_wait_on);
+        let fill_wait = config::with(|config| {
+            config.pool_chain.map_or(Duration::ZERO, |chain| {
+                crate::agreed::fill_wait_in(config, chain)
+            })
+        });
         let step = next(&item, now, in_flight(item.id), fill_wait);
         if step == Next::Wait {
             continue;

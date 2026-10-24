@@ -74,12 +74,15 @@ pub fn require_running() -> Result<(), PoolError> {
 /// chain, a controller's pause, a latched shortfall, stale books), and settings present.
 pub fn pool_closed() -> Option<String> {
     let now = now();
-    let config = config::get();
-    read_state(|state| {
-        closed_reason(
-            books::pool_status(state, &config, is_halted(), now),
-            &state.pool(),
-        )
+    config::with(|config| {
+        read_state(|state| {
+            // the ledger read once for both
+            let pool = state.pool();
+            closed_reason(
+                books::pool_status(state, &pool, config, is_halted(), now),
+                &pool,
+            )
+        })
     })
 }
 

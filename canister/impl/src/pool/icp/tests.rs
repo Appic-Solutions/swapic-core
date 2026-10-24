@@ -359,8 +359,11 @@ fn an_icp_shortfall_closes_the_pool_until_reopened() {
             pool_chain: Some(ChainId::BASE),
             ..types::Config::default()
         };
-        let status =
-            || read_state(|state| crate::books::pool_status(state, &config, false, at(11)));
+        let status = || {
+            read_state(|state| {
+                crate::books::pool_status(state, &state.pool(), &config, false, at(11))
+            })
+        };
         // the Base books are fresh and sound: the ICP latch alone closes the pool
         assert_eq!(status(), Err(PoolClosed::IcpShortfall));
         assert_eq!(
@@ -459,7 +462,9 @@ fn a_failed_read_passes_nothing() {
             .unwrap();
         };
         let status = |nanos: u64| {
-            read_state(|state| crate::books::pool_status(state, &config, false, at(nanos)))
+            read_state(|state| {
+                crate::books::pool_status(state, &state.pool(), &config, false, at(nanos))
+            })
         };
         base_checked(10);
         assert_eq!(status(11), Err(PoolClosed::IcpNeverChecked));
