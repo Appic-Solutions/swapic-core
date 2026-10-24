@@ -104,3 +104,151 @@ fn a_retried_approval_is_paid_out_of_what_the_leg_deposits() {
     // approvals that take all of it leave nothing to deposit
     assert_eq!(after_approvals(amount, fee, Some(100)), None);
 }
+
+/// Two pools as a fake quotes them: whether each trades its pair, and what each quotes.
+struct Quoting {
+    trades: (bool, bool),
+    quotes: (u32, u32),
+}
+
+impl Ledgers for Quoting {
+    async fn transfer(
+        &self,
+        _: Principal,
+        _: types::pool::IcpAccount,
+        _: TokenAmount,
+        _: crate::ic::Dedup,
+    ) -> Result<u64, CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+    async fn pull(
+        &self,
+        _: Principal,
+        _: types::pool::IcpAccount,
+        _: TokenAmount,
+        _: crate::ic::Dedup,
+    ) -> Result<u64, CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+    async fn approve(&self, _: Principal, _: Principal, _: TokenAmount) -> Result<(), CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+    async fn direction(
+        &self,
+        pool: Principal,
+        _: Principal,
+        _: Principal,
+    ) -> Result<Option<bool>, CallError> {
+        let trades = if pool == first() {
+            self.trades.0
+        } else {
+            self.trades.1
+        };
+        Ok(trades.then_some(true))
+    }
+    async fn quote(
+        &self,
+        pool: Principal,
+        _: TokenAmount,
+        _: bool,
+    ) -> Result<TokenAmount, CallError> {
+        let quote = if pool == first() {
+            self.quotes.0
+        } else {
+            self.quotes.1
+        };
+        Ok(TokenAmount::from(quote))
+    }
+    async fn swap(
+        &self,
+        _: Principal,
+        _: TokenAmount,
+        _: bool,
+        _: TokenAmount,
+        _: TokenAmount,
+        _: TokenAmount,
+    ) -> Result<TokenAmount, CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+    async fn unused(&self, _: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+    async fn withdraw(
+        &self,
+        _: Principal,
+        _: Principal,
+        _: TokenAmount,
+        _: TokenAmount,
+    ) -> Result<(), CallError> {
+        unreachable!("a chained quote moves nothing")
+    }
+}
+
+fn first() -> Principal {
+    Principal::from_slice(&[1; 10])
+}
+
+/// The two chained quotes' refusals read as each payout's lines always named them: an ICP
+/// swap's (`min_usdc needs`) and a payout's through ICP (`needed`).
+#[test]
+fn a_chained_quote_names_its_pools_and_need_as_its_caller_says() {
+    let chain = |ledgers: &Quoting, names: ChainNames| {
+        crate::test_util::block_on(chained_least(
+            ledgers,
+            (
+                first(),
+                Principal::from_slice(&[3; 10]),
+                TokenAmount::from(1_000_u32),
+            ),
+            (
+                Principal::from_slice(&[2; 10]),
+                Principal::from_slice(&[4; 10]),
+                Principal::from_slice(&[5; 10]),
+            ),
+            TokenAmount::from(30_u32),
+            TokenAmount::from(1_500_u32),
+            names,
+        ))
+        .unwrap()
+    };
+    let swap = || ChainNames {
+        first: "the first pool",
+        second: "the second pool",
+        need: "min_usdc needs",
+    };
+    let payout = || ChainNames {
+        first: "the ICP/ckUSDC pool",
+        second: "the token's ICP pool",
+        need: "needed",
+    };
+    let quoting = |trades, quotes| Quoting { trades, quotes };
+    assert_eq!(
+        chain(&quoting((false, true), (1_030, 2_000)), swap()),
+        Err("the first pool does not trade the pair".to_string())
+    );
+    assert_eq!(
+        chain(&quoting((true, false), (1_030, 2_000)), swap()),
+        Err("the second pool does not trade the pair".to_string())
+    );
+    assert_eq!(
+        chain(&quoting((true, true), (1_030, 1_499)), swap()),
+        Err("the pools quote 1499 through ICP, below the 1500 min_usdc needs".to_string())
+    );
+    assert_eq!(
+        chain(&quoting((false, true), (1_030, 2_000)), payout()),
+        Err("the ICP/ckUSDC pool does not trade the pair".to_string())
+    );
+    assert_eq!(
+        chain(&quoting((true, false), (1_030, 2_000)), payout()),
+        Err("the token's ICP pool does not trade the pair".to_string())
+    );
+    assert_eq!(
+        chain(&quoting((true, true), (1_030, 1_499)), payout()),
+        Err("the pools quote 1499 through ICP, below the 1500 needed".to_string())
+    );
+    // 1,000 sold of the 1,030 bought quotes 2,000: 1,500 needs 750 of it, plus the fees
+    assert_eq!(
+        chain(&quoting((true, true), (1_030, 2_000)), payout()),
+        Ok(TokenAmount::from(780_u32))
+    );
+}

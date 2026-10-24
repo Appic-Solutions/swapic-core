@@ -899,7 +899,23 @@ async fn via_icp(
             }
             let mut least0 = TokenAmount::ZERO;
             if !progress.swap.begun {
-                match chained_least(ledgers, payout, via, fee_icp, least).await? {
+                let fees = fee_icp
+                    .checked_mul(ICP_FEES_BEFORE_SECOND)
+                    .ok_or_else(|| Stop::Failed("the ICP fees overflow".to_string()))?;
+                let chained = legs::chained_least(
+                    ledgers,
+                    (via.pool, via.ckusdc, via.swap_in),
+                    (via.second, via.icp, payout.token_out),
+                    fees,
+                    least,
+                    legs::ChainNames {
+                        first: "the ICP/ckUSDC pool",
+                        second: "the token's ICP pool",
+                        need: "needed",
+                    },
+                )
+                .await?;
+                match chained {
                     Ok(at_least) => least0 = at_least,
                     Err(why) => {
                         if progress.swap.declined == 0 {
@@ -1106,55 +1122,6 @@ async fn via_icp(
 fn via_fall_back(payout: &Payout, leg: LegAt, why: String, now: Timestamp) -> Result<Done, Stop> {
     fall_back(payout, leg, why, now)?;
     Err(Stop::Again)
-}
-
-/// The least the first leg of a path through ICP must give, from both pools' quotes: the
-/// second leg's quote for what the first buys must reach `least`; below it, why.
-async fn chained_least(
-    ledgers: &impl Ledgers,
-    payout: &Payout,
-    via: ViaAt,
-    fee_icp: TokenAmount,
-    least: TokenAmount,
-) -> Result<Result<TokenAmount, String>, Stop> {
-    let Some(zero_for_one) = ledgers
-        .direction(via.pool, via.ckusdc, via.icp)
-        .await
-        .map_err(|error| call_stop("the pool's metadata", error))?
-    else {
-        return Ok(Err(
-            "the ICP/ckUSDC pool does not trade the pair".to_string()
-        ));
-    };
-    let bought = ledgers
-        .quote(via.pool, via.swap_in, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
-    let fees = fee_icp
-        .checked_mul(ICP_FEES_BEFORE_SECOND)
-        .ok_or_else(|| Stop::Failed("the ICP fees overflow".to_string()))?;
-    let sold = bought.checked_sub(fees).unwrap_or(TokenAmount::ZERO);
-    let Some(zero_for_one) = ledgers
-        .direction(via.second, via.icp, payout.token_out)
-        .await
-        .map_err(|error| call_stop("the pool's metadata", error))?
-    else {
-        return Ok(Err(
-            "the token's ICP pool does not trade the pair".to_string()
-        ));
-    };
-    let quoted = ledgers
-        .quote(via.second, sold, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
-    if sold == TokenAmount::ZERO || quoted < least {
-        return Ok(Err(format!(
-            "the pools quote {quoted} through ICP, below the {least} needed"
-        )));
-    }
-    legs::first_leg_least(sold, quoted, least, fees)
-        .map(Ok)
-        .ok_or_else(|| Stop::Failed("the first leg's minimum overflows".to_string()))
 }
 
 /// Records the fall back of a payout's leg to ckUSDC, with the exact transfer that pays all

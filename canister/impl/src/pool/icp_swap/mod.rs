@@ -34,7 +34,7 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
-use crate::pool::payout::{call_stop, open, record, Busy, Ledgers, Leg, Stop};
+use crate::pool::payout::{open, record, Busy, Ledgers, Leg, Stop};
 use crate::pool::plan::{Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Party};
@@ -771,12 +771,17 @@ async fn swap(
                 None => {
                     let mut least0 = TokenAmount::ZERO;
                     if !progress.swap.begun {
-                        match chained(
+                        match legs::chained_least(
                             ledgers,
                             (first, terms.token_in, in0),
                             (second, icp, ckusdc),
                             fees_before_second,
                             least,
+                            legs::ChainNames {
+                                first: "the first pool",
+                                second: "the second pool",
+                                need: "min_usdc needs",
+                            },
                         )
                         .await?
                         {
@@ -926,48 +931,6 @@ async fn run_leg(
         )));
     }
     legs::run(ledgers, spec, state, clock, guard).await
-}
-
-/// The least the first of two legs must give, from both pools' quotes: the second leg's quote
-/// for what the first buys (less `fees`) must reach `least`; below it, why.
-async fn chained(
-    ledgers: &impl Ledgers,
-    (first, token_in, amount_in): (Principal, Principal, TokenAmount),
-    (second, middle, token_out): (Principal, Principal, Principal),
-    fees: TokenAmount,
-    least: TokenAmount,
-) -> Result<Result<TokenAmount, String>, Stop> {
-    let Some(zero_for_one) = ledgers
-        .direction(first, token_in, middle)
-        .await
-        .map_err(|error| call_stop("the pool's metadata", error))?
-    else {
-        return Ok(Err("the first pool does not trade the pair".to_string()));
-    };
-    let bought = ledgers
-        .quote(first, amount_in, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
-    let sold = bought.checked_sub(fees).unwrap_or(TokenAmount::ZERO);
-    let Some(zero_for_one) = ledgers
-        .direction(second, middle, token_out)
-        .await
-        .map_err(|error| call_stop("the pool's metadata", error))?
-    else {
-        return Ok(Err("the second pool does not trade the pair".to_string()));
-    };
-    let quoted = ledgers
-        .quote(second, sold, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
-    if sold == TokenAmount::ZERO || quoted < least {
-        return Ok(Err(format!(
-            "the pools quote {quoted} through ICP, below the {least} min_usdc needs"
-        )));
-    }
-    legs::first_leg_least(sold, quoted, least, fees)
-        .map(Ok)
-        .ok_or_else(|| Stop::Failed("the first leg's minimum overflows".to_string()))
 }
 
 /// What an undone swap gives back, and in which token: its ckUSDC (all it made, less the

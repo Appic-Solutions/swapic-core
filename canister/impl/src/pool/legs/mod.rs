@@ -313,6 +313,58 @@ pub fn cost_in(state: &SwapLeg, fee_in: TokenAmount) -> Option<TokenAmount> {
     approved.checked_add(deposit)
 }
 
+/// How a chained quote's refusals name its two pools and what the swap needs: each lands in
+/// a `SwapDeclined` line or an undo's why as it reads.
+pub struct ChainNames {
+    pub first: &'static str,
+    pub second: &'static str,
+    pub need: &'static str,
+}
+
+/// The least the first of two legs must give, from both pools' quotes: the second leg's quote
+/// for what the first buys (less `fees`) must reach `least`; below it, why.
+pub async fn chained_least(
+    ledgers: &impl Ledgers,
+    (first, token_in, amount_in): (Principal, Principal, TokenAmount),
+    (second, middle, token_out): (Principal, Principal, Principal),
+    fees: TokenAmount,
+    least: TokenAmount,
+    names: ChainNames,
+) -> Result<Result<TokenAmount, String>, Stop> {
+    let Some(zero_for_one) = ledgers
+        .direction(first, token_in, middle)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+    else {
+        return Ok(Err(format!("{} does not trade the pair", names.first)));
+    };
+    let bought = ledgers
+        .quote(first, amount_in, zero_for_one)
+        .await
+        .map_err(|error| call_stop("the pool's quote", error))?;
+    let sold = bought.checked_sub(fees).unwrap_or(TokenAmount::ZERO);
+    let Some(zero_for_one) = ledgers
+        .direction(second, middle, token_out)
+        .await
+        .map_err(|error| call_stop("the pool's metadata", error))?
+    else {
+        return Ok(Err(format!("{} does not trade the pair", names.second)));
+    };
+    let quoted = ledgers
+        .quote(second, sold, zero_for_one)
+        .await
+        .map_err(|error| call_stop("the pool's quote", error))?;
+    if sold == TokenAmount::ZERO || quoted < least {
+        return Ok(Err(format!(
+            "the pools quote {quoted} through ICP, below the {least} {}",
+            names.need
+        )));
+    }
+    first_leg_least(sold, quoted, least, fees)
+        .map(Ok)
+        .ok_or_else(|| Stop::Failed("the first leg's minimum overflows".to_string()))
+}
+
 /// The least a first leg must give so its output, less the fees the second leg's pull takes
 /// (`fees`), buys at least `least` on a second leg quoted `quoted` for `quoted_in`: the
 /// second leg's input scaled to `least` (a pool's output per unit falls as its input grows,
