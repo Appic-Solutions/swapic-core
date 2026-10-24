@@ -19,11 +19,11 @@
 //! - `Refund`: only when the canister knows nothing of its payout went out: never started;
 //!   or started, no ICPSwap leg moved money, and its transfer to the recipient never asked or
 //!   refused by the ledger for sure at its last ask with no answer of it ever lost
-//!   (`PayoutProgress::nothing_went_out`, the fold's rule too). What arrived goes back to its payer on Base, less the least network
-//!   fee, through the orphan refund path, behind the pool's guard: its arrival is an orphan
-//!   held under its transfer's key, and the canister signs `USDC.transfer(payer, amount -
-//!   fee)`. A signature that fails leaves the orphan held, for `resolve_orphan`. A deposit
-//!   with no payer is not refunded.
+//!   (`PayoutProgress::nothing_went_out`, the fold's rule too). What arrived goes back to its
+//!   payer on Base, less the least network fee, through the orphan refund path, behind the
+//!   pool's guard: its arrival is an orphan held under its transfer's key, and the canister
+//!   signs `USDC.transfer(payer, amount - fee)`. A signature that fails leaves the orphan
+//!   held, for `resolve_orphan`. A deposit with no payer is not refunded.
 //! - `MarkPaid { block }`: its transfer landed in `block`. The canister reads the block on
 //!   the transfer's own ledger and books the deposit paid, once, only on exactly the transfer
 //!   its payout asked: from the canister's own account to the recipient, of what it sent,

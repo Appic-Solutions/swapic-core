@@ -177,12 +177,14 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
 /// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`.
 /// `MarkPaid { block }`: its transfer landed in that block; the canister reads it on the
-/// transfer's ledger (`icrc3_get_blocks`, else `get_transactions`, else the ICP ledger's
-/// `query_blocks`, on the ledger or its archive) and books the deposit paid only on exactly
-/// the transfer its payout asked (from the canister to the recipient, of what it sent, its
-/// memo and `created_at_time`); a ledger not read now answers `Unavailable`, to be asked
-/// again, and one serving none of those reads is refused by name. A refusal names what to
-/// search the ledger for.
+/// transfer's ledger, the read chosen by what the ledger is (the ICP ledger's own
+/// `query_blocks`; `icrc3_get_blocks` when it lists ICRC-3 among its standards; else
+/// `get_transactions`; each on the ledger or its archive, a read not answering in its own
+/// shape falling to the next), and books the deposit paid only on exactly the transfer its
+/// payout asked (from the canister to the recipient, of what it sent, its memo and
+/// `created_at_time`); a ledger not reached now answers `Unavailable`, to be asked again,
+/// and one none of whose reads answers is refused by name. A refusal names what to search
+/// the ledger for.
 #[update]
 pub async fn resolve_deposit(
     r#ref: Vec<u8>,
@@ -218,12 +220,11 @@ pub async fn resolve_deposit(
 /// was lost, past the ledger's deduplication window (23 hours after it started; the canister
 /// stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
 /// `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
-/// ckUSDC ledger block; the canister reads the block (`icrc3_get_blocks`, else
-/// `get_transactions`, on the ledger or its archive) and mints the stake's shares at the
-/// pool's price now only when it is the stake's own pull (from its account to the
-/// canister's, by the canister, its amount, its op id as the memo, its start as
-/// `created_at_time`), one block for one stake; a ledger not read answers `Unavailable`, to
-/// be asked again. `NotPulled`: it never landed (on the controller's word: no read proves a
+/// ckUSDC ledger block; the canister reads the block (as `resolve_deposit`'s `MarkPaid`
+/// does) and mints the stake's shares at the pool's price now only when it is the stake's
+/// own pull (from its account to the canister's, by the canister, its amount, its op id as
+/// the memo, its start as `created_at_time`), one block for one stake; a ledger not reached
+/// now answers `Unavailable`, to be asked again. `NotPulled`: it never landed (on the controller's word: no read proves a
 /// pull absent), and it is dropped, its room freed.
 #[update]
 pub async fn resolve_stake(id: Vec<u8>, resolution: StakeResolution) -> Result<(), PoolError> {
