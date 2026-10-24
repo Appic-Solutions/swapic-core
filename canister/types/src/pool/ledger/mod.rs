@@ -1257,17 +1257,13 @@ impl PoolLedger {
                 spent,
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
-                    ledger.spend_reserved(deposit.held(), *spent);
-                    ledger.paying.remove(r#ref);
-                    deposit.status = DepositStatus::Paid;
-                    deposit.held = Some(TokenAmount::ZERO);
-                    deposit.paid = Some(super::Paid {
+                    let paid = super::Paid {
                         token: *token,
                         amount: *amount,
                         block: *block,
                         spent: *spent,
-                    });
+                    };
+                    ledger.book_paid(r#ref, &mut deposit, paid);
                     deposit_out = Some((*r#ref, deposit));
                 }
             }
@@ -1372,17 +1368,13 @@ impl PoolLedger {
                         // its transfer as asked, paid in `block`: as `Paid` books it
                         DepositResolution::MarkPaid { block } => {
                             if let Some(sent) = deposit.payout.sent {
-                                ledger.owed = sat_sub(ledger.owed, owed_line(&deposit));
-                                ledger.spend_reserved(deposit.held(), sent.spent);
-                                ledger.paying.remove(r#ref);
-                                deposit.status = DepositStatus::Paid;
-                                deposit.held = Some(TokenAmount::ZERO);
-                                deposit.paid = Some(super::Paid {
+                                let paid = super::Paid {
                                     token: sent.token.0,
                                     amount: sent.amount,
                                     block: *block,
                                     spent: sent.spent,
-                                });
+                                };
+                                ledger.book_paid(r#ref, &mut deposit, paid);
                             }
                         }
                         DepositResolution::Refund => {
@@ -1710,6 +1702,17 @@ impl PoolLedger {
         } else {
             icp.free = sat_add(icp.free, sat_sub(reserve, spent));
         }
+    }
+
+    /// A deposit's payout paid as `paid` says: no longer owed or paying, its hold and the
+    /// rest of what it spent out of the ICP pocket, nothing held for it.
+    fn book_paid(&mut self, r#ref: &PoolRef, deposit: &mut Registered, paid: super::Paid) {
+        self.owed = sat_sub(self.owed, owed_line(deposit));
+        self.spend_reserved(deposit.held(), paid.spent);
+        self.paying.remove(r#ref);
+        deposit.status = DepositStatus::Paid;
+        deposit.held = Some(TokenAmount::ZERO);
+        deposit.paid = Some(paid);
     }
 
     /// Changes the payout progress of the deposit or withdrawal `r#ref` names: a withdrawal
