@@ -11,8 +11,9 @@ import {Envelope} from "../../src/libraries/Envelope.sol";
 /// Deploys Swapic from a fixed fresh deployer at nonce 0, so the Runner's
 /// address is known in advance (it is the KyberSwap recipient in the
 /// fixtures). Skips when the RPC variable is absent (plain `forge test`).
-/// Run with `--evm-version cancun`: KyberSwap's executor on Base uses Cancun
-/// opcodes, which the default shanghai target leaves unactivated in the fork.
+/// Run under the fork profile, `FOUNDRY_PROFILE=fork forge test --match-path
+/// 'test/fork/*'`: KyberSwap's executor on Base uses Cancun opcodes, which the
+/// default shanghai target leaves unactivated in the fork.
 abstract contract ForkBase is Test {
     address constant DEPLOYER = 0x5a91c1000000000000000000000000000000d3b1;
     address constant SWAPIC = 0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7;

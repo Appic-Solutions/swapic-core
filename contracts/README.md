@@ -10,5 +10,5 @@ Commands:
 
 - Build: `forge build` (`via_ir` on, target shanghai).
 - Unit tests: `forge test` (the fork tests skip without RPC variables).
-- Fork tests: `fork-env.sh forge test --match-path 'test/fork/*' --evm-version cancun` (KyberSwap's executor on Base needs Cancun opcodes). Fixtures in `test/fixtures/` record the block they were fetched at; each test forks at that block.
+- Fork tests: `FOUNDRY_PROFILE=fork fork-env.sh forge test --match-path 'test/fork/*'` (the fork profile targets Cancun: KyberSwap's executor on Base needs its opcodes; the deployed build stays Shanghai). Fixtures in `test/fixtures/` record the block they were fetched at; each test forks at that block.
 - Deploy: `script/DeploySwapic.s.sol`, env `CANISTER` (required), `OWNER`, `GUARDIAN`, `CK_HELPER` (Ethereum only). One transaction per chain deploys all three.
