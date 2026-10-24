@@ -2125,35 +2125,45 @@ fn a_transfer_whose_answer_was_lost_may_have_landed_even_once_refused() {
         .unwrap();
 }
 
-/// The review (2026-10-24): the fold does not trust the door for a retry's dedup instant: it
-/// is the line's own time or before it, and leaves the next drive inside the ledger's window
-/// less the margin.
+/// The review (2026-10-24): the fold does not trust the door for a retry's dedup pair. A
+/// fresh instant is exactly the line's own time; a retry with its own pair (its transfer may
+/// have landed) leaves its next drive inside the ledger's window less the margin.
 #[test]
 fn a_retrys_dedup_instant_is_the_lines_time_inside_the_window() {
     use std::time::Duration;
-    let pool = funded(usdc(1_000));
+    let mut pool = funded(usdc(1_000));
     let line = Timestamp::from_nanos(1_800_000_000_000_000_000);
     let retry_at = |at: Timestamp| PoolStep::DepositResolved {
         r#ref: PoolRef::new([1; 32]),
         resolution: DepositResolution::Retry,
         retry_at: Some(at),
     };
-    assert_eq!(pool.ledger.admits_at(&retry_at(line), line), Ok(()));
+    assert_eq!(pool.ledger.admits_at(&retry_at(line), &pool, line), Ok(()));
     let later = line.checked_add(Duration::from_secs(1)).unwrap();
-    assert!(pool.ledger.admits_at(&retry_at(later), line).is_err());
-    let edge = Timestamp::from_nanos(
-        line.as_nanos() - (crate::pool::DEDUP_WINDOW - crate::pool::RETRY_MARGIN).as_nanos() as u64,
-    );
-    assert!(pool.ledger.admits_at(&retry_at(edge), line).is_err());
-    let inside = Timestamp::from_nanos(edge.as_nanos() + 1);
-    assert_eq!(pool.ledger.admits_at(&retry_at(inside), line), Ok(()));
-    // a line with no instant has no rule of time
-    let no_instant = PoolStep::DepositResolved {
-        r#ref: PoolRef::new([1; 32]),
+    assert!(pool
+        .ledger
+        .admits_at(&retry_at(later), &pool, line)
+        .is_err());
+    let earlier = Timestamp::from_nanos(line.as_nanos() - 1);
+    assert!(pool
+        .ledger
+        .admits_at(&retry_at(earlier), &pool, line)
+        .is_err());
+    // its own pair: the payout started at 5 ns, its transfer asked, its answer unknown
+    let landed = started(&mut pool, 2, 2);
+    pool.step(asked(landed)).unwrap();
+    hold(&mut pool, landed);
+    let own = PoolStep::DepositResolved {
+        r#ref: landed,
         resolution: DepositResolution::Retry,
         retry_at: None,
     };
-    assert_eq!(pool.ledger.admits_at(&no_instant, line), Ok(()));
+    let edge = Timestamp::from_nanos(
+        5 + (crate::pool::DEDUP_WINDOW - crate::pool::RETRY_MARGIN).as_nanos() as u64,
+    );
+    assert!(pool.ledger.admits_at(&own, &pool, edge).is_err());
+    let inside = Timestamp::from_nanos(edge.as_nanos() - 1);
+    assert_eq!(pool.ledger.admits_at(&own, &pool, inside), Ok(()));
 }
 
 /// The review (2026-10-24): an ask on other terms is refused while an earlier one may have

@@ -504,19 +504,47 @@ impl PoolLedger {
     }
 
     /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`] (the
-    /// review, 2026-10-24): a retry's dedup instant is the line's time or before it, and
-    /// leaves its next drive inside the ledger's window, whoever wrote the line.
-    pub fn admits_at(&self, step: &PoolStep, at: Timestamp) -> Result<(), PoolStepError> {
-        match step {
-            PoolStep::DepositResolved {
-                retry_at: Some(retry_at),
-                ..
-            } if *retry_at > at || !super::deduplicated(*retry_at, at) => {
-                Err(PoolStepError::Terms(
-                    "a retry's dedup instant is the line's time, inside the ledger's window",
-                ))
+    /// review, 2026-10-24), whoever wrote the line: a retry's fresh dedup instant is exactly
+    /// the line's time; a retry with its own pair (its transfer may have landed) leaves its
+    /// next drive inside the ledger's window less the margin. A replay reads these too, of
+    /// every line in the log: the lines of builds never deployed are not grandfathered
+    /// (hfisl's log holds no Pool event).
+    pub fn admits_at(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+    ) -> Result<(), PoolStepError> {
+        let PoolStep::DepositResolved {
+            r#ref,
+            resolution: DepositResolution::Retry,
+            retry_at,
+        } = step
+        else {
+            return Ok(());
+        };
+        match retry_at {
+            Some(retry_at) if *retry_at != at => Err(PoolStepError::Terms(
+                "a retry's fresh dedup instant is its line's own time",
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let Some(deposit) = lookup.deposit(r#ref) else {
+                    return Ok(());
+                };
+                match deposit.payout.attempt {
+                    Some(attempt)
+                        if !deposit.payout.cannot_land_twice()
+                            && !super::deduplicated(attempt.created_at, at) =>
+                    {
+                        Err(PoolStepError::Terms(
+                            "a retry with its own dedup pair must leave its next drive inside \
+                             the ledger's window",
+                        ))
+                    }
+                    _ => Ok(()),
+                }
             }
-            _ => Ok(()),
         }
     }
 
