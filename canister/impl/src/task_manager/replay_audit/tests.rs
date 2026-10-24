@@ -1,13 +1,12 @@
 use super::*;
 use crate::guards::require_not_halted;
-use crate::state::transitions::tests::{funds, swap_id};
 use crate::state::transitions::ReplayError;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use crate::storage::replay_cursor::{self, ReplayCursor};
 use types::config::AuditChunk;
 use types::events::EventType;
-use types::{Attempt, ChainId, Event, EventIndex, Timestamp, TransitionError, TxHash};
+use types::{Attempt, ChainId, Event, EventIndex, QuoteHash, Timestamp, TransitionError, TxHash};
 
 /// The halt is one-way by design: a later clean audit must not clear it, because the
 /// canister may have been halted for a reason the audit no longer sees.
@@ -44,11 +43,17 @@ fn set_chunk(events: u32) {
     });
 }
 
-/// Funds one swap per nonce in `nonces`, one event each.
-fn fund(nonces: impl IntoIterator<Item = u64>) {
-    for nonce in nonces {
-        events::append_event_at(funds(nonce), Timestamp::from_nanos(nonce))
-            .expect("the fold admits it");
+/// One admissible line per `n` in `lines`, sealed at `n`: a config change, which the fold
+/// always admits.
+fn fund(lines: impl IntoIterator<Item = u64>) {
+    for n in lines {
+        events::append_event_at(
+            EventType::ConfigChanged {
+                json: format!("{{\"line\":{n}}}"),
+            },
+            Timestamp::from_nanos(n),
+        )
+        .expect("the fold admits it");
     }
 }
 
@@ -141,11 +146,11 @@ fn the_deep_audit_folds_a_long_log_in_bounded_steps_and_finds_it_sound() {
 fn a_divergence_deep_in_the_log_halts_the_step_that_reaches_it() {
     on_fresh_memory(|| {
         fund(1..=2_500);
-        // an entry no guard admitted, on a swap the log never funded, written raw with the
-        // fold moved onto it so the log builds on from there
+        // an entry no guard admits, a retired v1 swap's, written raw with the fold moved
+        // onto it so the log builds on from there
         let meta = events::read_state(|state| state.meta());
         assert_eq!(meta.next_event_index, EventIndex::new(2_500));
-        let orphan = swap_id(9_999);
+        let orphan = QuoteHash::new([0x99; 32]);
         let planted = Event::seal(
             meta.next_event_index,
             Timestamp::from_nanos(2_501),

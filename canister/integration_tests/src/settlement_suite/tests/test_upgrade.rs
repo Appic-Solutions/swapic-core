@@ -1,8 +1,20 @@
 use crate::client::settlement::{append, audit_replay_step, event_count, test_skew_state};
 use crate::settlement_suite::init::{setup, upgrade};
-use candid::{decode_one, encode_one, Nat, Principal};
+use candid::{decode_one, encode_one, Principal};
 use settlement_api::types::errors::TestAppendError;
 use settlement_api::types::events::EventType;
+
+/// A fee the books earned on Base, `units` of USDC: a line the fold admits and folds.
+fn fee(units: u64) -> EventType {
+    EventType::from(types::EventType::Books {
+        chain_id: types::ChainId::BASE,
+        step: types::books::BookStep::FeeEarned {
+            tx_hash: types::TxHash::new([units as u8; 32]),
+            amount: types::TokenAmount::from(units),
+            block: None,
+        },
+    })
+}
 
 #[test]
 fn events_survive_upgrade_and_replay_matches() {
@@ -11,10 +23,7 @@ fn events_survive_upgrade_and_replay_matches() {
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
         .unwrap();
     let installed = decode_one::<u64>(&raw).unwrap();
-    let event = EventType::PocketFunded {
-        chain_id: 8453,
-        amount: Nat::from(1000_u64),
-    };
+    let event = fee(1000);
     let raw = pic
         .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
         .unwrap();
@@ -56,10 +65,7 @@ fn test_append_rejects_non_controller() {
         .query_call(canister, stranger, "event_count", encode_one(()).unwrap())
         .unwrap();
     let installed = decode_one::<u64>(&raw).unwrap();
-    let event = EventType::PocketFunded {
-        chain_id: 8453,
-        amount: Nat::from(1_u64),
-    };
+    let event = fee(1);
     let raw = pic
         .update_call(
             canister,
@@ -89,10 +95,7 @@ fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
         .unwrap();
     let installed = decode_one::<u64>(&raw).unwrap();
-    let event = EventType::PocketFunded {
-        chain_id: 8453,
-        amount: Nat::from(1000_u64),
-    };
+    let event = fee(1000);
     let raw = pic
         .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
         .unwrap();
@@ -131,10 +134,7 @@ fn the_replay_cursor_survives_an_upgrade() {
     let (pic, canister, admin) = setup();
     let installed = event_count(&pic, canister, admin);
     for i in 1..=4_u64 {
-        let event = EventType::PocketFunded {
-            chain_id: 8453,
-            amount: Nat::from(i),
-        };
+        let event = fee(i);
         append(&pic, canister, admin, &event).expect("the guard admits it");
     }
     let total = installed + 4;

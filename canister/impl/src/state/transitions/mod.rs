@@ -2,12 +2,8 @@ use crate::state::{MemoryStore, State, Store};
 use thiserror::Error;
 use types::checked_amount::CheckedAmountOf;
 use types::events::{Event, EventType, TxPurpose};
-use types::quote::quote_hash_of;
 use types::FlowStep;
-use types::{
-    ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, Timestamp,
-    TransitionError,
-};
+use types::{ChainId, EventHash, EventIndex, Nonce, NonceKey, Timestamp, TransitionError};
 
 /// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
 /// unit it counts. Checked here so an event with no preimage is refused by the guard
@@ -44,184 +40,40 @@ impl<S: Store> State<S> {
             return Err(TransitionError::AmountOutOfRange(amount));
         }
         match event {
-            // the swap id must be the hash of the preimage recorded with it: the sweep reads
-            // `auto_refund` out of those bytes to decide refund policy, so a pair that does
-            // not bind would refund a user who asked to be consulted, or leave a swap
-            // waiting forever. The preimage must also be a quote this canister would hold:
-            // parsing is the layout and `validate` is the rest, so the log cannot record a
-            // version this wasm does not read, or the empty fields `register_quote` refuses
-            //
-            // And the money fields are the quote's own (A2): the line says which chain the
-            // funds arrived on, which token they are and how much, and each has to be what
-            // the quote it carries says, so no writer can record a swap the quote does not
-            // describe. The token is compared as a token, because the vault logs an address
-            // in its checksummed spelling and a quote may spell it in lower case.
-            EventType::FundsReceived {
-                quote_hash,
-                quote_bytes,
-                chain_id,
-                token,
-                amount,
+            // the retired v1 swaps and pockets (the vault-routed swaps of Plan 3): the fold
+            // holds none of them any more, so a line about one is refused as it is on a store
+            // that never held one (hfisl's log holds none). Each variant and its index stays
+            // in the log's types
+            EventType::FundsReceived { quote_hash, .. }
+            | EventType::TxSigned { quote_hash, .. }
+            | EventType::TxConfirmed { quote_hash, .. }
+            | EventType::TxFailed { quote_hash, .. }
+            | EventType::PaidInStable { quote_hash, .. }
+            | EventType::DecisionRequired { quote_hash, .. }
+            | EventType::DecisionMade { quote_hash, .. }
+            | EventType::RefundStarted { quote_hash, .. }
+            | EventType::Refunded { quote_hash, .. }
+            | EventType::SwapDone { quote_hash }
+            | EventType::Frozen { quote_hash, .. }
+            | EventType::FeeAccrued { quote_hash, .. }
+            | EventType::PocketReserved { quote_hash, .. }
+            | EventType::PocketReleased { quote_hash, .. }
+            | EventType::PocketSpent { quote_hash, .. }
+            | EventType::PullSigned { quote_hash, .. }
+            | EventType::WaitingRepaired { quote_hash } => {
+                Err(TransitionError::UnknownSwap(*quote_hash))
+            }
+            EventType::PocketFunded { chain_id, .. }
+            | EventType::PocketRebalanced {
+                from_chain: chain_id,
                 ..
-            } => {
-                if self.store().swap(quote_hash).is_some() {
-                    return Err(TransitionError::SwapExists(*quote_hash));
-                }
-                let quote = Quote::parse(quote_bytes)?;
-                quote.validate()?;
-                let computed = quote_hash_of(quote_bytes);
-                if computed != *quote_hash {
-                    return Err(TransitionError::QuoteHashMismatch {
-                        declared: *quote_hash,
-                        computed,
-                    });
-                }
-                if *chain_id != quote.src_chain {
-                    return Err(TransitionError::FundsChainNotTheQuotes {
-                        logged: *chain_id,
-                        quoted: quote.src_chain,
-                    });
-                }
-                if !token.names_the_same_token(&quote.src_token) {
-                    return Err(TransitionError::FundsTokenNotTheQuotes {
-                        logged: token.clone(),
-                        quoted: quote.src_token,
-                    });
-                }
-                if *amount != quote.amount_in {
-                    return Err(TransitionError::FundsAmountNotTheQuotes {
-                        logged: *amount,
-                        quoted: quote.amount_in,
-                    });
-                }
-                Ok(())
-            }
-            // the sign-before-send law: one open attempt at a time, numbered without gaps,
-            // a paused swap moves nothing until the user answers, and the record spends a
-            // number the swap is still holding
-            EventType::TxSigned {
-                quote_hash,
-                attempt,
-                chain_id,
-                ..
-            } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_not_closed()?;
-                swap.ensure_not_waiting()?;
-                swap.ensure_no_open_attempt()?;
-                swap.ensure_next_attempt(*attempt)?;
-                self.ensure_holds_unsigned_nonce(quote_hash, *chain_id)
-            }
-            EventType::TxConfirmed {
-                quote_hash,
-                attempt,
-                ..
-            }
-            | EventType::TxFailed {
-                quote_hash,
-                attempt,
-                ..
-            } => self.swap(quote_hash)?.ensure_attempt_open(*attempt),
-            EventType::PaidInStable { quote_hash, .. } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_executing()?;
-                swap.ensure_unpaid()?;
-                swap.ensure_no_open_attempt()
-            }
-            // one open question at a time: re-asking would silently re-arm the deadline.
-            // A refund is one way, and a question with an attempt in flight would be
-            // answered while that attempt is still deciding itself on the chain.
-            EventType::DecisionRequired { quote_hash, .. } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_not_closed()?;
-                swap.ensure_not_refunding()?;
-                swap.ensure_not_waiting()?;
-                swap.ensure_no_open_attempt()
-            }
-            EventType::DecisionMade { quote_hash, .. } => self.swap(quote_hash)?.ensure_waiting(),
-            EventType::RefundStarted { quote_hash, .. } => {
-                self.swap(quote_hash)?.ensure_can_start_refund()
-            }
-            EventType::Refunded { quote_hash, .. } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_refunding()?;
-                swap.ensure_no_open_attempt()
-            }
-            EventType::SwapDone { quote_hash } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_in_flight()?;
-                swap.ensure_no_open_attempt()
-            }
-            EventType::Frozen { quote_hash, .. } => {
-                let swap = self.swap(quote_hash)?;
-                swap.ensure_not_closed()?;
-                swap.ensure_no_open_attempt()
-            }
-            // one fee line per swap (rule A6): the line records the fee the swap's own
-            // payout left behind, so a second one could only accrue that fee twice
-            EventType::FeeAccrued { quote_hash, amount } => {
-                if self.swap(quote_hash)?.fee_accrued.is_some() {
-                    return Err(TransitionError::FeeAlreadyAccrued(*quote_hash));
-                }
-                self.meta()
-                    .fees_accrued
-                    .checked_add(*amount)
-                    .ok_or(TransitionError::FeesOverflow)
-                    .map(drop)
-            }
-            EventType::PocketFunded { chain_id, amount } => {
-                self.pocket_or_empty(chain_id).fund(*amount)?;
-                Ok(())
-            }
-            // the three per-swap pocket moves all name a swap, so all three check it exists
-            EventType::PocketReserved {
-                quote_hash,
-                chain_id,
-                amount,
-            } => {
-                self.swap(quote_hash)?;
-                self.pocket(chain_id)?.reserve(*amount)?;
-                Ok(())
-            }
-            EventType::PocketReleased {
-                quote_hash,
-                chain_id,
-                amount,
-            } => {
-                self.swap(quote_hash)?;
-                self.pocket(chain_id)?.release(*amount)?;
-                Ok(())
-            }
-            EventType::PocketSpent {
-                quote_hash,
-                chain_id,
-                amount,
-            } => {
-                self.swap(quote_hash)?;
-                self.pocket(chain_id)?.spend(*amount)?;
-                Ok(())
-            }
-            EventType::PocketRebalanced {
-                from_chain,
-                to_chain,
-                amount,
-                ..
-            } => {
-                let source = self.pocket(from_chain)?.withdraw(*amount)?;
-                let destination = if to_chain == from_chain {
-                    source
-                } else {
-                    self.pocket_or_empty(to_chain)
-                };
-                destination.fund(*amount)?;
-                Ok(())
-            }
+            } => Err(TransitionError::UnknownPocket(*chain_id)),
             // rule A4, the one line that makes a double spend of a nonce impossible: the
             // number the allocator is at is the only number a transaction may carry, so
-            // two transactions cannot share one however their calls interleave. The swap
-            // rules are `TxSigned`'s in full, checked here as well because a transaction
-            // created for a swap that can never sign it would strand the nonce it
-            // allocated, and one swap never holds two numbers at once.
+            // two transactions cannot share one however their calls interleave. The rules
+            // its signed record will be held to are checked here as well, because a
+            // transaction created for a record that can never be written would strand the
+            // nonce it allocated, and one key never holds two numbers at once.
             EventType::TxCreated {
                 purpose,
                 chain_id,
@@ -240,9 +92,8 @@ impl<S: Store> State<S> {
                 self.ensure_next_nonce(*chain_id, *nonce)
             }
             // a replacement keeps the nonce of what it replaces, so it allocates nothing
-            // and must name a nonce the allocator already handed out (rule A5). One that
-            // is a swap's attempt must be that swap's open attempt; a pull and a cancel
-            // have no swap to ask.
+            // and must name a nonce the allocator already handed out (rule A5). A retired
+            // v1 swap's attempt has no swap to replace it for.
             EventType::TxReplaced {
                 purpose,
                 chain_id,
@@ -254,10 +105,7 @@ impl<S: Store> State<S> {
                 in_preimage_range(*max_fee)?;
                 in_preimage_range(*max_priority_fee)?;
                 if let Some(quote_hash) = purpose.attempt_of() {
-                    let swap = self.swap(&quote_hash)?;
-                    if swap.open_attempt.is_none() {
-                        return Err(TransitionError::NoOpenAttempt(quote_hash));
-                    }
+                    return Err(TransitionError::UnknownSwap(quote_hash));
                 }
                 self.ensure_allocated_nonce(*chain_id, *nonce)
             }
@@ -268,24 +116,6 @@ impl<S: Store> State<S> {
             EventType::TxCancelled {
                 chain_id, nonce, ..
             } => self.ensure_unsigned_nonce(*chain_id, *nonce),
-            // the pull's signed record: `TxSigned` for a transaction with no swap behind it.
-            // It spends the number handed out for this pull and nothing else, so a late
-            // record of a cancelled pull, a swap's number, and another quote's pull are all
-            // refused, as they are for a swap.
-            EventType::PullSigned {
-                quote_hash,
-                chain_id,
-                nonce,
-                ..
-            } => self.ensure_pull_nonce(*quote_hash, *chain_id, *nonce),
-            // the repair of a divergence: it makes a swap's index entries agree with the
-            // swap, dropping what the swap does not imply and keeping what it does. Admitted
-            // on nothing, because nothing here could tell: the entry it drops is in no log,
-            // so a rule that read the index would refuse on replay the very line that
-            // explains the repair, and the swap alone cannot tell a stale entry from the
-            // wait the swap is really in. Where the index already agrees the repair changes
-            // nothing, so it can never strand a wait.
-            EventType::WaitingRepaired { .. } => Ok(()),
             EventType::Books { chain_id, step } => Ok(self.book(chain_id).admits(step)?),
             // a pool step that records a signed transaction spends the nonce handed out for
             // exactly its purpose, as a flow's does
@@ -345,13 +175,10 @@ impl<S: Store> State<S> {
         }
     }
 
-    /// Whether a transaction may be created for `purpose`: a swap it names has to exist and
-    /// be one an attempt can still be signed for, and it must not already be holding a
-    /// number it has not signed for. These are `TxSigned`'s rules, minus the attempt number
-    /// a `TxCreated` does not carry, so a creation this guard admits is one the signed
-    /// record will admit too. A pull is for a quote nobody has paid yet, so it needs the
-    /// swap NOT to exist and is held to one number at a time like a swap. A cancel names no
-    /// swap.
+    /// Whether a transaction may be created for `purpose`: its signed record's own rules,
+    /// so a creation this guard admits is one the record will admit too, and its key must
+    /// not already be holding a number it has not signed for. A cancel names no key; a
+    /// retired v1 swap's leg or pull has no swap to be signed for.
     fn ensure_can_send(&self, purpose: &TxPurpose) -> Result<(), TransitionError> {
         let Some(quote_hash) = purpose.quote_hash() else {
             return Ok(());
@@ -359,21 +186,12 @@ impl<S: Store> State<S> {
         // named rather than matched by `_`, so a new purpose has to be classified here
         // instead of falling into the rules of a swap's own leg
         match purpose {
-            TxPurpose::GaslessPull(_) => {
-                if self.store().swap(&quote_hash).is_some() {
-                    return Err(TransitionError::SwapExists(quote_hash));
-                }
-            }
-            TxPurpose::Burn(_)
+            TxPurpose::GaslessPull(_)
+            | TxPurpose::Burn(_)
             | TxPurpose::Mint(_)
             | TxPurpose::Payout(_)
             | TxPurpose::Refund(_)
-            | TxPurpose::Reclaim(_) => {
-                let swap = self.swap(&quote_hash)?;
-                swap.ensure_not_closed()?;
-                swap.ensure_not_waiting()?;
-                swap.ensure_no_open_attempt()?;
-            }
+            | TxPurpose::Reclaim(_) => return Err(TransitionError::UnknownSwap(quote_hash)),
             // a relay creates its flow with its signed record, and one quote is relayed at
             // most once (rule 4b.4 from this side; Swapic's `used(orderId)` is the other);
             // a finish is signed once per message and action the same way
@@ -516,49 +334,6 @@ impl<S: Store> State<S> {
         Ok(())
     }
 
-    /// The mirror of [`Self::ensure_unsigned_nonce`] from the swap's side: a signed record
-    /// spends the number the swap is holding, so the swap has to be holding one, on the
-    /// chain the record names. The signature is awaited across consensus rounds on the
-    /// signing subnet, and a cancel that spent the number meanwhile has sealed it (rule
-    /// A5); the record that comes back late is refused here, which is what keeps two signed
-    /// transactions off one nonce.
-    fn ensure_holds_unsigned_nonce(
-        &self,
-        quote_hash: &QuoteHash,
-        chain_id: ChainId,
-    ) -> Result<(), TransitionError> {
-        match self.store().unsigned_nonce_of(quote_hash) {
-            Some(key) if key.chain_id == chain_id => Ok(()),
-            _ => Err(TransitionError::NoUnsignedNonce {
-                quote_hash: *quote_hash,
-                chain_id,
-            }),
-        }
-    }
-
-    /// The mirror of [`Self::ensure_holds_unsigned_nonce`] for a pull, which has no swap to
-    /// find its number by: the record names the number, and that number must be waiting for
-    /// exactly this quote's pull.
-    fn ensure_pull_nonce(
-        &self,
-        quote_hash: QuoteHash,
-        chain_id: ChainId,
-        nonce: Nonce,
-    ) -> Result<(), TransitionError> {
-        let held = self
-            .store()
-            .unsigned_nonce(&NonceKey { chain_id, nonce })
-            .map(|unsigned| unsigned.purpose);
-        if held != Some(TxPurpose::GaslessPull(quote_hash)) {
-            return Err(TransitionError::NonceNotHeldForPull {
-                chain_id,
-                nonce,
-                quote_hash,
-            });
-        }
-        Ok(())
-    }
-
     /// A flow's signed record spends the number handed out for exactly its purpose.
     fn ensure_flow_nonce(
         &self,
@@ -601,101 +376,14 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         state.record_signed(event.index);
     }
     match &event.payload {
-        EventType::FundsReceived {
-            quote_hash,
-            quote_bytes,
-            chain_id,
-            token,
-            amount,
-            ..
-        } => state.record_funds_received(
-            *quote_hash,
-            quote_bytes.clone(),
-            *chain_id,
-            token.clone(),
-            *amount,
-        ),
-        EventType::TxSigned {
-            quote_hash,
-            attempt,
-            ..
-        } => state.record_attempt_signed(quote_hash, *attempt),
-        EventType::TxConfirmed {
-            quote_hash,
-            tx_hash,
-            ..
-        } => state.record_attempt_closed(quote_hash, Outcome::Confirmed, Some(*tx_hash)),
-        EventType::TxFailed { quote_hash, .. } => {
-            state.record_attempt_closed(quote_hash, Outcome::Failed, None)
-        }
-        EventType::PaidInStable {
-            quote_hash, amount, ..
-        } => state.record_paid_in_stable(quote_hash, *amount),
-        EventType::DecisionRequired { quote_hash, .. } => {
-            state.record_decision_required(quote_hash, event.timestamp)
-        }
-        EventType::DecisionMade { quote_hash, choice } => {
-            state.record_decision_made(quote_hash, *choice)
-        }
-        EventType::RefundStarted { quote_hash, .. } => state.record_refund_started(quote_hash),
-        EventType::Refunded { quote_hash, .. } => state.record_refunded(quote_hash),
-        EventType::SwapDone { quote_hash } => state.record_swap_done(quote_hash),
-        EventType::Frozen { quote_hash, .. } => state.record_frozen(quote_hash),
-        EventType::FeeAccrued { quote_hash, amount } => {
-            state.record_fee_accrued(quote_hash, *amount)
-        }
-        EventType::PocketFunded { chain_id, amount } => {
-            state.record_pocket_funded(*chain_id, *amount)
-        }
-        EventType::PocketReserved {
-            chain_id, amount, ..
-        } => state.record_pocket_reserved(*chain_id, *amount),
-        EventType::PocketReleased {
-            chain_id, amount, ..
-        } => state.record_pocket_released(*chain_id, *amount),
-        EventType::PocketSpent {
-            chain_id, amount, ..
-        } => state.record_pocket_spent(*chain_id, *amount),
-        EventType::PocketRebalanced {
-            from_chain,
-            to_chain,
-            amount,
-            ..
-        } => state.record_pocket_rebalanced(*from_chain, *to_chain, *amount),
-        EventType::WaitingRepaired { quote_hash } => state.record_waiting_repaired(quote_hash),
         EventType::TxCreated {
             purpose,
             chain_id,
             nonce,
-            data,
             action,
             ..
-        } => {
-            state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp, *action);
-            // the payout's own amount, off the calldata this canister built: what the
-            // record of a delivered swap is made from. Pure, so a replay rebuilds it.
-            if let TxPurpose::Payout(quote_hash) = purpose {
-                let paid_out = types::abi::decode_vault_payout(data).map(|payout| payout.amount);
-                state.record_payout_created(quote_hash, paid_out);
-            }
-            // the most a CCTP burn offered Circle, off the same calldata: what the message
-            // it emits carries, and so what its attestation is bound to (rule A3). An Eco
-            // publish rides the same leg and is no CCTP burn, so it records none.
-            if let TxPurpose::Burn(quote_hash) = purpose {
-                let offered = types::abi::decode_vault_execute(data)
-                    .and_then(|execute| {
-                        types::abi::decode_cctp_deposit_for_burn_with_hook(
-                            &execute.calls.first()?.data,
-                        )
-                    })
-                    .map(|burn| burn.max_fee);
-                state.record_burn_created(quote_hash, offered);
-            }
-        }
+        } => state.record_nonce_allocated(*chain_id, *nonce, *purpose, event.timestamp, *action),
         EventType::TxCancelled {
-            chain_id, nonce, ..
-        }
-        | EventType::PullSigned {
             chain_id, nonce, ..
         } => state.record_nonce_spent(*chain_id, *nonce),
         EventType::Flow { quote_hash, step } => {
@@ -736,6 +424,27 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         EventType::ConfigChanged { .. }
         | EventType::RolesChanged { .. }
         | EventType::TxReplaced { .. } => {}
+        // the retired v1 swaps' and pockets' lines: the check refuses every one, so none is
+        // ever applied
+        EventType::FundsReceived { .. }
+        | EventType::TxSigned { .. }
+        | EventType::TxConfirmed { .. }
+        | EventType::TxFailed { .. }
+        | EventType::PaidInStable { .. }
+        | EventType::DecisionRequired { .. }
+        | EventType::DecisionMade { .. }
+        | EventType::RefundStarted { .. }
+        | EventType::Refunded { .. }
+        | EventType::SwapDone { .. }
+        | EventType::Frozen { .. }
+        | EventType::FeeAccrued { .. }
+        | EventType::PocketFunded { .. }
+        | EventType::PocketReserved { .. }
+        | EventType::PocketReleased { .. }
+        | EventType::PocketSpent { .. }
+        | EventType::PocketRebalanced { .. }
+        | EventType::PullSigned { .. }
+        | EventType::WaitingRepaired { .. } => {}
     }
 }
 

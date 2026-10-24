@@ -14,35 +14,38 @@ use types::{
 fn sample_fold() -> MemoryStore {
     let quote_hash = QuoteHash::new([0x5a; 32]);
     let since = Timestamp::from_nanos(1_700_000_000_123_456_789);
-    let mut store = MemoryStore::default();
-    store.put_swap(
-        quote_hash,
-        Swap {
-            quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
-            status: SwapStatus::WaitingForUser,
-            last_attempt: Some(Attempt::new(3)),
-            open_attempt: None,
-            src_chain: ChainId::BASE,
-            src_token: "USDC".parse().unwrap(),
-            amount_in: TokenAmount::from(25_000_000_u32),
-            amount_paid: Some(TokenAmount::from(24_990_000_u32)),
-            waiting_since: Some(since),
-            // absent, so the pinned bytes below do not move: a field appended to the swap
-            // is absent from every swap stored before it existed
-            last_leg: None,
-            last_outcome: None,
-            last_tx_hash: None,
-            paid_out: None,
-            fee_accrued: None,
-            burn_max_fee: None,
-        },
-    );
-    store.put_pocket(
-        ChainId::ARBITRUM,
-        Pocket {
-            available: TokenAmount::from(1u128 << 70),
-            reserved: TokenAmount::from(250_u32),
-        },
+    // the retired v1 places hold one record each, as a fold saved before they retired may
+    let mut store = MemoryStore::default().with_retired(
+        (
+            quote_hash,
+            Swap {
+                quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
+                status: SwapStatus::WaitingForUser,
+                last_attempt: Some(Attempt::new(3)),
+                open_attempt: None,
+                src_chain: ChainId::BASE,
+                src_token: "USDC".parse().unwrap(),
+                amount_in: TokenAmount::from(25_000_000_u32),
+                amount_paid: Some(TokenAmount::from(24_990_000_u32)),
+                waiting_since: Some(since),
+                // absent, so the pinned bytes below do not move: a field appended to the swap
+                // is absent from every swap stored before it existed
+                last_leg: None,
+                last_outcome: None,
+                last_tx_hash: None,
+                paid_out: None,
+                fee_accrued: None,
+                burn_max_fee: None,
+            },
+        ),
+        (
+            ChainId::ARBITRUM,
+            Pocket {
+                available: TokenAmount::from(1u128 << 70),
+                reserved: TokenAmount::from(250_u32),
+            },
+        ),
+        WaitingKey { since, quote_hash },
     );
     store.put_meta(LedgerMeta {
         fees_accrued: TokenAmount::from(7_u32),
@@ -51,7 +54,6 @@ fn sample_fold() -> MemoryStore {
         pool_paused_by: None,
         pool_paused_at: None,
     });
-    store.put_auto_refund_waiting(WaitingKey { since, quote_hash });
     store.put_unsigned_nonce(
         NonceKey {
             chain_id: ChainId::BASE,

@@ -672,12 +672,12 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
 #[test]
 fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
     use crate::state::transitions::apply_state_transition;
-    use crate::state::transitions::tests::{funds, swap_id};
+    use crate::state::transitions::tests::relay_key;
     use crate::state::{MemoryStore, State};
     use types::events::EventType;
     use types::{Event, Nonce, NonceKey, TxHash};
 
-    let qh = swap_id(1);
+    let qh = relay_key(1);
     let mut state = State::<MemoryStore>::default();
     let apply = |state: &mut State<MemoryStore>, payload: EventType| {
         state.check(&payload).expect("the fold admits it");
@@ -692,7 +692,7 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
         apply_state_transition(state, &event);
     };
     let allocation = |nonce: u64| EventType::TxCreated {
-        purpose: TxPurpose::Payout(qh),
+        purpose: TxPurpose::Relay(qh),
         chain_id: ChainId::BASE,
         nonce: Nonce::new(nonce),
         to: EvmAddress::ZERO,
@@ -708,7 +708,6 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
         nonce: Nonce::new(nonce),
     };
 
-    apply(&mut state, funds(1));
     apply(&mut state, allocation(0));
     assert_eq!(
         still_holds(&state, &qh, key(0)),

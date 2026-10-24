@@ -1,17 +1,16 @@
 use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
-use crate::state::{after_bound, MemoryStore, State, Store};
+use crate::state::{MemoryStore, State, Store};
 use crate::storage::memory::{
-    auto_refund_waiting_memory, books_memory, eco_rescues_memory, events_data_memory,
-    events_index_memory, flows_memory, ledger_meta_memory, nonces_memory, pockets_memory,
-    pool_credited_memory, pool_deposits_memory, pool_ledger_memory, pool_moves_memory,
-    pool_orphans_memory, pool_own_sources_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
-    pool_withdrawal_nonces_memory, signed_memory, swaps_memory, unsigned_nonces_memory, Memory,
+    books_memory, eco_rescues_memory, events_data_memory, events_index_memory, flows_memory,
+    ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
+    pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
+    pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    pool_withdrawal_nonces_memory, signed_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
 use std::cell::RefCell;
-use std::ops::{Bound, RangeFrom};
+use std::ops::RangeFrom;
 use thiserror::Error;
 use types::books::Books;
 use types::canonical::CanonicalError;
@@ -19,8 +18,8 @@ use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
 use types::hash::{OwnerKey, PoolRef};
 use types::pool::{CreditKey, EvmPayout, NonceUse, PoolLedger, Registered, ShareLine};
 use types::{
-    ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
-    Timestamp, TransitionError, UnsignedTx, WaitingKey,
+    ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp,
+    TransitionError, UnsignedTx,
 };
 
 /// Longest page a query will return, so one call can never walk the whole log.
@@ -28,27 +27,16 @@ const MAX_PAGE: u64 = 500;
 
 thread_local! {
     // The log is the record and every map below is its fold. All are private, and every
-    // write to them goes through `append_event`: even the repair of a waiting entry
-    // no event could have produced is an event, so the fold has exactly one writer.
+    // write to them goes through `append_event`, so the fold has exactly one writer. The
+    // retired v1 swaps, pockets and waits held memory ids 6, 7 and 10.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
     );
-
-    static SWAPS: RefCell<StableBTreeMap<QuoteHash, Swap, Memory>> =
-        RefCell::new(StableBTreeMap::init(swaps_memory()));
-
-    static POCKETS: RefCell<StableBTreeMap<ChainId, Pocket, Memory>> =
-        RefCell::new(StableBTreeMap::init(pockets_memory()));
 
     static LEDGER_META: RefCell<StableCell<LedgerMeta, Memory>> = RefCell::new(
         StableCell::init(ledger_meta_memory(), LedgerMeta::default())
             .expect("ledger meta cell init"),
     );
-
-    // The v1 swaps waiting for their user and asking for an automatic refund: the queue the
-    // retired expiry sweep worked through. Part of the fold, kept with its rules.
-    static AUTO_REFUND_WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
-        RefCell::new(StableBTreeSet::init(auto_refund_waiting_memory()));
 
     // The nonce allocator, one counter per chain. Part of the fold: every counter is the
     // number of `TxCreated` lines the log holds for its chain, so a replay reproduces it
@@ -143,40 +131,6 @@ impl Store for StableStore {
         FLOWS.with(|flows| flows.borrow().iter().collect())
     }
 
-    fn swap(&self, quote_hash: &QuoteHash) -> Option<Swap> {
-        SWAPS.with(|swaps| swaps.borrow().get(quote_hash))
-    }
-
-    fn put_swap(&mut self, quote_hash: QuoteHash, swap: Swap) {
-        SWAPS.with(|swaps| swaps.borrow_mut().insert(quote_hash, swap));
-    }
-
-    fn swaps(&self) -> Vec<(QuoteHash, Swap)> {
-        SWAPS.with(|swaps| swaps.borrow().iter().collect())
-    }
-
-    fn swaps_after(&self, after: Option<QuoteHash>, limit: usize) -> Vec<(QuoteHash, Swap)> {
-        SWAPS.with(|swaps| {
-            swaps
-                .borrow()
-                .range((after_bound(after), Bound::Unbounded))
-                .take(limit)
-                .collect()
-        })
-    }
-
-    fn pocket(&self, chain_id: &ChainId) -> Option<Pocket> {
-        POCKETS.with(|pockets| pockets.borrow().get(chain_id))
-    }
-
-    fn put_pocket(&mut self, chain_id: ChainId, pocket: Pocket) {
-        POCKETS.with(|pockets| pockets.borrow_mut().insert(chain_id, pocket));
-    }
-
-    fn pockets(&self) -> Vec<(ChainId, Pocket)> {
-        POCKETS.with(|pockets| pockets.borrow().iter().collect())
-    }
-
     fn meta(&self) -> LedgerMeta {
         LEDGER_META.with(|meta| *meta.borrow().get())
     }
@@ -184,14 +138,6 @@ impl Store for StableStore {
     fn put_meta(&mut self, meta: LedgerMeta) {
         // out of stable memory is not a caller error, so it traps, rolling back the message
         LEDGER_META.with(|cell| cell.borrow_mut().set(meta).expect("ledger meta cell write"));
-    }
-
-    fn put_auto_refund_waiting(&mut self, key: WaitingKey) {
-        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().insert(key));
-    }
-
-    fn remove_auto_refund_waiting(&mut self, key: &WaitingKey) {
-        AUTO_REFUND_WAITING.with(|waiting| waiting.borrow_mut().remove(key));
     }
 
     fn next_nonce(&self, chain_id: &ChainId) -> Nonce {
@@ -388,23 +334,6 @@ impl Store for StableStore {
     fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)> {
         UNSIGNED_NONCES.with(|unsigned| unsigned.borrow().iter().collect())
     }
-
-    fn waiting_keys(
-        &self,
-        before: Option<Timestamp>,
-        naming: Option<QuoteHash>,
-        limit: usize,
-    ) -> Vec<WaitingKey> {
-        AUTO_REFUND_WAITING.with(|waiting| {
-            waiting
-                .borrow()
-                .iter()
-                .take_while(|key| before.is_none_or(|cutoff| key.since < cutoff))
-                .filter(|key| naming.is_none_or(|quote_hash| key.quote_hash == quote_hash))
-                .take(limit)
-                .collect()
-        })
-    }
 }
 
 /// Why an event was not appended. Nothing was written.
@@ -485,10 +414,7 @@ impl From<AppendError> for settlement_api::types::errors::AppendError {
 /// ever the first to grow their memory.
 pub fn init() {
     EVENTS.with(|_| ());
-    SWAPS.with(|_| ());
-    POCKETS.with(|_| ());
     LEDGER_META.with(|_| ());
-    AUTO_REFUND_WAITING.with(|_| ());
     NONCES.with(|_| ());
     UNSIGNED_NONCES.with(|_| ());
     FLOWS.with(|_| ());

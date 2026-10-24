@@ -16,13 +16,12 @@ const CONFIG_MEMORY_ID: MemoryId = MemoryId::new(2);
 const ROLES_MEMORY_ID: MemoryId = MemoryId::new(3);
 const HALT_MEMORY_ID: MemoryId = MemoryId::new(4);
 // 5 is reserved for the Plan 3 liveness stamp
-const SWAPS_MEMORY_ID: MemoryId = MemoryId::new(6);
-const POCKETS_MEMORY_ID: MemoryId = MemoryId::new(7);
+// 6 and 7 held the v1 swaps and pockets: retired, never reused
 const LEDGER_META_MEMORY_ID: MemoryId = MemoryId::new(8);
 // 9 held the v1 quotes registered and not yet paid: retired, never reused
-const AUTO_REFUND_WAITING_MEMORY_ID: MemoryId = MemoryId::new(10);
+// 10 held the v1 swaps' waiting index: retired, never reused
 const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
-// 12 held those quotes' expiry index: retired, never reused
+// 12 held the v1 pending quotes' expiry index: retired, never reused
 const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
 const NONCES_MEMORY_ID: MemoryId = MemoryId::new(15);
@@ -85,20 +84,8 @@ pub fn halt_memory() -> Memory {
     memory(HALT_MEMORY_ID)
 }
 
-pub fn swaps_memory() -> Memory {
-    memory(SWAPS_MEMORY_ID)
-}
-
-pub fn pockets_memory() -> Memory {
-    memory(POCKETS_MEMORY_ID)
-}
-
 pub fn ledger_meta_memory() -> Memory {
     memory(LEDGER_META_MEMORY_ID)
-}
-
-pub fn auto_refund_waiting_memory() -> Memory {
-    memory(AUTO_REFUND_WAITING_MEMORY_ID)
 }
 
 pub fn audit_cursor_memory() -> Memory {

@@ -6,94 +6,65 @@ use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, GuardError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::swap::TransitionError;
-use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
-/// The quote the spine's swap is for. The `FundsReceived` guard binds the swap id to the
-/// preimage recorded with it, so the spine carries a real quote and not a placeholder.
-fn quote() -> types::Quote {
-    types::Quote {
-        version: 1,
-        src_chain: ChainId::BASE,
-        src_token: "USDC".parse().unwrap(),
-        amount_in: TokenAmount::from(1_000_u32),
-        dst_chain: ChainId::ARBITRUM,
-        dst_token: "USDC".parse().unwrap(),
-        expected_out: TokenAmount::from(999_u32),
-        min_out: TokenAmount::from(990_u32),
-        dst_address: "0xuser".parse().unwrap(),
-        refund_address: None,
-        auto_refund: true,
-        gas_mode: GasMode::Gasless,
-        rail: Rail::CctpV2Fast,
-        expires_at: UnixSeconds::new(1_800_000_000),
-        nonce: 7,
-    }
+/// The key the spine's relay is signed under.
+fn relay_key() -> Hash32 {
+    [0x7e; 32]
 }
 
-/// The swap id every event of the spine names: the hash of the quote's preimage.
-fn quote_hash() -> Hash32 {
-    quote()
-        .hash()
-        .expect("a valid quote has an id")
-        .into_bytes()
+/// A flow step as the wire carries it.
+fn flow(step: types::FlowStep) -> EventType {
+    EventType::from(types::EventType::Flow {
+        quote_hash: types::QuoteHash::new(relay_key()),
+        step,
+    })
 }
 
-fn swap_sequence() -> Vec<EventType> {
-    let quote = quote();
-    let swap_id = quote_hash();
+/// A whole relay: its transaction handed out, its signed bytes recorded (the first lines
+/// carrying blob fields through stable storage), its receipt at depth, and the fee it paid
+/// booked.
+fn relay_sequence() -> Vec<EventType> {
     vec![
-        EventType::PocketFunded {
-            chain_id: 8453,
-            amount: Nat::from(1_000_000_u64),
-        },
-        // the first event carrying blob fields through stable storage
-        EventType::FundsReceived {
-            quote_hash: swap_id,
-            quote_bytes: quote
-                .canonical_bytes()
-                .expect("a valid quote has a preimage"),
-            chain_id: quote.src_chain.get(),
-            token: quote.src_token.to_string(),
-            amount: quote.amount_in.into(),
-            tx_ref: "0xfeed".into(),
-        },
-        // the allocation the signed record spends: a signed record for a swap holding no
-        // number is refused
         EventType::TxCreated {
-            purpose: TxPurpose::Payout(swap_id),
+            purpose: TxPurpose::Relay(relay_key()),
             chain_id: 8453,
             nonce: 0,
             to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
             value_wei: Nat::from(0_u8),
-            data: vec![],
+            data: vec![0xde, 0xad],
             gas_limit: Nat::from(120_000_u64),
             max_fee_wei_per_gas: Nat::from(1_u8),
             max_priority_fee_wei_per_gas: Nat::from(1_u8),
             action: None,
         },
-        EventType::TxSigned {
-            quote_hash: swap_id,
-            attempt: 1,
-            chain_id: 8453,
-            tx_hash: [1; 32],
+        flow(types::FlowStep::GaslessRelayed {
+            chain_id: types::ChainId::BASE,
+            nonce: types::Nonce::ZERO,
+            tx_hash: types::TxHash::new([1; 32]),
             raw_tx: vec![0x02, 0xf8, 0x6b],
-        },
-        EventType::TxConfirmed {
-            quote_hash: swap_id,
-            attempt: 1,
-            chain_id: 8453,
-            tx_hash: [1; 32],
-            block: 19_000_000,
-        },
-        EventType::PaidInStable {
-            quote_hash: swap_id,
-            chain_id: 42161,
-            amount: Nat::from(999_u64),
-        },
-        EventType::SwapDone {
-            quote_hash: swap_id,
-        },
+        }),
+        flow(types::FlowStep::TxClosed {
+            tx_hash: types::TxHash::new([1; 32]),
+            block: types::BlockNumber::new(19_000_000),
+            success: true,
+        }),
+        EventType::from(types::EventType::Books {
+            chain_id: types::ChainId::BASE,
+            step: types::books::BookStep::FeeEarned {
+                tx_hash: types::TxHash::new([1; 32]),
+                amount: types::TokenAmount::from(1_000_u32),
+                block: Some(types::BlockNumber::new(19_000_000)),
+            },
+        }),
     ]
+}
+
+/// Whether `err` is the refusal of a relay whose flow exists: one relay is signed once.
+fn refused_as_relayed(err: &TestAppendError) -> bool {
+    matches!(
+        err,
+        TestAppendError::Append(AppendError::Transition(TransitionError::Flow(_)))
+    )
 }
 
 fn count(pic: &PocketIc, canister: Principal, who: Principal) -> u64 {
@@ -115,12 +86,12 @@ fn skew(pic: &PocketIc, canister: Principal, who: Principal) -> Result<(), Guard
 }
 
 #[test]
-fn spine_holds_across_a_whole_swap_and_an_upgrade() {
+fn spine_holds_across_a_whole_relay_and_an_upgrade() {
     let (pic, canister, admin) = setup();
     // the install's config and roles events come first
     let installed = count(&pic, canister, admin);
 
-    let events = swap_sequence();
+    let events = relay_sequence();
     let total = installed + events.len() as u64;
     for (i, event) in (installed..).zip(&events) {
         let index = append(&pic, canister, admin, event).expect("guard admits");
@@ -129,14 +100,11 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     assert_eq!(count(&pic, canister, admin), total);
 
     // a rejected event must leave no trace in the log
-    let dup = &swap_sequence()[1];
+    let dup = &relay_sequence()[0];
     let err = append(&pic, canister, admin, dup).expect_err("guard rejects");
-    assert_eq!(
-        err,
-        TestAppendError::Append(AppendError::Transition(TransitionError::SwapExists(
-            quote_hash()
-        ))),
-        "the swap already has funds"
+    assert!(
+        refused_as_relayed(&err),
+        "the relay was signed already: {err:?}"
     );
     assert_eq!(
         count(&pic, canister, admin),
@@ -153,24 +121,20 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     for (i, env) in (0..).zip(&full) {
         assert_eq!(env.index, i);
     }
-    let swap_events: Vec<EventType> = full[installed as usize..]
+    let relay_events: Vec<EventType> = full[installed as usize..]
         .iter()
         .map(|env| env.payload.clone())
         .collect();
-    assert_eq!(swap_events, events);
+    assert_eq!(relay_events, events);
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
 
     upgrade(&pic, canister, admin).unwrap();
 
     // the fold is stable memory, so it comes through the upgrade without a replay: the
-    // swap is still there to refuse its funds a second time
-    assert_eq!(
-        append(&pic, canister, admin, dup),
-        Err(TestAppendError::Append(AppendError::Transition(
-            TransitionError::SwapExists(quote_hash())
-        )))
-    );
+    // relay's flow is still there to refuse its creation a second time
+    let err = append(&pic, canister, admin, dup).expect_err("guard rejects");
+    assert!(refused_as_relayed(&err), "{err:?}");
     assert_eq!(count(&pic, canister, admin), total);
     assert!(verify(&pic, canister, admin, "verify_chain"));
     assert!(verify(&pic, canister, admin, "verify_replay"));
@@ -184,13 +148,13 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
 /// The divergence the index check cannot see: the fold's chain head moved while the log
 /// stayed put, so the next event would seal on a parent hash the log does not end with and
 /// fork the chain at an index that looks perfectly right. Covered on the log the install
-/// wrote and on one that also holds a whole swap. An install always writes its config and
+/// wrote and on one that also holds a whole relay. An install always writes its config and
 /// roles events, so the genesis arm, where the head is the zero hash, is covered by the
 /// storage unit test `the_fold_check_passes_a_fold_in_step_and_names_what_is_not`.
 #[test]
 fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     let (pic, canister, admin) = setup();
-    let first = &swap_sequence()[0];
+    let first = &relay_sequence()[0];
     let installed = count(&pic, canister, admin);
 
     // the install's log: the fold's head is flipped, and nothing is admissible
@@ -212,7 +176,7 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     // the same flip puts the head back, so what refused above was the head check and not
     // the transition guard
     skew(&pic, canister, admin).unwrap();
-    let events = swap_sequence();
+    let events = relay_sequence();
     for (i, event) in (installed..).zip(&events) {
         assert_eq!(
             append(&pic, canister, admin, event).expect("the head lines up again"),
@@ -221,11 +185,10 @@ fn append_refuses_to_seal_on_a_chain_head_the_log_does_not_end_with() {
     }
     let total = installed + events.len() as u64;
 
-    // and the same divergence over a log that already holds a whole swap
+    // and the same divergence over a log that already holds a whole relay
     skew(&pic, canister, admin).unwrap();
-    let more = EventType::PocketFunded {
-        chain_id: 8453,
-        amount: Nat::from(1_u64),
+    let more = EventType::ConfigChanged {
+        json: "{}".to_string(),
     };
     let err = append(&pic, canister, admin, &more).expect_err("the head diverged");
     assert!(
@@ -250,5 +213,5 @@ fn test_skew_state_rejects_non_controller() {
     let (pic, canister, admin) = setup();
     let stranger = Principal::from_slice(&[9; 29]);
     assert!(skew(&pic, canister, stranger).is_err());
-    assert!(append(&pic, canister, admin, &swap_sequence()[0]).is_ok());
+    assert!(append(&pic, canister, admin, &relay_sequence()[0]).is_ok());
 }

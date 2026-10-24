@@ -1,19 +1,14 @@
 use crate::client::settlement::{self, append, set_config, set_halted, test_skew_state};
 use crate::settlement_suite::init::{quoter, rail_config, setup_with_rail_usdc, upgrade};
-use candid::Principal;
+use candid::{Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
 use settlement_api::types::errors::GuardError;
-use settlement_api::types::events::{EventType, Hash32};
+use settlement_api::types::events::{EventType, TxPurpose};
 use std::time::Duration;
 
 fn stranger() -> Principal {
     Principal::from_slice(&[9; 29])
-}
-
-/// Seconds on the pic clock, which is the clock the sweep reads.
-fn now_s(pic: &PocketIc) -> u64 {
-    pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000
 }
 
 /// Move the clock, then give the canister enough rounds for the due timer to run.
@@ -40,74 +35,43 @@ fn verifies(pic: &PocketIc, canister: Principal) -> bool {
     chain && replay
 }
 
-fn quote_expiring_in(pic: &PocketIc, ttl_s: u64, auto_refund: bool, nonce: u64) -> types::Quote {
-    types::Quote {
-        version: 1,
-        src_chain: types::ChainId::BASE,
-        src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-            .parse()
-            .unwrap(),
-        amount_in: types::TokenAmount::from(25_000_000_u32),
-        dst_chain: types::ChainId::ARBITRUM,
-        dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
-            .parse()
-            .unwrap(),
-        expected_out: types::TokenAmount::from(24_990_000_u32),
-        min_out: types::TokenAmount::from(24_900_000_u32),
-        dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b"
-            .parse()
-            .unwrap(),
-        // a quote that asks to be refunded on its own says where: without an address the
-        // engine can only stop the refund for a human
-        refund_address: Some(
-            "0x7551A66653f9a20979ed81835a0b7008EC83401b"
-                .parse()
-                .unwrap(),
-        ),
-        auto_refund,
-        gas_mode: types::GasMode::Gasless,
-        rail: types::Rail::CctpV2Fast,
-        expires_at: types::UnixSeconds::new(now_s(pic) + ttl_s),
-        nonce,
-    }
-}
-
-/// A swap parked on a user decision, with a real quote in `quote_bytes` so the sweep can
-/// read its `auto_refund`. Money first: `FundsReceived` is what creates the swap.
-fn waiting_swap(
-    pic: &PocketIc,
-    canister: Principal,
-    admin: Principal,
-    auto_refund: bool,
-    nonce: u64,
-) -> Hash32 {
-    let q = quote_expiring_in(pic, 60, auto_refund, nonce);
-    let hash = q.hash().expect("a valid quote has an id").into_bytes();
+/// A relay signed on Base, its transaction handed out and its signed bytes recorded: some
+/// of the log for the audits to read.
+fn relayed(pic: &PocketIc, canister: Principal, admin: Principal) {
+    let key = types::QuoteHash::new([0x7e; 32]);
     append(
         pic,
         canister,
         admin,
-        &EventType::FundsReceived {
-            quote_hash: hash,
-            quote_bytes: q.canonical_bytes().expect("a valid quote has a preimage"),
-            chain_id: q.src_chain.get(),
-            token: q.src_token.to_string(),
-            amount: q.amount_in.into(),
-            tx_ref: format!("0xdeposit{nonce}"),
+        &EventType::TxCreated {
+            purpose: TxPurpose::Relay(key.into_bytes()),
+            chain_id: 8453,
+            nonce: 0,
+            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
+            value_wei: Nat::from(0_u8),
+            data: vec![0xde, 0xad],
+            gas_limit: Nat::from(120_000_u64),
+            max_fee_wei_per_gas: Nat::from(1_u8),
+            max_priority_fee_wei_per_gas: Nat::from(1_u8),
+            action: None,
         },
     )
-    .expect("money first");
+    .expect("the allocation first");
     append(
         pic,
         canister,
         admin,
-        &EventType::DecisionRequired {
-            quote_hash: hash,
-            reason: "slippage".into(),
-        },
+        &EventType::from(types::EventType::Flow {
+            quote_hash: key,
+            step: types::FlowStep::GaslessRelayed {
+                chain_id: types::ChainId::BASE,
+                nonce: types::Nonce::ZERO,
+                tx_hash: types::TxHash::new([1; 32]),
+                raw_tx: vec![0x02, 0xf8, 0x6b],
+            },
+        }),
     )
-    .expect("the swap pauses on the user");
-    hash
+    .expect("then its signed record");
 }
 
 /// The audit timer is wired, and a healthy canister survives it: a false halt would freeze
@@ -115,7 +79,7 @@ fn waiting_swap(
 #[test]
 fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
     let (pic, canister, admin) = setup_with_rail_usdc();
-    waiting_swap(&pic, canister, admin, true, 1);
+    relayed(&pic, canister, admin);
 
     // the default replay_audit_interval_s is 21_600
     advance(&pic, 21_660);
@@ -236,7 +200,7 @@ fn an_audit_only_change_takes_effect_at_once() {
 #[test]
 fn audit_replay_step_is_the_controllers_deep_check_and_halts_on_a_divergence() {
     let (pic, canister, admin) = setup_with_rail_usdc();
-    waiting_swap(&pic, canister, admin, true, 1);
+    relayed(&pic, canister, admin);
     let len = settlement::event_count(&pic, canister, stranger());
 
     assert_eq!(

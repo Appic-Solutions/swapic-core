@@ -822,7 +822,7 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
     let (pic, canister, admin) = setup();
     let mine = evm_address(&pic, canister, Principal::anonymous()).expect("the address is derived");
 
-    // a `TxCreated` with no `TxSigned` after it: exactly the state a refused signature, a
+    // a `TxCreated` with no signed record after it: exactly the state a refused signature, a
     // refused signed record or a trap mid-await leaves behind
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     assert!(
