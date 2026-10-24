@@ -1725,9 +1725,8 @@ pub fn fail(id: PoolRef, why: String, now: Timestamp) {
     }
 }
 
-/// How long a ledger deduplicates a transfer: a pull asked again after it can no longer be
-/// told from a new one, so the drive stops asking (a little before, for the clocks' skew).
-pub const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(23 * 3_600);
+/// How long a ledger deduplicates a transfer (the fold's own rule reads it too).
+pub use types::pool::DEDUP_WINDOW;
 
 /// The pool's guard, as the payouts read it before every outflow.
 pub fn guard() -> Result<(), String> {

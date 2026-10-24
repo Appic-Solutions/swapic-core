@@ -503,6 +503,23 @@ impl PoolLedger {
         Shares::mint_for(amount, self.total_assets(), self.total_shares)
     }
 
+    /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`] (the
+    /// review, 2026-10-24): a retry's dedup instant is the line's time or before it, and
+    /// leaves its next drive inside the ledger's window, whoever wrote the line.
+    pub fn admits_at(&self, step: &PoolStep, at: Timestamp) -> Result<(), PoolStepError> {
+        match step {
+            PoolStep::DepositResolved {
+                retry_at: Some(retry_at),
+                ..
+            } if *retry_at > at || !super::deduplicated(*retry_at, at) => {
+                Err(PoolStepError::Terms(
+                    "a retry's dedup instant is the line's time, inside the ledger's window",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Every rule a step must meet, read off the fold alone.
     pub fn admits(&self, step: &PoolStep, lookup: &impl PoolLookup) -> Result<(), PoolStepError> {
         let not_from = |step: &'static str, status: &DepositStatus| PoolStepError::NotFrom {

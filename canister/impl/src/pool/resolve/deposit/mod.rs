@@ -40,28 +40,20 @@ mod tests;
 use super::{same_account, LedgerBlocks};
 use crate::ic::LedgerTransfer;
 use crate::pool::orphans::{self, Refund};
-use crate::pool::payout::{Busy, DEDUP_WINDOW};
+use crate::pool::payout::Busy;
+#[cfg(test)]
+use crate::pool::payout::DEDUP_WINDOW;
 use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
 use settlement_api::types::pool::{DepositResolution as WireResolution, PoolError};
-use std::time::Duration;
 use types::hash::PoolRef;
 use types::pool::{
     DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PoolStep, Registered, Sent,
 };
 use types::{Address, EvmAddress, Timestamp};
 
-/// What of the ledger's window a retry must leave its next drive (the review, 2026-10-24).
-pub const RETRY_MARGIN: Duration = Duration::from_secs(3_600);
-
-/// Whether a ledger still deduplicates a transfer of a payout started at `attempt_at` after
-/// a retry at `now`, its next drive [`RETRY_MARGIN`] away at most: a transfer that landed is
-/// then answered `Duplicate`.
-pub fn deduplicated(attempt_at: Timestamp, now: Timestamp) -> bool {
-    now.saturating_duration_since(attempt_at)
-        .saturating_add(RETRY_MARGIN)
-        < DEDUP_WINDOW
-}
+/// The retry's margin and the window, the fold's own rule too.
+pub use types::pool::{deduplicated, RETRY_MARGIN};
 
 fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {
     pool_store::record_at(step, now)

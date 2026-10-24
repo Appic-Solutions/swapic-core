@@ -599,3 +599,32 @@ fn a_deposit_whose_answer_was_lost_is_retried_only_with_its_own_pair() {
         );
     });
 }
+
+/// The review (2026-10-24): the log refuses a retry line whose dedup instant is not its own
+/// time, whoever writes it.
+#[test]
+fn a_retry_line_with_an_instant_after_its_time_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let r#ref = held_at(1, Sent::Unasked);
+        assert!(record_at(
+            PoolStep::DepositResolved {
+                r#ref,
+                resolution: DepositResolution::Retry,
+                retry_at: Some(at(9)),
+            },
+            at(8),
+        )
+        .is_err());
+        record_at(
+            PoolStep::DepositResolved {
+                r#ref,
+                resolution: DepositResolution::Retry,
+                retry_at: Some(at(8)),
+            },
+            at(8),
+        )
+        .unwrap();
+    });
+}
