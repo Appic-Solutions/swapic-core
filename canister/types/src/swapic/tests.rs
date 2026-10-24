@@ -629,3 +629,16 @@ fn the_scaler_is_kybers_input_scaling_helper() {
     );
     assert_eq!(getScaledInputDataCall::SELECTOR, [0xe4, 0xda, 0x6f, 0x2e]);
 }
+
+/// The books' balance read: ERC-20 `balanceOf(address)`, the account in its word.
+#[test]
+fn a_balance_read_is_erc20_balance_of() {
+    let account: EvmAddress = "0x36D34038F04990a58c068e08eD9754e2E3D9bA53"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        hex::encode(balance_of_calldata(account)),
+        "70a08231\
+         00000000000000000000000036d34038f04990a58c068e08ed9754e2e3d9ba53"
+    );
+}

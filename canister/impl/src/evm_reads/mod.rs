@@ -187,7 +187,7 @@ pub async fn transfer_to(
     if receipt.get("status").and_then(Value::as_str) != Some("0x1") {
         return Ok(TransferRead::NoTransfer);
     }
-    let topic = types::router::transfer_topic();
+    let topic = types::swapic::topics::transfer();
     let mut total = TokenAmount::ZERO;
     for log in receipt
         .get("logs")

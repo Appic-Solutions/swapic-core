@@ -51,7 +51,7 @@ fn the_network_fee_is_the_fee_steps_transfer() {
         canister: EvmAddress::new([0xca; 20]),
         eco_portal: None,
     };
-    let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
+    let topic = format!("0x{}", hex::encode(types::swapic::topics::transfer()));
     let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
     let transfer = |token: [u8; 20], from: EvmAddress, to: EvmAddress, amount: u64| {
         json!({ "address": format!("0x{}", hex::encode(token)),
@@ -424,7 +424,7 @@ fn a_fee_step_and_a_pool_arrival_in_one_receipt_are_each_expected_once() {
             canister: EvmAddress::new([0x36; 20]),
             eco_portal: None,
         };
-        let topic = format!("0x{}", hex::encode(types::router::transfer_topic()));
+        let topic = format!("0x{}", hex::encode(types::swapic::topics::transfer()));
         let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
         let transfer = |amount: u64| {
             json!({ "address": format!("0x{}", hex::encode(path.usdc.as_bytes())),

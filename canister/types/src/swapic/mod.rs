@@ -66,6 +66,7 @@ sol! {
     function release(bytes message, bytes attestation) external;
     function receiveMessage(bytes message, bytes attestation) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
     function depositForBurnWithHook(
         uint256 amount,
         uint32 destinationDomain,
@@ -612,6 +613,14 @@ pub fn transfer_calldata(to: EvmAddress, amount: U256) -> Vec<u8> {
     transferCall {
         to: addr(to),
         amount,
+    }
+    .abi_encode()
+}
+
+/// `token.balanceOf(account)`.
+pub fn balance_of_calldata(account: EvmAddress) -> Vec<u8> {
+    balanceOfCall {
+        account: addr(account),
     }
     .abi_encode()
 }

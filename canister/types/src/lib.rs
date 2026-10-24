@@ -21,7 +21,6 @@ pub mod numeric;
 pub mod pool;
 pub mod quote;
 pub mod rail;
-pub mod router;
 pub mod storable;
 pub mod swap;
 pub mod swapic;

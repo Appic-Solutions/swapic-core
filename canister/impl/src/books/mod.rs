@@ -204,7 +204,7 @@ async fn check_balance(
         .checked_sub(depth.get())
         .ok_or(ReadFailure::BelowDepth)?;
     let block = BlockNumber::new(block);
-    let calldata = types::router::balance_of_calldata(mine);
+    let calldata = types::swapic::balance_of_calldata(mine);
     let observed = match evm_reads::eth_call_at(chain_id, mine, usdc, &calldata, block).await {
         Ok(Simulated::Returned(bytes)) if bytes.len() == 32 => {
             TokenAmount::from_be_bytes(bytes.try_into().expect("BUG: checked to be 32 bytes"))
