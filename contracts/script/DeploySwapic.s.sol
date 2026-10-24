@@ -11,9 +11,10 @@ interface ITransmitterDomain {
 
 /// Deploys Swapic on the current chain (Base, Arbitrum, Ethereum, Polygon, and
 /// the chains added on 2026-10-19: OP Mainnet, Unichain, Monad, HyperEVM, World
-/// Chain, Plasma; docs/swapic-new-chains-2026-10-19.md); its constructor deploys
-/// the CctpReceiver and the Runner, so this is the whole deployment and nothing
-/// is configured afterwards:
+/// Chain, Plasma; each chain's USDC, wrapped native and CCTP domain as its
+/// official USDC, wrapped native and Circle CCTP domain listings give them,
+/// checked 2026-10-24); its constructor deploys the CctpReceiver and the
+/// Runner, so this is the whole deployment and nothing is configured afterwards:
 ///
 ///   forge script script/DeploySwapic.s.sol --rpc-url <chain> --broadcast
 ///       env: CANISTER (required: the canister's EVM address),

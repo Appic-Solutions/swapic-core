@@ -4,10 +4,10 @@ pragma solidity 0.8.24;
 import "forge-std/Test.sol";
 import {DeploySwapic} from "../script/DeploySwapic.s.sol";
 
-/// The deploy script's per-chain table against docs/swapic-new-chains-2026-10-19.md (every
-/// address read on chain there, every CCTP domain from MessageTransmitterV2.localDomain()), and
-/// the four chains deployed first. A chain the doc leaves open is refused: Arc (5042, later:
-/// USDC is its gas token and it has no wrapped native), and any chain not listed.
+/// The deploy script's per-chain table against each chain's official USDC, wrapped native and
+/// Circle CCTP domain listings (checked 2026-10-24), for the four chains deployed first and the
+/// six added on 2026-10-19. A chain not offered is refused: Arc (5042, later: USDC is its gas
+/// token and it has no wrapped native), and any chain not listed.
 contract DeploySwapicTest is Test {
     DeploySwapic script = new DeploySwapic();
 
