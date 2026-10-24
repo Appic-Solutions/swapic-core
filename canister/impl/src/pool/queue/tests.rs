@@ -1214,10 +1214,6 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
     assert_eq!(decide(&far, secs(60)), Next::Wait);
     // its order's deadline under a minute away
     assert_eq!(decide(&planned, secs(1_941)), Next::Relist);
-    // signed once: never tried again
-    let mut signed = planned.clone();
-    signed.order = Some(planned.plan.clone().unwrap());
-    assert_eq!(decide(&signed, secs(60)), Next::Wait);
 }
 
 /// The review (2026-10-24): the pass refits a plan only when the plan's own pure decision

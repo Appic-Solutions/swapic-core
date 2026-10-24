@@ -97,13 +97,11 @@ pub fn next(
         PayoutStatus::Known => Next::Drive,
         PayoutStatus::Queued => Next::Wait,
         PayoutStatus::Waiting if in_flight => Next::Wait,
-        // old semantics: a reverted payout waiting with its order pinned, to be signed again,
-        // is undone only once Swapic says that order never ran. hfisl's real log (2,310
-        // events, read 2026-10-22) holds no Pool event, so no such state exists on the
-        // deployed canister: no migration
+        // a waiting payout has no order pinned (`order` is set only by `PayoutSigned`): nothing
+        // of it can have run
         PayoutStatus::Waiting if late => Next::Undo {
             why: "past its deadline".to_string(),
-            checked: payout.order.is_some(),
+            checked: false,
         },
         PayoutStatus::Waiting if refittable(payout, now) => Next::Fit,
         PayoutStatus::Waiting => {
@@ -200,16 +198,15 @@ pub const REVERTED: &str = "its transaction reverted";
 pub const NO_REVERT_BLOCK: &str =
     "ALERT: its transaction reverted in no recorded block, so whether its order ran cannot be read";
 
-/// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): never
-/// signed, tries left, and the plan's own decision before any read ([`plan::decide`]) says it
+/// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): tries
+/// left (a waiting payout was never signed), and the plan's own decision before any read ([`plan::decide`]) says it
 /// can still fit, or could only revert (the fit then undoes it). A plan that waits whatever
 /// the time (not an Order, swapping twice, its payout outside the window, its order deadline
 /// too close) is left to the watcher's order.
 ///
 /// [`plan::decide`]: crate::pool::plan::decide
 pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
-    payout.order.is_none()
-        && payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
+    payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
         && matches!(
             crate::pool::plan::decide_payout(payout, now.as_secs().get()),
             Some(Ok(_) | Err(crate::pool::plan::Fit::Undo(_)))
