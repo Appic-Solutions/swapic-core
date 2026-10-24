@@ -21,7 +21,7 @@ use crate::guards::require_not_halted;
 use std::cell::Cell;
 use types::Timestamp;
 
-/// What one drive did. Returned rather than logged, like the sweep's.
+/// What one drive did. Returned rather than logged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Drive {
     /// payouts the drive acted on

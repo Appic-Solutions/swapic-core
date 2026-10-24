@@ -5,15 +5,13 @@ use crate::state::MemoryStore;
 use crate::storage::audit_cursor;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
-use crate::task_manager::expiry_sweep::run_expiry_sweep;
 use crate::task_manager::replay_audit::{run_audit_replay_step, run_replay_audit};
-use types::config::{AuditChunk, RefundsPerSweep};
+use types::config::AuditChunk;
 use types::events::{Choice, TxPurpose};
 use types::quote::QuoteError;
 use types::LedgerMeta;
 use types::{
-    Attempt, GasAmount, GasMode, Quote, Rail, SwapStatus, TokenAmount, TxHash, UnixSeconds,
-    WaitingKey, Wei, WeiPerGas,
+    Attempt, GasAmount, Quote, SwapStatus, TokenAmount, TxHash, WaitingKey, Wei, WeiPerGas,
 };
 
 fn fold_both(payloads: Vec<EventType>) -> (State<StableStore>, State<MemoryStore>) {
@@ -515,59 +513,6 @@ fn replay_audit_halts_on_a_waiting_entry_no_event_made() {
     });
 }
 
-/// The index is the queue, so an entry whose swap is not waiting any more is dropped by the
-/// pass that meets it: left in place it would hold a slot of every pass's cap for good. Only
-/// a fold no event could have produced has such an entry, and the drop is a logged event, so
-/// the repair is in the record the deep check reads rather than a silent edit of the fold.
-#[test]
-fn the_sweep_repairs_an_index_entry_whose_swap_stopped_waiting_through_the_log() {
-    on_fresh_memory(|| {
-        append(funds(1));
-        let orphan = QuoteHash::new([9; 32]);
-        // a swap that never waited, and an entry naming no swap at all
-        StableStore(()).put_auto_refund_waiting(waiting_key(1, swap_id(1)));
-        StableStore(()).put_auto_refund_waiting(waiting_key(2, orphan));
-        assert!(!verify_replay(), "neither entry is a fold of the log");
-        let before = event_count();
-
-        let swept = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
-        assert_eq!((swept.stale, swept.refunds, swept.skipped), (2, 0, 0));
-        assert!(read_state(|state| state.store().auto_refund_waiting()).is_empty());
-        assert_eq!(
-            events_page(before, 2)
-                .into_iter()
-                .map(|event| event.payload)
-                .collect::<Vec<_>>(),
-            vec![
-                EventType::WaitingRepaired {
-                    quote_hash: swap_id(1)
-                },
-                EventType::WaitingRepaired { quote_hash: orphan },
-            ],
-            "the pass wrote the repair down"
-        );
-        assert!(
-            verify_chain(),
-            "the repairs are links of the chain like every other event"
-        );
-        assert!(
-            verify_replay(),
-            "and the fold is the fold of the log again, because the log explains the drop"
-        );
-        assert!(
-            !deep_check_halts(),
-            "so the deep audit has nothing to halt on"
-        );
-
-        let again = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
-        assert_eq!(
-            (again.stale, again.skipped),
-            (0, 0),
-            "and there is nothing left to repair"
-        );
-    });
-}
-
 /// The repair makes a swap's entries agree with the swap, so turned on a swap that really
 /// is waiting it changes nothing: the entry is the index doing its job, and it stays.
 #[test]
@@ -594,160 +539,6 @@ fn a_repair_of_a_swap_that_really_waits_keeps_its_entry() {
         );
         assert!(verify_replay());
         assert!(!deep_check_halts());
-    });
-}
-
-/// What the cap put at risk: an entry the sweep can neither refund nor repair holds a slot
-/// of every pass's cap for good, and a cap's worth of them at the head of the index starves
-/// every automatic refund behind them. So every entry that is not the wait its swap is in
-/// is repaired through the log, whichever way it differs, and the refunds behind them start
-/// on the pass after.
-#[test]
-fn the_sweep_repairs_a_cap_of_unrefundable_entries_and_the_refunds_behind_them_start() {
-    on_fresh_memory(|| {
-        let cap = 4;
-        crate::storage::config::test_set(types::Config {
-            max_refunds_per_sweep: RefundsPerSweep::new(cap as u32),
-            ..crate::storage::config::get()
-        });
-        let timeout = crate::storage::config::get().decision_timeout;
-        let start = Timestamp::from_secs(1_700_000_000).unwrap();
-        let at = |n: u64| Timestamp::from_nanos(start.as_nanos() + n);
-        let ask = |quote_hash, nanos| {
-            append_event_at(
-                EventType::DecisionRequired {
-                    quote_hash,
-                    reason: "slippage".into(),
-                },
-                at(nanos),
-            )
-            .expect("the fold admits it");
-        };
-
-        // the swaps the entries will name: one that never waited, one that waits for a
-        // human, and one that really waits and asks for a refund
-        let [never_waited, real] = [swap_id(1), swap_id(3)];
-        let manual = manual_swap_id(2);
-        let orphan = QuoteHash::new([9; 32]);
-        append(funds(1));
-        append(funds_manual(2));
-        append(funds(3));
-        ask(manual, 5);
-        ask(real, 6);
-        // a cap's worth of entries no event produced, every one older than every real wait:
-        // no swap at all, a swap that never waited, the consult-me swap, and the real wait
-        // under an instant it never had
-        let mut store = StableStore(());
-        let key = |nanos, quote_hash| WaitingKey {
-            since: at(nanos),
-            quote_hash,
-        };
-        for planted in [
-            key(1, orphan),
-            key(2, never_waited),
-            key(3, manual),
-            key(4, real),
-        ] {
-            store.put_auto_refund_waiting(planted);
-        }
-        // and the automatic refunds behind them
-        let due = [swap_id(4), swap_id(5)];
-        append(funds(4));
-        append(funds(5));
-        ask(due[0], 7);
-        ask(due[1], 8);
-        assert!(!verify_replay(), "none of the four is a fold of the log");
-        let before = event_count();
-
-        let now = at(8).checked_add(timeout).unwrap();
-        let now = Timestamp::from_nanos(now.as_nanos() + 1);
-        let first = run_expiry_sweep(now);
-        assert_eq!(
-            (first.stale, first.refunds, first.skipped, first.more),
-            (cap, 0, 0, true),
-            "the pass spent its cap on repairs and reports the work behind them"
-        );
-        assert_eq!(
-            events_page(before, cap as u64)
-                .into_iter()
-                .map(|event| event.payload)
-                .collect::<Vec<_>>(),
-            [orphan, never_waited, manual, real]
-                .map(|quote_hash| EventType::WaitingRepaired { quote_hash })
-                .to_vec(),
-            "every repair is on the log"
-        );
-        assert_eq!(
-            read_state(|state| state.store().auto_refund_waiting()),
-            vec![key(6, real), key(7, due[0]), key(8, due[1])],
-            "the real wait is back under its own instant, and the others are gone"
-        );
-        assert!(
-            verify_replay(),
-            "the log explains the repairs, so the fold is its fold again"
-        );
-
-        let second = run_expiry_sweep(now);
-        assert_eq!(
-            (second.stale, second.refunds, second.skipped, second.more),
-            (0, 3, 0, false),
-            "the refunds behind them start on the next pass"
-        );
-        for quote_hash in [real, due[0], due[1]] {
-            assert_eq!(
-                read_state(|state| state.swap(&quote_hash).unwrap().status),
-                SwapStatus::Refunding
-            );
-        }
-        assert_eq!(
-            read_state(|state| state.swap(&manual).unwrap().status),
-            SwapStatus::WaitingForUser,
-            "the consult-me swap keeps waiting for its human"
-        );
-        assert!(verify_replay());
-        assert!(!deep_check_halts(), "and the audit stays clean");
-    });
-}
-
-/// The sweep finds timed-out swaps through the index alone: a waiting swap planted in the
-/// swaps map with no index entry is invisible to it, which is what keeps a pass from
-/// reading every swap ever recorded.
-#[test]
-fn the_expiry_sweep_reads_the_index_and_not_the_swaps() {
-    on_fresh_memory(|| {
-        let quote_hash = swap_id(4);
-        append(funds(4));
-        let auto_refund = Quote {
-            version: 1,
-            src_chain: ChainId::BASE,
-            src_token: "usdc".parse().unwrap(),
-            amount_in: TokenAmount::from(1_u32),
-            dst_chain: ChainId::ARBITRUM,
-            dst_token: "usdc".parse().unwrap(),
-            expected_out: TokenAmount::from(1_u32),
-            min_out: TokenAmount::from(1_u32),
-            dst_address: "0xuser".parse().unwrap(),
-            refund_address: None,
-            auto_refund: true,
-            gas_mode: GasMode::Gasless,
-            rail: Rail::CctpV2Fast,
-            expires_at: UnixSeconds::new(1),
-            nonce: 1,
-        };
-        let mut swap = StableStore(()).swap(&quote_hash).unwrap();
-        swap.quote_bytes = auto_refund.canonical_bytes().unwrap();
-        swap.status = SwapStatus::WaitingForUser;
-        swap.waiting_since = Some(Timestamp::from_nanos(0));
-        StableStore(()).put_swap(quote_hash, swap);
-
-        // a scan would find it timed out, readable and asking for a refund
-        let long_after = Timestamp::from_nanos(u64::MAX);
-        let swept = run_expiry_sweep(long_after);
-        assert_eq!((swept.refunds, swept.skipped), (0, 0));
-        assert_eq!(
-            read_state(|state| state.swap(&quote_hash).unwrap().status),
-            SwapStatus::WaitingForUser
-        );
     });
 }
 
@@ -816,27 +607,6 @@ fn the_fold_check_passes_a_fold_in_step_and_names_what_is_not() {
             Err(AppendError::ChainDiverged { .. })
         ));
         assert_eq!(event_count(), 2, "a refused append writes nothing");
-    });
-}
-
-/// One repair makes every entry of a swap right, so a swap with several stale entries at
-/// the head of the index is repaired by one line and not one per entry: the others would be
-/// no-op lines on a permanent log, each holding a slot of the pass's cap.
-#[test]
-fn several_stale_entries_for_one_swap_are_repaired_by_one_line() {
-    on_fresh_memory(|| {
-        append(funds(1));
-        let quote_hash = swap_id(1);
-        for nanos in [1, 2, 3] {
-            StableStore(()).put_auto_refund_waiting(waiting_key(nanos, quote_hash));
-        }
-        let before = event_count();
-
-        let swept = run_expiry_sweep(Timestamp::from_nanos(u64::MAX));
-        assert_eq!((swept.stale, swept.skipped, swept.more), (1, 0, false));
-        assert_eq!(event_count(), before + 1, "one line for the swap");
-        assert!(read_state(|state| state.store().auto_refund_waiting()).is_empty());
-        assert!(verify_replay());
     });
 }
 

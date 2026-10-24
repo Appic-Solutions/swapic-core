@@ -45,8 +45,8 @@ thread_local! {
             .expect("ledger meta cell init"),
     );
 
-    // The waiting swaps the expiry timer can act on: waiting for their user, and asking for
-    // an automatic refund. So a pass reads those and not every swap, nor every waiting swap.
+    // The v1 swaps waiting for their user and asking for an automatic refund: the queue the
+    // retired expiry sweep worked through. Part of the fold, kept with its rules.
     static AUTO_REFUND_WAITING: RefCell<StableBTreeSet<WaitingKey, Memory>> =
         RefCell::new(StableBTreeSet::init(auto_refund_waiting_memory()));
 

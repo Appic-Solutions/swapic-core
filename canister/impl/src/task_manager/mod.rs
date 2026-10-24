@@ -1,13 +1,10 @@
 use crate::storage::config;
-use expiry_sweep::run_expiry_sweep;
 use ic_cdk_timers::TimerId;
 use replay_audit::run_replay_audit;
 use std::cell::Cell;
 use std::thread::LocalKey;
 use std::time::Duration;
-use types::Timestamp;
 
-pub mod expiry_sweep;
 pub mod outbox;
 pub mod pool_arrivals;
 pub mod rail_status;
@@ -19,7 +16,6 @@ pub use rail_status::restart_rail_status_timer;
 thread_local! {
     // Heap by necessity: a timer id is a runtime handle that an upgrade invalidates anyway.
     // One slot per timer, so a restart replaces a timer instead of doubling it.
-    static EXPIRY_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
@@ -39,7 +35,6 @@ fn interval(every: Duration) -> Duration {
 /// Wires every repeating timer. Called from `init` and `post_upgrade`, because timers live
 /// in the heap and an upgrade clears them.
 pub fn start_timers() {
-    restart_expiry_timer();
     restart_audit_timer();
     restart_rail_status_timer();
     restart_books_timer();
@@ -66,17 +61,6 @@ pub fn restart_payout_timer() {
             ic_cdk::spawn(async {
                 crate::engine::drive_all().await;
             })
-        })
-    });
-}
-
-/// Puts the expiry timer on the configured interval. `set_config` calls it only when that
-/// interval changed, because a restart pushes the next sweep a whole interval out.
-pub fn restart_expiry_timer() {
-    let every = interval(config::get().expiry_check_interval);
-    restart(&EXPIRY_TIMER, || {
-        ic_cdk_timers::set_timer_interval(every, || {
-            run_expiry_sweep(Timestamp::from_nanos(ic_cdk::api::time()));
         })
     });
 }

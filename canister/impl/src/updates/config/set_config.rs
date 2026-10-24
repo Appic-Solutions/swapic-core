@@ -18,9 +18,6 @@ pub fn set_config(new: Config) -> Result<(), SetConfigError> {
     })?;
     // after the write, so a timer reads its new interval; only a moved interval restarts,
     // because a restart pushes the next run a whole interval out
-    if changed.expiry {
-        task_manager::restart_expiry_timer();
-    }
     if changed.audit {
         task_manager::restart_audit_timer();
     }

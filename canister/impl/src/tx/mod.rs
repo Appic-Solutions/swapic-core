@@ -842,8 +842,8 @@ pub async fn flush() {
     }
 }
 
-/// What one receipt pass did. Returned rather than logged, like the sweep's, so a pass can
-/// be read without the event log.
+/// What one receipt pass did. Returned rather than logged, so a pass can be read without the
+/// event log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReceiptPass {
     /// attempts closed on a receipt deep enough, confirmed or reverted

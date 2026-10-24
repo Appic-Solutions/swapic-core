@@ -17,9 +17,9 @@ use thiserror::Error;
 /// tight bound fails at set time rather than when the timer is wired.
 pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
 
-/// The shortest the expiry sweep may run: ten seconds. A pass reads stable memory and
-/// appends, and the work it has to do does not arrive faster than this, so anything shorter
-/// burns cycles on passes with nothing to do.
+/// The shortest `expiry_check_interval_s` may be: ten seconds. The knob outlived its timer
+/// (the v1 expiry sweep) and keeps the bounds it had, so a config written for it still
+/// reads the same.
 pub const MIN_EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The longest a window inside one swap may be: one day. Every knob bounded by this one
@@ -928,7 +928,6 @@ pub enum ConfigError {
 /// Which timer intervals a config write moved, so only those timers restart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntervalChanges {
-    pub expiry: bool,
     pub audit: bool,
     /// The engine's tick, which runs on `rail_status_max_age`.
     pub rail_status: bool,
@@ -1028,9 +1027,7 @@ impl Config {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
             }
         }
-        // the sweep is the one timer with a floor as well as a ceiling: it reads stable
-        // memory and appends, and a zero interval is clamped to a second rather than
-        // refused, so without this a config could put that pass on every second
+        // the expiry knob alone has a floor as well as a ceiling, kept from its retired timer
         if self.expiry_check_interval < MIN_EXPIRY_CHECK_INTERVAL {
             return Err(ConfigError::TimerIntervalTooShort {
                 field: "expiry_check_interval_s",
@@ -1154,7 +1151,6 @@ impl Config {
     /// Which timer intervals `new` moves, one flag per timer.
     pub fn interval_changes(&self, new: &Config) -> IntervalChanges {
         IntervalChanges {
-            expiry: self.expiry_check_interval != new.expiry_check_interval,
             audit: self.replay_audit_interval != new.replay_audit_interval,
             rail_status: self.rail_status_max_age != new.rail_status_max_age,
             books: self.books_check_interval != new.books_check_interval,

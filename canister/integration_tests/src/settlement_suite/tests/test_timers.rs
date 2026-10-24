@@ -1,12 +1,10 @@
-use crate::client::settlement::{
-    self, append, events_page, set_config, set_halted, test_skew_state,
-};
+use crate::client::settlement::{self, append, set_config, set_halted, test_skew_state};
 use crate::settlement_suite::init::{quoter, rail_config, setup_with_rail_usdc, upgrade};
 use candid::{Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
-use settlement_api::types::errors::{GuardError, RegisterQuoteError};
-use settlement_api::types::events::{Event, EventType, Hash32};
+use settlement_api::types::errors::GuardError;
+use settlement_api::types::events::{EventType, Hash32};
 use settlement_api::types::quote::{GasMode, Quote};
 use settlement_api::types::swap::{Swap, SwapStatus};
 use std::time::Duration;
@@ -38,26 +36,8 @@ fn halted(pic: &PocketIc, canister: Principal) -> bool {
     settlement::halted(pic, canister, stranger())
 }
 
-fn register_quote(
-    pic: &PocketIc,
-    canister: Principal,
-    quote: &Quote,
-) -> Result<Hash32, RegisterQuoteError> {
-    settlement::register_quote(pic, canister, quoter(), quote)
-}
-
-fn get_pending(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Quote> {
-    let answer: Result<Option<Quote>, GuardError> =
-        settlement::get_pending(pic, canister, quoter(), hash);
-    answer.expect("the quoter may read the store")
-}
-
 fn get_swap(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Swap> {
     settlement::get_swap(pic, canister, stranger(), hash)
-}
-
-fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
-    events_page(pic, canister, stranger(), 0, 100)
 }
 
 fn verifies(pic: &PocketIc, canister: Principal) -> bool {
@@ -127,179 +107,49 @@ fn waiting_swap(
     hash
 }
 
-/// A quote nobody paid must not hold its slot forever. The window is the expiry plus the
-/// `permit_deadline_s` a signed permit stays good for, plus the `claim_grace_s` a claim
-/// for a deposit that landed in it may still come in, and the sweep runs on its own.
-///
-/// Rewritten for fix wave 5 (N7): the store kept a quote only through its permit window,
-/// and it now keeps it through the grace after it too.
-#[test]
-fn expired_pending_quote_is_swept() {
-    let (pic, canister, _) = setup_with_rail_usdc();
-    let q = quote_expiring_in(&pic, 10, true, 1);
-    let hash = register_quote(&pic, canister, &q).unwrap();
-    assert_eq!(get_pending(&pic, canister, hash), Some(q));
-
-    // expired, but inside the permit window: a deposit signed against it can still land
-    advance(&pic, 60);
-    assert!(
-        get_pending(&pic, canister, hash).is_some(),
-        "the permit window is still open"
-    );
-
-    // past the permit window, inside the hour of grace: a late claim can still come in
-    advance(&pic, 300);
-    assert!(
-        get_pending(&pic, canister, hash).is_some(),
-        "the grace is still open"
-    );
-
-    // ten seconds to the expiry, the two minute permit window and the hour of grace
-    advance(&pic, 3_400);
-    assert_eq!(get_pending(&pic, canister, hash), None);
-}
-
-/// The dual refund policy, end to end through the timer: a quote that asked for an
-/// automatic refund gets one when the user never answers, and a quote that did not keeps
-/// waiting for a human.
-#[test]
-fn decision_timeout_auto_refunds_only_the_quotes_that_asked_for_it() {
-    let (pic, canister, admin) = setup_with_rail_usdc();
-    let auto = waiting_swap(&pic, canister, admin, true, 1);
-    let manual = waiting_swap(&pic, canister, admin, false, 2);
-    let before = events(&pic, canister).len();
-
-    // the default decision_timeout_min is 30
-    advance(&pic, 31 * 60);
-
-    assert_eq!(
-        get_swap(&pic, canister, auto).unwrap().status,
-        SwapStatus::Refunding
-    );
-    assert_eq!(
-        get_swap(&pic, canister, manual).unwrap().status,
-        SwapStatus::WaitingForUser,
-        "auto_refund false waits for a human"
-    );
-
-    let logged = events(&pic, canister);
-    assert_eq!(logged.len(), before + 1, "one timeout, one event");
-    assert_eq!(
-        logged.last().unwrap().payload,
-        EventType::RefundStarted {
-            quote_hash: auto,
-            reason: "decision timeout".to_string(),
-        }
-    );
-    assert!(
-        verifies(&pic, canister),
-        "the sweep appends like everyone else"
-    );
-
-    // and it does not fire twice: the swap is Refunding now, which the guard refuses
-    advance(&pic, 31 * 60);
-    assert_eq!(events(&pic, canister).len(), before + 1);
-}
-
-/// The audit timer is wired too, not only the expiry one, and a healthy canister survives
-/// it: a false halt would freeze every money path, so this is the more dangerous direction.
-/// The log it audits is one the sweep itself appended to.
+/// The audit timer is wired, and a healthy canister survives it: a false halt would freeze
+/// every money path, so this is the more dangerous direction.
 #[test]
 fn the_replay_audit_runs_on_its_own_and_halts_nothing_healthy() {
     let (pic, canister, admin) = setup_with_rail_usdc();
-    let swap = waiting_swap(&pic, canister, admin, true, 1);
+    waiting_swap(&pic, canister, admin, true, 1);
 
     // the default replay_audit_interval_s is 21_600
     advance(&pic, 21_660);
 
     assert!(!halted(&pic, canister), "a healthy canister is not halted");
     assert!(verifies(&pic, canister));
-    // six hours is also many expiry passes, so the refund happened and the audit read it
-    assert_eq!(
-        get_swap(&pic, canister, swap).unwrap().status,
-        SwapStatus::Refunding
-    );
 }
 
-/// A halted canister has a log and a state that disagree, so it appends nothing. Dropping
-/// stale quotes is pre-money hygiene and keeps running.
-///
-/// Rewritten for fix wave 5 (N7): a quote is stale once the claim's hour of grace after
-/// its permit window has ended, so the clock runs 63 minutes where it ran 31.
-#[test]
-fn a_halted_canister_starts_no_refund_and_still_drops_stale_quotes() {
-    let (pic, canister, admin) = setup_with_rail_usdc();
-    let q = quote_expiring_in(&pic, 10, true, 1);
-    let pending = register_quote(&pic, canister, &q).unwrap();
-    let swap = waiting_swap(&pic, canister, admin, true, 2);
-    set_halted(&pic, canister, admin, true).unwrap();
-
-    advance(&pic, 63 * 60);
-
-    assert_eq!(
-        get_swap(&pic, canister, swap).unwrap().status,
-        SwapStatus::WaitingForUser,
-        "a halted canister writes no event"
-    );
-    assert_eq!(get_pending(&pic, canister, pending), None);
-
-    // and the refund the halt held back happens on the next sweep after a human clears it
-    set_halted(&pic, canister, admin, false).unwrap();
-    advance(&pic, 60);
-    assert_eq!(
-        get_swap(&pic, canister, swap).unwrap().status,
-        SwapStatus::Refunding
-    );
-}
-
-/// `set_config` rewires both timers on the spot, and each call replaces the timers the one
-/// before it set. Both intervals move on every call and every generation runs at its own
-/// cadence, so a timer a restart missed would show up as a sweep or an audit at a cadence
-/// nobody configured any more.
-///
-/// Rewritten for fix wave 5 (N7): the store keeps a quote through the claim's grace after
-/// its permit window, so the configs set the grace to its ten minute floor and the first
-/// look comes at 800s, past the 730s any sweep would drop the quote after.
+/// `set_config` rewires the audit timer on the spot, and each call replaces the timer the
+/// one before it set. The interval moves on every call and every generation runs at its
+/// own cadence, so a timer a restart missed would show up as an audit at a cadence nobody
+/// configured any more.
 #[test]
 fn set_config_rewires_the_timers_and_leaves_no_stale_one_running() {
     let (pic, canister, admin) = setup_with_rail_usdc();
-    // init wired an expiry pass every 60s and an audit every 21_600s
+    // init wired an audit every 21_600s
     let fast = Config {
-        expiry_check_interval_s: 120,
         replay_audit_interval_s: 60,
-        claim_grace_s: 600,
         ..rail_config()
     };
     set_config(&pic, canister, admin, &fast).unwrap();
     let slow = Config {
-        expiry_check_interval_s: 3_600,
         replay_audit_interval_s: 43_200,
-        claim_grace_s: 600,
         ..rail_config()
     };
     set_config(&pic, canister, admin, &slow).unwrap();
 
-    // a quote any sweep past 730s would drop (ten seconds to the expiry, the permit window
-    // and the grace), and a divergence any audit would halt on
-    let q = quote_expiring_in(&pic, 10, true, 1);
-    let pending = register_quote(&pic, canister, &q).unwrap();
+    // a divergence any audit would halt on
     skew_state(&pic, canister, admin).unwrap();
 
     advance(&pic, 800);
     assert!(
-        get_pending(&pic, canister, pending).is_some(),
-        "no expiry timer is left from init (60s) or from the first set_config (120s)"
-    );
-    assert!(
         !halted(&pic, canister),
-        "and no 60s audit timer from the first set_config"
+        "no 60s audit timer from the first set_config"
     );
 
-    // the new expiry cadence is live without an upgrade
-    advance(&pic, 2_900);
-    assert_eq!(get_pending(&pic, canister, pending), None);
-
-    advance(&pic, 18_000);
+    advance(&pic, 20_900);
     assert!(!halted(&pic, canister), "init's 21_600s audit is gone too");
 
     advance(&pic, 21_600);
@@ -330,8 +180,9 @@ fn set_config_without_an_interval_change_keeps_the_audit_on_schedule() {
     assert!(halted(&pic, canister), "the audit ran on init's schedule");
 }
 
-/// Each timer restarts only for its own interval: an expiry tweak must not push the audit
-/// out, or tweaks more frequent than the audit interval would keep it from ever running.
+/// Each timer restarts only for its own interval: a tweak of the expiry knob (kept in the
+/// config, no timer reads it since the sweep went) must not push the audit out, or tweaks
+/// more frequent than the audit interval would keep it from ever running.
 #[test]
 fn an_expiry_only_change_keeps_the_audit_on_schedule() {
     let (pic, canister, admin) = setup_with_rail_usdc();
@@ -354,50 +205,21 @@ fn an_expiry_only_change_keeps_the_audit_on_schedule() {
     assert!(halted(&pic, canister), "the audit ran on init's schedule");
 }
 
-/// The mirror: an audit-only change takes effect at once and leaves the expiry timer on
-/// the schedule it already had.
-///
-/// Rewritten for fix wave 5 (N7): the store keeps a quote through the claim's grace after
-/// its permit window, so the config sets the grace to its ten minute floor and the quote
-/// is droppable from 730s. The sweep due at 600s runs and keeps it, and the change lands
-/// at 1_100s, before the sweep due at 1_200s.
+/// The mirror: an audit-only change takes effect at once.
 #[test]
-fn an_audit_only_change_takes_effect_and_keeps_the_expiry_on_schedule() {
+fn an_audit_only_change_takes_effect_at_once() {
     let (pic, canister, admin) = setup_with_rail_usdc();
-    let slow_sweep = Config {
-        expiry_check_interval_s: 600,
-        claim_grace_s: 600,
-        ..rail_config()
-    };
-    set_config(&pic, canister, admin, &slow_sweep).unwrap();
-    // droppable by any sweep past 730s, and the sweeps are due at 600s and 1_200s
-    let q = quote_expiring_in(&pic, 10, true, 1);
-    let pending = register_quote(&pic, canister, &q).unwrap();
-
-    advance(&pic, 600);
-    assert!(
-        get_pending(&pic, canister, pending).is_some(),
-        "the 600s sweep ran before the quote was droppable"
-    );
-    advance(&pic, 500);
+    advance(&pic, 1_100);
     set_config(
         &pic,
         canister,
         admin,
         &Config {
             replay_audit_interval_s: 120,
-            ..slow_sweep
+            ..rail_config()
         },
     )
     .unwrap();
-
-    // a restarted sweep would not be due until about 1_700s
-    advance(&pic, 150);
-    assert_eq!(
-        get_pending(&pic, canister, pending),
-        None,
-        "the sweep ran on its own schedule"
-    );
 
     // init's audit is not due for hours, so a halt now is the new 120s audit
     skew_state(&pic, canister, admin).unwrap();
