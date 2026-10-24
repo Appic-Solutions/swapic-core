@@ -21,11 +21,13 @@ fn in_preimage_range<Unit>(amount: CheckedAmountOf<Unit>) -> Result<(), Transiti
 
 impl<S: Store> State<S> {
     /// [`State::check`], and the rules that read the line's own seal time `at` (the review,
-    /// 2026-10-24: a pool step's dedup instant): what an append and a replay run.
+    /// 2026-10-24: a pool step's dedup instant): what an append and a replay run. A replay
+    /// applies them to every historic line; the lines of intermediate builds never deployed
+    /// are not grandfathered (hfisl's log holds no Pool event).
     pub fn check_at(&self, event: &EventType, at: Timestamp) -> Result<(), TransitionError> {
         self.check(event)?;
         if let EventType::Pool { step } = event {
-            self.pool().admits_at(step, at)?;
+            self.pool().admits_at(step, &self.pool_view(), at)?;
         }
         Ok(())
     }

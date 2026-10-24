@@ -70,8 +70,8 @@ struct Fake {
     /// its unused balances: its deposit when the swap did not happen, its output when the
     /// output was not withdrawn.
     swap_leaves: Cell<Option<(TokenAmount, TokenAmount)>>,
-    /// A line recorded during the next transfer call, before its answer.
-    during: RefCell<Option<PoolStep>>,
+    /// Lines recorded during the next transfer call, before its answer.
+    during: RefCell<Vec<PoolStep>>,
     /// The status of the deposit under watch at each money call
     watch: Cell<Option<PoolRef>>,
     seen: RefCell<Vec<Option<DepositStatus>>>,
@@ -105,7 +105,7 @@ impl Ledgers for Fake {
     ) -> Result<u64, CallError> {
         self.saw();
         self.calls.borrow_mut().push(format!("transfer {amount}"));
-        if let Some(step) = self.during.borrow_mut().take() {
+        for step in self.during.borrow_mut().drain(..) {
             record_at(step, at(0)).unwrap();
         }
         if self.refuse.replace(false) {
@@ -439,6 +439,66 @@ fn an_icpswap_leg_pays_its_output() {
     });
 }
 
+/// The review (2026-10-24): an output transfer on a token's ledger the canister does not
+/// know to deduplicate, its answer lost, is never asked again by the drive (that ledger may
+/// take it as a new transfer and pay twice): the payout is held for a human at once, for
+/// `resolve_deposit`'s `MarkPaid` if it landed.
+#[test]
+fn a_lost_answer_on_a_token_ledger_holds_the_payout_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        fake.lose_answers.set(1);
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        let held = deposit(&r#ref).unwrap();
+        assert!(
+            matches!(held.status, DepositStatus::PayoutFailed(ref why) if why.contains("ALERT")),
+            "{:?}",
+            held.status
+        );
+        assert!(held.payout.sent.unwrap().lost.0);
+        let calls = fake.calls.borrow().len();
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_ok());
+        assert_eq!(fake.calls.borrow().len(), calls, "never asked again");
+    });
+}
+
+/// The review (2026-10-24): a transfer on a token's ledger asked with no answer recorded (a
+/// lost answer not noted, a trap mid-call) is never asked again by the drive either: held.
+#[test]
+fn an_unanswered_ask_on_a_token_ledger_is_never_asked_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        fake.refuse.set(true);
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        // its ask on record again, its answer never recorded
+        record_at(
+            PoolStep::TransferAsked {
+                r#ref,
+                token: PrincipalBytes(token()),
+                amount: TokenAmount::from(5_900_u32),
+                spent: usdc(99),
+            },
+            clock(),
+        )
+        .unwrap();
+        let calls = fake.calls.borrow().len();
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        assert_eq!(fake.calls.borrow().len(), calls, "never asked again");
+        assert!(matches!(
+            deposit(&r#ref).unwrap().status,
+            DepositStatus::PayoutFailed(_)
+        ));
+    });
+}
+
 /// A swap whose answer never came is never called again: its outcome is unknown, and the
 /// payout fails until it stops for a human.
 #[test]
@@ -632,11 +692,11 @@ fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
     });
 }
 
-/// The review (2026-10-24): only the fold's refusal of an ask on other terms is a counted
-/// failure; any other line not recorded (here, a payout the fold does not know) is driven
-/// again, uncounted, and nothing is asked.
+/// The review (2026-10-24): an ask any rule of the fold refuses (here, a payout the fold
+/// does not know) is a counted failure, so the payout reaches a human; only the log's own
+/// trouble (a divergence, storage) is driven again uncounted. Nothing is asked.
 #[test]
-fn an_ask_not_recorded_for_another_reason_is_driven_again() {
+fn an_ask_any_rule_refuses_is_a_counted_failure() {
     on_fresh_memory(|| {
         crate::storage::init();
         let fake = Fake::default();
@@ -666,9 +726,33 @@ fn an_ask_not_recorded_for_another_reason_is_driven_again() {
                 "the transfer",
                 clock
             )),
-            Err(Stop::Append(_))
+            Err(Stop::Failed(_))
         ));
         assert!(fake.calls.borrow().is_empty());
+    });
+}
+
+/// The review (2026-10-24): a lost answer whose line could not be recorded stops the drive
+/// (driven again, uncounted) before anything else, so no later refusal can make the lost
+/// ask look safe.
+#[test]
+fn a_lost_answer_whose_line_is_not_recorded_stops_the_drive() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        fake.lose_answers.set(1);
+        // held for a human during the call: no payout in progress loses an answer
+        *fake.during.borrow_mut() = (1..=types::pool::MAX_PAYOUT_ATTEMPTS)
+            .map(|n| PoolStep::AttemptFailed {
+                r#ref,
+                why: format!("try {n}"),
+            })
+            .collect();
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Append(_))
+        ));
     });
 }
 
@@ -682,7 +766,7 @@ fn a_refusal_whose_line_is_not_recorded_still_counts() {
         let fake = Fake::default();
         fake.refuse.set(true);
         // the refusal's line is in already when the drive records its own: refused
-        *fake.during.borrow_mut() = Some(PoolStep::TransferRefused { r#ref });
+        *fake.during.borrow_mut() = vec![PoolStep::TransferRefused { r#ref }];
         assert!(matches!(
             block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Failed(_))
@@ -1241,8 +1325,9 @@ fn a_token_delisted_before_its_swap_falls_back() {
 }
 
 /// Review fix 8: the exact transfer is fixed when it is first known and every retry reuses
-/// it, whatever the settings say by then: a withdrawal's ckUSDC amount from its start, a
-/// swap's output transfer from its `Swapped`.
+/// it, whatever the settings say by then: a withdrawal's ckUSDC amount from its start. A
+/// swap's output transfer on a token's ledger, its answer lost, is not retried at all (the
+/// review, 2026-10-24: that ledger may take it as a new transfer): held for a human.
 #[test]
 fn a_retry_reuses_the_transfer_its_payout_fixed() {
     on_fresh_memory(|| {
@@ -1320,9 +1405,12 @@ fn a_retry_reuses_the_transfer_its_payout_fixed() {
                 format!("transfer {fixed}"),
                 "transfer 5900".to_string(),
                 format!("transfer {fixed}"),
-                "transfer 5900".to_string(),
             ]
         );
+        assert!(matches!(
+            deposit(&r#ref).unwrap().status,
+            DepositStatus::PayoutFailed(_)
+        ));
         assert_eq!(
             fake.transfers(),
             vec![

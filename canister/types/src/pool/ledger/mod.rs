@@ -505,19 +505,47 @@ impl PoolLedger {
     }
 
     /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`] (the
-    /// review, 2026-10-24): a retry's dedup instant is the line's time or before it, and
-    /// leaves its next drive inside the ledger's window, whoever wrote the line.
-    pub fn admits_at(&self, step: &PoolStep, at: Timestamp) -> Result<(), PoolStepError> {
-        match step {
-            PoolStep::DepositResolved {
-                retry_at: Some(retry_at),
-                ..
-            } if *retry_at > at || !super::deduplicated(*retry_at, at) => {
-                Err(PoolStepError::Terms(
-                    "a retry's dedup instant is the line's time, inside the ledger's window",
-                ))
+    /// review, 2026-10-24), whoever wrote the line: a retry's fresh dedup instant is exactly
+    /// the line's time; a retry with its own pair (its transfer may have landed) leaves its
+    /// next drive inside the ledger's window less the margin. A replay reads these too, of
+    /// every line in the log: the lines of builds never deployed are not grandfathered
+    /// (hfisl's log holds no Pool event).
+    pub fn admits_at(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+    ) -> Result<(), PoolStepError> {
+        let PoolStep::DepositResolved {
+            r#ref,
+            resolution: DepositResolution::Retry,
+            retry_at,
+        } = step
+        else {
+            return Ok(());
+        };
+        match retry_at {
+            Some(retry_at) if *retry_at != at => Err(PoolStepError::Terms(
+                "a retry's fresh dedup instant is its line's own time",
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let Some(deposit) = lookup.deposit(r#ref) else {
+                    return Ok(());
+                };
+                match deposit.payout.attempt {
+                    Some(attempt)
+                        if !deposit.payout.cannot_land_twice()
+                            && !super::deduplicated(attempt.created_at, at) =>
+                    {
+                        Err(PoolStepError::Terms(
+                            "a retry with its own dedup pair must leave its next drive inside \
+                             the ledger's window",
+                        ))
+                    }
+                    _ => Ok(()),
+                }
             }
-            _ => Ok(()),
         }
     }
 
@@ -710,19 +738,28 @@ impl PoolLedger {
                 if !target.in_payout() {
                     return Err(PoolStepError::Terms("only a payout in progress asks"));
                 }
-                match target.payout().and_then(|payout| payout.sent) {
-                    Some(sent)
-                        if !sent.refused && (sent.token, sent.amount) != (*token, *amount) =>
+                // may have landed: not refused at its last ask, or an answer of it once lost
+                match target.payout() {
+                    Some(payout)
+                        if !payout.cannot_land_twice()
+                            && payout.sent.is_some_and(|sent| {
+                                (sent.token, sent.amount) != (*token, *amount)
+                            }) =>
                     {
                         Err(PoolStepError::AskedOnOtherTerms)
                     }
                     _ => Ok(()),
                 }
             }
-            PoolStep::TransferLost { r#ref } => {
+            PoolStep::TransferLost { r#ref, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
+                if !target.in_payout() {
+                    return Err(PoolStepError::Terms(
+                        "only a payout in progress loses an answer",
+                    ));
+                }
                 match target.payout().and_then(|payout| payout.sent) {
                     Some(_) => Ok(()),
                     None => Err(PoolStepError::Terms(
@@ -1405,12 +1442,19 @@ impl PoolLedger {
                     }
                 });
             }
-            PoolStep::TransferLost { r#ref } => {
+            PoolStep::TransferLost { r#ref, held } => {
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
                     if let Some(sent) = payout.sent.as_mut() {
                         sent.lost = crate::pool::payout::Flag(true);
                     }
+                    // held for a human at once, as its tenth failure would
+                    if let Some(why) = held {
+                        payout.failed = Some(why.clone());
+                    }
                 });
+                if let (Some(why), Some((_, deposit))) = (held, deposit_out.as_mut()) {
+                    deposit.status = DepositStatus::PayoutFailed(why.clone());
+                }
             }
             PoolStep::AttemptFailed { r#ref, why } => {
                 let why = why.clone();

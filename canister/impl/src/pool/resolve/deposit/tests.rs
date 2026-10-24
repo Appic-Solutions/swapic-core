@@ -51,8 +51,8 @@ impl LedgerBlocks for Blocks {
             return Err(CallError::Unknown("the ledger did not answer".to_string()));
         }
         if self.unserved.get() {
-            return Err(CallError::Refused(format!(
-                "ledger {ledger} serves none of the block reads"
+            return Err(CallError::Unknown(format!(
+                "ledger {ledger} answered none of its block reads"
             )));
         }
         Ok(self.blocks.borrow().get(&block).cloned())
@@ -160,7 +160,7 @@ fn held_paying(byte: u8, sent: Sent, token_out: Principal, path: PayoutPath) -> 
         .unwrap();
     }
     if sent == Sent::LostThenRefused {
-        record_at(PoolStep::TransferLost { r#ref }, at(5)).unwrap();
+        record_at(PoolStep::TransferLost { r#ref, held: None }, at(5)).unwrap();
     }
     if matches!(sent, Sent::Refused | Sent::LostThenRefused) {
         record_at(PoolStep::TransferRefused { r#ref }, at(5)).unwrap();
@@ -531,8 +531,7 @@ fn a_deposit_is_marked_paid_only_on_its_own_transfer() {
 
 /// The review (2026-10-24): `MarkPaid` reads its block on whatever the transfer's ledger
 /// serves; the ICP ledger's own blocks name the parties by account identifier, and match
-/// them. A ledger serving none of the reads the canister knows is a clear refusal naming it,
-/// never a wait.
+/// them. A ledger none of whose reads answers is a read to try later, naming it.
 #[test]
 fn a_deposit_is_marked_paid_on_the_ledgers_own_block_or_refused_by_name() {
     on_fresh_memory(|| {
@@ -543,7 +542,7 @@ fn a_deposit_is_marked_paid_on_the_ledgers_own_block_or_refused_by_name() {
         blocks.unserved.set(true);
         assert!(matches!(
             by_controller(&blocks, r#ref, WireResolution::MarkPaid { block: 42 }, at(7)),
-            Err(PoolError::NotAllowed(why)) if why.contains(&ckusdc().to_text())
+            Err(PoolError::Unavailable(why)) if why.contains(&ckusdc().to_text())
         ));
         blocks.unserved.set(false);
         let main = types::pool::IcpAccount {

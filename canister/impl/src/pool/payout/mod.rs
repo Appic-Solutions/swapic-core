@@ -657,6 +657,41 @@ pub async fn pay(
     })
 }
 
+/// Whether `token`'s ledger is one the canister knows to deduplicate a payout's transfer on
+/// its memo and `created_at_time` within the window: the ckUSDC ledger the payout started
+/// with, or the ICP ledger the routes name.
+fn deduplicates_on(token: Principal, attempt: &PayoutAttempt) -> bool {
+    let settings = pool_store::ledger().settings;
+    let started_on = attempt
+        .token
+        .map(|started| started.0)
+        .or(settings.as_ref().map(|settings| settings.ckusdc_ledger));
+    let icp = settings
+        .and_then(|settings| settings.routes)
+        .and_then(|routes| routes.icp_ledger)
+        .map(|icp| icp.0);
+    Some(token) == started_on || Some(token) == icp
+}
+
+/// Holds a payout whose transfer on a ledger that may not deduplicate it has no known answer
+/// for a human, at once: never asked again by the drive; `MarkPaid` if it landed.
+fn hold_unanswered(payout: &Payout, what: &str, now: Timestamp) -> Stop {
+    let why = format!(
+        "ALERT: {what} on a ledger the canister does not know to deduplicate has no known \
+         answer: held for a human, never asked again (MarkPaid if it landed)"
+    );
+    match pool_store::record_at(
+        PoolStep::TransferLost {
+            r#ref: payout.id,
+            held: Some(why.clone()),
+        },
+        now,
+    ) {
+        Ok(_) => Stop::Retry(why),
+        Err(error) => Stop::Append(format!("{why}; not noted: {error}")),
+    }
+}
+
 /// The payout's transfer of `amount` of `token` to its recipient, its ask recorded before the
 /// call (the review, 2026-10-24): from then on it may have landed, until the ledger refuses
 /// it for sure, which is recorded too. A controller refunds a payout only when nothing of it
@@ -673,15 +708,23 @@ async fn send_out(
     clock: impl Fn() -> Timestamp,
 ) -> Result<u64, Stop> {
     let token_bytes = PrincipalBytes(token);
-    // asked already, on these terms and not refused since: not asked again
+    // asked already, on these terms and not refused since: its answer not known
     let asked = progress_of(payout.id)
         .and_then(|progress| progress.sent)
-        .is_some_and(|sent| {
-            !sent.refused && (sent.token, sent.amount, sent.spent) == (token_bytes, amount, spent)
-        });
-    // the fold's refusal of an ask on other terms (an earlier one may have landed) is a
-    // counted failure, so the payout reaches a human; any other line not recorded is driven
-    // again, uncounted (the review, 2026-10-24)
+        .is_some_and(|sent| !sent.refused && (sent.token, sent.amount) == (token_bytes, amount));
+    // the ledgers the canister knows to deduplicate a transfer on its memo and
+    // `created_at_time` within the window: the ckUSDC ledger the payout started with, and
+    // the ICP ledger the routes name. Any other may take a re-ask as a new transfer, so a
+    // transfer there whose answer is not known is never asked again: held for a human (the
+    // review, 2026-10-24)
+    let deduplicates = deduplicates_on(token, attempt);
+    if asked && !deduplicates {
+        return Err(hold_unanswered(payout, what, clock()));
+    }
+    // an ask a rule of the fold refuses (an earlier one on other terms may have landed, or
+    // any other) is a counted failure, so the payout reaches a human; only the log's own
+    // trouble (a divergence, an index, storage) is driven again, uncounted (the review,
+    // 2026-10-24)
     if !asked {
         pool_store::record_at(
             PoolStep::TransferAsked {
@@ -693,9 +736,9 @@ async fn send_out(
             clock(),
         )
         .map_err(|error| match error {
-            crate::storage::events::AppendError::Transition(types::TransitionError::Pool(
-                types::pool::PoolStepError::AskedOnOtherTerms,
-            )) => Stop::Failed(format!("{what} was not asked: {error}")),
+            crate::storage::events::AppendError::Transition(_) => {
+                Stop::Failed(format!("{what} was not asked: {error}"))
+            }
             error => Stop::Append(error.to_string()),
         })?;
     }
@@ -710,15 +753,22 @@ async fn send_out(
             let lost = progress_of(payout.id)
                 .and_then(|progress| progress.sent)
                 .is_some_and(|sent| sent.lost.0);
+            // and noted before anything else: a lost answer not noted stops the drive,
+            // uncounted, so no later refusal can make it look safe
+            if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !deduplicates {
+                return Err(hold_unanswered(payout, what, clock()));
+            }
             if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !lost {
-                if let Err(unnoted) =
-                    pool_store::record_at(PoolStep::TransferLost { r#ref: payout.id }, clock())
-                {
-                    crate::pool::log(&format!(
-                        "the pool payout {}'s lost answer was not noted: {unnoted}",
-                        payout.id
-                    ));
-                }
+                pool_store::record_at(
+                    PoolStep::TransferLost {
+                        r#ref: payout.id,
+                        held: None,
+                    },
+                    clock(),
+                )
+                .map_err(|unnoted| {
+                    Stop::Append(format!("{what}'s lost answer was not noted: {unnoted}"))
+                })?;
             }
             // a refusal counts whatever its line does: one not recorded leaves the transfer
             // asked, which only blocks a refund (the safe way, the review, 2026-10-24)

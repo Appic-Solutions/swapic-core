@@ -177,14 +177,14 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
 /// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`.
 /// `MarkPaid { block }`: its transfer landed in that block; the canister reads it on the
-/// transfer's ledger, the read chosen by what the ledger is (the ICP ledger's own
-/// `query_blocks`; `icrc3_get_blocks` when it lists ICRC-3 among its standards; else
-/// `get_transactions`; each on the ledger or its archive, a read not answering in its own
-/// shape falling to the next), and books the deposit paid only on exactly the transfer its
-/// payout asked (from the canister to the recipient, of what it sent, its memo and
-/// `created_at_time`); a ledger not reached now answers `Unavailable`, to be asked again,
-/// and one none of whose reads answers is refused by name. A refusal names what to search
-/// the ledger for.
+/// transfer's ledger, the read chosen by what the ledger is (the ICP ledger the routes name
+/// by its own `query_blocks`; `icrc3_get_blocks` when it lists ICRC-3 among its standards;
+/// else `get_transactions`; each on the ledger or its archive, a read not answering in its
+/// own shape falling to the next), and books the deposit paid only on exactly the transfer
+/// its payout asked (from the canister to the recipient, of what it sent, its memo and
+/// `created_at_time`); a ledger not read now (none of its reads answering) answers
+/// `Unavailable` naming it, to be asked again. A refusal names what to search the ledger
+/// for.
 #[update]
 pub async fn resolve_deposit(
     r#ref: Vec<u8>,
