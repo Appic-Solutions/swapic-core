@@ -81,6 +81,16 @@ impl<Unit> CheckedAmountOf<Unit> {
         self.0.to_be_bytes()
     }
 
+    /// The amount as the ABI's `uint256`.
+    pub fn to_u256(self) -> alloy_primitives::U256 {
+        alloy_primitives::U256::from_be_bytes(self.to_be_bytes())
+    }
+
+    /// An ABI `uint256` as an amount.
+    pub fn from_u256(value: alloy_primitives::U256) -> Self {
+        Self::from_be_bytes(value.to_be_bytes())
+    }
+
     /// The amount as a `u128`, or `None` above `u128::MAX`. The canonical codecs write
     /// amounts in 16 bytes, so they read them through this.
     pub fn try_into_u128(self) -> Option<u128> {

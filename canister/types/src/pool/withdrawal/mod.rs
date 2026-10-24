@@ -55,10 +55,6 @@ pub struct WithdrawalRequest {
     pub nonce: u64,
 }
 
-fn uint(amount: TokenAmount) -> U256 {
-    U256::from_be_bytes(amount.to_be_bytes())
-}
-
 /// The pool's EIP-712 domain on `chain_id`, Swapic there its verifying contract.
 pub fn domain(chain_id: ChainId, swapic: EvmAddress) -> Eip712Domain {
     Eip712Domain {
@@ -75,14 +71,14 @@ impl WithdrawalRequest {
     pub fn message(&self) -> Withdrawal {
         Withdrawal {
             staker: addr(self.staker),
-            usdc: uint(self.usdc),
+            usdc: self.usdc.to_u256(),
             maxShares: U256::from(self.max_shares.get()),
-            rebalanceShare: uint(self.rebalance_share),
-            networkFee: uint(self.network_fee),
+            rebalanceShare: self.rebalance_share.to_u256(),
+            networkFee: self.network_fee.to_u256(),
             dstChain: self.payout.dst_chain.get(),
             recipient: addr(self.payout.recipient),
             tokenOut: addr(self.payout.token_out),
-            minOut: uint(self.payout.min_out),
+            minOut: self.payout.min_out.to_u256(),
             deadline: self.payout.deadline.as_secs().get(),
             nonce: self.nonce,
         }

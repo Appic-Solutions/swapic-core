@@ -103,7 +103,7 @@ pub fn check_order(
         return Err(refused("the order does not pay in the pool chain's USDC"));
     }
     match amount {
-        Some(amount) if order.amountIn != U256::from_be_bytes(amount.to_be_bytes()) => {
+        Some(amount) if order.amountIn != amount.to_u256() => {
             return Err(refused(format!(
                 "the order spends {}, not the payout's {amount}",
                 order.amountIn

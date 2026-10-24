@@ -619,7 +619,7 @@ fn eco(
             swapic::route_delivery(&intent.route).is_some_and(|(token, to, value)| {
                 token == chain.usdc
                     && to == chain.canister
-                    && TokenAmount::from_be_bytes(value.to_be_bytes()) == amount
+                    && TokenAmount::from_u256(value) == amount
             })
         })
         .collect();

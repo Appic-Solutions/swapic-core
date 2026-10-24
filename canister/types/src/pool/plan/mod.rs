@@ -83,5 +83,5 @@ pub fn first_minimum(order: &crate::swapic::Order) -> TokenAmount {
         None if order.steps.is_empty() && order.payout.token == token_in => order.payout.minOut,
         None => alloy_primitives::U256::ZERO,
     };
-    TokenAmount::from_be_bytes(least.to_be_bytes::<32>())
+    TokenAmount::from_u256(least)
 }

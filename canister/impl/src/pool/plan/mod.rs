@@ -22,7 +22,6 @@ mod tests;
 
 use crate::evm_reads::{self, Simulated};
 use crate::pool::pay::{self, ORDER_MARGIN_S};
-use alloy_primitives::U256;
 use settlement_api::types::pool::PoolError;
 use types::pool::payout::{EvmPayout, PayoutKind, PinnedOrder};
 use types::pool::plan;
@@ -59,7 +58,7 @@ impl PlanReads for crate::pool::payout::Live {
             .ok_or("no pool chain is configured")?;
         let canister =
             crate::storage::ecdsa_address::get().ok_or("the canister's address is not derived")?;
-        let call = swapic::scale_calldata(route, U256::from_be_bytes(amount.to_be_bytes()));
+        let call = swapic::scale_calldata(route, amount.to_u256());
         match evm_reads::eth_call_capped(chain, canister, KYBER_SCALER, &call, scaled_cap(route))
             .await
         {
@@ -202,7 +201,7 @@ pub fn decide(
     if swaps.len() > 1 {
         return Err(Fit::Wait("the plan swaps more than once".to_string()));
     }
-    order.amountIn = U256::from_be_bytes(amount.to_be_bytes());
+    order.amountIn = amount.to_u256();
     Ok((order, swaps.first().copied()))
 }
 
@@ -247,7 +246,7 @@ pub fn rescaled(step: &Step, route: Vec<u8>, amount: TokenAmount) -> Result<Step
     if amounts_aside != before {
         return Err("the rewritten route is another swap".to_string());
     }
-    let amount = U256::from_be_bytes(amount.to_be_bytes());
+    let amount = amount.to_u256();
     if after.amount != amount {
         return Err(format!(
             "the rewritten route sells {}, not {amount}",

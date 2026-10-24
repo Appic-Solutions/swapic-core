@@ -262,7 +262,7 @@ pub fn check<S: Store>(
     } else {
         payouts.min_network_fee
     };
-    let planned = TokenAmount::from_be_bytes(order.amountIn.to_be_bytes::<32>());
+    let planned = TokenAmount::from_u256(order.amountIn);
     let too_large = || refused("the plan's amount is too large");
     let floor = if path == RoutePath::Ckusdc {
         request.amount_in

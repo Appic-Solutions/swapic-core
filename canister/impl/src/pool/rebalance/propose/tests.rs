@@ -8,6 +8,7 @@
 //! (`types::pool::ledger::rebalance`'s tests: a proposal is taken only when cheaper).
 
 use super::*;
+use alloy_primitives::U256;
 use alloy_sol_types::{SolCall, SolValue};
 use std::collections::BTreeMap;
 use types::config::{ChainTable, EvmChain, PerAction};

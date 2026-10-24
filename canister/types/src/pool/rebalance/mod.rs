@@ -98,7 +98,7 @@ pub fn ck_deposit_data(
     use alloy_sol_types::SolCall;
     depositErc20Call {
         erc20Address: crate::swapic::addr(token),
-        amount: alloy_primitives::U256::from_be_bytes(amount.to_be_bytes()),
+        amount: amount.to_u256(),
         principal: alloy_primitives::FixedBytes(principal),
         subaccount: alloy_primitives::FixedBytes(subaccount),
     }

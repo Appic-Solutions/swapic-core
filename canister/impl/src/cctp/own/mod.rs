@@ -15,7 +15,6 @@ mod tests;
 
 use super::{FinishError, Plan};
 use crate::state::{State, Store};
-use alloy_primitives::U256;
 use candid::Principal;
 use types::cctp::BurnMessage;
 use types::config::GasAction;
@@ -43,8 +42,8 @@ pub fn burn_of(order_bytes: &[u8], message: &BurnMessage) -> bool {
     let Some(call) = read_burn(&step.data) else {
         return false;
     };
-    let amount = U256::from_be_bytes(message.body.amount.to_be_bytes());
-    let max_fee = U256::from_be_bytes(message.body.max_fee.to_be_bytes());
+    let amount = message.body.amount.to_u256();
+    let max_fee = message.body.max_fee.to_u256();
     call.destinationDomain == message.destination_domain
         && call.mintRecipient.0 == message.body.mint_recipient
         && call.destinationCaller.0 == message.destination_caller

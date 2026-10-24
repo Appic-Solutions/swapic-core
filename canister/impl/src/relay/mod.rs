@@ -600,10 +600,6 @@ pub struct Plan {
     pub intent: Option<EcoIntent>,
 }
 
-fn amount_of(value: U256) -> TokenAmount {
-    TokenAmount::from_be_bytes(value.to_be_bytes::<32>())
-}
-
 /// A Swap envelope's delivery on `chain`: its recipient gets at least its `min_out` of its
 /// `token_out`. None for any other envelope.
 fn envelope_delivery(envelope: &Envelope, chain: ChainId) -> Option<Delivery> {
@@ -611,7 +607,7 @@ fn envelope_delivery(envelope: &Envelope, chain: ChainId) -> Option<Delivery> {
         chain,
         recipient: envelope.recipient,
         token: envelope.token_out,
-        min_out: amount_of(envelope.min_out),
+        min_out: TokenAmount::from_u256(envelope.min_out),
     })
 }
 
@@ -671,7 +667,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
         chain: chain_id,
         recipient: swapic::evm(order.payout.recipient),
         token: swapic::evm(order.payout.token),
-        min_out: amount_of(order.payout.minOut),
+        min_out: TokenAmount::from_u256(order.payout.minOut),
     });
     let (action, arrival, delivery) = match (burns.as_slice(), intents.as_slice()) {
         ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
@@ -688,7 +684,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                         chain: destination,
                         recipient,
                         token: intent.token,
-                        min_out: amount_of(min.saturating_sub(fee)),
+                        min_out: TokenAmount::from_u256(min.saturating_sub(fee)),
                     })
                 }
                 EcoArrival::Fill { envelope, .. } => envelope_delivery(&envelope, destination),
@@ -712,7 +708,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                         chain: arrival.chain_id,
                         recipient: envelope.recipient,
                         token: usdc,
-                        min_out: amount_of(min.saturating_sub(burn.max_fee)),
+                        min_out: TokenAmount::from_u256(min.saturating_sub(burn.max_fee)),
                     }),
                     _ => envelope_delivery(&envelope, arrival.chain_id),
                 }
@@ -777,7 +773,7 @@ pub fn check(
     let plan = read_plan(order, chains)?;
     let fee = match plan.fees.as_slice() {
         [] => return Err(RelayError::NoFeeStep),
-        [fee] => TokenAmount::from_be_bytes(fee.to_be_bytes::<32>()),
+        [fee] => TokenAmount::from_u256(*fee),
         more => return Err(RelayError::FeeSteps(more.len())),
     };
     let Plan {

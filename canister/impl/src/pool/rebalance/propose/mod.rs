@@ -22,7 +22,6 @@ use crate::guards::require_watcher;
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Chains, MIN_GAS_LIMIT};
 use crate::storage::{config, flow_settings};
-use alloy_primitives::U256;
 use settlement_api::types::pool::PoolError;
 use types::config::GasAction;
 use types::pool::payout::PinnedOrder;
@@ -51,10 +50,6 @@ pub struct Setup<'a> {
 
 fn refused(why: impl Into<String>) -> PoolError {
     PoolError::NotAllowed(why.into())
-}
-
-fn amount_of(value: U256) -> TokenAmount {
-    TokenAmount::from_be_bytes(value.to_be_bytes())
 }
 
 /// Every check of an order proposed for `item` at `now`, pure: answers the order to pin and
@@ -88,7 +83,7 @@ pub fn check(
     if swapic::evm(order.tokenIn) != setup.source_usdc {
         return Err(refused("the order does not spend the source pocket's USDC"));
     }
-    if order.amountIn != U256::from_be_bytes(item.amount.to_be_bytes()) {
+    if order.amountIn != item.amount.to_u256() {
         return Err(refused(format!(
             "the order spends {}, not the move's {}",
             order.amountIn, item.amount
@@ -119,7 +114,7 @@ pub fn check(
         .get(setup.chains.chain_id)
         .ok_or_else(|| refused("the source chain signs nothing"))?;
     let (intent, fee) = match swapic::read_step(step, source.usdc, source.token_messenger) {
-        Ok(KnownStep::Eco { intent, fee }) => (intent, amount_of(fee)),
+        Ok(KnownStep::Eco { intent, fee }) => (intent, TokenAmount::from_u256(fee)),
         Ok(_) => return Err(refused("the order's step is not an Eco intent")),
         Err(error) => return Err(refused(error.to_string())),
     };

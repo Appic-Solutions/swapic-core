@@ -92,3 +92,17 @@ fn cbor_round_trips_small_and_bignum_amounts() {
     // up to u64::MAX a native integer, one byte for a small value
     assert_eq!(minicbor::to_vec(Amount::from(7_u8)).unwrap(), vec![0x07]);
 }
+
+/// An amount is the ABI's `uint256` of the same value, both ways.
+#[test]
+fn an_amount_is_its_uint256_both_ways() {
+    for value in [0_u128, 1, 1_000_000, u128::MAX] {
+        let amount = CheckedAmountOf::<Unit>::from(value);
+        assert_eq!(amount.to_u256(), alloy_primitives::U256::from(value));
+        assert_eq!(CheckedAmountOf::<Unit>::from_u256(amount.to_u256()), amount);
+    }
+    assert_eq!(
+        CheckedAmountOf::<Unit>::MAX.to_u256(),
+        alloy_primitives::U256::MAX
+    );
+}

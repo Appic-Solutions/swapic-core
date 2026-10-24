@@ -61,10 +61,6 @@ fn word(address: EvmAddress) -> FixedBytes<32> {
     FixedBytes(address.to_word())
 }
 
-fn u256(amount: TokenAmount) -> U256 {
-    U256::from_be_bytes(amount.to_be_bytes())
-}
-
 impl OwnRoute<'_> {
     /// The envelope the burn carries to the destination.
     pub fn envelope(
@@ -94,7 +90,10 @@ impl OwnRoute<'_> {
                 deadline,
                 recipient: self.canister,
                 token_out: self.destination.usdc,
-                min_out: u256(amount.checked_sub(max_fee).unwrap_or(TokenAmount::ZERO)),
+                min_out: amount
+                    .checked_sub(max_fee)
+                    .unwrap_or(TokenAmount::ZERO)
+                    .to_u256(),
                 principal: [0; 32],
                 subaccount: [0; 32],
                 min_gas: 0,
@@ -135,7 +134,7 @@ impl OwnRoute<'_> {
             mintRecipient: mint_recipient,
             burnToken: swapic::addr(self.source.usdc),
             destinationCaller: destination_caller,
-            maxFee: u256(max_fee),
+            maxFee: max_fee.to_u256(),
             minFinalityThreshold: if fast {
                 FAST_FINALITY
             } else {
@@ -147,14 +146,14 @@ impl OwnRoute<'_> {
             r#ref: FixedBytes(move_ref(id).into_bytes()),
             payer: swapic::addr(self.canister),
             tokenIn: swapic::addr(self.source.usdc),
-            amountIn: u256(amount),
+            amountIn: amount.to_u256(),
             deadline: U256::from(deadline),
             steps: vec![Step {
                 target: swapic::addr(self.source.token_messenger),
                 data: burn_data(&burn).into(),
                 token: swapic::addr(self.source.usdc),
                 // no fee step and no swap: the Runner's delta is the whole amount
-                min: u256(amount),
+                min: amount.to_u256(),
                 writes: vec![Write {
                     at: offsets::CCTP_AMOUNT,
                     minus: U256::ZERO,

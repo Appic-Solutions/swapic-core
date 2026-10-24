@@ -11,7 +11,6 @@ mod tests;
 use crate::state::Store;
 use crate::storage::events::read_state;
 use crate::tx::{self, Detail};
-use alloy_primitives::U256;
 use ic_stable_structures::Storable;
 use settlement_api::types::pool::{evm_address, nat, OrphanAction, OrphanView, PoolError};
 use std::borrow::Cow;
@@ -174,7 +173,7 @@ pub async fn send(refund: Refund) -> Result<(), PoolError> {
         key.chain,
         usdc,
         Wei::ZERO,
-        types::swapic::transfer_calldata(to, U256::from_be_bytes(sent.to_be_bytes())),
+        types::swapic::transfer_calldata(to, sent.to_u256()),
         gas_limit,
         GasAction::PoolTransfer,
         Some(Detail::PoolTransfer { key, to, sent }),
