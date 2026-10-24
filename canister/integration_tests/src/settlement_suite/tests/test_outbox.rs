@@ -1,5 +1,6 @@
 //! The nonce allocator, the sign-before-send order, and the outbox that gets the bytes
-//! onto a chain.
+//! onto a chain, driven through `test_send`, which signs a relay: its signed record creates
+//! the relay's flow (`GaslessRelayed`), and its receipt at depth closes it (`TxClosed`).
 //!
 //! Every test here runs on a network holding pocket-ic's test threshold keys, because a
 //! transaction that is not signed is not a transaction.
@@ -25,7 +26,6 @@ use settlement_api::types::swap::TransitionError;
 use settlement_api::types::tx::TxError;
 use std::collections::BTreeMap;
 use std::time::Duration;
-use types::{ChainId, GasMode, Rail, TokenAmount, UnixSeconds};
 
 const BASE: u64 = 8453;
 const VAULT: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -85,51 +85,16 @@ const BATCH_WINDOW: Duration = Duration::from_secs(2);
 /// and never the batch window.
 const STRANDED_AFTER: Duration = Duration::from_secs(300);
 
-/// A quote whose swap the tests send transactions for, one per nonce.
-fn quote(nonce: u64) -> types::Quote {
-    types::Quote {
-        version: 1,
-        src_chain: ChainId::BASE,
-        src_token: "USDC".parse().unwrap(),
-        amount_in: TokenAmount::from(1_000_u32),
-        dst_chain: ChainId::ARBITRUM,
-        dst_token: "USDC".parse().unwrap(),
-        expected_out: TokenAmount::from(999_u32),
-        min_out: TokenAmount::from(990_u32),
-        dst_address: "0xuser".parse().unwrap(),
-        refund_address: None,
-        auto_refund: true,
-        gas_mode: GasMode::Gasless,
-        rail: Rail::CctpV2Fast,
-        expires_at: UnixSeconds::new(1_800_000_000),
-        nonce,
-    }
+/// The key of the `n`th relay the tests send: one per send, as each relay is signed once.
+fn relay_key(n: u64) -> Hash32 {
+    let mut key = [0x7e; 32];
+    key[..8].copy_from_slice(&n.to_be_bytes());
+    key
 }
 
-fn swap_id(nonce: u64) -> Hash32 {
-    quote(nonce)
-        .hash()
-        .expect("a valid quote has a preimage")
-        .into_bytes()
-}
-
-fn funds(nonce: u64) -> EventType {
-    let quote = quote(nonce);
-    EventType::FundsReceived {
-        quote_hash: swap_id(nonce),
-        quote_bytes: quote
-            .canonical_bytes()
-            .expect("a valid quote has a preimage"),
-        chain_id: BASE,
-        token: quote.src_token.to_string(),
-        amount: quote.amount_in.into(),
-        tx_ref: "0xfeed".into(),
-    }
-}
-
-/// A canister on a network holding the test threshold keys, with a provider for Base, a
-/// fresh chain reading, and `count` funded swaps ready to send from.
-fn setup_with_swaps(count: u64) -> (PocketIc, Principal, Principal) {
+/// A canister on a network holding the test threshold keys, with a provider for Base and a
+/// fresh chain reading.
+fn setup() -> (PocketIc, Principal, Principal) {
     let pic = PocketIcBuilder::new()
         .with_ii_subnet()
         .with_application_subnet()
@@ -146,9 +111,6 @@ fn setup_with_swaps(count: u64) -> (PocketIc, Principal, Principal) {
     install(&pic, canister, admin, &arg).expect("the arg installs");
     derive_evm_address(&pic, canister, admin).expect("the test key derives an address");
     push_reading(&pic, canister);
-    for nonce in 0..count {
-        append(&pic, canister, admin, &funds(nonce)).expect("the swap is funded");
-    }
     (pic, canister, admin)
 }
 
@@ -175,7 +137,15 @@ fn send(
     admin: Principal,
     nonce: u64,
 ) -> Result<Hash32, TxError> {
-    test_send(pic, canister, admin, swap_id(nonce), BASE, VAULT, GAS_LIMIT)
+    test_send(
+        pic,
+        canister,
+        admin,
+        relay_key(nonce),
+        BASE,
+        VAULT,
+        GAS_LIMIT,
+    )
 }
 
 fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
@@ -270,16 +240,16 @@ fn receipt(block: u64, success: bool, tx_hash: Hash32) -> Value {
     })
 }
 
-/// A `TxCreated` for the first swap at `nonce`, which the allocator admits only at the
+/// A `TxCreated` for the first relay at `nonce`, which the allocator admits only at the
 /// number it is at.
 fn created_at(nonce: u64) -> EventType {
     created_for(0, nonce)
 }
 
-/// A `TxCreated` for the swap of the quote at `swap`, at `nonce`.
-fn created_for(swap: u64, nonce: u64) -> EventType {
+/// A `TxCreated` for the relay keyed `relay`, at `nonce`.
+fn created_for(relay: u64, nonce: u64) -> EventType {
     EventType::TxCreated {
-        purpose: TxPurpose::Payout(swap_id(swap)),
+        purpose: TxPurpose::Relay(relay_key(relay)),
         chain_id: BASE,
         nonce,
         to: VAULT.to_string(),
@@ -304,11 +274,20 @@ fn tx_created(events: &[Event]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// The flow step a line carries, read as the canister's domain reads it.
+fn flow_step(payload: &EventType) -> Option<types::FlowStep> {
+    match types::EventType::try_from(payload.clone()).ok()? {
+        types::EventType::Flow { step, .. } => Some(step),
+        _ => None,
+    }
+}
+
+/// The signed bytes of every relay the log recorded.
 fn tx_signed(events: &[Event]) -> Vec<Vec<u8>> {
     events
         .iter()
-        .filter_map(|event| match &event.payload {
-            EventType::TxSigned { raw_tx, .. } => Some(raw_tx.clone()),
+        .filter_map(|event| match flow_step(&event.payload)? {
+            types::FlowStep::GaslessRelayed { raw_tx, .. } => Some(raw_tx),
             _ => None,
         })
         .collect()
@@ -324,11 +303,17 @@ fn of_kind(events: Vec<Event>, kind: fn(&EventType) -> bool) -> Vec<EventType> {
 }
 
 fn is_confirmed(payload: &EventType) -> bool {
-    matches!(payload, EventType::TxConfirmed { .. })
+    matches!(
+        flow_step(payload),
+        Some(types::FlowStep::TxClosed { success: true, .. })
+    )
 }
 
 fn is_failed(payload: &EventType) -> bool {
-    matches!(payload, EventType::TxFailed { .. })
+    matches!(
+        flow_step(payload),
+        Some(types::FlowStep::TxClosed { success: false, .. })
+    )
 }
 
 fn is_replaced(payload: &EventType) -> bool {
@@ -340,13 +325,13 @@ fn is_replaced(payload: &EventType) -> bool {
 /// `TxCreated` is appended before the first await, so the interleaving cannot reach it.
 #[test]
 fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
-    let (pic, canister, admin) = setup_with_swaps(2);
+    let (pic, canister, admin) = setup();
     let first = pic
         .submit_call(
             canister,
             admin,
             "test_send",
-            encode_args((swap_id(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
+            encode_args((relay_key(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
         )
         .unwrap();
     let second = pic
@@ -354,7 +339,7 @@ fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
             canister,
             admin,
             "test_send",
-            encode_args((swap_id(1), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
+            encode_args((relay_key(1), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap(),
         )
         .unwrap();
     // enough rounds for both messages to run to their signature and back: the first takes
@@ -378,21 +363,21 @@ fn two_sends_that_interleave_at_the_signature_get_different_nonces() {
     );
 }
 
-/// Rule A4 from the swap's side, which is what the guard on `TxCreated` exists for: two
-/// sends for ONE swap that are both in flight at the signature allocate once. The second
+/// Rule A4 from the key's side, which is what the guard on `TxCreated` exists for: two
+/// sends for ONE key that are both in flight at the signature allocate once. The second
 /// reaches the append while the first is still holding its number unsigned, and is refused
-/// there, before it can take a number that no `TxSigned` could ever spend. Without the
-/// guard both allocate, the second's signed record is refused because the first attempt is
-/// open, and its number is stranded.
+/// there, before it can take a number that no signed record could ever spend. Without the
+/// guard both allocate, the second's signed record is refused because the key's flow
+/// exists, and its number is stranded.
 #[test]
 fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
-    let (pic, canister, admin) = setup_with_swaps(1);
-    let same_swap = || encode_args((swap_id(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap();
+    let (pic, canister, admin) = setup();
+    let same_key = || encode_args((relay_key(0), BASE, VAULT.to_string(), GAS_LIMIT)).unwrap();
     let first = pic
-        .submit_call(canister, admin, "test_send", same_swap())
+        .submit_call(canister, admin, "test_send", same_key())
         .unwrap();
     let second = pic
-        .submit_call(canister, admin, "test_send", same_swap())
+        .submit_call(canister, admin, "test_send", same_key())
         .unwrap();
     for _ in 0..11 {
         pic.tick();
@@ -413,9 +398,9 @@ fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
     assert_eq!(
         refused,
         Err(TxError::Append(AppendError::Transition(
-            TransitionError::NonceStillUnsigned(swap_id(0))
+            TransitionError::NonceStillUnsigned(relay_key(0))
         ))),
-        "the swap was holding its number unsigned when the later send reached the append"
+        "the key was holding its number unsigned when the later send reached the append"
     );
 
     let log = events(&pic, canister);
@@ -451,7 +436,7 @@ fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
 /// allocator is at is refused, and it allocates nothing.
 #[test]
 fn a_transaction_created_off_the_allocator_is_refused() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let refused = append(&pic, canister, admin, &created_at(1));
     assert!(refused.is_err(), "{refused:?}");
     assert!(
@@ -468,7 +453,7 @@ fn a_transaction_created_off_the_allocator_is_refused() {
 /// what was recorded, byte for byte.
 #[test]
 fn the_bytes_broadcast_are_the_bytes_the_log_recorded() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
 
     let signed = tx_signed(&events(&pic, canister));
@@ -495,7 +480,7 @@ fn the_bytes_broadcast_are_the_bytes_the_log_recorded() {
 /// log, and no nonce more.
 #[test]
 fn a_missing_receipt_for_thirty_seconds_goes_out_replaced_at_the_same_nonce() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     let pending = pic.get_canister_http();
@@ -563,7 +548,7 @@ fn a_missing_receipt_for_thirty_seconds_goes_out_replaced_at_the_same_nonce() {
 /// attempt.
 #[test]
 fn a_receipt_closes_the_attempt_only_once_it_is_deep_enough() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -583,8 +568,8 @@ fn a_receipt_closes_the_attempt_only_once_it_is_deep_enough() {
     let confirmed = of_kind(events(&pic, canister), is_confirmed);
     assert_eq!(confirmed.len(), 1, "the attempt closed exactly once");
     assert!(matches!(
-        confirmed[0],
-        EventType::TxConfirmed { block, .. } if block == 19_000_005
+        flow_step(&confirmed[0]),
+        Some(types::FlowStep::TxClosed { block, .. }) if block.get() == 19_000_005
     ));
 
     // the entry left the outbox, so nothing is read for it again
@@ -599,7 +584,7 @@ fn a_receipt_closes_the_attempt_only_once_it_is_deep_enough() {
 /// attempt as a failure rather than a confirmation.
 #[test]
 fn a_reverted_receipt_fails_the_attempt() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -617,7 +602,7 @@ fn a_reverted_receipt_fails_the_attempt() {
 /// fee, and the replacement's receipt closes the attempt. The nonce is never abandoned.
 #[test]
 fn a_stuck_transaction_is_replaced_at_the_same_nonce_with_a_higher_fee() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let first_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -678,7 +663,7 @@ fn a_stuck_transaction_is_replaced_at_the_same_nonce_with_a_higher_fee() {
 /// clears it. A transaction signed before the upgrade still goes out after it.
 #[test]
 fn the_flush_pass_is_re_armed_after_an_upgrade_with_a_queued_entry() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     let signed = tx_signed(&events(&pic, canister));
 
@@ -702,7 +687,7 @@ fn the_flush_pass_is_re_armed_after_an_upgrade_with_a_queued_entry() {
 /// what the chains did with what this canister already signed.
 #[test]
 fn a_halted_canister_replaces_nothing_and_still_reads_its_receipts() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -773,7 +758,7 @@ fn tx_cancelled(events: &[Event]) -> Vec<(u64, u64, Vec<u8>)> {
 /// A canister with a provider and a fresh reading on a network that holds NO threshold key,
 /// so the signature a send asks for is refused: the one failure that strands a nonce
 /// without any test door planting it.
-fn setup_without_a_signing_key(count: u64) -> (PocketIc, Principal, Principal) {
+fn setup_without_a_signing_key() -> (PocketIc, Principal, Principal) {
     let (pic, canister, admin) = crate::settlement_suite::init::empty_canister();
     let arg = InitArg {
         config: outbox_config(),
@@ -782,9 +767,6 @@ fn setup_without_a_signing_key(count: u64) -> (PocketIc, Principal, Principal) {
     };
     install(&pic, canister, admin, &arg).expect("the arg installs");
     push_reading(&pic, canister);
-    for nonce in 0..count {
-        append(&pic, canister, admin, &funds(nonce)).expect("the swap is funded");
-    }
     (pic, canister, admin)
 }
 
@@ -794,7 +776,7 @@ fn setup_without_a_signing_key(count: u64) -> (PocketIc, Principal, Principal) {
 /// next send takes the next one.
 #[test]
 fn a_refused_signature_leaves_the_nonce_unsigned_and_blocks_no_later_send() {
-    let (pic, canister, admin) = setup_without_a_signing_key(2);
+    let (pic, canister, admin) = setup_without_a_signing_key();
     let refused = send(&pic, canister, admin, 0);
     assert!(
         matches!(refused, Err(TxError::Ecdsa(_))),
@@ -810,14 +792,14 @@ fn a_refused_signature_leaves_the_nonce_unsigned_and_blocks_no_later_send() {
         "and nothing was signed"
     );
 
-    // the same swap is refused another number while it is still holding this one
+    // the same key is refused another number while it is still holding this one
     let twice = send(&pic, canister, admin, 0);
     assert!(
         matches!(twice, Err(TxError::Append(_))),
-        "one swap holds one number: {twice:?}"
+        "one key holds one number: {twice:?}"
     );
 
-    // a different swap is not blocked by it: the allocator moves on
+    // a different key is not blocked by it: the allocator moves on
     let other = send(&pic, canister, admin, 1);
     assert!(matches!(other, Err(TxError::Ecdsa(_))), "{other:?}");
     assert_eq!(
@@ -837,7 +819,7 @@ fn a_refused_signature_leaves_the_nonce_unsigned_and_blocks_no_later_send() {
 /// account has a gap and can never mine anything above it again.
 #[test]
 fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let mine = evm_address(&pic, canister, Principal::anonymous()).expect("the address is derived");
 
     // a `TxCreated` with no `TxSigned` after it: exactly the state a refused signature, a
@@ -886,7 +868,7 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
 
     // and the number is spent, not given back: the next send takes the one after it
     reply(&pic, sends[0], vec![json!("0xabc")]);
-    send(&pic, canister, admin, 0).expect("the swap may send again");
+    send(&pic, canister, admin, 0).expect("the key may send again");
     assert_eq!(
         tx_created(&events(&pic, canister)),
         vec![(BASE, 0), (BASE, 1)],
@@ -899,7 +881,7 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
 /// the bytes went out, so what the chain did with them changes nothing in the fold.
 #[test]
 fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     advance(&pic, canister, STRANDED_AFTER);
     let cancelled = tx_cancelled(&events(&pic, canister));
@@ -948,7 +930,7 @@ fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
 /// cancel still happens (A9 over rule A5).
 #[test]
 fn an_upgrade_between_the_allocation_and_the_cancel_loses_nothing() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     upgrade(&pic, canister, admin).expect("the upgrade goes through");
     assert!(
@@ -990,10 +972,10 @@ fn reply_error(pic: &PocketIc, request: &CanisterHttpRequest, messages: Vec<&str
 /// Rule A5's replacement clock runs from the first broadcast and not from the last, so a
 /// rebroadcast can never postpone it. With the clock on the last broadcast, a pass every
 /// rebroadcast window resets it forever and the fee is never bumped: an underpriced
-/// transaction would hold its swap for as long as the chain refused to mine it.
+/// transaction would hold its key for as long as the chain refused to mine it.
 #[test]
 fn a_rebroadcast_never_postpones_the_replacement() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -1016,7 +998,7 @@ fn a_rebroadcast_never_postpones_the_replacement() {
 /// no longer watching, and the engine free to pay a second time.
 #[test]
 fn a_reverted_receipt_is_no_failure_until_it_is_deep_enough() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let tx_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -1044,7 +1026,7 @@ fn a_reverted_receipt_is_no_failure_until_it_is_deep_enough() {
 /// may not exist.
 #[test]
 fn a_receipt_for_a_transaction_we_never_sent_closes_nothing() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     reply(&pic, &pic.get_canister_http()[0], vec![json!("0xabc")]);
@@ -1074,7 +1056,7 @@ fn a_receipt_for_a_transaction_we_never_sent_closes_nothing() {
 /// replacement path and an honest chain refuses the replacement.
 #[test]
 fn a_nonce_the_provider_calls_too_low_goes_to_the_receipt_reader() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     let pending = pic.get_canister_http();
@@ -1098,7 +1080,7 @@ fn a_nonce_the_provider_calls_too_low_goes_to_the_receipt_reader() {
 /// window forever and every later nonce on the chain would wait behind them.
 #[test]
 fn an_underpriced_refusal_is_watched_and_then_replaced_at_a_higher_fee() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let first_hash = send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     let pending = pic.get_canister_http();
@@ -1148,7 +1130,7 @@ fn an_underpriced_refusal_is_watched_and_then_replaced_at_a_higher_fee() {
 /// needs the swap-less signed record the engine does not have.
 #[test]
 fn a_malformed_refusal_follows_the_same_path_and_stops_bumping_at_the_ceiling() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     send(&pic, canister, admin, 0).expect("the send goes through");
     advance(&pic, canister, BATCH_WINDOW);
     let pending = pic.get_canister_http();
@@ -1213,7 +1195,7 @@ fn replacement_fees(pic: &PocketIc, canister: Principal) -> Vec<Nat> {
 /// oversized batch, and nothing on that chain ever broadcasts or ever closes again.
 #[test]
 fn the_outcall_caps_follow_the_batch_they_are_for() {
-    let (pic, canister, admin) = setup_with_swaps(2);
+    let (pic, canister, admin) = setup();
     let first = send(&pic, canister, admin, 0).expect("the first send goes through");
     send(&pic, canister, admin, 1).expect("the second send goes through");
 
@@ -1272,7 +1254,7 @@ fn the_outcall_caps_follow_the_batch_they_are_for() {
 /// sends it.
 #[test]
 fn a_halted_canister_broadcasts_nothing_new() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     let signed = {
         send(&pic, canister, admin, 0).expect("the send goes through");
         tx_signed(&events(&pic, canister))
@@ -1333,7 +1315,7 @@ fn settle(pic: &PocketIc) {
 /// could possibly be.
 #[test]
 fn an_allocation_is_stranded_only_once_a_signing_round_trip_could_not_still_be_out() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
 
     for window in 1..=5 {
@@ -1363,12 +1345,12 @@ fn an_allocation_is_stranded_only_once_a_signing_round_trip_could_not_still_be_o
 /// number while the signature was on its way, and the signed record that comes back late
 /// is refused. Nothing of it reaches the outbox, so the cancel's entry at that nonce stays
 /// whole: its bytes are what goes out, its hash is what the receipt reader asks for, the
-/// log still folds, and the swap sends again at the next number. The real interleaving
+/// log still folds, and the key sends again at the next number. The real interleaving
 /// cannot be forced here, because both signatures ride the same signing subnet in the order
 /// they were asked for, so the late record arrives through the test door.
 #[test]
 fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     advance(&pic, canister, STRANDED_AFTER);
     let cancelled = tx_cancelled(&events(&pic, canister));
@@ -1376,19 +1358,21 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
     let cancel_raw = cancelled[0].2.clone();
     let cancel_hash = cancel_hash(&pic, canister);
 
-    let late = EventType::TxSigned {
-        quote_hash: swap_id(0),
-        attempt: 1,
-        chain_id: BASE,
-        tx_hash: [0x77; 32],
-        raw_tx: vec![0x02, 0xf8, 0x6b],
-    };
+    let late = EventType::from(types::EventType::Flow {
+        quote_hash: types::QuoteHash::new(relay_key(0)),
+        step: types::FlowStep::GaslessRelayed {
+            chain_id: types::ChainId::new(BASE),
+            nonce: types::Nonce::new(0),
+            tx_hash: types::TxHash::new([0x77; 32]),
+            raw_tx: vec![0x02, 0xf8, 0x6b],
+        },
+    });
     assert_eq!(
         append(&pic, canister, admin, &late),
         Err(TestAppendError::Append(AppendError::Transition(
-            TransitionError::NoUnsignedNonce {
-                quote_hash: swap_id(0),
+            TransitionError::NonceNotUnsigned {
                 chain_id: BASE,
+                nonce: 0,
             }
         ))),
         "the number this signature was made for is gone"
@@ -1431,8 +1415,8 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
     );
     answer_pending(&pic, 19_000_000, &json!(null));
 
-    // the swap is free to send at the next number
-    send(&pic, canister, admin, 0).expect("the swap may send again");
+    // the key is free to send at the next number
+    send(&pic, canister, admin, 0).expect("the key may send again");
     assert_eq!(
         tx_created(&events(&pic, canister)),
         vec![(BASE, 0), (BASE, 1)],
@@ -1448,7 +1432,7 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
 /// cancel refuses to price on it, and the watcher's next push lets the next pass cancel it.
 #[test]
 fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
-    let (pic, canister, admin) = setup_with_swaps(2);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_for(0, 0)).expect("the first allocation");
     append(&pic, canister, admin, &created_for(1, 1)).expect("the second allocation");
 
@@ -1527,9 +1511,9 @@ fn reject_oversized(pic: &PocketIc, request: &CanisterHttpRequest) {
 /// the chain ever closes again.
 #[test]
 fn a_chunk_whose_answer_does_not_come_back_whole_is_read_one_entry_at_a_time() {
-    let (pic, canister, admin) = setup_with_swaps(3);
+    let (pic, canister, admin) = setup();
     let hashes: Vec<Hash32> = (0..3)
-        .map(|swap| send(&pic, canister, admin, swap).expect("the send goes through"))
+        .map(|relay| send(&pic, canister, admin, relay).expect("the send goes through"))
         .collect();
     let signed = tx_signed(&events(&pic, canister));
     advance(&pic, canister, BATCH_WINDOW);
@@ -1633,7 +1617,7 @@ fn a_chunk_whose_answer_does_not_come_back_whole_is_read_one_entry_at_a_time() {
 /// runs an empty pass every window for as long as the halt lasts.
 #[test]
 fn a_halted_canister_rests_until_the_halt_lifts() {
-    let (pic, canister, admin) = setup_with_swaps(1);
+    let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     set_halted(&pic, canister, admin, true).expect("a controller may halt");
 

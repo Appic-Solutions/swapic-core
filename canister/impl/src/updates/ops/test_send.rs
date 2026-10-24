@@ -8,7 +8,8 @@ use types::{ChainId, GasAmount, QuoteHash, Wei};
 
 /// Test-only, controller-only door onto [`tx::create_and_send`], so the integration suite
 /// can drive the nonce allocator and the outbox without the engine that will drive them.
-/// Sends a payout for `quote_hash` with a fixed calldata and no value.
+/// Sends a relay keyed by `quote_hash` with a fixed calldata and no value: its signed record
+/// creates the relay's flow, and its receipt closes it.
 #[ic_cdk::update]
 pub async fn test_send(
     quote_hash: Hash32,
@@ -17,8 +18,8 @@ pub async fn test_send(
     gas_limit: u64,
 ) -> Result<Hash32, TxError> {
     require_controller().map_err(TxError::Guard)?;
-    // the door's own refusal: `PurposeNeedsASwap` means a cancel was asked to sign against
-    // a swap's attempt, and a mistyped address in a test is not that
+    // the door's own refusal: a mistyped address in a test is not a refusal of the signing
+    // path
     let parsed =
         to.parse().map_err(
             |reason: types::evm::EvmAddressError| TxError::NotAnAddress {
@@ -27,7 +28,7 @@ pub async fn test_send(
             },
         )?;
     tx::create_and_send(
-        TxPurpose::Payout(QuoteHash::new(quote_hash)),
+        TxPurpose::Relay(QuoteHash::new(quote_hash)),
         ChainId::new(chain_id),
         parsed,
         Wei::ZERO,

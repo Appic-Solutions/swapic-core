@@ -34,9 +34,8 @@ use types::config::{GasAction, MIN_ETHEREUM_CONFIRMATIONS};
 use types::events::TxPurpose;
 use types::tx::is_confirmed;
 use types::{
-    Attempt, BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventIndex, EventType, EvmAddress,
-    GasAmount, Nonce, NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei,
-    WeiPerGas,
+    BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventIndex, EventType, EvmAddress, GasAmount,
+    Nonce, NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
 };
 
 /// How long the current bytes stay out before they are handed to a provider again. A
@@ -170,10 +169,8 @@ pub enum TxError {
         cost: Wei,
         budget: Wei,
     },
-    #[error("{0} names no quote, and this path signs against the quote a transaction is for")]
-    PurposeNeedsASwap(&'static str),
-    #[error("swap {quote_hash} has used every attempt number there is")]
-    NoAttemptLeft { quote_hash: QuoteHash },
+    #[error("{0}: no signed transaction is recorded for it here")]
+    NoRecord(&'static str),
     #[error(
         "nonce {nonce} on chain {chain_id} was cancelled while swap {quote_hash}'s signature \
          was on its way, so the signed bytes carrying it are not recorded"
@@ -336,11 +333,6 @@ pub enum Detail {
         to: EvmAddress,
         sent: types::TokenAmount,
     },
-    /// The route action a continuation takes and the landed USDC it spends.
-    Continuation {
-        action: u8,
-        amount: types::TokenAmount,
-    },
     /// What a CCTP finish does, the keccak of its message, and the source transaction
     /// that burned it.
     Finish {
@@ -358,11 +350,160 @@ pub struct Signed {
     pub id: EventIndex,
 }
 
+/// The line a signed transaction is recorded by: a flow's step or the pool's own, each
+/// holding the nonce its `TxCreated` handed out.
+enum Record {
+    /// A gasless relay's, which creates its flow.
+    Relay,
+    /// A CCTP finish's, which creates its flow.
+    Finish {
+        action: types::flow::FinishAction,
+        arrival: [u8; 32],
+        source_tx: TxHash,
+    },
+    /// A pool payout's, which moves it to signed.
+    PoolPayout {
+        id: u64,
+        order: types::pool::PinnedOrder,
+    },
+    /// An orphan's refund.
+    PoolTransfer {
+        key: types::pool::CreditKey,
+        to: EvmAddress,
+        sent: types::TokenAmount,
+    },
+    /// The canister's allowance to Swapic.
+    PoolApprove,
+    /// A rescue's, naming the order whose intent it cancels.
+    EcoRescue([u8; 32]),
+    /// A move's, which moves it to signed.
+    PoolMove(u64),
+}
+
+/// The record a signed transaction of `purpose` is written in, decided before its nonce is
+/// handed out, pure. Refused for a purpose this path records nothing for: a cancel (the pass
+/// that ends a stranded allocation signs and records it), the retired v1 swap legs, pulls
+/// and continuations, and a finish, a pool payout or a pool transfer handed no detail.
+fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxError> {
+    match (purpose, detail) {
+        (TxPurpose::Relay(_), _) => Ok(Record::Relay),
+        (
+            TxPurpose::Finish(_),
+            Some(Detail::Finish {
+                action,
+                arrival,
+                source_tx,
+            }),
+        ) => Ok(Record::Finish {
+            action,
+            arrival,
+            source_tx,
+        }),
+        (TxPurpose::Finish(_), _) => Err(TxError::NoRecord("a finish with no detail")),
+        (TxPurpose::PoolPayout(id), Some(Detail::PoolPayout { order })) => {
+            Ok(Record::PoolPayout { id, order })
+        }
+        (TxPurpose::PoolPayout(_), _) => Err(TxError::NoRecord("a pool payout with no order")),
+        (TxPurpose::PoolTransfer(_), Some(Detail::PoolTransfer { key, to, sent })) => {
+            Ok(Record::PoolTransfer { key, to, sent })
+        }
+        (TxPurpose::PoolTransfer(_), _) => Err(TxError::NoRecord("a pool transfer with no orphan")),
+        (TxPurpose::PoolApprove, _) => Ok(Record::PoolApprove),
+        (TxPurpose::EcoRescue(order_id), _) => Ok(Record::EcoRescue(order_id)),
+        (TxPurpose::PoolMove(id), _) => Ok(Record::PoolMove(id)),
+        (TxPurpose::Cancel(_), _) => Err(TxError::NoRecord("a cancel")),
+        (
+            TxPurpose::Burn(_)
+            | TxPurpose::Mint(_)
+            | TxPurpose::Payout(_)
+            | TxPurpose::Refund(_)
+            | TxPurpose::Reclaim(_)
+            | TxPurpose::GaslessPull(_)
+            | TxPurpose::Continue(_),
+            _,
+        ) => Err(TxError::NoRecord("a retired v1 transaction")),
+    }
+}
+
+impl Record {
+    /// The line itself, once the bytes are signed: they carry `nonce` on `chain_id`.
+    fn line(
+        self,
+        quote_hash: QuoteHash,
+        chain_id: ChainId,
+        nonce: Nonce,
+        tx_hash: TxHash,
+        raw_tx: Vec<u8>,
+    ) -> EventType {
+        use types::pool::PoolStep;
+        let flow = |step| EventType::Flow { quote_hash, step };
+        let pool = |step| EventType::Pool { step };
+        match self {
+            Record::Relay => flow(types::FlowStep::GaslessRelayed {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::Finish {
+                action,
+                arrival,
+                source_tx,
+            } => flow(types::FlowStep::CctpFinishSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                action,
+                arrival,
+                source_tx: Some(source_tx),
+            }),
+            Record::PoolPayout { id, order } => pool(PoolStep::PayoutSigned {
+                id,
+                order,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::PoolTransfer { key, to, sent } => pool(PoolStep::OrphanRefundSigned {
+                key,
+                to,
+                sent,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::PoolApprove => pool(PoolStep::ApproveSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::EcoRescue(order_id) => pool(PoolStep::EcoRescueSigned {
+                order_id,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::PoolMove(id) => pool(PoolStep::MoveSigned {
+                id,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+        }
+    }
+}
+
 /// Creates, signs and queues one transaction, and answers the hash it will be looked up
 /// by.
 ///
 /// The order is the law of this module: halt check, fees, `TxCreated` with no await before
-/// it, signature, `TxSigned`, queue. The broadcast itself is the outbox pass, so the caller
+/// it, signature, the signed record, queue. The broadcast itself is the outbox pass, so the caller
 /// does not wait on a provider to know its nonce is safely allocated.
 ///
 /// `action` names the gas budget the transaction is held to (the gas rule), here and in
@@ -392,48 +533,16 @@ pub async fn create_and_send_with(
     detail: Option<Detail>,
 ) -> Result<Signed, TxError> {
     require_not_halted().map_err(TxError::Guard)?;
-    if matches!(purpose, TxPurpose::Finish(_)) && !matches!(detail, Some(Detail::Finish { .. })) {
-        return Err(TxError::PurposeNeedsASwap("a finish with no detail"));
-    }
-    if matches!(purpose, TxPurpose::PoolPayout(_))
-        && !matches!(detail, Some(Detail::PoolPayout { .. }))
-    {
-        return Err(TxError::PurposeNeedsASwap("a pool payout with no order"));
-    }
-    if matches!(purpose, TxPurpose::PoolTransfer(_))
-        && !matches!(detail, Some(Detail::PoolTransfer { .. }))
-    {
-        return Err(TxError::PurposeNeedsASwap("a pool transfer with no orphan"));
-    }
-    // a cancel spends a nonce with no quote behind it, and is signed and recorded by the
-    // pass that ends a stranded allocation, never through here
-    let quote_hash = purpose
-        .quote_hash()
-        .ok_or(TxError::PurposeNeedsASwap("a cancel"))?;
+    // the record its signed bytes will be written in, decided before any number is handed
+    // out: a purpose with none here is refused with nothing allocated
+    let record = record_of(purpose, detail)?;
+    let quote_hash = purpose.quote_hash().ok_or(TxError::NoRecord("a cancel"))?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let fees = fees(chain_id, now)?;
     affordable(chain_id, fees, gas_limit)?;
     gas_rule(&config::get(), chain_id, action, fees, gas_limit).inspect_err(|error| {
         ic_cdk::println!("not signed for {quote_hash}: {error}");
     })?;
-
-    // the attempt the signed record will carry: the swap's next one, and none for a pull,
-    // which is signed against its quote because no swap exists yet. Read before the
-    // allocation, not after it: a swap that has used every attempt number there is cannot
-    // sign anything, and refusing it here costs nothing, while refusing it after the append
-    // would leave a number handed out for a transaction that never existed
-    let attempt = match purpose.attempt_of() {
-        Some(attempts_of) => Some(
-            read_state(|state| {
-                state
-                    .swap(&attempts_of)
-                    .ok()
-                    .and_then(|swap| swap.next_attempt())
-            })
-            .ok_or(TxError::NoAttemptLeft { quote_hash })?,
-        ),
-        None => None,
-    };
 
     // A1 and A4: from here to the append there is no await, so the number read is the
     // number written
@@ -477,147 +586,19 @@ pub async fn create_and_send_with(
     let signed = tx.signed(signature);
     let tx_hash = signed.hash();
     let raw_tx = signed.into_raw();
-    // the bytes carry the number that was allocated before the await, and `TxSigned`
-    // names the swap, not the number: so the swap must still hold exactly that number,
-    // checked here with no await between the check and the append. A cancel that spent
-    // the number meanwhile has sealed it, and a retry may have handed the swap a fresh
-    // one; either way the late signature is refused, the outbox is not touched, and the
-    // cancel's entry at this nonce stays exactly as the pass queued it
+    // the bytes carry the number that was allocated before the await, so the key must still
+    // hold exactly that number, checked here with no await between the check and the
+    // append. A cancel that spent the number meanwhile has sealed it, and a retry may have
+    // handed the key a fresh one; either way the late signature is refused, the outbox is
+    // not touched, and the cancel's entry at this nonce stays exactly as the pass queued it
     read_state(|state| still_holds(state, &quote_hash, NonceKey { chain_id, nonce }))?;
-    let record = match attempt {
-        Some(attempt) => EventType::TxSigned {
-            quote_hash,
-            attempt,
-            chain_id,
-            tx_hash,
-            raw_tx: raw_tx.clone(),
-        },
-        // a relay and a continuation are a flow's, and name their number like a pull
-        None => match purpose {
-            TxPurpose::Relay(_) => EventType::Flow {
-                quote_hash,
-                step: types::FlowStep::GaslessRelayed {
-                    chain_id,
-                    nonce,
-                    tx_hash,
-                    raw_tx: raw_tx.clone(),
-                },
-            },
-            TxPurpose::Continue(_) => {
-                let (action, amount) = match detail {
-                    Some(Detail::Continuation { action, amount }) => (action, amount),
-                    _ => (0, types::TokenAmount::ZERO),
-                };
-                EventType::Flow {
-                    quote_hash,
-                    step: types::FlowStep::ContinuationSigned {
-                        chain_id,
-                        nonce,
-                        tx_hash,
-                        raw_tx: raw_tx.clone(),
-                        action,
-                        amount,
-                    },
-                }
-            }
-            TxPurpose::Finish(_) => {
-                let Some(Detail::Finish {
-                    action,
-                    arrival,
-                    source_tx,
-                }) = detail
-                else {
-                    unreachable!("BUG: a finish's detail is checked before its nonce");
-                };
-                EventType::Flow {
-                    quote_hash,
-                    step: types::FlowStep::CctpFinishSigned {
-                        chain_id,
-                        nonce,
-                        tx_hash,
-                        raw_tx: raw_tx.clone(),
-                        action,
-                        arrival,
-                        source_tx: Some(source_tx),
-                    },
-                }
-            }
-            // a pool payout's record is the payout's own step, which moves it to signed
-            TxPurpose::PoolPayout(id) => {
-                let Some(Detail::PoolPayout { order }) = detail else {
-                    unreachable!("BUG: a pool payout's order is checked before its nonce");
-                };
-                EventType::Pool {
-                    step: types::pool::PoolStep::PayoutSigned {
-                        id,
-                        order,
-                        chain_id,
-                        nonce,
-                        tx_hash,
-                        raw_tx: raw_tx.clone(),
-                    },
-                }
-            }
-            TxPurpose::PoolTransfer(_) => {
-                let Some(Detail::PoolTransfer { key, to, sent }) = detail else {
-                    unreachable!("BUG: a pool transfer's orphan is checked before its nonce");
-                };
-                EventType::Pool {
-                    step: types::pool::PoolStep::OrphanRefundSigned {
-                        key,
-                        to,
-                        sent,
-                        chain_id,
-                        nonce,
-                        tx_hash,
-                        raw_tx: raw_tx.clone(),
-                    },
-                }
-            }
-            TxPurpose::PoolApprove => EventType::Pool {
-                step: types::pool::PoolStep::ApproveSigned {
-                    chain_id,
-                    nonce,
-                    tx_hash,
-                    raw_tx: raw_tx.clone(),
-                },
-            },
-            // a rescue's record names the order whose intent it cancels
-            TxPurpose::EcoRescue(order_id) => EventType::Pool {
-                step: types::pool::PoolStep::EcoRescueSigned {
-                    order_id,
-                    chain_id,
-                    nonce,
-                    tx_hash,
-                    raw_tx: raw_tx.clone(),
-                },
-            },
-            // a move's record is the move's own step, which moves it to signed
-            TxPurpose::PoolMove(id) => EventType::Pool {
-                step: types::pool::PoolStep::MoveSigned {
-                    id,
-                    chain_id,
-                    nonce,
-                    tx_hash,
-                    raw_tx: raw_tx.clone(),
-                },
-            },
-            // a pull names its number: no swap holds it for the record to find
-            _ => EventType::PullSigned {
-                quote_hash,
-                chain_id,
-                nonce,
-                tx_hash,
-                raw_tx: raw_tx.clone(),
-            },
-        },
-    };
+    let record = record.line(quote_hash, chain_id, nonce, tx_hash, raw_tx.clone());
     let id = append_event(record)?;
     outbox::put(OutboxEntry {
         purpose,
         chain_id,
         nonce,
-        attempt,
+        attempt: None,
         hashes: vec![tx_hash],
         raw_tx,
         max_fee: fees.max_fee(),
@@ -1197,25 +1178,11 @@ async fn decide(
                 }
                 return usize::from(appended);
             }
-            let closed = if success {
-                close(entry, |quote_hash, attempt| EventType::TxConfirmed {
-                    quote_hash,
-                    attempt,
-                    chain_id,
-                    tx_hash,
-                    block,
-                })
-            } else {
-                close(entry, |quote_hash, attempt| EventType::TxFailed {
-                    quote_hash,
-                    attempt,
-                    reason: "the transaction reverted on the chain".to_string(),
-                })
-            };
-            if closed {
-                settle(entry, block, success, latest, credit);
-            }
-            usize::from(closed)
+            // a cancel closes with no line: `TxCancelled` already sealed that nonce's fate
+            // before the bytes went out, so what the chain did with them changes nothing in
+            // the fold
+            settle(entry, block, success, latest, credit);
+            1
         }
         // mined but not deep enough: nothing to do but wait
         Some(_) => 0,
@@ -1298,26 +1265,6 @@ pub(crate) fn credit_confirmations(
     } else {
         depth
     })
-}
-
-/// Appends the line that closes the entry's attempt when it has one, and answers whether
-/// the attempt is closed; [`settle`] then says what the outbox keeps of it. A refused
-/// append leaves the entry open, so the next pass sees the same receipt and tries again.
-///
-/// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
-/// fate before the bytes went out, so what the chain did with them changes nothing in the
-/// fold. Neither does a pull (the retired ABI v2 ICP flows'): `PullSigned` sealed its
-/// number. An entry that names a swap's attempt and carries no
-/// attempt number is neither shape, so it is left alone rather than closed against a number
-/// nobody recorded: the consensus log would otherwise carry an attempt this canister
-/// invented.
-///
-fn close(entry: &OutboxEntry, payload: impl FnOnce(QuoteHash, Attempt) -> EventType) -> bool {
-    match (entry.purpose.attempt_of(), entry.attempt) {
-        (None, _) => true,
-        (Some(quote_hash), Some(attempt)) => append_event(payload(quote_hash, attempt)).is_ok(),
-        (Some(_), None) => false,
-    }
 }
 
 /// What the outbox keeps of an entry whose attempt just closed on a receipt in `block` that
@@ -1639,11 +1586,8 @@ impl From<TxError> for settlement_api::types::tx::TxError {
                 cost_wei: cost.into(),
                 budget_wei: budget.into(),
             },
-            TxError::PurposeNeedsASwap(purpose) => Self::PurposeNeedsASwap {
+            TxError::NoRecord(purpose) => Self::PurposeNeedsASwap {
                 purpose: purpose.to_string(),
-            },
-            TxError::NoAttemptLeft { quote_hash } => Self::NoAttemptLeft {
-                quote_hash: quote_hash.into_bytes(),
             },
             TxError::NonceCancelled {
                 quote_hash,

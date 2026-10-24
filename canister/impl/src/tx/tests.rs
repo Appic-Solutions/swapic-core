@@ -2,6 +2,7 @@ use super::*;
 use crate::storage::on_fresh_memory;
 use serde_json::json;
 use types::chain_data::ChainReading;
+use types::Attempt;
 
 fn at(secs: u64) -> Timestamp {
     Timestamp::from_secs(secs).expect("a test instant is inside the epoch")
@@ -601,51 +602,6 @@ fn the_outcall_caps_are_derived_from_the_batch() {
         send_cap(types::config::MAX_BATCH_ITEMS as usize) < 2 * 1024 * 1024,
         "and so does the largest batch of broadcasts a config may ask for"
     );
-}
-
-/// The lines that close an attempt carry the attempt the entry recorded and never a
-/// default. A cancel closes no attempt and writes no line, and an entry that names a swap
-/// but carries no attempt number is left where it is rather than closed against a number
-/// this canister invented: the consensus log would otherwise hold an attempt nobody signed
-/// for. Rewritten for the kept closed entry: `close` answers whether the attempt closed,
-/// and `settle` says what the outbox keeps of it.
-#[test]
-fn closing_an_entry_never_invents_an_attempt() {
-    on_fresh_memory(|| {
-        crate::storage::init();
-        let never = |_: QuoteHash, _: Attempt| -> EventType {
-            panic!("no line is written for an entry that carries no attempt")
-        };
-
-        let mut cancel = entry_with(0, 1);
-        cancel.purpose = TxPurpose::Cancel(ChainId::BASE);
-        cancel.attempt = None;
-        assert!(
-            close(&cancel, never),
-            "a cancel's receipt closes its entry and writes nothing"
-        );
-
-        let mut unnumbered = entry_with(1, 1);
-        unnumbered.attempt = None;
-        outbox::put(unnumbered.clone());
-        assert!(!close(&unnumbered, never));
-        assert_eq!(
-            outbox::get(unnumbered.key()),
-            Some(unnumbered),
-            "a swap's entry with no attempt is left alone, not closed as attempt one"
-        );
-
-        // a pull is signed against its quote and not a swap's attempt: its record sealed
-        // the number, and the deposit its bytes made is read by the claim, so its receipt
-        // closes its entry and writes nothing, like a cancel's
-        let mut pull = entry_with(2, 1);
-        pull.purpose = TxPurpose::GaslessPull(QuoteHash::new([2; 32]));
-        pull.attempt = None;
-        assert!(
-            close(&pull, never),
-            "a pull's receipt closes its entry and writes nothing"
-        );
-    });
 }
 
 /// The answers of one chunk are sliced per entry in call order: the head first, then each
@@ -1347,4 +1303,49 @@ fn a_payouts_intent_is_the_one_ecos_portal_published() {
         None,
         "logged by another contract"
     );
+}
+
+/// The record a signed transaction is written in is decided before its nonce: a cancel, a
+/// retired v1 transaction, and a finish, a pool payout or a pool transfer with no detail are
+/// refused there, with nothing allocated; a relay, an approval, a rescue and a move need no
+/// detail.
+#[test]
+fn a_transaction_with_no_record_here_is_refused_before_its_nonce() {
+    let key = QuoteHash::new([4; 32]);
+    let refused = |purpose, words: &str| {
+        assert_eq!(
+            record_of(purpose, None).err(),
+            Some(TxError::NoRecord(match words {
+                "cancel" => "a cancel",
+                "v1" => "a retired v1 transaction",
+                "finish" => "a finish with no detail",
+                "payout" => "a pool payout with no order",
+                _ => "a pool transfer with no orphan",
+            })),
+            "{purpose:?}"
+        );
+    };
+    refused(TxPurpose::Cancel(ChainId::BASE), "cancel");
+    for v1 in [
+        TxPurpose::Burn(key),
+        TxPurpose::Mint(key),
+        TxPurpose::Payout(key),
+        TxPurpose::Refund(key),
+        TxPurpose::Reclaim(key),
+        TxPurpose::GaslessPull(key),
+        TxPurpose::Continue(key),
+    ] {
+        refused(v1, "v1");
+    }
+    refused(TxPurpose::Finish(key), "finish");
+    refused(TxPurpose::PoolPayout(1), "payout");
+    refused(TxPurpose::PoolTransfer([5; 32]), "transfer");
+    for kept in [
+        TxPurpose::Relay(key),
+        TxPurpose::PoolApprove,
+        TxPurpose::EcoRescue([6; 32]),
+        TxPurpose::PoolMove(2),
+    ] {
+        assert!(record_of(kept, None).is_ok(), "{kept:?}");
+    }
 }
