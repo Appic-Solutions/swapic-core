@@ -1932,3 +1932,58 @@ fn a_second_fee_line_for_one_swap_is_refused() {
     );
     assert_eq!(state.check(&fee(swap_id(2), 3)), Ok(()));
 }
+
+/// A flow in `status` with `landed_tx`, the rest empty: what the fold holds for it.
+fn stored_flow(status: types::FlowStatus, landed_tx: Option<TxHash>) -> types::Flow {
+    types::Flow {
+        kind: types::FlowKind::IcpToEvm,
+        status,
+        icp_quote: None,
+        evm_quote: None,
+        held: TokenAmount::ZERO,
+        held_ledger: None,
+        held_in_subaccount: false,
+        begun_at: None,
+        withdrawal_id: None,
+        withdrawn: None,
+        eth_held: TokenAmount::ZERO,
+        landed_tx,
+        chain_id: None,
+        tx_hash: None,
+        tx_open: false,
+        tx_block: None,
+        continuation: None,
+        failed_continuations: 0,
+        delivered: None,
+        reason: None,
+        created_at: Timestamp::from_nanos(1),
+        signed_id: None,
+        source_tx: None,
+        arrival: None,
+        gas_action: None,
+    }
+}
+
+/// A transfer is credited to one flow only: a `Landed` line naming a transfer another flow
+/// already landed is refused with that flow named, one naming a fresh transfer is not.
+#[test]
+fn a_transfer_landed_for_one_flow_is_refused_for_another() {
+    let landed = TxHash::new([0x1a; 32]);
+    let mut store = MemoryStore::default();
+    store.put_flow(qh(1), stored_flow(types::FlowStatus::Landed, Some(landed)));
+    store.put_flow(qh(2), stored_flow(types::FlowStatus::Withdrawn, None));
+    let state = HeapState::new(store);
+    let land = |tx_hash| EventType::Flow {
+        quote_hash: qh(2),
+        step: FlowStep::Landed {
+            chain_id: BASE,
+            tx_hash,
+            amount: amount(5),
+        },
+    };
+    assert_eq!(
+        state.check(&land(landed)),
+        Err(types::FlowError::LandedTwice(landed, qh(1)).into())
+    );
+    assert_eq!(state.check(&land(TxHash::new([0x1b; 32]))), Ok(()));
+}
