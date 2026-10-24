@@ -9,8 +9,6 @@ import "../helpers/EcoPlan.sol";
 /// an amount Eco never quoted. Terms (salt, deadlines, prover, fee) from a
 /// real Eco quote of the same shape (fixture `eco_base_arb_standin`).
 contract ForkEcoTest is ForkBase {
-    address constant PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
-    bytes32 constant INTENT_PUBLISHED = 0x43974895be1bcec7344337863fa7de24a0d1c315c0a994f663fe0ee220ddc8e4;
     uint256 constant X = 5_013_742;
 
     string j;
@@ -60,7 +58,7 @@ contract ForkEcoTest is ForkBase {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bool seen;
         for (uint256 i; i < logs.length; ++i) {
-            if (logs[i].emitter == PORTAL && logs[i].topics[0] == INTENT_PUBLISHED) {
+            if (logs[i].emitter == PORTAL && logs[i].topics[0] == IEcoPortal.IntentPublished.selector) {
                 assertEq(logs[i].topics[1], expected, "the Portal's intent hash is EcoPlan's at the real amount");
                 assertEq(logs[i].topics[2], bytes32(uint256(uint160(payer))), "creator is the payer");
                 (, bytes memory publishedRoute) = abi.decode(logs[i].data, (uint64, bytes));

@@ -20,9 +20,9 @@ contract OutOfGasTest is RunnerBase {
         usdc.approve(address(runner), type(uint256).max);
     }
 
-    function _env(uint256 minOut) internal view returns (bytes memory) {
+    function _env(Action action, uint256 minOut, uint64 minGas) internal view returns (bytes memory) {
         return Envelope.encode(
-            Envelope.Data(3, keccak256("ref"), Action.Swap, uint64(block.timestamp + 1 hours), user, address(weth), minOut, 0, 0, 0)
+            Envelope.Data(3, keccak256("ref"), action, uint64(block.timestamp + 1 hours), user, address(weth), minOut, 0, 0, minGas)
         );
     }
 
@@ -36,7 +36,7 @@ contract OutOfGasTest is RunnerBase {
     function _try(uint256 gas, Recipe memory r, uint256 minOut) internal returns (uint256 outcome) {
         uint256 snap = vm.snapshotState();
         vm.prank(executor);
-        try runner.fill{gas: gas}(address(usdc), 100e6, _env(minOut), r) {
+        try runner.fill{gas: gas}(address(usdc), 100e6, _env(Action.Swap, minOut, 0), r) {
             outcome = weth.balanceOf(user) > 0 ? 0 : 1;
         } catch (bytes memory err) {
             outcome = bytes4(err) == IRunner.OutOfGas.selector ? 2 : 3;
@@ -92,7 +92,7 @@ contract OutOfGasTest is RunnerBase {
         Recipe memory r = _recipe(6e16, 30_000, 3);
         assertEq(_try(30_000_000, r, 7e16), 1, "refunded with plenty of gas");
         vm.prank(executor);
-        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(7e16), r);
+        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(Action.Swap, 7e16, 0), r);
         assertEq(usdc.balanceOf(user), 100e6);
         assertEq(weth.balanceOf(user), 0);
     }
@@ -101,9 +101,9 @@ contract OutOfGasTest is RunnerBase {
         Recipe memory r = _recipe(6e16, 30_000, 3);
         vm.prank(executor);
         vm.expectRevert(IRunner.OutOfGas.selector);
-        runner.fill{gas: 3_000_000}(address(usdc), 100e6, _env(5e16), r);
+        runner.fill{gas: 3_000_000}(address(usdc), 100e6, _env(Action.Swap, 5e16, 0), r);
         vm.prank(executor);
-        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(5e16), r);
+        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(Action.Swap, 5e16, 0), r);
         assertEq(weth.balanceOf(user), 6e16, "the retry delivers");
         assertEq(usdc.balanceOf(user), 0);
     }
@@ -116,13 +116,7 @@ contract OutOfGasTest is RunnerBase {
         Recipe memory r = Recipe(address(new BurnsAll()), hex"01", address(0));
         vm.prank(executor);
         vm.expectRevert(IRunner.OutOfGas.selector);
-        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(5e16), r);
-    }
-
-    function _env(Action action, uint256 minOut, uint64 minGas) internal view returns (bytes memory) {
-        return Envelope.encode(
-            Envelope.Data(3, keccak256("ref"), action, uint64(block.timestamp + 1 hours), user, address(weth), minOut, 0, 0, minGas)
-        );
+        runner.fill{gas: 30_000_000}(address(usdc), 100e6, _env(Action.Swap, 5e16, 0), r);
     }
 
     /// The signed minimum: below it the arrival reverts before the action.

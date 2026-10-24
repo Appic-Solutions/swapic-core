@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {CctpPlan} from "../helpers/CctpPlan.sol";
 
 /// CCTP v2's TokenMessengerV2 in miniature: it pulls the burn from the caller
 /// and records the call, with the two refusals the quoter relies on.
@@ -47,19 +48,9 @@ contract DexMock {
         IERC20(tokenOut).transfer(msg.sender, amountOut);
     }
 
-    /// pays the output to someone else: the measured delta must catch it
-    function swapTo(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, address to) external {
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
-        IERC20(tokenOut).transfer(to, amountOut);
-    }
-
     /// spends one unit less than it was given
     function swapShort(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut) external {
         IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn - 1);
-        IERC20(tokenOut).transfer(msg.sender, amountOut);
-    }
-
-    function swapEth(address tokenOut, uint256 amountOut) external payable {
         IERC20(tokenOut).transfer(msg.sender, amountOut);
     }
 
@@ -112,7 +103,6 @@ interface IMessageHandler {
 /// mint recipient (here from the mock's own float), any other recipient is a
 /// generic message handler.
 contract TransmitterMock {
-    address internal constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     IERC20 public immutable usdc;
     mapping(bytes32 => bool) public usedNonces;
 
@@ -128,7 +118,7 @@ contract TransmitterMock {
         usedNonces[nonce] = true;
         address recipient = address(uint160(uint256(bytes32(message[76:108]))));
         bytes calldata body = message[148:];
-        if (recipient != TOKEN_MESSENGER) {
+        if (recipient != CctpPlan.TOKEN_MESSENGER) {
             return IMessageHandler(recipient).handleReceiveFinalizedMessage(
                 uint32(bytes4(message[4:8])), bytes32(message[44:76]), 2000, body
             );

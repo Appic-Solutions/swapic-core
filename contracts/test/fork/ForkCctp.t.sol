@@ -8,9 +8,6 @@ import "../helpers/CctpPlan.sol";
 /// as recipient), then a `depositForBurnWithHook` step on the real
 /// TokenMessengerV2 with the amount written at byte 4.
 contract ForkCctpTest is ForkBase {
-    bytes32 constant DEPOSIT_FOR_BURN = keccak256(
-        "DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)"
-    );
     bytes32 constant TRANSFER = keccak256("Transfer(address,address,uint256)");
 
     string j;

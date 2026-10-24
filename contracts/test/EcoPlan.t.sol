@@ -3,14 +3,13 @@ pragma solidity 0.8.24;
 
 import "forge-std/Test.sol";
 import "./helpers/EcoPlan.sol";
+import {PORTAL} from "./helpers/TestConstants.sol";
 
 /// The Eco offsets of abi.md section 6, checked against the encoder: the
 /// step built with zero amounts, with the Runner's writes applied for a
 /// delta X, must equal the call encoded directly at X and X - fee, for route
 /// lengths that land on and off a word boundary.
 contract EcoPlanTest is Test {
-    address constant PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
-
     function _terms() internal pure returns (EcoPlan.Terms memory t) {
         t.destination = 42161;
         t.portal = PORTAL;

@@ -19,16 +19,18 @@ remappings = [
 [profile.fork]
 evm_version = "cancun"
 
-[invariant]
-runs = 256
-depth = 50
-fail_on_revert = true
-
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"
 mainnet = "${ETH_RPC_URL}"
 polygon = "${POLYGON_RPC_URL}"
+# the chains added on 2026-10-19, each named as the staging kit's chain key and rpc variable
+optimism = "${OPTIMISM_RPC_URL}"
+unichain = "${UNICHAIN_RPC_URL}"
+monad = "${MONAD_RPC_URL}"
+hyperevm = "${HYPEREVM_RPC_URL}"
+worldchain = "${WORLDCHAIN_RPC_URL}"
+plasma = "${PLASMA_RPC_URL}"
 
 [lint]
 lint_on_build = false

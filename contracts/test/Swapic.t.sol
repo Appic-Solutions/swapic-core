@@ -13,6 +13,7 @@ import "./mocks/AuthorizationToken.sol";
 import "./mocks/Permit2Mock.sol";
 import "./mocks/Wallets.sol";
 import "./helpers/CctpPlan.sol";
+import {FEE} from "./helpers/TestConstants.sol";
 import {GoldenOrder} from "./OrderHash.t.sol";
 
 abstract contract SwapicBase is Test {
@@ -34,7 +35,6 @@ abstract contract SwapicBase is Test {
     address canister = address(0xCA);
     string constant WITNESS_TYPE =
         "OrderWitness witness)OrderWitness(bytes32 orderId)TokenPermissions(address token,uint256 amount)";
-    uint256 constant FEE = 50_000;
 
     function setUp() public virtual {
         vm.warp(1_790_000_000);
