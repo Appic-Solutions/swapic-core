@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "../../src/Swapic.sol";
 import "../../src/Runner.sol";
 import "../../src/SwapicTypes.sol";
@@ -23,6 +24,13 @@ abstract contract ForkBase is Test {
     address constant MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     address constant TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
     address constant SCALER = 0x2f577A41BeC1BE1152AeEA12e73b7391d15f655D;
+    address constant PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
+    bytes32 constant DEPOSIT_FOR_BURN =
+        keccak256("DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)");
+    /// USDC's ReceiveWithAuthorization type hash (EIP-3009)
+    bytes32 constant RECEIVE_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
+    /// the canister's fee step
+    uint256 constant FEE = 50_000;
 
     address constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant WETH_BASE = 0x4200000000000000000000000000000000000006;
@@ -129,6 +137,17 @@ abstract contract ForkBase is Test {
                 " total ",
                 vm.toString(21_000 + cg + used)
             )
+        );
+    }
+
+    /// The payer's EIP-3009 ReceiveWithAuthorization of the order on Base USDC.
+    function _auth3009(Order memory o) internal view returns (GaslessAuth memory a) {
+        a.door = Door.Auth3009;
+        a.validBefore = block.timestamp + 1 hours;
+        bytes32 structHash =
+            keccak256(abi.encode(RECEIVE_TYPEHASH, o.payer, SWAPIC, o.amountIn, 0, a.validBefore, swapic.orderId(o)));
+        a.signature = _sig(
+            PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC_BASE).DOMAIN_SEPARATOR(), structHash))
         );
     }
 

@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import "./ForkBase.sol";
 import "../helpers/CctpPlan.sol";
-import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 interface IPermit2Domain {
     function DOMAIN_SEPARATOR() external view returns (bytes32);
@@ -13,13 +12,8 @@ interface IPermit2Domain {
 /// a `vm.sign` key: the fee step pays the canister, the CCTP step burns the
 /// rest; any change to the plan breaks the authorization.
 contract ForkGaslessTest is ForkBase {
-    bytes32 constant RECEIVE_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
-    bytes32 constant DEPOSIT_FOR_BURN = keccak256(
-        "DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)"
-    );
     string constant WITNESS_TYPE =
         "OrderWitness witness)OrderWitness(bytes32 orderId)TokenPermissions(address token,uint256 amount)";
-    uint256 constant FEE = 50_000;
     uint256 forkBlock;
 
     function setUp() public {
@@ -42,15 +36,6 @@ contract ForkGaslessTest is ForkBase {
         o.steps[1] = CctpPlan.burnStep(
             MESSENGER, USDC_BASE, 99e6, 3, RECEIVER, RECEIVER, 100_000, 1000, _envelope(ref, Action.Swap, payer, WETH_ARB, 1)
         );
-    }
-
-    function _auth3009(Order memory o) internal view returns (GaslessAuth memory a) {
-        a.door = Door.Auth3009;
-        a.validBefore = block.timestamp + 1 hours;
-        bytes32 structHash =
-            keccak256(abi.encode(RECEIVE_TYPEHASH, payer, SWAPIC, o.amountIn, 0, a.validBefore, swapic.orderId(o)));
-        a.signature =
-            _sig(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC_BASE).DOMAIN_SEPARATOR(), structHash)));
     }
 
     function _auth2612(Order memory o) internal view returns (GaslessAuth memory a) {

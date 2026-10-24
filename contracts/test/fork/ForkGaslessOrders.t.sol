@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import "./ForkBase.sol";
 import "../helpers/EcoPlan.sol";
-import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 /// Base: the gas of two canister transactions abi.md section 10 lacked, each
 /// `runFor` Auth3009 on real USDC with the canister fee step:
@@ -11,22 +10,8 @@ import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC2
 ///     a WETH payout to the user;
 ///   - Eco: a `publishAndFund` Swap-route step on the real Portal 2.12.
 contract ForkGaslessOrdersTest is ForkBase {
-    bytes32 constant RECEIVE_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
-    address constant PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
-    uint256 constant FEE = 50_000;
-
     function _feeStep() internal view returns (Step memory) {
         return Step(USDC_BASE, abi.encodeCall(IERC20.transfer, (canister, FEE)), address(0), 0, new Write[](0));
-    }
-
-    function _auth3009(Order memory o) internal view returns (GaslessAuth memory a) {
-        a.door = Door.Auth3009;
-        a.validBefore = block.timestamp + 1 hours;
-        bytes32 structHash =
-            keccak256(abi.encode(RECEIVE_TYPEHASH, o.payer, SWAPIC, o.amountIn, 0, a.validBefore, swapic.orderId(o)));
-        a.signature = _sig(
-            PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC_BASE).DOMAIN_SEPARATOR(), structHash))
-        );
     }
 
     function test_gasless_same_chain_swap_and_payout() public {
