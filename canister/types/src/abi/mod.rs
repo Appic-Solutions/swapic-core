@@ -11,6 +11,7 @@
 mod tests;
 
 use crate::chain::ChainId;
+use crate::checked_amount::CheckedAmountOf;
 use crate::evm::EvmAddress;
 use crate::hash::QuoteHash;
 use crate::numeric::{Permit2Nonce, TokenAmount, UnixSeconds, Wei};
@@ -196,14 +197,6 @@ fn evm_address(address: Address) -> EvmAddress {
     EvmAddress::new(address.0 .0)
 }
 
-fn amount<Unit>(amount: crate::checked_amount::CheckedAmountOf<Unit>) -> U256 {
-    U256::from_be_bytes(amount.to_be_bytes())
-}
-
-fn checked<Unit>(value: U256) -> crate::checked_amount::CheckedAmountOf<Unit> {
-    crate::checked_amount::CheckedAmountOf::from_be_bytes(value.to_be_bytes())
-}
-
 fn word(bytes: [u8; 32]) -> FixedBytes<32> {
     FixedBytes(bytes)
 }
@@ -213,13 +206,13 @@ fn reward(reward: &EcoReward) -> Reward {
         deadline: reward.deadline.get(),
         creator: address(reward.creator),
         prover: address(reward.prover),
-        nativeAmount: amount(reward.native_amount),
+        nativeAmount: reward.native_amount.to_u256(),
         tokens: reward
             .tokens
             .iter()
             .map(|(token, value)| TokenAmountSol {
                 token: address(*token),
-                amount: amount(*value),
+                amount: value.to_u256(),
             })
             .collect(),
     }
@@ -230,11 +223,16 @@ fn eco_reward(reward: Reward) -> EcoReward {
         deadline: UnixSeconds::new(reward.deadline),
         creator: evm_address(reward.creator),
         prover: evm_address(reward.prover),
-        native_amount: checked(reward.nativeAmount),
+        native_amount: CheckedAmountOf::from_u256(reward.nativeAmount),
         tokens: reward
             .tokens
             .into_iter()
-            .map(|token| (evm_address(token.token), checked(token.amount)))
+            .map(|token| {
+                (
+                    evm_address(token.token),
+                    CheckedAmountOf::from_u256(token.amount),
+                )
+            })
             .collect(),
     }
 }
@@ -261,10 +259,10 @@ pub fn vault_execute(swap_ref: QuoteHash, calls: &[VaultCall], deltas: &[VaultDe
             .iter()
             .map(|call| Call {
                 target: address(call.target),
-                value: amount(call.value),
+                value: call.value.to_u256(),
                 data: call.data.clone().into(),
                 approveToken: address(call.approve_token),
-                approveAmount: amount(call.approve_amount),
+                approveAmount: call.approve_amount.to_u256(),
             })
             .collect(),
         deltas: deltas
@@ -290,7 +288,7 @@ pub fn vault_payout(
         swapRef: word(swap_ref.into_bytes()),
         token: address(token),
         to: address(to),
-        amount: amount(value),
+        amount: value.to_u256(),
     }
     .abi_encode()
 }
@@ -306,7 +304,7 @@ pub fn vault_refund(
         r#ref: word(swap_ref.into_bytes()),
         token: address(token),
         to: address(to),
-        amount: amount(value),
+        amount: value.to_u256(),
     }
     .abi_encode()
 }
@@ -331,7 +329,7 @@ pub fn vault_pull_with_permit(
         quoteHash: word(quote_hash.into_bytes()),
         token: address(token),
         owner: address(owner),
-        amount: amount(value),
+        amount: value.to_u256(),
         deadline: U256::from(deadline.get()),
         v: permit.v,
         r: word(permit.r),
@@ -356,9 +354,9 @@ pub fn vault_pull_with_permit2(
         permit: PermitTransferFrom {
             permitted: TokenPermissions {
                 token: address(permit.token),
-                amount: amount(permit.amount),
+                amount: permit.amount.to_u256(),
             },
-            nonce: amount(permit.nonce),
+            nonce: permit.nonce.to_u256(),
             deadline: U256::from(permit.deadline.get()),
         },
         signature: signature.to_vec().into(),
@@ -369,12 +367,12 @@ pub fn vault_pull_with_permit2(
 /// `depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)`.
 pub fn cctp_deposit_for_burn_with_hook(burn: &Burn) -> Vec<u8> {
     depositForBurnWithHookCall {
-        amount: amount(burn.amount),
+        amount: burn.amount.to_u256(),
         destinationDomain: burn.destination_domain,
         mintRecipient: word(burn.mint_recipient),
         burnToken: address(burn.burn_token),
         destinationCaller: word(burn.destination_caller),
-        maxFee: amount(burn.max_fee),
+        maxFee: burn.max_fee.to_u256(),
         minFinalityThreshold: burn.min_finality_threshold,
         hookData: burn.hook_data.clone().into(),
     }
@@ -495,10 +493,10 @@ pub fn decode_vault_execute(data: &[u8]) -> Option<VaultExecution> {
         .into_iter()
         .map(|call| VaultCall {
             target: evm_address(call.target),
-            value: checked(call.value),
+            value: CheckedAmountOf::from_u256(call.value),
             data: call.data.to_vec(),
             approve_token: evm_address(call.approveToken),
-            approve_amount: checked(call.approveAmount),
+            approve_amount: CheckedAmountOf::from_u256(call.approveAmount),
         })
         .collect();
     let deltas = call
@@ -525,7 +523,7 @@ pub fn decode_vault_payout(data: &[u8]) -> Option<VaultTransfer> {
         swap_ref: QuoteHash::new(call.swapRef.0),
         token: evm_address(call.token),
         to: evm_address(call.to),
-        amount: checked(call.amount),
+        amount: CheckedAmountOf::from_u256(call.amount),
     })
 }
 
@@ -536,7 +534,7 @@ pub fn decode_vault_refund(data: &[u8]) -> Option<VaultTransfer> {
         swap_ref: QuoteHash::new(call.r#ref.0),
         token: evm_address(call.token),
         to: evm_address(call.to),
-        amount: checked(call.amount),
+        amount: CheckedAmountOf::from_u256(call.amount),
     })
 }
 
@@ -548,8 +546,8 @@ pub fn decode_vault_pull_with_permit2(data: &[u8]) -> Option<Permit2Pull> {
         owner: evm_address(call.owner),
         permit: Permit2Permit {
             token: evm_address(call.permit.permitted.token),
-            amount: checked(call.permit.permitted.amount),
-            nonce: checked(call.permit.nonce),
+            amount: CheckedAmountOf::from_u256(call.permit.permitted.amount),
+            nonce: CheckedAmountOf::from_u256(call.permit.nonce),
             deadline: UnixSeconds::new(u64::try_from(call.permit.deadline).ok()?),
         },
         signature: call.signature.to_vec(),
@@ -564,7 +562,7 @@ pub fn decode_vault_pull_with_permit(data: &[u8]) -> Option<Eip2612Pull> {
         quote_hash: QuoteHash::new(call.quoteHash.0),
         token: evm_address(call.token),
         owner: evm_address(call.owner),
-        amount: checked(call.amount),
+        amount: CheckedAmountOf::from_u256(call.amount),
         deadline: UnixSeconds::new(u64::try_from(call.deadline).ok()?),
         signature: Permit {
             v: call.v,
@@ -578,12 +576,12 @@ pub fn decode_vault_pull_with_permit(data: &[u8]) -> Option<Eip2612Pull> {
 pub fn decode_cctp_deposit_for_burn_with_hook(data: &[u8]) -> Option<Burn> {
     let call = depositForBurnWithHookCall::abi_decode(data).ok()?;
     Some(Burn {
-        amount: checked(call.amount),
+        amount: CheckedAmountOf::from_u256(call.amount),
         destination_domain: call.destinationDomain,
         mint_recipient: call.mintRecipient.0,
         burn_token: evm_address(call.burnToken),
         destination_caller: call.destinationCaller.0,
-        max_fee: checked(call.maxFee),
+        max_fee: CheckedAmountOf::from_u256(call.maxFee),
         min_finality_threshold: call.minFinalityThreshold,
         hook_data: call.hookData.to_vec(),
     })
