@@ -144,7 +144,7 @@ impl PoolLedger {
         let order = crate::swapic::decode_order(&plan.order).ok_or(PoolStepError::Terms(
             "the plan is not abi.encode of an order",
         ))?;
-        if TokenAmount::from_be_bytes(order.amountIn.to_be_bytes::<32>()) != planned {
+        if TokenAmount::from_u256(order.amountIn) != planned {
             return Err(PoolStepError::Terms(
                 "the plan's order spends another amount",
             ));
