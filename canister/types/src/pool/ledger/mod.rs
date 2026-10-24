@@ -722,7 +722,7 @@ impl PoolLedger {
                     _ => Ok(()),
                 }
             }
-            PoolStep::TransferLost { r#ref } => {
+            PoolStep::TransferLost { r#ref, .. } => {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
@@ -1413,12 +1413,19 @@ impl PoolLedger {
                     }
                 });
             }
-            PoolStep::TransferLost { r#ref } => {
+            PoolStep::TransferLost { r#ref, held } => {
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
                     if let Some(sent) = payout.sent.as_mut() {
                         sent.lost = crate::pool::payout::Flag(true);
                     }
+                    // held for a human at once, as its tenth failure would
+                    if let Some(why) = held {
+                        payout.failed = Some(why.clone());
+                    }
                 });
+                if let (Some(why), Some((_, deposit))) = (held, deposit_out.as_mut()) {
+                    deposit.status = DepositStatus::PayoutFailed(why.clone());
+                }
             }
             PoolStep::AttemptFailed { r#ref, why } => {
                 let why = why.clone();

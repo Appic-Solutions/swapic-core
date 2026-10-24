@@ -1979,11 +1979,15 @@ pub enum PoolStep {
         r#ref: PoolRef,
     },
     /// An answer of a payout's transfer was lost (unknown, or too old to tell): it may have
-    /// landed, whatever comes after (the review, 2026-10-24).
+    /// landed, whatever comes after (the review, 2026-10-24). `held`, why: on a ledger the
+    /// canister does not know to deduplicate, never asked again, the payout held for a human
+    /// at once.
     #[n(52)]
     TransferLost {
         #[n(0)]
         r#ref: PoolRef,
+        #[n(1)]
+        held: Option<String>,
     },
     // P11c, the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.

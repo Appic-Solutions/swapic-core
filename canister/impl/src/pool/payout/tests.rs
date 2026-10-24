@@ -439,6 +439,66 @@ fn an_icpswap_leg_pays_its_output() {
     });
 }
 
+/// The review (2026-10-24): an output transfer on a token's ledger the canister does not
+/// know to deduplicate, its answer lost, is never asked again by the drive (that ledger may
+/// take it as a new transfer and pay twice): the payout is held for a human at once, for
+/// `resolve_deposit`'s `MarkPaid` if it landed.
+#[test]
+fn a_lost_answer_on_a_token_ledger_holds_the_payout_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        fake.lose_answers.set(1);
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        let held = deposit(&r#ref).unwrap();
+        assert!(
+            matches!(held.status, DepositStatus::PayoutFailed(ref why) if why.contains("ALERT")),
+            "{:?}",
+            held.status
+        );
+        assert!(held.payout.sent.unwrap().lost.0);
+        let calls = fake.calls.borrow().len();
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_ok());
+        assert_eq!(fake.calls.borrow().len(), calls, "never asked again");
+    });
+}
+
+/// The review (2026-10-24): a transfer on a token's ledger asked with no answer recorded (a
+/// lost answer not noted, a trap mid-call) is never asked again by the drive either: held.
+#[test]
+fn an_unanswered_ask_on_a_token_ledger_is_never_asked_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(token(), 5_000);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(8_000_u32)));
+        fake.swap_out.set(Some(TokenAmount::from(7_900_u32)));
+        fake.refuse.set(true);
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        // its ask on record again, its answer never recorded
+        record_at(
+            PoolStep::TransferAsked {
+                r#ref,
+                token: PrincipalBytes(token()),
+                amount: TokenAmount::from(5_900_u32),
+                spent: usdc(99),
+            },
+            clock(),
+        )
+        .unwrap();
+        let calls = fake.calls.borrow().len();
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        assert_eq!(fake.calls.borrow().len(), calls, "never asked again");
+        assert!(matches!(
+            deposit(&r#ref).unwrap().status,
+            DepositStatus::PayoutFailed(_)
+        ));
+    });
+}
+
 /// A swap whose answer never came is never called again: its outcome is unknown, and the
 /// payout fails until it stops for a human.
 #[test]
@@ -1265,8 +1325,9 @@ fn a_token_delisted_before_its_swap_falls_back() {
 }
 
 /// Review fix 8: the exact transfer is fixed when it is first known and every retry reuses
-/// it, whatever the settings say by then: a withdrawal's ckUSDC amount from its start, a
-/// swap's output transfer from its `Swapped`.
+/// it, whatever the settings say by then: a withdrawal's ckUSDC amount from its start. A
+/// swap's output transfer on a token's ledger, its answer lost, is not retried at all (the
+/// review, 2026-10-24: that ledger may take it as a new transfer): held for a human.
 #[test]
 fn a_retry_reuses_the_transfer_its_payout_fixed() {
     on_fresh_memory(|| {
@@ -1344,9 +1405,12 @@ fn a_retry_reuses_the_transfer_its_payout_fixed() {
                 format!("transfer {fixed}"),
                 "transfer 5900".to_string(),
                 format!("transfer {fixed}"),
-                "transfer 5900".to_string(),
             ]
         );
+        assert!(matches!(
+            deposit(&r#ref).unwrap().status,
+            DepositStatus::PayoutFailed(_)
+        ));
         assert_eq!(
             fake.transfers(),
             vec![

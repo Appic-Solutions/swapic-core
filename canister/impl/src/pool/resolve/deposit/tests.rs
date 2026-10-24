@@ -160,7 +160,7 @@ fn held_paying(byte: u8, sent: Sent, token_out: Principal, path: PayoutPath) -> 
         .unwrap();
     }
     if sent == Sent::LostThenRefused {
-        record_at(PoolStep::TransferLost { r#ref }, at(5)).unwrap();
+        record_at(PoolStep::TransferLost { r#ref, held: None }, at(5)).unwrap();
     }
     if matches!(sent, Sent::Refused | Sent::LostThenRefused) {
         record_at(PoolStep::TransferRefused { r#ref }, at(5)).unwrap();

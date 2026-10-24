@@ -2100,9 +2100,12 @@ fn a_ledger_block_resolves_one_lost_stake() {
 fn a_transfer_whose_answer_was_lost_may_have_landed_even_once_refused() {
     let mut pool = funded(usdc(1_000));
     let r#ref = started(&mut pool, 1, 1);
-    assert!(pool.step(PoolStep::TransferLost { r#ref }).is_err());
+    assert!(pool
+        .step(PoolStep::TransferLost { r#ref, held: None })
+        .is_err());
     pool.step(asked(r#ref)).unwrap();
-    pool.step(PoolStep::TransferLost { r#ref }).unwrap();
+    pool.step(PoolStep::TransferLost { r#ref, held: None })
+        .unwrap();
     pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
     let sent = pool.deposits[&r#ref].payout.sent.unwrap();
     assert!(sent.refused && sent.lost.0);
@@ -2160,7 +2163,8 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
     let mut pool = funded(usdc(1_000));
     let r#ref = started(&mut pool, 1, 1);
     pool.step(asked(r#ref)).unwrap();
-    pool.step(PoolStep::TransferLost { r#ref }).unwrap();
+    pool.step(PoolStep::TransferLost { r#ref, held: None })
+        .unwrap();
     pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
     let mut other = asked(r#ref);
     if let PoolStep::TransferAsked { amount, .. } = &mut other {

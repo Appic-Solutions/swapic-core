@@ -646,6 +646,21 @@ fn samples() -> Vec<Sample> {
     all.extend(resolved_pull_samples());
     all.extend(transfer_asked_samples());
     all.extend(transfer_lost_samples());
+    all.push(sample(
+        "transfer's answer lost on a ledger that may not deduplicate it, held",
+        Event::seal(
+            EventIndex::new(23_000),
+            Timestamp::from_nanos(1_800_000_000_000_002_301),
+            EventHash::new([0xa2; 32]),
+            crate::events::EventType::Pool {
+                step: crate::pool::PoolStep::TransferLost {
+                    r#ref: crate::hash::PoolRef::new([0xa3; 32]),
+                    held: Some("ALERT: held for a human".to_string()),
+                },
+            },
+        )
+        .expect("every sample has a preimage"),
+    ));
     all
 }
 
@@ -713,6 +728,7 @@ fn transfer_lost_samples() -> Vec<Sample> {
                 crate::events::EventType::Pool {
                     step: PoolStep::TransferLost {
                         r#ref: PoolRef::new([0xb3; 32]),
+                        held: None,
                     },
                 },
             )
