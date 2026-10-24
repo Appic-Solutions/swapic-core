@@ -316,11 +316,11 @@ pub fn signed_once(key: QuoteHash) -> Result<Option<u64>, String> {
 }
 
 /// Whether a transaction of `purpose`, one of the pool's own, is being signed (its nonce
-/// held) or is in the outbox.
+/// held) or is in the outbox. A purpose with no key (a cancel) is none of the pool's: false.
 pub fn in_flight(purpose: TxPurpose) -> bool {
-    let key = purpose
-        .quote_hash()
-        .expect("BUG: a pool transaction's purpose has a key");
+    let Some(key) = purpose.quote_hash() else {
+        return false;
+    };
     read_state(|state| state.store().has_unsigned_nonce_for(&key))
         || crate::storage::outbox::find(purpose).is_some()
 }
