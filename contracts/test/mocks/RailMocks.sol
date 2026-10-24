@@ -47,19 +47,9 @@ contract DexMock {
         IERC20(tokenOut).transfer(msg.sender, amountOut);
     }
 
-    /// pays the output to someone else: the measured delta must catch it
-    function swapTo(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, address to) external {
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
-        IERC20(tokenOut).transfer(to, amountOut);
-    }
-
     /// spends one unit less than it was given
     function swapShort(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut) external {
         IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn - 1);
-        IERC20(tokenOut).transfer(msg.sender, amountOut);
-    }
-
-    function swapEth(address tokenOut, uint256 amountOut) external payable {
         IERC20(tokenOut).transfer(msg.sender, amountOut);
     }
 
