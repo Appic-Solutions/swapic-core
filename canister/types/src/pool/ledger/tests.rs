@@ -1569,6 +1569,7 @@ fn a_transfer_asked_may_have_landed_until_the_ledger_refuses_it() {
             amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
             spent: usdc(99),
             refused: false,
+            lost: crate::pool::payout::Flag(false),
         })
     );
     let mut other = asked(r#ref);
@@ -2088,4 +2089,66 @@ fn a_ledger_block_resolves_one_lost_stake() {
         pool.ledger.resolved_pulls,
         Some([9_u64, 10].into_iter().collect())
     );
+}
+
+/// The review (2026-10-24): an answer of a payout's transfer that was lost (unknown, or too
+/// old to tell) is kept for good: a later refusal does not prove the lost ask landed nowhere
+/// (a ledger that does not deduplicate may refuse a re-ask because the first drained the
+/// money). Such a payout is neither refunded nor asked afresh; only its own dedup pair is
+/// asked again, on the ckUSDC ledger it started with.
+#[test]
+fn a_transfer_whose_answer_was_lost_may_have_landed_even_once_refused() {
+    let mut pool = funded(usdc(1_000));
+    let r#ref = started(&mut pool, 1, 1);
+    assert!(pool.step(PoolStep::TransferLost { r#ref }).is_err());
+    pool.step(asked(r#ref)).unwrap();
+    pool.step(PoolStep::TransferLost { r#ref }).unwrap();
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    let sent = pool.deposits[&r#ref].payout.sent.unwrap();
+    assert!(sent.refused && sent.lost.0);
+    assert!(!pool.deposits[&r#ref].payout.nothing_went_out());
+    // asked again: still lost
+    pool.step(asked(r#ref)).unwrap();
+    assert!(pool.deposits[&r#ref].payout.sent.unwrap().lost.0);
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    hold(&mut pool, r#ref);
+    assert!(pool
+        .step(resolved(r#ref, DepositResolution::Refund, None))
+        .is_err());
+    assert!(pool
+        .step(resolved(r#ref, DepositResolution::Retry, Some(7)))
+        .is_err());
+    pool.step(resolved(r#ref, DepositResolution::Retry, None))
+        .unwrap();
+}
+
+/// The review (2026-10-24): the fold does not trust the door for a retry's dedup instant: it
+/// is the line's own time or before it, and leaves the next drive inside the ledger's window
+/// less the margin.
+#[test]
+fn a_retrys_dedup_instant_is_the_lines_time_inside_the_window() {
+    use std::time::Duration;
+    let pool = funded(usdc(1_000));
+    let line = Timestamp::from_nanos(1_800_000_000_000_000_000);
+    let retry_at = |at: Timestamp| PoolStep::DepositResolved {
+        r#ref: PoolRef::new([1; 32]),
+        resolution: DepositResolution::Retry,
+        retry_at: Some(at),
+    };
+    assert_eq!(pool.ledger.admits_at(&retry_at(line), line), Ok(()));
+    let later = line.checked_add(Duration::from_secs(1)).unwrap();
+    assert!(pool.ledger.admits_at(&retry_at(later), line).is_err());
+    let edge = Timestamp::from_nanos(
+        line.as_nanos() - (crate::pool::DEDUP_WINDOW - crate::pool::RETRY_MARGIN).as_nanos() as u64,
+    );
+    assert!(pool.ledger.admits_at(&retry_at(edge), line).is_err());
+    let inside = Timestamp::from_nanos(edge.as_nanos() + 1);
+    assert_eq!(pool.ledger.admits_at(&retry_at(inside), line), Ok(()));
+    // a line with no instant has no rule of time
+    let no_instant = PoolStep::DepositResolved {
+        r#ref: PoolRef::new([1; 32]),
+        resolution: DepositResolution::Retry,
+        retry_at: None,
+    };
+    assert_eq!(pool.ledger.admits_at(&no_instant, line), Ok(()));
 }

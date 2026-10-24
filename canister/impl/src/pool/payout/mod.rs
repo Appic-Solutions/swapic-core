@@ -672,25 +672,32 @@ async fn send_out(
     what: &str,
     clock: impl Fn() -> Timestamp,
 ) -> Result<u64, Stop> {
-    let asked = types::pool::Sent {
-        token: PrincipalBytes(token),
-        amount,
-        spent,
-        refused: false,
-    };
-    // a line the fold refuses (an earlier ask on other terms may have landed) is a counted
-    // failure: the payout reaches a human, never loops uncounted (the review, 2026-10-24)
-    if progress_of(payout.id).and_then(|progress| progress.sent) != Some(asked) {
+    let token_bytes = PrincipalBytes(token);
+    // asked already, on these terms and not refused since: not asked again
+    let asked = progress_of(payout.id)
+        .and_then(|progress| progress.sent)
+        .is_some_and(|sent| {
+            !sent.refused && (sent.token, sent.amount, sent.spent) == (token_bytes, amount, spent)
+        });
+    // the fold's refusal of an ask on other terms (an earlier one may have landed) is a
+    // counted failure, so the payout reaches a human; any other line not recorded is driven
+    // again, uncounted (the review, 2026-10-24)
+    if !asked {
         pool_store::record_at(
             PoolStep::TransferAsked {
                 r#ref: payout.id,
-                token: asked.token,
+                token: token_bytes,
                 amount,
                 spent,
             },
             clock(),
         )
-        .map_err(|error| Stop::Failed(format!("{what} was not asked: {error}")))?;
+        .map_err(|error| match error {
+            crate::storage::events::AppendError::Transition(types::TransitionError::Pool(
+                types::pool::PoolStepError::AskedOnOtherTerms,
+            )) => Stop::Failed(format!("{what} was not asked: {error}")),
+            error => Stop::Append(error.to_string()),
+        })?;
     }
     match ledgers
         .transfer(token, payout.to, amount, payout.dedup(attempt))
@@ -698,6 +705,21 @@ async fn send_out(
     {
         Ok(block) => Ok(block),
         Err(error) => {
+            // an answer lost (unknown, or too old to tell) is kept for good: it may have
+            // landed whatever comes after (the review, 2026-10-24)
+            let lost = progress_of(payout.id)
+                .and_then(|progress| progress.sent)
+                .is_some_and(|sent| sent.lost.0);
+            if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !lost {
+                if let Err(unnoted) =
+                    pool_store::record_at(PoolStep::TransferLost { r#ref: payout.id }, clock())
+                {
+                    crate::pool::log(&format!(
+                        "the pool payout {}'s lost answer was not noted: {unnoted}",
+                        payout.id
+                    ));
+                }
+            }
             // a refusal counts whatever its line does: one not recorded leaves the transfer
             // asked, which only blocks a refund (the safe way, the review, 2026-10-24)
             if matches!(error, CallError::Refused(_)) {
@@ -1703,9 +1725,8 @@ pub fn fail(id: PoolRef, why: String, now: Timestamp) {
     }
 }
 
-/// How long a ledger deduplicates a transfer: a pull asked again after it can no longer be
-/// told from a new one, so the drive stops asking (a little before, for the clocks' skew).
-pub const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(23 * 3_600);
+/// How long a ledger deduplicates a transfer (the fold's own rule reads it too).
+pub use types::pool::DEDUP_WINDOW;
 
 /// The pool's guard, as the payouts read it before every outflow.
 pub fn guard() -> Result<(), String> {

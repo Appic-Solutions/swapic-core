@@ -564,7 +564,7 @@ pub fn append_event_at(
     // and an index off the log's length would write one slot and apply another
     ensure_fold_in_step()?;
     let mut state = State::new(StableStore(()));
-    state.check(&payload)?;
+    state.check_at(&payload, timestamp)?;
     let meta = state.meta();
     let index = meta.next_event_index;
     if index.next().is_none() {

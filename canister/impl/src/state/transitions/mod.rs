@@ -5,7 +5,8 @@ use types::events::{Event, EventType, TxPurpose};
 use types::quote::quote_hash_of;
 use types::FlowStep;
 use types::{
-    ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, TransitionError,
+    ChainId, EventHash, EventIndex, Nonce, NonceKey, Outcome, Quote, QuoteHash, Timestamp,
+    TransitionError,
 };
 
 /// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
@@ -19,6 +20,16 @@ fn in_preimage_range<Unit>(amount: CheckedAmountOf<Unit>) -> Result<(), Transiti
 }
 
 impl<S: Store> State<S> {
+    /// [`State::check`], and the rules that read the line's own seal time `at` (the review,
+    /// 2026-10-24: a pool step's dedup instant): what an append and a replay run.
+    pub fn check_at(&self, event: &EventType, at: Timestamp) -> Result<(), TransitionError> {
+        self.check(event)?;
+        if let EventType::Pool { step } = event {
+            self.pool().admits_at(step, at)?;
+        }
+        Ok(())
+    }
+
     /// Every rule that can refuse an event. The match is exhaustive with no wildcard arm,
     /// so a new variant fails to compile until someone decides its rule. Every checked
     /// computation [`apply_state_transition`] relies on is run here first.
@@ -786,7 +797,7 @@ pub fn replay_into(
             return Err(ReplayError::LogFull { index });
         }
         state
-            .check(&event.payload)
+            .check_at(&event.payload, event.timestamp)
             .map_err(|error| ReplayError::Refused { index, error })?;
         apply_state_transition(state, &event);
     }

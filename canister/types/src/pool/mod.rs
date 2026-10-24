@@ -102,6 +102,22 @@ impl IcpAccount {
     }
 }
 
+/// How long a ledger deduplicates a transfer: a pull asked again after it can no longer be
+/// told from a new one, so the drive stops asking (a little before, for the clocks' skew).
+pub const DEDUP_WINDOW: Duration = Duration::from_secs(23 * 3_600);
+
+/// What of the ledger's window a retry must leave its next drive (the review, 2026-10-24).
+pub const RETRY_MARGIN: Duration = Duration::from_secs(3_600);
+
+/// Whether a ledger still deduplicates a transfer whose dedup instant is `attempt_at` after a
+/// retry at `now`, its next drive [`RETRY_MARGIN`] away at most: a transfer that landed is
+/// then answered `Duplicate`.
+pub fn deduplicated(attempt_at: Timestamp, now: Timestamp) -> bool {
+    now.saturating_duration_since(attempt_at)
+        .saturating_add(RETRY_MARGIN)
+        < DEDUP_WINDOW
+}
+
 /// CRC-32 (IEEE 802.3), the check the ICP ledger puts before an account identifier's hash.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
@@ -1082,6 +1098,10 @@ pub struct Sent {
     pub spent: TokenAmount,
     #[n(3)]
     pub refused: bool,
+    /// Whether an answer of it was ever lost (unknown, or too old to tell), kept for good
+    /// (the review, 2026-10-24): a later refusal does not prove the lost ask landed nowhere.
+    #[n(4)]
+    pub lost: crate::pool::payout::Flag,
 }
 
 impl PayoutProgress {
@@ -1096,10 +1116,16 @@ impl PayoutProgress {
 
     /// Whether the canister knows nothing of it went out (the review, 2026-10-24): never
     /// started; or started, no ICPSwap leg moved money, and no transfer to the recipient may
-    /// have landed (none asked, or the last ask refused by the ledger for sure).
+    /// have landed (none asked, or the last ask refused by the ledger for sure with no answer
+    /// of it ever lost).
     pub fn nothing_went_out(&self) -> bool {
-        self.attempt.is_none()
-            || (!self.moved_on_icp() && self.sent.is_none_or(|sent| sent.refused))
+        self.attempt.is_none() || (!self.moved_on_icp() && self.cannot_land_twice())
+    }
+
+    /// Whether its transfer to the recipient cannot land twice if asked afresh: never asked,
+    /// or refused by the ledger for sure at its last ask and no answer of it ever lost.
+    pub fn cannot_land_twice(&self) -> bool {
+        self.sent.is_none_or(|sent| sent.refused && !sent.lost.0)
     }
 
     /// The leg a swap step names.
@@ -1939,9 +1965,16 @@ pub enum PoolStep {
         #[n(3)]
         spent: TokenAmount,
     },
-    /// The ledger refused a payout's transfer as asked, for sure: nothing of it landed.
+    /// The ledger refused a payout's transfer as asked, for sure: nothing of that ask landed.
     #[n(51)]
     TransferRefused {
+        #[n(0)]
+        r#ref: PoolRef,
+    },
+    /// An answer of a payout's transfer was lost (unknown, or too old to tell): it may have
+    /// landed, whatever comes after (the review, 2026-10-24).
+    #[n(52)]
+    TransferLost {
         #[n(0)]
         r#ref: PoolRef,
     },
@@ -2244,6 +2277,7 @@ impl PoolStep {
             PoolStep::StakeResolved { .. } => "StakeResolved",
             PoolStep::TransferAsked { .. } => "TransferAsked",
             PoolStep::TransferRefused { .. } => "TransferRefused",
+            PoolStep::TransferLost { .. } => "TransferLost",
             PoolStep::OrphanBooked { .. } => "OrphanBooked",
             PoolStep::OrphanRefundSigned { .. } => "OrphanRefundSigned",
             PoolStep::OrphanRefundClosed { .. } => "OrphanRefundClosed",

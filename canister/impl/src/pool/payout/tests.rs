@@ -568,6 +568,7 @@ fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
             amount: less(99, 1),
             spent: usdc(99),
             refused: false,
+            lost: types::pool::payout::Flag(false),
         };
         let sent = || deposit(&r#ref).unwrap().payout.sent;
         fake.refuse.set(true);
@@ -588,7 +589,12 @@ fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
             block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Retry(_))
         ));
-        assert_eq!(sent(), Some(asked));
+        // its answer lost, for good: it may have landed whatever comes after
+        let lost = Sent {
+            lost: types::pool::payout::Flag(true),
+            ..asked
+        };
+        assert_eq!(sent(), Some(lost));
         assert!(!deposit(&r#ref).unwrap().payout.nothing_went_out());
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
@@ -623,6 +629,46 @@ fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
             Err(Stop::Failed(_))
         ));
         assert_eq!(fake.calls.borrow().len(), calls, "never asked");
+    });
+}
+
+/// The review (2026-10-24): only the fold's refusal of an ask on other terms is a counted
+/// failure; any other line not recorded (here, a payout the fold does not know) is driven
+/// again, uncounted, and nothing is asked.
+#[test]
+fn an_ask_not_recorded_for_another_reason_is_driven_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let fake = Fake::default();
+        let payout = Payout {
+            id: PoolRef::new([9; 32]),
+            to: account(1),
+            token_out: ckusdc(),
+            min_out: 1,
+            amount: usdc(1),
+            progress: PayoutProgress::default(),
+        };
+        let attempt = PayoutAttempt {
+            created_at: clock(),
+            memo: [9; 32],
+            path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
+        };
+        assert!(matches!(
+            block_on(send_out(
+                &fake,
+                &payout,
+                &attempt,
+                ckusdc(),
+                usdc(1),
+                usdc(1),
+                "the transfer",
+                clock
+            )),
+            Err(Stop::Append(_))
+        ));
+        assert!(fake.calls.borrow().is_empty());
     });
 }
 

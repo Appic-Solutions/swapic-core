@@ -47,7 +47,13 @@ impl LedgerBlocks for crate::pool::payout::Live {
         ledger: Principal,
         block: u64,
     ) -> Result<Option<LedgerTransfer>, CallError> {
-        crate::ic::ledger_transfer_at(ledger, block).await
+        let configured = crate::storage::pool::ledger()
+            .settings
+            .and_then(|settings| settings.routes)
+            .and_then(|routes| routes.icp_ledger)
+            .map(|icp| icp.0);
+        let is_icp = crate::ic::is_icp_ledger(ledger, configured);
+        crate::ic::ledger_transfer_at(ledger, block, is_icp).await
     }
 }
 
