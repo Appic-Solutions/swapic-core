@@ -106,15 +106,24 @@ pub fn scaled_of(answer: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// What a plan does with a payout.
+/// Why a plan does not go on to its fit as it stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fit {
-    /// Signed next, with this order and its pin.
-    Sign(Box<Fitted>),
     /// Waits for the watcher's order, as before the plan flow: why.
     Wait(String),
     /// Undone at once: why.
     Undo(String),
+}
+
+/// A plan decided for its payout before any read ([`decide_payout`]): the order with the
+/// payout's exact amount in, the place of its KyberSwap step if it has one, that amount, and
+/// the plan's gas limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decided {
+    pub order: Order,
+    pub swap: Option<usize>,
+    pub amount: TokenAmount,
+    pub gas_limit: u64,
 }
 
 /// A plan filled with the payout's real amount, checked: what is signed.
@@ -199,16 +208,20 @@ pub fn decide(
 
 /// [`decide`] for `payout`, its plan, planned amount and amount read off it: none for a
 /// payout with no plan or no amount yet.
-pub fn decide_payout(
-    payout: &EvmPayout,
-    now_s: u64,
-) -> Option<Result<(Order, Option<usize>), Fit>> {
+pub fn decide_payout(payout: &EvmPayout, now_s: u64) -> Option<Result<Decided, Fit>> {
     let (Some(plan), PayoutKind::IcpSwap(terms), Some(amount)) =
         (payout.plan.as_ref(), payout.kind, payout.amount)
     else {
         return None;
     };
-    Some(decide(plan, terms.planned?, amount, now_s))
+    Some(
+        decide(plan, terms.planned?, amount, now_s).map(|(order, swap)| Decided {
+            order,
+            swap,
+            amount,
+            gas_limit: plan.gas_limit,
+        }),
+    )
 }
 
 /// The plan's KyberSwap `step` rewritten to `route` for `amount`, pure: the same swap but for
@@ -255,34 +268,33 @@ pub fn rescaled(step: &Step, route: Vec<u8>, amount: TokenAmount) -> Result<Step
     Ok(rewritten)
 }
 
-/// Fits `payout`'s plan to its exact amount at `now`: the scaler read (once, for a KyberSwap
-/// step), the rewritten step's checks, then every check of a payout order.
-pub async fn fit(reads: &impl PlanReads, payout: &EvmPayout, now: Timestamp) -> Fit {
-    let (Some(plan), Some(amount)) = (payout.plan.as_ref(), payout.amount) else {
-        return Fit::Wait("the payout has no plan".to_string());
-    };
-    let (mut order, swap) = match decide_payout(payout, now.as_secs().get()) {
-        Some(Ok(decided)) => decided,
-        Some(Err(fit)) => return fit,
-        None => return Fit::Wait("the payout has no plan".to_string()),
-    };
+/// Fits payout `id`'s plan, as [`decide_payout`] decided it, to its exact amount at `now`:
+/// the scaler read (once, for a KyberSwap step), the rewritten step's checks, then every check
+/// of a payout order. The order to sign, or why the payout waits.
+pub async fn fit(
+    reads: &impl PlanReads,
+    id: u64,
+    decided: Decided,
+    now: Timestamp,
+) -> Result<Fitted, String> {
+    let Decided {
+        mut order,
+        swap,
+        amount,
+        gas_limit,
+    } = decided;
     if let Some(at) = swap {
-        let route = match reads.scaled(&order.steps[at].data, amount).await {
-            Ok(route) => route,
-            Err(why) => return Fit::Wait(format!("the plan's swap was not rewritten: {why}")),
-        };
-        order.steps[at] = match rescaled(&order.steps[at], route, amount) {
-            Ok(step) => step,
-            Err(why) => return Fit::Wait(why),
-        };
+        let route = reads
+            .scaled(&order.steps[at].data, amount)
+            .await
+            .map_err(|why| format!("the plan's swap was not rewritten: {why}"))?;
+        order.steps[at] = rescaled(&order.steps[at], route, amount)?;
     }
     // the payout as it stands after the read
-    let Some(payout) = crate::storage::pool::payout(payout.id) else {
-        return Fit::Wait("the payout is gone".to_string());
-    };
+    let payout = crate::storage::pool::payout(id).ok_or("the payout is gone")?;
     let bytes = swapic::encode_order(&order);
-    match reads.checked(&payout, &order, &bytes, plan.gas_limit, now) {
-        Ok(pinned) => Fit::Sign(Box::new(Fitted { order, pinned })),
-        Err(error) => Fit::Wait(format!("the fitted plan is refused: {error:?}")),
-    }
+    let pinned = reads
+        .checked(&payout, &order, &bytes, gas_limit, now)
+        .map_err(|error| format!("the fitted plan is refused: {error:?}"))?;
+    Ok(Fitted { order, pinned })
 }

@@ -510,30 +510,32 @@ async fn try_plan(
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Tried, Stop> {
     let id = payout.id;
-    if let Some(Err(Fit::Undo(why))) =
-        crate::pool::plan::decide_payout(payout, clock().as_secs().get())
-    {
-        undo(id, why, clock())?;
-        return Ok(Tried::Undone);
-    }
-    if open(guard).is_err() {
-        return Ok(Tried::Closed);
-    }
-    let why = match crate::pool::plan::fit(reads, payout, clock()).await {
-        Fit::Sign(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(fitted)),
-        // closed during the read: tried again once it opens, not counted
-        Fit::Sign(_) => {
-            pool::log(&format!(
-                "the pool payout {id}'s plan waits: the pool closed"
-            ));
-            return Ok(Tried::Closed);
-        }
-        Fit::Wait(why) => why,
+    let decided = match crate::pool::plan::decide_payout(payout, clock().as_secs().get()) {
         // the user's ckUSDC back at once
-        Fit::Undo(why) => {
+        Some(Err(Fit::Undo(why))) => {
             undo(id, why, clock())?;
             return Ok(Tried::Undone);
         }
+        Some(Err(Fit::Wait(why))) => Err(why),
+        Some(Ok(decided)) => Ok(decided),
+        None => Err("the payout has no plan".to_string()),
+    };
+    if open(guard).is_err() {
+        return Ok(Tried::Closed);
+    }
+    let why = match decided {
+        Ok(decided) => match crate::pool::plan::fit(reads, id, decided, clock()).await {
+            Ok(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(Box::new(fitted))),
+            // closed during the read: tried again once it opens, not counted
+            Ok(_) => {
+                pool::log(&format!(
+                    "the pool payout {id}'s plan waits: the pool closed"
+                ));
+                return Ok(Tried::Closed);
+            }
+            Err(why) => why,
+        },
+        Err(why) => why,
     };
     pool::log(&format!("the pool payout {id} waits for an order: {why}"));
     crate::pool::plan::count_try(id, why, clock());
