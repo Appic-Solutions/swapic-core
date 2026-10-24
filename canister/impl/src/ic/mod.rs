@@ -160,7 +160,7 @@ pub struct LedgerTransfer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parsed {
     /// The transfer it logs.
-    Transfer(LedgerTransfer),
+    Transfer(Box<LedgerTransfer>),
     /// A block of another kind (a mint, a burn, an approval): no transfer.
     Other,
     /// Not in the shape this read knows: the next read is tried.
@@ -244,7 +244,7 @@ async fn lists_icrc3(ledger: Principal) -> Result<bool, CallError> {
 /// How one read of a block ended: answered in its shape (the transfer, or none: no such
 /// block, or a block of another kind), or fell through with why.
 enum Outcome {
-    Answered(Option<LedgerTransfer>),
+    Answered(Option<Box<LedgerTransfer>>),
     FellThrough(String),
 }
 
@@ -276,7 +276,7 @@ pub async fn ledger_transfer_at(
             BlockRead::IcpBlocks => icp_transfer_at(ledger, block).await?,
         };
         match outcome {
-            Outcome::Answered(found) => return Ok(found),
+            Outcome::Answered(found) => return Ok(found.map(|found| *found)),
             Outcome::FellThrough(reason) => why.push(reason),
         }
     }
@@ -307,14 +307,14 @@ struct LedgerTransaction {
 /// What a `get_transactions` transaction reads as, by its kind.
 fn transactions_transfer(transaction: LedgerTransaction) -> Parsed {
     match (transaction.kind.as_str(), transaction.transfer) {
-        ("transfer", Some(transfer)) => Parsed::Transfer(LedgerTransfer {
+        ("transfer", Some(transfer)) => Parsed::Transfer(Box::new(LedgerTransfer {
             from: Party::Account(transfer.from),
             to: Party::Account(transfer.to),
             amount: transfer.amount,
             memo: transfer.memo,
             created_at_time: transfer.created_at_time,
             spender: transfer.spender.map(Party::Account),
-        }),
+        })),
         ("transfer", None) => Parsed::Unreadable,
         _ => Parsed::Other,
     }
@@ -478,7 +478,9 @@ pub fn icrc3_transfer(block: &Icrc3Value) -> Parsed {
             spender,
         })
     };
-    read().map_or(Parsed::Unreadable, Parsed::Transfer)
+    read().map_or(Parsed::Unreadable, |transfer| {
+        Parsed::Transfer(Box::new(transfer))
+    })
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -628,7 +630,9 @@ pub fn icp_transfer(block: IcpBlock) -> Parsed {
             spender,
         })
     };
-    read().map_or(Parsed::Unreadable, Parsed::Transfer)
+    read().map_or(Parsed::Unreadable, |transfer| {
+        Parsed::Transfer(Box::new(transfer))
+    })
 }
 
 #[derive(CandidType, Deserialize)]
@@ -1197,14 +1201,14 @@ mod tests {
             map(entries)
         };
         let expected = |spender: Option<Party>| {
-            Parsed::Transfer(LedgerTransfer {
+            Parsed::Transfer(Box::new(LedgerTransfer {
                 from: Party::Account(Account::of(principal(1), None)),
                 to: Party::Account(Account::of(principal(2), Some([7; 32]))),
                 amount: Nat::from(98_990_000_u64),
                 memo: Some(vec![0xab; 32]),
                 created_at_time: Some(1_800_000_000_000_000_005),
                 spender,
-            })
+            }))
         };
         let older = map(vec![
             ("phash", Icrc3Value::Blob(vec![0; 32])),
@@ -1303,14 +1307,14 @@ mod tests {
         };
         assert_eq!(
             icp_transfer(block(transfer(vec![1; 32]))),
-            Parsed::Transfer(LedgerTransfer {
+            Parsed::Transfer(Box::new(LedgerTransfer {
                 from: Party::Identifier([1; 32]),
                 to: Party::Identifier([2; 32]),
                 amount: Nat::from(12_345_u64),
                 memo: Some(vec![0xab; 32]),
                 created_at_time: Some(1_800_000_000_000_000_005),
                 spender: None,
-            })
+            }))
         );
         assert_eq!(
             icp_transfer(block(Some(IcpOperation::Mint(candid::Reserved)))),
