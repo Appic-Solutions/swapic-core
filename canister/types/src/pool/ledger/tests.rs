@@ -1569,6 +1569,7 @@ fn a_transfer_asked_may_have_landed_until_the_ledger_refuses_it() {
             amount: usdc(99).checked_sub(TokenAmount::from(FEE)).unwrap(),
             spent: usdc(99),
             refused: false,
+            lost: crate::pool::payout::Flag(false),
         })
     );
     let mut other = asked(r#ref);
@@ -2088,4 +2089,35 @@ fn a_ledger_block_resolves_one_lost_stake() {
         pool.ledger.resolved_pulls,
         Some([9_u64, 10].into_iter().collect())
     );
+}
+
+/// The review (2026-10-24): an answer of a payout's transfer that was lost (unknown, or too
+/// old to tell) is kept for good: a later refusal does not prove the lost ask landed nowhere
+/// (a ledger that does not deduplicate may refuse a re-ask because the first drained the
+/// money). Such a payout is neither refunded nor asked afresh; only its own dedup pair is
+/// asked again, on the ckUSDC ledger it started with.
+#[test]
+fn a_transfer_whose_answer_was_lost_may_have_landed_even_once_refused() {
+    let mut pool = funded(usdc(1_000));
+    let r#ref = started(&mut pool, 1, 1);
+    assert!(pool.step(PoolStep::TransferLost { r#ref }).is_err());
+    pool.step(asked(r#ref)).unwrap();
+    pool.step(PoolStep::TransferLost { r#ref }).unwrap();
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    let sent = pool.deposits[&r#ref].payout.sent.unwrap();
+    assert!(sent.refused && sent.lost.0);
+    assert!(!pool.deposits[&r#ref].payout.nothing_went_out());
+    // asked again: still lost
+    pool.step(asked(r#ref)).unwrap();
+    assert!(pool.deposits[&r#ref].payout.sent.unwrap().lost.0);
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    hold(&mut pool, r#ref);
+    assert!(pool
+        .step(resolved(r#ref, DepositResolution::Refund, None))
+        .is_err());
+    assert!(pool
+        .step(resolved(r#ref, DepositResolution::Retry, Some(7)))
+        .is_err());
+    pool.step(resolved(r#ref, DepositResolution::Retry, None))
+        .unwrap();
 }

@@ -701,6 +701,17 @@ impl PoolLedger {
                     _ => Ok(()),
                 }
             }
+            PoolStep::TransferLost { r#ref } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                match target.payout().and_then(|payout| payout.sent) {
+                    Some(_) => Ok(()),
+                    None => Err(PoolStepError::Terms(
+                        "only a transfer asked loses an answer",
+                    )),
+                }
+            }
             PoolStep::TransferRefused { r#ref } => {
                 let target = self
                     .target(r#ref, lookup)
@@ -816,7 +827,9 @@ impl PoolLedger {
                             "a payout that never started has no dedup instant",
                         )),
                         (None, _) => Ok(()),
-                        (Some(attempt), Some(sent)) if !sent.refused => {
+                        // it may have landed (asked and not refused, or an answer of it lost):
+                        // only its own pair, on the ckUSDC ledger it started with
+                        (Some(attempt), Some(sent)) if !deposit.payout.cannot_land_twice() => {
                             let started_on = match attempt.token {
                                 Some(token) => token.0,
                                 None => self.settings()?.ckusdc_ledger,
@@ -1355,18 +1368,29 @@ impl PoolLedger {
                 amount,
                 spent,
             } => {
-                let sent = super::Sent {
-                    token: *token,
-                    amount: *amount,
-                    spent: *spent,
-                    refused: false,
-                };
-                deposit_out = ledger.with_payout(r#ref, lookup, |payout| payout.sent = Some(sent));
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    // an answer lost once is kept for good
+                    let lost = payout.sent.map_or(Default::default(), |sent| sent.lost);
+                    payout.sent = Some(super::Sent {
+                        token: *token,
+                        amount: *amount,
+                        spent: *spent,
+                        refused: false,
+                        lost,
+                    });
+                });
             }
             PoolStep::TransferRefused { r#ref } => {
                 deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
                     if let Some(sent) = payout.sent.as_mut() {
                         sent.refused = true;
+                    }
+                });
+            }
+            PoolStep::TransferLost { r#ref } => {
+                deposit_out = ledger.with_payout(r#ref, lookup, |payout| {
+                    if let Some(sent) = payout.sent.as_mut() {
+                        sent.lost = crate::pool::payout::Flag(true);
                     }
                 });
             }

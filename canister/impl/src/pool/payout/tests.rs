@@ -568,6 +568,7 @@ fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
             amount: less(99, 1),
             spent: usdc(99),
             refused: false,
+            lost: types::pool::payout::Flag(false),
         };
         let sent = || deposit(&r#ref).unwrap().payout.sent;
         fake.refuse.set(true);
@@ -588,7 +589,12 @@ fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
             block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Retry(_))
         ));
-        assert_eq!(sent(), Some(asked));
+        // its answer lost, for good: it may have landed whatever comes after
+        let lost = Sent {
+            lost: types::pool::payout::Flag(true),
+            ..asked
+        };
+        assert_eq!(sent(), Some(lost));
         assert!(!deposit(&r#ref).unwrap().payout.nothing_went_out());
         block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).unwrap();
         assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);

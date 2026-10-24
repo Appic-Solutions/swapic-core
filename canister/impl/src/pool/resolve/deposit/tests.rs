@@ -98,6 +98,8 @@ enum Sent {
     Asked,
     /// Its transfer refused by the ledger for sure.
     Refused,
+    /// Its transfer's answer lost once, then refused: it may have landed.
+    LostThenRefused,
 }
 
 /// What a started payout of `account(byte)` asks: 98.99 ckUSDC.
@@ -145,7 +147,7 @@ fn held_paying(byte: u8, sent: Sent, token_out: Principal, path: PayoutPath) -> 
         )
         .unwrap();
     }
-    if matches!(sent, Sent::Asked | Sent::Refused) {
+    if matches!(sent, Sent::Asked | Sent::Refused | Sent::LostThenRefused) {
         record_at(
             PoolStep::TransferAsked {
                 r#ref,
@@ -157,7 +159,10 @@ fn held_paying(byte: u8, sent: Sent, token_out: Principal, path: PayoutPath) -> 
         )
         .unwrap();
     }
-    if sent == Sent::Refused {
+    if sent == Sent::LostThenRefused {
+        record_at(PoolStep::TransferLost { r#ref }, at(5)).unwrap();
+    }
+    if matches!(sent, Sent::Refused | Sent::LostThenRefused) {
         record_at(PoolStep::TransferRefused { r#ref }, at(5)).unwrap();
     }
     for n in 1..=MAX_PAYOUT_ATTEMPTS {
@@ -561,5 +566,36 @@ fn a_deposit_is_marked_paid_on_the_ledgers_own_block_or_refused_by_name() {
             Ok(None)
         );
         assert_eq!(status(r#ref), DepositStatus::Paid);
+    });
+}
+
+/// The review (2026-10-24): a payout whose transfer's answer was lost once may have landed
+/// even if a later ask was refused: it is not refunded, nor asked afresh; its own dedup pair
+/// is asked again only while the ledger deduplicates it, else the controller searches.
+#[test]
+fn a_deposit_whose_answer_was_lost_is_retried_only_with_its_own_pair() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let blocks = Blocks::default();
+        let r#ref = held_at(1, Sent::LostThenRefused);
+        assert!(matches!(
+            by_controller(&blocks, r#ref, WireResolution::Refund, at(7)),
+            Err(PoolError::NotAllowed(_))
+        ));
+        let past = at(5).checked_add(DEDUP_WINDOW).unwrap();
+        assert!(matches!(
+            by_controller(&blocks, r#ref, WireResolution::Retry, past),
+            Err(PoolError::NotAllowed(why)) if why.contains("search")
+        ));
+        assert_eq!(
+            by_controller(&blocks, r#ref, WireResolution::Retry, at(7)),
+            Ok(None)
+        );
+        assert_eq!(
+            deposit(&r#ref).unwrap().payout.attempt.unwrap().created_at,
+            at(5),
+            "its own pair"
+        );
     });
 }

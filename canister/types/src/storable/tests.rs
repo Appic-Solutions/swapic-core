@@ -645,7 +645,80 @@ fn samples() -> Vec<Sample> {
     all.extend(held_resolution_samples());
     all.extend(resolved_pull_samples());
     all.extend(transfer_asked_samples());
+    all.extend(transfer_lost_samples());
     all
+}
+
+/// A payout's transfer whose answer was once lost (the review, 2026-10-24): the deposit
+/// keeping it, and its line.
+fn transfer_lost_samples() -> Vec<Sample> {
+    use crate::hash::PoolRef;
+    use crate::pool::{
+        DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress,
+        PoolRail, PoolStep, PrincipalBytes, Registered, Registration, Sent,
+    };
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    let sent = Sent {
+        token: PrincipalBytes(principal(0xb1)),
+        amount: TokenAmount::from(2_201_u32),
+        spent: TokenAmount::from(2_202_u32),
+        refused: false,
+        lost: crate::pool::payout::Flag(true),
+    };
+    let deposit = Registered {
+        terms: Registration {
+            kind: DepositKind::Swap {
+                recipient: IcpAccount {
+                    owner: principal(0xb4),
+                    subaccount: None,
+                },
+                token_out: principal(0xb1),
+                min_out: 0x2_205,
+            },
+            min_usdc: TokenAmount::from(2_206_000_000_u64),
+            premium: TokenAmount::from(2_207_u32),
+            rebalance_share: TokenAmount::ZERO,
+            src_chain: ChainId::ARBITRUM,
+            src_payer: crate::evm::EvmAddress::new([0xb5; 20]),
+            rail: PoolRail::Cctp,
+            expires_at: Timestamp::from_nanos(1_800_000_000_000_002_208),
+            salt: [0xb6; 32],
+            icp_fees: Some(TokenAmount::from(2_209_u32)),
+        },
+        status: DepositStatus::Paying,
+        arrived: None,
+        paid: None,
+        minted: None,
+        payout: PayoutProgress {
+            attempt: Some(PayoutAttempt {
+                created_at: Timestamp::from_nanos(1_800_000_000_000_002_210),
+                memo: [0xb3; 32],
+                path: PayoutPath::Ckusdc,
+                amount: Some(TokenAmount::from(2_201_u32)),
+                token: Some(sent.token),
+            }),
+            sent: Some(sent),
+            ..PayoutProgress::default()
+        },
+        held: Some(TokenAmount::from(2_211_u32)),
+    };
+    vec![
+        sample("deposit whose transfer's answer was lost", deposit),
+        sample(
+            "transfer's answer lost",
+            Event::seal(
+                EventIndex::new(22_000),
+                Timestamp::from_nanos(1_800_000_000_000_002_212),
+                EventHash::new([0xb2; 32]),
+                crate::events::EventType::Pool {
+                    step: PoolStep::TransferLost {
+                        r#ref: PoolRef::new([0xb3; 32]),
+                    },
+                },
+            )
+            .expect("every sample has a preimage"),
+        ),
+    ]
 }
 
 /// A payout's transfer to its recipient as asked, and refused (the review, 2026-10-24); a
@@ -662,6 +735,9 @@ fn transfer_asked_samples() -> Vec<Sample> {
         amount: TokenAmount::from(2_101_u32),
         spent: TokenAmount::from(2_102_u32),
         refused: true,
+        // absent, so this sample's bytes stay the ones the golden pins;
+        // `transfer_lost_samples` pins it
+        lost: crate::pool::payout::Flag(false),
     };
     let deposit = Registered {
         terms: Registration {

@@ -6,8 +6,10 @@
 //!
 //! - `Retry`: back to its payout with fresh attempts, keyed on its transfer. A started one
 //!   whose transfer cannot land twice (never asked, or refused by the ledger for sure at its
-//!   last ask) is asked afresh at the retry's instant, whatever token it pays, at any time.
-//!   One whose last ask may have landed, its answer lost, pays again with its own dedup pair,
+//!   last ask with no answer of it ever lost: after a lost answer, a ledger that does not
+//!   deduplicate may refuse a re-ask because the first drained the money) is asked afresh at
+//!   the retry's instant, whatever token it pays, at any time. One that may have landed (its
+//!   last ask not refused, or an answer of it once lost) pays again with its own dedup pair,
 //!   so the ledger answers `Duplicate` and it is recorded paid once: only on the ckUSDC
 //!   ledger the payout started with, which deduplicates it (another token's ledger may take
 //!   the old pair as a new transfer), and only with [`RETRY_MARGIN`] of the ledger's window
@@ -16,8 +18,8 @@
 //!   (never deployed).
 //! - `Refund`: only when the canister knows nothing of its payout went out: never started;
 //!   or started, no ICPSwap leg moved money, and its transfer to the recipient never asked or
-//!   refused by the ledger for sure at its last ask (`PayoutProgress::nothing_went_out`, the
-//!   fold's rule too). What arrived goes back to its payer on Base, less the least network
+//!   refused by the ledger for sure at its last ask with no answer of it ever lost
+//!   (`PayoutProgress::nothing_went_out`, the fold's rule too). What arrived goes back to its payer on Base, less the least network
 //!   fee, through the orphan refund path, behind the pool's guard: its arrival is an orphan
 //!   held under its transfer's key, and the canister signs `USDC.transfer(payer, amount -
 //!   fee)`. A signature that fails leaves the orphan held, for `resolve_orphan`. A deposit
@@ -181,7 +183,7 @@ pub async fn resolve(
                 (None, _) => None,
                 // its last ask may have landed: only with its own dedup pair, on the ckUSDC
                 // ledger the payout started with, while that ledger deduplicates it
-                (Some((attempt, _, search)), Some(sent)) if !sent.refused => {
+                (Some((attempt, _, search)), Some(sent)) if !deposit.payout.cannot_land_twice() => {
                     let started_on = attempt.token.map_or(ckusdc, |token| token.0);
                     if sent.token.0 != started_on {
                         return Err(PoolError::NotAllowed(format!(
@@ -198,8 +200,8 @@ pub async fn resolve(
                     }
                     None
                 }
-                // nothing of its transfer can land twice (never asked, or refused for sure):
-                // asked afresh, whatever it pays, at any time
+                // nothing of its transfer can land twice (never asked, or refused for sure
+                // with no answer of it ever lost): asked afresh, whatever it pays, any time
                 (Some(_), _) => Some(now),
             };
             record(

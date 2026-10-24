@@ -672,20 +672,21 @@ async fn send_out(
     what: &str,
     clock: impl Fn() -> Timestamp,
 ) -> Result<u64, Stop> {
-    let asked = types::pool::Sent {
-        token: PrincipalBytes(token),
-        amount,
-        spent,
-        refused: false,
-    };
+    let token_bytes = PrincipalBytes(token);
+    // asked already, on these terms and not refused since: not asked again
+    let asked = progress_of(payout.id)
+        .and_then(|progress| progress.sent)
+        .is_some_and(|sent| {
+            !sent.refused && (sent.token, sent.amount, sent.spent) == (token_bytes, amount, spent)
+        });
     // the fold's refusal of an ask on other terms (an earlier one may have landed) is a
     // counted failure, so the payout reaches a human; any other line not recorded is driven
     // again, uncounted (the review, 2026-10-24)
-    if progress_of(payout.id).and_then(|progress| progress.sent) != Some(asked) {
+    if !asked {
         pool_store::record_at(
             PoolStep::TransferAsked {
                 r#ref: payout.id,
-                token: asked.token,
+                token: token_bytes,
                 amount,
                 spent,
             },
@@ -704,6 +705,21 @@ async fn send_out(
     {
         Ok(block) => Ok(block),
         Err(error) => {
+            // an answer lost (unknown, or too old to tell) is kept for good: it may have
+            // landed whatever comes after (the review, 2026-10-24)
+            let lost = progress_of(payout.id)
+                .and_then(|progress| progress.sent)
+                .is_some_and(|sent| sent.lost.0);
+            if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !lost {
+                if let Err(unnoted) =
+                    pool_store::record_at(PoolStep::TransferLost { r#ref: payout.id }, clock())
+                {
+                    crate::pool::log(&format!(
+                        "the pool payout {}'s lost answer was not noted: {unnoted}",
+                        payout.id
+                    ));
+                }
+            }
             // a refusal counts whatever its line does: one not recorded leaves the transfer
             // asked, which only blocks a refund (the safe way, the review, 2026-10-24)
             if matches!(error, CallError::Refused(_)) {

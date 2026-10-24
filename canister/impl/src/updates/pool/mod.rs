@@ -165,12 +165,14 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
 /// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
 /// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
 /// `Retry`: back to its payout with fresh attempts. A started one whose transfer cannot land
-/// twice (never asked, or refused by the ledger for sure) is asked afresh, whatever it pays,
-/// at any time; one whose last transfer may have landed keeps its own dedup pair, so a
-/// transfer that landed is answered `Duplicate` and recorded paid once: only on the ckUSDC
-/// ledger it started with, and with an hour of the ledger's deduplication (23 hours) left. `Refund`: only when the canister knows nothing of its payout went out (never
-/// started, or no ICPSwap leg moved money and its transfer never asked or refused by the
-/// ledger for sure), refused while the pool is closed and for a sanctioned or zero payer;
+/// twice (never asked, or refused by the ledger for sure with no answer of it ever lost) is
+/// asked afresh, whatever it pays, at any time; one whose transfer may have landed keeps its
+/// own dedup pair, so a transfer that landed is answered `Duplicate` and recorded paid once:
+/// only on the ckUSDC ledger it started with, and with an hour of the ledger's
+/// deduplication (23 hours) left. `Refund`: only when the canister knows nothing of its
+/// payout went out (never started, or no ICPSwap leg moved money and its transfer never
+/// asked or refused by the ledger for sure with no answer of it ever lost), refused while
+/// the pool is closed and for a sanctioned or zero payer;
 /// what arrived is held as an orphan under its transfer's key and the canister signs
 /// `USDC.transfer(payer, amount - min_network_fee)` on Base, the fee kept for its gas. A
 /// signature that fails answers `Unavailable`, the orphan held for `resolve_orphan`.
