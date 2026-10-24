@@ -679,9 +679,10 @@ async fn send_out(
         .is_some_and(|sent| {
             !sent.refused && (sent.token, sent.amount, sent.spent) == (token_bytes, amount, spent)
         });
-    // the fold's refusal of an ask on other terms (an earlier one may have landed) is a
-    // counted failure, so the payout reaches a human; any other line not recorded is driven
-    // again, uncounted (the review, 2026-10-24)
+    // an ask a rule of the fold refuses (an earlier one on other terms may have landed, or
+    // any other) is a counted failure, so the payout reaches a human; only the log's own
+    // trouble (a divergence, an index, storage) is driven again, uncounted (the review,
+    // 2026-10-24)
     if !asked {
         pool_store::record_at(
             PoolStep::TransferAsked {
@@ -693,9 +694,9 @@ async fn send_out(
             clock(),
         )
         .map_err(|error| match error {
-            crate::storage::events::AppendError::Transition(types::TransitionError::Pool(
-                types::pool::PoolStepError::AskedOnOtherTerms,
-            )) => Stop::Failed(format!("{what} was not asked: {error}")),
+            crate::storage::events::AppendError::Transition(_) => {
+                Stop::Failed(format!("{what} was not asked: {error}"))
+            }
             error => Stop::Append(error.to_string()),
         })?;
     }

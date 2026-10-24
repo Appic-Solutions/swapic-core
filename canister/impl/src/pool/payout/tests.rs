@@ -632,11 +632,11 @@ fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
     });
 }
 
-/// The review (2026-10-24): only the fold's refusal of an ask on other terms is a counted
-/// failure; any other line not recorded (here, a payout the fold does not know) is driven
-/// again, uncounted, and nothing is asked.
+/// The review (2026-10-24): an ask any rule of the fold refuses (here, a payout the fold
+/// does not know) is a counted failure, so the payout reaches a human; only the log's own
+/// trouble (a divergence, storage) is driven again uncounted. Nothing is asked.
 #[test]
-fn an_ask_not_recorded_for_another_reason_is_driven_again() {
+fn an_ask_any_rule_refuses_is_a_counted_failure() {
     on_fresh_memory(|| {
         crate::storage::init();
         let fake = Fake::default();
@@ -666,7 +666,7 @@ fn an_ask_not_recorded_for_another_reason_is_driven_again() {
                 "the transfer",
                 clock
             )),
-            Err(Stop::Append(_))
+            Err(Stop::Failed(_))
         ));
         assert!(fake.calls.borrow().is_empty());
     });
