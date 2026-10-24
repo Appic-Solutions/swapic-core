@@ -20,8 +20,7 @@ use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::time::Duration;
 use thiserror::Error;
 
-/// One chain's book lines and its last balance check. `in_flight` is not here: it is the
-/// USDC the flows hold on the chain, read off the flows.
+/// One chain's book lines and its last balance check.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Books {
     /// Network and platform fees Swapic withheld to the canister.
@@ -312,9 +311,9 @@ impl Books {
         self
     }
 
-    /// The lines the books keep, summed, with the flows' `in_flight` added.
-    pub fn total(&self, in_flight: TokenAmount) -> TokenAmount {
-        [self.unattributed, self.pool, in_flight]
+    /// The lines the books keep, summed.
+    pub fn total(&self) -> TokenAmount {
+        [self.unattributed, self.pool]
             .into_iter()
             .try_fold(self.fee_income, TokenAmount::checked_add)
             .unwrap_or(TokenAmount::MAX)
@@ -333,22 +332,17 @@ impl Books {
 }
 
 /// What a balance means against the lines: what they expect at that block, and whether it
-/// is a shortfall. An outflow signed and not yet confirmed may or may not be mined at the
-/// block, so the expectation leaves it out and a pending payout is never a shortfall; a
-/// donation reads as surplus and is no shortfall either.
+/// is a shortfall, below them beyond `tolerance`; a donation reads as surplus and is no
+/// shortfall.
 pub fn assess(
     lines: TokenAmount,
-    pending_outflows: TokenAmount,
     observed: TokenAmount,
     tolerance: TokenAmount,
 ) -> (TokenAmount, bool) {
-    let expected = lines
-        .checked_sub(pending_outflows)
-        .unwrap_or(TokenAmount::ZERO);
     let shortfall = observed
         .checked_add(tolerance)
-        .is_some_and(|ceiling| ceiling < expected);
-    (expected, shortfall)
+        .is_some_and(|ceiling| ceiling < lines);
+    (lines, shortfall)
 }
 
 /// How many balance-check intervals the pool chain's books may go without a check that

@@ -420,7 +420,7 @@ pub fn judge(
     observed: TokenAmount,
     tolerance: TokenAmount,
 ) -> (TokenAmount, bool) {
-    assess(before.min(after), TokenAmount::ZERO, observed, tolerance)
+    assess(before.min(after), observed, tolerance)
 }
 
 /// [`judge`] of `observed` against the lines as they stand, read before and after alike.

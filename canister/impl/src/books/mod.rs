@@ -1,5 +1,5 @@
-//! The books' side of the canister: what the flows hold on a chain and have out, the
-//! balance check, and the fees read off the receipts of what the canister signed.
+//! The books' side of the canister: the balance check, and the fees read off the receipts
+//! of what the canister signed.
 
 #[cfg(test)]
 mod tests;
@@ -14,35 +14,7 @@ use crate::storage::{chain_data, config};
 use crate::tx::credit_confirmations;
 use serde_json::Value;
 use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed, ReadFailure};
-use types::{
-    BlockNumber, ChainId, EventType, EvmAddress, FlowKind, Timestamp, TokenAmount, TxHash,
-};
-
-/// The USDC the canister's flows hold at its address on `chain_id`: what landed for an
-/// ICP to EVM quote and has not left yet.
-pub fn in_flight<S: Store>(state: &State<S>, chain_id: ChainId) -> TokenAmount {
-    state
-        .store()
-        .flows()
-        .into_iter()
-        .filter(|(_, flow)| flow.kind == FlowKind::IcpToEvm && flow.chain_id == Some(chain_id))
-        .try_fold(TokenAmount::ZERO, |sum, (_, flow)| {
-            sum.checked_add(flow.eth_held)
-        })
-        .unwrap_or(TokenAmount::MAX)
-}
-
-/// The USDC the canister signed away on `chain_id` and has no receipt at depth for yet.
-pub fn pending_outflows<S: Store>(state: &State<S>, chain_id: ChainId) -> TokenAmount {
-    state
-        .store()
-        .flows()
-        .into_iter()
-        .filter(|(_, flow)| flow.tx_open && flow.chain_id == Some(chain_id))
-        .filter_map(|(_, flow)| flow.continuation.map(|(_, amount)| amount))
-        .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
-        .unwrap_or(TokenAmount::MAX)
-}
+use types::{BlockNumber, ChainId, EventType, EvmAddress, Timestamp, TokenAmount, TxHash};
 
 /// Appends one step of `chain_id`'s books.
 pub fn record(chain_id: ChainId, step: BookStep) -> Result<(), AppendError> {
@@ -184,8 +156,8 @@ pub async fn check_balances() {
 /// What the lines expect of `chain_id`'s balance read at `block`, and whether `observed`
 /// falls short of it beyond `tolerance`: the lines as they stand, less the fees booked from
 /// blocks above `block`, which a balance read there cannot hold yet (a fee is booked at the
-/// swap depth, the read is at the crediting depth behind the head), and less what is
-/// signed away and not yet confirmed. On the pool chain the pool's own lines are the
+/// swap depth, the read is at the crediting depth behind the head). On the pool chain the
+/// pool's own lines are the
 /// pool's part (its Base pocket's free and reserved USDC and its unattributed transfers),
 /// less every pool arrival from a block above `block`, the same way.
 pub fn expected_at<S: Store>(
@@ -198,7 +170,7 @@ pub fn expected_at<S: Store>(
 ) -> (TokenAmount, bool) {
     let books = state.book(&chain_id);
     let mut lines = books
-        .total(in_flight(state, chain_id))
+        .total()
         .checked_sub(books.fees_above(block))
         .unwrap_or(TokenAmount::ZERO);
     if pool_chain == Some(chain_id) {
@@ -209,12 +181,7 @@ pub fn expected_at<S: Store>(
             .unwrap_or(TokenAmount::ZERO);
         lines = lines.checked_add(held).unwrap_or(TokenAmount::MAX);
     }
-    assess(
-        lines,
-        pending_outflows(state, chain_id),
-        observed,
-        tolerance,
-    )
+    assess(lines, observed, tolerance)
 }
 
 /// One chain's balance check, or the kind of failure that read no balance.

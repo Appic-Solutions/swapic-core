@@ -1,6 +1,5 @@
 //! The canister's USDC books.
 
-use crate::books::in_flight;
 use crate::state::Store;
 use crate::storage::config;
 use crate::storage::events::read_state;
@@ -24,7 +23,9 @@ pub fn books() -> Vec<(u64, BookLines)> {
                 let lines = BookLines {
                     fee_income: Nat::from(books.fee_income),
                     unattributed: Nat::from(books.unattributed),
-                    in_flight: Nat::from(in_flight(state, chain)),
+                    // the v1 flows' USDC on the chain: none since they stopped, kept on the
+                    // wire
+                    in_flight: Nat::from(0_u8),
                     pool: Nat::from(books.pool),
                     observed: check.map(|check| Nat::from(check.observed)),
                     surplus: check.map(|check| Int::from(check.surplus())),

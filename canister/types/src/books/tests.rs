@@ -27,12 +27,7 @@ fn donation_is_surplus_and_halts_nothing() {
         },
         Timestamp::from_nanos(1),
     );
-    let (expected, shortfall) = assess(
-        books.total(TokenAmount::ZERO),
-        TokenAmount::ZERO,
-        usdc(150),
-        usdc(1),
-    );
+    let (expected, shortfall) = assess(books.total(), usdc(150), usdc(1));
     assert_eq!(expected, usdc(100));
     assert!(!shortfall);
     let books = books.apply(&checked(usdc(150), expected), Timestamp::from_nanos(1));
@@ -41,28 +36,14 @@ fn donation_is_surplus_and_halts_nothing() {
     assert_eq!(books.unattributed, TokenAmount::ZERO);
 }
 
-/// Review Focus 5: a payout of 30 signed and not yet confirmed is no shortfall, whether
-/// the block the balance is read at has it mined or not.
+/// A balance below the lines is a shortfall only beyond the tolerance.
 #[test]
-fn pending_payout_is_not_a_shortfall() {
-    let lines = Books::default().total(usdc(100));
-    // mined at the block: 70 left, as expected
-    assert_eq!(
-        assess(lines, usdc(30), usdc(70), usdc(1)),
-        (usdc(70), false)
-    );
-    // not mined yet: 100 still there, a passing surplus
-    assert_eq!(
-        assess(lines, usdc(30), usdc(100), usdc(1)),
-        (usdc(70), false)
-    );
-    // gone further than the payout and the tolerance: a shortfall
-    assert_eq!(assess(lines, usdc(30), usdc(68), usdc(1)), (usdc(70), true));
-    // within the tolerance: not one
-    assert_eq!(
-        assess(lines, usdc(30), usdc(69), usdc(1)),
-        (usdc(70), false)
-    );
+fn a_shortfall_is_only_beyond_the_tolerance() {
+    let lines = usdc(70);
+    assert_eq!(assess(lines, usdc(70), usdc(1)), (usdc(70), false));
+    assert_eq!(assess(lines, usdc(100), usdc(1)), (usdc(70), false));
+    assert_eq!(assess(lines, usdc(68), usdc(1)), (usdc(70), true));
+    assert_eq!(assess(lines, usdc(69), usdc(1)), (usdc(70), false));
 }
 
 #[test]
