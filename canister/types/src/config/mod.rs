@@ -5,7 +5,6 @@ use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::numeric::{BasisPoints, BlockDepth, GasAmount, TokenAmount, UsdAmount, Wei};
-use crate::quote::MAX_QUOTE_LIFETIME;
 use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
@@ -24,11 +23,6 @@ pub const ENGINE_EVERY_MAX: Duration = Duration::from_secs(60);
 /// The least any repeating timer waits between two runs: a zero interval would run on every
 /// round of the subnet and burn cycles for nothing.
 pub const TIMER_FLOOR: Duration = Duration::from_secs(1);
-
-/// The shortest `expiry_check_interval_s` may be: ten seconds. The knob outlived its timer
-/// (the v1 expiry sweep) and keeps the bounds it had, so a config written for it still
-/// reads the same.
-pub const MIN_EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The longest a window inside one swap may be: one day. Every knob bounded by this one
 /// measures a wait a user or a chain is in the middle of, so anything longer is a typo, and
@@ -88,9 +82,9 @@ pub const MAX_LOOKBACK_BLOCKS: u32 = {
 /// A quote is claimable for its lifetime (up to a day) plus the permit window and the
 /// grace, so the deposit a claim looks for can be more than a day old: a canister halted
 /// for an hour, a quoter outage, or a user who deposits late must not put the funds out of
-/// reach. `Config::validate` holds the lookback to that whole span at the fastest chain's
-/// rate ([`FASTEST_BLOCKS_PER_SECOND`], Arbitrum's), which covers it on every slower chain
-/// many times over. The default is the ceiling, [`MAX_LOOKBACK_BLOCKS`], the widest range
+/// reach. `Config::validate` held the lookback to that whole span at the fastest chain's
+/// rate ([`FASTEST_BLOCKS_PER_SECOND`], Arbitrum's) until the v1 claim door went
+/// (2026-10-24): nothing reads the knob now, which keeps only its own range. The default is the ceiling, [`MAX_LOOKBACK_BLOCKS`], the widest range
 /// the read walks: 100,000 seconds of Arbitrum, room for the longest quote, the permit
 /// window and a grace of up to about three and three quarter hours (a lookback above the ceiling
 /// would have every read refused as too wide, every claim and every arrival check with
@@ -855,6 +849,8 @@ pub enum ConfigError {
         field: &'static str,
         interval: Duration,
     },
+    /// No longer answered (2026-10-24): the expiry interval's floor went with the v1 expiry
+    /// sweep, the one timer that read the knob.
     #[error("{field} is {}s, below the floor of {}s", interval.as_secs(), floor.as_secs())]
     TimerIntervalTooShort {
         field: &'static str,
@@ -919,6 +915,8 @@ pub enum ConfigError {
         chain: Option<ChainId>,
         reason: crate::evm::EvmAddressError,
     },
+    /// No longer answered (2026-10-24): the cross-check went with the v1 claim door and
+    /// deposit read, the only readers of the lookback and the claim window.
     #[error(
         "deposit_lookback_blocks is {lookback}, and a claim may be asked {}s after the \
          deposit it reads for (the longest quote, permit_deadline_s and claim_grace_s), \
@@ -1035,14 +1033,6 @@ impl Config {
                 return Err(ConfigError::TimerIntervalTooLong { field, interval });
             }
         }
-        // the expiry knob alone has a floor as well as a ceiling, kept from its retired timer
-        if self.expiry_check_interval < MIN_EXPIRY_CHECK_INTERVAL {
-            return Err(ConfigError::TimerIntervalTooShort {
-                field: "expiry_check_interval_s",
-                interval: self.expiry_check_interval,
-                floor: MIN_EXPIRY_CHECK_INTERVAL,
-            });
-        }
         // every window inside one swap: unbounded, each of these overflows the deadline it
         // is added to, and the comparison that deadline feeds then never fires
         for (field, duration, cap) in [
@@ -1055,11 +1045,6 @@ impl Config {
             (
                 "chain_data_max_age_s",
                 self.chain_data_max_age,
-                MAX_SHORT_DURATION,
-            ),
-            (
-                "decision_timeout_min",
-                self.decision_timeout,
                 MAX_SHORT_DURATION,
             ),
             (
@@ -1077,15 +1062,10 @@ impl Config {
                 });
             }
         }
-        self.max_refunds_per_sweep
-            .validate("max_refunds_per_sweep")?;
-        self.max_evictions_per_sweep
-            .validate("max_evictions_per_sweep")?;
         self.audit_chunk_events.validate("audit_chunk_events")?;
         self.deposit_lookback_blocks
             .validate("deposit_lookback_blocks")?;
         self.claim_grace.validate()?;
-        self.ensure_lookback_reaches_claims()?;
         // Circle's own setter refuses a minimum at or above the whole amount, so a table
         // holding one is a typo, and every burn from that chain would revert on it
         if let Some((chain, min_fee)) = self
@@ -1122,28 +1102,6 @@ impl Config {
             .find_map(|(chain, url)| url.expose().is_empty().then_some(*chain))
         {
             return Err(ConfigError::EmptyRpcUrl { chain });
-        }
-        Ok(())
-    }
-
-    /// The lookback has to reach every deposit a claim may still be asked for. A claim is
-    /// admitted until the quote's expiry, the permit window and the grace after it, and the
-    /// deposit can be as old as the quote's whole lifetime before that expiry (at most
-    /// [`MAX_QUOTE_LIFETIME`], which registration holds a quote to). The read never looks
-    /// further back than the lookback, and counts the anchor's own block in it, so the
-    /// blocks that span holds at [`FASTEST_BLOCKS_PER_SECOND`] must be fewer than the
-    /// lookback: otherwise a claim the door admits reads past the deposit and leaves it in
-    /// the vault.
-    fn ensure_lookback_reaches_claims(&self) -> Result<(), ConfigError> {
-        let span = MAX_QUOTE_LIFETIME.saturating_add(self.claim_window());
-        let needed = span.as_secs().saturating_mul(FASTEST_BLOCKS_PER_SECOND);
-        let lookback = self.deposit_lookback_blocks.get();
-        if needed >= u64::from(lookback) {
-            return Err(ConfigError::LookbackShorterThanClaims {
-                lookback,
-                span,
-                needed,
-            });
         }
         Ok(())
     }

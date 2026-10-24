@@ -98,10 +98,10 @@ fn every_duration_keeps_its_unit() {
     assert_eq!(Config::unredacted(domain), wire);
 }
 
-/// The per-tick caps cross the wire as plain counts, and a cap outside its range comes back
-/// named, so ops see which knob was refused.
+/// The per-tick caps cross the wire as plain counts. Nothing refuses them since their sweeps
+/// went (2026-10-24).
 #[test]
-fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
+fn the_sweep_caps_cross_the_wire() {
     let wire = Config {
         max_refunds_per_sweep: 7,
         max_evictions_per_sweep: 9,
@@ -111,20 +111,6 @@ fn the_sweep_caps_cross_the_wire_and_a_bad_one_names_its_knob() {
     assert_eq!(domain.max_refunds_per_sweep.get(), 7);
     assert_eq!(domain.max_evictions_per_sweep.get(), 9);
     assert_eq!(Config::unredacted(domain), wire);
-
-    let zero = types::Config::try_from(Config {
-        max_refunds_per_sweep: 0,
-        ..Config::default()
-    })
-    .unwrap();
-    assert_eq!(
-        ConfigError::from(zero.validate().unwrap_err()),
-        ConfigError::CapOutOfRange {
-            field: "max_refunds_per_sweep".to_string(),
-            cap: 0,
-            ceiling: 500
-        }
-    );
 }
 
 /// A duration knob above its cap is refused by name too, with the cap it broke, and in
@@ -244,8 +230,8 @@ fn a_config_error_names_its_knob_on_the_wire() {
 ///
 /// Rewritten for fix wave 4 (N3): the refusal names the ceiling the read can walk,
 /// 400,000 blocks, where it named 1,000,000.
-/// Rewritten for fix wave 6 (M1): the default is that ceiling, and a lookback too short
-/// for the claims the door admits crosses back named.
+/// Rewritten for fix wave 6 (M1): the default is that ceiling. The cross-check against
+/// the claims went with the v1 claim door (2026-10-24).
 #[test]
 fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let wire = Config {
@@ -258,20 +244,6 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
     // the widest range the read walks, which reaches every deposit a claim may be asked
     // for at the default grace
     assert_eq!(Config::default().deposit_lookback_blocks, 400_000);
-    let short = types::Config::try_from(Config {
-        deposit_lookback_blocks: 345_600,
-        ..Config::default()
-    })
-    .unwrap();
-    assert_eq!(
-        ConfigError::from(short.validate().unwrap_err()),
-        ConfigError::LookbackShorterThanClaims {
-            lookback_blocks: 345_600,
-            span_s: 90_120,
-            needed_blocks: 360_480,
-        }
-    );
-
     let zero = types::Config::try_from(Config {
         deposit_lookback_blocks: 0,
         ..Config::default()

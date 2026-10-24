@@ -294,44 +294,6 @@ fn validate_rejects_a_timer_interval_above_a_year() {
     .expect("a year exactly is allowed");
 }
 
-/// The sweep interval has a floor as well as a ceiling: a zero interval is clamped to a
-/// second rather than refused, so a config could otherwise put a pass that reads stable
-/// memory and appends on every second.
-#[test]
-fn validate_rejects_a_sweep_interval_below_the_floor() {
-    let under = MIN_EXPIRY_CHECK_INTERVAL - Duration::from_secs(1);
-    for interval in [Duration::ZERO, Duration::from_secs(1), under] {
-        let err = Config {
-            expiry_check_interval: interval,
-            ..Config::default()
-        }
-        .validate()
-        .unwrap_err();
-        assert_eq!(
-            err,
-            ConfigError::TimerIntervalTooShort {
-                field: "expiry_check_interval_s",
-                interval,
-                floor: MIN_EXPIRY_CHECK_INTERVAL
-            }
-        );
-        assert!(err.to_string().contains("expiry_check_interval_s"), "{err}");
-    }
-    Config {
-        expiry_check_interval: MIN_EXPIRY_CHECK_INTERVAL,
-        ..Config::default()
-    }
-    .validate()
-    .expect("the floor itself is allowed");
-    // the floor is the sweep's alone: the audit timer keeps only its ceiling
-    Config {
-        replay_audit_interval: Duration::from_secs(1),
-        ..Config::default()
-    }
-    .validate()
-    .expect("the audit interval has no floor");
-}
-
 #[test]
 fn validate_rejects_an_empty_vault_address() {
     let config = Config {
@@ -384,7 +346,7 @@ fn validate_rejects_an_empty_rpc_url() {
 fn validate_rejects_every_duration_knob_above_its_cap() {
     /// One duration knob: its wire name, its cap, and a config with that knob set.
     type Knob = (&'static str, Duration, fn(Duration) -> Config);
-    let knobs: [Knob; 6] = [
+    let knobs: [Knob; 5] = [
         ("quote_ttl_s", MAX_SHORT_DURATION, |d| Config {
             quote_ttl: d,
             ..Config::default()
@@ -395,10 +357,6 @@ fn validate_rejects_every_duration_knob_above_its_cap() {
         }),
         ("chain_data_max_age_s", MAX_SHORT_DURATION, |d| Config {
             chain_data_max_age: d,
-            ..Config::default()
-        }),
-        ("decision_timeout_min", MAX_SHORT_DURATION, |d| Config {
-            decision_timeout: d,
             ..Config::default()
         }),
         ("rail_status_max_age_s", MAX_SHORT_DURATION, |d| Config {
@@ -424,15 +382,7 @@ fn validate_rejects_every_duration_knob_above_its_cap() {
             }
         );
         assert!(err.to_string().contains(field), "{err}");
-        let at_cap = with(cap).validate();
-        if field == "permit_deadline_s" {
-            assert!(
-                matches!(at_cap, Err(ConfigError::LookbackShorterThanClaims { .. })),
-                "a day of permit window is past what the lookback reaches: {at_cap:?}"
-            );
-        } else {
-            at_cap.expect("the cap itself is allowed");
-        }
+        with(cap).validate().expect("the cap itself is allowed");
         // the near-overflow shape the bound exists for
         assert!(with(Duration::from_secs(u64::MAX)).validate().is_err());
     }
@@ -442,36 +392,6 @@ fn validate_rejects_every_duration_knob_above_its_cap() {
 /// exists to prevent, so both are refused by name.
 #[test]
 fn validate_rejects_a_cap_outside_its_range() {
-    let refunds = |cap| Config {
-        max_refunds_per_sweep: RefundsPerSweep::new(cap),
-        ..Config::default()
-    };
-    let evictions = |cap| Config {
-        max_evictions_per_sweep: EvictionsPerSweep::new(cap),
-        ..Config::default()
-    };
-    assert_eq!(
-        refunds(0).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "max_refunds_per_sweep",
-            cap: 0,
-            ceiling: RefundsPerSweep::CEILING
-        })
-    );
-    let over = RefundsPerSweep::CEILING + 1;
-    assert_eq!(
-        refunds(over).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "max_refunds_per_sweep",
-            cap: over,
-            ceiling: RefundsPerSweep::CEILING
-        })
-    );
-    refunds(RefundsPerSweep::CEILING)
-        .validate()
-        .expect("the ceiling itself is allowed");
-    refunds(1).validate().expect("one item a pass is allowed");
-
     let chunk = |cap| Config {
         audit_chunk_events: AuditChunk::new(cap),
         ..Config::default()
@@ -481,23 +401,15 @@ fn validate_rejects_a_cap_outside_its_range() {
     chunk(AuditChunk::CEILING)
         .validate()
         .expect("the ceiling itself is allowed");
-
-    let err = evictions(0).validate().unwrap_err();
-    assert_eq!(
-        err,
-        ConfigError::CapOutOfRange {
-            field: "max_evictions_per_sweep",
-            cap: 0,
-            ceiling: EvictionsPerSweep::CEILING
-        }
-    );
-    assert!(err.to_string().contains("max_evictions_per_sweep"), "{err}");
-    assert!(evictions(EvictionsPerSweep::CEILING + 1)
-        .validate()
-        .is_err());
-    evictions(EvictionsPerSweep::CEILING)
-        .validate()
-        .expect("the ceiling itself is allowed");
+    // the sweeps' caps went with their sweeps (2026-10-24): nothing reads them, nothing
+    // refuses them
+    Config {
+        max_refunds_per_sweep: RefundsPerSweep::new(0),
+        max_evictions_per_sweep: EvictionsPerSweep::new(0),
+        ..Config::default()
+    }
+    .validate()
+    .expect("a cap no sweep reads is not refused");
 }
 
 /// A cap holding its default is absent from the stored bytes, which is what keeps the
@@ -628,9 +540,8 @@ fn validate_rejects_a_batch_size_outside_its_range() {
 /// provider serves, so the knob is a cap like the per-pass ones: one to its ceiling, at its
 /// default absent from storage so the stored config's bytes do not move.
 ///
-/// Rewritten for fix wave 6 (M1): the default is the ceiling, and a lookback inside the
-/// cap's own range but short of the claims the door admits (one block back) is refused by
-/// that rule instead of accepted.
+/// Rewritten for fix wave 6 (M1): the default is the ceiling. Since the v1 claim door went
+/// (2026-10-24) nothing reads the knob, and only its own range is held.
 #[test]
 fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
     // the widest range the read walks, which covers the longest claim at the default grace
@@ -662,13 +573,9 @@ fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
     lookback(DepositLookback::CEILING)
         .validate()
         .expect("the ceiling itself is allowed");
-    assert!(
-        matches!(
-            lookback(1).validate(),
-            Err(ConfigError::LookbackShorterThanClaims { lookback: 1, .. })
-        ),
-        "one block back is inside the cap and short of every claim"
-    );
+    lookback(1)
+        .validate()
+        .expect("one block back is inside the cap");
 
     // at its default the knob writes nothing, so the stored bytes are the ones the golden
     // file already pins; set, it is the twenty-first element
@@ -864,9 +771,7 @@ fn the_claim_grace_is_an_hour_by_default_and_absent_from_storage_while_it_is() {
 /// one longer than a day keeps a quote in the pending store for longer than any window
 /// inside one swap may be, so both are refused by name. The bounds themselves are allowed.
 ///
-/// Rewritten for fix wave 6 (M1): the grace's own bounds still allow a day, but a whole
-/// config holding one is refused, because no lookback the read can walk reaches a deposit
-/// a day's quote and a day's grace old; the floor is allowed as before.
+/// Since the v1 claim door went (2026-10-24) no lookback cross-check refuses a day of grace.
 #[test]
 fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
     let with = |secs| Config {
@@ -893,13 +798,9 @@ fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
     ClaimGrace::new(Duration::from_secs(86_400))
         .validate()
         .expect("the ceiling itself is inside the grace's own bounds");
-    assert!(
-        matches!(
-            with(86_400).validate(),
-            Err(ConfigError::LookbackShorterThanClaims { .. })
-        ),
-        "and past what the widest lookback reaches"
-    );
+    with(86_400)
+        .validate()
+        .expect("and a whole config holding it");
     assert_eq!(
         with(599).validate().unwrap_err().to_string(),
         "claim_grace_s is 599s, below the floor of 600s"
@@ -957,79 +858,6 @@ fn the_cctp_minimum_fees_are_a_table_absent_while_empty_and_below_the_whole() {
             min_fee: CctpMinFee::new(MIN_FEE_MULTIPLIER),
             ceiling: MIN_FEE_MULTIPLIER,
         })
-    );
-}
-
-/// A claim may be asked until the quote's expiry, the permit window and the grace after
-/// it, and the deposit it reads for can be a whole quote lifetime older than that expiry.
-/// The read never looks further back than the lookback, so the lookback has to reach that
-/// far at the fastest chain's rate, four blocks a second (Arbitrum's), or a claim the door
-/// admits reads past the deposit and strands it (review 5, M1). At the defaults a claim can
-/// come 90,120 seconds after its deposit, 360,480 blocks: a lookback of exactly that many
-/// is one short, because it counts the anchor's own block, and one more reaches it. A
-/// longer grace or permit window needs a longer lookback.
-#[test]
-fn the_lookback_reaches_every_deposit_a_claim_may_be_asked_for() {
-    assert_eq!(
-        FASTEST_BLOCKS_PER_SECOND, 4,
-        "Arbitrum's block every 250 ms"
-    );
-    Config::default()
-        .validate()
-        .expect("the defaults hold together");
-    let span = crate::quote::MAX_QUOTE_LIFETIME + Config::default().claim_window();
-    assert_eq!(span, Duration::from_secs(86_400 + 120 + 3_600));
-    let lookback = |blocks| Config {
-        deposit_lookback_blocks: DepositLookback::new(blocks),
-        ..Config::default()
-    };
-    assert_eq!(
-        lookback(360_480).validate(),
-        Err(ConfigError::LookbackShorterThanClaims {
-            lookback: 360_480,
-            span,
-            needed: 360_480,
-        })
-    );
-    lookback(360_481)
-        .validate()
-        .expect("one block more reaches the oldest deposit a claim may be asked for");
-    assert_eq!(
-        lookback(345_600).validate().unwrap_err().to_string(),
-        "deposit_lookback_blocks is 345600, and a claim may be asked 90120s after the \
-         deposit it reads for (the longest quote, permit_deadline_s and claim_grace_s), \
-         360480 blocks at 4 blocks a second: the lookback must be above that",
-        "the old default, a day of Arbitrum, fell short"
-    );
-
-    // at the widest lookback the permit window and the grace may be 13,599 seconds together
-    let grace = |secs| Config {
-        claim_grace: ClaimGrace::new(Duration::from_secs(secs)),
-        deposit_lookback_blocks: DepositLookback::new(400_000),
-        ..Config::default()
-    };
-    grace(13_479)
-        .validate()
-        .expect("99,999 seconds is 399,996 blocks");
-    assert!(matches!(
-        grace(13_480).validate(),
-        Err(ConfigError::LookbackShorterThanClaims {
-            needed: 400_000,
-            ..
-        })
-    ));
-    let permit = Config {
-        permit_deadline: Duration::from_secs(13_481),
-        claim_grace: ClaimGrace::new(MIN_CLAIM_GRACE),
-        deposit_lookback_blocks: DepositLookback::new(400_000),
-        ..Config::default()
-    };
-    assert!(
-        matches!(
-            permit.validate(),
-            Err(ConfigError::LookbackShorterThanClaims { .. })
-        ),
-        "the permit window counts the same"
     );
 }
 
