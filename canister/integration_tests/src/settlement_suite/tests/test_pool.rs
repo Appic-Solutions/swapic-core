@@ -146,6 +146,28 @@ fn world_in(
         ..init_arg()
     };
     install(&pic, canister, admin, &arg).expect("installs");
+    let ledger = install_ledger(
+        &pic,
+        admin,
+        "ckUSDC",
+        vec![(canister, canister_usdc), (staker(), usdc(1_000))],
+    );
+    let world = World {
+        pic,
+        canister,
+        admin,
+        ledger,
+    };
+    world_settled(world)
+}
+
+/// An ICRC-1/ICRC-2 ledger of `symbol` (the evm-minter's u256 build) minting `balances`.
+fn install_ledger(
+    pic: &PocketIc,
+    admin: Principal,
+    symbol: &str,
+    balances: Vec<(Principal, u64)>,
+) -> Principal {
     let ledger = pic.create_canister_with_settings(Some(admin), None);
     pic.add_cycles(ledger, 100_000_000_000_000);
     let init = LedgerArg::Init(LedgerInit {
@@ -154,13 +176,13 @@ fn world_in(
         transfer_fee: Nat::from(FEE),
         decimals: Some(6),
         max_memo_length: Some(32),
-        token_symbol: "ckUSDC".into(),
-        token_name: "ckUSDC".into(),
+        token_symbol: symbol.into(),
+        token_name: symbol.into(),
         metadata: vec![],
-        initial_balances: vec![
-            (account(canister), Nat::from(canister_usdc)),
-            (account(staker()), Nat::from(usdc(1_000))),
-        ],
+        initial_balances: balances
+            .into_iter()
+            .map(|(owner, amount)| (account(owner), Nat::from(amount)))
+            .collect(),
         feature_flags: Some(FeatureFlags { icrc2: true }),
         maximum_number_of_accounts: None,
         accounts_overflow_trim_quantity: None,
@@ -181,12 +203,12 @@ fn world_in(
         encode_one(init).unwrap(),
         Some(admin),
     );
-    let world = World {
-        pic,
-        canister,
-        admin,
-        ledger,
-    };
+    ledger
+}
+
+/// The pool's settings set on `world` and its first checks made.
+fn world_settled(world: World) -> World {
+    let (canister, admin, ledger) = (world.canister, world.admin, world.ledger);
     let settings = PoolSettings {
         tvl_cap: Nat::from(usdc(10_000)),
         per_swap_cap: Nat::from(usdc(1_000)),
@@ -1750,7 +1772,14 @@ struct TransferArg {
 impl World {
     /// The canister's own transfer of `amount` to `to`, its memo and `created_at_time`
     /// given, as a payout makes it: the ledger block it landed in.
-    fn transfer_as_canister(&self, to: Principal, amount: u64, memo: [u8; 32], at: u64) -> u64 {
+    fn transfer_as_canister(
+        &self,
+        ledger: Principal,
+        to: Principal,
+        amount: u64,
+        memo: [u8; 32],
+        at: u64,
+    ) -> u64 {
         let args = TransferArg {
             from_subaccount: None,
             to: account(to),
@@ -1762,7 +1791,7 @@ impl World {
         let raw = self
             .pic
             .update_call(
-                self.ledger,
+                ledger,
                 self.canister,
                 "icrc1_transfer",
                 encode_one(args).unwrap(),
@@ -1823,8 +1852,13 @@ fn a_held_deposit_whose_transfer_landed_is_marked_paid_once() {
         PoolDepositStatus::PayoutFailed(_)
     ));
     // it landed after all: the canister's own transfer, as the payout asked it
-    let block =
-        world.transfer_as_canister(recipient(), sent, r#ref.into_bytes(), created_at.as_nanos());
+    let block = world.transfer_as_canister(
+        world.ledger,
+        recipient(),
+        sent,
+        r#ref.into_bytes(),
+        created_at.as_nanos(),
+    );
     let resolve = |sender: Principal, resolution: DepositResolution| -> Result<(), PoolError> {
         update(
             &world.pic,
@@ -1859,5 +1893,101 @@ fn a_held_deposit_whose_transfer_landed_is_marked_paid_once() {
         resolve(world.admin, DepositResolution::MarkPaid { block }),
         Err(PoolError::NotAllowed(_))
     ));
+    assert!(world.replay_matches());
+}
+
+/// The review (2026-10-24): a held payout of another token whose transfer may have landed is
+/// never retried with its old pair; a controller names the block, the canister reads it on
+/// that token's own ledger and books the deposit paid on exactly its transfer, once.
+#[test]
+fn a_held_token_payout_whose_transfer_landed_is_marked_paid_on_its_tokens_ledger() {
+    use settlement_api::types::pool::DepositResolution;
+    use types::pool::{PayoutAttempt, PayoutPath, PrincipalBytes};
+    let world = world(usdc(1_000));
+    world.plant_stake(world.admin, usdc(1_000), 1);
+    let paused: Result<(), String> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_pool_paused",
+        encode_one(true).unwrap(),
+    );
+    assert_eq!(paused, Ok(()));
+    let token = install_ledger(
+        &world.pic,
+        world.admin,
+        "TKN",
+        vec![(world.canister, 9_000_000)],
+    );
+    let r#ref = world.arrive(
+        DepositKind::Swap {
+            recipient: IcpAccount {
+                owner: recipient(),
+                subaccount: None,
+            },
+            token_out: token,
+            min_out: 1,
+        },
+        5,
+    );
+    let created_at = world.now();
+    let sent = 4_000_000;
+    world.plant(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at,
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Icpswap {
+                pool: Principal::from_slice(&[0x71; 10]),
+            },
+            amount: Some(TokenAmount::from(usdc(98))),
+            token: Some(PrincipalBytes(world.ledger)),
+        },
+    });
+    world.plant(PoolStep::TransferAsked {
+        r#ref,
+        token: PrincipalBytes(token),
+        amount: TokenAmount::from(sent),
+        spent: TokenAmount::from(usdc(99)),
+    });
+    for n in 1..=10 {
+        world.plant(PoolStep::AttemptFailed {
+            r#ref,
+            why: format!("try {n}"),
+        });
+    }
+    // it landed after all, on the token's ledger
+    let block = world.transfer_as_canister(
+        token,
+        recipient(),
+        sent,
+        r#ref.into_bytes(),
+        created_at.as_nanos(),
+    );
+    let resolve = |resolution: DepositResolution| -> Result<(), PoolError> {
+        update(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "resolve_deposit",
+            candid::encode_args((r#ref.into_bytes().to_vec(), resolution)).unwrap(),
+        )
+    };
+    assert!(matches!(
+        resolve(DepositResolution::Retry),
+        Err(PoolError::NotAllowed(why)) if why.contains("never retried")
+    ));
+    assert_eq!(resolve(DepositResolution::MarkPaid { block }), Ok(()));
+    let view = world.deposit(r#ref);
+    assert_eq!(view.status, PoolDepositStatus::Paid);
+    assert_eq!(view.paid, Some(Nat::from(sent)));
+    let paid: Nat = query(
+        &world.pic,
+        token,
+        world.admin,
+        "icrc1_balance_of",
+        encode_one(account(recipient())).unwrap(),
+    );
+    assert_eq!(paid, Nat::from(sent));
     assert!(world.replay_matches());
 }
