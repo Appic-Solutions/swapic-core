@@ -351,6 +351,41 @@ fn an_eco_payout_order_is_read_and_its_refund_comes_back_to_the_canister() {
     assert!(check(&greedy, &order, &world, 600_000, nobody).is_err());
 }
 
+/// An Eco payout order's intent is held to Eco's own prover: the same order is refused
+/// while the canister knows another prover, or none.
+#[test]
+fn an_eco_payout_order_is_refused_under_another_prover() {
+    let world = World::new();
+    let order = eco();
+    let payout = waiting(&order, terms_of(&order, &world));
+    let under = |eco_prover| {
+        check_order(
+            &payout,
+            &order,
+            &swapic::encode_order(&order),
+            600_000,
+            &Payer {
+                eco_prover,
+                ..world.payer()
+            },
+            &PayoutSettings::default(),
+            deadline_of(&order) - 600,
+            nobody,
+            AmountIn::Exact,
+        )
+    };
+    assert!(under(world.payer().eco_prover).is_ok());
+    for prover in [
+        Some(address("0x1111111111111111111111111111111111111111")),
+        None,
+    ] {
+        assert!(matches!(
+            under(prover),
+            Err(PoolError::NotAllowed(why)) if why.contains("prover")
+        ));
+    }
+}
+
 /// A payout order WITH a fee step paying the canister is refused: the canister pays itself
 /// nothing, or the fee would be booked as income and the books would drift.
 #[test]
