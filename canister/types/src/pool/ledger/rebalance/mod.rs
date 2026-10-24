@@ -18,7 +18,7 @@ use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::rebalance::{
     Landing, Move, MoveDirection, MoveRoute, MoveStatus, Proposal, RebalanceLines, Sweep, DAY,
 };
-use crate::pool::{Pocket, Pockets, PoolStep, UnseenArrival};
+use crate::pool::{CreditKey, Pocket, Pockets, PoolStep, UnseenArrival};
 
 fn status_of(item: &Move) -> String {
     format!("{:?}", item.status)
@@ -456,6 +456,59 @@ impl PoolLedger {
                 lines.settings = Some(*settings);
                 None
             }
+            PoolStep::MoveOpened { .. }
+            | PoolStep::MoveProposed { .. }
+            | PoolStep::MoveRouted { .. } => {
+                Some(ledger.apply_move_opening(step, lookup, at, &mut lines)?)
+            }
+            PoolStep::MoveSigned { .. }
+            | PoolStep::MoveBurned { .. }
+            | PoolStep::MoveReverted { .. }
+            | PoolStep::MoveWithdrawing { .. }
+            | PoolStep::MoveWithdrawn { .. }
+            | PoolStep::MoveRefused { .. } => {
+                Some(ledger.apply_move_leaving(step, lookup, at, index, &mut lines)?)
+            }
+            PoolStep::MoveLanded { .. }
+            | PoolStep::MoveSweeping { .. }
+            | PoolStep::MoveArrived { .. }
+            | PoolStep::MoveRefunded { .. }
+            | PoolStep::MoveUnfilled { .. }
+            | PoolStep::MoveReimbursed { .. } => {
+                Some(ledger.apply_move_landing(step, lookup, at, &mut lines, &mut credited)?)
+            }
+            PoolStep::MoveStuck { .. }
+            | PoolStep::MoveRetried { .. }
+            | PoolStep::MoveLost { .. } => {
+                Some(ledger.apply_move_stuck(step, lookup, at, &mut lines)?)
+            }
+            _ => return None,
+        };
+        ledger.rebalance = Some(lines);
+        Some(PoolEffects {
+            ledger,
+            deposit: None,
+            shares: None,
+            credited,
+            payout: None,
+            queued: None,
+            dequeued: None,
+            nonce: None,
+            intent: None,
+            orphan: None,
+            moved,
+        })
+    }
+
+    /// What a move's opening changes: opened, a proposal taken, routed.
+    fn apply_move_opening(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut RebalanceLines,
+    ) -> Option<Move> {
+        match step {
             PoolStep::MoveOpened {
                 id,
                 direction,
@@ -472,7 +525,7 @@ impl PoolLedger {
                     .unwrap_or(Timestamp::from_nanos(0));
                 lines.recent.retain(|(opened, _)| *opened > since);
                 lines.recent.push((*opened_at, *amount));
-                let pocket = source(&mut ledger.pockets, *direction);
+                let pocket = source(&mut self.pockets, *direction);
                 pocket.free = sat_sub(pocket.free, *amount);
                 pocket.reserved = sat_add(pocket.reserved, *amount);
                 Some(Move::opened(
@@ -507,11 +560,26 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
+            _ => None,
+        }
+    }
+
+    /// What a move leaving its source pocket changes: its order signed and its end, the ck
+    /// minter's call and its answer.
+    fn apply_move_leaving(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        index: u64,
+        lines: &mut RebalanceLines,
+    ) -> Option<Move> {
+        match step {
             PoolStep::MoveSigned { id, tx_hash, .. } => {
                 let mut item = lookup.pool_move(*id)?;
                 // a Base to ICP move leaves the Base pocket with its first order
                 if !item.left {
-                    let base = &mut ledger.pockets.base;
+                    let base = &mut self.pockets.base;
                     base.reserved = sat_sub(base.reserved, item.amount);
                     base.in_flight = sat_add(base.in_flight, item.amount);
                     item.left = true;
@@ -536,7 +604,7 @@ impl PoolLedger {
                 match (item.direction, item.landed.is_some()) {
                     // its first order: nothing left the Base pocket
                     (MoveDirection::BaseToIcp, false) => {
-                        let base = &mut ledger.pockets.base;
+                        let base = &mut self.pockets.base;
                         base.in_flight = sat_sub(base.in_flight, item.amount);
                         base.reserved = sat_add(base.reserved, item.amount);
                         item.left = false;
@@ -560,7 +628,7 @@ impl PoolLedger {
             }
             PoolStep::MoveWithdrawing { id, created_at } => {
                 let mut item = lookup.pool_move(*id)?;
-                let icp = &mut ledger.pockets.icp;
+                let icp = &mut self.pockets.icp;
                 icp.reserved = sat_sub(icp.reserved, item.amount);
                 icp.in_flight = sat_add(icp.in_flight, item.amount);
                 item.left = true;
@@ -575,7 +643,7 @@ impl PoolLedger {
                 fee,
             } => {
                 let mut item = lookup.pool_move(*id)?;
-                ledger.pockets.icp.free = sat_sub(ledger.pockets.icp.free, *fee);
+                self.pockets.icp.free = sat_sub(self.pockets.icp.free, *fee);
                 lines.cost = sat_add(lines.cost, *fee);
                 item.withdrawal = Some(*withdrawal_id);
                 item.status = MoveStatus::Withdrawn;
@@ -584,7 +652,7 @@ impl PoolLedger {
             }
             PoolStep::MoveRefused { id, fee, .. } => {
                 let mut item = lookup.pool_move(*id)?;
-                let icp = &mut ledger.pockets.icp;
+                let icp = &mut self.pockets.icp;
                 icp.in_flight = sat_sub(icp.in_flight, item.amount);
                 icp.reserved = sat_add(icp.reserved, item.amount);
                 icp.free = sat_sub(icp.free, *fee);
@@ -595,6 +663,21 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
+            _ => None,
+        }
+    }
+
+    /// What a move landing changes: landed, swept, arrived, or given back (Eco's refund, an
+    /// unfilled intent, the ck minter's reimbursement), and the transfer it credits.
+    fn apply_move_landing(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut RebalanceLines,
+        credited: &mut Option<CreditKey>,
+    ) -> Option<Move> {
+        match step {
             PoolStep::MoveLanded {
                 id,
                 tx_hash,
@@ -639,68 +722,23 @@ impl PoolLedger {
                 ..
             } => {
                 let mut item = lookup.pool_move(*id)?;
-                let from = source(&mut ledger.pockets, item.direction);
+                let from = source(&mut self.pockets, item.direction);
                 from.in_flight = sat_sub(from.in_flight, item.amount);
-                let to = destination(&mut ledger.pockets, item.direction);
+                let to = destination(&mut self.pockets, item.direction);
                 to.free = sat_add(to.free, *amount);
                 lines.cost = sat_add(lines.cost, sat_sub(item.amount, *amount));
                 lines.open.remove(id);
                 // a Base arrival from a block no balance check has read at yet
                 if let (Some(key), Some(block)) = (credit, block) {
-                    ledger.unseen.push(UnseenArrival {
+                    self.unseen.push(UnseenArrival {
                         chain: key.chain,
                         block: *block,
                         amount: *amount,
                     });
                 }
-                credited = *credit;
+                *credited = *credit;
                 item.arrived = Some(*amount);
                 item.status = MoveStatus::Arrived;
-                item.stuck = None;
-                item.since = at;
-                Some(item)
-            }
-            PoolStep::MoveStuck { id, why } => {
-                let mut item = lookup.pool_move(*id)?;
-                item.stuck = Some(why.clone());
-                Some(item)
-            }
-            // on from where it stood, with fresh tries; a minter's call a controller found never
-            // ran is asked again, the ckUSDC approval its lost answer may have given booked as
-            // the pool's cost (P11e): on the safe side, a fee too many is a surplus
-            PoolStep::MoveRetried { id } => {
-                let mut item = lookup.pool_move(*id)?;
-                item.reverts = None;
-                if item.status == MoveStatus::Withdrawing {
-                    let fee = ledger
-                        .settings
-                        .as_ref()
-                        .and_then(|settings| settings.fee_of(settings.ckusdc_ledger))
-                        .unwrap_or(TokenAmount::ZERO);
-                    lines.cost = sat_add(lines.cost, fee);
-                    let icp = &mut ledger.pockets.icp;
-                    icp.free = sat_sub(icp.free, fee);
-                    icp.in_flight = sat_sub(icp.in_flight, item.amount);
-                    icp.reserved = sat_add(icp.reserved, item.amount);
-                    item.left = false;
-                    item.minter_at = None;
-                    item.status = MoveStatus::Open;
-                }
-                item.stuck = None;
-                item.since = at;
-                Some(item)
-            }
-            PoolStep::MoveLost { id, why } => {
-                let mut item = lookup.pool_move(*id)?;
-                let pocket = source(&mut ledger.pockets, item.direction);
-                if item.left {
-                    pocket.in_flight = sat_sub(pocket.in_flight, item.amount);
-                } else {
-                    pocket.reserved = sat_sub(pocket.reserved, item.amount);
-                }
-                lines.lost = sat_add(lines.lost, item.amount);
-                lines.open.remove(id);
-                item.status = MoveStatus::Lost(why.clone());
                 item.stuck = None;
                 item.since = at;
                 Some(item)
@@ -713,15 +751,15 @@ impl PoolLedger {
                 block,
             } => {
                 let mut item = lookup.pool_move(*id)?;
-                let base = &mut ledger.pockets.base;
+                let base = &mut self.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, item.amount);
                 base.reserved = sat_add(base.reserved, item.amount);
-                ledger.unseen.push(UnseenArrival {
+                self.unseen.push(UnseenArrival {
                     chain: credit.chain,
                     block: *block,
                     amount: *amount,
                 });
-                credited = Some(*credit);
+                *credited = Some(*credit);
                 item.left = false;
                 item.route = None;
                 item.order = None;
@@ -754,7 +792,7 @@ impl PoolLedger {
             // back in the ICP pocket: what came back free, the rest the move's cost
             PoolStep::MoveReimbursed { id, amount, .. } => {
                 let mut item = lookup.pool_move(*id)?;
-                let icp = &mut ledger.pockets.icp;
+                let icp = &mut self.pockets.icp;
                 icp.in_flight = sat_sub(icp.in_flight, item.amount);
                 icp.free = sat_add(icp.free, *amount);
                 lines.cost = sat_add(lines.cost, sat_sub(item.amount, *amount));
@@ -765,21 +803,65 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            _ => return None,
-        };
-        ledger.rebalance = Some(lines);
-        Some(PoolEffects {
-            ledger,
-            deposit: None,
-            shares: None,
-            credited,
-            payout: None,
-            queued: None,
-            dequeued: None,
-            nonce: None,
-            intent: None,
-            orphan: None,
-            moved,
-        })
+            _ => None,
+        }
+    }
+
+    /// What a move held for a human changes: stuck, retried, or written off as lost.
+    fn apply_move_stuck(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut RebalanceLines,
+    ) -> Option<Move> {
+        match step {
+            PoolStep::MoveStuck { id, why } => {
+                let mut item = lookup.pool_move(*id)?;
+                item.stuck = Some(why.clone());
+                Some(item)
+            }
+            // on from where it stood, with fresh tries; a minter's call a controller found never
+            // ran is asked again, the ckUSDC approval its lost answer may have given booked as
+            // the pool's cost (P11e): on the safe side, a fee too many is a surplus
+            PoolStep::MoveRetried { id } => {
+                let mut item = lookup.pool_move(*id)?;
+                item.reverts = None;
+                if item.status == MoveStatus::Withdrawing {
+                    let fee = self
+                        .settings
+                        .as_ref()
+                        .and_then(|settings| settings.fee_of(settings.ckusdc_ledger))
+                        .unwrap_or(TokenAmount::ZERO);
+                    lines.cost = sat_add(lines.cost, fee);
+                    let icp = &mut self.pockets.icp;
+                    icp.free = sat_sub(icp.free, fee);
+                    icp.in_flight = sat_sub(icp.in_flight, item.amount);
+                    icp.reserved = sat_add(icp.reserved, item.amount);
+                    item.left = false;
+                    item.minter_at = None;
+                    item.status = MoveStatus::Open;
+                }
+                item.stuck = None;
+                item.since = at;
+                Some(item)
+            }
+            PoolStep::MoveLost { id, why } => {
+                let mut item = lookup.pool_move(*id)?;
+                let pocket = source(&mut self.pockets, item.direction);
+                if item.left {
+                    pocket.in_flight = sat_sub(pocket.in_flight, item.amount);
+                } else {
+                    pocket.reserved = sat_sub(pocket.reserved, item.amount);
+                }
+                lines.lost = sat_add(lines.lost, item.amount);
+                lines.open.remove(id);
+                item.status = MoveStatus::Lost(why.clone());
+                item.stuck = None;
+                item.since = at;
+                Some(item)
+            }
+            _ => None,
+        }
     }
 }
