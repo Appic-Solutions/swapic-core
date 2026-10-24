@@ -2152,3 +2152,21 @@ fn a_retrys_dedup_instant_is_the_lines_time_inside_the_window() {
     };
     assert_eq!(pool.ledger.admits_at(&no_instant, line), Ok(()));
 }
+
+/// The review (2026-10-24): an ask on other terms is refused while an earlier one may have
+/// landed, and one whose answer was once lost may have, even if refused since.
+#[test]
+fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
+    let mut pool = funded(usdc(1_000));
+    let r#ref = started(&mut pool, 1, 1);
+    pool.step(asked(r#ref)).unwrap();
+    pool.step(PoolStep::TransferLost { r#ref }).unwrap();
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    let mut other = asked(r#ref);
+    if let PoolStep::TransferAsked { amount, .. } = &mut other {
+        *amount = usdc(1);
+    }
+    assert_eq!(pool.step(other), Err(PoolStepError::AskedOnOtherTerms));
+    // on its own terms it is asked again
+    pool.step(asked(r#ref)).unwrap();
+}

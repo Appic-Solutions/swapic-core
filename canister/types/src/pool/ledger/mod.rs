@@ -709,9 +709,13 @@ impl PoolLedger {
                 if !target.in_payout() {
                     return Err(PoolStepError::Terms("only a payout in progress asks"));
                 }
-                match target.payout().and_then(|payout| payout.sent) {
-                    Some(sent)
-                        if !sent.refused && (sent.token, sent.amount) != (*token, *amount) =>
+                // may have landed: not refused at its last ask, or an answer of it once lost
+                match target.payout() {
+                    Some(payout)
+                        if !payout.cannot_land_twice()
+                            && payout.sent.is_some_and(|sent| {
+                                (sent.token, sent.amount) != (*token, *amount)
+                            }) =>
                     {
                         Err(PoolStepError::AskedOnOtherTerms)
                     }
