@@ -1348,3 +1348,141 @@ fn a_transaction_with_no_record_here_is_refused_before_its_nonce() {
         assert!(record_of(kept, None).is_ok(), "{kept:?}");
     }
 }
+
+/// Each record carries the signed bytes as the fold's step for its purpose reads them: the
+/// key, the chain and the nonce the allocation handed out, the hash and the bytes, and the
+/// detail its purpose was handed.
+#[test]
+fn each_record_is_written_with_its_signed_bytes_and_its_detail() {
+    use types::pool::{CreditKey, PinnedOrder, PoolStep};
+    use types::FlowStep;
+    let key = QuoteHash::new([4; 32]);
+    let (chain_id, nonce, tx_hash, raw_tx) = (
+        ChainId::BASE,
+        Nonce::new(7),
+        TxHash::new([8; 32]),
+        vec![0x02, 0xf8],
+    );
+    let line = |purpose, detail| {
+        record_of(purpose, detail)
+            .unwrap()
+            .line(key, chain_id, nonce, tx_hash, raw_tx.clone())
+    };
+    let pool = |step| EventType::Pool { step };
+    assert_eq!(
+        line(TxPurpose::Relay(key), None),
+        EventType::Flow {
+            quote_hash: key,
+            step: FlowStep::GaslessRelayed {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx: raw_tx.clone(),
+            },
+        }
+    );
+    let arrival = [9; 32];
+    let source_tx = TxHash::new([10; 32]);
+    let action = types::flow::FinishAction::Complete;
+    assert_eq!(
+        line(
+            TxPurpose::Finish(key),
+            Some(Detail::Finish {
+                action,
+                arrival,
+                source_tx,
+            })
+        ),
+        EventType::Flow {
+            quote_hash: key,
+            step: FlowStep::CctpFinishSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx: raw_tx.clone(),
+                action,
+                arrival,
+                source_tx: Some(source_tx),
+            },
+        }
+    );
+    let order = PinnedOrder {
+        order_id: [11; 32],
+        order: vec![12],
+        gas_limit: 900_000,
+        deadline_s: 13,
+    };
+    assert_eq!(
+        line(
+            TxPurpose::PoolPayout(3),
+            Some(Detail::PoolPayout {
+                order: order.clone()
+            })
+        ),
+        pool(PoolStep::PayoutSigned {
+            id: 3,
+            order,
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        })
+    );
+    let credit = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([14; 32]),
+        log_index: 2,
+    };
+    let to: EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let sent = types::TokenAmount::from(15_u32);
+    assert_eq!(
+        line(
+            TxPurpose::PoolTransfer([16; 32]),
+            Some(Detail::PoolTransfer {
+                key: credit,
+                to,
+                sent
+            })
+        ),
+        pool(PoolStep::OrphanRefundSigned {
+            key: credit,
+            to,
+            sent,
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        })
+    );
+    assert_eq!(
+        line(TxPurpose::PoolApprove, None),
+        pool(PoolStep::ApproveSigned {
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        })
+    );
+    assert_eq!(
+        line(TxPurpose::EcoRescue([17; 32]), None),
+        pool(PoolStep::EcoRescueSigned {
+            order_id: [17; 32],
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx: raw_tx.clone(),
+        })
+    );
+    assert_eq!(
+        line(TxPurpose::PoolMove(5), None),
+        pool(PoolStep::MoveSigned {
+            id: 5,
+            chain_id,
+            nonce,
+            tx_hash,
+            raw_tx,
+        })
+    );
+}
