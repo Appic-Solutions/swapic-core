@@ -178,28 +178,9 @@ pub enum BlockRead {
     IcpBlocks,
 }
 
-/// The ICP ledger, by its known principal.
-pub const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
-
-/// Whether `ledger` is the ICP ledger: its known principal, or the one the routes name.
+/// Whether `ledger` is the ICP ledger: the one the routes name (the review, 2026-10-24).
 pub fn is_icp_ledger(ledger: Principal, configured: Option<Principal>) -> bool {
-    configured == Some(ledger) || Principal::from_text(ICP_LEDGER).is_ok_and(|icp| icp == ledger)
-}
-
-/// The reads tried for a ledger's block, in order (the review, 2026-10-24): the ICP ledger's
-/// own `query_blocks` for the ICP ledger, ICRC-3 when the ledger lists it among its
-/// standards, then `get_transactions`. Each read that does not answer in its own shape falls
-/// to the next.
-pub fn reads_for(is_icp: bool, lists_icrc3: bool) -> Vec<BlockRead> {
-    let mut reads = Vec::new();
-    if is_icp {
-        reads.push(BlockRead::IcpBlocks);
-    }
-    if lists_icrc3 {
-        reads.push(BlockRead::Icrc3);
-    }
-    reads.push(BlockRead::Transactions);
-    reads
+    configured == Some(ledger)
 }
 
 /// A read's call: its answer; or, when the callee answered with a refusal, a trap or a reply
@@ -229,21 +210,9 @@ struct Standard {
     name: String,
 }
 
-/// Whether `ledger` lists ICRC-3 among the standards it declares (`icrc1_supported_standards`,
-/// and `icrc10_supported_standards` where served).
-async fn lists_icrc3(ledger: Principal) -> Result<bool, CallError> {
-    let mut listed = false;
-    for method in ["icrc1_supported_standards", "icrc10_supported_standards"] {
-        if let Ok((standards,)) = call_read::<_, (Vec<Standard>,)>(ledger, method, ()).await? {
-            listed |= standards.iter().any(|standard| standard.name == "ICRC-3");
-        }
-    }
-    Ok(listed)
-}
-
 /// How one read of a block ended: answered in its shape (the transfer, or none: no such
 /// block, or a block of another kind), or fell through with why.
-enum Outcome {
+pub enum Outcome {
     Answered(Option<Box<LedgerTransfer>>),
     FellThrough(String),
 }
@@ -258,33 +227,106 @@ impl Outcome {
     }
 }
 
-/// The transfer in `ledger`'s block `block` (the review, 2026-10-24), read through the reads
-/// the ledger is known to serve ([`reads_for`]), each on the ledger or the archive that holds
-/// the block: the first that answers in its own shape decides (the transfer, or none: no
-/// such block, or a block of another kind). A ledger none of whose reads answers so is a
-/// refusal naming it; a ledger that cannot be reached now is asked again later.
-pub async fn ledger_transfer_at(
+/// What reading one ledger's block asks of it, so the choice of reads runs the same against
+/// a fake.
+#[allow(async_fn_in_trait)]
+pub trait BlockReads {
+    /// The names of the standards the ledger declares through `method`; none when it does not
+    /// answer them (any failure, a passing one included).
+    async fn standards(&self, method: &str) -> Option<Vec<String>>;
+    /// One read of the block.
+    async fn read(&self, read: BlockRead) -> Result<Outcome, CallError>;
+}
+
+/// Whether the ledger lists ICRC-3 among its standards: `icrc1_supported_standards`, and
+/// `icrc10_supported_standards` only when the first does not list it.
+async fn lists_icrc3(reads: &impl BlockReads) -> bool {
+    for method in ["icrc1_supported_standards", "icrc10_supported_standards"] {
+        if reads
+            .standards(method)
+            .await
+            .is_some_and(|names| names.iter().any(|name| name == "ICRC-3"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// A ledger's block read through the reads chosen by what the ledger is (the review,
+/// 2026-10-24): the ICP ledger's own `query_blocks` first for the ICP ledger, no standards
+/// asked; ICRC-3 when the ledger lists it among its standards; then `get_transactions`. The
+/// first that answers in its own shape decides (the transfer, or none: no such block, or a
+/// block of another kind). None answering so (a stopped ledger, no wasm, a trap, a shape
+/// not read) is a read to try later naming the ledger, never a refusal.
+pub async fn read_block(
+    reads: &impl BlockReads,
     ledger: Principal,
     block: u64,
     is_icp: bool,
 ) -> Result<Option<LedgerTransfer>, CallError> {
     let mut why = Vec::new();
-    for read in reads_for(is_icp, lists_icrc3(ledger).await?) {
-        let outcome = match read {
-            BlockRead::Icrc3 => icrc3_transfer_at(ledger, block).await?,
-            BlockRead::Transactions => transactions_transfer_at(ledger, block).await?,
-            BlockRead::IcpBlocks => icp_transfer_at(ledger, block).await?,
+    for read in [
+        BlockRead::IcpBlocks,
+        BlockRead::Icrc3,
+        BlockRead::Transactions,
+    ] {
+        // the standards are asked only once the ICP ledger's own read fell through
+        let wanted = match read {
+            BlockRead::IcpBlocks => is_icp,
+            BlockRead::Icrc3 => lists_icrc3(reads).await,
+            BlockRead::Transactions => true,
         };
-        match outcome {
+        if !wanted {
+            continue;
+        }
+        match reads.read(read).await? {
             Outcome::Answered(found) => return Ok(found.map(|found| *found)),
             Outcome::FellThrough(reason) => why.push(reason),
         }
     }
-    Err(CallError::Refused(format!(
+    Err(CallError::Unknown(format!(
         "ledger {ledger} answered none of its block reads in their own shape ({}): its block \
-         {block} cannot be read",
+         {block} is not read now, try later",
         why.join("; ")
     )))
+}
+
+/// A ledger's block reads through its own calls.
+struct LedgerCalls {
+    ledger: Principal,
+    block: u64,
+}
+
+impl BlockReads for LedgerCalls {
+    async fn standards(&self, method: &str) -> Option<Vec<String>> {
+        match call_read::<_, (Vec<Standard>,)>(self.ledger, method, ()).await {
+            Ok(Ok((standards,))) => Some(
+                standards
+                    .into_iter()
+                    .map(|standard| standard.name)
+                    .collect(),
+            ),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    }
+
+    async fn read(&self, read: BlockRead) -> Result<Outcome, CallError> {
+        match read {
+            BlockRead::Icrc3 => icrc3_transfer_at(self.ledger, self.block).await,
+            BlockRead::Transactions => transactions_transfer_at(self.ledger, self.block).await,
+            BlockRead::IcpBlocks => icp_transfer_at(self.ledger, self.block).await,
+        }
+    }
+}
+
+/// The transfer in `ledger`'s block `block`, read on the ledger itself ([`read_block`]).
+pub async fn ledger_transfer_at(
+    ledger: Principal,
+    block: u64,
+    is_icp: bool,
+) -> Result<Option<LedgerTransfer>, CallError> {
+    read_block(&LedgerCalls { ledger, block }, ledger, block, is_icp).await
 }
 
 /// A transfer as `get_transactions` answers it.
@@ -1327,33 +1369,105 @@ mod tests {
         assert_eq!(icp_transfer(block(None)), Parsed::Unreadable);
     }
 
-    /// The review (2026-10-24): the read is chosen by what the ledger is: the ICP ledger's own
-    /// `query_blocks` first, ICRC-3 when the ledger lists it among its standards, then
-    /// `get_transactions`; each read that does not answer in its shape falls to the next.
+    /// A ledger's block reads as a fake answers them, and the calls made.
+    struct Reads {
+        calls: std::cell::RefCell<Vec<String>>,
+        /// What each standards method lists; absent: it does not answer.
+        standards: Vec<(&'static str, Vec<String>)>,
+        /// Which reads answer the transfer; any other falls through.
+        answering: Vec<BlockRead>,
+    }
+
+    impl BlockReads for Reads {
+        async fn standards(&self, method: &str) -> Option<Vec<String>> {
+            self.calls.borrow_mut().push(method.to_string());
+            self.standards
+                .iter()
+                .find(|(name, _)| *name == method)
+                .map(|(_, listed)| listed.clone())
+        }
+
+        async fn read(&self, read: BlockRead) -> Result<Outcome, CallError> {
+            self.calls.borrow_mut().push(format!("{read:?}"));
+            Ok(if self.answering.contains(&read) {
+                Outcome::Answered(None)
+            } else {
+                Outcome::FellThrough(format!("{read:?} fell through"))
+            })
+        }
+    }
+
+    fn reads(standards: Vec<(&'static str, &[&str])>, answering: Vec<BlockRead>) -> Reads {
+        Reads {
+            calls: std::cell::RefCell::default(),
+            standards: standards
+                .into_iter()
+                .map(|(method, names)| {
+                    (method, names.iter().map(|name| name.to_string()).collect())
+                })
+                .collect(),
+            answering,
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("the fake ledger never waits"),
+        }
+    }
+
+    /// The review (2026-10-24): the read is chosen by what the ledger is. The ICP ledger (the
+    /// one the routes name) reads `query_blocks` first, no standards asked; ICRC-3 is read when
+    /// the ledger lists it (`icrc10_supported_standards` asked only if `icrc1_supported_standards`
+    /// does not); a standards call that does not answer falls to `get_transactions`; each read
+    /// not answering in its shape falls to the next, and none answering is a read to try later,
+    /// naming the ledger, never a refusal.
     #[test]
     fn the_block_read_is_chosen_by_the_ledgers_own_standards() {
-        assert_eq!(
-            reads_for(false, true),
-            vec![BlockRead::Icrc3, BlockRead::Transactions]
+        let ledger = principal(9);
+        let icp = reads(vec![], vec![BlockRead::IcpBlocks]);
+        assert_eq!(block_on(read_block(&icp, ledger, 1, true)), Ok(None));
+        assert_eq!(*icp.calls.borrow(), vec!["IcpBlocks".to_string()]);
+        let icrc3 = reads(
+            vec![("icrc1_supported_standards", &["ICRC-1", "ICRC-3"])],
+            vec![BlockRead::Icrc3],
         );
-        assert_eq!(reads_for(false, false), vec![BlockRead::Transactions]);
+        assert_eq!(block_on(read_block(&icrc3, ledger, 1, false)), Ok(None));
         assert_eq!(
-            reads_for(true, false),
-            vec![BlockRead::IcpBlocks, BlockRead::Transactions]
+            *icrc3.calls.borrow(),
+            vec!["icrc1_supported_standards".to_string(), "Icrc3".to_string()]
         );
-        assert_eq!(
-            reads_for(true, true),
+        let icrc10 = reads(
             vec![
-                BlockRead::IcpBlocks,
-                BlockRead::Icrc3,
-                BlockRead::Transactions
+                ("icrc1_supported_standards", &["ICRC-1"]),
+                ("icrc10_supported_standards", &["ICRC-3"]),
+            ],
+            vec![BlockRead::Icrc3],
+        );
+        assert_eq!(block_on(read_block(&icrc10, ledger, 1, false)), Ok(None));
+        assert_eq!(icrc10.calls.borrow().last(), Some(&"Icrc3".to_string()));
+        let unlisted = reads(vec![], vec![BlockRead::Transactions]);
+        assert_eq!(block_on(read_block(&unlisted, ledger, 1, false)), Ok(None));
+        assert_eq!(
+            *unlisted.calls.borrow(),
+            vec![
+                "icrc1_supported_standards".to_string(),
+                "icrc10_supported_standards".to_string(),
+                "Transactions".to_string()
             ]
         );
-        assert!(is_icp_ledger(
+        let none = reads(vec![("icrc1_supported_standards", &["ICRC-3"])], vec![]);
+        assert!(matches!(
+            block_on(read_block(&none, ledger, 1, false)),
+            Err(CallError::Unknown(why)) if why.contains(&ledger.to_text())
+        ));
+        assert!(is_icp_ledger(principal(4), Some(principal(4))));
+        assert!(!is_icp_ledger(
             Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
             None
         ));
-        assert!(is_icp_ledger(principal(4), Some(principal(4))));
-        assert!(!is_icp_ledger(principal(4), None));
     }
 }
