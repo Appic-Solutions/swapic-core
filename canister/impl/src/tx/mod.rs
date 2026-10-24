@@ -1081,9 +1081,6 @@ async fn decide(
                 network_fee,
                 eco_intent,
             } = receipt;
-            // a pool payout closes with its own line: paid (with the Eco intent its order
-            // published, whose refund reopens it) or reverted, back to waiting with its order
-            // pinned. It paid the canister no fee, so none is booked
             // an orphan's refund closes with its own line: refunded, or held again
             if let TxPurpose::PoolTransfer(hash) = entry.purpose {
                 let refunding = read_state(|state| {
@@ -1121,55 +1118,51 @@ async fn decide(
                     if success { "succeeded" } else { "reverted" },
                 ));
             }
-            // a move's transaction closes with its own line: burned (with the Eco intent its
-            // order published, whose refund routes it again), or reverted, back to signing
-            // the same order. It paid the canister no fee, so none is booked
-            if let TxPurpose::PoolMove(id) = entry.purpose {
-                let step = if success {
+            // a move's or a pool payout's transaction closes with its own line: burned or
+            // paid (with the Eco intent its order published, whose refund routes the move
+            // again or credits the pool), or reverted (a move signs the same order again, a
+            // payout is undone once its order is known unused). It paid the canister no fee,
+            // so none is booked
+            let pool_close = match entry.purpose {
+                TxPurpose::PoolMove(id) if success => Some((
+                    format!("the move {id}"),
                     types::pool::PoolStep::MoveBurned {
                         id,
                         tx_hash,
                         block,
                         intent: eco_intent,
-                    }
-                } else {
+                    },
+                )),
+                TxPurpose::PoolMove(id) => Some((
+                    format!("the move {id}"),
                     types::pool::PoolStep::MoveReverted {
                         id,
                         block: Some(block),
-                    }
-                };
-                let appended = match crate::storage::pool::record_at(step, now) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        log(&format!("the move {id}'s close was refused: {error}"));
-                        false
-                    }
-                };
-                if appended {
-                    settle(entry, block, success, latest, credit);
-                }
-                return usize::from(appended);
-            }
-            if let TxPurpose::PoolPayout(id) = entry.purpose {
-                let step = if success {
+                    },
+                )),
+                TxPurpose::PoolPayout(id) if success => Some((
+                    format!("the pool payout {id}"),
                     types::pool::PoolStep::PayoutPaid {
                         id,
                         tx_hash,
                         block,
                         intent: eco_intent,
-                    }
-                } else {
+                    },
+                )),
+                TxPurpose::PoolPayout(id) => Some((
+                    format!("the pool payout {id}"),
                     types::pool::PoolStep::PayoutReverted {
                         id,
                         block: Some(block),
-                    }
-                };
+                    },
+                )),
+                _ => None,
+            };
+            if let Some((what, step)) = pool_close {
                 let appended = match crate::storage::pool::record_at(step, now) {
                     Ok(_) => true,
                     Err(error) => {
-                        log(&format!(
-                            "the pool payout {id}'s close was refused: {error}"
-                        ));
+                        log(&format!("{what}'s close was refused: {error}"));
                         false
                     }
                 };
