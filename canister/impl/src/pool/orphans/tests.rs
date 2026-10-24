@@ -3,17 +3,9 @@ use crate::storage::events::append_event_at;
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{at, created, funded_pool, usdc};
 use crate::storage::pool::{ledger, record_at};
+use crate::test_util::block_on;
 use types::pool::PayoutSettings;
 use types::{BlockNumber, ChainId, EvmAddress, TxHash};
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("nothing here waits"),
-    }
-}
 
 fn payer() -> EvmAddress {
     "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"

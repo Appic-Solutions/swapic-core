@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{at, funded_pool, usdc};
+use crate::test_util::block_on;
 use std::cell::Cell;
 use types::pool::CreditKey;
 
@@ -164,16 +165,6 @@ fn the_backup_works_once_the_pool_has_settings() {
         funded_pool(usdc(1_000));
         assert!(read_state(|state| has_work(state.store())));
     });
-}
-
-/// Runs a future that never waits: every read of the fake chain answers at once.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake chain never waits"),
-    }
 }
 
 /// A chain whose every transfer to the canister is `logs`.

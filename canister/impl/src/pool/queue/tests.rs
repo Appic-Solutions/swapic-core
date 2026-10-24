@@ -5,21 +5,13 @@ use crate::storage::pool::tests::{
     account, at, base_stake, ckusdc, funded_pool, sign_payout, usdc, waiting_withdrawal, FEE,
 };
 use crate::storage::pool::{ledger, payout, record_at, shares_of};
+use crate::test_util::block_on;
 use candid::Principal;
 use std::cell::RefCell;
 use std::time::Duration;
 use types::pool::payout::{IcpSwapTerms, PayoutKind, PayoutTerms, PinnedOrder, Undo};
 use types::pool::{IcpAccount, PoolAccount};
 use types::{ChainId, EvmAddress, TokenAmount};
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake ledger never waits"),
-    }
-}
 
 fn open_pool() -> Result<(), String> {
     Ok(())

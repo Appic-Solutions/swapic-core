@@ -4,21 +4,12 @@ use crate::storage::pool::tests::{
     account, at, ckusdc, credit, funded_pool, register, settings, swap_terms, usdc, FEE,
 };
 use crate::storage::pool::{deposit, ledger, record_at};
+use crate::test_util::block_on;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use types::hash::PoolOpId;
 use types::pool::{IcpToken, LedgerFee, PoolAccount, PoolHeld, PrincipalBytes, Sent, Shares};
 use types::BlockNumber;
-
-/// Runs a future that never waits: every call of the fake ledger answers at once.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake ledger never waits"),
-    }
-}
 
 fn clock() -> Timestamp {
     at(10)

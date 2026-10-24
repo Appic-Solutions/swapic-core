@@ -15,6 +15,8 @@ pub mod rpc;
 pub mod state;
 pub mod storage;
 pub mod task_manager;
+#[cfg(test)]
+mod test_util;
 pub mod tx;
 pub mod updates;
 

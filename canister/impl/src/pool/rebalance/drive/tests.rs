@@ -6,6 +6,7 @@ use super::*;
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{base_stake, funded_pool, usdc, FEE};
 use crate::storage::pool::{ledger, record_at};
+use crate::test_util::block_on;
 use std::cell::RefCell;
 use types::events::TxPurpose;
 use types::pool::RebalanceSettings;
@@ -287,15 +288,6 @@ impl IcpCalls for Fake {
             })
             .into_iter()
             .collect())
-    }
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake never waits"),
     }
 }
 

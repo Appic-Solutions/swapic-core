@@ -5,20 +5,12 @@ use crate::storage::pool::tests::{
     account, at, base_stake, ckusdc, funded_pool, payer, settings, usdc, FEE,
 };
 use crate::storage::pool::{ledger, record_at};
+use crate::test_util::block_on;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use types::config::{ChainTable, EvmChain, PerAction};
 use types::pool::{IcpRoute, IcpRouteVia, IcpRoutes, LedgerFee, PayoutSettings};
 use types::ChainId;
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake ledger never waits"),
-    }
-}
 
 fn clock() -> Timestamp {
     at(10)

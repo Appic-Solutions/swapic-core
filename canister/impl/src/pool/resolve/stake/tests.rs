@@ -1,45 +1,14 @@
 use super::*;
-use crate::ic::{Account, CallError, Party};
+use crate::ic::{Account, Party};
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, usdc};
 use crate::storage::pool::{ledger, record_at, shares_of};
+use crate::test_util::{block_on, Blocks};
 use candid::Nat;
-use std::cell::{Cell, RefCell};
 use types::pool::PoolAccount;
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(out) => out,
-        std::task::Poll::Pending => panic!("the fake ledger never waits"),
-    }
-}
 
 fn canister() -> Principal {
     Principal::from_slice(&[0xc1; 10])
-}
-
-/// The ledger's blocks as the fake answers them, and the reads made.
-#[derive(Default)]
-struct Blocks {
-    blocks: RefCell<std::collections::BTreeMap<u64, LedgerTransfer>>,
-    unreadable: Cell<bool>,
-    reads: RefCell<Vec<(Principal, u64)>>,
-}
-
-impl LedgerBlocks for Blocks {
-    async fn transfer_at(
-        &self,
-        ledger: Principal,
-        block: u64,
-    ) -> Result<Option<LedgerTransfer>, CallError> {
-        self.reads.borrow_mut().push((ledger, block));
-        if self.unreadable.get() {
-            return Err(CallError::Unknown("the ledger did not answer".to_string()));
-        }
-        Ok(self.blocks.borrow().get(&block).cloned())
-    }
 }
 
 /// An ICP stake of 10 ckUSDC by `account(byte)` started at `at(1)` whose pull never

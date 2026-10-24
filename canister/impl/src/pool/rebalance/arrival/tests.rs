@@ -196,6 +196,7 @@ mod refunds_proven {
     use crate::storage::on_fresh_memory;
     use crate::storage::pool::record_at;
     use crate::storage::pool::tests::{base_stake, created, funded_pool};
+    use crate::test_util::block_on;
     use types::eco::Fill;
     use types::events::TxPurpose;
     use types::pool::payout::PinnedOrder;
@@ -258,15 +259,6 @@ mod refunds_proven {
     /// deadline [`ROUTE_DEADLINE`].
     fn eco_order() -> Vec<u8> {
         crate::storage::pool::tests::eco_order(ROUTE_DEADLINE)
-    }
-
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        match future.as_mut().poll(&mut context) {
-            std::task::Poll::Ready(out) => out,
-            std::task::Poll::Pending => panic!("the fake never waits"),
-        }
     }
 
     const INTENT: [u8; 32] = [0x84; 32];
