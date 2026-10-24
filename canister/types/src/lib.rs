@@ -1,7 +1,6 @@
 //! Domain types of the settlement canister: identifiers, amounts, the canonical codecs,
 //! and the rules values must satisfy. Everything here is pure, with no canister calls.
 
-pub mod abi;
 pub mod address;
 pub mod books;
 pub mod canonical;
