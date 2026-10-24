@@ -1,7 +1,6 @@
-//! The sanctions set: addresses no swap may be claimed for. The watcher (or a controller)
-//! pushes it; `claim_swap` reads it before it spends an outcall on a deposit, so a
-//! sanctioned destination or refund address is refused with nothing read and nothing
-//! written.
+//! The sanctions set: addresses the canister signs nothing for and pays nothing to. The
+//! watcher (or a controller) pushes it; the relay, the CCTP finish and the pool's doors
+//! and arrivals screen every party against it before anything is signed or paid.
 //!
 //! Not a fold of the event log: it is compliance data pushed from outside, the same before
 //! and after every event, so it has a map of its own and the replay audit does not compare

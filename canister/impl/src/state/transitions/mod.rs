@@ -362,7 +362,7 @@ impl<S: Store> State<S> {
                 swap.ensure_no_open_attempt()?;
             }
             // a relay creates its flow with its signed record, and one quote is relayed at
-            // most once (rule 4b.4 from this side; the router's `usedQuote` is the other);
+            // most once (rule 4b.4 from this side; Swapic's `used(orderId)` is the other);
             // a finish is signed once per message and action the same way
             TxPurpose::Relay(_) | TxPurpose::Finish(_) => {
                 if self.store().flow(&quote_hash).is_some() {

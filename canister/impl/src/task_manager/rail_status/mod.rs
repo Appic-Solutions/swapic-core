@@ -3,7 +3,7 @@
 //! drive (`engine::arm`); this tick is for what no line announces, a deposit landing on a
 //! chain or a balance arriving on a ledger, and for a read worth trying again. Each tick
 //! runs the engine under its own guard (rule A7), so a tick that outlives the interval is
-//! followed by an empty one rather than a second one over the same swaps.
+//! followed by an empty one rather than a second one over the same payouts.
 
 use crate::engine;
 use crate::storage::config;
@@ -33,8 +33,8 @@ pub fn restart_rail_status_timer() {
     });
 }
 
-/// One tick: the engine over every open swap. What it did is returned by the engine and
-/// dropped here, the way the sweep's summary is; a query surface for it is a later plan.
+/// One tick: the engine's drive over the pool's payouts. What it did is returned by the
+/// engine and dropped here; a query surface for it is a later plan.
 async fn run() {
     engine::drive_all().await;
 }

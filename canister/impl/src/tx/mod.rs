@@ -57,8 +57,8 @@ const STUCK_AFTER: Duration = Duration::from_secs(30);
 /// This clock is its own and is never the batch window. The signature is asked for after
 /// `TxCreated`, and that await does not run to its end inside one message on this subnet:
 /// it crosses to the signing subnet and spans the consensus rounds a threshold signature
-/// takes there, measured at 10.5 seconds for `key_1`, against a default window of two
-/// seconds. A cancel fired inside that round trip races the signature it was meant to
+/// takes there, measured at 2.7 seconds for `key_1` on mainnet (2026-10-18), against a
+/// default window of two seconds. A cancel fired inside that round trip races the signature it was meant to
 /// stand in for, and the fold refuses whichever comes second (`NoUnsignedNonce` or
 /// `NonceNotUnsigned`), so nothing breaks, but a cancel that was never needed is signed
 /// and broadcast. Five minutes is far above any round trip the signing subnet takes under
@@ -110,13 +110,12 @@ fn max_transaction_cost(chain_id: ChainId) -> Wei {
 /// 228-byte burn body and the swap's 32-byte hook), which is 816 hex characters plus its
 /// ABI offset and length words. With the receipt's own envelope, whose `logsBloom` alone
 /// is 514 characters of JSON, and the two dozen scalar fields, that is about four
-/// kilobytes. Eight is that with room for a fourth log, and a vault `execute` receipt is
-/// smaller.
+/// kilobytes. Eight is that with room for a fourth log.
 ///
-/// A router `swapFor` that bridges on CCTP logs more than that: the pull, the fees, the
-/// burn's three logs and the router's own two, which measured above 8 KB on a fork and
-/// left every read of it refused as too large until a replacement doubled the cap. So the
-/// cap is 32 KB, four of those.
+/// An order that bridges on CCTP logs more than that: the pull, the fees, the burn's three
+/// logs and the contracts' own. The ABI v2 router's measured above 8 KB on a fork and left
+/// every read of it refused as too large until a replacement doubled the cap. So the cap
+/// is 32 KB, four of those.
 pub(crate) const MAX_RECEIPT_BYTES_PER_ITEM: u64 = 32_768;
 
 /// How many receipts one outcall asks for. The cap an outcall reserves grows with this, and
@@ -1302,9 +1301,8 @@ pub(crate) fn credit_confirmations(
 ///
 /// A cancel closes no attempt and needs no line: `TxCancelled` already sealed that nonce's
 /// fate before the bytes went out, so what the chain did with them changes nothing in the
-/// fold. Neither does a pull: `PullSigned` sealed its number, and the deposit its bytes
-/// make is read from the vault's log by `claim_swap`, which is where a pull that reverted
-/// shows, as a quote with no deposit. An entry that names a swap's attempt and carries no
+/// fold. Neither does a pull (the retired ABI v2 ICP flows'): `PullSigned` sealed its
+/// number. An entry that names a swap's attempt and carries no
 /// attempt number is neither shape, so it is left alone rather than closed against a number
 /// nobody recorded: the consensus log would otherwise carry an attempt this canister
 /// invented.

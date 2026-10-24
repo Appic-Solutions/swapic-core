@@ -27,8 +27,8 @@ use types::{
 const MAX_PAGE: u64 = 500;
 
 thread_local! {
-    // The log is the record and the six below are its fold. All seven are private, and
-    // every write to them goes through `append_event`: even the repair of a waiting entry
+    // The log is the record and every map below is its fold. All are private, and every
+    // write to them goes through `append_event`: even the repair of a waiting entry
     // no event could have produced is an event, so the fold has exactly one writer.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
@@ -63,8 +63,8 @@ thread_local! {
     static UNSIGNED_NONCES: RefCell<StableBTreeMap<NonceKey, UnsignedTx, Memory>> =
         RefCell::new(StableBTreeMap::init(unsigned_nonces_memory()));
 
-    // The canister's flows: relays, ICP to EVM and EVM to ICP. Part of the fold: only
-    // `Flow` lines write them.
+    // The canister's flows: the gasless relays and the CCTP finishes (and the retired ICP
+    // flows' kinds). Part of the fold: only `Flow` lines write them.
     static FLOWS: RefCell<StableBTreeMap<QuoteHash, Flow, Memory>> =
         RefCell::new(StableBTreeMap::init(flows_memory()));
 

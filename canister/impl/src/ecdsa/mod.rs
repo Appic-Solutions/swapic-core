@@ -9,7 +9,7 @@
 //!
 //! Keys derive per canister id, so the address is fixed for the life of the canister: the
 //! production canister id is fixed on day one, and a canister that loses its key loses the
-//! vault admin behind that address.
+//! Swapic contracts' canister role, the gas and the pool's USDC behind that address.
 
 #[cfg(test)]
 mod tests;

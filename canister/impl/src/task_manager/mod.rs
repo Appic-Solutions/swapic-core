@@ -36,8 +36,8 @@ fn interval(every: Duration) -> Duration {
     every.max(Duration::from_secs(1))
 }
 
-/// Wires the three repeating timers. Called from `init` and `post_upgrade`, because timers
-/// live in the heap and an upgrade clears them.
+/// Wires every repeating timer. Called from `init` and `post_upgrade`, because timers live
+/// in the heap and an upgrade clears them.
 pub fn start_timers() {
     restart_expiry_timer();
     restart_audit_timer();
@@ -58,8 +58,8 @@ pub fn restart_rebalance_timer() {
 }
 
 /// The payout timer, every minute: the engine's drive, which serves the Base queue, drives
-/// the ICP swaps, signs a reverted payout's pinned order again, and undoes a payout at its
-/// deadline. Every line that moves a payout arms the same drive at once; this is the clock.
+/// the ICP swaps, undoes a reverted payout once its order is known unused, and undoes a
+/// payout at its deadline. Every line that moves a payout arms the same drive at once; this is the clock.
 pub fn restart_payout_timer() {
     restart(&PAYOUT_TIMER, || {
         ic_cdk_timers::set_timer_interval(PAYOUT_EVERY, || {
@@ -90,8 +90,9 @@ pub fn restart_audit_timer() {
     });
 }
 
-/// Clears the timer in `slot`, if any, and puts the one `start` sets in its place, so a
-/// second restart replaces the timer rather than doubling its rate.
+/// Puts the balance check on the configured interval (`books_check_interval`). `set_config`
+/// calls it only when that interval changed, because a restart pushes the next check a
+/// whole interval out.
 pub fn restart_books_timer() {
     let every = interval(config::get().books_check_interval.0);
     restart(&BOOKS_TIMER, || {
@@ -113,6 +114,8 @@ pub fn restart_pool_arrivals_timer() {
     });
 }
 
+/// Clears the timer in `slot`, if any, and puts the one `start` sets in its place, so a
+/// second restart replaces the timer rather than doubling its rate.
 fn restart(slot: &'static LocalKey<Cell<Option<TimerId>>>, start: impl FnOnce() -> TimerId) {
     if let Some(old) = slot.take() {
         ic_cdk_timers::clear_timer(old);
