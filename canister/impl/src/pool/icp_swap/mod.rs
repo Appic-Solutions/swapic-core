@@ -35,7 +35,7 @@ use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
 use crate::pool::payout::{open, record, Busy, Ledgers, Leg, Stop};
-use crate::pool::plan::{Fit, Fitted, PlanReads};
+use crate::pool::plan::{Decided, Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Party};
 use crate::state::{State, Store};
@@ -456,7 +456,8 @@ pub async fn drive(
         // that waits is counted; the pass tries again while it can still fit)
         if placed && payout.status == PayoutStatus::Waiting && is_planned(&payout) {
             placed = false;
-            match try_plan(ledgers, &payout, clock, guard).await? {
+            let decided = crate::pool::plan::decide_payout(&payout, clock().as_secs().get());
+            match try_plan(ledgers, &payout, decided, clock, guard).await? {
                 Tried::Sign(fitted) => return Ok(Some(*fitted)),
                 Tried::Waits | Tried::Closed => return Ok(None),
                 Tried::Undone => continue,
@@ -497,14 +498,16 @@ enum Tried {
 /// undone at once whatever the pool's guard (an undo pays nothing on Base; its refund on ICP
 /// is guarded like the deadline undo's); else the guard is read before any read, so a closed
 /// pool reads no scaler and spends no try. Fitted, or the try counted with why it waits.
+/// `decided` is the plan's decision before any read (`plan::decide_payout`), made once.
 async fn try_plan(
     reads: &impl PlanReads,
     payout: &EvmPayout,
+    decided: Option<Result<Decided, Fit>>,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Tried, Stop> {
     let id = payout.id;
-    let decided = match crate::pool::plan::decide_payout(payout, clock().as_secs().get()) {
+    let decided = match decided {
         // the user's ckUSDC back at once
         Some(Err(Fit::Undo(why))) => {
             undo(id, why, clock())?;
@@ -538,10 +541,11 @@ async fn try_plan(
 
 /// A waiting planned swap's plan tried again (the pass, after a try that waited): the order
 /// to sign if it fits now, its refund at once if it could only revert, nothing once its tries
-/// are spent or it was signed.
+/// are spent or it was signed. `decided` is the decision the pass's `queue::next` made.
 pub async fn refit(
     ledgers: &(impl Ledgers + PlanReads),
     id: u64,
+    decided: Result<Decided, Fit>,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<Option<Fitted>, Stop> {
@@ -555,7 +559,7 @@ pub async fn refit(
     {
         return Ok(None);
     }
-    match try_plan(ledgers, &payout, clock, guard).await? {
+    match try_plan(ledgers, &payout, Some(decided), clock, guard).await? {
         Tried::Sign(fitted) => Ok(Some(*fitted)),
         Tried::Waits | Tried::Closed => Ok(None),
         Tried::Undone => drive(ledgers, id, clock, guard).await,

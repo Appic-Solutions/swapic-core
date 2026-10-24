@@ -1203,7 +1203,10 @@ fn a_planned_payout_whose_plan_waited_is_tried_again_while_it_can_fit() {
     let settings = PayoutSettings::default();
     let planned = planned_with(plan_of(vec![]));
     let decide = |payout: &EvmPayout, now| next(payout, &settings, now, false, Waits::default());
-    assert_eq!(decide(&planned, secs(60)), Next::Fit);
+    assert!(matches!(
+        decide(&planned, secs(60)),
+        Next::Fit(decided) if decided.is_ok()
+    ));
     // its tries spent
     let mut spent = planned.clone();
     spent.fit_tries = Some(types::pool::payout::MAX_FIT_TRIES);
@@ -1241,7 +1244,10 @@ fn a_plan_its_decision_refuses_is_never_refitted() {
     // its first step asks more than the payout: refitted, and undone by the fit
     let mut greedy = swap;
     greedy.min = alloy_primitives::U256::from(102_000_000_u64);
-    assert_eq!(decide(&planned_with(plan_of(vec![greedy]))), Next::Fit);
+    assert!(matches!(
+        decide(&planned_with(plan_of(vec![greedy]))),
+        Next::Fit(decided) if matches!(*decided, Err(crate::pool::plan::Fit::Undo(_)))
+    ));
 }
 
 /// The review (2026-10-23): an Eco intent's fill is read only once the block every node

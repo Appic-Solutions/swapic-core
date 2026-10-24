@@ -24,7 +24,7 @@
 mod tests;
 
 use crate::pool::payout::{Busy, Ledgers, Stop, DEDUP_WINDOW};
-use crate::pool::plan::PlanReads;
+use crate::pool::plan::{Decided, Fit, PlanReads};
 use crate::pool::{icp_swap, log};
 use crate::state::Store;
 use crate::storage::events::read_state;
@@ -53,8 +53,9 @@ pub enum Next {
     Drive,
     /// Listed again: it waited `order_wait` with no order.
     Relist,
-    /// A planned swap's plan tried again: an earlier try waited.
-    Fit,
+    /// A planned swap's plan tried again: an earlier try waited. The plan's decision rides
+    /// with it, made once ([`refittable`]).
+    Fit(Box<Result<Decided, Fit>>),
     /// Undone; `checked`: it was signed once, so only once its transaction is closed for good
     /// and Swapic says its order never ran.
     Undo { why: String, checked: bool },
@@ -103,8 +104,10 @@ pub fn next(
             why: "past its deadline".to_string(),
             checked: false,
         },
-        PayoutStatus::Waiting if refittable(payout, now) => Next::Fit,
         PayoutStatus::Waiting => {
+            if let Some(decided) = refittable(payout, now) {
+                return Next::Fit(Box::new(decided));
+            }
             let since = payout.waiting_since.unwrap_or(payout.opened_at);
             if now.saturating_duration_since(since) >= settings.order_wait {
                 Next::Relist
@@ -198,19 +201,20 @@ pub const REVERTED: &str = "its transaction reverted";
 pub const NO_REVERT_BLOCK: &str =
     "ALERT: its transaction reverted in no recorded block, so whether its order ran cannot be read";
 
-/// Whether a waiting planned swap's plan is tried again (the review, 2026-10-23): tries
-/// left (a waiting payout was never signed), and the plan's own decision before any read ([`plan::decide`]) says it
-/// can still fit, or could only revert (the fit then undoes it). A plan that waits whatever
-/// the time (not an Order, swapping twice, its payout outside the window, its order deadline
-/// too close) is left to the watcher's order.
+/// The plan's decision when a waiting planned swap's plan is tried again (the review,
+/// 2026-10-23), made once for the try (`refit` takes it): tries left (a waiting payout was
+/// never signed), and the plan's own decision before any read ([`plan::decide`]) says it can
+/// still fit, or could only revert (the fit then undoes it). None for a plan that waits
+/// whatever the time (not an Order, swapping twice, its payout outside the window, its order
+/// deadline too close): it is left to the watcher's order.
 ///
 /// [`plan::decide`]: crate::pool::plan::decide
-pub fn refittable(payout: &EvmPayout, now: Timestamp) -> bool {
-    payout.fit_tries.unwrap_or(0) < types::pool::payout::MAX_FIT_TRIES
-        && matches!(
-            crate::pool::plan::decide_payout(payout, now.as_secs().get()),
-            Some(Ok(_) | Err(crate::pool::plan::Fit::Undo(_)))
-        )
+pub fn refittable(payout: &EvmPayout, now: Timestamp) -> Option<Result<Decided, Fit>> {
+    if payout.fit_tries.unwrap_or(0) >= types::pool::payout::MAX_FIT_TRIES {
+        return None;
+    }
+    crate::pool::plan::decide_payout(payout, now.as_secs().get())
+        .filter(|decided| matches!(decided, Ok(_) | Err(Fit::Undo(_))))
 }
 
 /// Why a payout whose Eco intent never filled is undone.
@@ -367,14 +371,16 @@ pub async fn pass_with(
                 Err(stop) => log(&format!("the pool payout {id} stopped: {stop:?}")),
             },
             Next::Relist => acted += usize::from(record(PoolStep::PayoutRelisted { id }, now)),
-            Next::Fit => match icp_swap::refit(ledgers, id, clock, guard).await {
-                Ok(Some(fitted)) => {
-                    acted += 1;
-                    crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
+            Next::Fit(decided) => {
+                match icp_swap::refit(ledgers, id, *decided, clock, guard).await {
+                    Ok(Some(fitted)) => {
+                        acted += 1;
+                        crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
+                    }
+                    Ok(None) => {}
+                    Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
                 }
-                Ok(None) => {}
-                Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
-            },
+            }
             Next::Stop(why) => {
                 log(&format!("the pool payout {id}: {why}"));
                 acted += usize::from(record(PoolStep::PayoutStopped { id, why }, now));
