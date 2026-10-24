@@ -22,6 +22,12 @@ interface ITransmitterDomain {
 ///            DEPLOYER_MNEMONIC + DEPLOYER_ADDRESS (optional: sign with the
 ///            phrase's key instead of --private-key or --account)
 ///       prints SWAPIC=, SWAPIC_RUNNER=, SWAPIC_CCTP_RECEIVER=
+///
+/// HyperEVM (999): turn the deployer's big blocks on first (HyperCore's
+/// `evmUserModify usingBigBlocks`): Swapic's constructor deploys the Runner and
+/// the CctpReceiver in the same transaction, above the 3M gas of a fast block.
+/// Monad (143) charges the whole gas limit, not the gas used: pass a tight
+/// `--gas-estimate-multiplier` there.
 contract DeploySwapic is Script {
     address constant TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
     address constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
