@@ -321,18 +321,11 @@ pub async fn pass_with(
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
     let mut acted = serve(clock());
-    // the ledger and the config read once per pass, not once per payout
+    // the ledger read once per pass, not once per payout
     let lines = pool_store::ledger().lines();
     let Some(settings) = lines.settings else {
         return acted;
     };
-    let config = crate::storage::config::get();
-    // a reverted order's `used` is read on the pool chain, whatever the payout pays on
-    let ran = config
-        .pool_chain
-        .map_or(std::time::Duration::ZERO, |chain| {
-            crate::agreed::fill_wait_in(&config, chain)
-        });
     for id in lines.open {
         let Some(payout) = pool_store::payout(id) else {
             continue;
@@ -341,15 +334,25 @@ pub async fn pass_with(
         let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
             continue;
         };
-        // what `next` reads only for some statuses is read only for them: the fill's wait
-        // for a delivering payout, a transaction in flight for a waiting or reverted one
-        let waits = Waits {
-            fill: if payout.status == PayoutStatus::Delivering {
-                crate::agreed::fill_wait_in(&config, payout.terms.dst_chain)
-            } else {
-                std::time::Duration::ZERO
-            },
-            ran,
+        // what `next` reads only for some statuses is read only for them: the chains' waits
+        // for a delivering or reverted payout, a transaction in flight for a waiting or
+        // reverted one. The waits come from the config as it stands now, after the awaits of
+        // the payouts before it, so a `set_config` mid-pass applies to the next payout
+        let waits = match payout.status {
+            PayoutStatus::Delivering | PayoutStatus::Reverted => {
+                let config = crate::storage::config::get();
+                Waits {
+                    fill: crate::agreed::fill_wait_in(&config, payout.terms.dst_chain),
+                    // a reverted order's `used` is read on the pool chain, whatever the
+                    // payout pays on
+                    ran: config
+                        .pool_chain
+                        .map_or(std::time::Duration::ZERO, |chain| {
+                            crate::agreed::fill_wait_in(&config, chain)
+                        }),
+                }
+            }
+            _ => Waits::default(),
         };
         let in_flight = matches!(
             payout.status,
