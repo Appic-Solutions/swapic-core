@@ -99,6 +99,21 @@ fn unfilled(ledger: &mut PoolLedger, payout: &mut EvmPayout) {
     payout.reclaim = Some(Reclaim::Pending);
 }
 
+/// Takes a payout off the queue at `at`, with its hold.
+fn dequeue(
+    lines: &mut PayoutLines,
+    payout: &mut EvmPayout,
+    effects: &mut PoolEffects,
+    at: Timestamp,
+) {
+    if let Some(seq) = payout.queued_at.take() {
+        effects.dequeued = Some(seq);
+        lines.queue_len = lines.queue_len.saturating_sub(1);
+        lines.queued = sat_sub(lines.queued, payout.base_hold());
+        lines.head_since = (lines.queue_len > 0).then_some(at);
+    }
+}
+
 impl PoolLedger {
     /// A planned ICP swap's opening (2026-10-23): its plan, its slippage and the plan's
     /// amount together; a slippage of at most 500 bps; a plan that is an order of exactly
@@ -712,32 +727,58 @@ impl PoolLedger {
     ) -> Option<PoolEffects> {
         let mut ledger = self;
         let mut lines = ledger.lines();
-        let mut effects = PoolEffects {
-            ledger: PoolLedger::default(),
-            deposit: None,
-            shares: None,
-            credited: None,
-            payout: None,
-            queued: None,
-            dequeued: None,
-            nonce: None,
-            intent: None,
-            orphan: None,
-            moved: None,
-        };
-        // takes a payout off the queue, with its hold
-        let dequeue = |lines: &mut crate::pool::PayoutLines,
-                       payout: &mut EvmPayout,
-                       effects: &mut PoolEffects| {
-            if let Some(seq) = payout.queued_at.take() {
-                effects.dequeued = Some(seq);
-                lines.queue_len = lines.queue_len.saturating_sub(1);
-                lines.queued = sat_sub(lines.queued, payout.base_hold());
-                lines.head_since = (lines.queue_len > 0).then_some(at);
-            }
-        };
+        let mut effects = PoolEffects::of(PoolLedger::default());
         match step {
             PoolStep::PayoutSettingsSet { settings } => lines.settings = Some(*settings),
+            PoolStep::PayoutOpened { .. }
+            | PoolStep::PayoutAmountKnown { .. }
+            | PoolStep::PayoutPulled { .. } => {
+                ledger.apply_payout_opening(step, lookup, at, &mut lines, &mut effects)?
+            }
+            PoolStep::PayoutQueued { .. }
+            | PoolStep::PayoutWaiting { .. }
+            | PoolStep::PayoutSigned { .. }
+            | PoolStep::PayoutPaid { .. }
+            | PoolStep::PayoutFitWaited { .. }
+            | PoolStep::PayoutReverted { .. }
+            | PoolStep::PayoutRelisted { .. } => {
+                ledger.apply_payout_order(step, lookup, at, index, &mut lines, &mut effects)?
+            }
+            PoolStep::PayoutDelivered { .. }
+            | PoolStep::PayoutFillEarly { .. }
+            | PoolStep::PayoutUnfilled { .. }
+            | PoolStep::PayoutRefunded { .. } => {
+                ledger.apply_payout_delivery(step, lookup, at, &mut lines, &mut effects)?
+            }
+            PoolStep::PayoutResolved { .. }
+            | PoolStep::PayoutStopped { .. }
+            | PoolStep::PayoutUndoing { .. }
+            | PoolStep::PayoutUndone { .. } => {
+                ledger.apply_payout_undo(step, lookup, at, &mut lines, &mut effects)?
+            }
+            PoolStep::OrphanBooked { .. }
+            | PoolStep::TermsClaimed { .. }
+            | PoolStep::OrphanRefundSigned { .. }
+            | PoolStep::OrphanRefundClosed { .. } => {
+                ledger.apply_orphan(step, lookup, &mut lines, &mut effects)?
+            }
+            _ => return None,
+        }
+        ledger.payouts = Some(lines);
+        effects.ledger = ledger;
+        Some(effects)
+    }
+
+    /// What a payout's opening changes: opened, an ICP swap's pull, its amount known.
+    fn apply_payout_opening(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
             PoolStep::PayoutOpened {
                 id,
                 kind,
@@ -754,7 +795,7 @@ impl PoolLedger {
                         .checked_sub(withdrawal.burned)
                         .unwrap_or(Shares::ZERO);
                     effects.shares = Some((account.key(), ShareLine { account, shares }));
-                    ledger.total_shares = ledger
+                    self.total_shares = self
                         .total_shares
                         .checked_sub(withdrawal.burned)
                         .unwrap_or(Shares::ZERO);
@@ -778,7 +819,7 @@ impl PoolLedger {
                 match payout.kind {
                     PayoutKind::IcpSwap(_) => {
                         payout.received = *received;
-                        let icp = &mut ledger.pockets.icp;
+                        let icp = &mut self.pockets.icp;
                         icp.reserved = sat_add(icp.reserved, payout.icp_hold());
                         lines.fees_icp = sat_add(lines.fees_icp, payout.icp_fee());
                     }
@@ -786,9 +827,35 @@ impl PoolLedger {
                         payout.base_fee = Some(withdrawal.network_fee);
                     }
                 }
-                ledger.owed = sat_add(ledger.owed, payout.owed());
+                self.owed = sat_add(self.owed, payout.owed());
                 effects.payout = Some(payout);
             }
+            PoolStep::PayoutPulled { id, block, attempt } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.status = PayoutStatus::Swapping;
+                payout.icp_block = Some(*block);
+                payout.legs = attempt.map(|attempt| crate::pool::PayoutProgress {
+                    attempt: Some(attempt),
+                    ..crate::pool::PayoutProgress::default()
+                });
+                effects.payout = Some(payout);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// What a payout's order changes: queued, waiting, signed once, its transaction's end.
+    fn apply_payout_order(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        index: u64,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
             PoolStep::PayoutQueued { id } => {
                 let mut payout = lookup.payout(*id)?;
                 let seq = lines.next_seq;
@@ -805,9 +872,9 @@ impl PoolLedger {
             }
             PoolStep::PayoutWaiting { id } => {
                 let mut payout = lookup.payout(*id)?;
-                dequeue(&mut lines, &mut payout, &mut effects);
+                dequeue(lines, &mut payout, effects, at);
                 let hold = payout.base_hold();
-                let base = &mut ledger.pockets.base;
+                let base = &mut self.pockets.base;
                 base.free = sat_sub(base.free, hold);
                 base.reserved = sat_add(base.reserved, hold);
                 payout.base_reserved = true;
@@ -820,7 +887,7 @@ impl PoolLedger {
             } => {
                 let mut payout = lookup.payout(*id)?;
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
-                let base = &mut ledger.pockets.base;
+                let base = &mut self.pockets.base;
                 base.reserved = sat_sub(base.reserved, amount);
                 base.in_flight = sat_add(base.in_flight, amount);
                 payout.status = PayoutStatus::Signed(index);
@@ -853,18 +920,7 @@ impl PoolLedger {
                 let mut payout = lookup.payout(*id)?;
                 payout.tx_hash = Some(*tx_hash);
                 payout.paid_block = Some(*block);
-                paid(&mut ledger, &mut lines, &mut payout, id);
-                effects.payout = Some(payout);
-            }
-            PoolStep::PayoutDelivered { id, .. } => {
-                let mut payout = lookup.payout(*id)?;
-                paid(&mut ledger, &mut lines, &mut payout, id);
-                effects.payout = Some(payout);
-            }
-            // noted, nothing moves
-            PoolStep::PayoutFillEarly { id } => {
-                let mut payout = lookup.payout(*id)?;
-                payout.fill_early_at = Some(at);
+                paid(self, lines, &mut payout, id);
                 effects.payout = Some(payout);
             }
             // counted, nothing moves
@@ -873,78 +929,52 @@ impl PoolLedger {
                 payout.fit_tries = Some(payout.fit_tries.unwrap_or(0).saturating_add(1));
                 effects.payout = Some(payout);
             }
-            // back on its undo, its refund under the door's instant; or paid, from where a
-            // reverted payout's USDC sits (reserved again)
-            PoolStep::PayoutResolved {
-                id,
-                resolution,
-                refund_at,
-            } => {
-                let mut payout = lookup.payout(*id)?;
-                match resolution {
-                    PayoutResolution::Refund => {
-                        if payout.icp_released.0 {
-                            let held = payout.icp_hold();
-                            let icp = &mut ledger.pockets.icp;
-                            icp.free = sat_sub(icp.free, held);
-                            icp.reserved = sat_add(icp.reserved, held);
-                            payout.icp_released = crate::pool::payout::Flag(false);
-                        }
-                        payout.status =
-                            PayoutStatus::Undoing(crate::pool::payout::REFUNDED.to_string());
-                        payout.undoing_at = refund_at.or(payout.undoing_at).or(Some(at));
-                        lines.open.insert(*id);
-                    }
-                    PayoutResolution::MarkPaid => {
-                        let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
-                        let base = &mut ledger.pockets.base;
-                        base.reserved = sat_sub(base.reserved, amount);
-                        base.in_flight = sat_add(base.in_flight, amount);
-                        paid(&mut ledger, &mut lines, &mut payout, id);
-                    }
-                }
-                effects.payout = Some(payout);
-            }
-            PoolStep::PayoutUnfilled { id, .. } => {
-                let mut payout = lookup.payout(*id)?;
-                unfilled(&mut ledger, &mut payout);
-                effects.payout = Some(payout);
-            }
             // back to reserved, for its undo: never signed again
             PoolStep::PayoutReverted { id, block } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.reverted_block = *block;
                 payout.reverted_at = Some(at);
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
-                let base = &mut ledger.pockets.base;
+                let base = &mut self.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, amount);
                 base.reserved = sat_add(base.reserved, amount);
                 payout.status = PayoutStatus::Reverted;
                 effects.payout = Some(payout);
             }
-            PoolStep::PayoutPulled { id, block, attempt } => {
-                let mut payout = lookup.payout(*id)?;
-                payout.status = PayoutStatus::Swapping;
-                payout.icp_block = Some(*block);
-                payout.legs = attempt.map(|attempt| crate::pool::PayoutProgress {
-                    attempt: Some(attempt),
-                    ..crate::pool::PayoutProgress::default()
-                });
-                effects.payout = Some(payout);
-            }
-            PoolStep::PayoutStopped { id, why } => {
-                let mut payout = lookup.payout(*id)?;
-                payout
-                    .legs
-                    .get_or_insert_with(crate::pool::PayoutProgress::default)
-                    .failed = Some(why.clone());
-                payout.status = PayoutStatus::Failed(why.clone());
-                lines.open.remove(id);
-                effects.payout = Some(payout);
-            }
             PoolStep::PayoutRelisted { id } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.waiting_since = Some(at);
+                effects.payout = Some(payout);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// What an Eco intent's delivery changes: its fill read, and Eco's refund.
+    fn apply_payout_delivery(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
+            PoolStep::PayoutDelivered { id, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                paid(self, lines, &mut payout, id);
+                effects.payout = Some(payout);
+            }
+            // noted, nothing moves
+            PoolStep::PayoutFillEarly { id } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.fill_early_at = Some(at);
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutUnfilled { id, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                unfilled(self, &mut payout);
                 effects.payout = Some(payout);
             }
             // Eco's refund: its USDC back to the Base pocket's free line, once; a payout still
@@ -957,12 +987,12 @@ impl PoolLedger {
             } => {
                 let mut payout = lookup.payout(*id)?;
                 if payout.status == PayoutStatus::Delivering {
-                    unfilled(&mut ledger, &mut payout);
+                    unfilled(self, &mut payout);
                 }
-                let base = &mut ledger.pockets.base;
+                let base = &mut self.pockets.base;
                 base.in_flight = sat_sub(base.in_flight, *amount);
                 base.free = sat_add(base.free, *amount);
-                ledger.unseen.push(crate::pool::UnseenArrival {
+                self.unseen.push(crate::pool::UnseenArrival {
                     chain: credit.chain,
                     block: *block,
                     amount: *amount,
@@ -971,11 +1001,129 @@ impl PoolLedger {
                 payout.reclaim = Some(Reclaim::Credited);
                 effects.payout = Some(payout);
             }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// What a payout stopped for a human or undone changes: stopped, a controller's
+    /// resolution, its undo.
+    fn apply_payout_undo(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
+            // back on its undo, its refund under the door's instant; or paid, from where a
+            // reverted payout's USDC sits (reserved again)
+            PoolStep::PayoutResolved {
+                id,
+                resolution,
+                refund_at,
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                match resolution {
+                    PayoutResolution::Refund => {
+                        if payout.icp_released.0 {
+                            let held = payout.icp_hold();
+                            let icp = &mut self.pockets.icp;
+                            icp.free = sat_sub(icp.free, held);
+                            icp.reserved = sat_add(icp.reserved, held);
+                            payout.icp_released = crate::pool::payout::Flag(false);
+                        }
+                        payout.status =
+                            PayoutStatus::Undoing(crate::pool::payout::REFUNDED.to_string());
+                        payout.undoing_at = refund_at.or(payout.undoing_at).or(Some(at));
+                        lines.open.insert(*id);
+                    }
+                    PayoutResolution::MarkPaid => {
+                        let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
+                        let base = &mut self.pockets.base;
+                        base.reserved = sat_sub(base.reserved, amount);
+                        base.in_flight = sat_add(base.in_flight, amount);
+                        paid(self, lines, &mut payout, id);
+                    }
+                }
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutStopped { id, why } => {
+                let mut payout = lookup.payout(*id)?;
+                payout
+                    .legs
+                    .get_or_insert_with(crate::pool::PayoutProgress::default)
+                    .failed = Some(why.clone());
+                payout.status = PayoutStatus::Failed(why.clone());
+                lines.open.remove(id);
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutUndoing { id, why } => {
+                let mut payout = lookup.payout(*id)?;
+                if payout.icp_released.0 {
+                    let held = payout.icp_hold();
+                    let icp = &mut self.pockets.icp;
+                    icp.free = sat_sub(icp.free, held);
+                    icp.reserved = sat_add(icp.reserved, held);
+                    payout.icp_released = crate::pool::payout::Flag(false);
+                }
+                payout.status = PayoutStatus::Undoing(why.clone());
+                payout.undoing_at = Some(at);
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutUndone { id, why, block } => {
+                let mut payout = lookup.payout(*id)?;
+                dequeue(lines, &mut payout, effects, at);
+                if payout.base_reserved {
+                    let hold = payout.base_hold();
+                    let base = &mut self.pockets.base;
+                    base.reserved = sat_sub(base.reserved, hold);
+                    base.free = sat_add(base.free, hold);
+                    payout.base_reserved = false;
+                }
+                self.owed = sat_sub(self.owed, payout.owed());
+                // an ICP swap's ckUSDC leaves with its refund, its fee with it: from its hold,
+                // or from the free ckUSDC once it was paid and released (an Eco refund)
+                let icp = &mut self.pockets.icp;
+                if payout.icp_released.0 {
+                    icp.free = sat_sub(icp.free, payout.icp_hold());
+                } else {
+                    icp.reserved = sat_sub(icp.reserved, payout.icp_hold());
+                }
+                lines.fees_icp = sat_sub(lines.fees_icp, payout.icp_fee());
+                if let Undo::Remint { owner, shares } = payout.undo {
+                    self.total_shares = self
+                        .total_shares
+                        .checked_add(shares)
+                        .unwrap_or(Shares::new(u128::MAX));
+                    effects.shares = Some(credit_shares(lookup, &owner, shares));
+                }
+                lines.open.remove(id);
+                payout.status = PayoutStatus::Undone(why.clone());
+                payout.icp_block = *block;
+                effects.payout = Some(payout);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// What the steps of the transfers no deposit took change: booked, refunded, claimed by
+    /// their terms.
+    fn apply_orphan(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
             // out of the pool's unattributed line: to the Base books' (the state moves the
             // books), or on its way back to its payer, the fee kept on the Base fee line
             PoolStep::OrphanBooked { key } => {
                 let mut orphan = lookup.orphan(key)?;
-                ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                self.unattributed = sat_sub(self.unattributed, orphan.amount);
                 orphan.status = crate::pool::OrphanStatus::Booked;
                 effects.orphan = Some((*key, orphan));
             }
@@ -989,7 +1137,7 @@ impl PoolLedger {
                         orphan.why = why.clone();
                     }
                     None => {
-                        ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                        self.unattributed = sat_sub(self.unattributed, orphan.amount);
                         orphan.status = crate::pool::OrphanStatus::Claimed;
                     }
                 }
@@ -997,7 +1145,7 @@ impl PoolLedger {
             }
             PoolStep::OrphanRefundSigned { key, to, sent, .. } => {
                 let mut orphan = lookup.orphan(key)?;
-                ledger.unattributed = sat_sub(ledger.unattributed, orphan.amount);
+                self.unattributed = sat_sub(self.unattributed, orphan.amount);
                 lines.fees_base = sat_add(lines.fees_base, sat_sub(orphan.amount, *sent));
                 orphan.status = crate::pool::OrphanStatus::Refunding {
                     to: *to,
@@ -1014,61 +1162,14 @@ impl PoolLedger {
                     orphan.status = crate::pool::OrphanStatus::Refunded { to, sent };
                 } else {
                     // reverted: nothing left, held again
-                    ledger.unattributed = sat_add(ledger.unattributed, orphan.amount);
+                    self.unattributed = sat_add(self.unattributed, orphan.amount);
                     lines.fees_base = sat_sub(lines.fees_base, sat_sub(orphan.amount, sent));
                     orphan.status = crate::pool::OrphanStatus::Held;
                 }
                 effects.orphan = Some((*key, orphan));
             }
-            PoolStep::PayoutUndoing { id, why } => {
-                let mut payout = lookup.payout(*id)?;
-                if payout.icp_released.0 {
-                    let held = payout.icp_hold();
-                    let icp = &mut ledger.pockets.icp;
-                    icp.free = sat_sub(icp.free, held);
-                    icp.reserved = sat_add(icp.reserved, held);
-                    payout.icp_released = crate::pool::payout::Flag(false);
-                }
-                payout.status = PayoutStatus::Undoing(why.clone());
-                payout.undoing_at = Some(at);
-                effects.payout = Some(payout);
-            }
-            PoolStep::PayoutUndone { id, why, block } => {
-                let mut payout = lookup.payout(*id)?;
-                dequeue(&mut lines, &mut payout, &mut effects);
-                if payout.base_reserved {
-                    let hold = payout.base_hold();
-                    let base = &mut ledger.pockets.base;
-                    base.reserved = sat_sub(base.reserved, hold);
-                    base.free = sat_add(base.free, hold);
-                    payout.base_reserved = false;
-                }
-                ledger.owed = sat_sub(ledger.owed, payout.owed());
-                // an ICP swap's ckUSDC leaves with its refund, its fee with it: from its hold,
-                // or from the free ckUSDC once it was paid and released (an Eco refund)
-                let icp = &mut ledger.pockets.icp;
-                if payout.icp_released.0 {
-                    icp.free = sat_sub(icp.free, payout.icp_hold());
-                } else {
-                    icp.reserved = sat_sub(icp.reserved, payout.icp_hold());
-                }
-                lines.fees_icp = sat_sub(lines.fees_icp, payout.icp_fee());
-                if let Undo::Remint { owner, shares } = payout.undo {
-                    ledger.total_shares = ledger
-                        .total_shares
-                        .checked_add(shares)
-                        .unwrap_or(Shares::new(u128::MAX));
-                    effects.shares = Some(credit_shares(lookup, &owner, shares));
-                }
-                lines.open.remove(id);
-                payout.status = PayoutStatus::Undone(why.clone());
-                payout.icp_block = *block;
-                effects.payout = Some(payout);
-            }
             _ => return None,
         }
-        ledger.payouts = Some(lines);
-        effects.ledger = ledger;
-        Some(effects)
+        Some(())
     }
 }
