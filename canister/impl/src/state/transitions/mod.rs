@@ -285,25 +285,28 @@ impl<S: Store> State<S> {
                     _ => Ok(()),
                 }
             }
-            // a flow's own rules, and the nonce its signed records spend
+            // a flow's own rules, and the nonce its signed records spend; every flow is read
+            // only by the two rules that ask (a `Landed`, a finish naming its source), never
+            // for each Flow line
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
-                let flows = self.store().flows();
                 types::Flow::admits(
                     *quote_hash,
                     existing.as_ref(),
                     step,
                     |tx_hash| {
-                        flows
-                            .iter()
+                        self.store()
+                            .flows()
+                            .into_iter()
                             .find(|(other, flow)| {
                                 other != quote_hash && flow.landed_tx.as_ref() == Some(tx_hash)
                             })
-                            .map(|(other, _)| *other)
+                            .map(|(other, _)| other)
                     },
                     |source_tx| {
-                        flows
-                            .iter()
+                        self.store()
+                            .flows()
+                            .into_iter()
                             .find(|(_, flow)| flow.source_tx.as_ref() == Some(source_tx))
                             .and_then(|(_, flow)| flow.arrival)
                     },
