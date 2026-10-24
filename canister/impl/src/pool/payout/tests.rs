@@ -626,6 +626,46 @@ fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
     });
 }
 
+/// The review (2026-10-24): only the fold's refusal of an ask on other terms is a counted
+/// failure; any other line not recorded (here, a payout the fold does not know) is driven
+/// again, uncounted, and nothing is asked.
+#[test]
+fn an_ask_not_recorded_for_another_reason_is_driven_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let fake = Fake::default();
+        let payout = Payout {
+            id: PoolRef::new([9; 32]),
+            to: account(1),
+            token_out: ckusdc(),
+            min_out: 1,
+            amount: usdc(1),
+            progress: PayoutProgress::default(),
+        };
+        let attempt = PayoutAttempt {
+            created_at: clock(),
+            memo: [9; 32],
+            path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
+        };
+        assert!(matches!(
+            block_on(send_out(
+                &fake,
+                &payout,
+                &attempt,
+                ckusdc(),
+                usdc(1),
+                usdc(1),
+                "the transfer",
+                clock
+            )),
+            Err(Stop::Append(_))
+        ));
+        assert!(fake.calls.borrow().is_empty());
+    });
+}
+
 /// The review (2026-10-24): a refusal whose own line could not be recorded is still the
 /// counted failure it is (its transfer left asked only blocks a refund, the safe way).
 #[test]

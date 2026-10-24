@@ -171,6 +171,10 @@ pub struct PoolEffects {
 pub enum PoolStepError {
     #[error("the pool has no settings")]
     NoSettings,
+    /// A payout's transfer asked on other terms while an earlier ask may have landed (the
+    /// review, 2026-10-24): the drive counts it, so the payout reaches a human.
+    #[error("a transfer asked on other terms may have landed")]
+    AskedOnOtherTerms,
     #[error(transparent)]
     Settings(#[from] PoolSettingsError),
     #[error("the ckUSDC ledger cannot change while the pool holds anything")]
@@ -692,9 +696,7 @@ impl PoolLedger {
                     Some(sent)
                         if !sent.refused && (sent.token, sent.amount) != (*token, *amount) =>
                     {
-                        Err(PoolStepError::Terms(
-                            "a transfer asked on other terms may have landed",
-                        ))
+                        Err(PoolStepError::AskedOnOtherTerms)
                     }
                     _ => Ok(()),
                 }
