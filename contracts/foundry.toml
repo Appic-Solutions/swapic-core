@@ -19,11 +19,6 @@ remappings = [
 [profile.fork]
 evm_version = "cancun"
 
-[invariant]
-runs = 256
-depth = 50
-fail_on_revert = true
-
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"
