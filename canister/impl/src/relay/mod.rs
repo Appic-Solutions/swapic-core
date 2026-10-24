@@ -596,6 +596,8 @@ pub struct Plan {
     pub arrival: Option<Arrival>,
     pub parties: Vec<Party>,
     pub delivery: Option<Delivery>,
+    /// The order's one Eco intent, as its step reads.
+    pub intent: Option<EcoIntent>,
 }
 
 fn amount_of(value: U256) -> TokenAmount {
@@ -728,6 +730,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
         arrival,
         parties,
         delivery,
+        intent: intents.first().copied(),
     })
 }
 

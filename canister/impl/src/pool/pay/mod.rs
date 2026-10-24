@@ -126,26 +126,15 @@ pub fn check_order(
     }
     // an onward intent names Eco's own prover and Portal, and short deadlines (P11e): any
     // other prover could pay its reward, the canister's USDC, to whoever it says
-    if plan.action == GasAction::RelayEco {
-        let source = payer
-            .chains
-            .evm_chains
-            .get(chain_id)
-            .ok_or_else(|| refused("the pool chain signs nothing"))?;
-        for step in &order.steps {
-            if let Ok(swapic::KnownStep::Eco { intent, .. }) =
-                swapic::read_step(step, source.usdc, source.token_messenger)
-            {
-                crate::pool::eco::check_intent(
-                    &intent,
-                    payer.chains.eco_portal,
-                    payer.eco_prover,
-                    u64::try_from(order.deadline).unwrap_or(u64::MAX),
-                    now_s,
-                )
-                .map_err(refused)?;
-            }
-        }
+    if let Some(intent) = &plan.intent {
+        crate::pool::eco::check_intent(
+            intent,
+            payer.chains.eco_portal,
+            payer.eco_prover,
+            u64::try_from(order.deadline).unwrap_or(u64::MAX),
+            now_s,
+        )
+        .map_err(refused)?;
     }
     let delivery = plan
         .delivery
