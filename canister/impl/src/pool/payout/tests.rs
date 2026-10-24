@@ -70,8 +70,8 @@ struct Fake {
     /// its unused balances: its deposit when the swap did not happen, its output when the
     /// output was not withdrawn.
     swap_leaves: Cell<Option<(TokenAmount, TokenAmount)>>,
-    /// A line recorded during the next transfer call, before its answer.
-    during: RefCell<Option<PoolStep>>,
+    /// Lines recorded during the next transfer call, before its answer.
+    during: RefCell<Vec<PoolStep>>,
     /// The status of the deposit under watch at each money call
     watch: Cell<Option<PoolRef>>,
     seen: RefCell<Vec<Option<DepositStatus>>>,
@@ -105,7 +105,7 @@ impl Ledgers for Fake {
     ) -> Result<u64, CallError> {
         self.saw();
         self.calls.borrow_mut().push(format!("transfer {amount}"));
-        if let Some(step) = self.during.borrow_mut().take() {
+        for step in self.during.borrow_mut().drain(..) {
             record_at(step, at(0)).unwrap();
         }
         if self.refuse.replace(false) {
@@ -672,6 +672,30 @@ fn an_ask_any_rule_refuses_is_a_counted_failure() {
     });
 }
 
+/// The review (2026-10-24): a lost answer whose line could not be recorded stops the drive
+/// (driven again, uncounted) before anything else, so no later refusal can make the lost
+/// ask look safe.
+#[test]
+fn a_lost_answer_whose_line_is_not_recorded_stops_the_drive() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        fake.lose_answers.set(1);
+        // held for a human during the call: no payout in progress loses an answer
+        *fake.during.borrow_mut() = (1..=types::pool::MAX_PAYOUT_ATTEMPTS)
+            .map(|n| PoolStep::AttemptFailed {
+                r#ref,
+                why: format!("try {n}"),
+            })
+            .collect();
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Append(_))
+        ));
+    });
+}
+
 /// The review (2026-10-24): a refusal whose own line could not be recorded is still the
 /// counted failure it is (its transfer left asked only blocks a refund, the safe way).
 #[test]
@@ -682,7 +706,7 @@ fn a_refusal_whose_line_is_not_recorded_still_counts() {
         let fake = Fake::default();
         fake.refuse.set(true);
         // the refusal's line is in already when the drive records its own: refused
-        *fake.during.borrow_mut() = Some(PoolStep::TransferRefused { r#ref });
+        *fake.during.borrow_mut() = vec![PoolStep::TransferRefused { r#ref }];
         assert!(matches!(
             block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
             Err(Stop::Failed(_))

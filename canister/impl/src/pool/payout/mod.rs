@@ -711,15 +711,13 @@ async fn send_out(
             let lost = progress_of(payout.id)
                 .and_then(|progress| progress.sent)
                 .is_some_and(|sent| sent.lost.0);
+            // and noted before anything else: a lost answer not noted stops the drive,
+            // uncounted, so no later refusal can make it look safe
             if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !lost {
-                if let Err(unnoted) =
-                    pool_store::record_at(PoolStep::TransferLost { r#ref: payout.id }, clock())
-                {
-                    crate::pool::log(&format!(
-                        "the pool payout {}'s lost answer was not noted: {unnoted}",
-                        payout.id
-                    ));
-                }
+                pool_store::record_at(PoolStep::TransferLost { r#ref: payout.id }, clock())
+                    .map_err(|unnoted| {
+                        Stop::Append(format!("{what}'s lost answer was not noted: {unnoted}"))
+                    })?;
             }
             // a refusal counts whatever its line does: one not recorded leaves the transfer
             // asked, which only blocks a refund (the safe way, the review, 2026-10-24)

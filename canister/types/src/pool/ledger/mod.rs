@@ -726,6 +726,11 @@ impl PoolLedger {
                 let target = self
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
+                if !target.in_payout() {
+                    return Err(PoolStepError::Terms(
+                        "only a payout in progress loses an answer",
+                    ));
+                }
                 match target.payout().and_then(|payout| payout.sent) {
                     Some(_) => Ok(()),
                     None => Err(PoolStepError::Terms(
