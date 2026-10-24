@@ -130,14 +130,7 @@ pub async fn resolve(
     open: impl Fn() -> Result<(), PoolError>,
     blocks: &impl LedgerBlocks,
 ) -> Result<Option<Refund>, PoolError> {
-    if halted() {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller resolves a deposit".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted(), is_controller, "resolves a deposit")?;
     let deposit = pool_store::deposit(&r#ref).ok_or(PoolError::Unknown)?;
     if !matches!(deposit.status, DepositStatus::PayoutFailed(_)) {
         return Err(PoolError::NotAllowed(format!(

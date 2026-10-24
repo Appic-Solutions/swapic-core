@@ -53,6 +53,18 @@ pub fn guard_error(error: GuardError) -> PoolError {
     }
 }
 
+/// A controller's door's first rules, in order: refused while halted, then for anyone but a
+/// controller, the refusal naming `what` only a controller does.
+pub fn controller_only(halted: bool, is_controller: bool, what: &str) -> Result<(), PoolError> {
+    if halted {
+        return Err(PoolError::Halted);
+    }
+    if !is_controller {
+        return Err(PoolError::NotAllowed(format!("only a controller {what}")));
+    }
+    Ok(())
+}
+
 /// The halt first, as every pool update runs it.
 pub fn require_running() -> Result<(), PoolError> {
     require_not_halted().map_err(guard_error)

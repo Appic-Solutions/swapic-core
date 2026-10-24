@@ -106,14 +106,7 @@ pub fn resolve(
     resolution: WireResolution,
     now: Timestamp,
 ) -> Result<(), PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller resolves a payout".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "resolves a payout")?;
     let payout = pool_store::payout(id).ok_or(PoolError::Unknown)?;
     if !matches!(payout.status, PayoutStatus::Failed(_)) {
         return Err(PoolError::NotAllowed(format!(

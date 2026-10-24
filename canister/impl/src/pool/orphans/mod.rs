@@ -66,15 +66,7 @@ pub fn refund_amount(orphan: &Orphan, min_network_fee: TokenAmount) -> Option<To
 
 /// The guards, in order: the halt, then the controller.
 pub fn checked(halted: bool, is_controller: bool) -> Result<(), PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller resolves an orphan".to_string(),
-        ));
-    }
-    Ok(())
+    crate::pool::controller_only(halted, is_controller, "resolves an orphan")
 }
 
 /// `resolve_orphan`'s body.

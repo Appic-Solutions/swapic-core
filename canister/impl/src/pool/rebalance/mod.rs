@@ -27,14 +27,7 @@ pub fn checked(
     is_controller: bool,
     settings: WireSettings,
 ) -> Result<RebalanceSettings, PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller sets the rebalancing's settings".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "sets the rebalancing's settings")?;
     let settings = RebalanceSettings::try_from(settings)
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     settings
@@ -104,14 +97,7 @@ pub fn resolve(
     resolution: MoveResolution,
     now: Timestamp,
 ) -> Result<(), PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller resolves a move".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "resolves a move")?;
     item(id).ok_or(PoolError::Unknown)?;
     let step = match resolution {
         MoveResolution::Retry => PoolStep::MoveRetried { id },

@@ -116,14 +116,7 @@ pub async fn resolve(
     clock: impl Fn() -> Timestamp,
     blocks: &impl LedgerBlocks,
 ) -> Result<(), PoolError> {
-    if halted() {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller resolves a stake".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted(), is_controller, "resolves a stake")?;
     let stake = pending_stake(id)?;
     if clock().saturating_duration_since(stake.created_at) < DEDUP_WINDOW {
         return Err(PoolError::NotAllowed(

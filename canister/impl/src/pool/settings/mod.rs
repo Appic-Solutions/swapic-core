@@ -18,14 +18,7 @@ pub fn checked(
     is_controller: bool,
     settings: WireSettings,
 ) -> Result<PoolSettings, PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller sets the pool's settings".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "sets the pool's settings")?;
     let settings = PoolSettings::try_from(settings)
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     settings
@@ -41,14 +34,7 @@ pub fn payout_checked(
     is_controller: bool,
     settings: WirePayoutSettings,
 ) -> Result<types::pool::PayoutSettings, PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller sets the payout settings".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "sets the payout settings")?;
     let settings = types::pool::PayoutSettings::try_from(settings)
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     settings
@@ -82,14 +68,7 @@ pub fn routes_checked(
     icp_ckusdc_pool: Option<candid::Principal>,
     routes: Vec<settlement_api::types::pool::IcpRoute>,
 ) -> Result<types::pool::IcpRoutes, PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller sets the ICP routes".to_string(),
-        ));
-    }
+    crate::pool::controller_only(halted, is_controller, "sets the ICP routes")?;
     Ok(types::pool::IcpRoutes {
         icp_ckusdc_pool: icp_ckusdc_pool.map(types::pool::PrincipalBytes),
         icp_ledger: None,

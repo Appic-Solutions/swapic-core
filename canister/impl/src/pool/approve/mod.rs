@@ -43,15 +43,7 @@ pub fn approve_calldata(spender: EvmAddress) -> Vec<u8> {
 
 /// The guards, in order: the halt, then the controller.
 pub fn checked(halted: bool, is_controller: bool) -> Result<(), PoolError> {
-    if halted {
-        return Err(PoolError::Halted);
-    }
-    if !is_controller {
-        return Err(PoolError::NotAllowed(
-            "only a controller approves Swapic".to_string(),
-        ));
-    }
-    Ok(())
+    crate::pool::controller_only(halted, is_controller, "approves Swapic")
 }
 
 /// What the allowance read answered, as an amount; None for an answer that is not one word.
