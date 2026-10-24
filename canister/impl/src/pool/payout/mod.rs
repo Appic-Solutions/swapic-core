@@ -708,10 +708,13 @@ async fn send_out(
     clock: impl Fn() -> Timestamp,
 ) -> Result<u64, Stop> {
     let token_bytes = PrincipalBytes(token);
+    let sent = progress_of(payout.id).and_then(|progress| progress.sent);
     // asked already, on these terms and not refused since: its answer not known
-    let asked = progress_of(payout.id)
-        .and_then(|progress| progress.sent)
+    let asked = sent
         .is_some_and(|sent| !sent.refused && (sent.token, sent.amount) == (token_bytes, amount));
+    // an answer of it ever lost: an ask keeps the mark, and only this drive, which holds the
+    // payout, notes one
+    let lost = sent.is_some_and(|sent| sent.lost.0);
     // the ledgers the canister knows to deduplicate a transfer on its memo and
     // `created_at_time` within the window: the ckUSDC ledger the payout started with, and
     // the ICP ledger the routes name. Any other may take a re-ask as a new transfer, so a
@@ -749,12 +752,9 @@ async fn send_out(
         Ok(block) => Ok(block),
         Err(error) => {
             // an answer lost (unknown, or too old to tell) is kept for good: it may have
-            // landed whatever comes after (the review, 2026-10-24)
-            let lost = progress_of(payout.id)
-                .and_then(|progress| progress.sent)
-                .is_some_and(|sent| sent.lost.0);
-            // and noted before anything else: a lost answer not noted stops the drive,
-            // uncounted, so no later refusal can make it look safe
+            // landed whatever comes after (the review, 2026-10-24), and noted before anything
+            // else: a lost answer not noted stops the drive, uncounted, so no later refusal
+            // can make it look safe
             if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !deduplicates {
                 return Err(hold_unanswered(payout, what, clock()));
             }
