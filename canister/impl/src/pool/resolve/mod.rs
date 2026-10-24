@@ -74,8 +74,8 @@ pub fn same_account(party: &Party, expected: IcpAccount) -> bool {
     }
 }
 
-/// A ledger block's read that failed, in the interface's words: a ledger serving no block
-/// read the canister knows is a refusal naming it; any other failure is asked again later.
+/// A ledger block's read that failed, in the interface's words: a refusal stays one; a
+/// ledger not read now (none of its reads answering, a stopped ledger) is asked again later.
 pub fn read_error(block: u64, error: CallError) -> PoolError {
     match error {
         CallError::Refused(why) => PoolError::NotAllowed(why),
