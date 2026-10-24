@@ -68,23 +68,6 @@ thread_local! {
     static PASSING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Held while one pass runs, released on drop: at the pass's every return, and in the
-/// cleanup of a trap after one of its awaits.
-pub struct Pass;
-
-impl Pass {
-    pub fn take() -> Option<Self> {
-        // lazily: a guard built for a refusal would end the running pass on its drop
-        (!PASSING.with(|passing| passing.replace(true))).then(|| Pass)
-    }
-}
-
-impl Drop for Pass {
-    fn drop(&mut self) {
-        PASSING.with(|passing| passing.set(false));
-    }
-}
-
 /// Whether the pool's own read of Base has work (P11d: no registration tells it when a
 /// deposit is on its way): once the pool has settings, always.
 pub fn has_work<S: Store>(store: &S) -> bool {
@@ -305,7 +288,7 @@ impl FillReads for LiveBase<'_> {
 /// registration waits.
 pub async fn run_backup() {
     // first, before anything: a tick while a pass is out leaves it alone
-    let Some(_pass) = Pass::take() else {
+    let Some(_pass) = crate::guards::Running::take(&PASSING) else {
         return;
     };
     if require_not_halted().is_err() {

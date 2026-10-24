@@ -17,7 +17,7 @@ pub mod flows;
 #[cfg(test)]
 mod tests;
 
-use crate::guards::require_not_halted;
+use crate::guards::{require_not_halted, Running};
 use std::cell::Cell;
 use types::Timestamp;
 
@@ -79,33 +79,13 @@ async fn drive_now() {
     }
 }
 
-/// Held for the length of one drive, so two drives can never overlap: a drive awaits
-/// calls, and a second one reading the same payouts would act twice.
-struct DriveGuard;
-
-impl DriveGuard {
-    fn take() -> Option<Self> {
-        RUNNING.with(|running| {
-            if running.get() {
-                return None;
-            }
-            running.set(true);
-            Some(Self)
-        })
-    }
-}
-
-impl Drop for DriveGuard {
-    fn drop(&mut self) {
-        RUNNING.with(|running| running.set(false));
-    }
-}
-
 /// One drive over the pool's payouts. Nothing while halted, and nothing while another drive
 /// is still running.
 pub async fn drive_all() -> Drive {
     let mut drive = Drive::default();
-    let Some(_guard) = DriveGuard::take() else {
+    // held for the length of the drive: a drive awaits calls, and a second one reading the
+    // same payouts would act twice
+    let Some(_guard) = Running::take(&RUNNING) else {
         return drive;
     };
     if require_not_halted().is_err() {

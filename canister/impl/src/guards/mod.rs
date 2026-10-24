@@ -6,6 +6,8 @@ use crate::storage::halt::is_halted;
 use crate::storage::roles;
 use candid::Principal;
 use settlement_api::types::errors::{GuardError, Role};
+use std::cell::Cell;
+use std::thread::LocalKey;
 
 /// The ops rule: controllers only. The two service rules live below.
 pub fn require_controller() -> Result<(), GuardError> {
@@ -51,6 +53,25 @@ pub fn require_watcher_or_controller() -> Result<(), GuardError> {
         caller,
         ic_cdk::api::is_controller(&caller),
     )
+}
+
+/// Held while one run of a job lasts, the job's heap flag set on take and cleared on drop
+/// (rule A7: two runs never overlap): at the run's every return, and in the cleanup of a trap
+/// after one of its awaits.
+pub struct Running(&'static LocalKey<Cell<bool>>);
+
+impl Running {
+    /// The guard, or none while a run holds `flag`.
+    pub fn take(flag: &'static LocalKey<Cell<bool>>) -> Option<Self> {
+        // lazily: a guard built for a refusal would end the running one on its drop
+        (!flag.with(|flag| flag.replace(true))).then(|| Self(flag))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.with(|flag| flag.set(false));
+    }
 }
 
 /// The gate Plan 3's money endpoints call before they move anything.

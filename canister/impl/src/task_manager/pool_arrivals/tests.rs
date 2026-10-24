@@ -148,11 +148,14 @@ fn a_range_halves_down_to_one_block() {
 /// Review fix 6: one pass at a time, and a refused one never ends the running one.
 #[test]
 fn one_pass_at_a_time() {
-    let running = Pass::take().unwrap();
-    assert!(Pass::take().is_none());
-    assert!(Pass::take().is_none(), "still running");
+    let running = crate::guards::Running::take(&PASSING).unwrap();
+    assert!(crate::guards::Running::take(&PASSING).is_none());
+    assert!(
+        crate::guards::Running::take(&PASSING).is_none(),
+        "still running"
+    );
     drop(running);
-    assert!(Pass::take().is_some());
+    assert!(crate::guards::Running::take(&PASSING).is_some());
 }
 
 /// The backup reads once the pool has settings (P11d: no registration says when a deposit
@@ -376,9 +379,12 @@ fn no_pass_reads_more_receipts_than_its_cap() {
 /// anything (were it to go on, it would read the clock, which only a canister has).
 #[test]
 fn a_tick_while_a_pass_is_out_does_nothing() {
-    let running = Pass::take().unwrap();
+    let running = crate::guards::Running::take(&PASSING).unwrap();
     block_on(run_backup());
-    assert!(Pass::take().is_none(), "the running pass still holds");
+    assert!(
+        crate::guards::Running::take(&PASSING).is_none(),
+        "the running pass still holds"
+    );
     drop(running);
 }
 

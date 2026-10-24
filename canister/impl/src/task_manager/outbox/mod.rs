@@ -9,6 +9,7 @@
 //! was in flight would read the same entries and send them twice; the guard is released on
 //! drop, including on a trap.
 
+use crate::guards::Running;
 use crate::storage::events::read_state;
 use crate::storage::halt::is_halted;
 use crate::storage::{config, outbox};
@@ -24,28 +25,6 @@ thread_local! {
     static FLUSH_TIMER: Cell<Option<(TimerId, Timestamp)>> = const { Cell::new(None) };
     // A7: set while a pass is running, cleared when its guard drops.
     static RUNNING: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Held for the length of one pass, so two passes can never overlap.
-struct PassGuard;
-
-impl PassGuard {
-    /// A guard, or nothing at all when a pass is already running.
-    fn take() -> Option<Self> {
-        RUNNING.with(|running| {
-            if running.get() {
-                return None;
-            }
-            running.set(true);
-            Some(Self)
-        })
-    }
-}
-
-impl Drop for PassGuard {
-    fn drop(&mut self) {
-        RUNNING.with(|running| running.set(false));
-    }
 }
 
 /// Whether the recorded timer still lies ahead, which is the only state in which arming
@@ -105,7 +84,7 @@ pub fn arm_if_work_is_pending() {
 /// The cancel comes first so the nonce it spends goes out in this pass's own batch rather
 /// than waiting a window for the next one.
 async fn run() {
-    let Some(_guard) = PassGuard::take() else {
+    let Some(_guard) = Running::take(&RUNNING) else {
         // a pass is already running and will re-arm when it is done
         return;
     };
