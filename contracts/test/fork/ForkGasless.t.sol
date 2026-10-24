@@ -3,11 +3,7 @@ pragma solidity 0.8.24;
 
 import "./ForkBase.sol";
 import "../helpers/CctpPlan.sol";
-
-interface IUsdc {
-    function DOMAIN_SEPARATOR() external view returns (bytes32);
-    function nonces(address) external view returns (uint256);
-}
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 interface IPermit2Domain {
     function DOMAIN_SEPARATOR() external view returns (bytes32);
@@ -54,7 +50,7 @@ contract ForkGaslessTest is ForkBase {
         bytes32 structHash =
             keccak256(abi.encode(RECEIVE_TYPEHASH, payer, SWAPIC, o.amountIn, 0, a.validBefore, swapic.orderId(o)));
         a.signature =
-            _sig(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IUsdc(USDC_BASE).DOMAIN_SEPARATOR(), structHash)));
+            _sig(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC_BASE).DOMAIN_SEPARATOR(), structHash)));
     }
 
     function _auth2612(Order memory o) internal view returns (GaslessAuth memory a) {
@@ -65,12 +61,12 @@ contract ForkGaslessTest is ForkBase {
                 payer,
                 SWAPIC,
                 o.amountIn,
-                IUsdc(USDC_BASE).nonces(payer),
+                IERC20Permit(USDC_BASE).nonces(payer),
                 o.deadline
             )
         );
         a.signature =
-            _sig(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IUsdc(USDC_BASE).DOMAIN_SEPARATOR(), permit)));
+            _sig(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", IERC20Permit(USDC_BASE).DOMAIN_SEPARATOR(), permit)));
         a.acceptance = _sig(PAYER_KEY, swapic.acceptanceDigest(o));
     }
 
