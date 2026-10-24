@@ -62,13 +62,11 @@ impl LedgerBlocks for crate::pool::payout::Live {
 pub fn same_account(party: &Party, expected: IcpAccount) -> bool {
     match party {
         Party::Account(account) => {
-            let default_as_none = |bytes: [u8; 32]| (bytes != [0; 32]).then_some(bytes);
             let theirs = match account.subaccount.as_deref() {
-                None => Some(None),
-                Some(bytes) => <[u8; 32]>::try_from(bytes).ok().map(default_as_none),
+                None => Some([0; 32]),
+                Some(bytes) => <[u8; 32]>::try_from(bytes).ok(),
             };
-            account.owner == expected.owner
-                && theirs == Some(expected.subaccount.and_then(default_as_none))
+            account.owner == expected.owner && theirs == Some(expected.subaccount_bytes())
         }
         Party::Identifier(identifier) => *identifier == expected.identifier(),
     }
