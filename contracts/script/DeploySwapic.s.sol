@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {Swapic} from "../src/Swapic.sol";
+import {PERMIT2} from "../src/SwapicTypes.sol";
 
 interface ITransmitterDomain {
     function localDomain() external view returns (uint32);
@@ -84,6 +85,7 @@ contract DeploySwapic is Script {
         require(wrapped.code.length > 0, "no wrapped native here");
         require(TRANSMITTER.code.length > 0, "no MessageTransmitterV2 here");
         require(TOKEN_MESSENGER.code.length > 0, "no TokenMessengerV2 here");
+        require(PERMIT2.code.length > 0, "no Permit2 here");
         require(ITransmitterDomain(TRANSMITTER).localDomain() == domainOf(block.chainid), "wrong CCTP domain");
         address ckHelper = block.chainid == 1 ? vm.envOr("CK_HELPER", CK_HELPER) : address(0);
         require(ckHelper == address(0) || ckHelper.code.length > 0, "no ck helper here");
