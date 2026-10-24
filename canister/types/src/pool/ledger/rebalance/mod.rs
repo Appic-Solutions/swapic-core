@@ -24,6 +24,20 @@ fn status_of(item: &Move) -> String {
     format!("{:?}", item.status)
 }
 
+/// The move `id`, or why there is none.
+fn move_of(lookup: &impl PoolLookup, id: u64) -> Result<Move, PoolStepError> {
+    lookup.pool_move(id).ok_or(PoolStepError::UnknownMove(id))
+}
+
+/// A move's step refused from the status the move is in.
+fn not_from(step: &'static str, item: &Move) -> PoolStepError {
+    PoolStepError::MoveNotFrom {
+        step,
+        id: item.id,
+        status: status_of(item),
+    }
+}
+
 /// The pocket a move leaves.
 fn source(pockets: &mut Pockets, direction: MoveDirection) -> &mut Pocket {
     match direction {
@@ -46,20 +60,44 @@ impl PoolLedger {
         self.rebalance.clone().unwrap_or_default()
     }
 
+    /// The rules of the rebalancing's steps.
     pub(super) fn admits_rebalance(
         &self,
         step: &PoolStep,
         lookup: &impl PoolLookup,
     ) -> Result<(), PoolStepError> {
-        let lines = self.moves();
-        let move_of = |id: u64| lookup.pool_move(id).ok_or(PoolStepError::UnknownMove(id));
-        let not_from = |step: &'static str, item: &Move| PoolStepError::MoveNotFrom {
-            step,
-            id: item.id,
-            status: status_of(item),
-        };
         match step {
             PoolStep::MoveSettingsSet { settings } => Ok(settings.validate()?),
+            PoolStep::MoveOpened { .. }
+            | PoolStep::MoveProposed { .. }
+            | PoolStep::MoveRouted { .. } => self.admits_move_opening(step, lookup),
+            PoolStep::MoveSigned { .. }
+            | PoolStep::MoveBurned { .. }
+            | PoolStep::MoveReverted { .. }
+            | PoolStep::MoveWithdrawing { .. }
+            | PoolStep::MoveWithdrawn { .. }
+            | PoolStep::MoveRefused { .. } => self.admits_move_leaving(step, lookup),
+            PoolStep::MoveLanded { .. }
+            | PoolStep::MoveSweeping { .. }
+            | PoolStep::MoveArrived { .. }
+            | PoolStep::MoveRefunded { .. }
+            | PoolStep::MoveUnfilled { .. }
+            | PoolStep::MoveReimbursed { .. } => self.admits_move_landing(step, lookup),
+            PoolStep::MoveStuck { .. }
+            | PoolStep::MoveRetried { .. }
+            | PoolStep::MoveLost { .. } => self.admits_move_stuck(step, lookup),
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a move's opening: opened, a proposal taken, routed.
+    fn admits_move_opening(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        let lines = self.moves();
+        match step {
             PoolStep::MoveOpened {
                 id,
                 direction,
@@ -119,7 +157,7 @@ impl PoolLedger {
                 }
             }
             PoolStep::MoveProposed { id, fee, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if !item.proposable() {
                     return Err(not_from("MoveProposed", &item));
                 }
@@ -141,7 +179,7 @@ impl PoolLedger {
             PoolStep::MoveRouted {
                 id, route, order, ..
             } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if !item.routable() {
                     return Err(not_from("MoveRouted", &item));
                 }
@@ -154,8 +192,20 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a move leaving its source pocket: its order signed and its end, the ck
+    /// minter's call and its answer.
+    fn admits_move_leaving(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
             PoolStep::MoveSigned { id, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 let deposit = item.direction == MoveDirection::BaseToIcp
                     && item.status == MoveStatus::Landed
                     && item.route.is_some_and(|route| route.is_eco());
@@ -169,14 +219,14 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::MoveBurned { id, .. } | PoolStep::MoveReverted { id, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if !matches!(item.status, MoveStatus::Signed(_)) {
                     return Err(not_from(step.name(), &item));
                 }
                 Ok(())
             }
             PoolStep::MoveWithdrawing { id, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if item.direction != MoveDirection::IcpToBase
                     || item.status != MoveStatus::Open
                     || item.stuck.is_some()
@@ -190,7 +240,7 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::MoveWithdrawn { id, fee, .. } | PoolStep::MoveRefused { id, fee, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if item.direction != MoveDirection::IcpToBase
                     || item.status != MoveStatus::Withdrawing
                 {
@@ -201,8 +251,20 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a move landing: landed, swept, arrived, or given back (Eco's refund, an
+    /// unfilled intent, the ck minter's reimbursement).
+    fn admits_move_landing(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
             PoolStep::MoveLanded { id, amount, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 let landing = match item.direction {
                     MoveDirection::IcpToBase => item.status == MoveStatus::Withdrawn,
                     MoveDirection::BaseToIcp => {
@@ -225,7 +287,7 @@ impl PoolLedger {
                 credited,
                 ..
             } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 // after its own burn, or after its ck deposit once an Eco fill landed
                 let swept = item.direction == MoveDirection::BaseToIcp
                     && item.status == MoveStatus::Burned
@@ -250,7 +312,7 @@ impl PoolLedger {
                 credit,
                 ..
             } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 match item.direction {
                     MoveDirection::BaseToIcp => {
                         let swept = item.sweep.map(|sweep| sweep.credited);
@@ -282,41 +344,10 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::MoveStuck { id, .. } => {
-                let item = move_of(*id)?;
-                if item.status.is_final() || item.stuck.is_some() {
-                    return Err(not_from("MoveStuck", &item));
-                }
-                Ok(())
-            }
-            PoolStep::MoveRetried { id } => {
-                let item = move_of(*id)?;
-                if item.status.is_final() || item.stuck.is_none() {
-                    return Err(not_from("MoveRetried", &item));
-                }
-                Ok(())
-            }
-            PoolStep::MoveLost { id, .. } => {
-                let item = move_of(*id)?;
-                if item.status.is_final() {
-                    return Err(not_from("MoveLost", &item));
-                }
-                let mut pockets = self.pockets;
-                let pocket = source(&mut pockets, item.direction);
-                let held = if item.left {
-                    pocket.in_flight
-                } else {
-                    pocket.reserved
-                };
-                if item.amount > held {
-                    return Err(PoolStepError::Overflow);
-                }
-                Ok(())
-            }
             PoolStep::MoveRefunded {
                 id, credit, amount, ..
             } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 let refundable = item.direction == MoveDirection::BaseToIcp
                     && item.status == MoveStatus::Burned
                     && item.route.is_some_and(|route| route.is_eco())
@@ -339,7 +370,7 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::MoveUnfilled { id } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 let unfilled = item.direction == MoveDirection::IcpToBase
                     && item.status == MoveStatus::Burned
                     && item.route.is_some_and(|route| route.is_eco())
@@ -350,7 +381,7 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::MoveReimbursed { id, amount, .. } => {
-                let item = move_of(*id)?;
+                let item = move_of(lookup, *id)?;
                 if item.direction != MoveDirection::IcpToBase
                     || item.status != MoveStatus::Withdrawn
                 {
@@ -360,6 +391,48 @@ impl PoolLedger {
                     return Err(PoolStepError::Terms(
                         "a reimbursement gives back at most the move's amount",
                     ));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a move held for a human: stuck, retried, or written off as lost.
+    fn admits_move_stuck(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
+            PoolStep::MoveStuck { id, .. } => {
+                let item = move_of(lookup, *id)?;
+                if item.status.is_final() || item.stuck.is_some() {
+                    return Err(not_from("MoveStuck", &item));
+                }
+                Ok(())
+            }
+            PoolStep::MoveRetried { id } => {
+                let item = move_of(lookup, *id)?;
+                if item.status.is_final() || item.stuck.is_none() {
+                    return Err(not_from("MoveRetried", &item));
+                }
+                Ok(())
+            }
+            PoolStep::MoveLost { id, .. } => {
+                let item = move_of(lookup, *id)?;
+                if item.status.is_final() {
+                    return Err(not_from("MoveLost", &item));
+                }
+                let mut pockets = self.pockets;
+                let pocket = source(&mut pockets, item.direction);
+                let held = if item.left {
+                    pocket.in_flight
+                } else {
+                    pocket.reserved
+                };
+                if item.amount > held {
+                    return Err(PoolStepError::Overflow);
                 }
                 Ok(())
             }
