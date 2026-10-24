@@ -678,8 +678,10 @@ async fn send_out(
         spent,
         refused: false,
     };
+    // a line the fold refuses (an earlier ask on other terms may have landed) is a counted
+    // failure: the payout reaches a human, never loops uncounted (the review, 2026-10-24)
     if progress_of(payout.id).and_then(|progress| progress.sent) != Some(asked) {
-        record(
+        pool_store::record_at(
             PoolStep::TransferAsked {
                 r#ref: payout.id,
                 token: asked.token,
@@ -687,7 +689,8 @@ async fn send_out(
                 spent,
             },
             clock(),
-        )?;
+        )
+        .map_err(|error| Stop::Failed(format!("{what} was not asked: {error}")))?;
     }
     match ledgers
         .transfer(token, payout.to, amount, payout.dedup(attempt))

@@ -590,6 +590,37 @@ fn a_transfer_is_asked_before_its_call_and_a_refusal_is_known() {
     });
 }
 
+/// The review (2026-10-24): a transfer the fold will not let be asked (an earlier ask on
+/// other terms may have landed) is a counted failure, never asked and never looped uncounted:
+/// the payout reaches a human.
+#[test]
+fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        fake.refuse.set(true);
+        assert!(block_on(drive_deposit(&fake, r#ref, clock, &open_pool)).is_err());
+        // an ask on other terms, which may have landed
+        record_at(
+            PoolStep::TransferAsked {
+                r#ref,
+                token: PrincipalBytes(ckusdc()),
+                amount: usdc(1),
+                spent: usdc(1),
+            },
+            clock(),
+        )
+        .unwrap();
+        let calls = fake.calls.borrow().len();
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Failed(_))
+        ));
+        assert_eq!(fake.calls.borrow().len(), calls, "never asked");
+    });
+}
+
 /// A stake's pull: refused, nothing moved and the room goes back; unknown, asked again; too
 /// old for the ledger to tell, never recorded as failed (it may have run): it waits for a
 /// human, and the drive stops asking once the ledger can no longer deduplicate it.
