@@ -1197,12 +1197,6 @@ impl PoolLedger {
         at: Timestamp,
         index: u64,
     ) -> PoolEffects {
-        if let Some(effects) = self.clone().apply_payout(step, lookup, at, index) {
-            return effects;
-        }
-        if let Some(effects) = self.clone().apply_rebalance(step, lookup, at, index) {
-            return effects;
-        }
         let mut ledger = self;
         let mut effects = PoolEffects::of(PoolLedger::default());
         match step {
@@ -1238,7 +1232,6 @@ impl PoolLedger {
             | PoolStep::StakeFailed { .. }
             | PoolStep::WithdrawStarted { .. } => ledger.apply_icp_op(step, lookup, &mut effects),
             PoolStep::ApproveSigned { .. } => {}
-            // `apply_payout` records these, and answered before this match
             PoolStep::PayoutSettingsSet { .. }
             | PoolStep::PayoutOpened { .. }
             | PoolStep::PayoutAmountKnown { .. }
@@ -1261,8 +1254,9 @@ impl PoolLedger {
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }
-            | PoolStep::TermsClaimed { .. } => {}
-            // `apply_rebalance` records these, and answered before this match
+            | PoolStep::TermsClaimed { .. } => {
+                ledger.apply_payout(step, lookup, at, index, &mut effects)
+            }
             PoolStep::MoveSettingsSet { .. }
             | PoolStep::MoveOpened { .. }
             | PoolStep::MoveProposed { .. }
@@ -1281,11 +1275,16 @@ impl PoolLedger {
             | PoolStep::MoveLost { .. }
             | PoolStep::MoveRefunded { .. }
             | PoolStep::MoveUnfilled { .. }
-            | PoolStep::MoveReimbursed { .. } => {}
+            | PoolStep::MoveReimbursed { .. } => {
+                ledger.apply_rebalance(step, lookup, at, index, &mut effects)
+            }
             // the state indexes it: nothing of the pool moves
             PoolStep::EcoRescueSigned { .. } => {}
         }
-        effects.payout = ledger.evm_changed.take();
+        // a Base payout's ICP legs, changed through `with_payout`
+        if let Some(payout) = ledger.evm_changed.take() {
+            effects.payout = Some(payout);
+        }
         effects.ledger = ledger;
         effects
     }

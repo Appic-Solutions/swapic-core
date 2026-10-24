@@ -717,23 +717,27 @@ impl PoolLedger {
         }
     }
 
-    /// What a payout step changes, None for a step that is not one.
+    /// What a payout step changes, in the ledger and in `effects`: nothing for a step that
+    /// names no payout or orphan the fold holds (each family answers None before it changes
+    /// anything).
     pub(super) fn apply_payout(
-        self,
+        &mut self,
         step: &PoolStep,
         lookup: &impl PoolLookup,
         at: Timestamp,
         index: u64,
-    ) -> Option<PoolEffects> {
-        let mut ledger = self;
-        let mut lines = ledger.lines();
-        let mut effects = PoolEffects::of(PoolLedger::default());
-        match step {
-            PoolStep::PayoutSettingsSet { settings } => lines.settings = Some(*settings),
+        effects: &mut PoolEffects,
+    ) {
+        let mut lines = self.lines();
+        let recorded = match step {
+            PoolStep::PayoutSettingsSet { settings } => {
+                lines.settings = Some(*settings);
+                Some(())
+            }
             PoolStep::PayoutOpened { .. }
             | PoolStep::PayoutAmountKnown { .. }
             | PoolStep::PayoutPulled { .. } => {
-                ledger.apply_payout_opening(step, lookup, at, &mut lines, &mut effects)?
+                self.apply_payout_opening(step, lookup, at, &mut lines, effects)
             }
             PoolStep::PayoutQueued { .. }
             | PoolStep::PayoutWaiting { .. }
@@ -742,31 +746,31 @@ impl PoolLedger {
             | PoolStep::PayoutFitWaited { .. }
             | PoolStep::PayoutReverted { .. }
             | PoolStep::PayoutRelisted { .. } => {
-                ledger.apply_payout_order(step, lookup, at, index, &mut lines, &mut effects)?
+                self.apply_payout_order(step, lookup, at, index, &mut lines, effects)
             }
             PoolStep::PayoutDelivered { .. }
             | PoolStep::PayoutFillEarly { .. }
             | PoolStep::PayoutUnfilled { .. }
             | PoolStep::PayoutRefunded { .. } => {
-                ledger.apply_payout_delivery(step, lookup, at, &mut lines, &mut effects)?
+                self.apply_payout_delivery(step, lookup, at, &mut lines, effects)
             }
             PoolStep::PayoutResolved { .. }
             | PoolStep::PayoutStopped { .. }
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. } => {
-                ledger.apply_payout_undo(step, lookup, at, &mut lines, &mut effects)?
+                self.apply_payout_undo(step, lookup, at, &mut lines, effects)
             }
             PoolStep::OrphanBooked { .. }
             | PoolStep::TermsClaimed { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. } => {
-                ledger.apply_orphan(step, lookup, &mut lines, &mut effects)?
+                self.apply_orphan(step, lookup, &mut lines, effects)
             }
-            _ => return None,
+            _ => return,
+        };
+        if recorded.is_some() {
+            self.payouts = Some(lines);
         }
-        ledger.payouts = Some(lines);
-        effects.ledger = ledger;
-        Some(effects)
     }
 
     /// What a payout's opening changes: opened, an ICP swap's pull, its amount known.

@@ -440,56 +440,57 @@ impl PoolLedger {
         }
     }
 
-    /// What a move step changes, None for a step that is not one.
+    /// What a move step changes, in the ledger and in `effects`: nothing for a step that names
+    /// no move the fold holds (each family answers None before it changes anything).
     pub(super) fn apply_rebalance(
-        self,
+        &mut self,
         step: &PoolStep,
         lookup: &impl PoolLookup,
         at: Timestamp,
         index: u64,
-    ) -> Option<PoolEffects> {
-        let mut ledger = self;
-        let mut lines = ledger.moves();
+        effects: &mut PoolEffects,
+    ) {
+        let mut lines = self.moves();
         let mut credited = None;
         let moved = match step {
             PoolStep::MoveSettingsSet { settings } => {
                 lines.settings = Some(*settings);
-                None
+                Some(None)
             }
             PoolStep::MoveOpened { .. }
             | PoolStep::MoveProposed { .. }
-            | PoolStep::MoveRouted { .. } => {
-                Some(ledger.apply_move_opening(step, lookup, at, &mut lines)?)
-            }
+            | PoolStep::MoveRouted { .. } => self
+                .apply_move_opening(step, lookup, at, &mut lines)
+                .map(Some),
             PoolStep::MoveSigned { .. }
             | PoolStep::MoveBurned { .. }
             | PoolStep::MoveReverted { .. }
             | PoolStep::MoveWithdrawing { .. }
             | PoolStep::MoveWithdrawn { .. }
-            | PoolStep::MoveRefused { .. } => {
-                Some(ledger.apply_move_leaving(step, lookup, at, index, &mut lines)?)
-            }
+            | PoolStep::MoveRefused { .. } => self
+                .apply_move_leaving(step, lookup, at, index, &mut lines)
+                .map(Some),
             PoolStep::MoveLanded { .. }
             | PoolStep::MoveSweeping { .. }
             | PoolStep::MoveArrived { .. }
             | PoolStep::MoveRefunded { .. }
             | PoolStep::MoveUnfilled { .. }
-            | PoolStep::MoveReimbursed { .. } => {
-                Some(ledger.apply_move_landing(step, lookup, at, &mut lines, &mut credited)?)
-            }
+            | PoolStep::MoveReimbursed { .. } => self
+                .apply_move_landing(step, lookup, at, &mut lines, &mut credited)
+                .map(Some),
             PoolStep::MoveStuck { .. }
             | PoolStep::MoveRetried { .. }
-            | PoolStep::MoveLost { .. } => {
-                Some(ledger.apply_move_stuck(step, lookup, at, &mut lines)?)
-            }
-            _ => return None,
+            | PoolStep::MoveLost { .. } => self
+                .apply_move_stuck(step, lookup, at, &mut lines)
+                .map(Some),
+            _ => return,
         };
-        ledger.rebalance = Some(lines);
-        Some(PoolEffects {
-            credited,
-            moved,
-            ..PoolEffects::of(ledger)
-        })
+        let Some(moved) = moved else {
+            return;
+        };
+        self.rebalance = Some(lines);
+        effects.credited = credited;
+        effects.moved = moved;
     }
 
     /// What a move's opening changes: opened, a proposal taken, routed.
