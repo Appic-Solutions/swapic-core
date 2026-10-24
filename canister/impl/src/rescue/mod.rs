@@ -129,15 +129,6 @@ pub fn plan(
     })
 }
 
-fn word_of(answer: crate::evm_reads::Simulated) -> Result<[u8; 32], String> {
-    match answer {
-        crate::evm_reads::Simulated::Returned(bytes) if bytes.len() == 32 => {
-            Ok(bytes.try_into().expect("BUG: checked to be 32 bytes"))
-        }
-        _ => Err("the prover answered no fee".to_string()),
-    }
-}
-
 /// `rescue_eco_intent`'s body: the signed transaction's id in `signed_txs`.
 pub async fn rescue(order_id: Vec<u8>) -> Result<u64, String> {
     require_watcher().map_err(|error| format!("{error:?}"))?;
@@ -186,7 +177,7 @@ pub async fn rescue(order_id: Vec<u8>) -> Result<u64, String> {
     )
     .await
     .map_err(|error| format!("the proof's fee: {:?}", error.kind()))?;
-    let fee = Wei::from_be_bytes(word_of(fee)?);
+    let fee = Wei::from_be_bytes(fee.word().ok_or("the prover answered no fee")?);
     let value = fee
         .checked_mul(FEE_MARGIN_PERCENT)
         .and_then(|scaled| scaled.checked_div_ceil(100_u64))

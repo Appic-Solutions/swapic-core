@@ -206,11 +206,8 @@ async fn check_balance(
     let block = BlockNumber::new(block);
     let calldata = types::swapic::balance_of_calldata(mine);
     let observed = match evm_reads::eth_call_at(chain_id, mine, usdc, &calldata, block).await {
-        Ok(Simulated::Returned(bytes)) if bytes.len() == 32 => {
-            TokenAmount::from_be_bytes(bytes.try_into().expect("BUG: checked to be 32 bytes"))
-        }
-        Ok(Simulated::Returned(_)) => return Err(ReadFailure::BadAnswer),
         Ok(Simulated::Reverted(_)) => return Err(ReadFailure::Provider),
+        Ok(answer) => TokenAmount::from_be_bytes(answer.word().ok_or(ReadFailure::BadAnswer)?),
         Err(error) => return Err(error.kind()),
     };
     // the lines as they stand now, after the read's await

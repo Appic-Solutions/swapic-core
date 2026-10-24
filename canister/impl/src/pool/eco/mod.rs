@@ -57,12 +57,10 @@ pub fn check_intent(
 }
 
 fn word_of(answer: Simulated) -> Result<[u8; 32], String> {
-    match answer {
-        Simulated::Returned(bytes) if bytes.len() == 32 => {
-            Ok(bytes.try_into().expect("BUG: checked to be 32 bytes"))
-        }
-        Simulated::Returned(_) => Err("the Portal answered no word".to_string()),
-        Simulated::Reverted(_) => Err("the Portal's read reverted".to_string()),
+    match (answer.word(), answer) {
+        (Some(word), _) => Ok(word),
+        (None, Simulated::Reverted(_)) => Err("the Portal's read reverted".to_string()),
+        (None, Simulated::Returned(_)) => Err("the Portal answered no word".to_string()),
     }
 }
 

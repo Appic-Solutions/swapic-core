@@ -56,10 +56,7 @@ pub fn checked(halted: bool, is_controller: bool) -> Result<(), PoolError> {
 
 /// What the allowance read answered, as an amount; None for an answer that is not one word.
 pub fn allowance_of(answer: &Simulated) -> Option<U256> {
-    match answer {
-        Simulated::Returned(bytes) if bytes.len() == 32 => Some(U256::from_be_slice(bytes)),
-        _ => None,
-    }
+    answer.word().map(U256::from_be_bytes)
 }
 
 /// `pool_approve_swapic`'s body: the signed approval's id in `signed_txs`. An allowance in

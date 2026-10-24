@@ -3,6 +3,9 @@
 //! (`todo_harden_reads`); each is bound to what the canister itself knows (its address,
 //! the configured token, the depth), so a provider can delay a decision but not invent one.
 
+#[cfg(test)]
+mod tests;
+
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError};
 use serde_json::{json, Value};
 use types::{BlockDepth, BlockNumber, ChainId, EvmAddress, TokenAmount, TxHash};
@@ -17,6 +20,16 @@ pub enum Simulated {
     Returned(Vec<u8>),
     /// It reverted, with the provider's message.
     Reverted(String),
+}
+
+impl Simulated {
+    /// The one 32-byte word the call returned: none for a revert or any other answer.
+    pub fn word(&self) -> Option<[u8; 32]> {
+        match self {
+            Simulated::Returned(bytes) => <[u8; 32]>::try_from(bytes.as_slice()).ok(),
+            Simulated::Reverted(_) => None,
+        }
+    }
 }
 
 fn call_object(from: EvmAddress, to: EvmAddress, data: &[u8]) -> Value {
