@@ -500,3 +500,27 @@ fn a_step_written_before_its_new_fields_still_decodes() {
         assert_eq!(minicbor::to_vec(&now).unwrap(), bytes);
     }
 }
+
+/// The review (2026-10-24): the ICP ledger's own blocks name an account by its identifier,
+/// CRC-32 then SHA-224 of the domain, the owner and the subaccount (vectors from Python's
+/// `hashlib` and `zlib`).
+#[test]
+fn an_icp_account_identifier_is_the_ledgers_own() {
+    assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+    let main = IcpAccount {
+        owner: Principal::from_slice(&[0xc1; 10]),
+        subaccount: None,
+    };
+    assert_eq!(
+        hex::encode(main.identifier()),
+        "b2b78f97fb2b5d981bb176e655dccd2c6b7efc3d679ea34ab3cbf5e5073e3e49"
+    );
+    let sub = IcpAccount {
+        owner: Principal::from_slice(&[0x51; 29]),
+        subaccount: Some([7; 32]),
+    };
+    assert_eq!(
+        hex::encode(sub.identifier()),
+        "1e50b1c4b041ff43427f79cbdc145f2f5c7d74adba3d2a3a690297ec7c36104d"
+    );
+}

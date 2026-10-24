@@ -1,5 +1,5 @@
 use super::*;
-use crate::ic::{Account, CallError, LedgerTransfer};
+use crate::ic::{Account, CallError, LedgerTransfer, Party};
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{
     account, at, ckusdc, credit, funded_pool, payer, register, swap_terms, usdc,
@@ -35,6 +35,8 @@ fn canister() -> Principal {
 struct Blocks {
     blocks: RefCell<BTreeMap<u64, LedgerTransfer>>,
     unreadable: Cell<bool>,
+    /// The ledger serves none of the block reads the canister knows.
+    unserved: Cell<bool>,
     reads: RefCell<Vec<(Principal, u64)>>,
 }
 
@@ -47,6 +49,11 @@ impl LedgerBlocks for Blocks {
         self.reads.borrow_mut().push((ledger, block));
         if self.unreadable.get() {
             return Err(CallError::Unknown("the ledger did not answer".to_string()));
+        }
+        if self.unserved.get() {
+            return Err(CallError::Refused(format!(
+                "ledger {ledger} serves none of the block reads"
+            )));
         }
         Ok(self.blocks.borrow().get(&block).cloned())
     }
@@ -435,8 +442,8 @@ fn a_deposit_is_refunded_only_when_nothing_went_out() {
 /// The transfer a started payout of `account(byte)` asked, as the ledger logs it.
 fn its_transfer(byte: u8, r#ref: PoolRef) -> LedgerTransfer {
     LedgerTransfer {
-        from: Account::of(canister(), None),
-        to: Account::of(account(byte).owner, None),
+        from: Party::Account(Account::of(canister(), None)),
+        to: Party::Account(Account::of(account(byte).owner, None)),
         amount: Nat::from(sent_amount()),
         memo: Some(r#ref.into_bytes().to_vec()),
         created_at_time: Some(at(5).as_nanos()),
@@ -474,15 +481,15 @@ fn a_deposit_is_marked_paid_only_on_its_own_transfer() {
         let stranger = Account::of(Principal::from_slice(&[0xee; 10]), None);
         let others = [
             LedgerTransfer {
-                from: stranger.clone(),
+                from: Party::Account(stranger.clone()),
                 ..transfer.clone()
             },
             LedgerTransfer {
-                to: stranger.clone(),
+                to: Party::Account(stranger.clone()),
                 ..transfer.clone()
             },
             LedgerTransfer {
-                spender: Some(stranger.clone()),
+                spender: Some(Party::Account(stranger.clone())),
                 ..transfer.clone()
             },
             LedgerTransfer {
@@ -514,5 +521,45 @@ fn a_deposit_is_marked_paid_only_on_its_own_transfer() {
         assert_eq!(paid.paid.unwrap().block, 42);
         assert_eq!(paid.paid.unwrap().amount, sent_amount());
         assert!(matches!(mark(r#ref, 42), Err(PoolError::NotAllowed(_))));
+    });
+}
+
+/// The review (2026-10-24): `MarkPaid` reads its block on whatever the transfer's ledger
+/// serves; the ICP ledger's own blocks name the parties by account identifier, and match
+/// them. A ledger serving none of the reads the canister knows is a clear refusal naming it,
+/// never a wait.
+#[test]
+fn a_deposit_is_marked_paid_on_the_ledgers_own_block_or_refused_by_name() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let blocks = Blocks::default();
+        let r#ref = held_at(1, Sent::Asked);
+        blocks.unserved.set(true);
+        assert!(matches!(
+            by_controller(&blocks, r#ref, WireResolution::MarkPaid { block: 42 }, at(7)),
+            Err(PoolError::NotAllowed(why)) if why.contains(&ckusdc().to_text())
+        ));
+        blocks.unserved.set(false);
+        let main = types::pool::IcpAccount {
+            owner: canister(),
+            subaccount: None,
+        };
+        let by_identifier = LedgerTransfer {
+            from: Party::Identifier(main.identifier()),
+            to: Party::Identifier(account(1).identifier()),
+            ..its_transfer(1, r#ref)
+        };
+        blocks.blocks.borrow_mut().insert(42, by_identifier);
+        assert_eq!(
+            by_controller(
+                &blocks,
+                r#ref,
+                WireResolution::MarkPaid { block: 42 },
+                at(7)
+            ),
+            Ok(None)
+        );
+        assert_eq!(status(r#ref), DepositStatus::Paid);
     });
 }

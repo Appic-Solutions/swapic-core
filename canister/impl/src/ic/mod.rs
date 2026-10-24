@@ -136,21 +136,53 @@ struct GetTransactionsRequest {
     length: Nat,
 }
 
-/// A transfer as an ICRC-1 ledger's `get_transactions` logs it, the fields the canister
-/// reads: an `icrc2_transfer_from` carries its spender.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// Who a ledger block names as paying, paid or spending: an ICRC account, or an account
+/// identifier (the ICP ledger's own blocks name no principal).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Party {
+    Account(Account),
+    Identifier([u8; 32]),
+}
+
+/// A transfer as a ledger's block logs it, the fields the canister reads: an
+/// `icrc2_transfer_from` carries its spender.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LedgerTransfer {
-    pub from: Account,
-    pub to: Account,
+    pub from: Party,
+    pub to: Party,
     pub amount: Nat,
     pub memo: Option<Vec<u8>>,
     pub created_at_time: Option<u64>,
-    pub spender: Option<Account>,
+    pub spender: Option<Party>,
+}
+
+/// A transfer as `get_transactions` answers it.
+#[derive(CandidType, Deserialize)]
+struct IcrcTransfer {
+    from: Account,
+    to: Account,
+    amount: Nat,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+    spender: Option<Account>,
+}
+
+impl From<IcrcTransfer> for LedgerTransfer {
+    fn from(transfer: IcrcTransfer) -> Self {
+        Self {
+            from: Party::Account(transfer.from),
+            to: Party::Account(transfer.to),
+            amount: transfer.amount,
+            memo: transfer.memo,
+            created_at_time: transfer.created_at_time,
+            spender: transfer.spender.map(Party::Account),
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize)]
 struct LedgerTransaction {
-    transfer: Option<LedgerTransfer>,
+    transfer: Option<IcrcTransfer>,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -174,32 +206,84 @@ struct GetTransactionsResponse {
     archived_transactions: Vec<ArchivedRange>,
 }
 
-/// The transfer in `ledger`'s block `block`, read with `get_transactions` on the ledger, or on
-/// the archive that holds it: none for no such block, or a block that is no transfer.
+/// A call whose callee may not serve the method: none when it does not (the replica's
+/// `DestinationInvalid`, or a refusal naming a method it has not).
+async fn call_served<
+    A: candid::utils::ArgumentEncoder,
+    R: for<'de> candid::utils::ArgumentDecoder<'de>,
+>(
+    canister: Principal,
+    method: &str,
+    args: A,
+) -> Result<Option<R>, CallError> {
+    match ic_cdk::call(canister, method, args).await {
+        Ok(answer) => Ok(Some(answer)),
+        Err((code, message))
+            if code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                || message.contains("has no query method")
+                || message.contains("has no update method") =>
+        {
+            Ok(None)
+        }
+        Err((code, message)) => Err(CallError::Unknown(format!("{code:?}: {message}"))),
+    }
+}
+
+/// The transfer in `ledger`'s block `block` (the review, 2026-10-24), read through whichever
+/// block read the ledger serves: ICRC-3's `icrc3_get_blocks`, else `get_transactions`, else
+/// the ICP ledger's own `query_blocks`, each on the ledger or the archive that holds the
+/// block. None for no such block, or a block that is no transfer; a ledger serving none of
+/// them is a refusal naming it.
 pub async fn ledger_transfer_at(
     ledger: Principal,
     block: u64,
 ) -> Result<Option<LedgerTransfer>, CallError> {
+    if let Some(found) = icrc3_transfer_at(ledger, block).await? {
+        return Ok(found);
+    }
+    if let Some(found) = transactions_transfer_at(ledger, block).await? {
+        return Ok(found);
+    }
+    if let Some(found) = icp_transfer_at(ledger, block).await? {
+        return Ok(found);
+    }
+    Err(CallError::Refused(format!(
+        "ledger {ledger} serves none of icrc3_get_blocks, get_transactions and query_blocks: \
+         its block {block} cannot be read"
+    )))
+}
+
+/// [`ledger_transfer_at`] through `get_transactions`: none when the ledger serves it not.
+async fn transactions_transfer_at(
+    ledger: Principal,
+    block: u64,
+) -> Result<Option<Option<LedgerTransfer>>, CallError> {
     let request = || GetTransactionsRequest {
         start: Nat::from(block),
         length: Nat::from(1_u8),
     };
-    let (answer,): (GetTransactionsResponse,) =
-        call(ledger, "get_transactions", (request(),)).await?;
+    let Some((answer,)): Option<(GetTransactionsResponse,)> =
+        call_served(ledger, "get_transactions", (request(),)).await?
+    else {
+        return Ok(None);
+    };
     let at = Nat::from(block);
-    if answer.first_index == at && !answer.transactions.is_empty() {
-        return Ok(answer
-            .transactions
+    let first = |transactions: Vec<LedgerTransaction>| {
+        transactions
             .into_iter()
             .next()
-            .and_then(|transaction| transaction.transfer));
+            .and_then(|transaction| transaction.transfer)
+            .map(LedgerTransfer::from)
+    };
+    if answer.first_index == at && !answer.transactions.is_empty() {
+        return Ok(Some(first(answer.transactions)));
     }
     let Some(range) = answer
         .archived_transactions
         .into_iter()
         .find(|range| range.start <= at && at < range.start.clone() + range.length.clone())
     else {
-        return Ok(None);
+        return Ok(Some(None));
     };
     let (archived,): (TransactionRange,) = call(
         range.callback.0.principal,
@@ -207,11 +291,312 @@ pub async fn ledger_transfer_at(
         (request(),),
     )
     .await?;
-    Ok(archived
-        .transactions
+    Ok(Some(first(archived.transactions)))
+}
+
+/// An ICRC-3 value: what an ICRC-3 ledger's blocks are made of.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Icrc3Value {
+    Blob(Vec<u8>),
+    Text(String),
+    Nat(Nat),
+    Int(candid::Int),
+    Array(Vec<Icrc3Value>),
+    Map(Vec<(String, Icrc3Value)>),
+}
+
+impl Icrc3Value {
+    fn get(&self, key: &str) -> Option<&Icrc3Value> {
+        match self {
+            Icrc3Value::Map(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    fn text(&self) -> Option<&str> {
+        match self {
+            Icrc3Value::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn nat(&self) -> Option<Nat> {
+        match self {
+            Icrc3Value::Nat(nat) => Some(nat.clone()),
+            Icrc3Value::Int(int) => natural_of(int),
+            _ => None,
+        }
+    }
+
+    fn blob(&self) -> Option<&[u8]> {
+        match self {
+            Icrc3Value::Blob(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// An ICRC-3 account: its owner and, if any, its subaccount.
+    fn account(&self) -> Option<Account> {
+        let Icrc3Value::Array(parts) = self else {
+            return None;
+        };
+        let owner = Principal::try_from_slice(parts.first()?.blob()?).ok()?;
+        let subaccount = match parts.get(1) {
+            Some(part) => Some(part.blob()?.to_vec()),
+            None => None,
+        };
+        Some(Account { owner, subaccount })
+    }
+}
+
+/// A non-negative ICRC-3 integer as a natural.
+fn natural_of(int: &candid::Int) -> Option<Nat> {
+    int.0.to_biguint().map(Nat)
+}
+
+/// The transfer an ICRC-3 block logs: a `1xfer`, a `2xfer` (with its spender), or a block
+/// from before block types whose `tx.op` is `xfer`. None for any other block.
+pub fn icrc3_transfer(block: &Icrc3Value) -> Option<LedgerTransfer> {
+    let tx = block.get("tx")?;
+    let is_transfer = match block.get("btype").and_then(Icrc3Value::text) {
+        Some(btype) => btype == "1xfer" || btype == "2xfer",
+        None => tx.get("op").and_then(Icrc3Value::text) == Some("xfer"),
+    };
+    if !is_transfer {
+        return None;
+    }
+    let created_at_time = match tx.get("ts") {
+        Some(ts) => Some(u64::try_from(ts.nat()?.0).ok()?),
+        None => None,
+    };
+    Some(LedgerTransfer {
+        from: Party::Account(tx.get("from")?.account()?),
+        to: Party::Account(tx.get("to")?.account()?),
+        amount: tx.get("amt")?.nat()?,
+        memo: tx
+            .get("memo")
+            .and_then(Icrc3Value::blob)
+            .map(<[u8]>::to_vec),
+        created_at_time,
+        spender: tx
+            .get("spender")
+            .and_then(Icrc3Value::account)
+            .map(Party::Account),
+    })
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct Icrc3GetBlocksArgs {
+    start: Nat,
+    length: Nat,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Icrc3BlockWithId {
+    id: Nat,
+    block: Icrc3Value,
+}
+
+candid::define_function!(Icrc3ArchiveFn : (Vec<Icrc3GetBlocksArgs>) -> (Icrc3GetBlocksResult) query);
+
+#[derive(CandidType, Deserialize)]
+struct Icrc3ArchivedBlocks {
+    args: Vec<Icrc3GetBlocksArgs>,
+    callback: Icrc3ArchiveFn,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Icrc3GetBlocksResult {
+    blocks: Vec<Icrc3BlockWithId>,
+    archived_blocks: Vec<Icrc3ArchivedBlocks>,
+}
+
+/// [`ledger_transfer_at`] through ICRC-3: none when the ledger serves it not.
+async fn icrc3_transfer_at(
+    ledger: Principal,
+    block: u64,
+) -> Result<Option<Option<LedgerTransfer>>, CallError> {
+    let at = Nat::from(block);
+    let request = || {
+        vec![Icrc3GetBlocksArgs {
+            start: at.clone(),
+            length: Nat::from(1_u8),
+        }]
+    };
+    let Some((answer,)): Option<(Icrc3GetBlocksResult,)> =
+        call_served(ledger, "icrc3_get_blocks", (request(),)).await?
+    else {
+        return Ok(None);
+    };
+    let found = |blocks: Vec<Icrc3BlockWithId>| {
+        blocks
+            .into_iter()
+            .find(|with_id| with_id.id == at)
+            .and_then(|with_id| icrc3_transfer(&with_id.block))
+    };
+    if answer.blocks.iter().any(|with_id| with_id.id == at) {
+        return Ok(Some(found(answer.blocks)));
+    }
+    let Some(archived) = answer.archived_blocks.into_iter().find(|archived| {
+        archived
+            .args
+            .iter()
+            .any(|args| args.start <= at && at < args.start.clone() + args.length.clone())
+    }) else {
+        return Ok(Some(None));
+    };
+    let (range,): (Icrc3GetBlocksResult,) = call(
+        archived.callback.0.principal,
+        &archived.callback.0.method,
+        (request(),),
+    )
+    .await?;
+    Ok(Some(found(range.blocks)))
+}
+
+#[derive(CandidType, Deserialize, Clone, Copy, Debug)]
+struct IcpGetBlocksArgs {
+    start: u64,
+    length: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tokens {
+    pub e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeStamp {
+    pub timestamp_nanos: u64,
+}
+
+/// An ICP ledger block's operation, the transfer's fields the canister reads; the others
+/// are read as nothing.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum IcpOperation {
+    Transfer {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        amount: Tokens,
+        fee: Tokens,
+        spender: Option<Vec<u8>>,
+    },
+    Mint(candid::Reserved),
+    Burn(candid::Reserved),
+    Approve(candid::Reserved),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct IcpTransaction {
+    pub memo: u64,
+    pub icrc1_memo: Option<Vec<u8>>,
+    pub operation: Option<IcpOperation>,
+    pub created_at_time: Option<TimeStamp>,
+}
+
+/// An ICP ledger block (`query_blocks`), its transaction.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct IcpBlock {
+    pub transaction: IcpTransaction,
+}
+
+/// The transfer an ICP ledger block logs, its parties account identifiers: none for any
+/// other block.
+pub fn icp_transfer(block: IcpBlock) -> Option<LedgerTransfer> {
+    let identifier = |bytes: Vec<u8>| <[u8; 32]>::try_from(bytes).ok().map(Party::Identifier);
+    let Some(IcpOperation::Transfer {
+        from,
+        to,
+        amount,
+        spender,
+        ..
+    }) = block.transaction.operation
+    else {
+        return None;
+    };
+    Some(LedgerTransfer {
+        from: identifier(from)?,
+        to: identifier(to)?,
+        amount: Nat::from(amount.e8s),
+        memo: block.transaction.icrc1_memo,
+        created_at_time: block
+            .transaction
+            .created_at_time
+            .map(|time| time.timestamp_nanos),
+        spender: match spender {
+            Some(bytes) => Some(identifier(bytes)?),
+            None => None,
+        },
+    })
+}
+
+#[derive(CandidType, Deserialize)]
+struct IcpBlockRange {
+    blocks: Vec<IcpBlock>,
+}
+
+#[derive(CandidType, Deserialize)]
+enum IcpArchiveResult {
+    Ok(IcpBlockRange),
+    Err(candid::Reserved),
+}
+
+candid::define_function!(IcpArchiveFn : (IcpGetBlocksArgs) -> (IcpArchiveResult) query);
+
+#[derive(CandidType, Deserialize)]
+struct IcpArchivedRange {
+    start: u64,
+    length: u64,
+    callback: IcpArchiveFn,
+}
+
+#[derive(CandidType, Deserialize)]
+struct IcpQueryBlocksResponse {
+    first_block_index: u64,
+    blocks: Vec<IcpBlock>,
+    archived_blocks: Vec<IcpArchivedRange>,
+}
+
+/// [`ledger_transfer_at`] through the ICP ledger's `query_blocks`: none when the ledger
+/// serves it not.
+async fn icp_transfer_at(
+    ledger: Principal,
+    block: u64,
+) -> Result<Option<Option<LedgerTransfer>>, CallError> {
+    let request = IcpGetBlocksArgs {
+        start: block,
+        length: 1,
+    };
+    let Some((answer,)): Option<(IcpQueryBlocksResponse,)> =
+        call_served(ledger, "query_blocks", (request,)).await?
+    else {
+        return Ok(None);
+    };
+    if answer.first_block_index == block && !answer.blocks.is_empty() {
+        return Ok(Some(
+            answer.blocks.into_iter().next().and_then(icp_transfer),
+        ));
+    }
+    let Some(range) = answer
+        .archived_blocks
         .into_iter()
-        .next()
-        .and_then(|transaction| transaction.transfer))
+        .find(|range| range.start <= block && block < range.start.saturating_add(range.length))
+    else {
+        return Ok(Some(None));
+    };
+    let (archived,): (IcpArchiveResult,) = call(
+        range.callback.0.principal,
+        &range.callback.0.method,
+        (request,),
+    )
+    .await?;
+    Ok(Some(match archived {
+        IcpArchiveResult::Ok(range) => range.blocks.into_iter().next().and_then(icp_transfer),
+        IcpArchiveResult::Err(_) => None,
+    }))
 }
 
 /// The deduplication key of one money call: the quote hash as the memo, and the instant
@@ -664,5 +1049,124 @@ mod tests {
             })),
             Err(CallError::Refused(_))
         ));
+    }
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 10])
+    }
+
+    fn account_value(owner: Principal, subaccount: Option<[u8; 32]>) -> Icrc3Value {
+        let mut parts = vec![Icrc3Value::Blob(owner.as_slice().to_vec())];
+        if let Some(bytes) = subaccount {
+            parts.push(Icrc3Value::Blob(bytes.to_vec()));
+        }
+        Icrc3Value::Array(parts)
+    }
+
+    fn map(entries: Vec<(&str, Icrc3Value)>) -> Icrc3Value {
+        Icrc3Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    /// The review (2026-10-24): an ICRC-3 block reads as the transfer it logs, in the older
+    /// shape (`tx.op` "xfer") and the newer (`btype` "1xfer" or "2xfer", a `transfer_from` with
+    /// its spender); a block that moves nothing to anyone (a mint, an approval) is none.
+    #[test]
+    fn an_icrc3_block_reads_as_its_transfer() {
+        let tx = |op: Option<&str>, spender: bool| {
+            let mut entries = vec![
+                ("amt", Icrc3Value::Nat(Nat::from(98_990_000_u64))),
+                ("from", account_value(principal(1), None)),
+                ("to", account_value(principal(2), Some([7; 32]))),
+                ("memo", Icrc3Value::Blob(vec![0xab; 32])),
+                (
+                    "ts",
+                    Icrc3Value::Nat(Nat::from(1_800_000_000_000_000_005_u64)),
+                ),
+            ];
+            if let Some(op) = op {
+                entries.push(("op", Icrc3Value::Text(op.to_string())));
+            }
+            if spender {
+                entries.push(("spender", account_value(principal(3), None)));
+            }
+            map(entries)
+        };
+        let expected = |spender: Option<Party>| LedgerTransfer {
+            from: Party::Account(Account::of(principal(1), None)),
+            to: Party::Account(Account::of(principal(2), Some([7; 32]))),
+            amount: Nat::from(98_990_000_u64),
+            memo: Some(vec![0xab; 32]),
+            created_at_time: Some(1_800_000_000_000_000_005),
+            spender,
+        };
+        let older = map(vec![
+            ("phash", Icrc3Value::Blob(vec![0; 32])),
+            ("ts", Icrc3Value::Nat(Nat::from(9_u8))),
+            ("tx", tx(Some("xfer"), false)),
+        ]);
+        assert_eq!(icrc3_transfer(&older), Some(expected(None)));
+        let newer = map(vec![
+            ("btype", Icrc3Value::Text("2xfer".to_string())),
+            ("ts", Icrc3Value::Nat(Nat::from(9_u8))),
+            ("tx", tx(None, true)),
+        ]);
+        assert_eq!(
+            icrc3_transfer(&newer),
+            Some(expected(Some(Party::Account(Account::of(
+                principal(3),
+                None
+            )))))
+        );
+        let mint = map(vec![("tx", tx(Some("mint"), false))]);
+        assert_eq!(icrc3_transfer(&mint), None);
+        let approval = map(vec![
+            ("btype", Icrc3Value::Text("2approve".to_string())),
+            ("tx", tx(None, true)),
+        ]);
+        assert_eq!(icrc3_transfer(&approval), None);
+    }
+
+    /// The review (2026-10-24): an ICP ledger block (`query_blocks`) reads as the transfer it
+    /// logs, its parties the account identifiers the ICP ledger keeps, its memo the ICRC-1
+    /// one; a mint is none.
+    #[test]
+    fn an_icp_ledger_block_reads_as_its_transfer() {
+        let block = |operation: IcpOperation| IcpBlock {
+            transaction: IcpTransaction {
+                memo: 0,
+                icrc1_memo: Some(vec![0xab; 32]),
+                operation: Some(operation),
+                created_at_time: Some(TimeStamp {
+                    timestamp_nanos: 1_800_000_000_000_000_005,
+                }),
+            },
+        };
+        let transfer = block(IcpOperation::Transfer {
+            from: vec![1; 32],
+            to: vec![2; 32],
+            amount: Tokens { e8s: 12_345 },
+            fee: Tokens { e8s: 10_000 },
+            spender: None,
+        });
+        assert_eq!(
+            icp_transfer(transfer),
+            Some(LedgerTransfer {
+                from: Party::Identifier([1; 32]),
+                to: Party::Identifier([2; 32]),
+                amount: Nat::from(12_345_u64),
+                memo: Some(vec![0xab; 32]),
+                created_at_time: Some(1_800_000_000_000_000_005),
+                spender: None,
+            })
+        );
+        assert_eq!(
+            icp_transfer(block(IcpOperation::Mint(candid::Reserved))),
+            None
+        );
     }
 }

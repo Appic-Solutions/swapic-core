@@ -84,6 +84,35 @@ impl IcpAccount {
     pub fn subaccount_bytes(&self) -> [u8; 32] {
         self.subaccount.unwrap_or([0; 32])
     }
+
+    /// The account identifier the ICP ledger's own blocks name this account by: the CRC-32
+    /// (big endian) of the SHA-224 of `\x0Aaccount-id`, the owner and the 32 subaccount
+    /// bytes, then that hash.
+    pub fn identifier(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha224};
+        let mut hasher = Sha224::new();
+        hasher.update(b"\x0Aaccount-id");
+        hasher.update(self.owner.as_slice());
+        hasher.update(self.subaccount_bytes());
+        let hash = hasher.finalize();
+        let mut identifier = [0; 32];
+        identifier[..4].copy_from_slice(&crc32(&hash).to_be_bytes());
+        identifier[4..].copy_from_slice(&hash);
+        identifier
+    }
+}
+
+/// CRC-32 (IEEE 802.3), the check the ICP ledger puts before an account identifier's hash.
+pub fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let low = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & low);
+        }
+    }
+    !crc
 }
 
 /// Whoever owns shares: an EVM address (a stake from EVM) or an ICP account.

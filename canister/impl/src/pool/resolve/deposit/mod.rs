@@ -252,11 +252,7 @@ pub async fn resolve(
             let transfer = blocks
                 .transfer_at(sent.token.0, block)
                 .await
-                .map_err(|error| {
-                    PoolError::Unavailable(format!(
-                        "the ledger's block {block} was not read, try later: {error}"
-                    ))
-                })?
+                .map_err(|error| super::read_error(block, error))?
                 .ok_or_else(|| {
                     PoolError::NotAllowed(format!("the ledger has no block {block} of a transfer"))
                 })?;

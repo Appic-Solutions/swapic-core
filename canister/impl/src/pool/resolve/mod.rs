@@ -19,7 +19,7 @@ pub mod stake;
 #[cfg(test)]
 mod tests;
 
-use crate::ic::{Account, CallError, LedgerTransfer};
+use crate::ic::{CallError, LedgerTransfer, Party};
 use crate::pool::payout::DEDUP_WINDOW;
 use crate::storage::pool as pool_store;
 use candid::Principal;
@@ -51,14 +51,32 @@ impl LedgerBlocks for crate::pool::payout::Live {
     }
 }
 
-/// Whether `account` is `expected`, the default subaccount written either way.
-pub fn same_account(account: &Account, expected: IcpAccount) -> bool {
-    let default_as_none = |bytes: [u8; 32]| (bytes != [0; 32]).then_some(bytes);
-    let theirs = match account.subaccount.as_deref() {
-        None => Some(None),
-        Some(bytes) => <[u8; 32]>::try_from(bytes).ok().map(default_as_none),
-    };
-    account.owner == expected.owner && theirs == Some(expected.subaccount.and_then(default_as_none))
+/// Whether the party a ledger block names is `expected`: an ICRC account, the default
+/// subaccount written either way, or the ICP ledger's account identifier of it.
+pub fn same_account(party: &Party, expected: IcpAccount) -> bool {
+    match party {
+        Party::Account(account) => {
+            let default_as_none = |bytes: [u8; 32]| (bytes != [0; 32]).then_some(bytes);
+            let theirs = match account.subaccount.as_deref() {
+                None => Some(None),
+                Some(bytes) => <[u8; 32]>::try_from(bytes).ok().map(default_as_none),
+            };
+            account.owner == expected.owner
+                && theirs == Some(expected.subaccount.and_then(default_as_none))
+        }
+        Party::Identifier(identifier) => *identifier == expected.identifier(),
+    }
+}
+
+/// A ledger block's read that failed, in the interface's words: a ledger serving no block
+/// read the canister knows is a refusal naming it; any other failure is asked again later.
+pub fn read_error(block: u64, error: CallError) -> PoolError {
+    match error {
+        CallError::Refused(why) => PoolError::NotAllowed(why),
+        error => PoolError::Unavailable(format!(
+            "the ledger's block {block} was not read, try later: {error}"
+        )),
+    }
 }
 
 /// The dedup instant of a refund a controller asks for: the payout's undo's own while a

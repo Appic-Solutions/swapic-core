@@ -1,5 +1,5 @@
 use super::*;
-use crate::ic::{Account, CallError};
+use crate::ic::{Account, CallError, Party};
 use crate::storage::on_fresh_memory;
 use crate::storage::pool::tests::{account, at, ckusdc, funded_pool, usdc};
 use crate::storage::pool::{ledger, record_at, shares_of};
@@ -63,12 +63,12 @@ fn lost_stake(byte: u8) -> PoolOpId {
 /// The pull of stake `id` by `account(byte)` as the ledger logs it.
 fn its_pull(byte: u8, id: PoolOpId) -> LedgerTransfer {
     LedgerTransfer {
-        from: Account::of(account(byte).owner, None),
-        to: Account::of(canister(), None),
+        from: Party::Account(Account::of(account(byte).owner, None)),
+        to: Party::Account(Account::of(canister(), None)),
         amount: Nat::from(usdc(10)),
         memo: Some(id.into_bytes().to_vec()),
         created_at_time: Some(at(1).as_nanos()),
-        spender: Some(Account::of(canister(), None)),
+        spender: Some(Party::Account(Account::of(canister(), None))),
     }
 }
 
@@ -232,11 +232,11 @@ fn a_lost_stake_is_never_minted_on_a_block_that_is_not_its_pull() {
         let stranger = Account::of(Principal::from_slice(&[0xee; 10]), None);
         let others = [
             LedgerTransfer {
-                from: stranger.clone(),
+                from: Party::Account(stranger.clone()),
                 ..pull.clone()
             },
             LedgerTransfer {
-                to: stranger.clone(),
+                to: Party::Account(stranger.clone()),
                 ..pull.clone()
             },
             LedgerTransfer {
