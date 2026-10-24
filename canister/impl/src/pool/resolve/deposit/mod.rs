@@ -47,9 +47,7 @@ use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
 use settlement_api::types::pool::{DepositResolution as WireResolution, PoolError};
 use types::hash::PoolRef;
-use types::pool::{
-    DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PoolStep, Registered, Sent,
-};
+use types::pool::{DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PoolStep, Sent};
 use types::{Address, EvmAddress, Timestamp};
 
 /// The retry's margin and the window, the fold's own rule too.
@@ -73,14 +71,6 @@ fn search(ledger: Principal, to: IcpAccount, attempt: &PayoutAttempt) -> String 
         crate::rpc::hex0x(&attempt.memo),
         attempt.created_at.as_nanos()
     )
-}
-
-/// The recipient of a swap deposit's payout.
-fn recipient(deposit: &Registered) -> Option<IcpAccount> {
-    match deposit.terms.kind {
-        types::pool::DepositKind::Swap { recipient, .. } => Some(recipient),
-        types::pool::DepositKind::Stake { .. } => None,
-    }
 }
 
 /// Whether `transfer` is exactly the transfer a payout asked (`sent`, its dedup pair in
@@ -162,11 +152,11 @@ pub async fn resolve(
         .map(|settings| settings.ckusdc_ledger)
         .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
     let out = deposit.out_ledger(ckusdc).unwrap_or(ckusdc);
+    // its payout's dedup pair and recipient, once it started
     let started = deposit
         .payout
         .attempt
-        .zip(recipient(&deposit))
-        .map(|(attempt, to)| (attempt, to, search(out, to, &attempt)));
+        .zip(crate::pool::payout::of_deposit(r#ref, &deposit).map(|payout| payout.to));
     let now = clock();
     match resolution {
         WireResolution::Retry => {
@@ -175,7 +165,8 @@ pub async fn resolve(
                 (None, _) => None,
                 // its last ask may have landed: only with its own dedup pair, on the ckUSDC
                 // ledger the payout started with, while that ledger deduplicates it
-                (Some((attempt, _, search)), Some(sent)) if !deposit.payout.cannot_land_twice() => {
+                (Some((attempt, to)), Some(sent)) if !deposit.payout.cannot_land_twice() => {
+                    let search = search(out, *to, attempt);
                     let started_on = attempt.token.map_or(ckusdc, |token| token.0);
                     if sent.token.0 != started_on {
                         return Err(PoolError::NotAllowed(format!(
@@ -208,7 +199,8 @@ pub async fn resolve(
         }
         WireResolution::Refund => {
             if !deposit.payout.nothing_went_out() {
-                let search = started.map_or(String::new(), |(_, _, search)| search);
+                let search =
+                    started.map_or(String::new(), |(attempt, to)| search(out, to, &attempt));
                 return Err(PoolError::NotAllowed(format!(
                     "its payout may have sent something (a transfer whose outcome is not known, \
                      or an ICPSwap leg that moved money): it is not refunded on Base; {search}"
@@ -235,7 +227,7 @@ pub async fn resolve(
             Ok(Some(refund))
         }
         WireResolution::MarkPaid { block } => {
-            let (attempt, to, _) = started.ok_or_else(|| {
+            let (attempt, to) = started.ok_or_else(|| {
                 PoolError::NotAllowed("its payout never started: nothing was paid".to_string())
             })?;
             let sent = deposit.payout.sent.ok_or_else(|| {
