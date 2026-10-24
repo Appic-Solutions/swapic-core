@@ -7,8 +7,7 @@ use ic_cdk::query;
 ///
 /// The deep comparison of the fold against a replay of the log is not on that timer: it is
 /// the controller-only `audit_replay_step`, run as many times as the log needs, and it
-/// halts the canister on what it finds. The flag also gates the expiry sweep, which appends
-/// nothing while it is set; the money endpoints that honour it arrive with the chain layer.
+/// halts the canister on what it finds. While it is set nothing is signed, sent or paid.
 ///
 /// Nothing clears it but a controller, once the divergence is understood.
 #[query]

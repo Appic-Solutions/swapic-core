@@ -704,7 +704,7 @@ pub enum ConfigError {
     },
     EmptyEcdsaKeyName,
     /// The canister has already derived its EVM address under the key name it holds, and
-    /// every vault on every chain is configured to obey that address.
+    /// the Swapic contracts on every chain name that address.
     EcdsaKeyNameFixed {
         current: String,
         requested: String,
@@ -775,10 +775,10 @@ pub enum ConfigError {
         chain_id: Option<u64>,
         reason: EvmAddressError,
     },
-    /// A claim may be asked `span_s` after the deposit it reads for (the longest quote
-    /// lifetime, `permit_deadline_s` and `claim_grace_s`), `needed_blocks` at four blocks a
-    /// second, and `deposit_lookback_blocks` does not reach that far back: a claim the door
-    /// admits would read past the deposit and leave it in the vault.
+    /// The v1 claim's rule, kept with its knobs: a claim could be asked `span_s` after the
+    /// deposit it read for (the longest quote lifetime, `permit_deadline_s` and
+    /// `claim_grace_s`), `needed_blocks` at four blocks a second, and
+    /// `deposit_lookback_blocks` does not reach that far back.
     LookbackShorterThanClaims {
         lookback_blocks: u32,
         span_s: u64,

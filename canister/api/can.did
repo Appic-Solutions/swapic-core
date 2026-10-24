@@ -179,13 +179,13 @@ type Config = record {
 // Why a config was refused, naming the knob at fault.
 type ConfigError = variant {
   // The canister has already derived its EVM address under the key name it holds, and
-  // every vault on every chain is configured to obey that address.
+  // the Swapic contracts on every chain name that address.
   EcdsaKeyNameFixed : record { requested : text; current : text };
   EmptyEcdsaKeyName;
-  // A claim may be asked `span_s` after the deposit it reads for (the longest quote
-  // lifetime, `permit_deadline_s` and `claim_grace_s`), `needed_blocks` at four blocks a
-  // second, and `deposit_lookback_blocks` does not reach that far back: a claim the door
-  // admits would read past the deposit and leave it in the vault.
+  // The v1 claim's rule, kept with its knobs: a claim could be asked `span_s` after the
+  // deposit it read for (the longest quote lifetime, `permit_deadline_s` and
+  // `claim_grace_s`), `needed_blocks` at four blocks a second, and
+  // `deposit_lookback_blocks` does not reach that far back.
   LookbackShorterThanClaims : record {
     needed_blocks : nat64;
     span_s : nat64;
@@ -1049,16 +1049,16 @@ service : (InitArg) -> {
   // The book lines of every chain, in micro-USDC, with the last balance check.
   books : () -> (vec record { nat64; BookLines }) query;
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
-  // it, or answers the cached one. Deploy needs this before anything else: the vaults are
-  // configured with this address and it has to be funded for gas, and neither can wait for
-  // the first swap to derive it.
+  // it, or answers the cached one. Deploy needs this before anything else: the Swapic
+  // contracts are configured with this address and it has to be funded for gas, and neither
+  // can wait for the first transaction to derive it.
   derive_evm_address : () -> (Result_2);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through.
   events_page : (nat64, nat64) -> (vec Event) query;
   // The EVM address this canister signs from, in its EIP-55 checksum, or nothing before it
-  // has been derived. World-readable: it is the address every vault on every chain is
-  // configured to obey, and ops fund it before the first transaction.
+  // has been derived. World-readable: it is the canister the Swapic contracts on every chain
+  // name, and ops fund it before the first transaction.
   // 
   // Derived once from the canister's threshold key and then read from stable memory, so it
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
@@ -1107,8 +1107,7 @@ service : (InitArg) -> {
   // 
   // The deep comparison of the fold against a replay of the log is not on that timer: it is
   // the controller-only `audit_replay_step`, run as many times as the log needs, and it
-  // halts the canister on what it finds. The flag also gates the expiry sweep, which appends
-  // nothing while it is set; the money endpoints that honour it arrive with the chain layer.
+  // halts the canister on what it finds. While it is set nothing is signed, sent or paid.
   // 
   // Nothing clears it but a controller, once the divergence is understood.
   halted : () -> (bool) query;
