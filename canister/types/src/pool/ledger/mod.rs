@@ -1504,8 +1504,7 @@ impl PoolLedger {
                 shares,
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
-                    self.owed = sat_sub(self.owed, owed_line(&deposit));
-                    self.paying.remove(r#ref);
+                    self.close_owed(r#ref, &deposit);
                     self.total_shares = self
                         .total_shares
                         .checked_add(*shares)
@@ -1560,8 +1559,7 @@ impl PoolLedger {
                             }
                         }
                         DepositResolution::Refund => {
-                            self.owed = sat_sub(self.owed, owed_line(&deposit));
-                            self.paying.remove(r#ref);
+                            self.close_owed(r#ref, &deposit);
                             // started, nothing went out: its hold is free again on ICP
                             if deposit.payout.attempt.is_some() {
                                 let held = deposit.held();
@@ -1889,12 +1887,17 @@ impl PoolLedger {
         }
     }
 
+    /// An arrived deposit leaves the pool's books: off the `owed` line, no longer paying.
+    fn close_owed(&mut self, r#ref: &PoolRef, deposit: &Registered) {
+        self.owed = sat_sub(self.owed, owed_line(deposit));
+        self.paying.remove(r#ref);
+    }
+
     /// A deposit's payout paid as `paid` says: no longer owed or paying, its hold and the
     /// rest of what it spent out of the ICP pocket, nothing held for it.
     fn book_paid(&mut self, r#ref: &PoolRef, deposit: &mut Registered, paid: super::Paid) {
-        self.owed = sat_sub(self.owed, owed_line(deposit));
+        self.close_owed(r#ref, deposit);
         self.spend_reserved(deposit.held(), paid.spent);
-        self.paying.remove(r#ref);
         deposit.status = DepositStatus::Paid;
         deposit.held = Some(TokenAmount::ZERO);
         deposit.paid = Some(paid);
