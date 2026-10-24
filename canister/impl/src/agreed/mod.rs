@@ -164,8 +164,12 @@ pub fn fill_wait(chain: ChainId, depth: u64) -> std::time::Duration {
 
 /// [`fill_wait`] at `chain`'s configured crediting depth (none configured: no depth).
 pub fn fill_wait_on(chain: ChainId) -> std::time::Duration {
-    let depth =
-        crate::tx::credit_confirmations(&config::get(), chain).map_or(0, |depth| depth.get());
+    fill_wait_in(&config::get(), chain)
+}
+
+/// [`fill_wait_on`] under `config`, read once by a caller that asks for many chains.
+pub fn fill_wait_in(config: &types::Config, chain: ChainId) -> std::time::Duration {
+    let depth = crate::tx::credit_confirmations(config, chain).map_or(0, |depth| depth.get());
     fill_wait(chain, depth)
 }
 
