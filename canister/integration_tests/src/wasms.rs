@@ -9,8 +9,8 @@ pub fn settlement() -> Vec<u8> {
 }
 
 /// The ICRC-1/ICRC-2 ledger wasm the pool's suite runs ckUSDC on: `LEDGER_WASM`, or the
-/// legacy evm-minter's `ledger_canister_u256.wasm.gz` beside the repository (the one
-/// `scripts/demo-icp.sh` runs), which is not committed here.
+/// legacy evm-minter's `ledger_canister_u256.wasm.gz` beside the repository, which is not
+/// committed here.
 pub fn icrc1_ledger() -> Vec<u8> {
     let candidates: Vec<std::path::PathBuf> = match std::env::var("LEDGER_WASM") {
         Ok(path) => vec![path.into()],
