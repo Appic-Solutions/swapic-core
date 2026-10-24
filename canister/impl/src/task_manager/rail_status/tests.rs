@@ -19,6 +19,11 @@ fn the_engine_ticks_on_the_configured_interval() {
     );
     assert_eq!(with(Duration::from_secs(5)), Duration::from_secs(5));
     assert_eq!(
+        with(Duration::from_secs(600)),
+        Duration::from_secs(60),
+        "the payouts' minute at the most"
+    );
+    assert_eq!(
         with(Duration::ZERO),
         Duration::from_secs(1),
         "the floor, not every round of the subnet"

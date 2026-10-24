@@ -19,11 +19,11 @@ thread_local! {
     static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
-    static PAYOUT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static REBALANCE_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
-/// How often the payout timer serves the Base queue and walks the payouts' deadlines.
+/// The longest the engine's drive waits between two ticks: it serves the Base queue and
+/// walks the payouts' deadlines at least this often, whatever `rail_status_max_age` says.
 pub const PAYOUT_EVERY: Duration = Duration::from_secs(60);
 
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
@@ -39,7 +39,6 @@ pub fn start_timers() {
     restart_rail_status_timer();
     restart_books_timer();
     restart_pool_arrivals_timer();
-    restart_payout_timer();
     restart_rebalance_timer();
 }
 
@@ -48,19 +47,6 @@ pub fn restart_rebalance_timer() {
     restart(&REBALANCE_TIMER, || {
         ic_cdk_timers::set_timer_interval(rebalance::REBALANCE_EVERY, || {
             ic_cdk::spawn(rebalance::tick())
-        })
-    });
-}
-
-/// The payout timer, every minute: the engine's drive, which serves the Base queue, drives
-/// the ICP swaps, undoes a reverted payout once its order is known unused, and undoes a
-/// payout at its deadline. Every line that moves a payout arms the same drive at once; this is the clock.
-pub fn restart_payout_timer() {
-    restart(&PAYOUT_TIMER, || {
-        ic_cdk_timers::set_timer_interval(PAYOUT_EVERY, || {
-            ic_cdk::spawn(async {
-                crate::engine::drive_all().await;
-            })
         })
     });
 }
