@@ -109,3 +109,44 @@ fn a_refund_keeps_its_dedup_instant_within_the_ledgers_window() {
         let _ = Duration::ZERO;
     });
 }
+
+/// A ledger block names an account with its subaccount absent, all zero, or set; the ICP
+/// ledger names it by its identifier. Absent and all zero are one account; a subaccount of
+/// another length is no account at all.
+#[test]
+fn a_blocks_party_is_the_expected_account_written_either_way() {
+    let owner = Principal::from_slice(&[7; 29]);
+    let account =
+        |subaccount: Option<Vec<u8>>| Party::Account(crate::ic::Account { owner, subaccount });
+    let default = IcpAccount {
+        owner,
+        subaccount: None,
+    };
+    let zero = IcpAccount {
+        owner,
+        subaccount: Some([0; 32]),
+    };
+    let set = IcpAccount {
+        owner,
+        subaccount: Some([5; 32]),
+    };
+    for expected in [default, zero] {
+        assert!(same_account(&account(None), expected));
+        assert!(same_account(&account(Some(vec![0; 32])), expected));
+        assert!(!same_account(&account(Some(vec![5; 32])), expected));
+        assert!(!same_account(&account(Some(vec![0; 31])), expected));
+        assert!(same_account(
+            &Party::Identifier(expected.identifier()),
+            expected
+        ));
+    }
+    assert!(same_account(&account(Some(vec![5; 32])), set));
+    assert!(!same_account(&account(None), set));
+    assert!(!same_account(&account(Some(vec![5; 33])), set));
+    assert!(!same_account(&Party::Identifier(default.identifier()), set));
+    let stranger = Party::Account(crate::ic::Account {
+        owner: Principal::from_slice(&[8; 29]),
+        subaccount: None,
+    });
+    assert!(!same_account(&stranger, default));
+}
