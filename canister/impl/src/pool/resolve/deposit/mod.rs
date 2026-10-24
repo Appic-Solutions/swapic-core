@@ -4,12 +4,16 @@
 //! since nothing led out of it. A controller resolves it once (the rules of the review,
 //! 2026-10-24):
 //!
-//! - `Retry`: back to its payout with fresh attempts. A started one pays again with its own
-//!   dedup pair, so a transfer that landed, its answer lost, is answered `Duplicate` and
-//!   recorded paid once: only on the pool's own ckUSDC ledger, which deduplicates its
-//!   transfer (another token's ledger may take the old pair as a new transfer), and only
-//!   with [`RETRY_MARGIN`] of the ledger's window left. One that never started is queued
-//!   again, at the back; a stake mints again.
+//! - `Retry`: back to its payout with fresh attempts, keyed on its transfer. A started one
+//!   whose transfer cannot land twice (never asked, or refused by the ledger for sure at its
+//!   last ask) is asked afresh at the retry's instant, whatever token it pays, at any time.
+//!   One whose last ask may have landed, its answer lost, pays again with its own dedup pair,
+//!   so the ledger answers `Duplicate` and it is recorded paid once: only on the ckUSDC
+//!   ledger the payout started with, which deduplicates it (another token's ledger may take
+//!   the old pair as a new transfer), and only with [`RETRY_MARGIN`] of the ledger's window
+//!   left; else `MarkPaid`. One that never started is queued again, at the back; a stake
+//!   mints again. The `Retry` lines d979af1..026e392 wrote (no instant) never ran anywhere
+//!   (never deployed).
 //! - `Refund`: only when the canister knows nothing of its payout went out: never started;
 //!   or started, no ICPSwap leg moved money, and its transfer to the recipient never asked or
 //!   refused by the ledger for sure at its last ask (`PayoutProgress::nothing_went_out`, the
@@ -172,25 +176,37 @@ pub async fn resolve(
     let now = clock();
     match resolution {
         WireResolution::Retry => {
-            if let Some((attempt, _, search)) = &started {
-                if out != ckusdc {
-                    return Err(PoolError::NotAllowed(format!(
-                        "its payout pays on ledger {out}, which the canister does not know to \
-                         deduplicate its transfer: it is never retried with its old dedup \
-                         pair; {search}"
-                    )));
+            let retry_at = match (&started, deposit.payout.sent) {
+                // never started: queued again, nothing to ask afresh
+                (None, _) => None,
+                // its last ask may have landed: only with its own dedup pair, on the ckUSDC
+                // ledger the payout started with, while that ledger deduplicates it
+                (Some((attempt, _, search)), Some(sent)) if !sent.refused => {
+                    let started_on = attempt.token.map_or(ckusdc, |token| token.0);
+                    if sent.token.0 != started_on {
+                        return Err(PoolError::NotAllowed(format!(
+                            "its last transfer may have landed on ledger {}, which the canister \
+                             does not know to deduplicate it: it is never retried with its old \
+                             dedup pair; {search}",
+                            sent.token.0
+                        )));
+                    }
+                    if !deduplicated(attempt.created_at, now) {
+                        return Err(PoolError::NotAllowed(format!(
+                            "the ledger no longer deduplicates its payout's transfer: {search}"
+                        )));
+                    }
+                    None
                 }
-                if !deduplicated(attempt.created_at, now) {
-                    return Err(PoolError::NotAllowed(format!(
-                        "the ledger no longer deduplicates its payout's transfer: {search}"
-                    )));
-                }
-            }
+                // nothing of its transfer can land twice (never asked, or refused for sure):
+                // asked afresh, whatever it pays, at any time
+                (Some(_), _) => Some(now),
+            };
             record(
                 PoolStep::DepositResolved {
                     r#ref,
                     resolution: DepositResolution::Retry,
-                    retry_at: None,
+                    retry_at,
                 },
                 now,
             )?;

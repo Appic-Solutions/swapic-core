@@ -1623,20 +1623,32 @@ fn held_never_started(pool: &mut Pool, byte: u8, log: u64) -> PoolRef {
 }
 
 /// Jeff (2026-10-24), `resolve_deposit`'s `Retry`: a deposit held for a human goes back to
-/// its payout with fresh attempts. A started one is paying again with its own dedup pair (the
-/// review, 2026-10-24: never a fresh one, so a transfer that landed is answered `Duplicate`
-/// by the ledger), still held; one that never started (CR-08) is queued again, at the back.
-/// Once.
+/// its payout with fresh attempts. A started one whose transfer may have landed is paying
+/// again with its own dedup pair (so a transfer that landed is answered `Duplicate`); one
+/// whose transfer cannot land twice (never asked, or refused for sure) with the instant the
+/// door gave it; either still held. One that never started (CR-08) is queued again, at the
+/// back. Once.
 #[test]
 fn a_held_deposit_retried_goes_back_to_its_payout_with_fresh_attempts() {
     let mut pool = funded(usdc(1_000));
+    let landed = started(&mut pool, 9, 9);
+    pool.step(asked(landed)).unwrap();
+    hold(&mut pool, landed);
+    assert!(
+        pool.step(resolved(landed, DepositResolution::Retry, Some(7)))
+            .is_err(),
+        "its own pair, while it may have landed"
+    );
+    pool.step(resolved(landed, DepositResolution::Retry, None))
+        .unwrap();
+    assert_eq!(
+        pool.deposits[&landed].payout.attempt.unwrap().created_at,
+        Timestamp::from_nanos(5)
+    );
     let started = held_started(&mut pool, 1, 1);
     let (owed, icp) = (pool.ledger.owed, pool.ledger.pockets.icp);
-    // its dedup instant is never changed
-    assert!(pool
-        .step(resolved(started, DepositResolution::Retry, Some(7)))
-        .is_err());
-    pool.step(resolved(started, DepositResolution::Retry, None))
+    // nothing can land twice: asked afresh, at the door's instant
+    pool.step(resolved(started, DepositResolution::Retry, Some(7)))
         .unwrap();
     let deposit = &pool.deposits[&started];
     assert_eq!(deposit.status, DepositStatus::Paying);
@@ -1644,7 +1656,7 @@ fn a_held_deposit_retried_goes_back_to_its_payout_with_fresh_attempts() {
     assert_eq!(deposit.payout.failed, None);
     assert_eq!(
         deposit.payout.attempt.unwrap().created_at,
-        Timestamp::from_nanos(5)
+        Timestamp::from_nanos(7)
     );
     assert_eq!((pool.ledger.owed, pool.ledger.pockets.icp), (owed, icp));
     assert!(pool.ledger.paying.contains(&started));
@@ -1800,11 +1812,12 @@ fn a_held_deposit_is_refunded_only_when_nothing_went_out() {
     }
 }
 
-/// The review (2026-10-24): a started payout is retried with its old dedup pair only when its
-/// transfer is on the pool's own ckUSDC ledger, which deduplicates it; one paying another ICP
-/// token out is not (that ledger may take the old pair as a new transfer).
+/// The review (2026-10-24): a started payout whose transfer may have landed is retried with
+/// its old dedup pair only when that transfer is on the ckUSDC ledger it started with, which
+/// deduplicates it; one that may have landed on another token's ledger is never retried
+/// (that ledger may take the old pair as a new transfer), with any instant.
 #[test]
-fn a_started_payout_paying_another_token_is_never_retried() {
+fn a_started_payout_that_may_have_paid_another_token_is_never_retried() {
     let mut pool = funded(usdc(1_000));
     let token = Principal::from_slice(&[0x70; 10]);
     let mut terms = swap(1, usdc(100), usdc(1));
@@ -1834,14 +1847,76 @@ fn a_started_payout_paying_another_token_is_never_retried() {
         },
     })
     .unwrap();
+    // its transfer on the token's ledger asked, and its answer lost: it may have landed
+    pool.step(PoolStep::TransferAsked {
+        r#ref,
+        token: PrincipalBytes(token),
+        amount: usdc(5),
+        spent: usdc(99),
+    })
+    .unwrap();
     hold(&mut pool, r#ref);
     assert_eq!(pool.deposits[&r#ref].out_ledger(ckusdc()), Some(token));
-    assert!(pool
-        .step(resolved(r#ref, DepositResolution::Retry, None))
-        .is_err());
-    // nothing went out: refunded
-    pool.step(resolved(r#ref, DepositResolution::Refund, None))
+    for retry_at in [None, Some(7)] {
+        assert!(pool
+            .step(resolved(r#ref, DepositResolution::Retry, retry_at))
+            .is_err());
+    }
+}
+
+/// The review (2026-10-24): a started payout whose transfer cannot land twice (never asked,
+/// or refused for sure) is retried whatever token it pays, asked afresh; a payout that never
+/// started has no instant to give.
+#[test]
+fn a_started_payout_whose_transfer_cannot_land_twice_is_retried_whatever_it_pays() {
+    let mut pool = funded(usdc(1_000));
+    let token = Principal::from_slice(&[0x70; 10]);
+    let mut terms = swap(1, usdc(100), usdc(1));
+    terms.kind = DepositKind::Swap {
+        recipient: recipient(1),
+        token_out: token,
+        min_out: 1,
+    };
+    let r#ref = register(&mut pool, terms);
+    pool.step(PoolStep::Arrived {
+        r#ref,
+        credit: credit(1),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutStarted {
+        r#ref,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(5),
+            memo: r#ref.into_bytes(),
+            path: PayoutPath::Icpswap {
+                pool: Principal::from_slice(&[0x71; 10]),
+            },
+            amount: None,
+            token: None,
+        },
+    })
+    .unwrap();
+    pool.step(PoolStep::TransferAsked {
+        r#ref,
+        token: PrincipalBytes(token),
+        amount: usdc(5),
+        spent: usdc(99),
+    })
+    .unwrap();
+    pool.step(PoolStep::TransferRefused { r#ref }).unwrap();
+    hold(&mut pool, r#ref);
+    pool.step(resolved(r#ref, DepositResolution::Retry, Some(8)))
         .unwrap();
+    assert_eq!(
+        pool.deposits[&r#ref].payout.attempt.unwrap().created_at,
+        Timestamp::from_nanos(8)
+    );
+    let never = held_never_started(&mut pool, 2, 2);
+    assert!(pool
+        .step(resolved(never, DepositResolution::Retry, Some(8)))
+        .is_err());
 }
 
 /// The review (2026-10-24): `MarkPaid` books a started payout's transfer, as the payout

@@ -142,7 +142,7 @@ fn held_paying(byte: u8, sent: Sent, token_out: Principal, path: PayoutPath) -> 
         record_at(
             PoolStep::TransferAsked {
                 r#ref,
-                token: PrincipalBytes(ckusdc()),
+                token: PrincipalBytes(token_out),
                 amount: sent_amount(),
                 spent: usdc(99),
             },
@@ -307,10 +307,11 @@ fn a_started_deposit_is_retried_only_while_the_ledger_deduplicates_it() {
     });
 }
 
-/// The review (2026-10-24): a started payout whose transfer is on another token's ledger is
-/// never retried with its old dedup pair (that ledger may take it as a new transfer).
+/// The review (2026-10-24): a started payout whose transfer may have landed on another
+/// token's ledger is never retried with its old dedup pair (that ledger may take it as a new
+/// transfer): `MarkPaid` it if it landed.
 #[test]
-fn a_started_deposit_paying_another_token_is_never_retried() {
+fn a_started_deposit_that_may_have_paid_another_token_is_never_retried() {
     on_fresh_memory(|| {
         crate::storage::init();
         pool();
@@ -318,7 +319,7 @@ fn a_started_deposit_paying_another_token_is_never_retried() {
         let token = Principal::from_slice(&[0x70; 10]);
         let r#ref = held_paying(
             1,
-            Sent::Unasked,
+            Sent::Asked,
             token,
             PayoutPath::Icpswap {
                 pool: Principal::from_slice(&[0x71; 10]),
@@ -329,6 +330,38 @@ fn a_started_deposit_paying_another_token_is_never_retried() {
             Err(PoolError::NotAllowed(why)) if why.contains("never retried")
         ));
         assert!(matches!(status(r#ref), DepositStatus::PayoutFailed(_)));
+    });
+}
+
+/// The review (2026-10-24): a started payout whose transfer cannot land twice (never asked,
+/// or refused by the ledger for sure) is retried whatever token it pays, at any time, asked
+/// afresh: its dedup instant the retry's own.
+#[test]
+fn a_started_deposit_whose_transfer_cannot_land_twice_is_retried_afresh() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let blocks = Blocks::default();
+        let past = at(5).checked_add(DEDUP_WINDOW).unwrap();
+        let token = Principal::from_slice(&[0x70; 10]);
+        let unasked = held_paying(
+            1,
+            Sent::Unasked,
+            token,
+            PayoutPath::Icpswap {
+                pool: Principal::from_slice(&[0x71; 10]),
+            },
+        );
+        let refused = held_at(2, Sent::Refused);
+        for r#ref in [unasked, refused] {
+            assert_eq!(
+                by_controller(&blocks, r#ref, WireResolution::Retry, past),
+                Ok(None)
+            );
+            assert_eq!(status(r#ref), DepositStatus::Paying);
+            let attempt = deposit(&r#ref).unwrap().payout.attempt.unwrap();
+            assert_eq!(attempt.created_at, past, "asked afresh");
+        }
     });
 }
 

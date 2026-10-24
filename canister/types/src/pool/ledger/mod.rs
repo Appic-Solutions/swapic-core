@@ -798,26 +798,43 @@ impl PoolLedger {
                 if !matches!(deposit.status, DepositStatus::PayoutFailed(_)) {
                     return Err(not_from("DepositResolved", &deposit.status));
                 }
-                // a payout keeps its own dedup pair (the review, 2026-10-24)
-                if retry_at.is_some() {
-                    return Err(PoolStepError::Terms(
-                        "a resolution keeps its payout's own dedup instant",
-                    ));
+                // only a retry of a started payout carries a dedup instant
+                if retry_at.is_some() && resolution != &DepositResolution::Retry {
+                    return Err(PoolStepError::Terms("only a retry carries a dedup instant"));
                 }
                 let started = deposit.payout.attempt.is_some();
                 match resolution {
-                    // a started payout keeps its dedup pair: only on the pool's own ckUSDC
-                    // ledger, which deduplicates its transfer (the review, 2026-10-24)
-                    DepositResolution::Retry => {
-                        let ckusdc = self.settings()?.ckusdc_ledger;
-                        match deposit.out_ledger(ckusdc) {
-                            Some(out) if out != ckusdc => Err(PoolStepError::Terms(
-                                "a started payout paying another token is never retried with \
-                                 its old dedup pair",
-                            )),
-                            _ => Ok(()),
+                    // keyed on its transfer (the review, 2026-10-24): one that may have
+                    // landed is retried only with its own dedup pair, on the ckUSDC ledger
+                    // the payout started with, which deduplicates it (the door holds it to
+                    // the window); one that cannot land twice, whatever it pays, afresh
+                    DepositResolution::Retry => match (deposit.payout.attempt, deposit.payout.sent)
+                    {
+                        (None, _) if retry_at.is_some() => Err(PoolStepError::Terms(
+                            "a payout that never started has no dedup instant",
+                        )),
+                        (None, _) => Ok(()),
+                        (Some(attempt), Some(sent)) if !sent.refused => {
+                            let started_on = match attempt.token {
+                                Some(token) => token.0,
+                                None => self.settings()?.ckusdc_ledger,
+                            };
+                            if retry_at.is_some() {
+                                Err(PoolStepError::Terms(
+                                    "a transfer that may have landed is retried with its own \
+                                     dedup pair",
+                                ))
+                            } else if sent.token.0 != started_on {
+                                Err(PoolStepError::Terms(
+                                    "a transfer that may have landed on another token's ledger \
+                                     is never retried",
+                                ))
+                            } else {
+                                Ok(())
+                            }
                         }
-                    }
+                        (Some(_), _) => Ok(()),
+                    },
                     // its transfer as asked, which the door read in the block named
                     DepositResolution::MarkPaid { .. } => {
                         if !started || deposit.payout.sent.is_none() {
@@ -1253,16 +1270,24 @@ impl PoolLedger {
                 }
             }
             PoolStep::DepositResolved {
-                r#ref, resolution, ..
+                r#ref,
+                resolution,
+                retry_at,
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     match resolution {
                         DepositResolution::Retry => {
                             deposit.payout.failures = 0;
                             deposit.payout.failed = None;
-                            match deposit.payout.attempt {
-                                // paying again, with its own dedup pair
-                                Some(_) => deposit.status = DepositStatus::Paying,
+                            match deposit.payout.attempt.as_mut() {
+                                // paying again: with its own dedup pair, or asked afresh at
+                                // the door's instant when nothing can land twice
+                                Some(attempt) => {
+                                    if let Some(retry_at) = retry_at {
+                                        attempt.created_at = *retry_at;
+                                    }
+                                    deposit.status = DepositStatus::Paying;
+                                }
                                 // never started (CR-08): queued again, at the back
                                 None => {
                                     deposit.status = DepositStatus::Arrived;

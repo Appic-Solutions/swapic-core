@@ -793,8 +793,9 @@ pub enum DepositStatus {
 /// 2026-10-24).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum DepositResolution {
-    /// Back to its payout with fresh attempts: a started one paying again with its own dedup
-    /// pair (only on the pool's ckUSDC ledger, which deduplicates it), one that never
+    /// Back to its payout with fresh attempts: a started one whose transfer may have landed
+    /// paying again with its own dedup pair (only on the ckUSDC ledger it started with, which
+    /// deduplicates it), one whose transfer cannot land twice asked afresh, one that never
     /// started queued again at the back, a stake minting again.
     #[n(0)]
     Retry,
@@ -1038,7 +1039,9 @@ pub struct PayoutProgress {
     /// A path through ICP whose second leg could not pay: the ICP swapped back to ckUSDC.
     #[n(6)]
     pub back: Option<SwapLeg>,
-    /// Its transfer to the recipient as last asked (the review, 2026-10-24): none never.
+    /// Its transfer to the recipient as last asked (the review, 2026-10-24): none never. A
+    /// payout started by a build before `TransferAsked` existed reads none here too; hfisl's
+    /// log holds no Pool event, so no such payout exists.
     #[n(7)]
     pub sent: Option<Sent>,
 }
@@ -1875,13 +1878,13 @@ pub enum PoolStep {
         id: u64,
     },
     /// A controller resolved a deposit held for a human (`resolve_deposit`), once: `Retry`
-    /// puts it back on its payout with fresh attempts, a started one with its own dedup pair;
-    /// `Refund`, when nothing of its payout went out, holds what arrived as an orphan under
-    /// its transfer's key, for its payer; `MarkPaid` books its transfer as asked paid in the
-    /// block named. `retry_at` is always none (the review, 2026-10-24: a payout keeps its own
-    /// dedup instant), kept for the line's layout. The lines the intermediate builds of
-    /// 1649a9f..117b35d wrote were never replayed anywhere (never deployed): no rule of theirs
-    /// is kept for them.
+    /// puts it back on its payout with fresh attempts, a started one whose transfer may have
+    /// landed with its own dedup pair (`retry_at` none), one whose transfer cannot land twice
+    /// asked afresh at `retry_at`, the door's instant; `Refund`, when nothing of its payout
+    /// went out, holds what arrived as an orphan under its transfer's key, for its payer;
+    /// `MarkPaid` books its transfer as asked paid in the block named. The lines the
+    /// intermediate builds of 1649a9f..026e392 wrote were never replayed anywhere (never
+    /// deployed): no rule of theirs is kept for them.
     #[n(48)]
     DepositResolved {
         #[n(0)]
