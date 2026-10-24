@@ -13,7 +13,9 @@
 #[cfg(test)]
 mod tests;
 
-use super::{sat_add, sat_sub, PoolEffects, PoolLedger, PoolLookup, PoolStepError};
+use super::{
+    sat_add, sat_sub, unrouted, unrouted_apply, PoolEffects, PoolLedger, PoolLookup, PoolStepError,
+};
 use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::rebalance::{
     Landing, Move, MoveDirection, MoveRoute, MoveStatus, Proposal, RebalanceLines, Sweep, DAY,
@@ -86,7 +88,7 @@ impl PoolLedger {
             PoolStep::MoveStuck { .. }
             | PoolStep::MoveRetried { .. }
             | PoolStep::MoveLost { .. } => self.admits_move_stuck(step, lookup),
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -192,7 +194,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -251,7 +253,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -394,7 +396,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -436,7 +438,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -483,7 +485,7 @@ impl PoolLedger {
             | PoolStep::MoveLost { .. } => self
                 .apply_move_stuck(step, lookup, at, &mut lines)
                 .map(Some),
-            _ => return,
+            _ => unrouted_apply(step),
         };
         let Some(moved) = moved else {
             return;
@@ -553,7 +555,7 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            _ => None,
+            _ => unrouted_apply(step),
         }
     }
 
@@ -656,7 +658,7 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            _ => None,
+            _ => unrouted_apply(step),
         }
     }
 
@@ -796,7 +798,7 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            _ => None,
+            _ => unrouted_apply(step),
         }
     }
 
@@ -854,7 +856,7 @@ impl PoolLedger {
                 item.since = at;
                 Some(item)
             }
-            _ => None,
+            _ => unrouted_apply(step),
         }
     }
 }

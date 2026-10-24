@@ -2184,3 +2184,508 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
     // on its own terms it is asked again
     pool.step(asked(r#ref)).unwrap();
 }
+
+/// How many variants `PoolStep` has: [`place`] gives each its own place below it.
+const STEP_COUNT: usize = 73;
+
+/// Each step's place in `PoolStep`'s order. The match has no catch-all, so a step added to
+/// `PoolStep` does not compile here until it has a place, and a sample in [`every_step`].
+fn place(step: &PoolStep) -> usize {
+    match step {
+        PoolStep::SettingsSet { .. } => 0,
+        PoolStep::Registered { .. } => 1,
+        PoolStep::Expired { .. } => 2,
+        PoolStep::Arrived { .. } => 3,
+        PoolStep::Unattributed { .. } => 4,
+        PoolStep::PayoutStarted { .. } => 5,
+        PoolStep::Paid { .. } => 6,
+        PoolStep::FellBack { .. } => 7,
+        PoolStep::Minted { .. } => 8,
+        PoolStep::StakedIcp { .. } => 9,
+        PoolStep::WithdrawnIcp { .. } => 10,
+        PoolStep::AttemptFailed { .. } => 11,
+        PoolStep::SwapDeclined { .. } => 12,
+        PoolStep::SwapBegun { .. } => 13,
+        PoolStep::Swapped { .. } => 14,
+        PoolStep::StakeStarted { .. } => 15,
+        PoolStep::StakeFailed { .. } => 16,
+        PoolStep::WithdrawStarted { .. } => 17,
+        PoolStep::IcpChecked { .. } => 18,
+        PoolStep::IcpCheckFailed { .. } => 19,
+        PoolStep::ScanCursor { .. } => 20,
+        PoolStep::SwapApproved { .. } => 21,
+        PoolStep::SwapUndone { .. } => 22,
+        PoolStep::PayoutSettingsSet { .. } => 23,
+        PoolStep::PayoutOpened { .. } => 24,
+        PoolStep::PayoutAmountKnown { .. } => 25,
+        PoolStep::PayoutQueued { .. } => 26,
+        PoolStep::PayoutWaiting { .. } => 27,
+        PoolStep::PayoutSigned { .. } => 28,
+        PoolStep::PayoutPaid { .. } => 29,
+        PoolStep::PayoutReverted { .. } => 30,
+        PoolStep::PayoutUndoing { .. } => 31,
+        PoolStep::PayoutUndone { .. } => 32,
+        PoolStep::IcpRoutesSet { .. } => 33,
+        PoolStep::ApproveSigned { .. } => 34,
+        PoolStep::PayoutPulled { .. } => 35,
+        PoolStep::PayoutStopped { .. } => 36,
+        PoolStep::PayoutRelisted { .. } => 37,
+        PoolStep::PayoutRefunded { .. } => 38,
+        PoolStep::OrphanBooked { .. } => 39,
+        PoolStep::OrphanRefundSigned { .. } => 40,
+        PoolStep::OrphanRefundClosed { .. } => 41,
+        PoolStep::TermsClaimed { .. } => 42,
+        PoolStep::PayoutDelivered { .. } => 43,
+        PoolStep::PayoutUnfilled { .. } => 44,
+        PoolStep::PayoutResolved { .. } => 45,
+        PoolStep::PayoutFitWaited { .. } => 46,
+        PoolStep::PayoutFillEarly { .. } => 47,
+        PoolStep::DepositResolved { .. } => 48,
+        PoolStep::StakeResolved { .. } => 49,
+        PoolStep::TransferAsked { .. } => 50,
+        PoolStep::TransferRefused { .. } => 51,
+        PoolStep::TransferLost { .. } => 52,
+        PoolStep::MoveSettingsSet { .. } => 53,
+        PoolStep::MoveOpened { .. } => 54,
+        PoolStep::MoveProposed { .. } => 55,
+        PoolStep::MoveRouted { .. } => 56,
+        PoolStep::MoveSigned { .. } => 57,
+        PoolStep::MoveBurned { .. } => 58,
+        PoolStep::MoveReverted { .. } => 59,
+        PoolStep::MoveWithdrawing { .. } => 60,
+        PoolStep::MoveWithdrawn { .. } => 61,
+        PoolStep::MoveRefused { .. } => 62,
+        PoolStep::MoveLanded { .. } => 63,
+        PoolStep::MoveSweeping { .. } => 64,
+        PoolStep::MoveArrived { .. } => 65,
+        PoolStep::MoveStuck { .. } => 66,
+        PoolStep::MoveRetried { .. } => 67,
+        PoolStep::MoveLost { .. } => 68,
+        PoolStep::MoveRefunded { .. } => 69,
+        PoolStep::EcoRescueSigned { .. } => 70,
+        PoolStep::MoveUnfilled { .. } => 71,
+        PoolStep::MoveReimbursed { .. } => 72,
+    }
+}
+
+/// One sample of every pool step, whatever its fields: what the routing test sends through
+/// `admits` and `apply`.
+fn every_step() -> Vec<PoolStep> {
+    use crate::numeric::Nonce;
+    use crate::pool::payout::{IcpSwapTerms, PayoutKind, PayoutResolution, PayoutSettings};
+    use crate::pool::payout::{PayoutTerms, PinnedOrder, Undo};
+    use crate::pool::{
+        IcpCheck, IcpReadFailure, IcpRoutes, MoveDirection, MoveRoute, PayoutPath, PoolAccount,
+        RebalanceSettings,
+    };
+
+    let r#ref = PoolRef::new([0x51; 32]);
+    let id = PoolOpId::new([0x52; 32]);
+    let at = Timestamp::from_nanos(1);
+    let amount = usdc(1);
+    let block = BlockNumber::new(9);
+    let tx_hash = TxHash::new([0x53; 32]);
+    let nonce = Nonce::new(1);
+    let credit = CreditKey {
+        chain: ChainId::BASE,
+        tx: tx_hash,
+        log_index: 0,
+    };
+    let attempt = PayoutAttempt {
+        created_at: at,
+        memo: [0x54; 32],
+        path: PayoutPath::Ckusdc,
+        amount: None,
+        token: None,
+    };
+    let order = PinnedOrder {
+        order_id: [0x55; 32],
+        order: vec![0x55],
+        gas_limit: 1,
+        deadline_s: 1,
+    };
+    let terms = PayoutTerms {
+        dst_chain: ChainId::BASE,
+        recipient: payer(),
+        token_out: payer(),
+        min_out: amount,
+        deadline: at,
+    };
+    let swap_terms = IcpSwapTerms {
+        token_in: ckusdc(),
+        amount_in: amount,
+        from: recipient(1),
+        min_usdc: amount,
+        premium: TokenAmount::ZERO,
+        network_fee: TokenAmount::ZERO,
+        refund_to: recipient(2),
+        slippage_bps: None,
+        planned: None,
+    };
+    let owner = PoolAccount::Icp(recipient(3));
+    let why = "why".to_string();
+    vec![
+        PoolStep::SettingsSet {
+            settings: settings(),
+        },
+        PoolStep::Registered {
+            r#ref,
+            deposit: swap(1, usdc(10), usdc(1)),
+        },
+        PoolStep::Expired { r#ref },
+        PoolStep::Arrived {
+            r#ref,
+            credit,
+            amount,
+            block,
+        },
+        PoolStep::Unattributed {
+            credit,
+            amount,
+            src_payer: None,
+            why: why.clone(),
+            block,
+            r#ref: None,
+            awaiting_until: None,
+        },
+        PoolStep::PayoutStarted { r#ref, attempt },
+        PoolStep::Paid {
+            r#ref,
+            token: ckusdc(),
+            amount,
+            block: 1,
+            spent: amount,
+        },
+        PoolStep::FellBack {
+            r#ref,
+            why: why.clone(),
+            amount: None,
+            token: None,
+        },
+        PoolStep::Minted {
+            r#ref,
+            owner,
+            shares: Shares::new(1),
+        },
+        PoolStep::StakedIcp {
+            id,
+            owner,
+            amount,
+            rebalance_share: TokenAmount::ZERO,
+            shares: Shares::new(1),
+            block: 1,
+        },
+        PoolStep::WithdrawnIcp {
+            id,
+            owner: recipient(3),
+            burned: Shares::new(1),
+            usdc: amount,
+            token: ckusdc(),
+            paid: amount,
+            block: 1,
+            spent: amount,
+        },
+        PoolStep::AttemptFailed {
+            r#ref,
+            why: why.clone(),
+        },
+        PoolStep::SwapDeclined {
+            r#ref,
+            why: why.clone(),
+            leg: None,
+        },
+        PoolStep::SwapBegun {
+            r#ref,
+            before: None,
+            leg: None,
+            amount_in: None,
+        },
+        PoolStep::Swapped {
+            r#ref,
+            out: amount,
+            send: None,
+            leg: None,
+        },
+        PoolStep::StakeStarted {
+            id,
+            owner,
+            from: recipient(4),
+            amount,
+            created_at: at,
+        },
+        PoolStep::StakeFailed {
+            id,
+            why: why.clone(),
+        },
+        PoolStep::WithdrawStarted {
+            id,
+            owner: recipient(3),
+            burned: Shares::new(1),
+            usdc: amount,
+            to: recipient(5),
+            token_out: ckusdc(),
+            min_out: 1,
+            attempt,
+        },
+        PoolStep::IcpChecked {
+            check: IcpCheck {
+                observed: amount,
+                expected: amount,
+                shortfall: false,
+            },
+        },
+        PoolStep::IcpCheckFailed {
+            failure: IcpReadFailure::CallFailed,
+        },
+        PoolStep::ScanCursor { block, log: None },
+        PoolStep::SwapApproved { r#ref, leg: None },
+        PoolStep::SwapUndone {
+            r#ref,
+            cost: amount,
+            withdrawn: amount,
+            leg: None,
+        },
+        PoolStep::PayoutSettingsSet {
+            settings: PayoutSettings::default(),
+        },
+        PoolStep::PayoutOpened {
+            id: 0,
+            kind: Box::new(PayoutKind::IcpSwap(swap_terms)),
+            terms,
+            undo: Undo::Refund {
+                to: swap_terms.refund_to,
+            },
+            plan: None,
+        },
+        PoolStep::PayoutAmountKnown {
+            id: 0,
+            amount,
+            received: None,
+        },
+        PoolStep::PayoutQueued { id: 0 },
+        PoolStep::PayoutWaiting { id: 0 },
+        PoolStep::PayoutSigned {
+            id: 0,
+            order: order.clone(),
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
+        PoolStep::PayoutPaid {
+            id: 0,
+            tx_hash,
+            block,
+            intent: None,
+        },
+        PoolStep::PayoutReverted { id: 0, block: None },
+        PoolStep::PayoutUndoing {
+            id: 0,
+            why: why.clone(),
+        },
+        PoolStep::PayoutUndone {
+            id: 0,
+            why: why.clone(),
+            block: None,
+        },
+        PoolStep::IcpRoutesSet {
+            routes: IcpRoutes::default(),
+        },
+        PoolStep::ApproveSigned {
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
+        PoolStep::PayoutPulled {
+            id: 0,
+            block: 1,
+            attempt: None,
+        },
+        PoolStep::PayoutStopped {
+            id: 0,
+            why: why.clone(),
+        },
+        PoolStep::PayoutRelisted { id: 0 },
+        PoolStep::PayoutRefunded {
+            id: 0,
+            credit,
+            amount,
+            block,
+        },
+        PoolStep::OrphanBooked { key: credit },
+        PoolStep::OrphanRefundSigned {
+            key: credit,
+            to: payer(),
+            sent: amount,
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
+        PoolStep::OrphanRefundClosed {
+            key: credit,
+            success: true,
+        },
+        PoolStep::TermsClaimed {
+            credit,
+            refused: None,
+        },
+        PoolStep::PayoutDelivered { id: 0, block },
+        PoolStep::PayoutUnfilled { id: 0, block },
+        PoolStep::PayoutResolved {
+            id: 0,
+            resolution: PayoutResolution::Refund,
+            refund_at: None,
+        },
+        PoolStep::PayoutFitWaited {
+            id: 0,
+            why: why.clone(),
+        },
+        PoolStep::PayoutFillEarly { id: 0 },
+        PoolStep::DepositResolved {
+            r#ref,
+            resolution: DepositResolution::Retry,
+            retry_at: None,
+        },
+        PoolStep::StakeResolved {
+            id,
+            resolution: StakeResolution::NotPulled,
+        },
+        PoolStep::TransferAsked {
+            r#ref,
+            token: PrincipalBytes(ckusdc()),
+            amount,
+            spent: amount,
+        },
+        PoolStep::TransferRefused { r#ref },
+        PoolStep::TransferLost { r#ref, held: None },
+        PoolStep::MoveSettingsSet {
+            settings: RebalanceSettings::default(),
+        },
+        PoolStep::MoveOpened {
+            id: 0,
+            direction: MoveDirection::BaseToIcp,
+            amount,
+            urgent: false,
+            opened_at: at,
+            window_ends: None,
+            own_cost: TokenAmount::ZERO,
+        },
+        PoolStep::MoveProposed {
+            id: 0,
+            order: order.clone(),
+            fee: amount,
+        },
+        PoolStep::MoveRouted {
+            id: 0,
+            route: MoveRoute::Own {
+                max_fee: amount,
+                fast: false,
+            },
+            order,
+            scan_from: None,
+        },
+        PoolStep::MoveSigned {
+            id: 0,
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
+        PoolStep::MoveBurned {
+            id: 0,
+            tx_hash,
+            block,
+            intent: None,
+        },
+        PoolStep::MoveReverted { id: 0, block: None },
+        PoolStep::MoveWithdrawing {
+            id: 0,
+            created_at: at,
+        },
+        PoolStep::MoveWithdrawn {
+            id: 0,
+            withdrawal_id: 1,
+            fee: amount,
+        },
+        PoolStep::MoveRefused {
+            id: 0,
+            why: why.clone(),
+            fee: amount,
+        },
+        PoolStep::MoveLanded {
+            id: 0,
+            tx_hash,
+            block,
+            amount,
+            window_ends: None,
+        },
+        PoolStep::MoveSweeping {
+            id: 0,
+            created_at: at,
+            amount,
+            credited: amount,
+        },
+        PoolStep::MoveArrived {
+            id: 0,
+            credited: amount,
+            credit: None,
+            block: None,
+            ledger_block: None,
+        },
+        PoolStep::MoveStuck {
+            id: 0,
+            why: why.clone(),
+        },
+        PoolStep::MoveRetried { id: 0 },
+        PoolStep::MoveLost { id: 0, why },
+        PoolStep::MoveRefunded {
+            id: 0,
+            credit,
+            amount,
+            block,
+        },
+        PoolStep::EcoRescueSigned {
+            order_id: [0x56; 32],
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
+        PoolStep::MoveUnfilled { id: 0 },
+        PoolStep::MoveReimbursed {
+            id: 0,
+            amount,
+            block: 1,
+        },
+    ]
+}
+
+/// The review (2026-10-24): every step reaches the family with its arm, in `admits` and in
+/// `apply`. A family refuses a step it has no arm for, and its changes for one are a bug, so
+/// a step sent to the wrong family fails here, never admitted unchecked in production.
+#[test]
+fn every_step_is_routed_to_the_family_with_its_arm() {
+    let steps = every_step();
+    let places: BTreeSet<usize> = steps.iter().map(place).collect();
+    assert_eq!(steps.len(), STEP_COUNT);
+    assert_eq!(places, (0..STEP_COUNT).collect());
+    let mut pool = Pool::default();
+    pool.step(PoolStep::SettingsSet {
+        settings: settings(),
+    })
+    .unwrap();
+    for step in &steps {
+        assert_ne!(
+            pool.ledger.admits(step, &pool),
+            Err(unrouted(step)),
+            "{} is admitted by the family with its arm",
+            step.name()
+        );
+        // a step sent to a family with no arm for it would panic here
+        pool.ledger
+            .clone()
+            .apply_at(step, &pool, Timestamp::from_nanos(1), 1);
+    }
+}

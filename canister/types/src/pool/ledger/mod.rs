@@ -334,6 +334,24 @@ fn not_from(step: &'static str, status: &DepositStatus) -> PoolStepError {
     }
 }
 
+/// A family's answer to a step it has no arm for: refused, never admitted unchecked. `admits`
+/// sends each step to the family with its arm, which a test holds for every step.
+fn unrouted(step: &PoolStep) -> PoolStepError {
+    PoolStepError::NotFrom {
+        step: step.name(),
+        status: "the family it was routed to".to_string(),
+    }
+}
+
+/// A family's changes for a step it has no arm for: none, as [`unrouted`] refused it in
+/// `admits` first.
+fn unrouted_apply(step: &PoolStep) -> ! {
+    unreachable!(
+        "BUG: PoolLedger::admits refuses {} where this family has no arm for it",
+        step.name()
+    )
+}
+
 /// What a step that names a payout (a deposit's, a withdrawal's, or a Base payout's ICP
 /// legs) names.
 enum Target {
@@ -704,7 +722,7 @@ impl PoolLedger {
                     .map_err(PoolSettingsError::from)?;
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -769,7 +787,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -921,7 +939,7 @@ impl PoolLedger {
                     }
                 }
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -1076,7 +1094,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -1178,7 +1196,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -1322,7 +1340,7 @@ impl PoolLedger {
                 self.scan_cursor = Some(*block);
                 self.scan_log = *log;
             }
-            _ => {}
+            _ => unrouted_apply(step),
         }
     }
 
@@ -1450,7 +1468,7 @@ impl PoolLedger {
                     }
                 }
             }
-            _ => {}
+            _ => unrouted_apply(step),
         }
     }
 
@@ -1581,7 +1599,7 @@ impl PoolLedger {
                     effects.deposit = Some((*r#ref, deposit));
                 }
             }
-            _ => {}
+            _ => unrouted_apply(step),
         }
     }
 
@@ -1730,7 +1748,7 @@ impl PoolLedger {
                     this.withdrawn = Some(withdrawn);
                 });
             }
-            _ => {}
+            _ => unrouted_apply(step),
         }
     }
 
@@ -1845,7 +1863,7 @@ impl PoolLedger {
                     },
                 );
             }
-            _ => {}
+            _ => unrouted_apply(step),
         }
     }
 

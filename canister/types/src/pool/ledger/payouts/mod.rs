@@ -33,7 +33,10 @@
 #[cfg(test)]
 mod tests;
 
-use super::{credit_shares, sat_add, sat_sub, PoolEffects, PoolLedger, PoolLookup, PoolStepError};
+use super::{
+    credit_shares, sat_add, sat_sub, unrouted, unrouted_apply, PoolEffects, PoolLedger, PoolLookup,
+    PoolStepError,
+};
 use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::payout::{
     EvmPayout, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutResolution, PayoutStatus,
@@ -207,7 +210,7 @@ impl PoolLedger {
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::TermsClaimed { .. }
             | PoolStep::OrphanRefundClosed { .. } => self.admits_orphan(step, lookup),
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -364,7 +367,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -460,7 +463,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -524,7 +527,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -652,7 +655,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -713,7 +716,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(unrouted(step)),
         }
     }
 
@@ -766,7 +769,7 @@ impl PoolLedger {
             | PoolStep::OrphanRefundClosed { .. } => {
                 self.apply_orphan(step, lookup, &mut lines, effects)
             }
-            _ => return,
+            _ => unrouted_apply(step),
         };
         if recorded.is_some() {
             self.payouts = Some(lines);
@@ -844,7 +847,7 @@ impl PoolLedger {
                 });
                 effects.payout = Some(payout);
             }
-            _ => return None,
+            _ => unrouted_apply(step),
         }
         Some(())
     }
@@ -950,7 +953,7 @@ impl PoolLedger {
                 payout.waiting_since = Some(at);
                 effects.payout = Some(payout);
             }
-            _ => return None,
+            _ => unrouted_apply(step),
         }
         Some(())
     }
@@ -1005,7 +1008,7 @@ impl PoolLedger {
                 payout.reclaim = Some(Reclaim::Credited);
                 effects.payout = Some(payout);
             }
-            _ => return None,
+            _ => unrouted_apply(step),
         }
         Some(())
     }
@@ -1108,7 +1111,7 @@ impl PoolLedger {
                 payout.icp_block = *block;
                 effects.payout = Some(payout);
             }
-            _ => return None,
+            _ => unrouted_apply(step),
         }
         Some(())
     }
@@ -1172,7 +1175,7 @@ impl PoolLedger {
                 }
                 effects.orphan = Some((*key, orphan));
             }
-            _ => return None,
+            _ => unrouted_apply(step),
         }
         Some(())
     }
