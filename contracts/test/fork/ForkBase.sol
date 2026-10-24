@@ -8,6 +8,8 @@ import "../../src/Swapic.sol";
 import "../../src/Runner.sol";
 import "../../src/SwapicTypes.sol";
 import {Envelope} from "../../src/libraries/Envelope.sol";
+import {CctpPlan} from "../helpers/CctpPlan.sol";
+import {PORTAL, FEE} from "../helpers/TestConstants.sol";
 
 /// Deploys Swapic from a fixed fresh deployer at nonce 0, so the Runner's
 /// address is known in advance (it is the KyberSwap recipient in the
@@ -21,16 +23,13 @@ abstract contract ForkBase is Test {
     address constant RECEIVER = 0xf761327AD745400a3BD63DC7fA367DB58e43DE45;
     address constant RUNNER = 0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C;
 
-    address constant MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
+    address constant MESSENGER = CctpPlan.TOKEN_MESSENGER;
     address constant TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
     address constant SCALER = 0x2f577A41BeC1BE1152AeEA12e73b7391d15f655D;
-    address constant PORTAL = 0xEC000769A73b70e16f361a442292500b3BCf4A85;
     bytes32 constant DEPOSIT_FOR_BURN =
         keccak256("DepositForBurn(address,uint256,address,bytes32,uint32,bytes32,bytes32,uint256,uint32,bytes)");
     /// USDC's ReceiveWithAuthorization type hash (EIP-3009)
     bytes32 constant RECEIVE_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
-    /// the canister's fee step
-    uint256 constant FEE = 50_000;
 
     address constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant WETH_BASE = 0x4200000000000000000000000000000000000006;
