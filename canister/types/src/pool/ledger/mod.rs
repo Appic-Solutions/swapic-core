@@ -326,6 +326,14 @@ fn status_name(status: &DepositStatus) -> String {
     format!("{status:?}")
 }
 
+/// A deposit's step refused from the status the deposit is in.
+fn not_from(step: &'static str, status: &DepositStatus) -> PoolStepError {
+    PoolStepError::NotFrom {
+        step,
+        status: status_name(status),
+    }
+}
+
 /// What a step that names a payout (a deposit's, a withdrawal's, or a Base payout's ICP
 /// legs) names.
 enum Target {
@@ -569,10 +577,95 @@ impl PoolLedger {
 
     /// Every rule a step must meet, read off the fold alone.
     pub fn admits(&self, step: &PoolStep, lookup: &impl PoolLookup) -> Result<(), PoolStepError> {
-        let not_from = |step: &'static str, status: &DepositStatus| PoolStepError::NotFrom {
-            step,
-            status: status_name(status),
-        };
+        match step {
+            PoolStep::SettingsSet { .. }
+            | PoolStep::IcpChecked { .. }
+            | PoolStep::IcpCheckFailed { .. }
+            | PoolStep::ScanCursor { .. }
+            | PoolStep::IcpRoutesSet { .. } => self.admits_settings_and_reads(step),
+            PoolStep::Registered { .. }
+            | PoolStep::Expired { .. }
+            | PoolStep::Arrived { .. }
+            | PoolStep::Unattributed { .. } => self.admits_arrival(step, lookup),
+            PoolStep::PayoutStarted { .. }
+            | PoolStep::Paid { .. }
+            | PoolStep::Minted { .. }
+            | PoolStep::DepositResolved { .. } => self.admits_deposit_payout(step, lookup),
+            PoolStep::FellBack { .. }
+            | PoolStep::TransferAsked { .. }
+            | PoolStep::TransferLost { .. }
+            | PoolStep::TransferRefused { .. }
+            | PoolStep::AttemptFailed { .. }
+            | PoolStep::SwapDeclined { .. }
+            | PoolStep::SwapBegun { .. }
+            | PoolStep::Swapped { .. }
+            | PoolStep::SwapApproved { .. }
+            | PoolStep::SwapUndone { .. } => self.admits_progress(step, lookup),
+            PoolStep::StakedIcp { .. }
+            | PoolStep::WithdrawnIcp { .. }
+            | PoolStep::StakeStarted { .. }
+            | PoolStep::StakeFailed { .. }
+            | PoolStep::StakeResolved { .. }
+            | PoolStep::WithdrawStarted { .. } => self.admits_icp_op(step, lookup),
+            PoolStep::PayoutSettingsSet { .. }
+            | PoolStep::PayoutOpened { .. }
+            | PoolStep::PayoutAmountKnown { .. }
+            | PoolStep::PayoutQueued { .. }
+            | PoolStep::PayoutWaiting { .. }
+            | PoolStep::PayoutSigned { .. }
+            | PoolStep::PayoutPaid { .. }
+            | PoolStep::PayoutReverted { .. }
+            | PoolStep::PayoutUndoing { .. }
+            | PoolStep::PayoutUndone { .. }
+            | PoolStep::PayoutPulled { .. }
+            | PoolStep::PayoutStopped { .. }
+            | PoolStep::PayoutRelisted { .. }
+            | PoolStep::PayoutRefunded { .. }
+            | PoolStep::PayoutDelivered { .. }
+            | PoolStep::PayoutUnfilled { .. }
+            | PoolStep::PayoutResolved { .. }
+            | PoolStep::PayoutFitWaited { .. }
+            | PoolStep::PayoutFillEarly { .. }
+            | PoolStep::OrphanBooked { .. }
+            | PoolStep::OrphanRefundSigned { .. }
+            | PoolStep::OrphanRefundClosed { .. }
+            | PoolStep::TermsClaimed { .. } => self.admits_payout(step, lookup),
+            // the nonce it spends is the state's to check: nothing of the pool moves
+            PoolStep::ApproveSigned { .. } => Ok(()),
+            PoolStep::MoveSettingsSet { .. }
+            | PoolStep::MoveOpened { .. }
+            | PoolStep::MoveProposed { .. }
+            | PoolStep::MoveRouted { .. }
+            | PoolStep::MoveSigned { .. }
+            | PoolStep::MoveBurned { .. }
+            | PoolStep::MoveReverted { .. }
+            | PoolStep::MoveWithdrawing { .. }
+            | PoolStep::MoveWithdrawn { .. }
+            | PoolStep::MoveRefused { .. }
+            | PoolStep::MoveLanded { .. }
+            | PoolStep::MoveSweeping { .. }
+            | PoolStep::MoveArrived { .. }
+            | PoolStep::MoveStuck { .. }
+            | PoolStep::MoveRetried { .. }
+            | PoolStep::MoveLost { .. }
+            | PoolStep::MoveRefunded { .. }
+            | PoolStep::MoveUnfilled { .. }
+            | PoolStep::MoveReimbursed { .. } => self.admits_rebalance(step, lookup),
+            // one rescue per order; the nonce it spends is the state's to check
+            PoolStep::EcoRescueSigned { order_id, .. } => {
+                if lookup.eco_rescued(order_id) {
+                    return Err(PoolStepError::Terms(
+                        "the order's intent was rescued already",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The rules of the pool's knobs and its reads: its settings and ICP routes, the ICP
+    /// pocket's balance check, the canister's read of Base.
+    fn admits_settings_and_reads(&self, step: &PoolStep) -> Result<(), PoolStepError> {
         match step {
             PoolStep::SettingsSet { settings } => {
                 settings.validate()?;
@@ -590,6 +683,39 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
+            // never back: a block done whole is past any log of it
+            PoolStep::ScanCursor { block, log } => match self.scan_position() {
+                Some(at) if (*block, log.map_or(u128::MAX, u128::from)) < at => {
+                    Err(PoolStepError::CursorBack {
+                        at: at.0,
+                        to: *block,
+                    })
+                }
+                _ => Ok(()),
+            },
+            PoolStep::IcpRoutesSet { routes } => {
+                let settings = self.settings()?;
+                routes
+                    .validate(settings.ckusdc_ledger)
+                    .map_err(PoolSettingsError::from)?;
+                routes
+                    .fees_complete(settings.ckusdc_ledger)
+                    .map_err(PoolSettingsError::from)?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a deposit's registration and its transfer's arrival, or of a transfer
+    /// no deposit takes.
+    fn admits_arrival(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
             PoolStep::Registered { r#ref, deposit } => {
                 self.settings()?;
                 if deposit.pool_ref() != Some(*r#ref) {
@@ -643,6 +769,18 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of an arrived deposit's end: a swap's payout started and paid, a stake's
+    /// shares minted, a controller's resolution of one held for a human.
+    fn admits_deposit_payout(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
             // a payout starts first in first out, and only once the pocket's free ckUSDC
             // covers all it holds
             PoolStep::PayoutStarted { r#ref, .. } => {
@@ -665,37 +803,6 @@ impl PoolLedger {
                 let deposit = self.deposit(r#ref, lookup)?;
                 if deposit.status != DepositStatus::Paying {
                     return Err(not_from("Paid", &deposit.status));
-                }
-                Ok(())
-            }
-            PoolStep::FellBack { r#ref, .. } => {
-                let target = self
-                    .target(r#ref, lookup)
-                    .ok_or(PoolStepError::Unknown(*r#ref))?;
-                let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                let path = payout.attempt.map(|attempt| attempt.path);
-                if !target.in_payout() || !path.is_some_and(|path| path.swaps()) {
-                    return Err(PoolStepError::Terms(
-                        "only an ICPSwap leg with no output falls back",
-                    ));
-                }
-                // a path through ICP whose first leg paid out falls back once the way back
-                // brought the ICP back as ckUSDC, and never once its second leg paid out
-                if payout.swap.out.is_some() {
-                    let through_icp = matches!(path, Some(PayoutPath::IcpswapVia { .. }));
-                    let second = payout.leg(Some(super::LEG_SECOND));
-                    let back = payout.leg(Some(super::LEG_BACK));
-                    if !through_icp || second.out.is_some() || back.out.is_none() {
-                        return Err(PoolStepError::Terms(
-                            "only an ICPSwap leg with no output falls back",
-                        ));
-                    }
-                    return Ok(());
-                }
-                // a leg falls back before its swap, or after one that did not happen and was
-                // undone (the driver read the pool to know): never once the swap paid out
-                if payout.swap.begun && payout.swap.undone.is_none() {
-                    return Err(PoolStepError::Terms("a begun swap falls back once undone"));
                 }
                 Ok(())
             }
@@ -727,22 +834,136 @@ impl PoolLedger {
                     .ok_or(PoolStepError::Overflow)?;
                 Ok(())
             }
-            PoolStep::StakedIcp {
-                id, owner, amount, ..
-            } => match self.pending.get(id) {
-                Some(PendingOp::Stake {
-                    owner: started,
-                    amount: pulled,
-                    ..
-                }) if started == owner && pulled == amount => Ok(()),
-                Some(_) => Err(PoolStepError::Mismatch),
-                None => Err(PoolStepError::NotPending(*id)),
-            },
-            PoolStep::WithdrawnIcp { id, owner, .. } => match self.pending.get(id) {
-                Some(PendingOp::Withdraw { owner: started, .. }) if started == owner => Ok(()),
-                Some(_) => Err(PoolStepError::Mismatch),
-                None => Err(PoolStepError::NotPending(*id)),
-            },
+            // a deposit held for a human, resolved once by a controller
+            PoolStep::DepositResolved {
+                r#ref,
+                resolution,
+                retry_at,
+            } => {
+                let deposit = self.deposit(r#ref, lookup)?;
+                if !matches!(deposit.status, DepositStatus::PayoutFailed(_)) {
+                    return Err(not_from("DepositResolved", &deposit.status));
+                }
+                // only a retry of a started payout carries a dedup instant
+                if retry_at.is_some() && resolution != &DepositResolution::Retry {
+                    return Err(PoolStepError::Terms("only a retry carries a dedup instant"));
+                }
+                let started = deposit.payout.attempt.is_some();
+                match resolution {
+                    // keyed on its transfer (the review, 2026-10-24): one that may have
+                    // landed is retried only with its own dedup pair, on the ckUSDC ledger
+                    // the payout started with, which deduplicates it (the door holds it to
+                    // the window); one that cannot land twice, whatever it pays, afresh
+                    DepositResolution::Retry => match (deposit.payout.attempt, deposit.payout.sent)
+                    {
+                        (None, _) if retry_at.is_some() => Err(PoolStepError::Terms(
+                            "a payout that never started has no dedup instant",
+                        )),
+                        (None, _) => Ok(()),
+                        // it may have landed (asked and not refused, or an answer of it lost):
+                        // only its own pair, on the ckUSDC ledger it started with
+                        (Some(attempt), Some(sent)) if !deposit.payout.cannot_land_twice() => {
+                            let started_on = match attempt.token {
+                                Some(token) => token.0,
+                                None => self.settings()?.ckusdc_ledger,
+                            };
+                            if retry_at.is_some() {
+                                Err(PoolStepError::Terms(
+                                    "a transfer that may have landed is retried with its own \
+                                     dedup pair",
+                                ))
+                            } else if sent.token.0 != started_on {
+                                Err(PoolStepError::Terms(
+                                    "a transfer that may have landed on another token's ledger \
+                                     is never retried",
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        (Some(_), _) => Ok(()),
+                    },
+                    // its transfer as asked, which the door read in the block named
+                    DepositResolution::MarkPaid { .. } => {
+                        if !started || deposit.payout.sent.is_none() {
+                            return Err(PoolStepError::Terms(
+                                "only a payout that asked its transfer is marked paid",
+                            ));
+                        }
+                        Ok(())
+                    }
+                    DepositResolution::Refund => {
+                        // only when the canister knows nothing went out: a transfer that may
+                        // have landed, or a leg that moved money, could pay twice
+                        if !deposit.payout.nothing_went_out() {
+                            return Err(PoolStepError::Terms(
+                                "its payout may have sent something: it is not refunded on Base",
+                            ));
+                        }
+                        if started && deposit.held() > self.pockets.icp.reserved {
+                            return Err(PoolStepError::Overflow);
+                        }
+                        let (credit, orphan) = deposit
+                            .refund_orphan()
+                            .ok_or(PoolStepError::Terms("a deposit refunds only what arrived"))?;
+                        if deposit.terms.src_payer == crate::evm::EvmAddress::ZERO {
+                            return Err(PoolStepError::Terms("the deposit has no payer to refund"));
+                        }
+                        if orphan.amount > self.pockets.base.free {
+                            return Err(PoolStepError::Overflow);
+                        }
+                        if lookup.orphan(&credit).is_some_and(|known| {
+                            known.status != crate::pool::OrphanStatus::Credited
+                        }) {
+                            return Err(PoolStepError::Terms("its transfer is an orphan already"));
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of a payout's progress (a deposit's, an ICP withdrawal's, or a Base
+    /// payout's ICP legs): its transfer, its ICPSwap legs, its failures.
+    fn admits_progress(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
+            PoolStep::FellBack { r#ref, .. } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
+                let path = payout.attempt.map(|attempt| attempt.path);
+                if !target.in_payout() || !path.is_some_and(|path| path.swaps()) {
+                    return Err(PoolStepError::Terms(
+                        "only an ICPSwap leg with no output falls back",
+                    ));
+                }
+                // a path through ICP whose first leg paid out falls back once the way back
+                // brought the ICP back as ckUSDC, and never once its second leg paid out
+                if payout.swap.out.is_some() {
+                    let through_icp = matches!(path, Some(PayoutPath::IcpswapVia { .. }));
+                    let second = payout.leg(Some(super::LEG_SECOND));
+                    let back = payout.leg(Some(super::LEG_BACK));
+                    if !through_icp || second.out.is_some() || back.out.is_none() {
+                        return Err(PoolStepError::Terms(
+                            "only an ICPSwap leg with no output falls back",
+                        ));
+                    }
+                    return Ok(());
+                }
+                // a leg falls back before its swap, or after one that did not happen and was
+                // undone (the driver read the pool to know): never once the swap paid out
+                if payout.swap.begun && payout.swap.undone.is_none() {
+                    return Err(PoolStepError::Terms("a begun swap falls back once undone"));
+                }
+                Ok(())
+            }
             // a payout's transfer asked: never on other terms while one may have landed
             PoolStep::TransferAsked {
                 r#ref,
@@ -838,6 +1059,50 @@ impl PoolLedger {
                 }
                 Ok(())
             }
+            PoolStep::SwapApproved { r#ref, leg } | PoolStep::SwapUndone { r#ref, leg, .. } => {
+                let target = self
+                    .target(r#ref, lookup)
+                    .ok_or(PoolStepError::Unknown(*r#ref))?;
+                let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
+                let swaps = admits_leg(payout, *leg);
+                let this = payout.leg(*leg);
+                if !target.in_payout() || !swaps || this.out.is_some() {
+                    return Err(PoolStepError::Terms("the ICPSwap leg has its output"));
+                }
+                if matches!(step, PoolStep::SwapUndone { .. })
+                    && (!this.begun || this.undone.is_some())
+                {
+                    return Err(PoolStepError::Terms("only a begun swap is undone, once"));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The rules of an ICP stake's or an ICP withdrawal's own steps.
+    fn admits_icp_op(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
+            PoolStep::StakedIcp {
+                id, owner, amount, ..
+            } => match self.pending.get(id) {
+                Some(PendingOp::Stake {
+                    owner: started,
+                    amount: pulled,
+                    ..
+                }) if started == owner && pulled == amount => Ok(()),
+                Some(_) => Err(PoolStepError::Mismatch),
+                None => Err(PoolStepError::NotPending(*id)),
+            },
+            PoolStep::WithdrawnIcp { id, owner, .. } => match self.pending.get(id) {
+                Some(PendingOp::Withdraw { owner: started, .. }) if started == owner => Ok(()),
+                Some(_) => Err(PoolStepError::Mismatch),
+                None => Err(PoolStepError::NotPending(*id)),
+            },
             PoolStep::StakeStarted { id, amount, .. } => {
                 self.settings()?;
                 if self.pending.contains_key(id) {
@@ -874,93 +1139,6 @@ impl PoolLedger {
                 Some(_) => Err(PoolStepError::Mismatch),
                 None => Err(PoolStepError::NotPending(*id)),
             },
-            // a deposit held for a human, resolved once by a controller
-            PoolStep::DepositResolved {
-                r#ref,
-                resolution,
-                retry_at,
-            } => {
-                let deposit = self.deposit(r#ref, lookup)?;
-                if !matches!(deposit.status, DepositStatus::PayoutFailed(_)) {
-                    return Err(not_from("DepositResolved", &deposit.status));
-                }
-                // only a retry of a started payout carries a dedup instant
-                if retry_at.is_some() && resolution != &DepositResolution::Retry {
-                    return Err(PoolStepError::Terms("only a retry carries a dedup instant"));
-                }
-                let started = deposit.payout.attempt.is_some();
-                match resolution {
-                    // keyed on its transfer (the review, 2026-10-24): one that may have
-                    // landed is retried only with its own dedup pair, on the ckUSDC ledger
-                    // the payout started with, which deduplicates it (the door holds it to
-                    // the window); one that cannot land twice, whatever it pays, afresh
-                    DepositResolution::Retry => match (deposit.payout.attempt, deposit.payout.sent)
-                    {
-                        (None, _) if retry_at.is_some() => Err(PoolStepError::Terms(
-                            "a payout that never started has no dedup instant",
-                        )),
-                        (None, _) => Ok(()),
-                        // it may have landed (asked and not refused, or an answer of it lost):
-                        // only its own pair, on the ckUSDC ledger it started with
-                        (Some(attempt), Some(sent)) if !deposit.payout.cannot_land_twice() => {
-                            let started_on = match attempt.token {
-                                Some(token) => token.0,
-                                None => self.settings()?.ckusdc_ledger,
-                            };
-                            if retry_at.is_some() {
-                                Err(PoolStepError::Terms(
-                                    "a transfer that may have landed is retried with its own \
-                                     dedup pair",
-                                ))
-                            } else if sent.token.0 != started_on {
-                                Err(PoolStepError::Terms(
-                                    "a transfer that may have landed on another token's ledger \
-                                     is never retried",
-                                ))
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        (Some(_), _) => Ok(()),
-                    },
-                    // its transfer as asked, which the door read in the block named
-                    DepositResolution::MarkPaid { .. } => {
-                        if !started || deposit.payout.sent.is_none() {
-                            return Err(PoolStepError::Terms(
-                                "only a payout that asked its transfer is marked paid",
-                            ));
-                        }
-                        Ok(())
-                    }
-                    DepositResolution::Refund => {
-                        // only when the canister knows nothing went out: a transfer that may
-                        // have landed, or a leg that moved money, could pay twice
-                        if !deposit.payout.nothing_went_out() {
-                            return Err(PoolStepError::Terms(
-                                "its payout may have sent something: it is not refunded on Base",
-                            ));
-                        }
-                        if started && deposit.held() > self.pockets.icp.reserved {
-                            return Err(PoolStepError::Overflow);
-                        }
-                        let (credit, orphan) = deposit
-                            .refund_orphan()
-                            .ok_or(PoolStepError::Terms("a deposit refunds only what arrived"))?;
-                        if deposit.terms.src_payer == crate::evm::EvmAddress::ZERO {
-                            return Err(PoolStepError::Terms("the deposit has no payer to refund"));
-                        }
-                        if orphan.amount > self.pockets.base.free {
-                            return Err(PoolStepError::Overflow);
-                        }
-                        if lookup.orphan(&credit).is_some_and(|known| {
-                            known.status != crate::pool::OrphanStatus::Credited
-                        }) {
-                            return Err(PoolStepError::Terms("its transfer is an orphan already"));
-                        }
-                        Ok(())
-                    }
-                }
-            }
             PoolStep::WithdrawStarted {
                 id,
                 owner,
@@ -1000,97 +1178,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::SwapApproved { r#ref, leg } | PoolStep::SwapUndone { r#ref, leg, .. } => {
-                let target = self
-                    .target(r#ref, lookup)
-                    .ok_or(PoolStepError::Unknown(*r#ref))?;
-                let payout = target.payout().ok_or(PoolStepError::Mismatch)?;
-                let swaps = admits_leg(payout, *leg);
-                let this = payout.leg(*leg);
-                if !target.in_payout() || !swaps || this.out.is_some() {
-                    return Err(PoolStepError::Terms("the ICPSwap leg has its output"));
-                }
-                if matches!(step, PoolStep::SwapUndone { .. })
-                    && (!this.begun || this.undone.is_some())
-                {
-                    return Err(PoolStepError::Terms("only a begun swap is undone, once"));
-                }
-                Ok(())
-            }
-            PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
-            // never back: a block done whole is past any log of it
-            PoolStep::ScanCursor { block, log } => match self.scan_position() {
-                Some(at) if (*block, log.map_or(u128::MAX, u128::from)) < at => {
-                    Err(PoolStepError::CursorBack {
-                        at: at.0,
-                        to: *block,
-                    })
-                }
-                _ => Ok(()),
-            },
-            PoolStep::PayoutSettingsSet { .. }
-            | PoolStep::PayoutOpened { .. }
-            | PoolStep::PayoutAmountKnown { .. }
-            | PoolStep::PayoutQueued { .. }
-            | PoolStep::PayoutWaiting { .. }
-            | PoolStep::PayoutSigned { .. }
-            | PoolStep::PayoutPaid { .. }
-            | PoolStep::PayoutReverted { .. }
-            | PoolStep::PayoutUndoing { .. }
-            | PoolStep::PayoutUndone { .. }
-            | PoolStep::PayoutPulled { .. }
-            | PoolStep::PayoutStopped { .. }
-            | PoolStep::PayoutRelisted { .. }
-            | PoolStep::PayoutRefunded { .. }
-            | PoolStep::PayoutDelivered { .. }
-            | PoolStep::PayoutUnfilled { .. }
-            | PoolStep::PayoutResolved { .. }
-            | PoolStep::PayoutFitWaited { .. }
-            | PoolStep::PayoutFillEarly { .. }
-            | PoolStep::OrphanBooked { .. }
-            | PoolStep::OrphanRefundSigned { .. }
-            | PoolStep::OrphanRefundClosed { .. }
-            | PoolStep::TermsClaimed { .. } => self.admits_payout(step, lookup),
-            // the nonce it spends is the state's to check: nothing of the pool moves
-            PoolStep::ApproveSigned { .. } => Ok(()),
-            PoolStep::MoveSettingsSet { .. }
-            | PoolStep::MoveOpened { .. }
-            | PoolStep::MoveProposed { .. }
-            | PoolStep::MoveRouted { .. }
-            | PoolStep::MoveSigned { .. }
-            | PoolStep::MoveBurned { .. }
-            | PoolStep::MoveReverted { .. }
-            | PoolStep::MoveWithdrawing { .. }
-            | PoolStep::MoveWithdrawn { .. }
-            | PoolStep::MoveRefused { .. }
-            | PoolStep::MoveLanded { .. }
-            | PoolStep::MoveSweeping { .. }
-            | PoolStep::MoveArrived { .. }
-            | PoolStep::MoveStuck { .. }
-            | PoolStep::MoveRetried { .. }
-            | PoolStep::MoveLost { .. }
-            | PoolStep::MoveRefunded { .. }
-            | PoolStep::MoveUnfilled { .. }
-            | PoolStep::MoveReimbursed { .. } => self.admits_rebalance(step, lookup),
-            // one rescue per order; the nonce it spends is the state's to check
-            PoolStep::EcoRescueSigned { order_id, .. } => {
-                if lookup.eco_rescued(order_id) {
-                    return Err(PoolStepError::Terms(
-                        "the order's intent was rescued already",
-                    ));
-                }
-                Ok(())
-            }
-            PoolStep::IcpRoutesSet { routes } => {
-                let settings = self.settings()?;
-                routes
-                    .validate(settings.ckusdc_ledger)
-                    .map_err(PoolSettingsError::from)?;
-                routes
-                    .fees_complete(settings.ckusdc_ledger)
-                    .map_err(PoolSettingsError::from)?;
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 
