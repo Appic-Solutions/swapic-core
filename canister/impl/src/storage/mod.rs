@@ -6,7 +6,6 @@ pub mod ecdsa_address;
 pub mod events;
 pub mod flow_settings;
 pub mod halt;
-pub mod inflight;
 pub mod memory;
 pub mod outbox;
 pub mod pool;
@@ -31,7 +30,6 @@ pub fn init() {
     outbox::init();
     replay_cursor::init();
     sanctions::init();
-    inflight::init();
     flow_settings::init();
     timer_state::init();
     callers::init();
