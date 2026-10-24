@@ -47,7 +47,9 @@ use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
 use settlement_api::types::pool::{DepositResolution as WireResolution, PoolError};
 use types::hash::PoolRef;
-use types::pool::{DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PoolStep, Sent};
+use types::pool::{
+    DepositKind, DepositResolution, DepositStatus, IcpAccount, PayoutAttempt, PoolStep, Sent,
+};
 use types::{Address, EvmAddress, Timestamp};
 
 /// The retry's margin and the window, the fold's own rule too.
@@ -139,11 +141,12 @@ pub async fn resolve(
         .map(|settings| settings.ckusdc_ledger)
         .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
     let out = deposit.out_ledger(ckusdc).unwrap_or(ckusdc);
-    // its payout's dedup pair and recipient, once it started
-    let started = deposit
-        .payout
-        .attempt
-        .zip(crate::pool::payout::of_deposit(r#ref, &deposit).map(|payout| payout.to));
+    // its payout's dedup pair and recipient, once it started (a swap's: a stake pays no one)
+    let recipient = match deposit.terms.kind {
+        DepositKind::Swap { recipient, .. } => Some(recipient),
+        DepositKind::Stake { .. } => None,
+    };
+    let started = deposit.payout.attempt.zip(recipient);
     let now = clock();
     match resolution {
         WireResolution::Retry => {
