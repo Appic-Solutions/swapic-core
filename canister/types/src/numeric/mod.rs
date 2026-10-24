@@ -218,6 +218,7 @@ impl BasisPoints {
     }
 
     /// This fraction of `amount`, rounded down. `None` only on overflow.
+    #[cfg(test)]
     pub fn apply_to(self, amount: TokenAmount) -> Option<TokenAmount> {
         amount
             .checked_mul(self.0)

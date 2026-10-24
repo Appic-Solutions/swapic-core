@@ -469,6 +469,7 @@ pub struct PendingQuote {
 impl PendingQuote {
     /// The deadlines the quote is held to: the ones it was registered under, or, for an
     /// entry written before they were recorded, the ones `config` puts on it now.
+    #[cfg(test)]
     pub fn held_to(&self, config: &Config) -> QuoteDeadlines {
         self.deadlines
             .unwrap_or_else(|| QuoteDeadlines::under(self.quote.expires_at, config))

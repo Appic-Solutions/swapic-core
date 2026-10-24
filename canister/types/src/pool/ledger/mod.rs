@@ -412,6 +412,7 @@ impl PoolLedger {
     }
 
     /// The open registrations `party` holds.
+    #[cfg(test)]
     pub fn open_of(&self, party: &OwnerKey) -> u32 {
         self.open_by_party.get(party).copied().unwrap_or(0)
     }

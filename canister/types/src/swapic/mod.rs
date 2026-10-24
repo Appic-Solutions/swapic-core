@@ -1390,6 +1390,7 @@ impl Envelope {
     }
 
     /// The envelope a CCTP v2 message carries at its hook data, if it carries one of ours.
+    #[cfg(test)]
     pub fn of_cctp_message(message: &[u8]) -> Result<Self, EnvelopeError> {
         Self::decode(message.get(Self::CCTP_OFFSET..).unwrap_or_default())
     }

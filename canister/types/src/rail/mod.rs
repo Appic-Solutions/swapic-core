@@ -250,6 +250,7 @@ impl EcoIntent {
 
     /// Whether the reward's deadline has passed at `now`: the deadline second itself is
     /// still the filler's.
+    #[cfg(test)]
     pub fn is_past_deadline(&self, now: UnixSeconds) -> bool {
         now > self.deadline
     }

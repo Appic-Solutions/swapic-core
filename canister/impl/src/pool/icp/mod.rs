@@ -424,6 +424,7 @@ pub fn judge(
 }
 
 /// [`judge`] of `observed` against the lines as they stand, read before and after alike.
+#[cfg(test)]
 pub fn icp_expected<S: Store>(
     state: &State<S>,
     observed: TokenAmount,
