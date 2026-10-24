@@ -227,50 +227,29 @@ fn message_for(envelope: &Envelope) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The items of one RLP list: each item's own encoding, header included.
-fn rlp_items(list: &[u8]) -> Vec<&[u8]> {
-    let length = |bytes: &[u8]| bytes.iter().fold(0_usize, |n, b| n * 256 + *b as usize);
-    let (header, payload) = match list[0] {
-        0xc0..=0xf7 => (1, (list[0] - 0xc0) as usize),
-        b => {
-            let n = (b - 0xf7) as usize;
-            (1 + n, length(&list[1..1 + n]))
-        }
-    };
+fn rlp_items(mut list: &[u8]) -> Vec<&[u8]> {
+    let header = alloy_rlp::Header::decode(&mut list).unwrap();
+    assert!(header.list, "an RLP list");
+    let mut rest = &list[..header.payload_length];
     let mut items = Vec::new();
-    let mut at = header;
-    while at < header + payload {
-        let size = match list[at] {
-            0x00..=0x7f => 1,
-            b @ 0x80..=0xb7 => 1 + (b - 0x80) as usize,
-            b @ 0xb8..=0xbf => {
-                let n = (b - 0xb7) as usize;
-                1 + n + length(&list[at + 1..at + 1 + n])
-            }
-            b @ 0xc0..=0xf7 => 1 + (b - 0xc0) as usize,
-            b => {
-                let n = (b - 0xf7) as usize;
-                1 + n + length(&list[at + 1..at + 1 + n])
-            }
-        };
-        items.push(&list[at..at + size]);
-        at += size;
+    while !rest.is_empty() {
+        let start = rest;
+        // a byte below 0x80 is its own item: its header takes nothing
+        let item = alloy_rlp::Header::decode(&mut rest).unwrap();
+        let size = start.len() - rest.len() + item.payload_length;
+        items.push(&start[..size]);
+        rest = &start[size..];
     }
     items
 }
 
 /// An RLP string's payload.
-fn rlp_bytes(item: &[u8]) -> &[u8] {
-    match item[0] {
-        0x00..=0x7f => item,
-        b @ 0x80..=0xb7 => &item[1..1 + (b - 0x80) as usize],
-        b => &item[1 + (b - 0xb7) as usize..],
-    }
+fn rlp_bytes(mut item: &[u8]) -> &[u8] {
+    alloy_rlp::Header::decode_bytes(&mut item, false).unwrap()
 }
 
-fn integer(item: &[u8]) -> u64 {
-    rlp_bytes(item)
-        .iter()
-        .fold(0_u64, |n, b| n * 256 + u64::from(*b))
+fn integer(mut item: &[u8]) -> u64 {
+    <u64 as alloy_rlp::Decodable>::decode(&mut item).unwrap()
 }
 
 /// A signed EIP-1559 transaction read back: its chain, `to`, gas limit and data, and the
@@ -290,14 +269,11 @@ fn read(raw: &[u8]) -> Read {
     // the nine unsigned fields, under a list header of their own, are what was signed
     let unsigned: Vec<u8> = items[..9].concat();
     let mut payload = vec![0x02];
-    if unsigned.len() < 56 {
-        payload.push(0xc0 + unsigned.len() as u8);
-    } else {
-        let length = unsigned.len().to_be_bytes();
-        let length: Vec<u8> = length.iter().copied().skip_while(|b| *b == 0).collect();
-        payload.push(0xf7 + length.len() as u8);
-        payload.extend_from_slice(&length);
+    alloy_rlp::Header {
+        list: true,
+        payload_length: unsigned.len(),
     }
+    .encode(&mut payload);
     payload.extend_from_slice(&unsigned);
     let hash: [u8; 32] = alloy_primitives::keccak256(&payload).into();
     let mut signature = [0_u8; 64];
