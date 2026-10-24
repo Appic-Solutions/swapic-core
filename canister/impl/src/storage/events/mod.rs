@@ -45,7 +45,7 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(nonces_memory()));
 
     // The nonces handed out and not yet signed for. Part of the fold as well: `TxCreated`
-    // writes one, `TxSigned` and `TxCancelled` take it away, so a replay reproduces it and
+    // writes one, the signed record and `TxCancelled` take it away, so a replay reproduces it and
     // the deep audit compares it. It is what rule A5 is read off, and the pass that ends an
     // abandoned allocation is the only reader.
     static UNSIGNED_NONCES: RefCell<StableBTreeMap<NonceKey, UnsignedTx, Memory>> =

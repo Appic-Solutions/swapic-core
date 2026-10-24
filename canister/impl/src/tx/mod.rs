@@ -5,7 +5,7 @@
 //!
 //! - `TxCreated` allocates the nonce and is appended with NO await before it (A1), so two
 //!   calls that interleave at the signature cannot come back to the same number (A4).
-//! - The signature is asked for after the allocation, and `TxSigned` records the exact
+//! - The signature is asked for after the allocation, and the signed record holds the exact
 //!   bytes before anything is broadcast (A6), so a rebroadcast re-sends what the log
 //!   holds and never something else.
 //! - An allocated nonce is never abandoned (A5): a transaction that does not land is
@@ -57,9 +57,9 @@ const STUCK_AFTER: Duration = Duration::from_secs(30);
 /// `TxCreated`, and that await does not run to its end inside one message on this subnet:
 /// it crosses to the signing subnet and spans the consensus rounds a threshold signature
 /// takes there, measured at 2.7 seconds for `key_1` on mainnet (2026-10-18), against a
-/// default window of two seconds. A cancel fired inside that round trip races the signature it was meant to
-/// stand in for, and the fold refuses whichever comes second (`NoUnsignedNonce` or
-/// `NonceNotUnsigned`), so nothing breaks, but a cancel that was never needed is signed
+/// default window of two seconds. A cancel fired inside that round trip races the signature
+/// it was meant to stand in for, and the fold refuses whichever comes second
+/// (`NonceNotUnsigned`), so nothing breaks, but a cancel that was never needed is signed
 /// and broadcast. Five minutes is far above any round trip the signing subnet takes under
 /// load, and short enough that a number nothing carries holds up the chain's queue for
 /// minutes rather than hours. A config knob is a later plan.
@@ -188,8 +188,7 @@ pub enum TxError {
 
 /// Whether `quote_hash` still holds exactly `key` as its unsigned nonce: the signed bytes
 /// carry that number, and a record that spent any other number the quote holds would put
-/// two signed transactions on one nonce (the cancelled one) and strand the other. The same
-/// rule for a swap's leg and for a pull, which holds its number by its quote too. Pure, so
+/// two signed transactions on one nonce (the cancelled one) and strand the other. Pure, so
 /// the race a signing await opens is proven without a signing subnet.
 fn still_holds<S: Store>(
     state: &State<S>,
@@ -626,8 +625,8 @@ const CANCEL_GAS_LIMIT: u64 = 21_000;
 /// Spends every nonce that was handed out and never signed for, with a zero-value transfer
 /// from this canister's address to itself at that exact number (rule A5).
 ///
-/// A nonce leaves the allocator with `TxCreated` and is spent by `TxSigned`. Anything that
-/// refuses in between, a rejected signing call, a signed record the swap no longer admits,
+/// A nonce leaves the allocator with `TxCreated` and is spent by its signed record. Anything
+/// that refuses in between, a rejected signing call, a signed record the fold no longer admits,
 /// a trap or an upgrade mid-await, leaves the number handed out with nothing carrying it,
 /// and an EVM account with a gap at N can never mine N+1: every payout, refund and burn on
 /// that chain stops. So the allocation is in the fold, and this pass ends it.
@@ -686,7 +685,7 @@ async fn cancel(key: NonceKey) {
     let Ok(mine) = ecdsa::canister_address().await else {
         return;
     };
-    // the fold may have moved while the address was being read: a `TxSigned` that arrived
+    // the fold may have moved while the address was being read: a signed record that arrived
     // late spends this number, and cancelling it would put a second transaction on it
     if read_state(|state| state.store().unsigned_nonce(&key).is_none()) {
         return;

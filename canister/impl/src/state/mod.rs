@@ -92,19 +92,19 @@ pub trait Store {
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex>;
-    /// The nonce `TxCreated` handed out at `key` and no `TxSigned` or `TxCancelled` has
+    /// The nonce `TxCreated` handed out at `key` and no signed record or `TxCancelled` has
     /// ended, if there is one.
     fn unsigned_nonce(&self, key: &NonceKey) -> Option<UnsignedTx>;
     fn put_unsigned_nonce(&mut self, key: NonceKey, unsigned: UnsignedTx);
     fn remove_unsigned_nonce(&mut self, key: &NonceKey);
     /// Every nonce still waiting for its signed record, in chain then nonce order. The
-    /// collection holds one entry per send between its `TxCreated` and its `TxSigned`, plus
+    /// collection holds one entry per send between its `TxCreated` and its signed record, plus
     /// the allocations whose transaction never came back, and the outbox pass ends those
     /// within a batch window: it is small by construction, so a walk of it is the read.
     fn unsigned_nonces(&self) -> Vec<(NonceKey, UnsignedTx)>;
 
     /// Whether `quote_hash` already holds a nonce it has not signed for. Rule A4 read from
-    /// the swap's side: one swap never has two numbers out at once, so two sends that
+    /// the key's side: one key never has two numbers out at once, so two sends that
     /// interleave at the signature cannot both allocate.
     fn has_unsigned_nonce_for(&self, quote_hash: &QuoteHash) -> bool {
         self.unsigned_nonces()
@@ -112,8 +112,8 @@ pub trait Store {
             .any(|(_, unsigned)| unsigned.purpose.quote_hash().as_ref() == Some(quote_hash))
     }
 
-    /// The nonce `quote_hash` holds unsigned, if it holds one. `TxSigned` names a swap and
-    /// not a nonce, so this is how the signed record finds the allocation it spends.
+    /// The nonce `quote_hash` holds unsigned, if it holds one: what a late signature is
+    /// checked against before its record is written.
     fn unsigned_nonce_of(&self, quote_hash: &QuoteHash) -> Option<NonceKey> {
         self.unsigned_nonces()
             .into_iter()
