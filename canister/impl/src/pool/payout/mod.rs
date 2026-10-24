@@ -698,8 +698,17 @@ async fn send_out(
     {
         Ok(block) => Ok(block),
         Err(error) => {
+            // a refusal counts whatever its line does: one not recorded leaves the transfer
+            // asked, which only blocks a refund (the safe way, the review, 2026-10-24)
             if matches!(error, CallError::Refused(_)) {
-                record(PoolStep::TransferRefused { r#ref: payout.id }, clock())?;
+                if let Err(refused) =
+                    pool_store::record_at(PoolStep::TransferRefused { r#ref: payout.id }, clock())
+                {
+                    crate::pool::log(&format!(
+                        "the pool payout {}'s refused transfer was not noted: {refused}",
+                        payout.id
+                    ));
+                }
             }
             Err(call_stop(what, error))
         }

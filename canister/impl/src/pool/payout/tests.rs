@@ -70,6 +70,8 @@ struct Fake {
     /// its unused balances: its deposit when the swap did not happen, its output when the
     /// output was not withdrawn.
     swap_leaves: Cell<Option<(TokenAmount, TokenAmount)>>,
+    /// A line recorded during the next transfer call, before its answer.
+    during: RefCell<Option<PoolStep>>,
     /// The status of the deposit under watch at each money call
     watch: Cell<Option<PoolRef>>,
     seen: RefCell<Vec<Option<DepositStatus>>>,
@@ -103,6 +105,9 @@ impl Ledgers for Fake {
     ) -> Result<u64, CallError> {
         self.saw();
         self.calls.borrow_mut().push(format!("transfer {amount}"));
+        if let Some(step) = self.during.borrow_mut().take() {
+            record_at(step, at(0)).unwrap();
+        }
         if self.refuse.replace(false) {
             return Err(CallError::Refused("InsufficientFunds".into()));
         }
@@ -618,6 +623,24 @@ fn a_transfer_the_fold_refuses_to_ask_is_a_counted_failure() {
             Err(Stop::Failed(_))
         ));
         assert_eq!(fake.calls.borrow().len(), calls, "never asked");
+    });
+}
+
+/// The review (2026-10-24): a refusal whose own line could not be recorded is still the
+/// counted failure it is (its transfer left asked only blocks a refund, the safe way).
+#[test]
+fn a_refusal_whose_line_is_not_recorded_still_counts() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let r#ref = arrived_swap(ckusdc(), 1);
+        let fake = Fake::default();
+        fake.refuse.set(true);
+        // the refusal's line is in already when the drive records its own: refused
+        *fake.during.borrow_mut() = Some(PoolStep::TransferRefused { r#ref });
+        assert!(matches!(
+            block_on(drive_deposit(&fake, r#ref, clock, &open_pool)),
+            Err(Stop::Failed(_))
+        ));
     });
 }
 
