@@ -486,17 +486,9 @@ impl PoolLedger {
         };
         ledger.rebalance = Some(lines);
         Some(PoolEffects {
-            ledger,
-            deposit: None,
-            shares: None,
             credited,
-            payout: None,
-            queued: None,
-            dequeued: None,
-            nonce: None,
-            intent: None,
-            orphan: None,
             moved,
+            ..PoolEffects::of(ledger)
         })
     }
 
