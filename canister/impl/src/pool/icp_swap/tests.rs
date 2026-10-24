@@ -16,6 +16,12 @@ fn clock() -> Timestamp {
     at(10)
 }
 
+/// Payout `id`'s plan decided now, as the pass's `queue::next` hands it to `refit`.
+fn decided(id: u64) -> Result<crate::pool::plan::Decided, crate::pool::plan::Fit> {
+    crate::pool::plan::decide_payout(&pool_store::payout(id).unwrap(), clock().as_secs().get())
+        .expect("a planned payout with its amount")
+}
+
 fn open_pool() -> Result<(), String> {
     Ok(())
 }
@@ -1225,7 +1231,7 @@ fn a_plan_whose_scaler_read_failed_is_tried_again_and_fits() {
         assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
         // tried again: the read answers now
         *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
-        let fitted = block_on(refit(&fake, id, clock, &open_pool))
+        let fitted = block_on(refit(&fake, id, decided(id), clock, &open_pool))
             .unwrap()
             .expect("the plan fits");
         assert_eq!(
@@ -1236,7 +1242,10 @@ fn a_plan_whose_scaler_read_failed_is_tried_again_and_fits() {
         // two more failed tries: the last; then nothing is read any more
         *fake.scaled.borrow_mut() = Some(Err("the scaler's read: Unreachable".to_string()));
         for _ in 0..2 {
-            assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+            assert_eq!(
+                block_on(refit(&fake, id, decided(id), clock, &open_pool)).unwrap(),
+                None
+            );
         }
         assert_eq!(
             pool_store::payout(id).unwrap().fit_tries,
@@ -1248,7 +1257,10 @@ fn a_plan_whose_scaler_read_failed_is_tried_again_and_fits() {
             .iter()
             .filter(|call| call.starts_with("scale"))
             .count();
-        assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert_eq!(
+            block_on(refit(&fake, id, decided(id), clock, &open_pool)).unwrap(),
+            None
+        );
         assert_eq!(
             fake.calls
                 .borrow()
@@ -1286,7 +1298,7 @@ fn a_fitted_plan_whose_signature_is_refused_counts_a_try() {
         )));
         assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
         for tries in 2..=MAX_FIT_TRIES {
-            let fitted = block_on(refit(&fake, id, clock, &open_pool))
+            let fitted = block_on(refit(&fake, id, decided(id), clock, &open_pool))
                 .unwrap()
                 .expect("the plan fits");
             assert!(!block_on(crate::pool::plan::sign_fitted(
@@ -1297,8 +1309,11 @@ fn a_fitted_plan_whose_signature_is_refused_counts_a_try() {
         // its tries spent: never refitted again, the watcher's order it waits for
         let payout = pool_store::payout(id).unwrap();
         assert_eq!(payout.status, PayoutStatus::Waiting);
-        assert!(!crate::pool::queue::refittable(&payout, clock()));
-        assert_eq!(block_on(refit(&fake, id, clock, &open_pool)).unwrap(), None);
+        assert!(crate::pool::queue::refittable(&payout, clock()).is_none());
+        assert_eq!(
+            block_on(refit(&fake, id, decided(id), clock, &open_pool)).unwrap(),
+            None
+        );
     });
 }
 
@@ -1329,11 +1344,14 @@ fn a_plan_is_not_fitted_while_the_pool_is_closed() {
         *fake.scaled.borrow_mut() = Some(Ok(scaled_route(501_650_000)));
         let closed = || Err("the pool is closed".to_string());
         for _ in 0..5 {
-            assert_eq!(block_on(refit(&fake, id, clock, &closed)).unwrap(), None);
+            assert_eq!(
+                block_on(refit(&fake, id, decided(id), clock, &closed)).unwrap(),
+                None
+            );
         }
         assert_eq!(reads(), before);
         assert_eq!(pool_store::payout(id).unwrap().fit_tries, Some(1));
-        assert!(block_on(refit(&fake, id, clock, &open_pool))
+        assert!(block_on(refit(&fake, id, decided(id), clock, &open_pool))
             .unwrap()
             .is_some());
     });

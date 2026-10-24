@@ -311,14 +311,19 @@ pub fn signed_once(key: QuoteHash) -> Result<Option<u64>, String> {
     })
 }
 
-/// Whether a transaction of `purpose`, one of the pool's own, is being signed (its nonce
-/// held) or is in the outbox.
-pub fn in_flight(purpose: TxPurpose) -> bool {
-    let key = purpose
+/// Whether a transaction of `purpose` is being signed: a nonce held under its key. Never for
+/// a purpose with no key (a cancel).
+pub fn being_signed(purpose: TxPurpose) -> bool {
+    purpose
         .quote_hash()
-        .expect("BUG: a pool transaction's purpose has a key");
-    read_state(|state| state.store().has_unsigned_nonce_for(&key))
-        || crate::storage::outbox::find(purpose).is_some()
+        .is_some_and(|key| read_state(|state| state.store().has_unsigned_nonce_for(&key)))
+}
+
+/// Whether a transaction of `purpose`, one of the pool's own, is being signed (its nonce
+/// held) or is in the outbox. A purpose with no key (a cancel) is none of the pool's: false.
+pub fn in_flight(purpose: TxPurpose) -> bool {
+    purpose.quote_hash().is_some()
+        && (being_signed(purpose) || crate::storage::outbox::find(purpose).is_some())
 }
 
 /// What a flow's or a pool payout's signed record says beyond the transaction itself.

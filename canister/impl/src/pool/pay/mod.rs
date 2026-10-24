@@ -214,10 +214,7 @@ fn signable(id: u64) -> Result<Option<u64>, PoolError> {
     match payout.status {
         PayoutStatus::Signed(tx_id) => Ok(Some(tx_id)),
         PayoutStatus::Waiting => {
-            let key = TxPurpose::PoolPayout(id)
-                .quote_hash()
-                .expect("BUG: a pool payout's purpose has a key");
-            if read_state(|state| state.store().has_unsigned_nonce_for(&key)) {
+            if tx::being_signed(TxPurpose::PoolPayout(id)) {
                 return Err(PoolError::Unavailable(
                     "the payout is being signed".to_string(),
                 ));

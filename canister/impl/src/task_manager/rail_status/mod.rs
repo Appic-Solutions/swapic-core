@@ -12,26 +12,17 @@ use crate::engine;
 use crate::storage::config;
 use ic_cdk_timers::TimerId;
 use std::cell::Cell;
-use std::time::Duration;
 
 thread_local! {
     // Heap by necessity, like every other timer id: an upgrade invalidates it anyway.
     static RAIL_STATUS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
-/// How often the engine ticks: the interval `config` names, at most [`super::PAYOUT_EVERY`]
-/// (the drive serves the Base queue and the payouts' deadlines at least that often), held to
-/// the floor every timer here is held to, so a knob of zero puts the engine on one tick a
-/// second and not on every round of the subnet. The config is the caller's, so the decision
-/// is testable without a canister.
-fn every(config: &types::Config) -> Duration {
-    super::interval(config.rail_status_max_age.min(super::PAYOUT_EVERY))
-}
-
-/// Puts the engine on the configured interval. `set_config` calls it only when that
-/// interval changed, because a restart pushes the next tick a whole interval out.
+/// Puts the engine on the configured interval ([`types::Config::engine_every`]).
+/// `set_config` calls it only when that interval changed, because a restart pushes the next
+/// tick a whole interval out.
 pub fn restart_rail_status_timer() {
-    let every = every(&config::get());
+    let every = config::get().engine_every();
     super::restart(&RAIL_STATUS_TIMER, || {
         ic_cdk_timers::set_timer_interval(every, || ic_cdk::spawn(run()))
     });
@@ -42,6 +33,3 @@ pub fn restart_rail_status_timer() {
 async fn run() {
     engine::drive_all().await;
 }
-
-#[cfg(test)]
-mod tests;

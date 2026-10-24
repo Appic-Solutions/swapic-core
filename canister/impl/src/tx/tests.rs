@@ -1486,3 +1486,13 @@ fn each_record_is_written_with_its_signed_bytes_and_its_detail() {
         })
     );
 }
+
+/// The review (2026-10-24): a purpose with no key (a cancel) is none of the pool's, so
+/// `in_flight` answers false for it instead of trapping.
+#[test]
+fn a_cancel_is_never_a_pool_transaction_in_flight() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        assert!(!in_flight(TxPurpose::Cancel(ChainId::BASE)));
+    });
+}
