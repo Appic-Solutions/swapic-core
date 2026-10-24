@@ -354,6 +354,12 @@ pub enum Stop {
     Queued,
 }
 
+impl From<crate::storage::events::AppendError> for Stop {
+    fn from(error: crate::storage::events::AppendError) -> Self {
+        Stop::Append(error.to_string())
+    }
+}
+
 /// What a call's failure means for a payout: an outcome unknown is asked again as it is; a
 /// refusal, and an outcome the ledger can no longer tell, count toward the stop.
 pub(crate) fn call_stop(what: &str, error: CallError) -> Stop {
@@ -504,10 +510,10 @@ pub fn path_for(settings: &PoolSettings, token_out: Principal) -> PayoutPath {
     }
 }
 
-fn record(step: PoolStep, now: Timestamp) -> Result<(), Stop> {
-    pool_store::record_at(step, now)
-        .map(drop)
-        .map_err(|error| Stop::Append(error.to_string()))
+/// Records `step` at `now`; a line not appended stops the drive, driven again.
+pub(crate) fn record(step: PoolStep, now: Timestamp) -> Result<(), Stop> {
+    pool_store::record_at(step, now)?;
+    Ok(())
 }
 
 /// What a paid payout records.
@@ -742,7 +748,7 @@ async fn send_out(
             crate::storage::events::AppendError::Transition(_) => {
                 Stop::Failed(format!("{what} was not asked: {error}"))
             }
-            error => Stop::Append(error.to_string()),
+            error => Stop::from(error),
         })?;
     }
     match ledgers

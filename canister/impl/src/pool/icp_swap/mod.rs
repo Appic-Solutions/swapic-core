@@ -34,7 +34,7 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
-use crate::pool::payout::{call_stop, open, Busy, Ledgers, Leg, Stop};
+use crate::pool::payout::{call_stop, open, record, Busy, Ledgers, Leg, Stop};
 use crate::pool::plan::{Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Party};
@@ -421,12 +421,6 @@ fn refund_dedup(payout: &EvmPayout) -> Dedup {
         memo: keccak256(&preimage).0,
         created_at_nanos: payout.undoing_at.unwrap_or(payout.opened_at).as_nanos(),
     }
-}
-
-fn record(step: PoolStep, now: Timestamp) -> Result<(), Stop> {
-    pool_store::record_at(step, now)
-        .map(drop)
-        .map_err(|error| Stop::Append(error.to_string()))
 }
 
 fn terms_of(payout: &EvmPayout) -> Result<IcpSwapTerms, Stop> {

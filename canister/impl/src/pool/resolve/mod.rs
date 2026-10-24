@@ -92,7 +92,8 @@ pub fn refund_at(payout: &EvmPayout, now: Timestamp) -> Timestamp {
     }
 }
 
-fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {
+/// Records `step` at `now`; a line the fold refuses is the door's refusal.
+pub(crate) fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {
     pool_store::record_at(step, now)
         .map(drop)
         .map_err(|error| PoolError::NotAllowed(error.to_string()))

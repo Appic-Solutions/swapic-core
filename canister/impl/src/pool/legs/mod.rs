@@ -19,8 +19,7 @@
 mod tests;
 
 use crate::ic::CallError;
-use crate::pool::payout::{call_stop, open, Ledgers, Stop};
-use crate::storage::pool as pool_store;
+use crate::pool::payout::{call_stop, open, record, Ledgers, Stop};
 use candid::Principal;
 use types::hash::PoolRef;
 use types::pool::{PoolHeld, PoolStep, SwapLeg};
@@ -71,12 +70,6 @@ pub enum LegEnd {
     NoPair,
     /// The swap did not happen; its deposit, if any, came back (`SwapUndone`).
     NotDone(String),
-}
-
-fn record(step: PoolStep, now: Timestamp) -> Result<(), Stop> {
-    pool_store::record_at(step, now)
-        .map(drop)
-        .map_err(|error| Stop::Append(error.to_string()))
 }
 
 /// What the pool holds of the canister's, unused, as the leg's token in and token out.

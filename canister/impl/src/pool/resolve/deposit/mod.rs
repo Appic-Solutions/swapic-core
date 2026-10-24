@@ -37,7 +37,7 @@
 #[cfg(test)]
 mod tests;
 
-use super::{same_account, LedgerBlocks};
+use super::{record, same_account, LedgerBlocks};
 use crate::ic::LedgerTransfer;
 use crate::pool::orphans::{self, Refund};
 use crate::pool::payout::Busy;
@@ -52,12 +52,6 @@ use types::{Address, EvmAddress, Timestamp};
 
 /// The retry's margin and the window, the fold's own rule too.
 pub use types::pool::{deduplicated, RETRY_MARGIN};
-
-fn record(step: PoolStep, now: Timestamp) -> Result<(), PoolError> {
-    pool_store::record_at(step, now)
-        .map(drop)
-        .map_err(|error| PoolError::NotAllowed(error.to_string()))
-}
 
 /// What a controller searches `ledger` for to find whether a started payout's transfer
 /// landed: to its recipient, its memo and `created_at_time` its dedup pair.
