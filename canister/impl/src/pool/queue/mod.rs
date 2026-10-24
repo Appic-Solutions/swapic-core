@@ -190,12 +190,7 @@ pub fn serve(now: Timestamp) -> usize {
 
 /// Whether a transaction of payout `id` is being signed or is in the outbox.
 fn in_flight(id: u64) -> bool {
-    let purpose = TxPurpose::PoolPayout(id);
-    let key = purpose
-        .quote_hash()
-        .expect("BUG: a pool payout's purpose has a key");
-    read_state(|state| state.store().has_unsigned_nonce_for(&key))
-        || crate::storage::outbox::find(purpose).is_some()
+    crate::tx::in_flight(TxPurpose::PoolPayout(id))
 }
 
 /// Why a reverted payout is undone.

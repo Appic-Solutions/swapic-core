@@ -14,9 +14,8 @@ mod tests;
 use super::{cost, own::OwnRoute};
 use crate::ic::{self, Account, CallError, Dedup};
 use crate::pool::{self, payout::Busy};
-use crate::state::Store;
 use crate::storage::events::read_state;
-use crate::storage::{chain_data, config, flow_settings, outbox, pool as pool_store};
+use crate::storage::{chain_data, config, flow_settings, pool as pool_store};
 use crate::tx;
 use candid::{Nat, Principal};
 use serde_json::{json, Value};
@@ -261,12 +260,7 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -
 
 /// Whether a transaction of move `id` is being signed or is out.
 fn in_flight(id: u64) -> bool {
-    let purpose = TxPurpose::PoolMove(id);
-    let key = purpose
-        .quote_hash()
-        .expect("BUG: a move's purpose has a key");
-    read_state(|state| state.store().has_unsigned_nonce_for(&key))
-        || outbox::find(purpose).is_some()
+    crate::tx::in_flight(TxPurpose::PoolMove(id))
 }
 
 fn record(step: PoolStep, now: Timestamp) -> Result<(), String> {
