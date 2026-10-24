@@ -161,15 +161,6 @@ impl Stage {
             Stage::Refund => FlowStatus::Refunding,
         }
     }
-
-    /// Whether a retry of this call is deduplicated by its ledger, so an outcome in doubt
-    /// is settled by asking again.
-    pub fn retries_safely(self) -> bool {
-        matches!(
-            self,
-            Stage::Pull | Stage::Consolidate | Stage::Deliver | Stage::Refund
-        )
-    }
 }
 
 /// A principal as raw bytes: the domain carries no candid type.
@@ -238,10 +229,8 @@ pub struct EvmToIcpQuote {
     pub reference: QuoteHash,
 }
 
-/// The domain tags the two quote hashes are taken under, so a hash of one kind is never a
-/// hash of the other.
+/// The domain tag the ICP to EVM quote's hash is taken under.
 const ICP_TO_EVM_TAG: &[u8] = b"swapic-icp-to-evm-v1";
-const EVM_TO_ICP_TAG: &[u8] = b"swapic-evm-to-icp-v1";
 
 fn tagged_hash(tag: &[u8], body: &[u8]) -> QuoteHash {
     let mut hasher = sha2::Sha256::new();
@@ -265,14 +254,6 @@ impl EvmToIcpQuote {
     /// The flow's key and the subaccount the ckUSDC lands in: the router params' `ref`.
     pub fn hash(&self) -> QuoteHash {
         self.reference
-    }
-
-    /// A digest of every term, for the record.
-    pub fn terms_digest(&self) -> QuoteHash {
-        tagged_hash(
-            EVM_TO_ICP_TAG,
-            &minicbor::to_vec(self).expect("BUG: encoding into a Vec is infallible"),
-        )
     }
 }
 

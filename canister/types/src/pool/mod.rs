@@ -720,13 +720,6 @@ impl Registration {
             vec![payer, owner]
         }
     }
-
-    /// The last instant an arrival for it is still credited.
-    pub fn credit_until(&self, grace: Duration) -> Timestamp {
-        self.expires_at
-            .checked_add(grace)
-            .unwrap_or(Timestamp::from_nanos(u64::MAX))
-    }
 }
 
 /// A deposit's terms as they reach the canister with its arrival (P11d, 2026-10-21: no

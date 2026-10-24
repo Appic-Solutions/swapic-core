@@ -427,18 +427,6 @@ impl TxPurpose {
         }
     }
 
-    /// Whether it is one of the pool's own transactions, whose signed record is a pool step.
-    pub fn is_pool(&self) -> bool {
-        matches!(
-            self,
-            Self::PoolPayout(_)
-                | Self::PoolTransfer(_)
-                | Self::PoolApprove
-                | Self::PoolMove(_)
-                | Self::EcoRescue(_)
-        )
-    }
-
     /// The swap whose attempt this transaction is, if it is one: a pull runs before any
     /// swap exists and a cancel belongs to none, so neither is signed against an attempt.
     pub fn attempt_of(&self) -> Option<QuoteHash> {
