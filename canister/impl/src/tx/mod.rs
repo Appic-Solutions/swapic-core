@@ -697,7 +697,7 @@ async fn cancel(key: NonceKey) {
     };
     // the fold may have moved while the address was being read: a `TxSigned` that arrived
     // late spends this number, and cancelling it would put a second transaction on it
-    if read_state(|state| state.unsigned_nonces().into_iter().all(|(at, _)| at != key)) {
+    if read_state(|state| state.store().unsigned_nonce(&key).is_none()) {
         return;
     }
     let tx = Eip1559Tx {
