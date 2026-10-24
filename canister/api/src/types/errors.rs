@@ -3,9 +3,8 @@
 
 use crate::types::chain_data::ChainDataError;
 use crate::types::config::ConfigError;
-use crate::types::events::{CanonicalError, EventError, EvmAddressError, Hash32};
+use crate::types::events::{CanonicalError, EventError, Hash32};
 use crate::types::evm::EcdsaError;
-use crate::types::quote::{QuoteAddressError, QuoteError, RailTokenError};
 use crate::types::rpc::RpcError;
 use crate::types::swap::TransitionError;
 use candid::CandidType;
@@ -52,48 +51,6 @@ pub enum AppendError {
     },
     Transition(TransitionError),
     Canonical(CanonicalError),
-}
-
-/// Why `register_quote` stored nothing.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum RegisterQuoteError {
-    Guard(GuardError),
-    InvalidQuote(QuoteError),
-    Expired {
-        expires_at_s: u64,
-        now_s: u64,
-    },
-    ExpiresTooFarAhead {
-        expires_at_s: u64,
-        now_s: u64,
-        max_lifetime_s: u64,
-    },
-    StoreFull {
-        capacity: u64,
-    },
-    /// The quote names no refund address, so no refund could ever be paid on it.
-    NoRefundAddress,
-    /// The quote's refund address is not an EVM address.
-    RefundAddressNotAnAddress {
-        reason: EvmAddressError,
-    },
-    /// The quote's destination address is not an address the destination chain can be
-    /// paid at: every chain this canister pays is an EVM chain, so not an EVM address.
-    DstAddressNotAnAddress {
-        reason: EvmAddressError,
-    },
-    /// The quote names a rail this deploy does not run, by its id: its claim would be
-    /// refused, so the quote is not handed to a user to pay.
-    RailUnavailable {
-        rail: String,
-    },
-    /// A payee the quote names is one the vault cannot pay: the zero address as the
-    /// destination or the refund address.
-    QuoteAddress(QuoteAddressError),
-    /// A token the quote names is not the one its rail carries, the USDC the deploy
-    /// configured for that chain: its claim would be refused on the same check, so the
-    /// quote is not handed to a user to pay.
-    RailToken(RailTokenError),
 }
 
 /// Why `push_chain_data` stored nothing.

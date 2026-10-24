@@ -14,7 +14,6 @@ use types::{
     UnsignedTx, WaitingKey,
 };
 
-pub mod pending_quotes;
 pub mod transitions;
 
 /// Where the event log's fold lives. [`State`] reads and writes only through this, so one

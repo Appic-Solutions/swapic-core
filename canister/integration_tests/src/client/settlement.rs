@@ -6,15 +6,14 @@ use crate::client::pocket::{query, update};
 use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
-    event_count, events_page, evm_address, get_chain_data, get_config, get_config_full,
-    get_pending, get_swap, halted, test_outbox_armed, verify_chain, verify_replay,
+    event_count, events_page, evm_address, get_chain_data, get_config, get_config_full, halted,
+    test_outbox_armed, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, clear_pending_quotes, derive_evm_address, push_chain_data, register_quote,
-    set_config, set_halted, set_roles, set_sanctioned, test_rpc_batch as test_rpc_batch_api,
-    test_send, test_sign,
+    audit_replay_step, derive_evm_address, push_chain_data, set_config, set_halted, set_roles,
+    set_sanctioned, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
 };
 
 pub fn event_count(
@@ -124,59 +123,6 @@ pub fn set_roles(
         "set_roles",
         encode_args((quoter, watcher)).unwrap(),
     )
-}
-
-pub fn register_quote(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    quote: &register_quote::Args,
-) -> register_quote::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "register_quote",
-        encode_one(quote).unwrap(),
-    )
-}
-
-pub fn clear_pending_quotes(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-) -> clear_pending_quotes::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "clear_pending_quotes",
-        encode_one(()).unwrap(),
-    )
-}
-
-pub fn get_pending(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    hash: get_pending::Args,
-) -> get_pending::Response {
-    query(
-        pic,
-        canister,
-        sender,
-        "get_pending",
-        encode_one(hash).unwrap(),
-    )
-}
-
-pub fn get_swap(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    hash: get_swap::Args,
-) -> get_swap::Response {
-    query(pic, canister, sender, "get_swap", encode_one(hash).unwrap())
 }
 
 /// Positional, as the endpoint takes them.

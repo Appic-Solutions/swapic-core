@@ -4,7 +4,6 @@ mod test_design_c;
 mod test_install;
 mod test_outbox;
 mod test_pool;
-mod test_quotes;
 mod test_rpc;
 mod test_sanctions;
 mod test_signing;

@@ -2,7 +2,6 @@ use crate::types::events::Hash32;
 use crate::types::quote::QuoteError;
 use candid::{CandidType, Nat};
 use serde::Deserialize;
-use types::TxHash;
 
 /// Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -18,84 +17,6 @@ pub enum SwapStatus {
     Frozen,
 }
 
-/// The leg of a swap a transaction attempt was signed for.
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Leg {
-    Burn,
-    Mint,
-    Payout,
-    Refund,
-    Reclaim,
-}
-
-/// How a swap's latest attempt ended.
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Confirmed,
-    Failed,
-}
-
-impl From<types::Leg> for Leg {
-    fn from(leg: types::Leg) -> Self {
-        match leg {
-            types::Leg::Burn => Self::Burn,
-            types::Leg::Mint => Self::Mint,
-            types::Leg::Payout => Self::Payout,
-            types::Leg::Refund => Self::Refund,
-            types::Leg::Reclaim => Self::Reclaim,
-        }
-    }
-}
-
-impl From<types::Outcome> for Outcome {
-    fn from(outcome: types::Outcome) -> Self {
-        match outcome {
-            types::Outcome::Confirmed => Self::Confirmed,
-            types::Outcome::Failed => Self::Failed,
-        }
-    }
-}
-
-/// One page of `paused_swaps`: the count of swaps paused on a rail the deploy has off,
-/// among the swaps this page read.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct PausedSwapsPage {
-    /// How many of the swaps this page read are paused.
-    pub paused: u64,
-    /// How many swaps this page read: at most 500.
-    pub read: u64,
-    /// The swap id the next page starts after, while any swap is left after this page;
-    /// absent on the last page.
-    pub next: Option<Hash32>,
-}
-
-/// The folded state of one swap. `waiting_since_ns` is IC time in nanoseconds.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
-pub struct Swap {
-    pub quote_bytes: Vec<u8>,
-    pub status: SwapStatus,
-    pub last_attempt: Option<u32>,
-    pub open_attempt: Option<u32>,
-    pub src_chain: u64,
-    pub src_token: String,
-    pub amount_in: Nat,
-    /// Absent until the swap is paid in stable.
-    pub amount_paid: Option<Nat>,
-    pub waiting_since_ns: Option<u64>,
-    /// The leg the latest attempt was signed for, once one has been.
-    pub last_leg: Option<Leg>,
-    /// How the latest attempt ended: absent while it is open, or before any was signed.
-    pub last_outcome: Option<Outcome>,
-    /// The transaction the latest attempt confirmed as, once it has.
-    pub last_tx_hash: Option<Hash32>,
-    /// What the payout leg was signed to pay the user, once one has been.
-    pub paid_out: Option<Nat>,
-    /// The platform's fee on this swap, once the log has accrued it.
-    pub fee_accrued: Option<Nat>,
-    /// The most the swap's CCTP burn offered Circle, once one was created.
-    pub burn_max_fee: Option<Nat>,
-}
-
 impl From<types::SwapStatus> for SwapStatus {
     fn from(status: types::SwapStatus) -> Self {
         use types::SwapStatus as Domain;
@@ -109,28 +30,6 @@ impl From<types::SwapStatus> for SwapStatus {
             Domain::Refunding => Self::Refunding,
             Domain::Refunded => Self::Refunded,
             Domain::Frozen => Self::Frozen,
-        }
-    }
-}
-
-impl From<types::Swap> for Swap {
-    fn from(swap: types::Swap) -> Self {
-        Self {
-            quote_bytes: swap.quote_bytes,
-            status: swap.status.into(),
-            last_attempt: swap.last_attempt.map(|attempt| attempt.get()),
-            open_attempt: swap.open_attempt.map(|attempt| attempt.get()),
-            src_chain: swap.src_chain.get(),
-            src_token: swap.src_token.to_string(),
-            amount_in: swap.amount_in.into(),
-            amount_paid: swap.amount_paid.map(Nat::from),
-            waiting_since_ns: swap.waiting_since.map(|since| since.as_nanos()),
-            last_leg: swap.last_leg.map(Leg::from),
-            last_outcome: swap.last_outcome.map(Outcome::from),
-            last_tx_hash: swap.last_tx_hash.map(TxHash::into_bytes),
-            paid_out: swap.paid_out.map(Nat::from),
-            fee_accrued: swap.fee_accrued.map(Nat::from),
-            burn_max_fee: swap.burn_max_fee.map(Nat::from),
         }
     }
 }

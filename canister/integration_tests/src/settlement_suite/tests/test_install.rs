@@ -1,17 +1,16 @@
 use crate::client::settlement::{
-    event_count, events_page, get_config_full, get_pending, register_quote, verify_chain,
-    verify_replay,
+    event_count, events_page, get_config_full, push_chain_data, verify_chain, verify_replay,
 };
 use crate::settlement_suite::init::{
     empty_canister, init_arg, install, quoter, rail_usdc, watcher,
 };
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
+use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::config::Config;
-use settlement_api::types::errors::{GuardError, RegisterQuoteError, Role};
+use settlement_api::types::errors::{GuardError, PushChainDataError, Role};
 use settlement_api::types::events::EventType;
 use settlement_api::types::init::InitArg;
-use settlement_api::types::quote::{GasMode, Quote};
 use std::collections::BTreeMap;
 
 /// An install the canister refuses.
@@ -19,28 +18,6 @@ fn refused_install(pic: &PocketIc, canister: Principal, admin: Principal, arg: &
     install(pic, canister, admin, arg)
         .expect_err("the install is refused")
         .reject_message
-}
-
-fn quote_live_at(pic: &PocketIc) -> Quote {
-    let now_s = pic.get_time().as_nanos_since_unix_epoch() / 1_000_000_000;
-    Quote {
-        version: 1,
-        src_chain: 8453,
-        src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-        amount_in: 25_000_000_u32.into(),
-        dst_chain: 42161,
-        dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".into(),
-        expected_out: 24_990_000_u32.into(),
-        min_out: 24_900_000_u32.into(),
-        dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
-        // the store takes only a quote a refund can be paid on
-        refund_address: Some("0x1111111111111111111111111111111111111111".into()),
-        auto_refund: true,
-        gas_mode: GasMode::Gasless,
-        rail: "cctp_v2_fast".into(),
-        expires_at_s: now_s + 60,
-        nonce: 1,
-    }
 }
 
 /// The install is the first config write and the first role rotation, so it refuses what
@@ -133,23 +110,22 @@ fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
 
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), config);
 
-    let quote = quote_live_at(&pic);
+    // the arg's watcher holds its role: its door answers it and no one else
+    let reading = ChainData {
+        block: 19_000_000,
+        base_fee_wei_per_gas: 1_000_000_000_u64.into(),
+        priority_fee_wei_per_gas: 100_000_000_u64.into(),
+    };
     let stranger = Principal::from_slice(&[9; 29]);
     assert_eq!(
-        register_quote(&pic, canister, admin, &quote),
-        Err(RegisterQuoteError::Guard(GuardError::CallerNotRole(
-            Role::Quoter
+        push_chain_data(&pic, canister, admin, 8453, &reading),
+        Err(PushChainDataError::Guard(GuardError::CallerNotRole(
+            Role::Watcher
         )))
     );
-    let hash = register_quote(&pic, canister, quoter(), &quote).expect("the arg's quoter");
     assert_eq!(
-        get_pending(&pic, canister, watcher(), hash),
-        Ok(Some(quote)),
-        "and the arg's watcher reads"
-    );
-    assert_eq!(
-        get_pending(&pic, canister, stranger, hash),
-        Err(GuardError::CallerNotQuoterOrWatcher)
+        push_chain_data(&pic, canister, watcher(), 8453, &reading),
+        Ok(())
     );
 
     let redacted = Config {

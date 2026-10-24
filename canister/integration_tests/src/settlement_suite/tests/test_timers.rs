@@ -1,12 +1,10 @@
 use crate::client::settlement::{self, append, set_config, set_halted, test_skew_state};
 use crate::settlement_suite::init::{quoter, rail_config, setup_with_rail_usdc, upgrade};
-use candid::{Nat, Principal};
+use candid::Principal;
 use pocket_ic::PocketIc;
 use settlement_api::types::config::Config;
 use settlement_api::types::errors::GuardError;
 use settlement_api::types::events::{EventType, Hash32};
-use settlement_api::types::quote::{GasMode, Quote};
-use settlement_api::types::swap::{Swap, SwapStatus};
 use std::time::Duration;
 
 fn stranger() -> Principal {
@@ -36,34 +34,40 @@ fn halted(pic: &PocketIc, canister: Principal) -> bool {
     settlement::halted(pic, canister, stranger())
 }
 
-fn get_swap(pic: &PocketIc, canister: Principal, hash: Hash32) -> Option<Swap> {
-    settlement::get_swap(pic, canister, stranger(), hash)
-}
-
 fn verifies(pic: &PocketIc, canister: Principal) -> bool {
     let chain: bool = settlement::verify_chain(pic, canister, stranger());
     let replay: bool = settlement::verify_replay(pic, canister, stranger());
     chain && replay
 }
 
-fn quote_expiring_in(pic: &PocketIc, ttl_s: u64, auto_refund: bool, nonce: u64) -> Quote {
-    Quote {
+fn quote_expiring_in(pic: &PocketIc, ttl_s: u64, auto_refund: bool, nonce: u64) -> types::Quote {
+    types::Quote {
         version: 1,
-        src_chain: 8453,
-        src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-        amount_in: Nat::from(25_000_000_u32),
-        dst_chain: 42161,
-        dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".into(),
-        expected_out: Nat::from(24_990_000_u32),
-        min_out: Nat::from(24_900_000_u32),
-        dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b".into(),
+        src_chain: types::ChainId::BASE,
+        src_token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap(),
+        amount_in: types::TokenAmount::from(25_000_000_u32),
+        dst_chain: types::ChainId::ARBITRUM,
+        dst_token: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+            .parse()
+            .unwrap(),
+        expected_out: types::TokenAmount::from(24_990_000_u32),
+        min_out: types::TokenAmount::from(24_900_000_u32),
+        dst_address: "0x7551A66653f9a20979ed81835a0b7008EC83401b"
+            .parse()
+            .unwrap(),
         // a quote that asks to be refunded on its own says where: without an address the
         // engine can only stop the refund for a human
-        refund_address: Some("0x7551A66653f9a20979ed81835a0b7008EC83401b".into()),
+        refund_address: Some(
+            "0x7551A66653f9a20979ed81835a0b7008EC83401b"
+                .parse()
+                .unwrap(),
+        ),
         auto_refund,
-        gas_mode: GasMode::Gasless,
-        rail: "cctp_v2_fast".into(),
-        expires_at_s: now_s(pic) + ttl_s,
+        gas_mode: types::GasMode::Gasless,
+        rail: types::Rail::CctpV2Fast,
+        expires_at: types::UnixSeconds::new(now_s(pic) + ttl_s),
         nonce,
     }
 }
@@ -77,8 +81,7 @@ fn waiting_swap(
     auto_refund: bool,
     nonce: u64,
 ) -> Hash32 {
-    let q = types::Quote::try_from(quote_expiring_in(pic, 60, auto_refund, nonce))
-        .expect("a valid quote");
+    let q = quote_expiring_in(pic, 60, auto_refund, nonce);
     let hash = q.hash().expect("a valid quote has an id").into_bytes();
     append(
         pic,
@@ -288,18 +291,4 @@ fn the_halt_flag_survives_an_upgrade() {
     assert!(halted(&pic, canister), "a redeploy is not an investigation");
     set_halted(&pic, canister, admin, false).unwrap();
     assert!(!halted(&pic, canister));
-}
-
-/// What Plan 3 and the indexer read a swap out of.
-#[test]
-fn get_swap_answers_from_the_folded_state() {
-    let (pic, canister, admin) = setup_with_rail_usdc();
-    assert_eq!(get_swap(&pic, canister, [0; 32]), None, "no such swap");
-
-    let hash = waiting_swap(&pic, canister, admin, true, 1);
-    let swap = get_swap(&pic, canister, hash).expect("the swap exists");
-    assert_eq!(swap.status, SwapStatus::WaitingForUser);
-    assert_eq!(swap.amount_in, Nat::from(25_000_000_u32));
-    assert_eq!(swap.src_chain, 8453);
-    assert!(swap.waiting_since_ns.is_some(), "the clock is running");
 }

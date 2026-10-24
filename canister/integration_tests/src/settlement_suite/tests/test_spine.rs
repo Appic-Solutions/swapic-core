@@ -1,5 +1,5 @@
 use crate::client::pocket::query;
-use crate::client::settlement::{append, event_count, events_page, get_swap, test_skew_state};
+use crate::client::settlement::{append, event_count, events_page, test_skew_state};
 use crate::settlement_suite::init::{setup, upgrade};
 use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
@@ -161,14 +161,15 @@ fn spine_holds_across_a_whole_swap_and_an_upgrade() {
     assert!(page(&pic, canister, admin, total + 10, 10).is_empty());
     assert_eq!(page(&pic, canister, admin, 0, 10_000).len() as u64, total);
 
-    let swap = get_swap(&pic, canister, admin, quote_hash()).expect("the swap exists");
-
     upgrade(&pic, canister, admin).unwrap();
 
+    // the fold is stable memory, so it comes through the upgrade without a replay: the
+    // swap is still there to refuse its funds a second time
     assert_eq!(
-        get_swap(&pic, canister, admin, quote_hash()),
-        Some(swap),
-        "the fold is stable memory, so it comes through the upgrade without a replay"
+        append(&pic, canister, admin, dup),
+        Err(TestAppendError::Append(AppendError::Transition(
+            TransitionError::SwapExists(quote_hash())
+        )))
     );
     assert_eq!(count(&pic, canister, admin), total);
     assert!(verify(&pic, canister, admin, "verify_chain"));

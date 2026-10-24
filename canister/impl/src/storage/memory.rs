@@ -19,10 +19,10 @@ const HALT_MEMORY_ID: MemoryId = MemoryId::new(4);
 const SWAPS_MEMORY_ID: MemoryId = MemoryId::new(6);
 const POCKETS_MEMORY_ID: MemoryId = MemoryId::new(7);
 const LEDGER_META_MEMORY_ID: MemoryId = MemoryId::new(8);
-const PENDING_QUOTES_MEMORY_ID: MemoryId = MemoryId::new(9);
+// 9 held the v1 quotes registered and not yet paid: retired, never reused
 const AUTO_REFUND_WAITING_MEMORY_ID: MemoryId = MemoryId::new(10);
 const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
-const PENDING_EXPIRY_MEMORY_ID: MemoryId = MemoryId::new(12);
+// 12 held those quotes' expiry index: retired, never reused
 const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
 const NONCES_MEMORY_ID: MemoryId = MemoryId::new(15);
@@ -97,20 +97,12 @@ pub fn ledger_meta_memory() -> Memory {
     memory(LEDGER_META_MEMORY_ID)
 }
 
-pub fn pending_quotes_memory() -> Memory {
-    memory(PENDING_QUOTES_MEMORY_ID)
-}
-
 pub fn auto_refund_waiting_memory() -> Memory {
     memory(AUTO_REFUND_WAITING_MEMORY_ID)
 }
 
 pub fn audit_cursor_memory() -> Memory {
     memory(AUDIT_CURSOR_MEMORY_ID)
-}
-
-pub fn pending_expiry_memory() -> Memory {
-    memory(PENDING_EXPIRY_MEMORY_ID)
 }
 
 pub fn replay_cursor_memory() -> Memory {

@@ -18,8 +18,6 @@ pub mod timer_state;
 #[cfg(test)]
 mod tests;
 
-use crate::state::pending_quotes;
-
 /// Touches every stable structure in an update context, so their headers are written here
 /// and no query is ever the first to grow stable memory.
 pub fn init() {
@@ -27,7 +25,6 @@ pub fn init() {
     config::init();
     roles::init();
     halt::init();
-    pending_quotes::init();
     audit_cursor::init();
     chain_data::init();
     ecdsa_address::init();

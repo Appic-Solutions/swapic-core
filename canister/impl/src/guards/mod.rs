@@ -3,7 +3,7 @@
 //! principal: a stranger learns whether a role is configured, nothing about who holds it.
 
 use crate::storage::halt::is_halted;
-use crate::storage::roles::{self, Roles};
+use crate::storage::roles;
 use candid::Principal;
 use settlement_api::types::errors::{GuardError, Role};
 
@@ -25,26 +25,8 @@ fn check(holder: Option<Principal>, caller: Principal, role: Role) -> Result<(),
     }
 }
 
-pub fn require_quoter() -> Result<(), GuardError> {
-    check(roles::get().quoter, ic_cdk::api::caller(), Role::Quoter)
-}
-
 pub fn require_watcher() -> Result<(), GuardError> {
     check(roles::get().watcher, ic_cdk::api::caller(), Role::Watcher)
-}
-
-/// Either service. One error for both, so a refusal says nothing about which role the
-/// caller failed to be.
-fn check_either(roles: &Roles, caller: Principal) -> Result<(), GuardError> {
-    match (roles.quoter, roles.watcher) {
-        (None, None) => Err(GuardError::RolesNotSet),
-        (q, w) if q == Some(caller) || w == Some(caller) => Ok(()),
-        _ => Err(GuardError::CallerNotQuoterOrWatcher),
-    }
-}
-
-pub fn require_quoter_or_watcher() -> Result<(), GuardError> {
-    check_either(&roles::get(), ic_cdk::api::caller())
 }
 
 /// The watcher, or a controller standing in for it: the compliance data the watcher pushes
