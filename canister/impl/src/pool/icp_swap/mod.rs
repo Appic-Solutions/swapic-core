@@ -548,9 +548,9 @@ pub async fn refit(
     let Some(payout) = pool_store::payout(id) else {
         return Ok(None);
     };
+    // a waiting payout has no order pinned (`order` is set only by `PayoutSigned`)
     if payout.status != PayoutStatus::Waiting
         || !is_planned(&payout)
-        || payout.order.is_some()
         || payout.fit_tries.unwrap_or(0) >= types::pool::payout::MAX_FIT_TRIES
     {
         return Ok(None);
