@@ -22,14 +22,10 @@ thread_local! {
     static REBALANCE_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
 }
 
-/// The longest the engine's drive waits between two ticks: it serves the Base queue and
-/// walks the payouts' deadlines at least this often, whatever `rail_status_max_age` says.
-pub const PAYOUT_EVERY: Duration = Duration::from_secs(60);
-
 /// A zero interval is a repeating timer with no gap between runs, which burns cycles for
 /// nothing, so every configured interval is clamped to at least a second.
 fn interval(every: Duration) -> Duration {
-    every.max(Duration::from_secs(1))
+    every.max(types::config::TIMER_FLOOR)
 }
 
 /// Wires every repeating timer. Called from `init` and `post_upgrade`, because timers live

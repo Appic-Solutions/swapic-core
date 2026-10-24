@@ -218,6 +218,46 @@ fn interval_changes_flags_each_timer_for_its_own_interval_only() {
         ..Config::default()
     };
     assert_eq!(changes(rail_status), (false, true, false));
+    // past a minute the knob moves no tick: the engine's period is a minute either way
+    let slow = Config {
+        rail_status_max_age: Duration::from_secs(600),
+        ..Config::default()
+    };
+    let slower = Config {
+        rail_status_max_age: Duration::from_secs(900),
+        ..Config::default()
+    };
+    assert!(!slow.interval_changes(&slower).rail_status);
+}
+
+/// The engine ticks on the interval the config names, at most every minute, and on the
+/// floor every timer is held to when the knob is below it: a zero interval would otherwise
+/// put the engine on every round of the subnet.
+#[test]
+fn the_engine_ticks_on_the_configured_interval() {
+    let with = |rail_status_max_age| {
+        Config {
+            rail_status_max_age,
+            ..Config::default()
+        }
+        .engine_every()
+    };
+    assert_eq!(
+        Config::default().engine_every(),
+        Duration::from_secs(30),
+        "the spec's own interval"
+    );
+    assert_eq!(with(Duration::from_secs(5)), Duration::from_secs(5));
+    assert_eq!(
+        with(Duration::from_secs(600)),
+        Duration::from_secs(60),
+        "the payouts' minute at the most"
+    );
+    assert_eq!(
+        with(Duration::ZERO),
+        Duration::from_secs(1),
+        "the floor, not every round of the subnet"
+    );
 }
 
 #[test]

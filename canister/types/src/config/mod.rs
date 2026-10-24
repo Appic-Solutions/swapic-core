@@ -17,6 +17,14 @@ use thiserror::Error;
 /// tight bound fails at set time rather than when the timer is wired.
 pub const MAX_TIMER_INTERVAL: Duration = Duration::from_secs(31_536_000);
 
+/// The longest the engine waits between two ticks: it serves the Base queue and walks the
+/// payouts' deadlines at least this often, whatever `rail_status_max_age` says.
+pub const ENGINE_EVERY_MAX: Duration = Duration::from_secs(60);
+
+/// The least any repeating timer waits between two runs: a zero interval would run on every
+/// round of the subnet and burn cycles for nothing.
+pub const TIMER_FLOOR: Duration = Duration::from_secs(1);
+
 /// The shortest `expiry_check_interval_s` may be: ten seconds. The knob outlived its timer
 /// (the v1 expiry sweep) and keeps the bounds it had, so a config written for it still
 /// reads the same.
@@ -929,7 +937,7 @@ pub enum ConfigError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntervalChanges {
     pub audit: bool,
-    /// The engine's tick, which runs on `rail_status_max_age`.
+    /// The engine's tick, which runs on [`Config::engine_every`].
     pub rail_status: bool,
     pub books: bool,
 }
@@ -1148,11 +1156,20 @@ impl Config {
         self.permit_deadline.saturating_add(self.claim_grace.get())
     }
 
+    /// How often the engine ticks: `rail_status_max_age`, at most [`ENGINE_EVERY_MAX`], at
+    /// least [`TIMER_FLOOR`].
+    pub fn engine_every(&self) -> Duration {
+        self.rail_status_max_age
+            .min(ENGINE_EVERY_MAX)
+            .max(TIMER_FLOOR)
+    }
+
     /// Which timer intervals `new` moves, one flag per timer.
     pub fn interval_changes(&self, new: &Config) -> IntervalChanges {
         IntervalChanges {
             audit: self.replay_audit_interval != new.replay_audit_interval,
-            rail_status: self.rail_status_max_age != new.rail_status_max_age,
+            // the engine's period, not its knob: past a minute the knob moves no tick
+            rail_status: self.engine_every() != new.engine_every(),
             books: self.books_check_interval != new.books_check_interval,
         }
     }
