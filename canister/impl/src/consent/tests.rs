@@ -719,3 +719,21 @@ fn the_standards_are_icrc10_and_icrc21() {
         ]
     );
 }
+
+/// The quoter's own Eco payout order (its builder `built`, which `payout_plan` shares),
+/// captured from its test `usdc_elsewhere_goes_by_eco`: the message names the recipient, the
+/// token and the chain that test asked for.
+#[test]
+fn a_quoter_built_eco_plan_is_described_with_the_terms_it_was_built_for() {
+    let order = hex::decode(include_str!("samples/quoter_eco_payout_arbitrum.hex").trim()).unwrap();
+    let text = generic(
+        "swap_from_icp",
+        swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, order),
+        user(),
+    )
+    .unwrap();
+    assert!(text.starts_with("## Swap ckUSDC to Arbitrum\n\n"), "{text}");
+    assert!(text.contains(" USDC on Arbitrum\n"), "{text}");
+    assert!(text.contains("\n- Token: USDC (0xaf88d065e77c8cC2239327C5EDb3A432268e5831)\n"), "{text}");
+    assert!(text.contains("\n- Recipient: 0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC\n"), "{text}");
+}
