@@ -40,6 +40,37 @@ impl ChainId {
             _ => 12,
         }
     }
+
+    /// The chain's name, for the chains the canister signs on or the deploy script adds;
+    /// None for any other, which a message names by its id.
+    pub const fn name(self) -> Option<&'static str> {
+        match self.0 {
+            1 => Some("Ethereum"),
+            10 => Some("OP Mainnet"),
+            130 => Some("Unichain"),
+            137 => Some("Polygon"),
+            143 => Some("Monad"),
+            480 => Some("World Chain"),
+            999 => Some("HyperEVM"),
+            8453 => Some("Base"),
+            9745 => Some("Plasma"),
+            42161 => Some("Arbitrum"),
+            _ => None,
+        }
+    }
+
+    /// The symbol of the chain's native coin, which every EVM chain counts in wei (18
+    /// decimals); None for a chain [`Self::name`] does not name.
+    pub const fn native_symbol(self) -> Option<&'static str> {
+        match self.0 {
+            1 | 10 | 130 | 480 | 8453 | 42161 => Some("ETH"),
+            137 => Some("POL"),
+            143 => Some("MON"),
+            999 => Some("HYPE"),
+            9745 => Some("XPL"),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ChainId {

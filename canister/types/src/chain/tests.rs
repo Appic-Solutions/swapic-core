@@ -44,3 +44,28 @@ fn a_chain_names_the_seconds_its_block_takes_at_the_most() {
     assert_eq!(ChainId::POLYGON.block_seconds(), 2);
     assert_eq!(ChainId::new(999_999).block_seconds(), 12);
 }
+
+#[test]
+fn the_chains_the_canister_signs_on_have_names_and_native_coins() {
+    let named = [
+        (1, "Ethereum", "ETH"),
+        (10, "OP Mainnet", "ETH"),
+        (130, "Unichain", "ETH"),
+        (137, "Polygon", "POL"),
+        (143, "Monad", "MON"),
+        (480, "World Chain", "ETH"),
+        (999, "HyperEVM", "HYPE"),
+        (8453, "Base", "ETH"),
+        (9745, "Plasma", "XPL"),
+        (42161, "Arbitrum", "ETH"),
+    ];
+    for (id, name, symbol) in named {
+        assert_eq!(ChainId::new(id).name(), Some(name), "{id}");
+        assert_eq!(ChainId::new(id).native_symbol(), Some(symbol), "{id}");
+    }
+    // Arc is not offered, BSC is not deployed: unnamed, so a message writes their ids
+    for id in [5042, 56] {
+        assert_eq!(ChainId::new(id).name(), None);
+        assert_eq!(ChainId::new(id).native_symbol(), None);
+    }
+}
