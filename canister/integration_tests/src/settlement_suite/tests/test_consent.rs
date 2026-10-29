@@ -104,7 +104,11 @@ fn a_stake_is_described_to_its_staker_and_to_a_cold_signer_and_nothing_is_writte
              kdt24-ukskj-jfeus-skjjf-eussk-jjfeu-sskjj-feuss-kjjfe-usskj-jfe"
         ))
     );
-    assert_eq!(event_count(&pic, canister, admin), before, "nothing written");
+    assert_eq!(
+        event_count(&pic, canister, admin),
+        before,
+        "nothing written"
+    );
 }
 
 #[test]
@@ -126,8 +130,12 @@ fn another_method_is_unsupported_and_a_swap_before_the_address_is_unavailable() 
                 .to_string()
         }))
     );
-    let usdc: types::EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".parse().unwrap();
-    let to: types::EvmAddress = "0x2222222222222222222222222222222222222222".parse().unwrap();
+    let usdc: types::EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        .parse()
+        .unwrap();
+    let to: types::EvmAddress = "0x2222222222222222222222222222222222222222"
+        .parse()
+        .unwrap();
     let plan = encode_order(&Order {
         r#ref: FixedBytes([0x61; 32]),
         payer: addr(types::EvmAddress::new([0x36; 20])),
@@ -163,8 +171,9 @@ fn another_method_is_unsupported_and_a_swap_before_the_address_is_unavailable() 
     assert_eq!(
         answer,
         ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
-            description: "swap_from_icp: Unavailable(\"the canister's address is not derived yet\")"
-                .to_string()
+            description:
+                "swap_from_icp: Unavailable(\"the canister's address is not derived yet\")"
+                    .to_string()
         }))
     );
 }

@@ -95,7 +95,10 @@ mod standard {
         UnsupportedCanisterCall(icrc21_error_info),
         ConsentMessageUnavailable(icrc21_error_info),
         InsufficientPayment(icrc21_error_info),
-        GenericError { error_code: Nat, description: String },
+        GenericError {
+            error_code: Nat,
+            description: String,
+        },
     }
 
     #[derive(CandidType, Deserialize)]
@@ -130,7 +133,11 @@ fn a_signers_request_decodes_as_ours_and_our_answer_as_the_standards() {
     let theirs = ty::<standard::icrc21_consent_message_request>(&mut env);
     let ours = ty::<ConsentMessageRequest>(&mut env);
     assert_eq!(fits(&env, &theirs, &ours), Ok(()), "a signer's request");
-    assert_eq!(fits(&env, &ours, &theirs), Ok(()), "the same record both ways");
+    assert_eq!(
+        fits(&env, &ours, &theirs),
+        Ok(()),
+        "the same record both ways"
+    );
     let ours = ty::<ConsentMessageResponse>(&mut env);
     let theirs = ty::<standard::icrc21_consent_message_response>(&mut env);
     assert_eq!(fits(&env, &ours, &theirs), Ok(()), "our answer");

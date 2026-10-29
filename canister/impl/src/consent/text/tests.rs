@@ -17,7 +17,11 @@ fn decimals_are_exact_and_trimmed() {
         (u128::MAX, 6, "340282366920938463463374607431768.211455"),
     ];
     for (units, decimals, text) in cases {
-        assert_eq!(decimal(TokenAmount::new(units), decimals), text, "{units} at {decimals}");
+        assert_eq!(
+            decimal(TokenAmount::new(units), decimals),
+            text,
+            "{units} at {decimals}"
+        );
     }
 }
 
@@ -25,8 +29,16 @@ fn decimals_are_exact_and_trimmed() {
 #[test]
 fn amounts_name_their_token_or_its_id() {
     let vchf = Principal::from_text("ly36x-wiaaa-aaaai-aqj7q-cai").unwrap();
-    let other: EvmAddress = "0x3333333333333333333333333333333333333333".parse().unwrap();
-    let amount = |units: u128, token: TokenName| Amount { units: TokenAmount::new(units), token }.to_string();
+    let other: EvmAddress = "0x3333333333333333333333333333333333333333"
+        .parse()
+        .unwrap();
+    let amount = |units: u128, token: TokenName| {
+        Amount {
+            units: TokenAmount::new(units),
+            token,
+        }
+        .to_string()
+    };
     assert_eq!(amount(5_100_000, CKUSDC), "5.1 ckUSDC");
     assert_eq!(amount(9_900_000, USDC), "9.9 USDC");
     assert_eq!(
@@ -60,14 +72,30 @@ fn accounts_are_named_in_full_and_the_asking_wallet_is_marked() {
     let other = Principal::from_slice(&[0x51; 29]);
     let sevens = "0707070707070707070707070707070707070707070707070707070707070707";
     let account = |owner, subaccount| IcpAccount { owner, subaccount };
-    assert_eq!(AccountText::Yours { subaccount: None }.to_string(), "your account");
-    assert_eq!(AccountText::Yours { subaccount: Some([0; 32]) }.to_string(), "your account");
     assert_eq!(
-        AccountText::Yours { subaccount: Some([7; 32]) }.to_string(),
+        AccountText::Yours { subaccount: None }.to_string(),
+        "your account"
+    );
+    assert_eq!(
+        AccountText::Yours {
+            subaccount: Some([0; 32])
+        }
+        .to_string(),
+        "your account"
+    );
+    assert_eq!(
+        AccountText::Yours {
+            subaccount: Some([7; 32])
+        }
+        .to_string(),
         format!("your account (subaccount {sevens})")
     );
     assert_eq!(
-        AccountText::Other { account: account(me, None), asker: me }.to_string(),
+        AccountText::Other {
+            account: account(me, None),
+            asker: me
+        }
+        .to_string(),
         "kdt24-ukskj-jfeus-skjjf-eussk-jjfeu-sskjj-feuss-kjjfe-usskj-jfe (this wallet)"
     );
     assert_eq!(
@@ -75,17 +103,31 @@ fn accounts_are_named_in_full_and_the_asking_wallet_is_marked() {
         format!("kdt24-ukskj-jfeus-skjjf-eussk-jjfeu-sskjj-feuss-kjjfe-usskj-jfe (this wallet, subaccount {sevens})")
     );
     assert_eq!(
-        AccountText::Other { account: account(other, None), asker: me }.to_string(),
+        AccountText::Other {
+            account: account(other, None),
+            asker: me
+        }
+        .to_string(),
         "im66i-jsrkf-ivcuk-rkfiv-cukrk-fivcu-krkfi-vcukr-kfivc-ukrkf-ivc"
     );
     assert_eq!(
-        AccountText::Other { account: account(other, Some([7; 32])), asker: me }.to_string(),
-        format!("im66i-jsrkf-ivcuk-rkfiv-cukrk-fivcu-krkfi-vcukr-kfivc-ukrkf-ivc (subaccount {sevens})")
+        AccountText::Other {
+            account: account(other, Some([7; 32])),
+            asker: me
+        }
+        .to_string(),
+        format!(
+            "im66i-jsrkf-ivcuk-rkfiv-cukrk-fivcu-krkfi-vcukr-kfivc-ukrkf-ivc (subaccount {sevens})"
+        )
     );
     // a cold signer asks anonymously: the anonymous principal is never "this wallet"
     let anonymous = Principal::anonymous();
     assert_eq!(
-        AccountText::Other { account: account(anonymous, None), asker: anonymous }.to_string(),
+        AccountText::Other {
+            account: account(anonymous, None),
+            asker: anonymous
+        }
+        .to_string(),
         "2vxsx-fae"
     );
     assert_eq!(normal(Some([0; 32])), None);
@@ -98,7 +140,11 @@ fn instants_are_written_in_utc_or_the_offset_asked() {
     let cases = [
         (at(1_793_189_700), None, "28 Oct 2026, 12:15 UTC"),
         (at(1_793_189_700), Some(240), "28 Oct 2026, 16:15 UTC+04:00"),
-        (at(1_793_189_700), Some(-330), "28 Oct 2026, 06:45 UTC-05:30"),
+        (
+            at(1_793_189_700),
+            Some(-330),
+            "28 Oct 2026, 06:45 UTC-05:30",
+        ),
         (at(1_793_189_700), Some(841), "28 Oct 2026, 12:15 UTC"),
         (at(1_793_189_700), Some(i16::MIN), "28 Oct 2026, 12:15 UTC"),
         (at(0), None, "1 Jan 1970, 00:00 UTC"),
@@ -106,11 +152,22 @@ fn instants_are_written_in_utc_or_the_offset_asked() {
         (at(951_782_400), None, "29 Feb 2000, 00:00 UTC"),
         (at(4_102_444_799), None, "31 Dec 2099, 23:59:59 UTC"),
         // seconds are written when they are not zero: a deadline is never rounded
-        (Timestamp::from_nanos(1_793_205_930_999_999_999), None, "28 Oct 2026, 16:45:30 UTC"),
-        (Timestamp::from_nanos(u64::MAX), None, "21 Jul 2554, 23:34:33 UTC"),
+        (
+            Timestamp::from_nanos(1_793_205_930_999_999_999),
+            None,
+            "28 Oct 2026, 16:45:30 UTC",
+        ),
+        (
+            Timestamp::from_nanos(u64::MAX),
+            None,
+            "21 Jul 2554, 23:34:33 UTC",
+        ),
     ];
     for (instant, asked, text) in cases {
-        let local = LocalTime { at: instant, offset: UtcOffset::of(asked) };
+        let local = LocalTime {
+            at: instant,
+            offset: UtcOffset::of(asked),
+        };
         assert_eq!(local.to_string(), text, "{instant:?} at {asked:?}");
     }
 }

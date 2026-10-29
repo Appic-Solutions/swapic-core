@@ -660,7 +660,9 @@ fn a_check_before_settings_records_nothing() {
 fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
     use settlement_api::types::pool::{IcpAccount as WireAccount, PoolAccount as WirePool};
     let caller = account(7).owner;
-    let evm_owner: types::EvmAddress = "0x1111111111111111111111111111111111111111".parse().unwrap();
+    let evm_owner: types::EvmAddress = "0x1111111111111111111111111111111111111111"
+        .parse()
+        .unwrap();
     let stake = StakeRequest::of(
         caller,
         StakeIcpArgs {
@@ -683,12 +685,17 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
         StakeIcpArgs {
             from_subaccount: Some(vec![7; 31]),
             amount: Nat::from(1_u8),
-            owner: WirePool::Icp(WireAccount { owner: caller, subaccount: None }),
+            owner: WirePool::Icp(WireAccount {
+                owner: caller,
+                subaccount: None,
+            }),
         },
     );
     assert_eq!(
         short,
-        Err(PoolError::NotAllowed("from_subaccount must be 32 bytes, not 31".to_string()))
+        Err(PoolError::NotAllowed(
+            "from_subaccount must be 32 bytes, not 31".to_string()
+        ))
     );
     let wire = |usdc: Nat| WithdrawIcpArgs {
         from: None,
@@ -696,7 +703,10 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
         max_shares: Nat::from(10_u8),
         token_out: caller,
         min_out: Nat::from(99_990_000_u64),
-        to: WireAccount { owner: caller, subaccount: None },
+        to: WireAccount {
+            owner: caller,
+            subaccount: None,
+        },
     };
     assert_eq!(
         WithdrawRequest::of(caller, wire(Nat::from(100_000_000_u64))),
@@ -707,11 +717,16 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
             max_shares: Shares::new(10),
             token_out: caller,
             min_out: 99_990_000,
-            to: IcpAccount { owner: caller, subaccount: None },
+            to: IcpAccount {
+                owner: caller,
+                subaccount: None
+            },
         })
     );
     assert_eq!(
         WithdrawRequest::of(caller, wire(Nat::from(u128::MAX) + Nat::from(1_u8))),
-        Err(PoolError::NotAllowed("usdc does not fit 128 bits".to_string()))
+        Err(PoolError::NotAllowed(
+            "usdc does not fit 128 bits".to_string()
+        ))
     );
 }

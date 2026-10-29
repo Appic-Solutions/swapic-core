@@ -168,12 +168,16 @@ fn as_plan(mut order: Order) -> Vec<u8> {
 
 /// 5 USDC on Base to USDC on Arbitrum through Eco: at least 5 USDC to 0xf00E...89AC.
 fn eco_plan() -> Vec<u8> {
-    as_plan(sample(include_str!("../pool/pay/samples/eco_base_to_arbitrum.hex")))
+    as_plan(sample(include_str!(
+        "../pool/pay/samples/eco_base_to_arbitrum.hex"
+    )))
 }
 
 /// 1 USDC to ether on Base through KyberSwap: at least 408660260803591 wei to 0xf00E...89AC.
 fn ether_plan() -> Vec<u8> {
-    as_plan(sample(include_str!("../pool/pay/samples/same_chain_base.hex")))
+    as_plan(sample(include_str!(
+        "../pool/pay/samples/same_chain_base.hex"
+    )))
 }
 
 /// 500 USDC to WETH on Base through the real KyberSwap route, at least 0.2 WETH to
@@ -316,7 +320,10 @@ fn a_swap_of_icp_to_ether_names_base_s_own_coin_and_another_refund_account() {
             icp(),
             25_000_000,
             Some(vec![7; 32]),
-            Some(WireAccount { owner: receiver(), subaccount: None }),
+            Some(WireAccount {
+                owner: receiver(),
+                subaccount: None,
+            }),
             LATER_NS,
             ether_plan(),
         ),
@@ -403,8 +410,12 @@ fn a_stake_is_described_to_its_staker_and_to_a_cold_signer() {
         )
     );
     assert_eq!(
-        generic("stake_icp", stake_arg(icp_account(staker(), Some(vec![7; 32])), None), staker())
-            .unwrap(),
+        generic(
+            "stake_icp",
+            stake_arg(icp_account(staker(), Some(vec![7; 32])), None),
+            staker()
+        )
+        .unwrap(),
         format!(
             "{header}- Stake owned by: \
              kdt24-ukskj-jfeus-skjjf-eussk-jjfeu-sskjj-feuss-kjjfe-usskj-jfe (this wallet, \
@@ -414,11 +425,16 @@ fn a_stake_is_described_to_its_staker_and_to_a_cold_signer() {
     assert_eq!(
         generic(
             "stake_icp",
-            stake_arg(WirePool::Evm("0x1111111111111111111111111111111111111111".to_string()), None),
+            stake_arg(
+                WirePool::Evm("0x1111111111111111111111111111111111111111".to_string()),
+                None
+            ),
             staker()
         )
         .unwrap(),
-        format!("{header}- Stake owned by: the EVM address 0x1111111111111111111111111111111111111111")
+        format!(
+            "{header}- Stake owned by: the EVM address 0x1111111111111111111111111111111111111111"
+        )
     );
 }
 
@@ -436,7 +452,15 @@ fn a_withdrawal_on_icp_states_who_is_paid_at_least_what() {
         })
         .unwrap()
     };
-    let to_self = wire(None, ckusdc(), 99_990_000, WireAccount { owner: staker(), subaccount: None });
+    let to_self = wire(
+        None,
+        ckusdc(),
+        99_990_000,
+        WireAccount {
+            owner: staker(),
+            subaccount: None,
+        },
+    );
     assert_eq!(
         generic("withdraw_icp", to_self, staker()).unwrap(),
         "## Withdraw from the Swapic pool on ICP\n\n\
@@ -449,7 +473,10 @@ fn a_withdrawal_on_icp_states_who_is_paid_at_least_what() {
         Some(vec![7; 32]),
         icp(),
         1_250_000_000,
-        WireAccount { owner: receiver(), subaccount: None },
+        WireAccount {
+            owner: receiver(),
+            subaccount: None,
+        },
     );
     assert_eq!(
         generic("withdraw_icp", as_icp, staker()).unwrap(),
@@ -487,7 +514,11 @@ fn a_fields_display_gets_the_same_facts_as_plain_fields() {
     let config = config();
     let mut asked = request("withdraw_evm", withdrawal_arg());
     asked.user_preferences.device_spec = Some(DeviceSpec::FieldsDisplay);
-    let text = |content: &str| Value::Text(TextValue { content: content.to_string() });
+    let text = |content: &str| {
+        Value::Text(TextValue {
+            content: content.to_string(),
+        })
+    };
     assert_eq!(
         answer(&asked, &known(&config, Principal::anonymous())),
         ConsentMessageResponse::Ok(ConsentInfo {
@@ -546,10 +577,16 @@ fn the_deadline_is_written_in_the_offset_asked_and_the_metadata_says_which() {
         }
     };
     let (text, metadata) = ask(Some(240), "en");
-    assert!(text.contains("\n- Deadline: 28 Oct 2026, 16:15 UTC+04:00\n"), "{text}");
+    assert!(
+        text.contains("\n- Deadline: 28 Oct 2026, 16:15 UTC+04:00\n"),
+        "{text}"
+    );
     assert_eq!(metadata.utc_offset_minutes, Some(240));
     let (text, metadata) = ask(Some(10_000), "en");
-    assert!(text.contains("\n- Deadline: 28 Oct 2026, 12:15 UTC\n"), "{text}");
+    assert!(
+        text.contains("\n- Deadline: 28 Oct 2026, 12:15 UTC\n"),
+        "{text}"
+    );
     assert_eq!(metadata.utc_offset_minutes, Some(0));
     let (german, metadata) = ask(None, "de-CH");
     assert_eq!(metadata.language, "en");
@@ -562,15 +599,25 @@ fn both_displays_state_the_same_lines_in_the_same_order() {
     let calls = [
         ("stake_icp", stake_arg(icp_account(staker(), None), None)),
         ("withdraw_evm", withdrawal_arg()),
-        ("swap_from_icp", swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, eco_plan())),
+        (
+            "swap_from_icp",
+            swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, eco_plan()),
+        ),
     ];
     for (method, arg) in calls {
         let consent = consent(method, &arg, &known(&config, staker())).unwrap();
         let markdown = consent.markdown(UtcOffset::of(None));
         let fields = consent.fields();
-        assert_eq!(markdown.lines().count(), fields.fields.len() + 2, "{method}");
+        assert_eq!(
+            markdown.lines().count(),
+            fields.fields.len() + 2,
+            "{method}"
+        );
         for ((label, _), line) in fields.fields.iter().zip(markdown.lines().skip(2)) {
-            assert!(line.starts_with(&format!("- {label}: ")), "{method}: {line}");
+            assert!(
+                line.starts_with(&format!("- {label}: ")),
+                "{method}: {line}"
+            );
         }
     }
 }
@@ -582,8 +629,14 @@ fn no_message_says_rebalancing_position_or_a_chain_id() {
     let calls = [
         ("stake_icp", stake_arg(icp_account(staker(), None), None)),
         ("withdraw_evm", withdrawal_arg()),
-        ("swap_from_icp", swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, eco_plan())),
-        ("swap_from_icp", swap_arg(icp(), 25_000_000, None, None, LATER_NS, ether_plan())),
+        (
+            "swap_from_icp",
+            swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, eco_plan()),
+        ),
+        (
+            "swap_from_icp",
+            swap_arg(icp(), 25_000_000, None, None, LATER_NS, ether_plan()),
+        ),
     ];
     for (method, arg) in calls {
         let text = consent(method, &arg, &known(&config, staker()))
@@ -623,7 +676,11 @@ fn any_other_method_is_refused_by_name_bounded() {
          withdraw_icp and withdraw_evm"
     );
     let description = unsupported(ask(&"a".repeat(100_000)));
-    assert!(description.len() <= MAX_DESCRIPTION_BYTES + 3, "{}", description.len());
+    assert!(
+        description.len() <= MAX_DESCRIPTION_BYTES + 3,
+        "{}",
+        description.len()
+    );
 }
 
 /// Review Focus 2 and 5.
@@ -632,12 +689,17 @@ fn an_argument_the_door_would_not_take_is_refused_never_trapped() {
     let config = config();
     let k = known(&config, staker());
     let ask = |method: &str, arg: Vec<u8>| answer(&request(method, arg), &k);
-    assert!(unsupported(ask("stake_icp", encode_one("not a stake").unwrap()))
-        .starts_with("the argument of stake_icp does not decode: "));
+    assert!(
+        unsupported(ask("stake_icp", encode_one("not a stake").unwrap()))
+            .starts_with("the argument of stake_icp does not decode: ")
+    );
     assert!(unsupported(ask("stake_icp", vec![0xff; 8]))
         .starts_with("the argument of stake_icp does not decode: "));
     assert_eq!(
-        unsupported(ask("stake_icp", stake_arg(icp_account(staker(), None), Some(vec![1; 31])))),
+        unsupported(ask(
+            "stake_icp",
+            stake_arg(icp_account(staker(), None), Some(vec![1; 31]))
+        )),
         "stake_icp: NotAllowed(\"from_subaccount must be 32 bytes, not 31\")"
     );
     let huge = encode_one(IcpSwapTerms {
@@ -647,7 +709,10 @@ fn an_argument_the_door_would_not_take_is_refused_never_trapped() {
         refund_to: None,
         slippage_bps: 100,
         deadline_ns: DEADLINE_NS,
-        plan: PayoutPlan { order: eco_plan(), gas_limit: 600_000 },
+        plan: PayoutPlan {
+            order: eco_plan(),
+            gas_limit: 600_000,
+        },
     })
     .unwrap();
     assert_eq!(
@@ -664,7 +729,14 @@ fn an_argument_the_door_would_not_take_is_refused_never_trapped() {
     assert_eq!(
         unsupported(ask(
             "swap_from_icp",
-            swap_arg(ckusdc(), 1, None, None, DEADLINE_NS, vec![0; 16 * 1_024 + 1])
+            swap_arg(
+                ckusdc(),
+                1,
+                None,
+                None,
+                DEADLINE_NS,
+                vec![0; 16 * 1_024 + 1]
+            )
         )),
         "swap_from_icp: NotAllowed(\"a payout plan is at most 16384 bytes\")"
     );
@@ -679,7 +751,10 @@ fn an_argument_the_door_would_not_take_is_refused_never_trapped() {
         candid::decode_args(&withdrawal_arg()).unwrap();
     withdrawal.staker = "0xnotanaddress".to_string();
     assert_eq!(
-        unsupported(ask("withdraw_evm", encode_args((withdrawal, signature)).unwrap())),
+        unsupported(ask(
+            "withdraw_evm",
+            encode_args((withdrawal, signature)).unwrap()
+        )),
         "withdraw_evm: NotAllowed(\"staker is not an EVM address\")"
     );
 }
@@ -689,14 +764,23 @@ fn an_argument_the_door_would_not_take_is_refused_never_trapped() {
 fn a_swap_the_canister_cannot_read_yet_is_unavailable() {
     let config = config();
     let arg = swap_arg(ckusdc(), 5_100_000, None, None, DEADLINE_NS, eco_plan());
-    let no_address = Known { canister: None, ..known(&config, user()) };
+    let no_address = Known {
+        canister: None,
+        ..known(&config, user())
+    };
     assert_eq!(
         not_now(answer(&request("swap_from_icp", arg.clone()), &no_address)),
         "swap_from_icp: Unavailable(\"the canister's address is not derived yet\")"
     );
-    let no_pool_chain = types::Config { pool_chain: None, ..config.clone() };
+    let no_pool_chain = types::Config {
+        pool_chain: None,
+        ..config.clone()
+    };
     assert_eq!(
-        not_now(answer(&request("swap_from_icp", arg), &known(&no_pool_chain, user()))),
+        not_now(answer(
+            &request("swap_from_icp", arg),
+            &known(&no_pool_chain, user())
+        )),
         "swap_from_icp: Closed(\"no pool chain is configured\")"
     );
 }
@@ -734,6 +818,12 @@ fn a_quoter_built_eco_plan_is_described_with_the_terms_it_was_built_for() {
     .unwrap();
     assert!(text.starts_with("## Swap ckUSDC to Arbitrum\n\n"), "{text}");
     assert!(text.contains(" USDC on Arbitrum\n"), "{text}");
-    assert!(text.contains("\n- Token: USDC (0xaf88d065e77c8cC2239327C5EDb3A432268e5831)\n"), "{text}");
-    assert!(text.contains("\n- Recipient: 0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC\n"), "{text}");
+    assert!(
+        text.contains("\n- Token: USDC (0xaf88d065e77c8cC2239327C5EDb3A432268e5831)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n- Recipient: 0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC\n"),
+        "{text}"
+    );
 }

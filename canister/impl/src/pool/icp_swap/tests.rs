@@ -1401,7 +1401,10 @@ fn a_plan_is_decoded_and_its_delivery_read_as_check_reads_them() {
             "the payout plan is not abi.encode of an Order".to_string()
         ))
     );
-    let order = plan_order(TokenAmount::from(5_000_000_u64), TokenAmount::from(4_900_000_u64));
+    let order = plan_order(
+        TokenAmount::from(5_000_000_u64),
+        TokenAmount::from(4_900_000_u64),
+    );
     assert_eq!(
         decode_plan(&types::swapic::encode_order(&order)),
         Ok(order.clone())

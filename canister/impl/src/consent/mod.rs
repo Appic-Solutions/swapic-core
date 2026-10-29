@@ -30,8 +30,8 @@ use settlement_api::types::pool::{
 };
 use std::fmt;
 use text::{
-    AccountText, Amount, ChainText, LocalTime, TokenName, UtcOffset, CKUSDC, NATIVE_DECIMALS,
-    USDC, USDC_DECIMALS,
+    AccountText, Amount, ChainText, LocalTime, TokenName, UtcOffset, CKUSDC, NATIVE_DECIMALS, USDC,
+    USDC_DECIMALS,
 };
 use thiserror::Error;
 use types::pool::{IcpAccount, PoolAccount};
@@ -327,8 +327,14 @@ pub fn consent(method: &str, arg: &[u8], known: &Known) -> Result<Consent, Refus
 /// The ICRC-10 answer: this standard and ICRC-21.
 pub fn supported_standards() -> Vec<SupportedStandard> {
     [
-        ("ICRC-10", "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-10/ICRC-10.md"),
-        ("ICRC-21", "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-21/ICRC-21.md"),
+        (
+            "ICRC-10",
+            "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-10/ICRC-10.md",
+        ),
+        (
+            "ICRC-21",
+            "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-21/ICRC-21.md",
+        ),
     ]
     .into_iter()
     .map(|(name, url)| SupportedStandard {
@@ -404,7 +410,10 @@ fn swap(door: Door, terms: IcpSwapTerms, known: &Known) -> Result<Consent, Refus
                 },
             ),
             Line::text("Recipient gets at least", format!("{gets} on {chain}")),
-            Line::text("Token", token_line(delivery.chain, delivery.token, gets.token)),
+            Line::text(
+                "Token",
+                token_line(delivery.chain, delivery.token, gets.token),
+            ),
             Line::text("Recipient", delivery.recipient),
             Line::time("Deadline", request.deadline),
             Line::text(
@@ -521,7 +530,10 @@ fn withdraw_evm(door: Door, args: EvmWithdrawal, known: &Known) -> Result<Consen
                 ),
             ),
             Line::text("Recipient gets at least", format!("{gets} on {chain}")),
-            Line::text("Token", token_line(terms.dst_chain, terms.token_out, gets.token)),
+            Line::text(
+                "Token",
+                token_line(terms.dst_chain, terms.token_out, gets.token),
+            ),
             Line::text("Recipient", terms.recipient),
             Line::time("Deadline", terms.deadline),
             Line::text(

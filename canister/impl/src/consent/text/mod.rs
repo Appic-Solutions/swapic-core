@@ -27,9 +27,15 @@ pub enum TokenName {
 /// Micro USDC: the unit the pool and the books count USDC and ckUSDC in.
 pub const USDC_DECIMALS: u8 = 6;
 /// ckUSDC, which the pool counts in micro USDC.
-pub const CKUSDC: TokenName = TokenName::Known { symbol: "ckUSDC", decimals: USDC_DECIMALS };
+pub const CKUSDC: TokenName = TokenName::Known {
+    symbol: "ckUSDC",
+    decimals: USDC_DECIMALS,
+};
 /// USDC on a chain the canister signs on, and the pool's value, in micro USDC.
-pub const USDC: TokenName = TokenName::Known { symbol: "USDC", decimals: USDC_DECIMALS };
+pub const USDC: TokenName = TokenName::Known {
+    symbol: "USDC",
+    decimals: USDC_DECIMALS,
+};
 /// What an EVM chain's native coin is counted in: wei, 10^-18.
 pub const NATIVE_DECIMALS: u8 = 18;
 
@@ -107,7 +113,10 @@ pub enum AccountText {
     /// The caller's own account: no principal, since a cold signer asks anonymously.
     Yours { subaccount: Option<[u8; 32]> },
     /// Any other account, by its principal in full; marked when the asking wallet owns it.
-    Other { account: IcpAccount, asker: Principal },
+    Other {
+        account: IcpAccount,
+        asker: Principal,
+    },
 }
 
 impl fmt::Display for AccountText {
@@ -179,7 +188,12 @@ impl fmt::Display for LocalTime {
             .and_then(|index| MONTHS.get(index))
             .expect("BUG: civil answers a month from 1 to 12");
         let second = local.rem_euclid(86_400);
-        write!(f, "{day} {month} {year}, {:02}:{:02}", second / 3_600, second % 3_600 / 60)?;
+        write!(
+            f,
+            "{day} {month} {year}, {:02}:{:02}",
+            second / 3_600,
+            second % 3_600 / 60
+        )?;
         if second % 60 != 0 {
             write!(f, ":{:02}", second % 60)?;
         }
