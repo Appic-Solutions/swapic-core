@@ -1,0 +1,1 @@
+pub mod icrc21_canister_call_consent_message;

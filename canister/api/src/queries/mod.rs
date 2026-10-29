@@ -9,9 +9,11 @@
 mod chain;
 mod config;
 mod events;
+mod icrc10;
 mod ops;
 
 pub use chain::get_chain_data;
 pub use config::{get_config, get_config_full};
 pub use events::{event_count, events_page, verify_chain, verify_replay};
+pub use icrc10::icrc10_supported_standards;
 pub use ops::{evm_address, halted, test_outbox_armed, version};

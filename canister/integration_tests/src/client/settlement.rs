@@ -7,13 +7,14 @@ use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
     event_count, events_page, evm_address, get_chain_data, get_config, get_config_full, halted,
-    test_outbox_armed, verify_chain, verify_replay,
+    icrc10_supported_standards, test_outbox_armed, verify_chain, verify_replay,
 };
 use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, derive_evm_address, push_chain_data, set_config, set_halted, set_roles,
-    set_sanctioned, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
+    audit_replay_step, derive_evm_address, icrc21_canister_call_consent_message, push_chain_data,
+    set_config, set_halted, set_roles, set_sanctioned, test_rpc_batch as test_rpc_batch_api,
+    test_send, test_sign,
 };
 
 pub fn event_count(
@@ -339,5 +340,36 @@ pub fn set_sanctioned(
         sender,
         "set_sanctioned",
         encode_args((add, remove)).unwrap(),
+    )
+}
+
+/// ICRC-21: what a wallet would show before signing `request.method` with `request.arg`.
+pub fn icrc21_canister_call_consent_message(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    request: &icrc21_canister_call_consent_message::Args,
+) -> icrc21_canister_call_consent_message::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "icrc21_canister_call_consent_message",
+        encode_one(request).unwrap(),
+    )
+}
+
+/// ICRC-10: the standards the canister implements.
+pub fn icrc10_supported_standards(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+) -> icrc10_supported_standards::Response {
+    query(
+        pic,
+        canister,
+        sender,
+        "icrc10_supported_standards",
+        encode_one(()).unwrap(),
     )
 }

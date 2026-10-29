@@ -239,6 +239,41 @@ type ConfigError = variant {
   DurationTooLong : record { field : text };
   EmptyRpcUrl : record { chain_id : nat64 };
 };
+// `icrc21_consent_info`.
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+// `icrc21_consent_message`.
+type ConsentMessage = variant {
+  FieldsDisplayMessage : FieldsDisplay;
+  GenericDisplayMessage : text;
+};
+// `icrc21_consent_message_metadata`.
+type ConsentMessageMetadata = record {
+  // Minutes east of UTC. In a request, None is UTC; in an answer, None says the message
+  // holds no local time.
+  utc_offset_minutes : opt int16;
+  // A BCP-47 language tag.
+  language : text;
+};
+// `icrc21_consent_message_request`: the call a signer is about to make.
+type ConsentMessageRequest = record {
+  // Its candid argument, byte for byte as the signer would send it.
+  arg : blob;
+  // The method the signer would call on this canister.
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+// `icrc21_consent_message_response`. A variant of its own rather than a `Result`, so the
+// did gains no `Result_N` and every existing one keeps its number.
+type ConsentMessageResponse = variant { Ok : ConsentInfo; Err : Icrc21Error };
+// `icrc21_consent_message_spec`.
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  // None: the canister picks (this one: the generic display).
+  device_spec : opt DeviceSpec;
+};
 // A controller's answer to a deposit held for a human (`resolve_deposit`): back to its
 // payout with fresh attempts, what arrived back to its payer on Base, or its transfer found
 // landed in ledger block `block`.
@@ -246,6 +281,13 @@ type DepositResolution = variant {
   Refund;
   MarkPaid : record { block : nat64 };
   Retry;
+};
+// The display a signer shows a message on.
+type DeviceSpec = variant {
+  // Markdown, no external resources.
+  GenericDisplay;
+  // Titled fields of plain text.
+  FieldsDisplay;
 };
 // Why a key or a signature is not one this canister can use. A refused management call is
 // reported rather than trapped: the interface specification says a rejected signing
@@ -258,6 +300,8 @@ type EcdsaError = variant {
   Signature : record { message : text };
   PublicKey : record { message : text };
 };
+// `icrc21_error_info`: a description for developers, never shown to the user.
+type ErrorInfo = record { description : text };
 // One entry of the log. `time_ns` is IC time in nanoseconds.
 type Event = record {
   hash : blob;
@@ -436,6 +480,11 @@ type EvmWithdrawal = record {
   network_fee : nat;
   payout : PayoutTerms;
 };
+// A fields display's message: its intent and its titled values.
+type FieldsDisplay = record {
+  fields : vec record { text; Value };
+  intent : text;
+};
 // Why a flow door refused. Nothing moved.
 type FlowCallError = variant {
   // The request is not one the canister acts on: the field and the reason.
@@ -536,6 +585,13 @@ type IcpSwapTerms = record {
   amount_in : nat;
 };
 type IcpTokenEntry = record { ledger : principal; icpswap_pool : principal };
+// `icrc21_error`, the two cases this canister answers.
+type Icrc21Error = variant {
+  // A call the canister refuses: another method, or an argument its door would not take.
+  UnsupportedCanisterCall : ErrorInfo;
+  // A call the canister cannot describe now: what reading it needs is not set yet.
+  ConsentMessageUnavailable : ErrorInfo;
+};
 // What an install starts from: the whole config and both service roles, so a canister is
 // never live on default knobs or without its quoter and watcher. Each is validated as
 // `set_config` and `set_roles` validate it, and anything invalid fails the install.
@@ -921,6 +977,8 @@ type StakeIcpOk = record { shares : nat };
 // deduplication window (`resolve_stake`): the pull landed in ledger block `block`, or it
 // never landed.
 type StakeResolution = variant { NotPulled; Pulled : record { block : nat64 } };
+// One standard `icrc10_supported_standards` lists.
+type SupportedStandard = record { url : text; name : text };
 // `swap_from_icp`'s answer: the payout's id, and where it stands as the call returns
 // (`Signed` when its plan fitted; `Waiting` when it waits for an order).
 type SwapFromIcpOk = record { id : nat64; status : PayoutStatus };
@@ -936,6 +994,9 @@ type SwapStatus = variant {
   Executing;
   Frozen;
 };
+type TextValue = record { content : text };
+// Unix seconds, which the signer writes in its user's zone.
+type TimestampSeconds = record { amount : nat64 };
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
   NoUnsignedNonce : record { quote_hash : blob; chain_id : nat64 };
@@ -1015,6 +1076,10 @@ type TxPurpose = variant {
   Cancel : nat64;
   Reclaim : blob;
 };
+// A field's value: the standard's `Value` less `TokenAmount` and `DurationSeconds`, which
+// this canister never sends (an amount is text it wrote exactly; no message holds a
+// duration).
+type Value = variant { Text : TextValue; TimestampSeconds : TimestampSeconds };
 // `withdraw_evm`'s answer: the payout's id and the shares burned.
 type WithdrawEvmOk = record { id : nat64; burned : nat };
 type WithdrawIcpArgs = record {
@@ -1114,6 +1179,16 @@ service : (InitArg) -> {
   // The ICP routes every ICP path of the pool reads: the ICP/ckUSDC pool, and each listed
   // token's route. Empty while none are set.
   icp_routes : () -> (IcpRoutesView) query;
+  // ICRC-10: the standards this canister implements, ICRC-10 itself and ICRC-21.
+  icrc10_supported_standards : () -> (vec SupportedStandard) query;
+  // ICRC-21: a plain-words description of a call to `swap_from_icp`, `stake_icp`,
+  // `withdraw_icp` or `withdraw_evm`, read from its argument exactly as that door reads it,
+  // for a wallet to show its user before it signs; an ICRC-21 error for any other call or an
+  // argument the door would not take. Any caller, anonymous included; never halted; writes
+  // nothing and awaits nothing. An update, as ICRC-21 declares it.
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (
+      ConsentMessageResponse,
+    );
   // Anyone (the watcher), refused while halted: an ICP to Base move's USDC reached the
   // canister's Base address in `base_tx` (and, for an Eco route, the order's `src_tx` on
   // `src_chain`; an empty `src_tx` names none). The canister reads the receipts itself, proves

@@ -7,11 +7,13 @@
 
 mod chain;
 mod config;
+mod icrc21;
 mod ops;
 mod roles;
 
 pub use chain::push_chain_data;
 pub use config::set_config;
+pub use icrc21::icrc21_canister_call_consent_message;
 pub use ops::{
     audit_replay_step, derive_evm_address, set_halted, set_sanctioned, test_rpc_batch, test_send,
     test_sign,
