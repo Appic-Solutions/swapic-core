@@ -5,6 +5,7 @@ pub mod errors;
 pub mod events;
 pub mod evm;
 pub mod flow;
+pub mod icrc21;
 pub mod init;
 pub mod pool;
 pub mod quote;
