@@ -1,6 +1,7 @@
 pub mod agreed;
 pub mod books;
 pub mod cctp;
+pub mod consent;
 pub mod ecdsa;
 pub mod engine;
 pub mod evm_reads;
