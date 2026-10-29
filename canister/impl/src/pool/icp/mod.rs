@@ -52,6 +52,19 @@ pub struct StakeRequest {
     pub owner: PoolAccount,
 }
 
+impl StakeRequest {
+    /// The wire arguments as `stake_icp` reads them, `caller` paying: what the door checks
+    /// and what a consent message states.
+    pub fn of(caller: Principal, args: StakeIcpArgs) -> Result<Self, PoolError> {
+        Ok(Self {
+            caller,
+            from_subaccount: subaccount("from_subaccount", args.from_subaccount)?,
+            amount: settlement_api::types::pool::amount("amount", &args.amount)?,
+            owner: PoolAccount::try_from(args.owner)?,
+        })
+    }
+}
+
 /// A withdrawal as its caller asks it, read off the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawRequest {
@@ -65,6 +78,23 @@ pub struct WithdrawRequest {
 }
 
 impl WithdrawRequest {
+    /// The wire arguments as `withdraw_icp` reads them, `caller` owning the shares: what the
+    /// door checks and what a consent message states.
+    pub fn of(caller: Principal, args: WithdrawIcpArgs) -> Result<Self, PoolError> {
+        Ok(Self {
+            caller,
+            from: subaccount("from", args.from)?,
+            usdc: settlement_api::types::pool::amount("usdc", &args.usdc)?,
+            max_shares: Shares::new(settlement_api::types::pool::u128_of(
+                "max_shares",
+                &args.max_shares,
+            )?),
+            token_out: args.token_out,
+            min_out: settlement_api::types::pool::u128_of("min_out", &args.min_out)?,
+            to: args.to.try_into()?,
+        })
+    }
+
     /// The account whose shares are burned: the caller's, at `from`.
     pub fn owner(&self) -> IcpAccount {
         IcpAccount {
@@ -242,12 +272,7 @@ pub async fn stake(
     pool::require_pool_open()?;
     // counted before anything is recorded: past the limit, nothing is written
     pool::callers::admit(ic_cdk::api::caller(), now())?;
-    let request = StakeRequest {
-        caller: ic_cdk::api::caller(),
-        from_subaccount: subaccount("from_subaccount", args.from_subaccount)?,
-        amount: settlement_api::types::pool::amount("amount", &args.amount)?,
-        owner: PoolAccount::try_from(args.owner)?,
-    };
+    let request = StakeRequest::of(ic_cdk::api::caller(), args)?;
     let id = read_state(|state| -> Result<_, PoolError> {
         check_stake(state, &request, &sanctioned)?;
         Ok(op_id(
@@ -295,18 +320,7 @@ pub async fn withdraw(
     sanctioned: impl Fn(&Address) -> bool,
 ) -> Result<WithdrawIcpOk, PoolError> {
     pool::require_running()?;
-    let request = WithdrawRequest {
-        caller: ic_cdk::api::caller(),
-        from: subaccount("from", args.from)?,
-        usdc: settlement_api::types::pool::amount("usdc", &args.usdc)?,
-        max_shares: Shares::new(settlement_api::types::pool::u128_of(
-            "max_shares",
-            &args.max_shares,
-        )?),
-        token_out: args.token_out,
-        min_out: settlement_api::types::pool::u128_of("min_out", &args.min_out)?,
-        to: args.to.try_into()?,
-    };
+    let request = WithdrawRequest::of(ic_cdk::api::caller(), args)?;
     let closed = pool::pool_closed();
     let owner = PoolAccount::Icp(request.owner());
     let (id, plan) = read_state(|state| -> Result<_, PoolError> {

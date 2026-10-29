@@ -1390,3 +1390,43 @@ fn a_plan_that_could_only_revert_is_undone_while_the_pool_is_closed() {
         ));
     });
 }
+
+/// `check`'s reading of a plan, which a consent message shares: bytes that are no order are
+/// refused, and the delivery is the payout's chain, recipient, token and least out.
+#[test]
+fn a_plan_is_decoded_and_its_delivery_read_as_check_reads_them() {
+    assert_eq!(
+        decode_plan(&[0xab; 10]),
+        Err(PoolError::NotAllowed(
+            "the payout plan is not abi.encode of an Order".to_string()
+        ))
+    );
+    let order = plan_order(TokenAmount::from(5_000_000_u64), TokenAmount::from(4_900_000_u64));
+    assert_eq!(
+        decode_plan(&types::swapic::encode_order(&order)),
+        Ok(order.clone())
+    );
+    let config = config();
+    let payer = pay::payer_of(&config, canister(), None).unwrap();
+    let (read, delivery) = plan_delivery(&order, &payer.chains).unwrap();
+    assert_eq!(read.action, GasAction::RelayLocal);
+    assert_eq!(
+        delivery,
+        Delivery {
+            chain: ChainId::BASE,
+            recipient: recipient(),
+            token: base_usdc(),
+            min_out: TokenAmount::from(4_900_000_u64),
+        }
+    );
+    let mut nobody = order;
+    nobody.payout.token = alloy_primitives::Address::ZERO;
+    assert_eq!(
+        plan_delivery(&nobody, &payer.chains).map(|(_, delivery)| delivery),
+        Err(PoolError::NotAllowed(
+            "the plan the order names no recipient the canister can read: no CCTP burn, no Eco \
+             intent and no payout"
+                .to_string()
+        ))
+    );
+}

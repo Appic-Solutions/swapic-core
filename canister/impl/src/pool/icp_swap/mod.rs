@@ -37,7 +37,7 @@ use crate::pool::pay::{self, refused, AmountIn};
 use crate::pool::payout::{open, record, Busy, Ledgers, Leg, Stop};
 use crate::pool::plan::{Decided, Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
-use crate::relay::{read_plan, Party};
+use crate::relay::{read_plan, Chains, Delivery, Party, Plan};
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
@@ -54,6 +54,7 @@ use types::pool::{
     evm_payout_ref, IcpAccount, PayoutAttempt, PayoutPath, PoolStep, PrincipalBytes, RoutePath,
     LEG_BACK, LEG_SECOND,
 };
+use types::swapic::Order;
 use types::{Address, EvmAddress, Timestamp, TokenAmount};
 
 /// The least time a payout's deadline must be ahead of its opening.
@@ -162,6 +163,23 @@ pub fn check_payout_terms(
     Ok(())
 }
 
+/// The payout plan's order, or the refusal `check` answers for bytes that are none.
+pub fn decode_plan(plan: &[u8]) -> Result<Order, PoolError> {
+    types::swapic::decode_order(plan)
+        .ok_or_else(|| refused("the payout plan is not abi.encode of an Order"))
+}
+
+/// The plan as the canister's own reader reads it against `chains`, and its one delivery:
+/// the chain, the recipient, the token and the least out `check` takes for the payout's
+/// terms, and that a consent message states.
+pub fn plan_delivery(order: &Order, chains: &Chains) -> Result<(Plan, Delivery), PoolError> {
+    let read = read_plan(order, chains).map_err(|error| refused(format!("the plan {error}")))?;
+    let delivery = read
+        .delivery
+        .ok_or_else(|| refused("the plan has no single delivery the canister reads"))?;
+    Ok((read, delivery))
+}
+
 /// A swap that met every rule: what `PayoutOpened` records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opening {
@@ -234,17 +252,12 @@ pub fn check<S: Store>(
     if request.deadline > after(MAX_DEADLINE) {
         return Err(refused("the deadline is more than an hour away"));
     }
-    let order = types::swapic::decode_order(&request.plan)
-        .ok_or_else(|| refused("the payout plan is not abi.encode of an Order"))?;
+    let order = decode_plan(&request.plan)?;
     let canister = canister.ok_or_else(|| {
         PoolError::Unavailable("the canister's address is not derived yet".to_string())
     })?;
     let payer = pay::payer_of(config, canister, eco_prover)?;
-    let read =
-        read_plan(&order, &payer.chains).map_err(|error| refused(format!("the plan {error}")))?;
-    let delivery = read
-        .delivery
-        .ok_or_else(|| refused("the plan has no single delivery the canister reads"))?;
+    let (read, delivery) = plan_delivery(&order, &payer.chains)?;
     let payout = PayoutTerms {
         dst_chain: delivery.chain,
         recipient: delivery.recipient,
