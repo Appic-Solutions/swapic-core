@@ -15,6 +15,14 @@ pub struct ChainData {
     pub priority_fee_wei_per_gas: Nat,
 }
 
+/// One chain's reading in `push_chain_data_many`: what `push_chain_data` takes, as one
+/// entry of a list.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChainPush {
+    pub chain_id: u64,
+    pub data: ChainData,
+}
+
 /// A cached reading with the canister time it arrived at.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ChainDataEntry {

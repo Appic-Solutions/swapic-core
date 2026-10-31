@@ -1,7 +1,7 @@
-use crate::client::settlement::{get_chain_data, push_chain_data};
+use crate::client::settlement::{get_chain_data, push_chain_data, push_chain_data_many};
 use crate::settlement_suite::init::{quoter, setup, upgrade, watcher};
 use candid::{Nat, Principal};
-use settlement_api::types::chain_data::{ChainData, ChainDataEntry};
+use settlement_api::types::chain_data::{ChainData, ChainDataEntry, ChainDataError, ChainPush};
 use settlement_api::types::errors::{GuardError, PushChainDataError, Role};
 
 const BASE: u64 = 8453;
@@ -113,4 +113,92 @@ fn the_chain_data_cache_survives_an_upgrade() {
     let before: Option<ChainDataEntry> = get_chain_data(&pic, canister, stranger(), BASE);
     upgrade(&pic, canister, admin).expect("the upgrade goes through");
     assert_eq!(get_chain_data(&pic, canister, stranger(), BASE), before);
+}
+
+/// The watcher's push for every chain in one call: one result per entry, in order, each what
+/// `push_chain_data` answers; a refused entry stops none of the others; a stranger has every
+/// entry refused; more entries than the bound are refused whole.
+#[test]
+fn every_chain_is_pushed_in_one_call() {
+    let (pic, canister, _admin) = setup();
+    let too_large = ChainData {
+        base_fee_wei_per_gas: Nat::from(u128::MAX) * Nat::from(u128::MAX) * Nat::from(4_u8),
+        ..reading(5)
+    };
+    let pushes = vec![
+        ChainPush {
+            chain_id: BASE,
+            data: reading(19_000_000),
+        },
+        ChainPush {
+            chain_id: ARBITRUM,
+            data: too_large,
+        },
+        ChainPush {
+            chain_id: 1,
+            data: reading(21_000_000),
+        },
+    ];
+    assert_eq!(
+        push_chain_data_many(&pic, canister, stranger(), &pushes),
+        vec![
+            Err(PushChainDataError::Guard(GuardError::CallerNotRole(
+                Role::Watcher
+            )));
+            3
+        ]
+    );
+    assert_eq!(
+        get_chain_data(&pic, canister, stranger(), BASE),
+        None,
+        "a refusal stores nothing"
+    );
+    assert_eq!(
+        push_chain_data_many(&pic, canister, watcher(), &pushes),
+        vec![
+            Ok(()),
+            Err(PushChainDataError::InvalidData(
+                ChainDataError::FeeTooLarge {
+                    field: "base_fee_wei_per_gas".to_string()
+                }
+            )),
+            Ok(()),
+        ]
+    );
+    let base = get_chain_data(&pic, canister, stranger(), BASE).expect("stored");
+    assert_eq!(base.data, reading(19_000_000));
+    assert_eq!(
+        base.pushed_at_ns,
+        now_ns(&pic),
+        "stamped with the canister's clock"
+    );
+    assert_eq!(get_chain_data(&pic, canister, stranger(), ARBITRUM), None);
+    assert_eq!(
+        get_chain_data(&pic, canister, stranger(), 1).map(|entry| entry.data.block),
+        Some(21_000_000)
+    );
+
+    let too_many: Vec<ChainPush> = (0..65)
+        .map(|n| ChainPush {
+            chain_id: 10_000 + n,
+            data: reading(1),
+        })
+        .collect();
+    let refused = pic.update_call(
+        canister,
+        watcher(),
+        "push_chain_data_many",
+        candid::encode_one(&too_many).unwrap(),
+    );
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|reject| reject.reject_message.contains("at most 64 entries")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        get_chain_data(&pic, canister, stranger(), 10_000),
+        None,
+        "refused whole"
+    );
 }

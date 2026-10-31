@@ -105,6 +105,9 @@ type ChainData = record {
 type ChainDataEntry = record { data : ChainData; pushed_at_ns : nat64 };
 // Why a pushed reading is not one this canister prices gas with.
 type ChainDataError = variant { FeeTooLarge : record { field : text } };
+// One chain's reading in `push_chain_data_many`: what `push_chain_data` takes, as one
+// entry of a list.
+type ChainPush = record { data : ChainData; chain_id : nat64 };
 // The chain a signed transaction is for.
 type ChainRef = variant { Evm : nat64; Solana };
 type Choice = variant { Requote; Refund };
@@ -1265,6 +1268,14 @@ service : (InitArg) -> {
   // because the age of a reading is what every decision on it depends on, and a caller that
   // could date its data forward could keep stale gas prices alive indefinitely.
   push_chain_data : (nat64, ChainData) -> (Result_8);
+  // Watcher-only. Every chain's reading in one message: each entry validated and stored
+  // exactly as push_chain_data stores one, stamped with the canister's clock. One result per
+  // entry, in order, each exactly push_chain_data's result; the role is checked once, and when
+  // it fails every entry carries that Guard error. A chain named twice is stored twice, in
+  // order, so the later reading is the one kept. A call with more than 64 entries is refused
+  // whole: the canister traps and stores nothing. Not gated by the halt, as push_chain_data is
+  // not.
+  push_chain_data_many : (vec ChainPush) -> (vec Result_8);
   // The open and in-flight moves, in id order.
   rebalance_moves : () -> (vec MoveView) query;
   // The rebalancing's knobs; the defaults while none are set.

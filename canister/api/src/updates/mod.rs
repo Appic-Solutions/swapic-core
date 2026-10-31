@@ -11,7 +11,7 @@ mod icrc21;
 mod ops;
 mod roles;
 
-pub use chain::push_chain_data;
+pub use chain::{push_chain_data, push_chain_data_many};
 pub use config::set_config;
 pub use icrc21::icrc21_canister_call_consent_message;
 pub use ops::{

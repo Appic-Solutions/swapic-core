@@ -13,8 +13,8 @@ use settlement_api::types::errors::{GuardError, TestAppendError};
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
     audit_replay_step, derive_evm_address, icrc21_canister_call_consent_message, push_chain_data,
-    set_config, set_halted, set_roles, set_sanctioned, test_rpc_batch as test_rpc_batch_api,
-    test_send, test_sign,
+    push_chain_data_many, set_config, set_halted, set_roles, set_sanctioned,
+    test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
 };
 
 pub fn event_count(
@@ -140,6 +140,22 @@ pub fn push_chain_data(
         sender,
         "push_chain_data",
         encode_args((chain_id, data)).unwrap(),
+    )
+}
+
+/// Every chain's reading in one call: one result per entry, in order.
+pub fn push_chain_data_many(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    pushes: &push_chain_data_many::Args,
+) -> push_chain_data_many::Response {
+    update(
+        pic,
+        canister,
+        sender,
+        "push_chain_data_many",
+        encode_one(pushes).unwrap(),
     )
 }
 
