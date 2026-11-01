@@ -1192,7 +1192,7 @@ pub fn scaled_route(answer: &[u8]) -> Result<Option<Vec<u8>>, NotScaled> {
 pub struct NotScaled;
 
 /// KyberSwap's executor, at one address on every chain the quoter routes on: the one
-/// `callTarget` a swap may hand its input to. Should KyberSwap move it, gasless swaps are
+/// `callTarget` a swap may call with its route. Should KyberSwap move it, gasless swaps are
 /// refused until this follows.
 pub const KYBER_EXECUTOR: EvmAddress = EvmAddress::new([
     0x8f, 0x10, 0xb4, 0x68, 0xb0, 0x6c, 0x6f, 0xd2, 0x14, 0xb6, 0x5f, 0x87, 0x77, 0x88, 0x27, 0xf7,

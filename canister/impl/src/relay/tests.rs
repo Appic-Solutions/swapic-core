@@ -827,8 +827,9 @@ fn a_step_the_canister_cannot_read_is_refused() {
     );
 }
 
-/// A swap's own receivers are parties too: its output must go to the Runner, its input
-/// only to the executor it calls, and nothing to fee receivers.
+/// A swap's own receivers are parties too: its output must go to the Runner, its input to
+/// the receivers its route starts at but never to the zero address, Swapic's contracts or
+/// the canister, and nothing to fee receivers.
 #[test]
 fn a_swap_that_pays_anyone_but_the_runner_is_refused() {
     let sample = local_sample();
@@ -848,14 +849,197 @@ fn a_swap_that_pays_anyone_but_the_runner_is_refused() {
         sample.check_resigned(&fee_to_someone),
         Err(RelayError::Swap("pays fees or carries a permit"))
     );
-    let input_to_someone = with_swap(&sample.order, |execution| {
+    // a pool the route starts at may take the input; the Runner's minimums hold the rest
+    let input_to_a_pool = with_swap(&sample.order, |execution| {
         execution.desc.srcReceivers = vec![swapic::addr(SOMEONE)];
     });
+    assert!(sample.check_resigned(&input_to_a_pool).is_ok());
+    let runner = sample.evm_chains.get(sample.chain_id).unwrap().runner;
+    let input_to_the_runner = with_swap(&sample.order, |execution| {
+        execution.desc.srcReceivers = vec![swapic::addr(runner)];
+    });
     assert_eq!(
-        sample.check_resigned(&input_to_someone),
+        sample.check_resigned(&input_to_the_runner),
         Err(RelayError::Swap(
-            "hands its input to other than KyberSwap's executor"
+            "hands its input to the zero address, one of Swapic's own contracts or the canister"
         ))
+    );
+}
+
+/// KyberSwap's router calldata as the quoter built it for the Arbitrum Runner on 2026-11-01
+/// (`samples/kyber_arb_weth_usdc_*_2026_11_01.json`), as a step spending WETH.
+fn kyber_capture(json: &str) -> Step {
+    let capture: serde_json::Value = serde_json::from_str(json).unwrap();
+    let data = capture["build"]["data"]["data"].as_str().unwrap();
+    let weth: EvmAddress = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        .parse()
+        .unwrap();
+    Step {
+        target: swapic::addr(KYBER_ROUTER),
+        data: hex::decode(data.trim_start_matches("0x")).unwrap().into(),
+        token: swapic::addr(weth),
+        min: capture["build"]["data"]["amountIn"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+        writes: vec![],
+    }
+}
+
+fn pool_capture() -> Step {
+    kyber_capture(include_str!(
+        "../../samples/kyber_arb_weth_usdc_pool_2026_11_01.json"
+    ))
+}
+
+fn executor_capture() -> Step {
+    kyber_capture(include_str!(
+        "../../samples/kyber_arb_weth_usdc_executor_2026_11_01.json"
+    ))
+}
+
+/// `step` read and checked as `read_plan` reads and checks a swap step on Arbitrum.
+fn checked_swap(sample: &Sample, step: &Step) -> Result<(), RelayError> {
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    match swapic::read_step(step, source.usdc, source.token_messenger) {
+        Ok(KnownStep::Swap(swap)) => check_swap(&swap, step, &source, sample.canister),
+        other => panic!("not a swap step: {other:?}"),
+    }
+}
+
+/// `step` with its swap edited, encoded again canonically.
+fn edited(step: &Step, edit: impl Fn(&mut KyberExecution)) -> Step {
+    let mut call = swapCall::abi_decode(&step.data).unwrap();
+    edit(&mut call.execution);
+    Step {
+        data: call.abi_encode().into(),
+        ..step.clone()
+    }
+}
+
+/// The two shapes KyberSwap builds: a route starting at an old v2-style pool, which the
+/// router pays itself (0.001 WETH to USDC through a SushiSwap v2 pool), and one starting at
+/// the executor (0.005 WETH through PancakeSwap v3). Both pay the Arbitrum Runner, and both
+/// are read and pass.
+#[test]
+fn a_swap_starting_at_a_pool_or_at_the_executor_is_taken() {
+    let sample = sample();
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    let runner: EvmAddress = "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        source.runner, runner,
+        "the captures were built for this Runner"
+    );
+    let sushi: EvmAddress = "0x57b85fef094e10b5eecdf350af688299e9553378"
+        .parse()
+        .unwrap();
+    for (step, first) in [
+        (pool_capture(), sushi),
+        (executor_capture(), KYBER_EXECUTOR),
+    ] {
+        let Ok(KnownStep::Swap(swap)) =
+            swapic::read_step(&step, source.usdc, source.token_messenger)
+        else {
+            panic!("the capture reads as a swap step");
+        };
+        assert_eq!(swap.src_receivers, vec![first]);
+        assert_eq!(swap.call_target, KYBER_EXECUTOR);
+        assert_eq!(swap.dst_receiver, runner);
+        assert_eq!(checked_swap(&sample, &step), Ok(()));
+    }
+}
+
+/// Everything but the input's first receiver is held as before, and the receivers are
+/// held to at least one, none the zero address, Swapic, the Runner, the CctpReceiver or the
+/// canister: each refused shape, on the real pool capture.
+#[test]
+fn a_swap_handing_its_input_to_us_or_paying_elsewhere_is_refused() {
+    let sample = sample();
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    let step = pool_capture();
+    let receivers = |receivers: Vec<EvmAddress>| {
+        edited(&step, |execution| {
+            execution.desc.srcAmounts = receivers.iter().map(|_| U256::from(1)).collect();
+            execution.desc.srcReceivers = receivers.iter().map(|r| swapic::addr(*r)).collect();
+        })
+    };
+    let ours = "hands its input to the zero address, one of Swapic's own contracts or the canister";
+    assert_eq!(
+        checked_swap(&sample, &receivers(vec![])),
+        Err(RelayError::Swap("hands its input to no receiver"))
+    );
+    let sushi: EvmAddress = "0x57b85fef094e10b5eecdf350af688299e9553378"
+        .parse()
+        .unwrap();
+    for bad in [
+        EvmAddress::ZERO,
+        source.swapic,
+        source.runner,
+        source.cctp_receiver,
+        sample.canister,
+    ] {
+        assert_eq!(
+            checked_swap(&sample, &receivers(vec![bad])),
+            Err(RelayError::Swap(ours)),
+            "{bad}"
+        );
+        assert_eq!(
+            checked_swap(&sample, &receivers(vec![sushi, bad])),
+            Err(RelayError::Swap(ours)),
+            "{bad} beside the pool"
+        );
+    }
+    assert_eq!(
+        checked_swap(&sample, &receivers(vec![sushi, SOMEONE])),
+        Ok(())
+    );
+    let fees = edited(&step, |execution| {
+        execution.desc.feeReceivers = vec![swapic::addr(SOMEONE)];
+        execution.desc.feeAmounts = vec![U256::from(1)];
+    });
+    assert_eq!(
+        checked_swap(&sample, &fees),
+        Err(RelayError::Swap("pays fees or carries a permit"))
+    );
+    let permit = edited(&step, |execution| {
+        execution.desc.permit = vec![1, 2, 3].into()
+    });
+    assert_eq!(
+        checked_swap(&sample, &permit),
+        Err(RelayError::Swap("pays fees or carries a permit"))
+    );
+    let elsewhere = edited(&step, |execution| {
+        execution.desc.dstReceiver = swapic::addr(SOMEONE)
+    });
+    assert_eq!(
+        checked_swap(&sample, &elsewhere),
+        Err(RelayError::Swap("pays its output to other than the Runner"))
+    );
+    let other_executor = edited(&step, |execution| {
+        execution.callTarget = swapic::addr(SOMEONE)
+    });
+    assert_eq!(
+        checked_swap(&sample, &other_executor),
+        Err(RelayError::Swap("calls other than KyberSwap's executor"))
+    );
+    let other_token = Step {
+        token: swapic::addr(source.usdc),
+        ..step.clone()
+    };
+    assert_eq!(
+        checked_swap(&sample, &other_token),
+        Err(RelayError::Swap("does not sell the token the step spends"))
+    );
+    let other_router = Step {
+        target: swapic::addr(SOMEONE),
+        ..step.clone()
+    };
+    assert_eq!(
+        checked_swap(&sample, &other_router),
+        Err(RelayError::Swap("is not on KyberSwap's router"))
     );
 }
 

@@ -550,10 +550,27 @@ fn eco_parties(
 }
 
 /// A swap step the canister reads in full but for its route: KyberSwap's router, called
-/// with the Runner's delta of the token the swap sells, handing it only to the executor
-/// it calls, paying no fees, and paying its output to the Runner, where the plan's next
-/// step or its payout takes it.
-fn check_swap(swap: &KyberSwap, step: &Step, source: &EvmChain) -> Result<(), RelayError> {
+/// with the Runner's delta of the token the swap sells, calling KyberSwap's executor with
+/// the route, handing the input to the receivers the route starts at (the executor, or an
+/// old v2-style pool itself, which KyberSwap's router pays directly), at least one and
+/// none of them the zero address, one of Swapic's own contracts here or the canister,
+/// paying no fees, carrying no permit, and paying its output to the Runner, where the
+/// plan's next step or its payout takes it.
+///
+/// The input's receivers need no closer reading, and its amounts none at all: the Runner
+/// approves the router for exactly the step's delta and reverts on anything left of it
+/// (`LeftOver`), so the receivers share exactly what the step hands over; and whoever
+/// receives it, what comes back is held by KyberSwap's router (at least `minReturnAmount`
+/// of the output to `dst_receiver`, the Runner, or the call reverts) and by the Runner's
+/// signed minimums (each later step's `min` and the payout's `minOut`, or the whole order
+/// reverts). A receiver that keeps the input can make the order revert, never pay anyone
+/// less than the order was signed for.
+fn check_swap(
+    swap: &KyberSwap,
+    step: &Step,
+    source: &EvmChain,
+    canister: EvmAddress,
+) -> Result<(), RelayError> {
     let sold = swapic::evm(step.token);
     if swapic::evm(step.target) != KYBER_ROUTER {
         return Err(RelayError::Swap("is not on KyberSwap's router"));
@@ -561,9 +578,26 @@ fn check_swap(swap: &KyberSwap, step: &Step, source: &EvmChain) -> Result<(), Re
     if sold == EvmAddress::ZERO || swap.src_token != sold {
         return Err(RelayError::Swap("does not sell the token the step spends"));
     }
-    if swap.call_target != KYBER_EXECUTOR || swap.src_receivers != [swap.call_target] {
+    if swap.call_target != KYBER_EXECUTOR {
+        return Err(RelayError::Swap("calls other than KyberSwap's executor"));
+    }
+    let ours = [
+        EvmAddress::ZERO,
+        source.swapic,
+        source.runner,
+        source.cctp_receiver,
+        canister,
+    ];
+    if swap.src_receivers.is_empty() {
+        return Err(RelayError::Swap("hands its input to no receiver"));
+    }
+    if swap
+        .src_receivers
+        .iter()
+        .any(|receiver| ours.contains(receiver))
+    {
         return Err(RelayError::Swap(
-            "hands its input to other than KyberSwap's executor",
+            "hands its input to the zero address, one of Swapic's own contracts or the canister",
         ));
     }
     if !swap.fee_receivers.is_empty() || swap.permit {
@@ -652,7 +686,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 intents.push(intent);
                 intent_steps.push((step.min, fee));
             }
-            KnownStep::Swap(swap) => check_swap(&swap, step, &source)?,
+            KnownStep::Swap(swap) => check_swap(&swap, step, &source, chains.canister)?,
         }
     }
 
