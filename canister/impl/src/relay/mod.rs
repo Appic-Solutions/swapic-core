@@ -74,6 +74,16 @@ pub enum RelayError {
     NoFeeStep,
     #[error("the order pays the canister {0} fee steps, and one fee pays for one order")]
     FeeSteps(usize),
+    #[error(
+        "step {0} pays the fee before the order holds the chain's USDC: it pays in another \
+         token and no swap into USDC comes first"
+    )]
+    FeeBeforeUsdc(usize),
+    #[error(
+        "the fee and the payout's least amount, {owed}, are more than the swaps into USDC \
+         buy at their least, {bought}"
+    )]
+    FeeAboveSwap { owed: U256, bought: U256 },
     #[error("the fee step pays {paid}, below the {needed} the order's transactions need")]
     FeeBelowMinimum {
         paid: TokenAmount,
@@ -663,6 +673,13 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
     let mut intents = Vec::new();
     // each intent's step: the least delta the Runner gives it, and the fee Eco keeps
     let mut intent_steps = Vec::new();
+    // the chain's USDC the Runner holds for a fee step: the order's own when it pays in
+    // USDC, else what the swaps into USDC before it buy at their least (KyberSwap's
+    // `minReturnAmount`); a fee paid from those swaps, and the least of them it left
+    let pays_in_usdc = swapic::evm(order.tokenIn) == source.usdc;
+    let mut swapped_into_usdc = false;
+    let mut bought = U256::ZERO;
+    let mut paid_from_swaps = None;
     for (index, step) in order.steps.iter().enumerate() {
         let read = match swapic::read_step(step, source.usdc, source.token_messenger) {
             Ok(read) => read,
@@ -676,6 +693,14 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 if to != chains.canister {
                     return Err(RelayError::UnknownStep(index));
                 }
+                // a fee step before the order holds USDC would pay from no one's USDC: on
+                // chain it reverts, at the canister's cost
+                if !pays_in_usdc {
+                    if !swapped_into_usdc {
+                        return Err(RelayError::FeeBeforeUsdc(index));
+                    }
+                    paid_from_swaps = Some(bought);
+                }
                 fees.push(amount);
             }
             KnownStep::Burn(burn) => burns.push((burn, step.min)),
@@ -686,7 +711,29 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 intents.push(intent);
                 intent_steps.push((step.min, fee));
             }
-            KnownStep::Swap(swap) => check_swap(&swap, step, &source, chains.canister)?,
+            KnownStep::Swap(swap) => {
+                check_swap(&swap, step, &source, chains.canister)?;
+                if swap.dst_token == source.usdc {
+                    swapped_into_usdc = true;
+                    bought = bought.saturating_add(swap.min_return);
+                }
+            }
+        }
+    }
+    if !order.payout.token.is_zero() && order.payout.minOut.is_zero() {
+        return Err(RelayError::Order("pays out with no least amount"));
+    }
+    // a fee paid from what swaps bought, with the rest paid out in USDC, must leave the
+    // payout its least amount when the swaps buy only their own least, or the order can
+    // revert while every swap keeps its word
+    if let Some(bought) = paid_from_swaps {
+        if swapic::evm(order.payout.token) == source.usdc {
+            let owed = fees
+                .iter()
+                .fold(order.payout.minOut, |owed, fee| owed.saturating_add(*fee));
+            if owed > bought {
+                return Err(RelayError::FeeAboveSwap { owed, bought });
+            }
         }
     }
 

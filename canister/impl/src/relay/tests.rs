@@ -1801,3 +1801,126 @@ fn a_chains_usdc_domain_is_its_entrys_or_circles_usual() {
     let own = named.usdc_domain();
     assert_eq!((own.name, own.version), ("USDC", "3"));
 }
+
+/// A gasless swap on one chain into USDC (the real pool capture: 0.001 WETH to USDC on
+/// Arbitrum, the Runner its receiver), the fee paid to the canister from what the swap
+/// bought, the rest paid out to the user: step 1 the swap, step 2 the USDC fee, the payout
+/// with its least amount, the payer's Permit2 signature over the WETH it pays in.
+fn usdc_out_order(sample: &Sample, steps: Vec<Step>, min_out: u64) -> (Order, GaslessAuth) {
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    let weth: EvmAddress = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        .parse()
+        .unwrap();
+    let order = Order {
+        r#ref: alloy_primitives::FixedBytes([0x5b; 32]),
+        payer: swapic::addr(address_of_key(&payer_key())),
+        tokenIn: swapic::addr(weth),
+        amountIn: U256::from(1_000_000_000_000_000_u64),
+        deadline: U256::from(sample.deadline()),
+        steps,
+        payout: Payout {
+            token: swapic::addr(source.usdc),
+            recipient: swapic::addr(SOMEONE),
+            minOut: U256::from(min_out),
+        },
+    };
+    let id = swapic::order_id(&order, ARBITRUM, source.swapic);
+    let mut auth = GaslessAuth {
+        door: DOOR_PERMIT2,
+        nonce: U256::from(7),
+        deadline: order.deadline,
+        ..Default::default()
+    };
+    auth.signature = sign(
+        swapic::permit2_digest(&order, &auth, id, ARBITRUM, source.swapic),
+        &payer_key(),
+    )
+    .into();
+    (order, auth)
+}
+
+/// A fixed USDC transfer of `amount` to `to`: the fee step's shape.
+fn usdc_fee(sample: &Sample, to: EvmAddress, amount: u64) -> Step {
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    Step {
+        target: swapic::addr(source.usdc),
+        data: transferCall {
+            to: swapic::addr(to),
+            amount: U256::from(amount),
+        }
+        .abi_encode()
+        .into(),
+        token: alloy_primitives::Address::ZERO,
+        min: U256::ZERO,
+        writes: vec![],
+    }
+}
+
+/// The gasless swap into USDC on one chain is relayed: the swap, then the fee from what it
+/// bought, then the payout of the rest; the payer's own Permit2 signature authorizes it.
+/// The pool capture buys at least 2,233,763 USDC units (its `minReturnAmount`).
+#[test]
+fn a_gasless_swap_into_usdc_pays_its_fee_from_what_it_bought() {
+    let sample = sample();
+    let source = sample.evm_chains.get(ARBITRUM).unwrap();
+    let steps = vec![pool_capture(), usdc_fee(&sample, sample.canister, 150_000)];
+    let (order, auth) = usdc_out_order(&sample, steps, 2_000_000);
+    let relay = sample
+        .check_with(&order, &auth)
+        .expect("the shape is relayed");
+    assert_eq!(relay.action, GasAction::RelayLocal);
+    assert_eq!(relay.fee, TokenAmount::from(150_000_u64));
+    let id = swapic::order_id(&order, ARBITRUM, source.swapic);
+    assert_eq!(authorize(&order, &auth, id, ARBITRUM, &source), Ok(()));
+    // the fee and the least payout may take all the swap buys at its least
+    let (exact, auth) = usdc_out_order(
+        &sample,
+        vec![pool_capture(), usdc_fee(&sample, sample.canister, 233_763)],
+        2_000_000,
+    );
+    assert!(sample.check_with(&exact, &auth).is_ok());
+}
+
+/// Each way the shape can go wrong is refused before anything is signed: the fee to
+/// someone else, the fee before the swap (from USDC the order does not hold yet), a fee
+/// that with the payout's least amount is more than the swap buys at its least, and a
+/// payout with no least amount.
+#[test]
+fn a_gasless_swap_into_usdc_that_could_not_pay_is_refused() {
+    let sample = sample();
+    let check = |steps: Vec<Step>, min_out: u64| {
+        let (order, auth) = usdc_out_order(&sample, steps, min_out);
+        sample.check_with(&order, &auth).map(|relay| relay.fee)
+    };
+    assert_eq!(
+        check(
+            vec![pool_capture(), usdc_fee(&sample, SOMEONE, 150_000)],
+            2_000_000
+        ),
+        Err(RelayError::UnknownStep(1))
+    );
+    assert_eq!(
+        check(
+            vec![usdc_fee(&sample, sample.canister, 150_000), pool_capture()],
+            2_000_000
+        ),
+        Err(RelayError::FeeBeforeUsdc(0))
+    );
+    assert_eq!(
+        check(
+            vec![pool_capture(), usdc_fee(&sample, sample.canister, 233_764)],
+            2_000_000
+        ),
+        Err(RelayError::FeeAboveSwap {
+            owed: U256::from(2_233_764_u64),
+            bought: U256::from(2_233_763_u64),
+        })
+    );
+    assert_eq!(
+        check(
+            vec![pool_capture(), usdc_fee(&sample, sample.canister, 150_000)],
+            0
+        ),
+        Err(RelayError::Order("pays out with no least amount"))
+    );
+}
