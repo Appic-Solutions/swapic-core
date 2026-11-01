@@ -350,10 +350,15 @@ pub const PERMIT2: EvmAddress = EvmAddress::new([
     0x3a, 0xc7, 0x8b, 0xa3,
 ]);
 
-/// Circle's USDC EIP-712 domain, the same name and version on every chain the quoter
-/// routes on: what the 3009 door's authorization is signed under.
-pub const USDC_NAME: &str = "USD Coin";
-pub const USDC_VERSION: &str = "2";
+/// A chain's USDC as its EIP-712 domain names it: the contract, and the name and version
+/// it answers (`name()`, `version()`), which differ between chains ("USD Coin" on Base,
+/// "USDC" on Unichain): what a 3009 door's authorization is signed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsdcDomain<'a> {
+    pub address: EvmAddress,
+    pub name: &'a str,
+    pub version: &'a str,
+}
 
 /// The digest a 3009 door's authorization signs: USDC's `ReceiveWithAuthorization` from
 /// the payer to Swapic of `amountIn`, its nonce the order id, under the chain's USDC's own
@@ -363,14 +368,15 @@ pub fn receive_with_authorization_digest(
     auth: &GaslessAuth,
     id: OrderId,
     chain_id: ChainId,
-    usdc: EvmAddress,
+    usdc: UsdcDomain<'_>,
     swapic: EvmAddress,
 ) -> [u8; 32] {
     let domain = Eip712Domain {
-        name: Some(Cow::Borrowed(USDC_NAME)),
-        version: Some(Cow::Borrowed(USDC_VERSION)),
+        // the domain holds its texts for 'static: copied, a few bytes
+        name: Some(Cow::Owned(usdc.name.to_string())),
+        version: Some(Cow::Owned(usdc.version.to_string())),
         chain_id: Some(U256::from(chain_id.get())),
-        verifying_contract: Some(addr(usdc)),
+        verifying_contract: Some(addr(usdc.address)),
         salt: None,
     };
     ReceiveWithAuthorization {

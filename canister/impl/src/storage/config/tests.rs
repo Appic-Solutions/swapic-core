@@ -133,6 +133,8 @@ fn the_pools_gas_rows_show_in_the_json_only_once_set() {
                 eco_rescue: rows.then_some(fees.relay_cctp),
                 ..fees
             },
+            usdc_name: None,
+            usdc_version: None,
         }
     };
     let config = |rows: bool| Config {

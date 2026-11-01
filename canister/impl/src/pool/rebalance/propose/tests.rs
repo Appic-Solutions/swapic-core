@@ -55,6 +55,8 @@ fn chain(usdc: EvmAddress) -> EvmChain {
         gas_limit: PerAction::all(GasAmount::from(600_000_u64)),
         gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
         min_network_fee: PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 

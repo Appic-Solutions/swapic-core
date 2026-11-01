@@ -1566,6 +1566,8 @@ fn rescue_samples() -> Vec<Sample> {
                 eco_rescue: r.eco_rescue.map(TokenAmount::from),
             }
         },
+        usdc_name: None,
+        usdc_version: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -1940,6 +1942,8 @@ fn rebalance_samples() -> Vec<Sample> {
                 eco_rescue: None,
             }
         },
+        usdc_name: None,
+        usdc_version: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -2444,6 +2448,8 @@ fn pool_tx_samples() -> Vec<Sample> {
                 eco_rescue: None,
             }
         },
+        usdc_name: None,
+        usdc_version: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),

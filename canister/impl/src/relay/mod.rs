@@ -393,7 +393,7 @@ pub fn authorize(
                 auth,
                 id,
                 chain_id,
-                source.usdc,
+                source.usdc_domain(),
                 source.swapic,
             );
             (Verifier::LowS, digest, auth.signature.as_ref())

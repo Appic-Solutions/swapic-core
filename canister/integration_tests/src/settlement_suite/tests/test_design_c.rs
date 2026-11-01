@@ -112,6 +112,8 @@ fn chain(usdc: &str) -> EvmChainConfig {
             complete_swap: Nat::from(60_000_u32),
             ..amounts(0)
         },
+        usdc_domain_name: None,
+        usdc_domain_version: None,
     }
 }
 
@@ -361,7 +363,11 @@ fn relay_for(canister: EvmAddress, now: u64) -> (Vec<u8>, Order, GaslessAuth, En
         &auth,
         order_id,
         ChainId::new(ARBITRUM),
-        address(ARB_USDC),
+        swapic::UsdcDomain {
+            address: address(ARB_USDC),
+            name: "USD Coin",
+            version: "2",
+        },
         address(SWAPIC),
     );
     let (signature, recovery) =

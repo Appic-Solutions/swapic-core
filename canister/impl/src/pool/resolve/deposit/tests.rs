@@ -41,6 +41,8 @@ fn pool() {
         gas_limit: PerAction::all(types::GasAmount::from(90_000_u64)),
         gas_budget: PerAction::all(types::Wei::from(1_000_000_000_000_000_u64)),
         min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
     };
     crate::storage::config::test_set(types::Config {
         evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, chain)])),

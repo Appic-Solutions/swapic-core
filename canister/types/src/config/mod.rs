@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+pub mod usdc_domain;
+
+pub use usdc_domain::{DomainText, NotDomainText, DEFAULT_USDC_NAME, DEFAULT_USDC_VERSION};
+
 use crate::address::{Address, RpcUrl};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
@@ -741,6 +745,32 @@ pub struct EvmChain {
     /// it at the least.
     #[n(8)]
     pub min_network_fee: PerAction<TokenAmount>,
+    /// USDC's EIP-712 domain name here, as its contract answers `name()`; none is
+    /// [`DEFAULT_USDC_NAME`]. A config stored before the field reads as none.
+    #[n(9)]
+    pub usdc_name: Option<DomainText>,
+    /// USDC's EIP-712 domain version here, as its contract answers `version()`; none is
+    /// [`DEFAULT_USDC_VERSION`].
+    #[n(10)]
+    pub usdc_version: Option<DomainText>,
+}
+
+impl EvmChain {
+    /// This chain's USDC as a 3009 authorization is signed under: its contract, and the
+    /// name and version the entry names or Circle's usual ones.
+    pub fn usdc_domain(&self) -> crate::swapic::UsdcDomain<'_> {
+        crate::swapic::UsdcDomain {
+            address: self.usdc,
+            name: self
+                .usdc_name
+                .as_ref()
+                .map_or(DEFAULT_USDC_NAME, DomainText::as_str),
+            version: self
+                .usdc_version
+                .as_ref()
+                .map_or(DEFAULT_USDC_VERSION, DomainText::as_str),
+        }
+    }
 }
 
 /// How often the books read the canister's balances: ten minutes unless set.
@@ -909,6 +939,12 @@ pub enum ConfigError {
     EmptyVaultAddress { chain: ChainId },
     #[error("rpc_urls[{chain}] is empty")]
     EmptyRpcUrl { chain: ChainId },
+    #[error("{field}[{chain}] {reason}")]
+    NotDomainText {
+        field: &'static str,
+        chain: ChainId,
+        reason: NotDomainText,
+    },
     #[error("{field}{} is not an EVM address: {reason}", chain.map(|chain| format!("[{chain}]")).unwrap_or_default())]
     NotAnAddress {
         field: &'static str,

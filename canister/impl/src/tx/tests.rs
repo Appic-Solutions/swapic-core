@@ -907,6 +907,8 @@ fn chain_with_budget(budget: Wei) -> types::config::EvmChain {
         gas_limit: types::config::PerAction::all(GasAmount::from(1_000_000_u64)),
         gas_budget: types::config::PerAction::all(budget),
         min_network_fee: types::config::PerAction::all(types::TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 

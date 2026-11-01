@@ -202,6 +202,9 @@ type ConfigError = variant {
     interval_s : nat64;
     floor_s : nat64;
   };
+  // The text in `field` at `chain_id` is not an EIP-712 domain name or version: 1 to 32
+  // printable ASCII characters.
+  NotDomainText : record { field : text; chain_id : nat64 };
   PlatformFeeAboveMax : record {
     max_fee_bps : nat16;
     platform_fee_bps : nat16;
@@ -455,8 +458,15 @@ type EvmChainConfig = record {
   // The one shared Runner: it makes this chain's burns.
   runner : text;
   usdc : text;
+  // USDC's EIP-712 domain version on this chain, as its contract answers `version()`.
+  // None: "2". 1 to 32 printable ASCII characters.
+  usdc_domain_version : opt text;
   // The least fee step, in USDC units, each action needs.
   min_network_fee : ActionAmounts;
+  // USDC's EIP-712 domain name on this chain, as its contract answers `name()`: what a
+  // 3009 authorization is signed under. None: "USD Coin". 1 to 32 printable ASCII
+  // characters.
+  usdc_domain_name : opt text;
   // The most each action's transaction may cost in wei (`gas_limit * max_fee_per_gas`):
   // the gas rule. Above it the canister signs nothing and the caller tries again.
   gas_budget_wei : ActionAmounts;

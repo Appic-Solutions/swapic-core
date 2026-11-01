@@ -729,6 +729,8 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
         },
         gas_budget_wei: amounts(100_000_000_000_000_000),
         min_network_fee: amounts(0),
+        usdc_domain_name: None,
+        usdc_domain_version: None,
     }
 }
 

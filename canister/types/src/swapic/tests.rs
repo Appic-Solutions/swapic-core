@@ -534,6 +534,16 @@ fn a_step_that_does_not_rebuild_is_refused() {
     );
 }
 
+/// `usdc` under Circle's usual domain, "USD Coin" version "2": every chain the canister
+/// launched on.
+fn usd_coin(usdc: EvmAddress) -> UsdcDomain<'static> {
+    UsdcDomain {
+        address: usdc,
+        name: crate::config::DEFAULT_USDC_NAME,
+        version: crate::config::DEFAULT_USDC_VERSION,
+    }
+}
+
 /// The digests each gasless door's payer signs, on the quoter's real CCTP order, against
 /// goldens computed independently with `cast keccak` and `cast abi-encode` from the
 /// EIP-712 definitions: USDC's `ReceiveWithAuthorization` (the fixture's own typed data),
@@ -554,7 +564,7 @@ fn the_door_digests_are_the_cast_goldens() {
         ..Default::default()
     };
     assert_eq!(
-        receive_with_authorization_digest(&order, &auth, id, chain, usdc, swapic),
+        receive_with_authorization_digest(&order, &auth, id, chain, usd_coin(usdc), swapic),
         b256!("92c4eb4de81f76629a82f059a1f7c52e081b90bb2c49554cf6d025e47b377025").0
     );
     let permit2 = GaslessAuth {

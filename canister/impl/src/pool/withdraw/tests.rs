@@ -42,6 +42,8 @@ fn config() -> types::Config {
         gas_limit: PerAction::all(types::GasAmount::from(500_000_u64)),
         gas_budget: PerAction::all(types::Wei::from(1_000_000_000_000_000_u64)),
         min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
     };
     types::Config {
         evm_chains: ChainTable(BTreeMap::from([

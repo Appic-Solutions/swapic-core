@@ -55,6 +55,8 @@ fn base() -> EvmChain {
         gas_limit: types::config::PerAction::all(types::GasAmount::from(300_000_u64)),
         gas_budget: types::config::PerAction::all(Wei::ZERO),
         min_network_fee: types::config::PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 

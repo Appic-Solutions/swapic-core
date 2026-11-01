@@ -50,6 +50,8 @@ fn chain(
         gas_limit: PerAction::all(GasAmount::from(2_000_000_u64)),
         gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
         min_network_fee: PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 
@@ -1159,7 +1161,7 @@ fn the_payers_authorization_is_verified_on_every_door() {
             &auth,
             id,
             ARBITRUM,
-            chain.usdc,
+            chain.usdc_domain(),
             chain.swapic,
         ),
         &key,
@@ -1177,7 +1179,7 @@ fn the_payers_authorization_is_verified_on_every_door() {
             &auth,
             id,
             ARBITRUM,
-            chain.usdc,
+            chain.usdc_domain(),
             chain.swapic,
         ),
         &stranger,
@@ -1295,7 +1297,11 @@ fn each_door_accepts_exactly_what_its_verifier_accepts() {
     let auth = sample.resigned(&order);
     let authorize = |auth: &GaslessAuth| authorize(&order, auth, id, ARBITRUM, &chain);
     let rwa = |order: &Order, chain_id: ChainId, usdc: EvmAddress| {
-        swapic::receive_with_authorization_digest(order, &auth, id, chain_id, usdc, chain.swapic)
+        let domain = swapic::UsdcDomain {
+            address: usdc,
+            ..chain.usdc_domain()
+        };
+        swapic::receive_with_authorization_digest(order, &auth, id, chain_id, domain, chain.swapic)
     };
     let with_signature = |auth: &GaslessAuth, signature: Vec<u8>| GaslessAuth {
         signature: signature.into(),
@@ -1504,4 +1510,110 @@ fn a_carried_reading_no_newer_than_the_stored_one_is_kept_out() {
         assert_eq!(take_reading(chain, Some(at_block(101)), later), Ok(()));
         assert_eq!(stored(), Some((101, later)));
     });
+}
+
+/// Anvil's first account: a published test key that holds nothing, the signer of the two
+/// real 3009 signatures below.
+const ANVIL: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+/// The staging deploy's Swapic, one address on every chain.
+const STAGING_SWAPIC: &str = "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406";
+
+/// A gasless order of 5 USDC on `usdc`, paid by Anvil's first account.
+fn anvil_order(usdc: EvmAddress) -> Order {
+    let anvil: EvmAddress = ANVIL.parse().unwrap();
+    Order {
+        r#ref: alloy_primitives::FixedBytes([0x5a; 32]),
+        payer: swapic::addr(anvil),
+        tokenIn: swapic::addr(usdc),
+        amountIn: U256::from(5_000_000_u64),
+        deadline: U256::from(1_793_189_700_u64),
+        steps: vec![],
+        payout: swapic::Payout {
+            token: swapic::addr(usdc),
+            recipient: swapic::addr(
+                "0x2222222222222222222222222222222222222222"
+                    .parse()
+                    .unwrap(),
+            ),
+            minOut: U256::from(4_900_000_u64),
+        },
+    }
+}
+
+/// The 3009 door is checked under the chain's own USDC domain. Two real signatures, made
+/// with `cast wallet sign --data` (foundry 1.3.5) from Anvil's first key over the typed data
+/// of USDC's `ReceiveWithAuthorization` (`sigs/typed_<chain>.json` in the plan's scratch):
+/// one under "USDC" on Unichain (130), as its USDC answers `name()`, and one under
+/// "USD Coin" on Base. Each recovers to its payer only under the name its chain's entry
+/// holds, an entry naming none being "USD Coin".
+#[test]
+fn a_3009_signature_is_checked_under_its_chains_own_usdc_name() {
+    let base_chain = sample().evm_chains.get(ARBITRUM).unwrap();
+    let swapic: EvmAddress = STAGING_SWAPIC.parse().unwrap();
+    let usdc_named: types::config::DomainText = "USDC".parse().unwrap();
+    let cases = [
+        (
+            ChainId::new(130),
+            "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
+            Some(usdc_named),
+            None,
+            "75a64b5dd29fff01a93403d0b78c738c4b946890d5574e2d2776519744c9a23a5dd02cde0d15366d746d8010263001dfe06752e04de94399192e35e301258e841b",
+        ),
+        (
+            ChainId::BASE,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            None,
+            Some(usdc_named),
+            "7fb83d9fde4a262d3aee626308a4cd17facc4dfc671ef2207107cafd2e3a29076a97dd049086a73cad94d431c72288c7d33c6601551155c36c18e9fbac15fa1c1c",
+        ),
+    ];
+    for (chain_id, usdc, signed_under, other, signature) in cases {
+        let usdc: EvmAddress = usdc.parse().unwrap();
+        let order = anvil_order(usdc);
+        let id = swapic::order_id(&order, chain_id, swapic);
+        let auth = GaslessAuth {
+            door: swapic::DOOR_AUTH_3009,
+            validAfter: U256::ZERO,
+            validBefore: order.deadline,
+            nonce: id.as_nonce(),
+            signature: hex::decode(signature).unwrap().into(),
+            ..Default::default()
+        };
+        let entry = |usdc_name| EvmChain {
+            usdc,
+            swapic,
+            usdc_name,
+            ..base_chain
+        };
+        assert_eq!(
+            authorize(&order, &auth, id, chain_id, &entry(signed_under)),
+            Ok(()),
+            "{chain_id} under its own name"
+        );
+        assert_eq!(
+            authorize(&order, &auth, id, chain_id, &entry(other)),
+            Err(RelayError::ContractPayerUnsupported),
+            "{chain_id} under the other name"
+        );
+    }
+}
+
+/// An entry naming no domain reads as Circle's usual "USD Coin" and "2", and one naming
+/// its own reads as it.
+#[test]
+fn a_chains_usdc_domain_is_its_entrys_or_circles_usual() {
+    let chain = sample().evm_chains.get(ARBITRUM).unwrap();
+    assert_eq!(chain.usdc_name, None, "the sample's entry names none");
+    let usual = chain.usdc_domain();
+    assert_eq!(
+        (usual.address, usual.name, usual.version),
+        (chain.usdc, "USD Coin", "2")
+    );
+    let named = EvmChain {
+        usdc_name: Some("USDC".parse().unwrap()),
+        usdc_version: Some("3".parse().unwrap()),
+        ..chain
+    };
+    let own = named.usdc_domain();
+    assert_eq!((own.name, own.version), ("USDC", "3"));
 }

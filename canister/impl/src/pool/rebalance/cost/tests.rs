@@ -22,6 +22,8 @@ fn chain(move_fee: u64, finish_fee: u64) -> EvmChain {
             pool_move_finish: Some(TokenAmount::from(finish_fee)),
             ..PerAction::all(TokenAmount::ZERO)
         },
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 

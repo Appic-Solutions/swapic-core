@@ -56,6 +56,8 @@ fn chain(swapic: u8, runner: EvmAddress, receiver: EvmAddress, usdc: EvmAddress)
         gas_limit: PerAction::all(GasAmount::from(1_500_000_u64)),
         gas_budget: PerAction::all(Wei::from(10_000_000_000_000_000_u64)),
         min_network_fee: PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
     }
 }
 

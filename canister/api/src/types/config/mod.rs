@@ -6,8 +6,8 @@ use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
 use types::config::{
-    AuditChunk, BooksInterval, BooksTolerance, ChainTable, ClaimGrace, DepositLookback, EcoEnabled,
-    EvictionsPerSweep, EvmChain, PerAction, RefundsPerSweep,
+    AuditChunk, BooksInterval, BooksTolerance, ChainTable, ClaimGrace, DepositLookback, DomainText,
+    EcoEnabled, EvictionsPerSweep, EvmChain, PerAction, RefundsPerSweep,
 };
 use types::rail::{CctpDomain, CctpMinFee};
 use types::{
@@ -112,6 +112,13 @@ pub struct EvmChainConfig {
     pub gas_budget_wei: ActionAmounts,
     /// The least fee step, in USDC units, each action needs.
     pub min_network_fee: ActionAmounts,
+    /// USDC's EIP-712 domain name on this chain, as its contract answers `name()`: what a
+    /// 3009 authorization is signed under. None: "USD Coin". 1 to 32 printable ASCII
+    /// characters.
+    pub usdc_domain_name: Option<String>,
+    /// USDC's EIP-712 domain version on this chain, as its contract answers `version()`.
+    /// None: "2". 1 to 32 printable ASCII characters.
+    pub usdc_domain_version: Option<String>,
 }
 
 /// One gas limit per action the canister signs.
@@ -310,12 +317,25 @@ impl From<EvmChain> for EvmChainConfig {
             gas_limit: chain.gas_limit.into(),
             gas_budget_wei: chain.gas_budget.into(),
             min_network_fee: chain.min_network_fee.into(),
+            usdc_domain_name: chain.usdc_name.map(|name| name.to_string()),
+            usdc_domain_version: chain.usdc_version.map(|version| version.to_string()),
         }
     }
 }
 
 fn evm_chain(chain: ChainId, config: EvmChainConfig) -> Result<EvmChain, types::ConfigError> {
     let at = |field: &'static str, text: &str| evm_address(field, Some(chain), text);
+    let domain_text = |field: &'static str, text: Option<String>| {
+        text.map(|text| {
+            text.parse::<DomainText>()
+                .map_err(|reason| types::ConfigError::NotDomainText {
+                    field,
+                    chain,
+                    reason,
+                })
+        })
+        .transpose()
+    };
     Ok(EvmChain {
         swapic: at("evm_chains.swapic", &config.swapic)?,
         runner: at("evm_chains.runner", &config.runner)?,
@@ -329,6 +349,8 @@ fn evm_chain(chain: ChainId, config: EvmChainConfig) -> Result<EvmChain, types::
         gas_limit: config.gas_limit.into(),
         gas_budget: per_action("evm_chains.gas_budget_wei", config.gas_budget_wei)?,
         min_network_fee: per_action("evm_chains.min_network_fee", config.min_network_fee)?,
+        usdc_name: domain_text("evm_chains.usdc_domain_name", config.usdc_domain_name)?,
+        usdc_version: domain_text("evm_chains.usdc_domain_version", config.usdc_domain_version)?,
     })
 }
 
@@ -769,6 +791,12 @@ pub enum ConfigError {
     EmptyRpcUrl {
         chain_id: u64,
     },
+    /// The text in `field` at `chain_id` is not an EIP-712 domain name or version: 1 to 32
+    /// printable ASCII characters.
+    NotDomainText {
+        field: String,
+        chain_id: u64,
+    },
     /// The text in `field` (for a table, at `chain_id`) is not an EVM address.
     NotAnAddress {
         field: String,
@@ -885,6 +913,10 @@ impl From<types::ConfigError> for ConfigError {
                 chain_id: chain.get(),
             },
             Domain::EmptyRpcUrl { chain } => Self::EmptyRpcUrl {
+                chain_id: chain.get(),
+            },
+            Domain::NotDomainText { field, chain, .. } => Self::NotDomainText {
+                field: field.to_string(),
                 chain_id: chain.get(),
             },
             Domain::NotAnAddress {

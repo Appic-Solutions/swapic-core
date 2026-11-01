@@ -70,6 +70,8 @@ fn outbox_config() -> Config {
                 },
                 gas_budget_wei: amounts,
                 min_network_fee: ActionAmounts::default(),
+                usdc_domain_name: None,
+                usdc_domain_version: None,
             },
         )]),
         ..Config::default()

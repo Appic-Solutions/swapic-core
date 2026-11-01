@@ -673,6 +673,8 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
                 gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
                 gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
                 min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+                usdc_name: None,
+                usdc_version: None,
             },
         )])),
         ..Config::default()
@@ -706,6 +708,44 @@ fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
     // a table written as null, by an encoder that keeps every index, reads as empty
     let empty: ChainTable<CctpDomain> = minicbor::decode(&[0xf6]).unwrap();
     assert!(empty.0.is_empty());
+}
+
+/// USDC's domain name and version are appended to a chain's stored entry: an entry naming
+/// none writes exactly what it wrote before the two fields existed (nine fields, so a
+/// stored config reads back unchanged), and one naming its own reads back as it.
+#[test]
+fn a_chains_usdc_domain_is_appended_to_its_stored_entry() {
+    let usual = EvmChain {
+        swapic: EvmAddress::new([0x5a; 20]),
+        runner: EvmAddress::new([0x5b; 20]),
+        cctp_receiver: EvmAddress::new([0x5c; 20]),
+        usdc: EvmAddress::new([0x5d; 20]),
+        token_messenger: EvmAddress::new([0x5e; 20]),
+        message_transmitter: EvmAddress::new([0x5f; 20]),
+        gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
+        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
+    };
+    let bytes = minicbor::to_vec(usual).unwrap();
+    assert_eq!(bytes[0], 0x89, "an array of nine fields, as before");
+    assert_eq!(minicbor::decode::<EvmChain>(&bytes).unwrap(), usual);
+    let named = EvmChain {
+        usdc_name: Some("USDC".parse().unwrap()),
+        ..usual
+    };
+    let bytes = minicbor::to_vec(named).unwrap();
+    assert_eq!(bytes[0], 0x8a, "ten fields: the name, the version left out");
+    assert_eq!(minicbor::decode::<EvmChain>(&bytes).unwrap(), named);
+    let both = EvmChain {
+        usdc_version: Some("2".parse().unwrap()),
+        ..named
+    };
+    assert_eq!(
+        minicbor::decode::<EvmChain>(&minicbor::to_vec(both).unwrap()).unwrap(),
+        both
+    );
 }
 
 /// The Eco rail is off until its route is designed, so the knob that turns it on is off by

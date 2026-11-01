@@ -291,6 +291,8 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
                     complete_swap: Nat::from(60_000_u64),
                     ..ActionAmounts::default()
                 },
+                usdc_domain_name: None,
+                usdc_domain_version: None,
             },
         )]),
         eco_portal: Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string()),
@@ -345,6 +347,69 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
             chain_id: None,
             reason: EvmAddressError::WrongLength { len: 2 },
         }
+    );
+}
+
+/// Arbitrum as design C runs on it, USDC's domain left as `name` and `version` say.
+fn arbitrum(name: Option<&str>, version: Option<&str>) -> EvmChainConfig {
+    EvmChainConfig {
+        swapic: "0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7".to_string(),
+        runner: "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C".to_string(),
+        cctp_receiver: "0x5555555555555555555555555555555555555555".to_string(),
+        usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
+        token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
+        message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
+        gas_limit: ActionGas::default(),
+        gas_budget_wei: ActionAmounts::default(),
+        min_network_fee: ActionAmounts::default(),
+        usdc_domain_name: name.map(str::to_string),
+        usdc_domain_version: version.map(str::to_string),
+    }
+}
+
+/// A chain's USDC domain name and version cross the wire as set, none staying none (Circle's
+/// usual pair), and a text that is no domain name or version is refused by its knob.
+#[test]
+fn a_chains_usdc_domain_crosses_the_wire_and_a_bad_one_names_its_knob() {
+    let wire = |chain: EvmChainConfig| Config {
+        evm_chains: BTreeMap::from([(42161, chain)]),
+        ..Config::default()
+    };
+    let named = wire(arbitrum(Some("USDC"), None));
+    let domain = types::Config::try_from(named.clone()).unwrap();
+    let chain = domain.evm_chains.get(types::ChainId::ARBITRUM).unwrap();
+    let usdc = chain.usdc_domain();
+    assert_eq!((usdc.name, usdc.version), ("USDC", "2"));
+    assert_eq!(Config::unredacted(domain), named);
+    let usual = types::Config::try_from(wire(arbitrum(None, None))).unwrap();
+    let chain = usual.evm_chains.get(types::ChainId::ARBITRUM).unwrap();
+    let usdc = chain.usdc_domain();
+    assert_eq!((usdc.name, usdc.version), ("USD Coin", "2"));
+
+    let empty = types::Config::try_from(wire(arbitrum(Some(""), None))).unwrap_err();
+    assert_eq!(
+        empty,
+        types::ConfigError::NotDomainText {
+            field: "evm_chains.usdc_domain_name",
+            chain: types::ChainId::ARBITRUM,
+            reason: types::config::NotDomainText,
+        }
+    );
+    assert_eq!(
+        ConfigError::from(empty),
+        ConfigError::NotDomainText {
+            field: "evm_chains.usdc_domain_name".to_string(),
+            chain_id: 42161,
+        }
+    );
+    let long = "2".repeat(33);
+    assert_eq!(
+        types::Config::try_from(wire(arbitrum(None, Some(&long)))).map(drop),
+        Err(types::ConfigError::NotDomainText {
+            field: "evm_chains.usdc_domain_version",
+            chain: types::ChainId::ARBITRUM,
+            reason: types::config::NotDomainText,
+        })
     );
 }
 
