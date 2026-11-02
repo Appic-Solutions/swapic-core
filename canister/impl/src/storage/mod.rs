@@ -1,4 +1,3 @@
-pub mod audit_cursor;
 pub mod callers;
 pub mod chain_data;
 pub mod config;
@@ -9,7 +8,6 @@ pub mod halt;
 pub mod memory;
 pub mod outbox;
 pub mod pool;
-pub mod replay_cursor;
 pub mod roles;
 pub mod sanctions;
 pub mod timer_state;
@@ -24,11 +22,9 @@ pub fn init() {
     config::init();
     roles::init();
     halt::init();
-    audit_cursor::init();
     chain_data::init();
     ecdsa_address::init();
     outbox::init();
-    replay_cursor::init();
     sanctions::init();
     flow_settings::init();
     timer_state::init();

@@ -33,10 +33,10 @@ pub use chain_data::{ChainData, ChainDataError, ChainReading};
 pub use checked_amount::CheckedAmountOf;
 pub use config::{Config, ConfigError};
 pub use entry::{Attestation, InFlight, InFlightKind};
-pub use events::{Choice, Event, EventType};
+pub use events::{Event, EventType};
 pub use evm::{EcdsaSignature, Eip1559Tx, EvmAddress, SignedTx};
 pub use flow::{Flow, FlowError, FlowKind, FlowStatus, FlowStep};
-pub use hash::{EventHash, QuoteHash, TxHash};
+pub use hash::{QuoteHash, TxHash};
 pub use ledger::LedgerMeta;
 pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Permit2Nonce,

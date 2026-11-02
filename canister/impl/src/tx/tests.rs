@@ -512,7 +512,7 @@ fn raw_bytes_cross_the_wire_prefixed() {
 /// An entry in the outbox with `hashes` transactions broadcast at its nonce.
 fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
     OutboxEntry {
-        purpose: TxPurpose::Payout(QuoteHash::new([1; 32])),
+        purpose: TxPurpose::Relay(QuoteHash::new([1; 32])),
         chain_id: ChainId::BASE,
         nonce: types::Nonce::new(nonce),
         attempt: Some(Attempt::FIRST),
@@ -682,13 +682,11 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
     let apply = |state: &mut State<MemoryStore>, payload: EventType| {
         state.check(&payload).expect("the fold admits it");
         let meta = state.meta();
-        let event = Event::seal(
-            meta.next_event_index,
-            Timestamp::from_nanos(1),
-            meta.last_event_hash,
-            payload,
-        )
-        .expect("the payload has a preimage");
+        let event = Event {
+            index: meta.next_event_index,
+            timestamp: Timestamp::from_nanos(1),
+            payload: payload,
+        };
         apply_state_transition(state, &event);
     };
     let allocation = |nonce: u64| EventType::TxCreated {
@@ -974,11 +972,6 @@ fn the_gas_action_is_folded_from_the_log() {
             max_priority_fee: WeiPerGas::from(100_000_000_u64),
             action,
         };
-        assert_ne!(
-            created(Some(GasAction::RelayCctp)).canonical_bytes(),
-            created(None).canonical_bytes(),
-            "the hash covers the action"
-        );
         let at = at(100);
         crate::storage::events::append_event_at(created(Some(GasAction::RelayCctp)), at).unwrap();
         crate::storage::events::append_event_at(
@@ -1062,10 +1055,12 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
         // its line just landed at the swap depth: kept, with the block it closed at
         settle(
             &open,
+            TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
             BlockNumber::new(100),
             credit,
+            Timestamp::from_nanos(1),
         );
         let kept = outbox::get(open.key()).expect("kept until the crediting depth");
         assert_eq!(kept.closed_at, Some(BlockNumber::new(100)));
@@ -1104,10 +1099,12 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
         outbox::put(open.clone());
         settle(
             &open,
+            TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
             BlockNumber::new(100),
             swap,
+            Timestamp::from_nanos(1),
         );
         assert_eq!(outbox::get(open.key()), None);
     });
@@ -1128,10 +1125,12 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
         outbox::put(open.clone());
         settle(
             &open,
+            TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
             BlockNumber::new(100),
             credit,
+            Timestamp::from_nanos(1),
         );
         let kept = outbox::get(open.key()).expect("kept until the crediting depth");
         assert_eq!(kept.closed_success, Some(true));
@@ -1319,7 +1318,6 @@ fn a_transaction_with_no_record_here_is_refused_before_its_nonce() {
             record_of(purpose, None).err(),
             Some(TxError::NoRecord(match words {
                 "cancel" => "a cancel",
-                "v1" => "a retired v1 transaction",
                 "finish" => "a finish with no detail",
                 "payout" => "a pool payout with no order",
                 _ => "a pool transfer with no orphan",
@@ -1328,17 +1326,6 @@ fn a_transaction_with_no_record_here_is_refused_before_its_nonce() {
         );
     };
     refused(TxPurpose::Cancel(ChainId::BASE), "cancel");
-    for v1 in [
-        TxPurpose::Burn(key),
-        TxPurpose::Mint(key),
-        TxPurpose::Payout(key),
-        TxPurpose::Refund(key),
-        TxPurpose::Reclaim(key),
-        TxPurpose::GaslessPull(key),
-        TxPurpose::Continue(key),
-    ] {
-        refused(v1, "v1");
-    }
     refused(TxPurpose::Finish(key), "finish");
     refused(TxPurpose::PoolPayout(1), "payout");
     refused(TxPurpose::PoolTransfer([5; 32]), "transfer");

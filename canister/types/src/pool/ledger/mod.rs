@@ -110,10 +110,6 @@ pub struct PoolLedger {
     pub icp_checked_at: Option<Timestamp>,
     #[n(14)]
     pub icp_failed_at: Option<Timestamp>,
-    /// How far the canister's own read of Base got: done through this block, all of it, or
-    /// with `scan_log` through that log of it.
-    #[n(15)]
-    pub scan_cursor: Option<BlockNumber>,
     /// The arrived swaps whose payouts wait for the ICP pocket's free ckUSDC, first in first
     /// out: credited and owed, and held only when they start.
     #[n(16)]
@@ -122,10 +118,6 @@ pub struct PoolLedger {
     /// rebalance and the alert read.
     #[n(17)]
     pub head_since: Option<Timestamp>,
-    /// The log of `scan_cursor`'s block the read is done through, the rest of the block to
-    /// read yet. None: the block is done whole.
-    #[n(18)]
-    pub scan_log: Option<u64>,
     /// The Base payouts' lines (P11b): absent until their first step.
     #[n(19)]
     pub payouts: Option<PayoutLines>,
@@ -244,8 +236,6 @@ pub enum PoolStepError {
     NotPending(PoolOpId),
     #[error("the step does not match the operation it names")]
     Mismatch,
-    #[error("the cursor at {at} cannot move back to {to}")]
-    CursorBack { at: BlockNumber, to: BlockNumber },
     #[error("the arrival does not fit the pool: {0}")]
     DoesNotFit(&'static str),
     #[error(transparent)]
@@ -523,13 +513,6 @@ impl PoolLedger {
         }
     }
 
-    /// Where the canister's read of Base stands, in order: a block, then its log (a block
-    /// done whole above every log of it).
-    pub fn scan_position(&self) -> Option<(BlockNumber, u128)> {
-        self.scan_cursor
-            .map(|block| (block, self.scan_log.map_or(u128::MAX, u128::from)))
-    }
-
     /// The ICP pocket's free ckUSDC less what the queued payouts will take: what a
     /// registration may count on and a withdrawal may take, behind the queue.
     pub fn icp_available(&self) -> TokenAmount {
@@ -601,7 +584,6 @@ impl PoolLedger {
             PoolStep::SettingsSet { .. }
             | PoolStep::IcpChecked { .. }
             | PoolStep::IcpCheckFailed { .. }
-            | PoolStep::ScanCursor { .. }
             | PoolStep::IcpRoutesSet { .. } => self.admits_settings_and_reads(step),
             PoolStep::Registered { .. }
             | PoolStep::Expired { .. }
@@ -704,16 +686,6 @@ impl PoolLedger {
                 Ok(())
             }
             PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
-            // never back: a block done whole is past any log of it
-            PoolStep::ScanCursor { block, log } => match self.scan_position() {
-                Some(at) if (*block, log.map_or(u128::MAX, u128::from)) < at => {
-                    Err(PoolStepError::CursorBack {
-                        at: at.0,
-                        to: *block,
-                    })
-                }
-                _ => Ok(()),
-            },
             PoolStep::IcpRoutesSet { routes } => {
                 let settings = self.settings()?;
                 routes
@@ -1222,8 +1194,7 @@ impl PoolLedger {
             PoolStep::SettingsSet { .. }
             | PoolStep::IcpRoutesSet { .. }
             | PoolStep::IcpChecked { .. }
-            | PoolStep::IcpCheckFailed { .. }
-            | PoolStep::ScanCursor { .. } => ledger.apply_settings_and_reads(step, at),
+            | PoolStep::IcpCheckFailed { .. } => ledger.apply_settings_and_reads(step, at),
             PoolStep::Registered { .. }
             | PoolStep::Expired { .. }
             | PoolStep::Arrived { .. }
@@ -1337,10 +1308,6 @@ impl PoolLedger {
                 }
             }
             PoolStep::IcpCheckFailed { .. } => self.icp_failed_at = Some(at),
-            PoolStep::ScanCursor { block, log } => {
-                self.scan_cursor = Some(*block);
-                self.scan_log = *log;
-            }
             _ => unrouted_apply(step),
         }
     }

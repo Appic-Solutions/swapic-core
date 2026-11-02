@@ -1,7 +1,8 @@
 use super::*;
+use crate::state::MemoryStore;
 use types::events::TxPurpose;
 use types::{
-    BlockNumber, ChainId, EventHash, EventIndex, GasAmount, Nonce, NonceKey, QuoteHash, Timestamp,
+    BlockNumber, ChainId, EventIndex, GasAmount, Nonce, NonceKey, QuoteHash, Timestamp,
     TokenAmount, TxHash, UnsignedTx, Wei, WeiPerGas,
 };
 
@@ -98,13 +99,11 @@ fn cancel(nonce: u64) -> EventType {
 /// Seals `payload` as the next event of `state` at `nanos`.
 fn next_event(state: &HeapState, nanos: u64, payload: EventType) -> Event {
     let meta = state.meta();
-    Event::seal(
-        meta.next_event_index,
-        Timestamp::from_nanos(nanos),
-        meta.last_event_hash,
-        payload,
-    )
-    .expect("the payload has a preimage")
+    Event {
+        index: meta.next_event_index,
+        timestamp: Timestamp::from_nanos(nanos),
+        payload: payload,
+    }
 }
 
 /// Checks and applies `payload` as the next event of `state`, sealed at `nanos`.
@@ -134,27 +133,6 @@ fn replay_is_deterministic() {
     assert_eq!(
         replay(events.clone().into_iter()).unwrap(),
         replay(events.into_iter()).unwrap()
-    );
-}
-
-/// No event can carry an amount a 16-byte canonical field cannot hold, so the guard
-/// refuses it with a typed error before anything could try to seal it, ahead of every
-/// other rule.
-#[test]
-fn check_refuses_an_amount_no_canonical_field_holds() {
-    let state = HeapState::default();
-    let fund = |amount| EventType::PocketFunded {
-        chain_id: BASE,
-        amount,
-    };
-    assert_eq!(
-        state.check(&fund(TokenAmount::MAX)),
-        Err(TransitionError::AmountOutOfRange(TokenAmount::MAX))
-    );
-    assert_eq!(
-        state.check(&fund(amount(u128::MAX))),
-        Err(TransitionError::UnknownPocket(BASE)),
-        "in range, and then refused by its own rule"
     );
 }
 
@@ -217,153 +195,6 @@ fn replay_refuses_a_log_append_event_could_not_have_written() {
             expected: EventIndex::ZERO,
             found: EventIndex::new(1)
         })
-    );
-
-    // a link to a parent the fold does not end with
-    let mut unlinked = log.clone();
-    unlinked[1].parent_hash = EventHash::new([7; 32]);
-    assert!(matches!(
-        replay(unlinked),
-        Err(ReplayError::Unlinked { .. })
-    ));
-}
-
-/// The retired v1 swaps and pockets (Plan 3's vault-routed swaps): every line about one is
-/// refused as it is on a store that never held one, its variant and index kept in the
-/// log's types. hfisl's log holds none of them.
-#[test]
-fn every_retired_v1_line_is_refused() {
-    let state = fold(vec![relay_created(1, 0)]);
-    let swap = qh(5);
-    for line in [
-        EventType::FundsReceived {
-            quote_hash: swap,
-            quote_bytes: vec![1],
-            chain_id: BASE,
-            token: "USDC".parse().unwrap(),
-            amount: amount(1),
-            tx_ref: "0xfeed".to_string(),
-        },
-        EventType::TxSigned {
-            quote_hash: swap,
-            attempt: types::Attempt::FIRST,
-            chain_id: BASE,
-            tx_hash: TxHash::new([1; 32]),
-            raw_tx: vec![],
-        },
-        EventType::TxConfirmed {
-            quote_hash: swap,
-            attempt: types::Attempt::FIRST,
-            chain_id: BASE,
-            tx_hash: TxHash::new([1; 32]),
-            block: BlockNumber::new(1),
-        },
-        EventType::TxFailed {
-            quote_hash: swap,
-            attempt: types::Attempt::FIRST,
-            reason: "reverted".to_string(),
-        },
-        EventType::PaidInStable {
-            quote_hash: swap,
-            chain_id: BASE,
-            amount: amount(1),
-        },
-        EventType::DecisionRequired {
-            quote_hash: swap,
-            reason: "slippage".to_string(),
-        },
-        EventType::DecisionMade {
-            quote_hash: swap,
-            choice: types::Choice::Refund,
-        },
-        EventType::RefundStarted {
-            quote_hash: swap,
-            reason: "asked".to_string(),
-        },
-        EventType::Refunded {
-            quote_hash: swap,
-            chain_id: BASE,
-            token: "USDC".parse().unwrap(),
-            amount: amount(1),
-            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-                .parse()
-                .unwrap(),
-        },
-        EventType::SwapDone { quote_hash: swap },
-        EventType::Frozen {
-            quote_hash: swap,
-            reason: "stuck".to_string(),
-        },
-        EventType::FeeAccrued {
-            quote_hash: swap,
-            amount: amount(1),
-        },
-        EventType::PocketReserved {
-            quote_hash: swap,
-            chain_id: BASE,
-            amount: amount(1),
-        },
-        EventType::PocketReleased {
-            quote_hash: swap,
-            chain_id: BASE,
-            amount: amount(1),
-        },
-        EventType::PocketSpent {
-            quote_hash: swap,
-            chain_id: BASE,
-            amount: amount(1),
-        },
-        EventType::PullSigned {
-            quote_hash: swap,
-            chain_id: BASE,
-            nonce: Nonce::ZERO,
-            tx_hash: TxHash::new([1; 32]),
-            raw_tx: vec![],
-        },
-        EventType::WaitingRepaired { quote_hash: swap },
-    ] {
-        assert_eq!(
-            state.check(&line),
-            Err(TransitionError::UnknownSwap(swap)),
-            "{line:?}"
-        );
-    }
-    for line in [
-        EventType::PocketFunded {
-            chain_id: BASE,
-            amount: amount(1),
-        },
-        EventType::PocketRebalanced {
-            from_chain: BASE,
-            to_chain: ARBITRUM,
-            amount: amount(1),
-            route: "cctp".to_string(),
-        },
-    ] {
-        assert_eq!(
-            state.check(&line),
-            Err(TransitionError::UnknownPocket(BASE)),
-            "{line:?}"
-        );
-    }
-    // nor is a transaction created for, or a replacement made of, a v1 swap's leg or pull
-    for purpose in [
-        TxPurpose::Burn(swap),
-        TxPurpose::Mint(swap),
-        TxPurpose::Payout(swap),
-        TxPurpose::Refund(swap),
-        TxPurpose::Reclaim(swap),
-        TxPurpose::GaslessPull(swap),
-    ] {
-        assert_eq!(
-            state.check(&created(purpose, BASE, 1)),
-            Err(TransitionError::UnknownSwap(swap)),
-            "{purpose:?}"
-        );
-    }
-    assert_eq!(
-        state.check(&replaced(TxPurpose::Payout(swap), BASE, 0)),
-        Err(TransitionError::UnknownSwap(swap))
     );
 }
 
@@ -566,45 +397,6 @@ fn a_replacement_keeps_an_allocated_nonce_and_allocates_none() {
                 nonce: Nonce::new(never_allocated),
                 next: Nonce::new(1),
             })
-        );
-    }
-}
-
-/// A value, a gas limit or a fee no sixteen-byte field holds has no preimage, so it is
-/// refused by the guard rather than failing at the seal.
-#[test]
-fn a_transaction_field_above_the_preimage_range_is_refused() {
-    let state = HeapState::default();
-    let field = |value: Wei, gas_limit: GasAmount, max_fee: WeiPerGas, tip: WeiPerGas| {
-        EventType::TxCreated {
-            purpose: TxPurpose::Relay(relay_key(1)),
-            chain_id: BASE,
-            nonce: Nonce::ZERO,
-            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-                .parse()
-                .unwrap(),
-            value,
-            data: vec![],
-            gas_limit,
-            max_fee,
-            max_priority_fee: tip,
-            action: None,
-        }
-    };
-    let (gas, fee) = (GasAmount::from(120_000_u32), WeiPerGas::from(1_u8));
-    assert_eq!(state.check(&field(Wei::ZERO, gas, fee, fee)), Ok(()));
-    for broken in [
-        field(Wei::MAX, gas, fee, fee),
-        field(Wei::ZERO, GasAmount::MAX, fee, fee),
-        field(Wei::ZERO, gas, WeiPerGas::MAX, fee),
-        field(Wei::ZERO, gas, fee, WeiPerGas::MAX),
-    ] {
-        assert!(
-            matches!(
-                state.check(&broken),
-                Err(TransitionError::AmountOutOfRange(_))
-            ),
-            "a field above the range was admitted"
         );
     }
 }

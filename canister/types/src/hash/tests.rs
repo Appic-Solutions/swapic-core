@@ -12,11 +12,6 @@ fn display_and_debug_print_lowercase_hex() {
 }
 
 #[test]
-fn the_genesis_parent_is_all_zeros() {
-    assert_eq!(EventHash::ZERO.into_bytes(), [0; 32]);
-}
-
-#[test]
 fn cbor_writes_a_byte_string() {
     let hash = TxHash::new([7; 32]);
     let bytes = minicbor::to_vec(hash).unwrap();

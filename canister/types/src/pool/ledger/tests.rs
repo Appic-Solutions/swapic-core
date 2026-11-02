@@ -1303,25 +1303,6 @@ fn the_queues_head_has_its_need_and_its_wait() {
     assert_eq!(pool.ledger.head_since, Some(Timestamp::from_nanos(1)));
 }
 
-/// The cursor rule: the canister's read of Base stands at a block or at a log inside one,
-/// and never goes back; a block done whole is past every log of it.
-#[test]
-fn the_read_of_base_never_goes_back() {
-    let mut pool = funded(usdc(1));
-    let cursor = |block: u64, log: Option<u64>| PoolStep::ScanCursor {
-        block: BlockNumber::new(block),
-        log,
-    };
-    pool.step(cursor(10, Some(3))).unwrap();
-    assert_eq!(pool.ledger.scan_position(), Some((BlockNumber::new(10), 3)));
-    assert!(pool.step(cursor(10, Some(2))).is_err());
-    assert!(pool.step(cursor(9, None)).is_err());
-    pool.step(cursor(10, None)).unwrap();
-    assert!(pool.step(cursor(10, Some(5))).is_err(), "done whole");
-    pool.step(cursor(11, Some(0))).unwrap();
-    assert_eq!(pool.ledger.scan_log, Some(0));
-}
-
 /// A path through ICP (P11b): its second leg only once the first paid out, its way back only
 /// once the second cannot pay, and its fall back to ckUSDC only once the way back brought the
 /// ICP back; never once the second leg paid out.
@@ -2195,7 +2176,7 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
 }
 
 /// How many variants `PoolStep` has: [`place`] gives each its own place below it.
-const STEP_COUNT: usize = 73;
+const STEP_COUNT: usize = 72;
 
 /// Each step's place in `PoolStep`'s order. The match has no catch-all, so a step added to
 /// `PoolStep` does not compile here until it has a place, and a sample in [`every_step`].
@@ -2221,59 +2202,58 @@ fn place(step: &PoolStep) -> usize {
         PoolStep::WithdrawStarted { .. } => 17,
         PoolStep::IcpChecked { .. } => 18,
         PoolStep::IcpCheckFailed { .. } => 19,
-        PoolStep::ScanCursor { .. } => 20,
-        PoolStep::SwapApproved { .. } => 21,
-        PoolStep::SwapUndone { .. } => 22,
-        PoolStep::PayoutSettingsSet { .. } => 23,
-        PoolStep::PayoutOpened { .. } => 24,
-        PoolStep::PayoutAmountKnown { .. } => 25,
-        PoolStep::PayoutQueued { .. } => 26,
-        PoolStep::PayoutWaiting { .. } => 27,
-        PoolStep::PayoutSigned { .. } => 28,
-        PoolStep::PayoutPaid { .. } => 29,
-        PoolStep::PayoutReverted { .. } => 30,
-        PoolStep::PayoutUndoing { .. } => 31,
-        PoolStep::PayoutUndone { .. } => 32,
-        PoolStep::IcpRoutesSet { .. } => 33,
-        PoolStep::ApproveSigned { .. } => 34,
-        PoolStep::PayoutPulled { .. } => 35,
-        PoolStep::PayoutStopped { .. } => 36,
-        PoolStep::PayoutRelisted { .. } => 37,
-        PoolStep::PayoutRefunded { .. } => 38,
-        PoolStep::OrphanBooked { .. } => 39,
-        PoolStep::OrphanRefundSigned { .. } => 40,
-        PoolStep::OrphanRefundClosed { .. } => 41,
-        PoolStep::TermsClaimed { .. } => 42,
-        PoolStep::PayoutDelivered { .. } => 43,
-        PoolStep::PayoutUnfilled { .. } => 44,
-        PoolStep::PayoutResolved { .. } => 45,
-        PoolStep::PayoutFitWaited { .. } => 46,
-        PoolStep::PayoutFillEarly { .. } => 47,
-        PoolStep::DepositResolved { .. } => 48,
-        PoolStep::StakeResolved { .. } => 49,
-        PoolStep::TransferAsked { .. } => 50,
-        PoolStep::TransferRefused { .. } => 51,
-        PoolStep::TransferLost { .. } => 52,
-        PoolStep::MoveSettingsSet { .. } => 53,
-        PoolStep::MoveOpened { .. } => 54,
-        PoolStep::MoveProposed { .. } => 55,
-        PoolStep::MoveRouted { .. } => 56,
-        PoolStep::MoveSigned { .. } => 57,
-        PoolStep::MoveBurned { .. } => 58,
-        PoolStep::MoveReverted { .. } => 59,
-        PoolStep::MoveWithdrawing { .. } => 60,
-        PoolStep::MoveWithdrawn { .. } => 61,
-        PoolStep::MoveRefused { .. } => 62,
-        PoolStep::MoveLanded { .. } => 63,
-        PoolStep::MoveSweeping { .. } => 64,
-        PoolStep::MoveArrived { .. } => 65,
-        PoolStep::MoveStuck { .. } => 66,
-        PoolStep::MoveRetried { .. } => 67,
-        PoolStep::MoveLost { .. } => 68,
-        PoolStep::MoveRefunded { .. } => 69,
-        PoolStep::EcoRescueSigned { .. } => 70,
-        PoolStep::MoveUnfilled { .. } => 71,
-        PoolStep::MoveReimbursed { .. } => 72,
+        PoolStep::SwapApproved { .. } => 20,
+        PoolStep::SwapUndone { .. } => 21,
+        PoolStep::PayoutSettingsSet { .. } => 22,
+        PoolStep::PayoutOpened { .. } => 23,
+        PoolStep::PayoutAmountKnown { .. } => 24,
+        PoolStep::PayoutQueued { .. } => 25,
+        PoolStep::PayoutWaiting { .. } => 26,
+        PoolStep::PayoutSigned { .. } => 27,
+        PoolStep::PayoutPaid { .. } => 28,
+        PoolStep::PayoutReverted { .. } => 29,
+        PoolStep::PayoutUndoing { .. } => 30,
+        PoolStep::PayoutUndone { .. } => 31,
+        PoolStep::IcpRoutesSet { .. } => 32,
+        PoolStep::ApproveSigned { .. } => 33,
+        PoolStep::PayoutPulled { .. } => 34,
+        PoolStep::PayoutStopped { .. } => 35,
+        PoolStep::PayoutRelisted { .. } => 36,
+        PoolStep::PayoutRefunded { .. } => 37,
+        PoolStep::OrphanBooked { .. } => 38,
+        PoolStep::OrphanRefundSigned { .. } => 39,
+        PoolStep::OrphanRefundClosed { .. } => 40,
+        PoolStep::TermsClaimed { .. } => 41,
+        PoolStep::PayoutDelivered { .. } => 42,
+        PoolStep::PayoutUnfilled { .. } => 43,
+        PoolStep::PayoutResolved { .. } => 44,
+        PoolStep::PayoutFitWaited { .. } => 45,
+        PoolStep::PayoutFillEarly { .. } => 46,
+        PoolStep::DepositResolved { .. } => 47,
+        PoolStep::StakeResolved { .. } => 48,
+        PoolStep::TransferAsked { .. } => 49,
+        PoolStep::TransferRefused { .. } => 50,
+        PoolStep::TransferLost { .. } => 51,
+        PoolStep::MoveSettingsSet { .. } => 52,
+        PoolStep::MoveOpened { .. } => 53,
+        PoolStep::MoveProposed { .. } => 54,
+        PoolStep::MoveRouted { .. } => 55,
+        PoolStep::MoveSigned { .. } => 56,
+        PoolStep::MoveBurned { .. } => 57,
+        PoolStep::MoveReverted { .. } => 58,
+        PoolStep::MoveWithdrawing { .. } => 59,
+        PoolStep::MoveWithdrawn { .. } => 60,
+        PoolStep::MoveRefused { .. } => 61,
+        PoolStep::MoveLanded { .. } => 62,
+        PoolStep::MoveSweeping { .. } => 63,
+        PoolStep::MoveArrived { .. } => 64,
+        PoolStep::MoveStuck { .. } => 65,
+        PoolStep::MoveRetried { .. } => 66,
+        PoolStep::MoveLost { .. } => 67,
+        PoolStep::MoveRefunded { .. } => 68,
+        PoolStep::EcoRescueSigned { .. } => 69,
+        PoolStep::MoveUnfilled { .. } => 70,
+        PoolStep::MoveReimbursed { .. } => 71,
     }
 }
 
@@ -2448,7 +2428,6 @@ fn every_step() -> Vec<PoolStep> {
         PoolStep::IcpCheckFailed {
             failure: IcpReadFailure::CallFailed,
         },
-        PoolStep::ScanCursor { block, log: None },
         PoolStep::SwapApproved { r#ref, leg: None },
         PoolStep::SwapUndone {
             r#ref,

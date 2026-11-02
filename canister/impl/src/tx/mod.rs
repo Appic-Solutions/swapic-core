@@ -416,16 +416,6 @@ fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxErr
         (TxPurpose::PoolMove(id), _) => Ok(Record::PoolMove(id)),
         (TxPurpose::Cancel(_), _) => Err(TxError::NoRecord("a cancel")),
         (TxPurpose::Sweep(_), _) => todo!("C5: a sweep's signed record"),
-        (
-            TxPurpose::Burn(_)
-            | TxPurpose::Mint(_)
-            | TxPurpose::Payout(_)
-            | TxPurpose::Refund(_)
-            | TxPurpose::Reclaim(_)
-            | TxPurpose::GaslessPull(_)
-            | TxPurpose::Continue(_),
-            _,
-        ) => Err(TxError::NoRecord("a retired v1 transaction")),
     }
 }
 
@@ -1093,7 +1083,7 @@ async fn decide(
                     None => true,
                 };
                 if appended {
-                    settle(entry, block, success, latest, credit);
+                    settle(entry, tx_hash, block, success, latest, credit, now);
                 }
                 return usize::from(appended);
             }
@@ -1154,16 +1144,13 @@ async fn decide(
                     }
                 };
                 if appended {
-                    settle(entry, block, success, latest, credit);
+                    settle(entry, tx_hash, block, success, latest, credit, now);
                 }
                 return usize::from(appended);
             }
             // a flow's transaction closes with a flow line, whichever of the nonce's
             // transactions landed
-            if let TxPurpose::Relay(quote_hash)
-            | TxPurpose::Continue(quote_hash)
-            | TxPurpose::Finish(quote_hash) = entry.purpose
-            {
+            if let TxPurpose::Relay(quote_hash) | TxPurpose::Finish(quote_hash) = entry.purpose {
                 let appended = append_event(EventType::Flow {
                     quote_hash,
                     step: types::FlowStep::TxClosed {
@@ -1174,7 +1161,7 @@ async fn decide(
                 })
                 .is_ok();
                 if appended {
-                    settle(entry, block, success, latest, credit);
+                    settle(entry, tx_hash, block, success, latest, credit, now);
                     // the closing line is appended once per transaction, so the fee is too
                     if success {
                         crate::books::credit_fee(chain_id, tx_hash, block, network_fee);
@@ -1185,7 +1172,7 @@ async fn decide(
             // a cancel closes with no line: `TxCancelled` already sealed that nonce's fate
             // before the bytes went out, so what the chain did with them changes nothing in
             // the fold
-            settle(entry, block, success, latest, credit);
+            settle(entry, tx_hash, block, success, latest, credit, now);
             1
         }
         // mined but not deep enough: nothing to do but wait
@@ -1271,8 +1258,8 @@ pub(crate) fn credit_confirmations(
     })
 }
 
-/// What the outbox keeps of an entry whose attempt just closed on a receipt in `block` that
-/// `success`ed or not: nothing once that receipt is at the crediting depth `credit` against
+/// Records the end of an entry's attempt on a receipt in `block` that `success`ed or not
+/// (`TxFinal`), and what the outbox keeps of the entry: nothing once that receipt is at the crediting depth `credit` against
 /// `latest`, which on a chain that credits at its swap depth is at once, as it always was.
 /// Otherwise the entry itself, marked closed with the block and the outcome: a reorg that
 /// drops the transaction before the crediting depth finds its bytes to send again, and the
@@ -1285,11 +1272,35 @@ pub(crate) fn credit_confirmations(
 /// and this one is not.
 fn settle(
     entry: &OutboxEntry,
+    tx_hash: TxHash,
     block: BlockNumber,
     success: bool,
     latest: BlockNumber,
     credit: BlockDepth,
+    now: Timestamp,
 ) {
+    let outcome = if success {
+        types::events::TxOutcome::Succeeded { block }
+    } else {
+        types::events::TxOutcome::Reverted { block }
+    };
+    // the line the watcher's database files the transaction's end from; its close above is
+    // what the fold acts on, so a line refused here is reported and nothing else
+    if let Err(error) = crate::storage::events::append_event_at(
+        EventType::TxFinal {
+            purpose: entry.purpose,
+            chain_id: entry.chain_id,
+            nonce: entry.nonce,
+            tx_hash,
+            outcome,
+        },
+        now,
+    ) {
+        log(&format!(
+            "the end of {tx_hash} on chain {} was not recorded: {error}",
+            entry.chain_id
+        ));
+    }
     if is_confirmed(block, latest, credit) {
         outbox::remove(entry.key());
         return;
@@ -1441,7 +1452,7 @@ fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees
     // nothing more
     let config = config::get();
     let action = match entry.purpose {
-        TxPurpose::Relay(key) | TxPurpose::Continue(key) | TxPurpose::Finish(key) => {
+        TxPurpose::Relay(key) | TxPurpose::Finish(key) => {
             read_state(|state| state.flow(&key)).and_then(|flow| flow.gas_action)
         }
         TxPurpose::PoolPayout(_) => Some(GasAction::PoolPayout),

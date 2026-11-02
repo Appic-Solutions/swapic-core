@@ -1,6 +1,6 @@
 use super::*;
 use crate::types::sweep::{SweepAsset, SweepTarget};
-use types::{EventHash, EventIndex, Timestamp};
+use types::{EventIndex, Timestamp};
 
 const INTERFACE: &str = include_str!("../../../../golden/interface.json");
 
@@ -190,13 +190,11 @@ fn an_event_reads_back_with_its_index_and_time() {
         quoter: "aaaaa-aa".into(),
         watcher: "2vxsx-fae".into(),
     };
-    let sealed = types::Event::seal(
-        EventIndex::new(4),
-        Timestamp::from_nanos(1_700_000_000),
-        EventHash::new([9; 32]),
-        payload,
-    )
-    .unwrap();
+    let sealed = types::Event {
+        index: EventIndex::new(4),
+        timestamp: Timestamp::from_nanos(1_700_000_000),
+        payload: payload,
+    };
     let wire = Event::from(sealed);
     assert_eq!(wire.index, 4);
     assert_eq!(wire.time_ns, 1_700_000_000);

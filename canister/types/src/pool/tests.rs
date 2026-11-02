@@ -360,11 +360,6 @@ mod earlier {
             #[n(1)]
             out: TokenAmount,
         },
-        #[n(20)]
-        ScanCursor {
-            #[n(0)]
-            block: BlockNumber,
-        },
     }
 }
 
@@ -429,15 +424,6 @@ fn a_step_written_before_its_new_fields_still_decodes() {
                 out: TokenAmount::from(25_u8),
                 send: None,
                 leg: None,
-            },
-        ),
-        (
-            earlier::Step::ScanCursor {
-                block: BlockNumber::new(26),
-            },
-            PoolStep::ScanCursor {
-                block: BlockNumber::new(26),
-                log: None,
             },
         ),
     ];

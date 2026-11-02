@@ -5,7 +5,7 @@ use types::{Attempt, QuoteHash, Timestamp, TxHash, WeiPerGas};
 
 fn entry(chain_id: ChainId, nonce: u64, status: OutboxStatus) -> OutboxEntry {
     OutboxEntry {
-        purpose: TxPurpose::Burn(QuoteHash::new([1; 32])),
+        purpose: TxPurpose::Relay(QuoteHash::new([1; 32])),
         chain_id,
         nonce: Nonce::new(nonce),
         attempt: Some(Attempt::FIRST),

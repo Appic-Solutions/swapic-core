@@ -151,11 +151,6 @@ pub enum TxPurpose {
     Sweep(u64),
 }
 
-/// A purpose the canister no longer creates is never in its log.
-fn retired(name: &str) -> ! {
-    unreachable!("BUG: the canister never writes a {name} line")
-}
-
 impl From<types::events::TxPurpose> for TxPurpose {
     fn from(purpose: types::events::TxPurpose) -> Self {
         use types::events::TxPurpose as Domain;
@@ -169,13 +164,6 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::PoolMove(id) => Self::PoolMove(id),
             Domain::EcoRescue(order_id) => Self::EcoRescue(order_id),
             Domain::Sweep(id) => Self::Sweep(id),
-            Domain::Burn(_)
-            | Domain::Mint(_)
-            | Domain::Payout(_)
-            | Domain::Refund(_)
-            | Domain::GaslessPull(_)
-            | Domain::Reclaim(_)
-            | Domain::Continue(_) => retired("v1 transaction purpose"),
         }
     }
 }
@@ -327,25 +315,6 @@ impl From<types::EventType> for EventType {
                 from_fee_income: sweep.from_fee_income.into(),
             },
             Domain::SweepReverted { id, why } => Self::SweepReverted { id, why },
-            Domain::FundsReceived { .. }
-            | Domain::TxSigned { .. }
-            | Domain::TxConfirmed { .. }
-            | Domain::TxFailed { .. }
-            | Domain::PaidInStable { .. }
-            | Domain::DecisionRequired { .. }
-            | Domain::DecisionMade { .. }
-            | Domain::RefundStarted { .. }
-            | Domain::Refunded { .. }
-            | Domain::SwapDone { .. }
-            | Domain::Frozen { .. }
-            | Domain::FeeAccrued { .. }
-            | Domain::PocketFunded { .. }
-            | Domain::PocketReserved { .. }
-            | Domain::PocketRebalanced { .. }
-            | Domain::PocketReleased { .. }
-            | Domain::PocketSpent { .. }
-            | Domain::WaitingRepaired { .. }
-            | Domain::PullSigned { .. } => retired("v1 event"),
         }
     }
 }

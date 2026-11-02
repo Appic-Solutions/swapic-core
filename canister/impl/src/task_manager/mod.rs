@@ -8,7 +8,6 @@ pub mod outbox;
 pub mod pool_arrivals;
 pub mod rail_status;
 pub mod rebalance;
-pub mod replay_audit;
 
 pub use rail_status::restart_rail_status_timer;
 

@@ -61,3 +61,16 @@ fn a_refused_report_counts_for_nothing() {
         assert_eq!(limiter.admit(tx(byte), at(300)), Ok(()));
     }
 }
+
+/// The read of Base stands at a block or at a log inside one: a block done whole is past
+/// every log of it, and a later block past both.
+#[test]
+fn a_cursor_orders_by_block_then_log() {
+    let at = |block: u64, log: Option<u64>| ScanCursor {
+        block: crate::numeric::BlockNumber::new(block),
+        log,
+    };
+    assert!(at(10, Some(3)).position() < at(10, Some(4)).position());
+    assert!(at(10, Some(u64::MAX)).position() < at(10, None).position());
+    assert!(at(10, None).position() < at(11, Some(0)).position());
+}

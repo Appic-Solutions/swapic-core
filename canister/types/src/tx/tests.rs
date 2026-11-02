@@ -4,7 +4,7 @@ use crate::numeric::{GasAmount, Wei};
 
 fn entry() -> OutboxEntry {
     OutboxEntry {
-        purpose: TxPurpose::Burn(QuoteHash::new([1; 32])),
+        purpose: TxPurpose::Relay(QuoteHash::new([1; 32])),
         chain_id: ChainId::BASE,
         nonce: Nonce::new(7),
         attempt: Some(Attempt::FIRST),
@@ -253,7 +253,7 @@ fn an_outbox_entry_round_trips_through_storage() {
 #[test]
 fn an_unsigned_nonce_round_trips_and_knows_when_it_was_abandoned() {
     let unsigned = UnsignedTx {
-        purpose: TxPurpose::Payout(QuoteHash::new([4; 32])),
+        purpose: TxPurpose::Relay(QuoteHash::new([4; 32])),
         created_at: Timestamp::from_nanos(1_000_000_000),
         action: None,
     };

@@ -38,7 +38,8 @@ use crate::storage::{config, pool as pool_store};
 use serde_json::{json, Value};
 use settlement_api::types::pool::PoolError;
 use std::cell::Cell;
-use types::pool::{CreditKey, PoolStep};
+use types::pool::CreditKey;
+use types::timer_state::ScanCursor;
 use types::{BlockNumber, ChainId, Timestamp, TokenAmount, TxHash};
 
 /// The most blocks one `eth_getLogs` reads.
@@ -131,6 +132,19 @@ pub fn logged(logs: &Value) -> Vec<Logged> {
         .collect();
     logged.sort_by_key(|one| (one.block, one.log_index));
     logged
+}
+
+/// Moves the stored cursor to `to`, never back: a block done whole is past any log of it.
+pub fn advance_cursor(to: ScanCursor) {
+    crate::storage::timer_state::update(|state| {
+        let ahead = state
+            .scan_cursor
+            .is_none_or(|at| to.position() >= at.position());
+        if ahead {
+            state.scan_cursor = Some(to);
+        }
+        ((), ahead)
+    });
 }
 
 /// How far a pass got.
@@ -344,8 +358,8 @@ pub async fn backup(
 ) -> Result<PassReport, String> {
     let safe = reads.safe_block().await?;
     let mut report = PassReport::default();
-    let ledger = pool_store::ledger();
-    let (cursor, cursor_log) = (ledger.scan_cursor, ledger.scan_log);
+    let stored = crate::storage::timer_state::get().scan_cursor;
+    let (cursor, cursor_log) = (stored.map(|at| at.block), stored.and_then(|at| at.log));
     let Some((from, mut to)) = range(cursor, cursor_log, safe) else {
         return Ok(report);
     };
@@ -439,8 +453,7 @@ pub async fn backup(
         Done::Nothing => None,
     };
     if let Some((block, log)) = report.cursor {
-        pool_store::record_at(PoolStep::ScanCursor { block, log }, clock())
-            .map_err(|error| error.to_string())?;
+        advance_cursor(ScanCursor { block, log });
     }
     Ok(report)
 }

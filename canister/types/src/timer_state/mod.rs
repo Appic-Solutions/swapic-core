@@ -8,7 +8,7 @@
 mod tests;
 
 use crate::hash::{PoolRef, TxHash};
-use crate::numeric::Timestamp;
+use crate::numeric::{BlockNumber, Timestamp};
 use crate::pool::Pockets;
 use minicbor::{Decode, Encode};
 use std::collections::BTreeMap;
@@ -85,6 +85,27 @@ pub struct TimerState {
     /// The queue's head already alerted on, so a head that waits raises one line.
     #[n(3)]
     pub alerted_head: Option<PoolRef>,
+    /// How far the canister's own read of Base got.
+    #[n(4)]
+    pub scan_cursor: Option<ScanCursor>,
+}
+
+/// Where the canister's own read of Base stands: every transfer at or before it is done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ScanCursor {
+    #[n(0)]
+    pub block: BlockNumber,
+    /// The log of `block` the read is done through, the rest of the block to read yet. None:
+    /// the block is done whole.
+    #[n(1)]
+    pub log: Option<u64>,
+}
+
+impl ScanCursor {
+    /// The cursor in order: a block, then its log, a block done whole above every log of it.
+    pub fn position(&self) -> (BlockNumber, u128) {
+        (self.block, self.log.map_or(u128::MAX, u128::from))
+    }
 }
 
 crate::storable_as_cbor!(TimerState);

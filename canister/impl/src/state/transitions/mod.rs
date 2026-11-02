@@ -1,25 +1,11 @@
-use crate::state::{MemoryStore, State, Store};
-use thiserror::Error;
-use types::checked_amount::CheckedAmountOf;
+use crate::state::{State, Store};
 use types::events::{Event, EventType, TxPurpose};
 use types::FlowStep;
-use types::{ChainId, EventHash, EventIndex, Nonce, NonceKey, Timestamp, TransitionError};
-
-/// Every field a canonical preimage writes in sixteen bytes must fit in them, whatever
-/// unit it counts. Checked here so an event with no preimage is refused by the guard
-/// rather than failing at the seal.
-fn in_preimage_range<Unit>(amount: CheckedAmountOf<Unit>) -> Result<(), TransitionError> {
-    if amount.try_into_u128().is_none() {
-        return Err(TransitionError::AmountOutOfRange(amount.change_units()));
-    }
-    Ok(())
-}
+use types::{ChainId, Nonce, NonceKey, Timestamp, TransitionError};
 
 impl<S: Store> State<S> {
-    /// [`State::check`], and the rules that read the line's own seal time `at` (the review,
-    /// 2026-10-24: a pool step's dedup instant): what an append and a replay run. A replay
-    /// applies them to every historic line; the lines of intermediate builds never deployed
-    /// are not grandfathered (hfisl's log holds no Pool event).
+    /// [`State::check`], and the rules that read the line's own time `at` (a pool step's
+    /// dedup instant): what an append runs.
     pub fn check_at(&self, event: &EventType, at: Timestamp) -> Result<(), TransitionError> {
         self.check(event)?;
         if let EventType::Pool { step } = event {
@@ -32,42 +18,7 @@ impl<S: Store> State<S> {
     /// so a new variant fails to compile until someone decides its rule. Every checked
     /// computation [`apply_state_transition`] relies on is run here first.
     pub fn check(&self, event: &EventType) -> Result<(), TransitionError> {
-        // before any rule: an amount no 16-byte canonical field holds could never be sealed
-        if let Some(amount) = event
-            .amount()
-            .filter(|amount| amount.try_into_u128().is_none())
-        {
-            return Err(TransitionError::AmountOutOfRange(amount));
-        }
         match event {
-            // the retired v1 swaps and pockets (the vault-routed swaps of Plan 3): the fold
-            // holds none of them any more, so a line about one is refused as it is on a store
-            // that never held one (hfisl's log holds none). Each variant and its index stays
-            // in the log's types
-            EventType::FundsReceived { quote_hash, .. }
-            | EventType::TxSigned { quote_hash, .. }
-            | EventType::TxConfirmed { quote_hash, .. }
-            | EventType::TxFailed { quote_hash, .. }
-            | EventType::PaidInStable { quote_hash, .. }
-            | EventType::DecisionRequired { quote_hash, .. }
-            | EventType::DecisionMade { quote_hash, .. }
-            | EventType::RefundStarted { quote_hash, .. }
-            | EventType::Refunded { quote_hash, .. }
-            | EventType::SwapDone { quote_hash }
-            | EventType::Frozen { quote_hash, .. }
-            | EventType::FeeAccrued { quote_hash, .. }
-            | EventType::PocketReserved { quote_hash, .. }
-            | EventType::PocketReleased { quote_hash, .. }
-            | EventType::PocketSpent { quote_hash, .. }
-            | EventType::PullSigned { quote_hash, .. }
-            | EventType::WaitingRepaired { quote_hash } => {
-                Err(TransitionError::UnknownSwap(*quote_hash))
-            }
-            EventType::PocketFunded { chain_id, .. }
-            | EventType::PocketRebalanced {
-                from_chain: chain_id,
-                ..
-            } => Err(TransitionError::UnknownPocket(*chain_id)),
             // rule A4, the one line that makes a double spend of a nonce impossible: the
             // number the allocator is at is the only number a transaction may carry, so
             // two transactions cannot share one however their calls interleave. The rules
@@ -78,37 +29,16 @@ impl<S: Store> State<S> {
                 purpose,
                 chain_id,
                 nonce,
-                value,
-                gas_limit,
-                max_fee,
-                max_priority_fee,
                 ..
             } => {
-                in_preimage_range(*value)?;
-                in_preimage_range(*gas_limit)?;
-                in_preimage_range(*max_fee)?;
-                in_preimage_range(*max_priority_fee)?;
                 self.ensure_can_send(purpose)?;
                 self.ensure_next_nonce(*chain_id, *nonce)
             }
             // a replacement keeps the nonce of what it replaces, so it allocates nothing
-            // and must name a nonce the allocator already handed out (rule A5). A retired
-            // v1 swap's attempt has no swap to replace it for.
+            // and must name a nonce the allocator already handed out (rule A5)
             EventType::TxReplaced {
-                purpose,
-                chain_id,
-                nonce,
-                max_fee,
-                max_priority_fee,
-                ..
-            } => {
-                in_preimage_range(*max_fee)?;
-                in_preimage_range(*max_priority_fee)?;
-                if let Some(quote_hash) = purpose.attempt_of() {
-                    return Err(TransitionError::UnknownSwap(quote_hash));
-                }
-                self.ensure_allocated_nonce(*chain_id, *nonce)
-            }
+                chain_id, nonce, ..
+            } => self.ensure_allocated_nonce(*chain_id, *nonce),
             // the other end of rule A5: a cancel spends a number that was handed out and
             // never signed for, and nothing else. A nonce with a signed transaction behind
             // it is not one to cancel, and a number that was never handed out is not one to
@@ -158,10 +88,9 @@ impl<S: Store> State<S> {
                     FlowStep::GaslessRelayed {
                         chain_id, nonce, ..
                     } => self.ensure_flow_nonce(TxPurpose::Relay(*quote_hash), *chain_id, *nonce),
-                    FlowStep::ContinuationSigned {
-                        chain_id, nonce, ..
-                    } => {
-                        self.ensure_flow_nonce(TxPurpose::Continue(*quote_hash), *chain_id, *nonce)
+                    // no purpose signs a continuation: the ICP flows that made one are gone
+                    FlowStep::ContinuationSigned { .. } => {
+                        Err(types::FlowError::Unknown(*quote_hash).into())
                     }
                     FlowStep::CctpFinishSigned {
                         chain_id, nonce, ..
@@ -172,7 +101,10 @@ impl<S: Store> State<S> {
             // always legal; named rather than matched by `_` so a new variant has to be
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
-            EventType::TxFinal { .. } => todo!("C2: a final transaction's rules"),
+            // a final transaction is one the canister allocated a nonce for
+            EventType::TxFinal {
+                chain_id, nonce, ..
+            } => self.ensure_allocated_nonce(*chain_id, *nonce),
             EventType::Swept { .. } | EventType::SweepReverted { .. } => {
                 todo!("C5: a sweep's rules")
             }
@@ -181,8 +113,7 @@ impl<S: Store> State<S> {
 
     /// Whether a transaction may be created for `purpose`: its signed record's own rules,
     /// so a creation this guard admits is one the record will admit too, and its key must
-    /// not already be holding a number it has not signed for. A cancel names no key; a
-    /// retired v1 swap's leg or pull has no swap to be signed for.
+    /// not already be holding a number it has not signed for. A cancel names no key.
     fn ensure_can_send(&self, purpose: &TxPurpose) -> Result<(), TransitionError> {
         let Some(quote_hash) = purpose.quote_hash() else {
             return Ok(());
@@ -190,33 +121,12 @@ impl<S: Store> State<S> {
         // named rather than matched by `_`, so a new purpose has to be classified here
         // instead of falling into the rules of a swap's own leg
         match purpose {
-            TxPurpose::GaslessPull(_)
-            | TxPurpose::Burn(_)
-            | TxPurpose::Mint(_)
-            | TxPurpose::Payout(_)
-            | TxPurpose::Refund(_)
-            | TxPurpose::Reclaim(_) => return Err(TransitionError::UnknownSwap(quote_hash)),
             // a relay creates its flow with its signed record, and one quote is relayed at
             // most once (rule 4b.4 from this side; Swapic's `used(orderId)` is the other);
             // a finish is signed once per message and action the same way
             TxPurpose::Relay(_) | TxPurpose::Finish(_) => {
                 if self.store().flow(&quote_hash).is_some() {
                     return Err(types::FlowError::Exists(quote_hash).into());
-                }
-            }
-            // the continuation is the landed USDC's one transaction
-            TxPurpose::Continue(_) => {
-                let flow = self
-                    .store()
-                    .flow(&quote_hash)
-                    .ok_or(types::FlowError::Unknown(quote_hash))?;
-                if flow.status != types::FlowStatus::Landed {
-                    return Err(types::FlowError::NotFromHere {
-                        quote_hash,
-                        status: flow.status,
-                        step: "continuation",
-                    }
-                    .into());
                 }
             }
             // a cancel names no swap, so `quote_hash()` answered none and this function
@@ -376,7 +286,7 @@ impl<S: Store> State<S> {
 /// Records an event [`State::check`] admitted. Pure: no canister calls, and nothing here
 /// refuses.
 pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
-    state.record_event(event.index, event.hash);
+    state.record_event(event.index);
     if event.payload.signed_tx().is_some() {
         state.record_signed(event.index);
     }
@@ -424,79 +334,46 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             }
             state.record_pool(step, event.timestamp, event.index)
         }
-        // audit lines for deploy-time truth that lives in its own stable cell, and for a
-        // re-send that allocates nothing and closes nothing
+        // lines for deploy-time truth that lives in its own stable cell, and for a re-send
+        // that allocates nothing and closes nothing
         EventType::ConfigChanged { .. }
         | EventType::RolesChanged { .. }
         | EventType::TxReplaced { .. } => {}
-        // the retired v1 swaps' and pockets' lines: the check refuses every one, so none is
-        // ever applied
-        EventType::FundsReceived { .. }
-        | EventType::TxSigned { .. }
-        | EventType::TxConfirmed { .. }
-        | EventType::TxFailed { .. }
-        | EventType::PaidInStable { .. }
-        | EventType::DecisionRequired { .. }
-        | EventType::DecisionMade { .. }
-        | EventType::RefundStarted { .. }
-        | EventType::Refunded { .. }
-        | EventType::SwapDone { .. }
-        | EventType::Frozen { .. }
-        | EventType::FeeAccrued { .. }
-        | EventType::PocketFunded { .. }
-        | EventType::PocketReserved { .. }
-        | EventType::PocketReleased { .. }
-        | EventType::PocketSpent { .. }
-        | EventType::PocketRebalanced { .. }
-        | EventType::PullSigned { .. }
-        | EventType::WaitingRepaired { .. } => {}
-        EventType::TxFinal { .. } => todo!("C2: a final transaction's record"),
+        // a final transaction's own record is the outbox's; the line is the log's
+        EventType::TxFinal { .. } => {}
         EventType::Swept { .. } | EventType::SweepReverted { .. } => {
             todo!("C5: a sweep's books")
         }
     }
 }
 
-/// Why a log does not fold. The replay stopped at `index` and applied nothing from there.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+/// Why a log does not fold, in a test's heap fold. The replay stopped at `index` and applied
+/// nothing from there.
+#[cfg(test)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ReplayError {
     #[error("event {found} sits where event {expected} belongs")]
     OutOfSequence {
-        expected: EventIndex,
-        found: EventIndex,
-    },
-    #[error("event {index} links to {parent} but the fold ends with {head}")]
-    Unlinked {
-        index: EventIndex,
-        parent: EventHash,
-        head: EventHash,
+        expected: types::EventIndex,
+        found: types::EventIndex,
     },
     #[error("event {index} has no successor index")]
-    LogFull { index: EventIndex },
+    LogFull { index: types::EventIndex },
     #[error("event {index} is refused: {error}")]
     Refused {
-        index: EventIndex,
+        index: types::EventIndex,
         error: TransitionError,
     },
 }
 
 /// Folds a log into a fresh heap state, admitting each event the way `append_event` did:
-/// in sequence, linked to the head, and through [`State::check`]. A log a bug or a later
-/// wasm made inconsistent is an `Err`, never a panic, so the audit can halt on it.
-pub fn replay(events: impl IntoIterator<Item = Event>) -> Result<State<MemoryStore>, ReplayError> {
-    let mut state = State::default();
-    replay_into(&mut state, events)?;
-    Ok(state)
-}
-
-/// [`replay`] continued: folds `events` onto a heap state that already holds the fold of
-/// the events before them, so a log too long to fold in one message is folded across many.
-/// The first event must be the one the state seals next. On an `Err` the state holds the
-/// events before the one refused, and nothing of it.
-pub fn replay_into(
-    state: &mut State<MemoryStore>,
+/// in sequence and through [`State::check_at`]. The tests' check that the stable fold is the
+/// fold of its log.
+#[cfg(test)]
+pub fn replay(
     events: impl IntoIterator<Item = Event>,
-) -> Result<(), ReplayError> {
+) -> Result<State<crate::state::MemoryStore>, ReplayError> {
+    let mut state = State::default();
     for event in events {
         let meta = state.meta();
         let index = event.index;
@@ -506,22 +383,15 @@ pub fn replay_into(
                 found: index,
             });
         }
-        if event.parent_hash != meta.last_event_hash {
-            return Err(ReplayError::Unlinked {
-                index,
-                parent: event.parent_hash,
-                head: meta.last_event_hash,
-            });
-        }
         if index.next().is_none() {
             return Err(ReplayError::LogFull { index });
         }
         state
             .check_at(&event.payload, event.timestamp)
             .map_err(|error| ReplayError::Refused { index, error })?;
-        apply_state_transition(state, &event);
+        apply_state_transition(&mut state, &event);
     }
-    Ok(())
+    Ok(state)
 }
 
 #[cfg(test)]

@@ -13,8 +13,6 @@ pub mod test_rpc_batch;
 pub mod test_send;
 #[cfg(feature = "inttest")]
 pub mod test_sign;
-#[cfg(feature = "inttest")]
-pub mod test_skew_state;
 
 pub use derive_evm_address::*;
 pub use set_halted::*;
@@ -31,5 +29,3 @@ pub use test_rpc_batch::*;
 pub use test_send::*;
 #[cfg(feature = "inttest")]
 pub use test_sign::*;
-#[cfg(feature = "inttest")]
-pub use test_skew_state::*;

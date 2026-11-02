@@ -1,5 +1,5 @@
-use crate::state::transitions::{apply_state_transition, replay, replay_into, ReplayError};
-use crate::state::{MemoryStore, State, Store};
+use crate::state::transitions::apply_state_transition;
+use crate::state::{State, Store};
 use crate::storage::memory::{
     books_memory, eco_rescues_memory, events_data_memory, events_index_memory, flows_memory,
     ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
@@ -13,13 +13,12 @@ use std::cell::RefCell;
 use std::ops::RangeFrom;
 use thiserror::Error;
 use types::books::Books;
-use types::canonical::CanonicalError;
-use types::events::{chain_is_valid, check_link, Event, EventType, LinkError};
+use types::events::{Event, EventType};
 use types::hash::{OwnerKey, PoolRef};
 use types::pool::{CreditKey, EvmPayout, NonceUse, PoolLedger, Registered, ShareLine};
 use types::{
-    ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp,
-    TransitionError, UnsignedTx,
+    ChainId, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp, TransitionError,
+    UnsignedTx,
 };
 
 /// Longest page a query will return, so one call can never walk the whole log.
@@ -339,9 +338,7 @@ impl Store for StableStore {
 /// Why an event was not appended. Nothing was written.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum AppendError {
-    #[error("log head is {log} but the state carries {state}: the chain diverged")]
-    ChainDiverged { log: EventHash, state: EventHash },
-    #[error("log is at {log_len} but the event sealed as {sealed}")]
+    #[error("log is at {log_len} but the event would be written as {sealed}")]
     IndexMismatch { log_len: u64, sealed: EventIndex },
     #[error("the log holds u64::MAX events")]
     LogFull,
@@ -352,35 +349,22 @@ pub enum AppendError {
     },
     #[error(transparent)]
     Transition(#[from] TransitionError),
-    #[error(transparent)]
-    Canonical(#[from] CanonicalError),
 }
 
-/// Why the stable fold is out of step with the log it is the fold of.
+/// Why the stable fold is out of step with the log it is the fold of: the index it writes
+/// next is not the log's length.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum FoldOutOfStep {
-    #[error(
-        "the log holds {log_len} events but the fold expects to seal event {next_event_index}"
-    )]
-    Length {
-        log_len: u64,
-        next_event_index: EventIndex,
-    },
-    #[error("the log ends with {log} but the fold links to {fold}")]
-    Head { log: EventHash, fold: EventHash },
+#[error("the log holds {log_len} events but the fold expects to write event {next_event_index}")]
+pub struct FoldOutOfStep {
+    pub log_len: u64,
+    pub next_event_index: EventIndex,
 }
 
 impl From<FoldOutOfStep> for AppendError {
     fn from(error: FoldOutOfStep) -> Self {
-        match error {
-            FoldOutOfStep::Length {
-                log_len,
-                next_event_index,
-            } => Self::IndexMismatch {
-                log_len,
-                sealed: next_event_index,
-            },
-            FoldOutOfStep::Head { log, fold } => Self::ChainDiverged { log, state: fold },
+        Self::IndexMismatch {
+            log_len: error.log_len,
+            sealed: error.next_event_index,
         }
     }
 }
@@ -388,9 +372,6 @@ impl From<FoldOutOfStep> for AppendError {
 impl From<AppendError> for settlement_api::types::errors::AppendError {
     fn from(error: AppendError) -> Self {
         match error {
-            AppendError::ChainDiverged { .. } | AppendError::Canonical(_) => {
-                todo!("C2: the hash chain and its errors go")
-            }
             AppendError::IndexMismatch { log_len, sealed } => Self::IndexMismatch {
                 log_len,
                 sealed: sealed.get(),
@@ -432,60 +413,34 @@ pub fn init() {
     ECO_RESCUES.with(|_| ());
 }
 
-/// The chain head the log actually ends with: the last event's hash, or the zero hash at
-/// genesis, which is the anchor `chain_is_valid` checks index 0 against. Decodes the last
-/// event, and only that one.
-fn log_head() -> EventHash {
-    EVENTS.with(|e| {
-        let log = e.borrow();
-        match log.len().checked_sub(1) {
-            None => EventHash::ZERO,
-            Some(last) => {
-                log.get(last)
-                    .expect("BUG: StableLog::get answers every index below len")
-                    .hash
-            }
-        }
-    })
-}
-
-/// The one and only path that writes an event, sealed at the canister's clock.
+/// The one and only path that writes an event, at the canister's clock.
 pub fn append_event(payload: EventType) -> Result<EventIndex, AppendError> {
     append_event_at(payload, Timestamp::from_nanos(ic_cdk::api::time()))
 }
 
-/// In O(1), whether the fold is in step with its log: the index it seals next is the log's
-/// length, and the head it links to is the log's last hash, the zero hash on an empty log.
-/// `post_upgrade` refuses an upgrade on it, and `append_event` refuses to write on it.
+/// In O(1), whether the fold is in step with its log: the index it writes next is the log's
+/// length. `post_upgrade` refuses an upgrade on it, and `append_event` refuses to write on
+/// it.
 pub fn ensure_fold_in_step() -> Result<(), FoldOutOfStep> {
     let meta = StableStore(()).meta();
     let log_len = EVENTS.with(|e| e.borrow().len());
     if meta.next_event_index.get() != log_len {
-        return Err(FoldOutOfStep::Length {
+        return Err(FoldOutOfStep {
             log_len,
             next_event_index: meta.next_event_index,
-        });
-    }
-    let head = log_head();
-    if head != meta.last_event_hash {
-        return Err(FoldOutOfStep::Head {
-            log: head,
-            fold: meta.last_event_hash,
         });
     }
     Ok(())
 }
 
-/// [`append_event`] sealed at `timestamp`: a caller that already read the clock seals on
-/// the same reading, and a unit test runs without a canister. Guard, seal, append, apply,
-/// all within a single message, so a trap anywhere rolls back the log and the fold together.
+/// [`append_event`] at `timestamp`: a caller that already read the clock writes on the same
+/// reading, and a unit test runs without a canister. Guard, append, apply, all within a
+/// single message, so a trap anywhere rolls back the log and the fold together.
 pub fn append_event_at(
     payload: EventType,
     timestamp: Timestamp,
 ) -> Result<EventIndex, AppendError> {
-    // checked before anything is sealed: a head the log does not end with would seal on a
-    // parent the log does not have and fork the chain at an index that still looks right,
-    // and an index off the log's length would write one slot and apply another
+    // an index off the log's length would write one slot and apply another
     ensure_fold_in_step()?;
     let mut state = State::new(StableStore(()));
     state.check_at(&payload, timestamp)?;
@@ -494,9 +449,11 @@ pub fn append_event_at(
     if index.next().is_none() {
         return Err(AppendError::LogFull);
     }
-    // the guard refuses every amount without a preimage, so this is only the residue, and
-    // it is refused before the write like everything above
-    let event = Event::seal(index, timestamp, meta.last_event_hash, payload)?;
+    let event = Event {
+        index,
+        timestamp,
+        payload,
+    };
     EVENTS.with(|e| e.borrow_mut().append(&event)).map_err(
         |WriteError::GrowFailed {
              current_size,
@@ -523,14 +480,6 @@ pub fn read_state<R>(f: impl FnOnce(&State<StableStore>) -> R) -> R {
     f(&State::new(StableStore(())))
 }
 
-/// Test-only: moves the fold's idea of the chain head off the log's, and touches the log
-/// not at all. That is the one divergence the append-time head check exists for, and no
-/// legitimate call can produce it. Flipping the same bit a second time puts the head back.
-#[cfg(feature = "inttest")]
-pub fn test_skew_chain_head() {
-    State::new(StableStore(())).skew_chain_head();
-}
-
 /// The event at `index`, if the log holds one.
 pub fn event_at(index: u64) -> Option<Event> {
     EVENTS.with(|e| e.borrow().get(index))
@@ -549,105 +498,15 @@ pub fn events_page(start: u64, len: u64) -> Vec<Event> {
     })
 }
 
-/// Genesis-anchored: every link from index 0 up. Streams the log rather than
-/// materializing it.
-pub fn verify_chain() -> bool {
-    EVENTS.with(|e| chain_is_valid(e.borrow().iter()))
-}
-
-/// The audit that matters: folding the log onto the heap must reproduce the stable fold
-/// exactly. A log the heap fold refuses is a divergence too, so it answers false rather
-/// than trapping before the audit can halt.
-///
-/// Its cost grows with the log, so no timer runs it: a query that runs out of instructions
-/// fails that query alone, and the ops door onto the same comparison is the controller's
-/// `audit_replay_step`, which folds the log through [`replay_next`] a bounded step at a
-/// time.
+/// Whether folding the log onto the heap reproduces the stable fold exactly: the tests'
+/// check that every write went through `append_event`.
+#[cfg(test)]
 pub fn verify_replay() -> bool {
-    match EVENTS.with(|e| replay(e.borrow().iter())) {
+    let log: Vec<Event> = EVENTS.with(|e| e.borrow().iter().collect());
+    match crate::state::transitions::replay(log) {
         Ok(rebuilt) => read_state(|live| rebuilt.matches(live)),
         Err(_) => false,
     }
-}
-
-/// How far a chunk of the chain got, and what the next chunk resumes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainChunk {
-    /// where the next pass starts, and the hash it checks that entry's parent against
-    pub next_index: EventIndex,
-    pub parent_hash: EventHash,
-    /// links verified by this pass
-    pub verified: u64,
-    /// whether the pass reached the end of the log
-    pub reached_head: bool,
-}
-
-/// Verifies at most `max` links from `cursor`, carrying its parent hash in: each entry must
-/// sit where it says, link to the entry before it, and hash to the hash it carries. Streams
-/// the log one entry at a time, so a pass costs its chunk and never the whole chain. A pass
-/// that starts past the head verifies nothing and reports it reached the head.
-pub fn verify_chain_chunk(
-    from: EventIndex,
-    parent: EventHash,
-    max: u64,
-) -> Result<ChainChunk, LinkError> {
-    let log_len = event_count();
-    let start = from.get().min(log_len);
-    let end = start.saturating_add(max).min(log_len);
-    let mut parent_hash = parent;
-    let mut index = EventIndex::new(start);
-    EVENTS.with(|e| {
-        let log = e.borrow();
-        for at in start..end {
-            let event = log
-                .get(at)
-                .expect("BUG: StableLog::get answers every index below len");
-            parent_hash = check_link(&event, index, parent_hash)?;
-            index = index
-                .next()
-                .expect("BUG: an index below the log's length has a successor");
-        }
-        Ok(ChainChunk {
-            next_index: index,
-            parent_hash,
-            verified: end - start,
-            reached_head: end == log_len,
-        })
-    })
-}
-
-/// Folds at most `max` more entries of the log onto `fold`, from the index it seals next,
-/// admitting each the way `append_event` did, and answers how many entries still lie
-/// between the fold and the head. Reads the log one entry at a time, so a step costs the
-/// entries it folds and never the whole log; the fold is the caller's to keep between
-/// steps. A fold sealing past the head folds nothing and has nothing left, and the
-/// comparison it then goes to is what refuses it.
-pub fn replay_next(fold: &mut State<MemoryStore>, max: u64) -> Result<u64, ReplayError> {
-    let log_len = event_count();
-    let start = fold.meta().next_event_index.get();
-    let end = start.saturating_add(max).min(log_len);
-    EVENTS.with(|e| {
-        let log = e.borrow();
-        replay_into(fold, (start..end).map_while(|i| log.get(i)))
-    })?;
-    Ok(log_len.saturating_sub(fold.meta().next_event_index.get()))
-}
-
-/// Test-only: writes `event` into the log and moves the fold's index and head onto it, so
-/// the fold stays in step with an entry no guard admitted. The only way to plant the broken
-/// link the chain audit exists to find: `append_event` seals every entry on the head the log
-/// actually ends with, and the O(1) head check would see a log the fold did not follow.
-#[cfg(test)]
-pub(crate) fn test_push_raw(event: Event) {
-    let (index, hash) = (event.index, event.hash);
-    EVENTS.with(|e| e.borrow_mut().append(&event).expect("raw log append"));
-    let mut store = StableStore(());
-    let meta = store.meta();
-    store.put_meta(LedgerMeta {
-        next_event_index: index.next().expect("a test index has a successor"),
-        last_event_hash: hash,
-        ..meta
-    });
 }
 
 #[cfg(test)]

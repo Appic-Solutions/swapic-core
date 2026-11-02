@@ -1,8 +1,8 @@
 use crate::chain::ChainId;
 use crate::chain_data::ChainReading;
 use crate::config::{ChainTable, Config, MIN_ETHEREUM_CONFIRMATIONS};
-use crate::events::{Event, TxPurpose, EVENT_VARIANT_COUNT};
-use crate::hash::{EventHash, QuoteHash, TxHash};
+use crate::events::{Event, TxPurpose};
+use crate::hash::{QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
 use crate::numeric::{
     Attempt, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount,
@@ -71,22 +71,15 @@ fn sample<T: Storable + Debug + PartialEq + 'static>(name: impl Into<String>, va
 /// its own rather than changing the line above it.
 fn samples() -> Vec<Sample> {
     let events = crate::events::tests::samples();
-    assert_eq!(
-        events.len(),
-        EVENT_VARIANT_COUNT,
-        "samples() must cover every variant"
-    );
     let mut all: Vec<Sample> = (0u8..)
         .zip(events)
         .map(|(i, payload)| {
             let name = format!("event {i}");
-            let event = Event::seal(
-                EventIndex::new(i.into()),
-                Timestamp::from_nanos(1_700_000_000_000_000_000 + u64::from(i)),
-                EventHash::new([i; 32]),
-                payload,
-            )
-            .expect("every sample has a preimage");
+            let event = Event {
+                index: EventIndex::new(i.into()),
+                timestamp: Timestamp::from_nanos(1_700_000_000_000_000_000 + u64::from(i)),
+                payload: payload,
+            };
             sample(name, event)
         })
         .collect();
@@ -163,7 +156,6 @@ fn samples() -> Vec<Sample> {
             LedgerMeta {
                 fees_accrued: TokenAmount::from(7_u32),
                 next_event_index: EventIndex::new(19),
-                last_event_hash: EventHash::new([0xab; 32]),
                 pool_paused_by: None,
                 pool_paused_at: None,
             },
@@ -198,7 +190,7 @@ fn samples() -> Vec<Sample> {
         sample(
             "outbox entry",
             OutboxEntry {
-                purpose: TxPurpose::Burn(QuoteHash::new([0x5c; 32])),
+                purpose: TxPurpose::Relay(QuoteHash::new([0x5c; 32])),
                 chain_id: ChainId::BASE,
                 nonce: Nonce::new(7),
                 attempt: Some(Attempt::new(2)),
@@ -234,7 +226,7 @@ fn samples() -> Vec<Sample> {
         sample(
             "unsigned nonce",
             UnsignedTx {
-                purpose: TxPurpose::Refund(QuoteHash::new([0x5f; 32])),
+                purpose: TxPurpose::Relay(QuoteHash::new([0x5f; 32])),
                 created_at: Timestamp::from_nanos(1_700_000_002_000_000_000),
                 action: None,
             },
@@ -348,7 +340,7 @@ fn samples() -> Vec<Sample> {
         sample(
             "outbox entry the provider refused",
             OutboxEntry {
-                purpose: TxPurpose::Payout(QuoteHash::new([0x67; 32])),
+                purpose: TxPurpose::Relay(QuoteHash::new([0x67; 32])),
                 chain_id: ChainId::BASE,
                 nonce: Nonce::new(12),
                 attempt: Some(Attempt::new(3)),
@@ -504,11 +496,10 @@ fn samples() -> Vec<Sample> {
         // the books line above (`event 25`) leaves the fee's block absent; this one pins it
         sample(
             "books line with the block its fee was read at",
-            Event::seal(
-                EventIndex::new(1_000),
-                Timestamp::from_nanos(1_800_000_000_000_000_000),
-                EventHash::new([0x4b; 32]),
-                crate::events::EventType::Books {
+            Event {
+                index: EventIndex::new(1_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_000),
+                payload: crate::events::EventType::Books {
                     chain_id: ChainId::ETHEREUM,
                     step: crate::books::BookStep::FeeEarned {
                         tx_hash: TxHash::new([0x4c; 32]),
@@ -516,8 +507,7 @@ fn samples() -> Vec<Sample> {
                         block: Some(BlockNumber::new(23_600_001)),
                     },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
         // a chain's books, with a fee no balance check has read at yet
         sample(
@@ -629,18 +619,16 @@ fn samples() -> Vec<Sample> {
     all.extend(transfer_lost_samples());
     all.push(sample(
         "transfer's answer lost on a ledger that may not deduplicate it, held",
-        Event::seal(
-            EventIndex::new(23_000),
-            Timestamp::from_nanos(1_800_000_000_000_002_301),
-            EventHash::new([0xa2; 32]),
-            crate::events::EventType::Pool {
+        Event {
+            index: EventIndex::new(23_000),
+            timestamp: Timestamp::from_nanos(1_800_000_000_000_002_301),
+            payload: crate::events::EventType::Pool {
                 step: crate::pool::PoolStep::TransferLost {
                     r#ref: crate::hash::PoolRef::new([0xa3; 32]),
                     held: Some("ALERT: held for a human".to_string()),
                 },
             },
-        )
-        .expect("every sample has a preimage"),
+        },
     ));
     all
 }
@@ -703,18 +691,16 @@ fn transfer_lost_samples() -> Vec<Sample> {
         sample("deposit whose transfer's answer was lost", deposit),
         sample(
             "transfer's answer lost",
-            Event::seal(
-                EventIndex::new(22_000),
-                Timestamp::from_nanos(1_800_000_000_000_002_212),
-                EventHash::new([0xb2; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(22_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_002_212),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::TransferLost {
                         r#ref: PoolRef::new([0xb3; 32]),
                         held: None,
                     },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -775,14 +761,10 @@ fn transfer_asked_samples() -> Vec<Sample> {
         },
         held: Some(TokenAmount::from(2_111_u32)),
     };
-    let line = |index: u64, step: PoolStep| {
-        Event::seal(
-            EventIndex::new(index),
-            Timestamp::from_nanos(1_800_000_000_000_002_103),
-            EventHash::new([0xc2; 32]),
-            crate::events::EventType::Pool { step },
-        )
-        .expect("every sample has a preimage")
+    let line = |index: u64, step: PoolStep| Event {
+        index: EventIndex::new(index),
+        timestamp: Timestamp::from_nanos(1_800_000_000_000_002_103),
+        payload: crate::events::EventType::Pool { step },
     };
     let r#ref = PoolRef::new([0xc3; 32]);
     vec![
@@ -874,14 +856,10 @@ fn held_resolution_samples() -> Vec<Sample> {
         payout: PayoutProgress::default(),
         held: Some(TokenAmount::ZERO),
     };
-    let line = |index: u64, step: PoolStep| {
-        Event::seal(
-            EventIndex::new(index),
-            Timestamp::from_nanos(1_800_000_000_000_001_909),
-            EventHash::new([0xd6; 32]),
-            crate::events::EventType::Pool { step },
-        )
-        .expect("every sample has a preimage")
+    let line = |index: u64, step: PoolStep| Event {
+        index: EventIndex::new(index),
+        timestamp: Timestamp::from_nanos(1_800_000_000_000_001_909),
+        payload: crate::events::EventType::Pool { step },
     };
     let r#ref = PoolRef::new([0xd7; 32]);
     let id = PoolOpId::new([0xd8; 32]);
@@ -1021,14 +999,10 @@ fn reverted_block_samples() -> Vec<Sample> {
         TokenAmount::ZERO,
     );
     item.reverted_block = Some(BlockNumber::new(1_612));
-    let line = |index: u64, step: PoolStep| {
-        Event::seal(
-            EventIndex::new(index),
-            Timestamp::from_nanos(1_800_000_000_000_001_613),
-            EventHash::new([0xf8; 32]),
-            crate::events::EventType::Pool { step },
-        )
-        .expect("every sample has a preimage")
+    let line = |index: u64, step: PoolStep| Event {
+        index: EventIndex::new(index),
+        timestamp: Timestamp::from_nanos(1_800_000_000_000_001_613),
+        payload: crate::events::EventType::Pool { step },
     };
     vec![
         sample("payout with its reverted block", payout),
@@ -1092,15 +1066,13 @@ fn fill_early_samples() -> Vec<Sample> {
         sample("payout delivering, its fill read too early", payout),
         sample(
             "payout fill read too early",
-            Event::seal(
-                EventIndex::new(17_000),
-                Timestamp::from_nanos(1_800_000_000_000_001_712),
-                EventHash::new([0xf9; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(17_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_712),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::PayoutFillEarly { id: 1_701 },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -1140,18 +1112,16 @@ fn fit_retry_samples() -> Vec<Sample> {
         sample("payout counting its plan's tries", payout),
         sample(
             "payout plan tried and waiting",
-            Event::seal(
-                EventIndex::new(16_000),
-                Timestamp::from_nanos(1_800_000_000_000_001_611),
-                EventHash::new([0xf5; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(16_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_611),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::PayoutFitWaited {
                         id: 1_601,
                         why: "the scaler's read: Unreachable".to_string(),
                     },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -1183,13 +1153,11 @@ fn resolved_payout_samples() -> Vec<Sample> {
         .map(|(i, (name, step))| {
             sample(
                 name,
-                Event::seal(
-                    EventIndex::new(14_000 + i),
-                    Timestamp::from_nanos(1_800_000_000_000_001_404 + i),
-                    EventHash::new([0xf1; 32]),
-                    crate::events::EventType::Pool { step },
-                )
-                .expect("every sample has a preimage"),
+                Event {
+                    index: EventIndex::new(14_000 + i),
+                    timestamp: Timestamp::from_nanos(1_800_000_000_000_001_404 + i),
+                    payload: crate::events::EventType::Pool { step },
+                },
             )
         })
         .collect()
@@ -1199,7 +1167,7 @@ fn resolved_payout_samples() -> Vec<Sample> {
 fn timer_state_samples() -> Vec<Sample> {
     use crate::hash::{PoolRef, TxHash};
     use crate::pool::{Pocket, Pockets};
-    use crate::timer_state::{Limiter, TimerState};
+    use crate::timer_state::{Limiter, ScanCursor, TimerState};
     let at = |n: u64| Timestamp::from_nanos(1_800_000_000_000_001_500 + n);
     vec![sample(
         "the doors' and timers' memory",
@@ -1225,6 +1193,10 @@ fn timer_state_samples() -> Vec<Sample> {
                 },
             )),
             alerted_head: Some(PoolRef::new([0xf2; 32])),
+            scan_cursor: Some(ScanCursor {
+                block: BlockNumber::new(37_000_203),
+                log: Some(204),
+            }),
         },
     )]
 }
@@ -1248,15 +1220,13 @@ fn deposit_tier_samples() -> Vec<Sample> {
         ),
         sample(
             "pool settings set with the deposit tiers",
-            Event::seal(
-                EventIndex::new(14_000),
-                Timestamp::from_nanos(1_800_000_000_000_001_402),
-                EventHash::new([0xe9; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(14_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_402),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::SettingsSet { settings },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -1315,13 +1285,11 @@ fn planned_swap_samples() -> Vec<Sample> {
         sample("payout of a planned ICP swap", payout),
         sample(
             "planned ICP swap opened",
-            Event::seal(
-                EventIndex::new(13_000),
-                Timestamp::from_nanos(1_800_000_000_000_001_312),
-                EventHash::new([0xe8; 32]),
-                crate::events::EventType::Pool { step: opened },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(13_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_312),
+                payload: crate::events::EventType::Pool { step: opened },
+            },
         ),
     ]
 }
@@ -1408,13 +1376,11 @@ fn eco_payout_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(12_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_001_217 + i),
-                EventHash::new([0xd6; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(12_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_217 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -1450,13 +1416,11 @@ fn returned_move_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(11_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_001_110 + i),
-                EventHash::new([0xce; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(11_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_110 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -1568,11 +1532,10 @@ fn rescue_samples() -> Vec<Sample> {
         sample("config with the Eco rescue's gas row", config),
         sample(
             "Eco rescue transaction created",
-            Event::seal(
-                EventIndex::new(10_000),
-                Timestamp::from_nanos(1_800_000_000_000_001_000),
-                EventHash::new([0xcd; 32]),
-                crate::events::EventType::TxCreated {
+            Event {
+                index: EventIndex::new(10_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_000),
+                payload: crate::events::EventType::TxCreated {
                     purpose: TxPurpose::EcoRescue([0xb7; 32]),
                     chain_id: ChainId::POLYGON,
                     nonce: Nonce::new(1_001),
@@ -1584,16 +1547,14 @@ fn rescue_samples() -> Vec<Sample> {
                     max_priority_fee: WeiPerGas::new(1_005_000),
                     action: Some(GasAction::EcoRescue),
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
         sample(
             "Eco rescue signed",
-            Event::seal(
-                EventIndex::new(10_001),
-                Timestamp::from_nanos(1_800_000_000_000_001_006),
-                EventHash::new([0xcd; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(10_001),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_001_006),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::EcoRescueSigned {
                         order_id: [0xb7; 32],
                         chain_id: ChainId::POLYGON,
@@ -1602,8 +1563,7 @@ fn rescue_samples() -> Vec<Sample> {
                         raw_tx: vec![0x02, 0xbb],
                     },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -1953,11 +1913,10 @@ fn rebalance_samples() -> Vec<Sample> {
         sample("config with the rebalancing's gas rows", config),
         sample(
             "move transaction created",
-            Event::seal(
-                EventIndex::new(9_000),
-                Timestamp::from_nanos(1_800_000_000_000_000_974),
-                EventHash::new([0xcc; 32]),
-                crate::events::EventType::TxCreated {
+            Event {
+                index: EventIndex::new(9_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_974),
+                payload: crate::events::EventType::TxCreated {
                     purpose: TxPurpose::PoolMove(975),
                     chain_id: ChainId::BASE,
                     nonce: Nonce::new(976),
@@ -1969,20 +1928,17 @@ fn rebalance_samples() -> Vec<Sample> {
                     max_priority_fee: WeiPerGas::new(979_000),
                     action: Some(GasAction::PoolMove),
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ];
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(9_001 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_980 + i),
-                EventHash::new([0xcc; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(9_001 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_980 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     // the canister's own CCTP sources (P11c Task 3)
@@ -2105,13 +2061,11 @@ fn arrival_terms_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(9_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_920 + i),
-                EventHash::new([0xcb; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(9_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_920 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -2166,13 +2120,11 @@ fn orphan_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(8_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_810 + i),
-                EventHash::new([0xcb; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(8_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_810 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -2238,13 +2190,11 @@ fn queue_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(7_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_612 + i),
-                EventHash::new([0xca; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(7_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_612 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -2342,13 +2292,11 @@ fn icp_swap_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(6_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_511 + i),
-                EventHash::new([0xc9; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(6_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_511 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -2457,25 +2405,21 @@ fn pool_tx_samples() -> Vec<Sample> {
         pool_chain: Some(ChainId::BASE),
         ..Config::default()
     };
-    let created = |i: u64, purpose: TxPurpose, action: GasAction| {
-        Event::seal(
-            EventIndex::new(5_000 + i),
-            Timestamp::from_nanos(1_800_000_000_000_000_400 + i),
-            EventHash::new([0xc8; 32]),
-            crate::events::EventType::TxCreated {
-                purpose,
-                chain_id: ChainId::BASE,
-                nonce: Nonce::new(401 + i),
-                to: address(0x57),
-                value: Wei::ZERO,
-                data: vec![0x58; 36],
-                gas_limit: GasAmount::from(402_000_u64),
-                max_fee: WeiPerGas::new(403_000_000),
-                max_priority_fee: WeiPerGas::new(404_000),
-                action: Some(action),
-            },
-        )
-        .expect("every sample has a preimage")
+    let created = |i: u64, purpose: TxPurpose, action: GasAction| Event {
+        index: EventIndex::new(5_000 + i),
+        timestamp: Timestamp::from_nanos(1_800_000_000_000_000_400 + i),
+        payload: crate::events::EventType::TxCreated {
+            purpose,
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(401 + i),
+            to: address(0x57),
+            value: Wei::ZERO,
+            data: vec![0x58; 36],
+            gas_limit: GasAmount::from(402_000_u64),
+            max_fee: WeiPerGas::new(403_000_000),
+            max_priority_fee: WeiPerGas::new(404_000),
+            action: Some(action),
+        },
     };
     vec![
         sample("config with the pool's gas rows", config),
@@ -2497,11 +2441,10 @@ fn pool_tx_samples() -> Vec<Sample> {
         ),
         sample(
             "pool approval signed",
-            Event::seal(
-                EventIndex::new(5_003),
-                Timestamp::from_nanos(1_800_000_000_000_000_406),
-                EventHash::new([0xc8; 32]),
-                crate::events::EventType::Pool {
+            Event {
+                index: EventIndex::new(5_003),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_406),
+                payload: crate::events::EventType::Pool {
                     step: PoolStep::ApproveSigned {
                         chain_id: ChainId::BASE,
                         nonce: Nonce::new(403),
@@ -2509,8 +2452,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                         raw_tx: vec![0x02, 0x5b],
                     },
                 },
-            )
-            .expect("every sample has a preimage"),
+            },
         ),
     ]
 }
@@ -2661,13 +2603,11 @@ fn route_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(4_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_310 + i),
-                EventHash::new([0xc7; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(4_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_310 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -2924,13 +2864,11 @@ fn payout_samples() -> Vec<Sample> {
     out.extend((0_u64..).zip(steps).map(|(i, (name, step))| {
         sample(
             name,
-            Event::seal(
-                EventIndex::new(3_000 + i),
-                Timestamp::from_nanos(1_800_000_000_000_000_260 + i),
-                EventHash::new([0xc6; 32]),
-                crate::events::EventType::Pool { step },
-            )
-            .expect("every sample has a preimage"),
+            Event {
+                index: EventIndex::new(3_000 + i),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_260 + i),
+                payload: crate::events::EventType::Pool { step },
+            },
         )
     }));
     out
@@ -3065,7 +3003,6 @@ fn pool_samples() -> Vec<Sample> {
         }),
         icp_checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_162)),
         icp_failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_163)),
-        scan_cursor: Some(BlockNumber::new(37_000_164)),
         // empty, so this sample's bytes stay the ones the golden pins; the ledger appended
         // at the end of the pool's samples pins it
         queue: crate::pool::PayoutQueue::default(),
@@ -3073,7 +3010,6 @@ fn pool_samples() -> Vec<Sample> {
         head_since: None,
         // absent, so this sample's bytes stay the ones the golden pins; the ledger appended
         // after the step samples pins it
-        scan_log: None,
         // absent, so this sample's bytes stay the ones the golden pins; the ledger with its
         // payout lines appended at the end pins it
         payouts: None,
@@ -3190,10 +3126,7 @@ fn pool_samples() -> Vec<Sample> {
     });
     undone.payout.swap.withdrawn = Some(TokenAmount::from(190_u8));
     // the waiting ledger above, its read of Base standing inside a block
-    let reading = PoolLedger {
-        scan_log: Some(205),
-        ..waiting.clone()
-    };
+    let reading = PoolLedger { ..waiting.clone() };
     vec![
         sample("pool ledger", ledger),
         sample("pool deposit", deposit),
@@ -3291,26 +3224,17 @@ fn pool_step_samples() -> Vec<Sample> {
                 leg: None,
             },
         ),
-        (
-            "pool read of Base done through a log of a block",
-            PoolStep::ScanCursor {
-                block: BlockNumber::new(37_000_203),
-                log: Some(204),
-            },
-        ),
     ];
     (0_u64..)
         .zip(steps)
         .map(|(i, (name, step))| {
             sample(
                 name,
-                Event::seal(
-                    EventIndex::new(2_000 + i),
-                    Timestamp::from_nanos(1_800_000_000_000_000_202 + i),
-                    EventHash::new([0xc5; 32]),
-                    crate::events::EventType::Pool { step },
-                )
-                .expect("every sample has a preimage"),
+                Event {
+                    index: EventIndex::new(2_000 + i),
+                    timestamp: Timestamp::from_nanos(1_800_000_000_000_000_202 + i),
+                    payload: crate::events::EventType::Pool { step },
+                },
             )
         })
         .collect()

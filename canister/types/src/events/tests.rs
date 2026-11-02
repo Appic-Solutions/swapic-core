@@ -5,526 +5,151 @@ fn quote(byte: u8) -> QuoteHash {
     QuoteHash::new([byte; 32])
 }
 
-fn text<T: std::str::FromStr>(s: &str) -> T
-where
-    T::Err: std::fmt::Debug,
-{
-    s.parse().unwrap()
-}
-
-fn amount(value: u128) -> TokenAmount {
-    TokenAmount::from(value)
-}
-
-/// One fixed sample of every variant, in tag order, for the golden files.
+/// One sample of every variant the canister writes.
 pub(crate) fn samples() -> Vec<EventType> {
     vec![
         EventType::ConfigChanged {
-            json: "{\"fee_bps\":30}".into(),
-        },
-        EventType::FundsReceived {
-            quote_hash: quote(1),
-            quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
-            chain_id: ChainId::BASE,
-            token: text("USDC"),
-            amount: amount(1_000_000),
-            tx_ref: "0xfeed".into(),
-        },
-        EventType::TxSigned {
-            quote_hash: quote(2),
-            attempt: Attempt::new(1),
-            chain_id: ChainId::ARBITRUM,
-            tx_hash: TxHash::new([3; 32]),
-            raw_tx: vec![0x02, 0xf8, 0x6b],
-        },
-        EventType::TxConfirmed {
-            quote_hash: quote(4),
-            attempt: Attempt::new(2),
-            chain_id: ChainId::ETHEREUM,
-            tx_hash: TxHash::new([5; 32]),
-            block: BlockNumber::new(19_000_000),
-        },
-        EventType::TxFailed {
-            quote_hash: quote(6),
-            attempt: Attempt::new(3),
-            reason: "reverted".into(),
-        },
-        EventType::PaidInStable {
-            quote_hash: quote(7),
-            chain_id: ChainId::BASE,
-            amount: amount(999_999),
-        },
-        EventType::DecisionRequired {
-            quote_hash: quote(8),
-            reason: "slippage".into(),
-        },
-        EventType::DecisionMade {
-            quote_hash: quote(9),
-            choice: Choice::Refund,
-        },
-        EventType::RefundStarted {
-            quote_hash: quote(10),
-            reason: "timeout".into(),
-        },
-        EventType::Refunded {
-            quote_hash: quote(11),
-            chain_id: ChainId::POLYGON,
-            token: text("USDT"),
-            amount: amount(42),
-            // empty text: length prefix must still be written
-            to: text(""),
-        },
-        EventType::SwapDone {
-            quote_hash: quote(12),
-        },
-        EventType::Frozen {
-            quote_hash: quote(13),
-            // multibyte utf8: length is bytes, not chars
-            reason: "griefed \u{2603}".into(),
-        },
-        EventType::FeeAccrued {
-            quote_hash: quote(14),
-            amount: amount(7),
-        },
-        EventType::PocketFunded {
-            chain_id: ChainId::new(10),
-            // high word set: proves the u128 is 16 bytes, not a truncated u64
-            amount: amount(1u128 << 70),
-        },
-        EventType::PocketReserved {
-            quote_hash: quote(15),
-            chain_id: ChainId::BASE,
-            amount: amount(3),
-        },
-        EventType::PocketRebalanced {
-            from_chain: ChainId::BASE,
-            to_chain: ChainId::ARBITRUM,
-            amount: amount(250),
-            route: "cctp".into(),
-        },
-        EventType::PocketReleased {
-            quote_hash: quote(16),
-            chain_id: ChainId::BASE,
-            amount: amount(150),
-        },
-        EventType::PocketSpent {
-            quote_hash: quote(17),
-            chain_id: ChainId::ARBITRUM,
-            amount: amount(250),
+            json: "{\"batch_window_ms\":2000}".into(),
         },
         EventType::RolesChanged {
             quoter: "aaaaa-aa".into(),
             watcher: "2vxsx-fae".into(),
         },
-        EventType::WaitingRepaired {
-            quote_hash: quote(18),
-        },
         EventType::TxCreated {
-            purpose: TxPurpose::Burn(quote(19)),
+            purpose: TxPurpose::PoolPayout(3),
             chain_id: ChainId::BASE,
-            nonce: Nonce::new(7),
-            to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-                .parse()
-                .unwrap(),
+            nonce: Nonce::new(4),
+            to: EvmAddress::new([5; 20]),
             value: Wei::ZERO,
             data: vec![0xa9, 0x05, 0x9c, 0xbb],
             gas_limit: GasAmount::from(120_000_u32),
             max_fee: WeiPerGas::from(2_000_000_000_u64),
             max_priority_fee: WeiPerGas::from(100_000_000_u64),
-            action: None,
+            action: Some(crate::config::GasAction::PoolPayout),
         },
         EventType::TxReplaced {
-            purpose: TxPurpose::Cancel(ChainId::ARBITRUM),
+            purpose: TxPurpose::Relay(quote(6)),
             chain_id: ChainId::ARBITRUM,
-            nonce: Nonce::new(8),
+            nonce: Nonce::new(7),
             max_fee: WeiPerGas::from(4_000_000_000_u64),
             max_priority_fee: WeiPerGas::from(200_000_000_u64),
-            tx_hash: TxHash::new([20; 32]),
-            raw_tx: vec![0x02, 0xf8, 0x6b],
+            tx_hash: TxHash::new([8; 32]),
+            raw_tx: vec![0x02, 0xf8],
         },
         EventType::TxCancelled {
             chain_id: ChainId::POLYGON,
             nonce: Nonce::new(9),
-            tx_hash: TxHash::new([21; 32]),
-            raw_tx: vec![0x02, 0xf8, 0x6c],
-        },
-        EventType::PullSigned {
-            quote_hash: quote(22),
-            chain_id: ChainId::BASE,
-            nonce: Nonce::new(10),
-            tx_hash: TxHash::new([23; 32]),
-            raw_tx: vec![0x02, 0xf8, 0x6d],
+            tx_hash: TxHash::new([10; 32]),
+            raw_tx: vec![0x02, 0xf9],
         },
         EventType::Flow {
-            quote_hash: quote(24),
-            step: crate::flow::FlowStep::Pulled {
-                amount: TokenAmount::from(25_u8),
-                block_index: 26,
+            quote_hash: quote(11),
+            step: FlowStep::TxClosed {
+                tx_hash: TxHash::new([12; 32]),
+                block: BlockNumber::new(13),
+                success: true,
             },
         },
         EventType::Books {
             chain_id: ChainId::BASE,
-            step: crate::books::BookStep::FeeEarned {
-                tx_hash: TxHash::new([27; 32]),
-                amount: TokenAmount::from(28_u8),
-                // absent, so this sample's bytes stay the ones the golden pins; the line
-                // appended at the end of `storable/tests.rs`'s samples pins the block
-                block: None,
+            step: BookStep::FeeEarned {
+                tx_hash: TxHash::new([14; 32]),
+                amount: crate::numeric::TokenAmount::from(15_u32),
+                block: Some(BlockNumber::new(16)),
             },
         },
         EventType::Pool {
-            step: crate::pool::PoolStep::Arrived {
-                r#ref: crate::hash::PoolRef::new([29; 32]),
-                credit: crate::pool::CreditKey {
-                    chain: ChainId::BASE,
-                    tx: TxHash::new([30; 32]),
-                    log_index: 31,
-                },
-                amount: TokenAmount::from(32_000_000_u32),
-                block: BlockNumber::new(33),
+            step: PoolStep::Expired {
+                r#ref: crate::hash::PoolRef::new([17; 32]),
             },
         },
         EventType::TxFinal {
-            purpose: TxPurpose::Sweep(34),
+            purpose: TxPurpose::Sweep(18),
             chain_id: ChainId::BASE,
-            nonce: Nonce::new(35),
-            tx_hash: TxHash::new([36; 32]),
+            nonce: Nonce::new(19),
+            tx_hash: TxHash::new([20; 32]),
             outcome: TxOutcome::Succeeded {
-                block: BlockNumber::new(37),
+                block: BlockNumber::new(21),
             },
         },
         EventType::Swept {
             sweep: crate::sweep::Sweep {
-                id: 38,
+                id: 22,
                 asset: crate::sweep::SweepAsset::FeeUsdc,
                 to: crate::sweep::SweepTo::Evm {
                     chain: ChainId::BASE,
-                    to: EvmAddress::new([39; 20]),
+                    to: EvmAddress::new([23; 20]),
                 },
-                amount: TokenAmount::from(40_000_000_u32),
-                from_pool_fees: TokenAmount::ZERO,
-                from_fee_income: TokenAmount::from(40_000_000_u32),
+                amount: crate::numeric::TokenAmount::from(24_000_000_u32),
+                from_pool_fees: crate::numeric::TokenAmount::from(4_000_000_u32),
+                from_fee_income: crate::numeric::TokenAmount::from(20_000_000_u32),
             },
         },
         EventType::SweepReverted {
-            id: 38,
+            id: 22,
             why: "reverted".into(),
         },
     ]
 }
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/event_bytes_v1.txt");
-
-fn tag_of(line: &str) -> &str {
-    line.get(..4).unwrap_or("????")
-}
-
-fn swap_done(byte: u8) -> EventType {
-    EventType::SwapDone {
-        quote_hash: quote(byte),
-    }
-}
-
-#[test]
-fn choice_encodes_one_byte() {
-    let q = EventType::DecisionMade {
-        quote_hash: quote(0),
-        choice: Choice::Requote,
-    }
-    .canonical_bytes()
-    .unwrap();
-    let r = EventType::DecisionMade {
-        quote_hash: quote(0),
-        choice: Choice::Refund,
-    }
-    .canonical_bytes()
-    .unwrap();
-    assert_eq!(q.len(), 35, "tag + hash + one choice byte");
-    assert_eq!(q.len(), r.len());
-    assert_eq!(*q.last().unwrap(), 0, "Requote encodes 0");
-    assert_eq!(*r.last().unwrap(), 1, "Refund encodes 1");
-}
-
-#[test]
-fn event_bytes_matches_golden_vectors() {
-    let s = samples();
-    assert_eq!(
-        s.len(),
-        EVENT_VARIANT_COUNT,
-        "samples() must cover every variant"
-    );
-    let got: Vec<String> = s
-        .iter()
-        .map(|e| hex::encode(e.canonical_bytes().unwrap()))
-        .collect();
-
-    // regeneration is opt-in and never green, so a blessing is always a deliberate diff
-    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
-        let dir = std::path::Path::new(GOLDEN).parent().unwrap();
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(GOLDEN, got.join("\n") + "\n").unwrap();
-        panic!("golden regenerated, inspect the diff and rerun: {GOLDEN}");
-    }
-
-    let raw = std::fs::read_to_string(GOLDEN).unwrap_or_else(|e| {
-        panic!("golden missing or unreadable ({e}); regenerate with UPDATE_GOLDEN=1: {GOLDEN}")
-    });
-    let want: Vec<&str> = raw.lines().collect();
-    assert_eq!(
-        want.len(),
-        got.len(),
-        "golden has {} lines but samples() has {}: {GOLDEN}",
-        want.len(),
-        got.len()
-    );
-    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-        assert_eq!(
-            g,
-            w,
-            "canonical layout changed: breaking. first differing line {i} (tag {})",
-            tag_of(g)
-        );
-    }
-}
-
 /// The stable log decodes an event only when it is read, so a variant that no longer
-/// decodes would upgrade cleanly and then trap every read of it. This walks the same
-/// `Storable` impl the stable log uses, over every variant; `storage_v1.txt` pins the bytes.
+/// decodes would trap every read of it: every variant crosses the log's own `Storable`.
 #[test]
 fn every_variant_round_trips_through_storage() {
-    let s = samples();
-    assert_eq!(
-        s.len(),
-        EVENT_VARIANT_COUNT,
-        "samples() must cover every variant"
-    );
-    for (i, payload) in (0u8..).zip(s) {
-        let event = Event::seal(
-            EventIndex::new(i.into()),
-            Timestamp::from_nanos(1_700_000_000),
-            EventHash::new([i; 32]),
+    for (i, payload) in (0u64..).zip(samples()) {
+        let event = Event {
+            index: EventIndex::new(i),
+            timestamp: Timestamp::from_nanos(1_700_000_000_000_000_000 + i),
             payload,
-        )
-        .unwrap();
-        let back = Event::from_bytes(event.to_bytes());
-        assert_eq!(back, event, "variant {i} does not survive stable storage");
-    }
-}
-
-/// The two numberings of a variant are one assignment: its minicbor index is its
-/// canonical tag.
-#[test]
-fn every_variant_stores_under_its_canonical_tag() {
-    for payload in samples() {
-        let cbor = minicbor::to_vec(&payload).unwrap();
-        let mut d = minicbor::Decoder::new(&cbor);
-        d.array().unwrap();
-        let index = d.u16().unwrap();
-        let tag = u16::from_be_bytes(payload.canonical_bytes().unwrap()[..2].try_into().unwrap());
-        assert_eq!(index, tag, "{payload:?}");
-    }
-}
-
-#[test]
-fn hash_changes_when_any_field_changes() {
-    let at = |index: u64, nanos: u64, parent: u8, payload: EventType| {
-        event_hash(
-            EventIndex::new(index),
-            Timestamp::from_nanos(nanos),
-            &EventHash::new([parent; 32]),
-            &payload,
-        )
-        .unwrap()
-    };
-    let a = at(1, 2, 0, swap_done(1));
-    assert_ne!(a, at(2, 2, 0, swap_done(1)));
-    assert_ne!(a, at(1, 3, 0, swap_done(1)));
-    assert_ne!(a, at(1, 2, 9, swap_done(1)));
-    assert_ne!(a, at(1, 2, 0, swap_done(2)));
-}
-
-#[test]
-fn chain_links_and_detects_tampering() {
-    let e0 = Event::seal(
-        EventIndex::ZERO,
-        Timestamp::from_nanos(100),
-        EventHash::ZERO,
-        EventType::PocketFunded {
-            chain_id: ChainId::BASE,
-            amount: amount(5),
-        },
-    )
-    .unwrap();
-    let e1 = Event::seal(
-        EventIndex::new(1),
-        Timestamp::from_nanos(200),
-        e0.hash,
-        swap_done(1),
-    )
-    .unwrap();
-    assert!(chain_is_valid(&[e0.clone(), e1.clone()]));
-    let mut bad = e1.clone();
-    bad.payload = swap_done(2);
-    assert!(!chain_is_valid(&[e0.clone(), bad]));
-    let mut unlinked = e1;
-    unlinked.parent_hash = EventHash::new([7; 32]);
-    assert!(!chain_is_valid(&[e0, unlinked]));
-}
-
-/// One link at a time, which is what lets a verification stop at a chunk boundary and
-/// resume: each way a link can be wrong is named, and a sound link answers the hash the
-/// next one is checked against.
-#[test]
-fn check_link_names_what_is_wrong_and_carries_the_head_forward() {
-    let e0 = Event::seal(
-        EventIndex::ZERO,
-        Timestamp::from_nanos(100),
-        EventHash::ZERO,
-        swap_done(1),
-    )
-    .unwrap();
-    let e1 = Event::seal(
-        EventIndex::new(1),
-        Timestamp::from_nanos(200),
-        e0.hash,
-        swap_done(2),
-    )
-    .unwrap();
-    assert_eq!(
-        check_link(&e0, EventIndex::ZERO, EventHash::ZERO),
-        Ok(e0.hash)
-    );
-    assert_eq!(check_link(&e1, EventIndex::new(1), e0.hash), Ok(e1.hash));
-
-    assert_eq!(
-        check_link(&e1, EventIndex::new(7), e0.hash),
-        Err(LinkError::OutOfSequence {
-            expected: EventIndex::new(7),
-            found: EventIndex::new(1)
-        })
-    );
-    assert_eq!(
-        check_link(&e1, EventIndex::new(1), EventHash::new([7; 32])),
-        Err(LinkError::Unlinked {
-            index: EventIndex::new(1),
-            parent: e0.hash,
-            head: EventHash::new([7; 32])
-        })
-    );
-    let mut tampered = e1.clone();
-    tampered.payload = swap_done(3);
-    assert_eq!(
-        check_link(&tampered, EventIndex::new(1), e0.hash),
-        Err(LinkError::HashMismatch {
-            index: EventIndex::new(1),
-            hash: e1.hash
-        })
-    );
-}
-
-fn above_u128() -> TokenAmount {
-    amount(u128::MAX).checked_add(TokenAmount::ONE).unwrap()
-}
-
-/// An amount no 16-byte field holds has no preimage, so there is no hash to seal: an error
-/// naming the amount, not a panic inside `append_event`.
-#[test]
-fn seal_refuses_an_amount_above_u128_max() {
-    for too_large in [above_u128(), TokenAmount::MAX] {
-        let payload = EventType::PocketFunded {
-            chain_id: ChainId::BASE,
-            amount: too_large,
         };
-        assert_eq!(
-            payload.canonical_bytes(),
-            Err(CanonicalError::AmountTooLarge(too_large))
-        );
-        assert_eq!(
-            Event::seal(
-                EventIndex::ZERO,
-                Timestamp::from_nanos(1),
-                EventHash::ZERO,
-                payload
-            ),
-            Err(CanonicalError::AmountTooLarge(too_large))
-        );
+        assert_eq!(Event::from_bytes(event.to_bytes()), event);
     }
 }
 
-/// A stored event whose payload has no preimage cannot be a link, so the chain check says
-/// false rather than trapping the audit.
+/// Only a flow or pool step that moves something arms the engine.
 #[test]
-fn chain_check_is_false_for_an_event_with_no_preimage() {
-    let mut e0 = Event::seal(
-        EventIndex::ZERO,
-        Timestamp::from_nanos(100),
-        EventHash::ZERO,
-        EventType::PocketFunded {
-            chain_id: ChainId::BASE,
-            amount: amount(5),
-        },
-    )
-    .unwrap();
-    e0.payload = EventType::PocketFunded {
-        chain_id: ChainId::BASE,
-        amount: TokenAmount::MAX,
-    };
-    assert!(!chain_is_valid(&[e0]));
+fn only_steps_that_move_something_arm_the_engine() {
+    for sample in samples() {
+        let moves = matches!(sample, EventType::Flow { .. } | EventType::Pool { .. })
+            && sample.moves_a_step();
+        assert_eq!(sample.moves_a_step(), moves, "{sample:?}");
+    }
 }
 
-/// A purpose is one byte and its argument, and no two purposes share a preimage.
+/// Every keyed purpose has its own key, so two transactions of different purposes never
+/// hold one key; a cancel holds none.
 #[test]
-fn every_purpose_has_its_own_preimage() {
-    let hash = quote(1);
-    let purposes = [
-        TxPurpose::Burn(hash),
-        TxPurpose::Mint(hash),
-        TxPurpose::Payout(hash),
-        TxPurpose::Refund(hash),
-        TxPurpose::GaslessPull(hash),
-        TxPurpose::Cancel(ChainId::BASE),
-        TxPurpose::Reclaim(hash),
+fn every_purpose_has_its_own_key() {
+    let keyed = [
+        TxPurpose::Relay(quote(1)),
+        TxPurpose::Finish(quote(2)),
+        TxPurpose::PoolPayout(1),
+        TxPurpose::PoolTransfer([1; 32]),
+        TxPurpose::PoolApprove,
+        TxPurpose::PoolMove(1),
+        TxPurpose::EcoRescue([1; 32]),
+        TxPurpose::Sweep(1),
     ];
-    let mut seen = Vec::new();
-    for purpose in purposes {
-        assert_eq!(
-            purpose.quote_hash().is_none(),
-            purpose == TxPurpose::Cancel(ChainId::BASE)
-        );
-        let mut w = CanonicalWriter::default();
-        purpose.write_canonical(&mut w);
-        let bytes = w.finish().unwrap();
-        assert!(!seen.contains(&bytes), "{purpose:?} shares a preimage");
-        seen.push(bytes);
-    }
+    let keys: std::collections::BTreeSet<_> = keyed
+        .iter()
+        .map(|purpose| purpose.quote_hash().unwrap())
+        .collect();
+    assert_eq!(keys.len(), keyed.len());
+    assert_eq!(TxPurpose::Cancel(ChainId::BASE).quote_hash(), None);
+    assert_ne!(
+        TxPurpose::Sweep(1).quote_hash(),
+        TxPurpose::PoolMove(1).quote_hash()
+    );
 }
 
-/// `amount` names exactly the variants whose preimage carries an amount field.
+/// A recorded signed transaction is read back for the watcher's broadcast.
 #[test]
-fn amount_is_the_one_amount_field_of_each_variant() {
-    for payload in samples() {
-        let found = payload.amount();
-        let mut without = payload.clone();
-        let moved = match &mut without {
-            EventType::FundsReceived { amount, .. }
-            | EventType::PaidInStable { amount, .. }
-            | EventType::Refunded { amount, .. }
-            | EventType::FeeAccrued { amount, .. }
-            | EventType::PocketFunded { amount, .. }
-            | EventType::PocketReserved { amount, .. }
-            | EventType::PocketRebalanced { amount, .. }
-            | EventType::PocketReleased { amount, .. }
-            | EventType::PocketSpent { amount, .. } => {
-                *amount = TokenAmount::MAX;
-                true
-            }
-            _ => false,
-        };
-        assert_eq!(found.is_some(), moved, "{payload:?}");
-        assert_eq!(
-            without.canonical_bytes().is_err(),
-            moved,
-            "the amount is in the preimage: {payload:?}"
+fn a_replacement_and_a_cancel_carry_their_bytes() {
+    for sample in samples() {
+        let carries = matches!(
+            sample,
+            EventType::TxReplaced { .. } | EventType::TxCancelled { .. }
         );
+        assert_eq!(sample.signed_tx().is_some(), carries, "{sample:?}");
     }
 }

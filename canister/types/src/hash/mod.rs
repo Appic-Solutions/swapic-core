@@ -81,13 +81,8 @@ hash_type! {
 }
 
 hash_type! {
-    /// A link of the event log's hash chain.
-    EventHash
-}
-
-hash_type! {
-    /// A pool deposit's reference: the commitment an order's `ref` carries to who is paid
-    /// and at what fee (`types::pool::pool_ref`).
+    /// A pool deposit's reference: `keccak256` of the memo its order carries
+    /// (`types::pool::memo`).
     PoolRef
 }
 
@@ -100,15 +95,4 @@ hash_type! {
 hash_type! {
     /// The id of a pool operation started on ICP: a stake pulled in, or a withdrawal paid out.
     PoolOpId
-}
-
-impl EventHash {
-    /// The parent of the first event.
-    pub const ZERO: Self = Self([0; 32]);
-}
-
-impl Default for EventHash {
-    fn default() -> Self {
-        Self::ZERO
-    }
 }

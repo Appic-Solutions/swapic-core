@@ -20,9 +20,7 @@ const HALT_MEMORY_ID: MemoryId = MemoryId::new(4);
 const LEDGER_META_MEMORY_ID: MemoryId = MemoryId::new(8);
 // 9 held the v1 quotes registered and not yet paid: retired, never reused
 // 10 held the v1 swaps' waiting index: retired, never reused
-const AUDIT_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(11);
 // 12 held the v1 pending quotes' expiry index: retired, never reused
-const REPLAY_CURSOR_MEMORY_ID: MemoryId = MemoryId::new(13);
 const CHAIN_DATA_MEMORY_ID: MemoryId = MemoryId::new(14);
 const NONCES_MEMORY_ID: MemoryId = MemoryId::new(15);
 const OUTBOX_MEMORY_ID: MemoryId = MemoryId::new(16);
@@ -86,14 +84,6 @@ pub fn halt_memory() -> Memory {
 
 pub fn ledger_meta_memory() -> Memory {
     memory(LEDGER_META_MEMORY_ID)
-}
-
-pub fn audit_cursor_memory() -> Memory {
-    memory(AUDIT_CURSOR_MEMORY_ID)
-}
-
-pub fn replay_cursor_memory() -> Memory {
-    memory(REPLAY_CURSOR_MEMORY_ID)
 }
 
 pub fn chain_data_memory() -> Memory {

@@ -1,4 +1,4 @@
-use minicbor::{Decode, Encode};
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeFrom;
 use types::books::{BookStep, Books};
@@ -8,8 +8,8 @@ use types::pool::{
     CreditKey, EvmPayout, NonceUse, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares,
 };
 use types::{
-    ChainId, EventHash, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, Pocket, QuoteHash, Swap,
-    Timestamp, TokenAmount, TxHash, UnsignedTx, WaitingKey,
+    ChainId, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp, TokenAmount,
+    TxHash, UnsignedTx,
 };
 
 pub mod transitions;
@@ -165,79 +165,31 @@ impl<S: Store> PoolLookup for PoolView<'_, S> {
     }
 }
 
-/// A [`Store`] on the heap: what unit tests and the replay audit fold into. The deep audit
-/// saves one between its steps, so it is stored as minicbor: `#[n]` indices are
-/// append-only, never renumbered or reused, and a new field is optional.
-///
-/// `swaps`, `pockets` and `auto_refund_waiting` are the retired v1 swaps' places: kept so a
-/// saved fold's bytes read the same, and always empty, since no line folds into them any
-/// more.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+/// A [`Store`] on the heap: what unit tests fold into.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryStore {
-    #[n(0)]
-    swaps: BTreeMap<QuoteHash, Swap>,
-    #[n(1)]
-    pockets: BTreeMap<ChainId, Pocket>,
-    #[n(2)]
     meta: LedgerMeta,
-    #[n(3)]
-    auto_refund_waiting: BTreeSet<WaitingKey>,
-    #[n(4)]
     nonces: BTreeMap<ChainId, Nonce>,
-    #[n(5)]
     unsigned: BTreeMap<NonceKey, UnsignedTx>,
-    #[n(6)]
     flows: BTreeMap<QuoteHash, Flow>,
-    #[n(7)]
     signed: BTreeSet<EventIndex>,
-    #[n(8)]
     books: BTreeMap<ChainId, Books>,
-    #[n(9)]
     pool_ledger: PoolLedger,
-    #[n(10)]
     pool_deposits: BTreeMap<PoolRef, Registered>,
-    #[n(11)]
     pool_shares: BTreeMap<OwnerKey, ShareLine>,
-    #[n(12)]
     pool_credited: BTreeSet<CreditKey>,
-    #[n(13)]
     pool_payouts: BTreeMap<u64, EvmPayout>,
-    #[n(14)]
     payout_queue: BTreeMap<u64, u64>,
-    #[n(15)]
     withdrawal_nonces: BTreeSet<NonceUse>,
-    #[n(16)]
     payout_intents: BTreeMap<PoolRef, u64>,
-    #[n(17)]
     pool_orphans: BTreeMap<CreditKey, types::pool::Orphan>,
-    /// The rebalance moves (P11c).
-    #[n(18)]
     pool_moves: BTreeMap<u64, types::pool::Move>,
-    /// The canister's own CCTP sources (P11c).
-    #[n(19)]
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
-    /// The Eco rescues by order id (P11e).
-    #[n(20)]
     eco_rescues: BTreeMap<PoolRef, u64>,
 }
 
 #[cfg(test)]
-impl MemoryStore {
-    /// A store whose retired v1 places hold `swap`, `pocket` and `waiting`, as a fold saved
-    /// before they retired may: what the test that pins a saved fold's bytes builds.
-    pub(crate) fn with_retired(
-        mut self,
-        swap: (QuoteHash, Swap),
-        pocket: (ChainId, Pocket),
-        waiting: WaitingKey,
-    ) -> Self {
-        self.swaps.insert(swap.0, swap.1);
-        self.pockets.insert(pocket.0, pocket.1);
-        self.auto_refund_waiting.insert(waiting);
-        self
-    }
-}
-
 impl Store for MemoryStore {
     fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
         self.flows.get(quote_hash).cloned()
@@ -495,16 +447,13 @@ pub struct State<S> {
     store: S,
 }
 
+#[cfg(test)]
 impl State<MemoryStore> {
     /// Whether `other` holds exactly this heap fold, whatever its store. The destructure has
     /// no `..`, so a collection added to the store fails to compile until it is compared.
     pub fn matches<T: Store>(&self, other: &State<T>) -> bool {
         let MemoryStore {
-            // the retired v1 swaps', pockets' and waits' places, always empty
-            swaps: _,
-            pockets: _,
             meta,
-            auto_refund_waiting: _,
             nonces,
             unsigned,
             flows,
@@ -748,13 +697,12 @@ impl<S: Store> State<S> {
         self.store.put_signed(index);
     }
 
-    fn record_event(&mut self, index: EventIndex, hash: EventHash) {
+    fn record_event(&mut self, index: EventIndex) {
         let meta = self.store.meta();
         self.store.put_meta(LedgerMeta {
             next_event_index: index
                 .next()
                 .expect("BUG: append_event refuses an index without a successor"),
-            last_event_hash: hash,
             ..meta
         });
     }
@@ -816,17 +764,5 @@ impl<S: Store> State<S> {
     /// The flow under `quote_hash`, if any.
     pub fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
         self.store.flow(quote_hash)
-    }
-
-    /// Test-only: flips one bit of the chain head, and nothing else.
-    #[cfg(feature = "inttest")]
-    pub fn skew_chain_head(&mut self) {
-        let meta = self.store.meta();
-        let mut head = meta.last_event_hash.into_bytes();
-        head[0] ^= 1;
-        self.store.put_meta(LedgerMeta {
-            last_event_hash: EventHash::new(head),
-            ..meta
-        });
     }
 }
