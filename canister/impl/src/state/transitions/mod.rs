@@ -67,20 +67,9 @@ impl<S: Store> State<S> {
                     *quote_hash,
                     existing.as_ref(),
                     step,
-                    |tx_hash| {
-                        self.store()
-                            .flows()
-                            .into_iter()
-                            .find(|(other, flow)| {
-                                other != quote_hash && flow.landed_tx.as_ref() == Some(tx_hash)
-                            })
-                            .map(|(other, _)| other)
-                    },
+                    |tx_hash| self.flow_landed_by(tx_hash, quote_hash),
                     |source_tx| {
-                        self.store()
-                            .flows()
-                            .into_iter()
-                            .find(|(_, flow)| flow.source_tx.as_ref() == Some(source_tx))
+                        self.finish_of_source(source_tx)
                             .and_then(|(_, flow)| flow.arrival)
                     },
                 )?;
