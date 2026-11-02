@@ -47,12 +47,14 @@ pub fn restart_hourly_timer() {
 
 /// The hourly pass. First the safety, before any await so a check that fails or traps
 /// still does it: the backstop armed, and the outbox armed if anything is in flight, in
-/// case a one-shot was lost. Then the balance check and the books read for a move.
+/// case a one-shot was lost. Then the balance check, the books read for a move, and the
+/// ICP sweeps whose answer was lost, asked again.
 async fn hourly() {
     backstop::arm();
     outbox::arm_if_work_is_pending();
     crate::books::check_pool_books().await;
     rebalance::tick().await;
+    crate::sweep::icp::retry_lost().await;
 }
 
 /// Puts the canister's own read of Base on its settings' interval (`arrival_backup_s`, the

@@ -7,6 +7,7 @@ use types::hash::{OwnerKey, PoolRef};
 use types::pool::{
     CreditKey, EvmPayout, NonceUse, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares,
 };
+use types::sweep::SweepEntry;
 use types::{
     BlockNumber, ChainId, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp,
     TokenAmount, TxHash, UnsignedTx,
@@ -88,6 +89,13 @@ pub trait Store {
     fn put_eco_rescue(&mut self, order_id: PoolRef, index: u64);
     /// Every rescue, in order id order: what the audit compares.
     fn eco_rescues(&self) -> Vec<(PoolRef, u64)>;
+    /// A controller's sweep, by id.
+    fn sweep(&self, id: u64) -> Option<SweepEntry>;
+    fn put_sweep(&mut self, id: u64, entry: SweepEntry);
+    /// Every sweep, in id order.
+    fn sweeps(&self) -> Vec<(u64, SweepEntry)>;
+    /// How many sweeps were ever made: the next one's id.
+    fn sweep_count(&self) -> u64;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -187,10 +195,30 @@ pub struct MemoryStore {
     pool_moves: BTreeMap<u64, types::pool::Move>,
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
     eco_rescues: BTreeMap<PoolRef, u64>,
+    sweeps: BTreeMap<u64, SweepEntry>,
 }
 
 #[cfg(test)]
 impl Store for MemoryStore {
+    fn sweep(&self, id: u64) -> Option<SweepEntry> {
+        self.sweeps.get(&id).copied()
+    }
+
+    fn put_sweep(&mut self, id: u64, entry: SweepEntry) {
+        self.sweeps.insert(id, entry);
+    }
+
+    fn sweeps(&self) -> Vec<(u64, SweepEntry)> {
+        self.sweeps
+            .iter()
+            .map(|(id, entry)| (*id, *entry))
+            .collect()
+    }
+
+    fn sweep_count(&self) -> u64 {
+        self.sweeps.len() as u64
+    }
+
     fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
         self.flows.get(quote_hash).cloned()
     }
@@ -471,6 +499,7 @@ impl State<MemoryStore> {
             pool_moves,
             pool_own_sources,
             eco_rescues,
+            sweeps,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -541,6 +570,9 @@ impl State<MemoryStore> {
                 .eco_rescues()
                 .iter()
                 .map(|(order_id, index)| (order_id, index)))
+            && sweeps
+                .iter()
+                .eq(other.store.sweeps().iter().map(|(id, entry)| (id, entry)))
     }
 }
 
@@ -620,6 +652,61 @@ impl<S: Store> State<S> {
                 ..meta
             }),
             _ => {}
+        }
+    }
+
+    /// A controller's sweep, recorded: its amount off the lines it came from.
+    pub(crate) fn record_sweep(&mut self, sweep: &types::sweep::Sweep) {
+        self.shift_sweep(sweep, false);
+        self.store.put_sweep(
+            sweep.id,
+            SweepEntry {
+                sweep: *sweep,
+                reverted: false,
+            },
+        );
+    }
+
+    /// A sweep that moved nothing: its amount back on the lines it came from.
+    pub(crate) fn record_sweep_reverted(&mut self, id: u64) {
+        let Some(mut entry) = self.store.sweep(id) else {
+            return;
+        };
+        self.shift_sweep(&entry.sweep, true);
+        entry.reverted = true;
+        self.store.put_sweep(id, entry);
+    }
+
+    /// Moves a sweep's parts off their lines, or `back` onto them.
+    fn shift_sweep(&mut self, sweep: &types::sweep::Sweep, back: bool) {
+        let shift = |line: TokenAmount, by: TokenAmount| {
+            if back {
+                line.checked_add(by).unwrap_or(TokenAmount::MAX)
+            } else {
+                line.checked_sub(by).unwrap_or(TokenAmount::ZERO)
+            }
+        };
+        if let Some(chain) = sweep.chain() {
+            if sweep.from_fee_income > TokenAmount::ZERO {
+                let mut books = self.book(&chain);
+                books.fee_income = shift(books.fee_income, sweep.from_fee_income);
+                self.store.put_book(chain, books);
+            }
+        }
+        if sweep.from_pool_fees > TokenAmount::ZERO {
+            let mut ledger = self.store.pool_ledger();
+            let mut lines = ledger.lines();
+            match sweep.asset {
+                types::sweep::SweepAsset::FeeUsdc => {
+                    lines.fees_base = shift(lines.fees_base, sweep.from_pool_fees)
+                }
+                types::sweep::SweepAsset::CkUsdcFees => {
+                    lines.fees_icp = shift(lines.fees_icp, sweep.from_pool_fees)
+                }
+                _ => {}
+            }
+            ledger.payouts = Some(lines);
+            self.store.put_pool_ledger(ledger);
         }
     }
 

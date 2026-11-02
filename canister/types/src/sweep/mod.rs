@@ -63,11 +63,48 @@ pub struct Sweep {
     /// In the asset's smallest unit.
     #[n(3)]
     pub amount: TokenAmount,
-    /// Of `amount`, what came off the pool ledger's fee line: `fees_base` for USDC on the
-    /// pool chain, `fees_icp` for ckUSDC. Zero for native gas, ckETH and ICP.
+    /// What came off the pool ledger's fee line: for USDC on the pool chain the part of
+    /// `amount` from `fees_base`; for ckUSDC `amount` and the ledger's fee, both from
+    /// `fees_icp`. Zero for native gas, ckETH and ICP.
     #[n(4)]
     pub from_pool_fees: TokenAmount,
     /// Of `amount`, what came off the chain books' `fee_income`. Zero but for USDC.
     #[n(5)]
     pub from_fee_income: TokenAmount,
+}
+
+impl Sweep {
+    /// The EVM chain the sweep is sent on; none for an ICP sweep.
+    pub fn chain(&self) -> Option<ChainId> {
+        match self.to {
+            SweepTo::Evm { chain, .. } => Some(chain),
+            SweepTo::Icp(_) => None,
+        }
+    }
+}
+
+/// A sweep as the fold keeps it, every sweep ever made: what it took off which lines, and
+/// whether it was taken back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct SweepEntry {
+    #[n(0)]
+    pub sweep: Sweep,
+    #[n(1)]
+    pub reverted: bool,
+}
+
+crate::storable_as_cbor!(SweepEntry);
+
+/// An ICP sweep's transfer whose answer was lost: asked again, the same transfer (the same
+/// `created_at` and the sweep's memo), until the ledger answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct IcpSweepAsk {
+    #[n(0)]
+    pub asset: SweepAsset,
+    #[n(1)]
+    pub to: IcpAccount,
+    #[n(2)]
+    pub amount: TokenAmount,
+    #[n(3)]
+    pub created_at: crate::numeric::Timestamp,
 }

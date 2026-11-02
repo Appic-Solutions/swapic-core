@@ -629,7 +629,7 @@ impl PoolLedger {
             | PoolStep::OrphanRefundClosed { .. }
             | PoolStep::TermsClaimed { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
-            PoolStep::ApproveSigned { .. } => Ok(()),
+            PoolStep::ApproveSigned { .. } | PoolStep::SweepSigned { .. } => Ok(()),
             PoolStep::MoveSettingsSet { .. }
             | PoolStep::MoveOpened { .. }
             | PoolStep::MoveProposed { .. }
@@ -1235,7 +1235,7 @@ impl PoolLedger {
             | PoolStep::StakeStarted { .. }
             | PoolStep::StakeFailed { .. }
             | PoolStep::WithdrawStarted { .. } => ledger.apply_icp_op(step, lookup, &mut effects),
-            PoolStep::ApproveSigned { .. } => {}
+            PoolStep::ApproveSigned { .. } | PoolStep::SweepSigned { .. } => {}
             PoolStep::PayoutSettingsSet { .. }
             | PoolStep::PayoutOpened { .. }
             | PoolStep::PayoutAmountKnown { .. }

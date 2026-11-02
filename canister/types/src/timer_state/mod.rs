@@ -102,6 +102,9 @@ pub struct TimerState {
     /// When the outbox reads each chain's receipts next.
     #[n(7)]
     pub receipts_due: BTreeMap<ChainId, Timestamp>,
+    /// The ICP sweeps whose transfer's answer was lost, by sweep id.
+    #[n(8)]
+    pub icp_sweeps: BTreeMap<u64, crate::sweep::IcpSweepAsk>,
 }
 
 /// A pocket's balance reads: the last one that read a balance, and when one last failed.

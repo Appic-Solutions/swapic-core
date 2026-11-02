@@ -53,6 +53,7 @@ const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
 // limit on the free doors)
 const TIMER_STATE_MEMORY_ID: MemoryId = MemoryId::new(37);
 const POOL_CALLERS_MEMORY_ID: MemoryId = MemoryId::new(43);
+const SWEEPS_MEMORY_ID: MemoryId = MemoryId::new(44);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -172,6 +173,10 @@ pub fn pool_own_sources_memory() -> Memory {
 
 pub fn eco_rescues_memory() -> Memory {
     memory(ECO_RESCUES_MEMORY_ID)
+}
+
+pub fn sweeps_memory() -> Memory {
+    memory(SWEEPS_MEMORY_ID)
 }
 
 pub fn timer_state_memory() -> Memory {

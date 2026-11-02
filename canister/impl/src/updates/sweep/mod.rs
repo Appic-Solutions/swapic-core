@@ -20,8 +20,7 @@ pub use settlement_api::types::sweep::{
 /// the sweep's id and its transaction's id in `signed_txs`.
 #[update]
 pub async fn sweep_evm(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
-    let _ = args;
-    todo!("C5: the EVM sweep")
+    crate::sweep::evm::sweep(args).await
 }
 
 /// Controller-only, refused while halted. Sends `amount` of the canister's own `asset` on
@@ -38,6 +37,5 @@ pub async fn sweep_evm(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
 /// ledger block of its transfer.
 #[update]
 pub async fn sweep_icp(args: SweepIcpArgs) -> Result<SweepIcpOk, SweepError> {
-    let _ = args;
-    todo!("C5: the ICP sweep")
+    crate::sweep::icp::sweep(args).await
 }

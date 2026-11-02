@@ -209,6 +209,17 @@ pub enum BooksError {
     Overflow,
     #[error("{amount} is above the {surplus} surplus the last check found")]
     AboveSurplus { amount: TokenAmount, surplus: i128 },
+    #[error("sweep {given} is out of order: the next sweep is {expected}")]
+    SweepOutOfOrder { expected: u64, given: u64 },
+    #[error("a sweep's parts do not add up to what its asset takes them from")]
+    SweepParts,
+    #[error("a sweep takes {wanted} off a fee line that can spare {available}")]
+    AboveFees {
+        wanted: TokenAmount,
+        available: TokenAmount,
+    },
+    #[error("no sweep {0}, or it was taken back already")]
+    NoSweep(u64),
 }
 
 impl Books {

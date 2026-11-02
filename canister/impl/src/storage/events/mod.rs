@@ -5,7 +5,7 @@ use crate::storage::memory::{
     ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
     pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
     pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
-    pool_withdrawal_nonces_memory, signed_memory, unsigned_nonces_memory, Memory,
+    pool_withdrawal_nonces_memory, signed_memory, sweeps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
 use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog};
@@ -108,6 +108,11 @@ thread_local! {
     // transaction, once it succeeded at depth, which its finish names with no fee step.
     static POOL_OWN_SOURCES: RefCell<StableBTreeMap<types::TxHash, types::pool::OwnSource, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_own_sources_memory()));
+
+    // Every controller's sweep by id, never removed: what each took off which lines, and
+    // whether it was taken back. Part of the fold: only `Swept` and `SweepReverted` write it.
+    static SWEEPS: RefCell<StableBTreeMap<u64, types::sweep::SweepEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(sweeps_memory()));
 
     // The Eco rescues by order id (P11e): the line that signed each.
     static ECO_RESCUES: RefCell<StableBTreeMap<PoolRef, u64, Memory>> =
@@ -307,6 +312,22 @@ impl Store for StableStore {
         POOL_OWN_SOURCES.with(|sources| sources.borrow().iter().collect())
     }
 
+    fn sweep(&self, id: u64) -> Option<types::sweep::SweepEntry> {
+        SWEEPS.with(|sweeps| sweeps.borrow().get(&id))
+    }
+
+    fn put_sweep(&mut self, id: u64, entry: types::sweep::SweepEntry) {
+        SWEEPS.with(|sweeps| sweeps.borrow_mut().insert(id, entry));
+    }
+
+    fn sweeps(&self) -> Vec<(u64, types::sweep::SweepEntry)> {
+        SWEEPS.with(|sweeps| sweeps.borrow().iter().collect())
+    }
+
+    fn sweep_count(&self) -> u64 {
+        SWEEPS.with(|sweeps| sweeps.borrow().len())
+    }
+
     fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64> {
         ECO_RESCUES.with(|rescues| rescues.borrow().get(order_id))
     }
@@ -412,6 +433,7 @@ pub fn init() {
     POOL_MOVES.with(|_| ());
     POOL_OWN_SOURCES.with(|_| ());
     ECO_RESCUES.with(|_| ());
+    SWEEPS.with(|_| ());
 }
 
 /// The one and only path that writes an event, at the canister's clock.

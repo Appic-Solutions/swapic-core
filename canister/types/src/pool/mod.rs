@@ -2210,6 +2210,21 @@ pub enum PoolStep {
         #[n(2)]
         block: u64,
     },
+    /// A controller's EVM sweep `id` was signed: its transaction's bytes. Nothing of the
+    /// pool moves; the sweep's own line took its amount off the books.
+    #[n(80)]
+    SweepSigned {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        tx_hash: TxHash,
+        #[cbor(n(4), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 impl PoolStep {
@@ -2256,6 +2271,7 @@ impl PoolStep {
             PoolStep::PayoutUndone { .. } => "PayoutUndone",
             PoolStep::IcpRoutesSet { .. } => "IcpRoutesSet",
             PoolStep::ApproveSigned { .. } => "ApproveSigned",
+            PoolStep::SweepSigned { .. } => "SweepSigned",
             PoolStep::PayoutPulled { .. } => "PayoutPulled",
             PoolStep::PayoutStopped { .. } => "PayoutStopped",
             PoolStep::PayoutRelisted { .. } => "PayoutRelisted",
@@ -2315,6 +2331,13 @@ impl PoolStep {
                 tx_hash,
                 raw_tx,
             }
+            | PoolStep::SweepSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+                ..
+            }
             | PoolStep::OrphanRefundSigned {
                 chain_id,
                 nonce,
@@ -2346,6 +2369,7 @@ impl PoolStep {
         match self {
             PoolStep::PayoutSigned { id, .. } => Some(crate::events::TxPurpose::PoolPayout(*id)),
             PoolStep::ApproveSigned { .. } => Some(crate::events::TxPurpose::PoolApprove),
+            PoolStep::SweepSigned { id, .. } => Some(crate::events::TxPurpose::Sweep(*id)),
             PoolStep::OrphanRefundSigned { key, .. } => {
                 Some(crate::events::TxPurpose::PoolTransfer(orphan_key(key)))
             }

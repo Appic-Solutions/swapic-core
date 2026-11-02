@@ -1221,6 +1221,18 @@ fn timer_state_samples() -> Vec<Sample> {
                 failed_at: Some(at(13)),
             },
             receipts_due: BTreeMap::from([(ChainId::ETHEREUM, at(14))]),
+            icp_sweeps: BTreeMap::from([(
+                3,
+                crate::sweep::IcpSweepAsk {
+                    asset: crate::sweep::SweepAsset::CkUsdcFees,
+                    to: crate::pool::IcpAccount {
+                        owner: candid::Principal::from_slice(&[0xf3; 10]),
+                        subaccount: None,
+                    },
+                    amount: TokenAmount::from(1_515_u32),
+                    created_at: at(16),
+                },
+            )]),
         },
     )]
 }

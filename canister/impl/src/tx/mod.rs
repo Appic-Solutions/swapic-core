@@ -384,6 +384,8 @@ enum Record {
     EcoRescue([u8; 32]),
     /// A move's, which moves it to signed.
     PoolMove(u64),
+    /// A controller's EVM sweep's.
+    Sweep(u64),
 }
 
 /// The record a signed transaction of `purpose` is written in, decided before its nonce is
@@ -418,7 +420,7 @@ fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxErr
         (TxPurpose::EcoRescue(order_id), _) => Ok(Record::EcoRescue(order_id)),
         (TxPurpose::PoolMove(id), _) => Ok(Record::PoolMove(id)),
         (TxPurpose::Cancel(_), _) => Err(TxError::NoRecord("a cancel")),
-        (TxPurpose::Sweep(_), _) => todo!("C5: a sweep's signed record"),
+        (TxPurpose::Sweep(id), _) => Ok(Record::Sweep(id)),
     }
 }
 
@@ -486,6 +488,13 @@ impl Record {
                 raw_tx,
             }),
             Record::PoolMove(id) => pool(PoolStep::MoveSigned {
+                id,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::Sweep(id) => pool(PoolStep::SweepSigned {
                 id,
                 chain_id,
                 nonce,
@@ -689,9 +698,11 @@ async fn cancel(key: NonceKey) {
     };
     // the fold may have moved while the address was being read: a signed record that arrived
     // late spends this number, and cancelling it would put a second transaction on it
-    if read_state(|state| state.store().unsigned_nonce(&key).is_none()) {
+    let Some(purpose) =
+        read_state(|state| state.store().unsigned_nonce(&key)).map(|unsigned| unsigned.purpose)
+    else {
         return;
-    }
+    };
     let tx = Eip1559Tx {
         chain_id,
         nonce,
@@ -717,6 +728,10 @@ async fn cancel(key: NonceKey) {
     .is_err()
     {
         return;
+    }
+    // a sweep whose bytes were never sent moved nothing: its amount goes back on its books
+    if let TxPurpose::Sweep(id) = purpose {
+        crate::sweep::evm::taken_back(id, "its nonce was cancelled", now);
     }
     outbox::put(OutboxEntry {
         purpose: TxPurpose::Cancel(chain_id),
@@ -1210,6 +1225,14 @@ async fn decide(
                 )),
                 _ => None,
             };
+            // a sweep that reverted moved nothing: its amount goes back on its books
+            if let TxPurpose::Sweep(id) = entry.purpose {
+                if !success {
+                    crate::sweep::evm::taken_back(id, "its transaction reverted", now);
+                }
+                settle(entry, tx_hash, block, success, latest, credit, now);
+                return 1;
+            }
             if let Some((what, step)) = pool_close {
                 let appended = match crate::storage::pool::record_at(step, now) {
                     Ok(_) => true,

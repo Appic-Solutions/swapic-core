@@ -16,6 +16,7 @@ pub mod rescue;
 pub mod rpc;
 pub mod state;
 pub mod storage;
+pub mod sweep;
 pub mod task_manager;
 #[cfg(test)]
 mod test_util;

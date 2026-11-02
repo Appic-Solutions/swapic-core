@@ -105,9 +105,8 @@ impl<S: Store> State<S> {
             EventType::TxFinal {
                 chain_id, nonce, ..
             } => self.ensure_allocated_nonce(*chain_id, *nonce),
-            EventType::Swept { .. } | EventType::SweepReverted { .. } => {
-                todo!("C5: a sweep's rules")
-            }
+            EventType::Swept { sweep } => Ok(crate::sweep::admits(self, sweep)?),
+            EventType::SweepReverted { id, .. } => Ok(crate::sweep::admits_revert(self, *id)?),
         }
     }
 
@@ -168,7 +167,16 @@ impl<S: Store> State<S> {
                 }
             }
             TxPurpose::PoolApprove => {}
-            TxPurpose::Sweep(_) => todo!("C5: a sweep's transaction rules"),
+            // an EVM sweep's one transaction: the sweep made on that chain and not taken back
+            TxPurpose::Sweep(id) => {
+                let sendable = self
+                    .store()
+                    .sweep(*id)
+                    .is_some_and(|entry| !entry.reverted && entry.sweep.chain().is_some());
+                if !sendable {
+                    return Err(types::books::BooksError::NoSweep(*id).into());
+                }
+            }
             // one rescue per order
             TxPurpose::EcoRescue(order_id) => {
                 if self
@@ -341,9 +349,8 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         | EventType::TxReplaced { .. } => {}
         // a final transaction's own record is the outbox's; the line is the log's
         EventType::TxFinal { .. } => {}
-        EventType::Swept { .. } | EventType::SweepReverted { .. } => {
-            todo!("C5: a sweep's books")
-        }
+        EventType::Swept { sweep } => state.record_sweep(sweep),
+        EventType::SweepReverted { id, .. } => state.record_sweep_reverted(*id),
     }
 }
 
