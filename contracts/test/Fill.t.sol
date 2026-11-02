@@ -279,6 +279,26 @@ contract FillTest is RunnerBase {
         usdc.transfer(address(this), 100e6);
     }
 
+    /// The watcher's own path when no swap is found for a CCTP arrival: a recipe whose step
+    /// targets the arriving USDC itself. The Runner refuses that step, and the fill pays
+    /// all the USDC to the recipient at once.
+    function test_a_recipe_on_the_arriving_usdc_pays_all_usdc() public {
+        Recipe memory r = Recipe(address(usdc), "", address(0));
+        _approve(100e6);
+        vm.expectEmit(address(runner));
+        emit IRunner.Refunded(REF, user, address(usdc), 100e6);
+        _doFill(100e6, _env(Action.Swap, address(weth), 5e16), r);
+        _assertRefundedAll(100e6);
+
+        Envelope.Data memory e = abi.decode(_env(Action.Swap, address(weth), 5e16), (Envelope.Data));
+        usdc.transfer(address(runner), 100e6);
+        vm.prank(address(runner));
+        vm.expectRevert(IRunner.BadStep.selector);
+        runner.swapAll(address(usdc), 100e6, 0, e, r);
+        vm.prank(address(runner));
+        usdc.transfer(address(this), 100e6);
+    }
+
     function test_recipe_refuses_forbidden_calls() public {
         weth.transfer(victim, 1000e18);
         vm.prank(victim);
