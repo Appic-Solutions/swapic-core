@@ -266,22 +266,6 @@ fn samples() -> Vec<Sample> {
                 .unwrap(),
         ),
         sample(
-            "in-flight marker",
-            crate::InFlight {
-                kind: crate::InFlightKind::Pull,
-                since: Timestamp::from_nanos(1_700_000_006_000_000_000),
-            },
-        ),
-        sample(
-            "attestation",
-            crate::Attestation::new(
-                vec![0x61; 40],
-                vec![0x62; 65],
-                Timestamp::from_nanos(1_700_000_007_000_000_000),
-            )
-            .unwrap(),
-        ),
-        sample(
             "swap with its latest leg known",
             Swap {
                 quote_bytes: vec![0xca, 0xfe],
