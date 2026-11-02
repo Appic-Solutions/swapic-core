@@ -255,6 +255,14 @@ impl Ledgers for Live {
         token_in: Principal,
         token_out: Principal,
     ) -> Result<Option<bool>, CallError> {
+        // the tokens read when the routes were set; the pool itself only for one not read then
+        let stored = pool_store::ledger()
+            .settings
+            .and_then(|settings| settings.routes)
+            .and_then(|routes| routes.tokens_of(pool));
+        if let Some(tokens) = stored {
+            return Ok(tokens.direction(token_in, token_out));
+        }
         let metadata = ic::pool_metadata(pool).await?;
         let (token_in, token_out) = (token_in.to_text(), token_out.to_text());
         Ok(

@@ -2522,6 +2522,11 @@ fn route_samples() -> Vec<Sample> {
             ledger: principal(0x33),
             fee: TokenAmount::from(0x35_u8),
         }],
+        pool_tokens: vec![crate::pool::PoolTokens {
+            pool: candid::Principal::from_slice(&[0x31; 10]),
+            token0: candid::Principal::from_slice(&[0x32; 10]),
+            token1: candid::Principal::from_slice(&[0x33; 10]),
+        }],
     };
     let ledger = PoolLedger {
         settings: Some(PoolSettings {

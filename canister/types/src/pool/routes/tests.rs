@@ -41,6 +41,7 @@ fn routes() -> IcpRoutes {
                 fee: TokenAmount::from(u32::from(byte)),
             })
             .collect(),
+        pool_tokens: Vec::new(),
     }
 }
 
@@ -112,4 +113,38 @@ fn routes_that_do_not_hold_together_are_refused() {
         missing.fees_complete(ckusdc()),
         Err(RoutesError::MissingFee(principal(0x20)))
     );
+}
+
+/// A pool's stored tokens answer which way a swap goes, and nothing for a pair it does not
+/// trade; the routes list each pool they trade in once.
+#[test]
+fn a_pools_stored_tokens_answer_the_swaps_direction() {
+    let p = |byte: u8| Principal::from_slice(&[byte; 10]);
+    let tokens = PoolTokens {
+        pool: p(1),
+        token0: p(2),
+        token1: p(3),
+    };
+    assert_eq!(tokens.direction(p(2), p(3)), Some(true));
+    assert_eq!(tokens.direction(p(3), p(2)), Some(false));
+    assert_eq!(tokens.direction(p(2), p(4)), None);
+    let routes = IcpRoutes {
+        icp_ckusdc_pool: Some(super::PrincipalBytes(p(9))),
+        icp_ledger: None,
+        routes: vec![
+            IcpRoute {
+                ledger: p(5),
+                via: IcpRouteVia::Direct(p(6)),
+            },
+            IcpRoute {
+                ledger: p(7),
+                via: IcpRouteVia::Icp(p(9)),
+            },
+        ],
+        ledger_fees: Vec::new(),
+        pool_tokens: vec![tokens],
+    };
+    assert_eq!(routes.pools(), vec![p(9), p(6)]);
+    assert_eq!(routes.tokens_of(p(1)), Some(tokens));
+    assert_eq!(routes.tokens_of(p(6)), None);
 }

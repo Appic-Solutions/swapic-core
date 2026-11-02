@@ -49,6 +49,35 @@ pub struct IcpRoutes {
     pub routes: Vec<IcpRoute>,
     #[n(3)]
     pub ledger_fees: Vec<LedgerFee>,
+    /// Each route pool's two tokens, in its own order, read once when the routes are set:
+    /// which way a swap goes is answered from here, never asked of the pool per swap.
+    #[n(4)]
+    pub pool_tokens: Vec<PoolTokens>,
+}
+
+/// An ICPSwap pool's tokens, in its own order (`token0` first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PoolTokens {
+    #[cbor(n(0), with = "principal_cbor")]
+    pub pool: Principal,
+    #[cbor(n(1), with = "principal_cbor")]
+    pub token0: Principal,
+    #[cbor(n(2), with = "principal_cbor")]
+    pub token1: Principal,
+}
+
+impl PoolTokens {
+    /// Whether a swap of `token_in` for `token_out` in this pool is zero for one; None for a
+    /// pair the pool does not trade.
+    pub fn direction(&self, token_in: Principal, token_out: Principal) -> Option<bool> {
+        if (token_in, token_out) == (self.token0, self.token1) {
+            Some(true)
+        } else if (token_in, token_out) == (self.token1, self.token0) {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 /// The ICPSwap legs of a path, by the pools they trade in.
@@ -98,6 +127,26 @@ pub enum RoutesError {
 }
 
 impl IcpRoutes {
+    /// Every pool a route trades in: the ICP/ckUSDC pool and each route's own, once each.
+    pub fn pools(&self) -> Vec<Principal> {
+        let mut pools: Vec<Principal> = self.icp_pool().into_iter().collect();
+        for route in &self.routes {
+            let (IcpRouteVia::Direct(pool) | IcpRouteVia::Icp(pool)) = route.via;
+            if !pools.contains(&pool) {
+                pools.push(pool);
+            }
+        }
+        pools
+    }
+
+    /// The tokens of `pool`, as read when the routes were set.
+    pub fn tokens_of(&self, pool: Principal) -> Option<PoolTokens> {
+        self.pool_tokens
+            .iter()
+            .find(|tokens| tokens.pool == pool)
+            .copied()
+    }
+
     pub fn icp_pool(&self) -> Option<Principal> {
         self.icp_ckusdc_pool.map(|pool| pool.0)
     }

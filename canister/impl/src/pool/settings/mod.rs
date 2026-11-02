@@ -74,6 +74,7 @@ pub fn routes_checked(
         icp_ledger: None,
         routes: routes.into_iter().map(Into::into).collect(),
         ledger_fees: Vec::new(),
+        pool_tokens: Vec::new(),
     })
 }
 
@@ -111,6 +112,24 @@ pub async fn routes_with_reads(
             })?;
         routes.icp_ledger = Some(types::pool::PrincipalBytes(icp));
     }
+    // every route pool's tokens, read once here and never per swap
+    let mut pool_tokens = Vec::new();
+    for pool in routes.pools() {
+        let metadata = ic::pool_metadata(pool)
+            .await
+            .map_err(|error| PoolError::Ledger(format!("{pool}'s metadata: {error}")))?;
+        let token = |text: &str| {
+            candid::Principal::from_text(text).map_err(|_| {
+                PoolError::BadSettings(format!("{pool} names a token that is no principal"))
+            })
+        };
+        pool_tokens.push(types::pool::PoolTokens {
+            pool,
+            token0: token(&metadata.token0.address)?,
+            token1: token(&metadata.token1.address)?,
+        });
+    }
+    routes.pool_tokens = pool_tokens;
     let mut fees = Vec::new();
     for ledger in routes.ledgers() {
         if ledger == ckusdc {

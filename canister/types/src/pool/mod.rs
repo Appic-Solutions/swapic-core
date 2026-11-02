@@ -20,7 +20,7 @@ pub mod rebalance;
 pub mod routes;
 pub mod withdrawal;
 
-pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, RoutePath, RoutesError};
+pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, PoolTokens, RoutePath, RoutesError};
 
 pub use payout::{
     evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse,

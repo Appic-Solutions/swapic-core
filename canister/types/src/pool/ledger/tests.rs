@@ -1243,6 +1243,7 @@ fn the_icp_fees_floor_is_the_paths_own_ckusdc_fees() {
                 },
             ],
             ledger_fees: Vec::new(),
+            pool_tokens: Vec::new(),
         }),
         ..settings.clone()
     };

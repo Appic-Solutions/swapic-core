@@ -1824,6 +1824,7 @@ fn arrived_via_icp(min_out: u128) -> PoolRef {
                         fee: TokenAmount::from(TOKEN_FEE),
                     },
                 ],
+                pool_tokens: Vec::new(),
             },
         },
         at(1),
