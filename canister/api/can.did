@@ -1299,7 +1299,8 @@ service : (InitArg) -> {
   // at a gas price the canister reads itself:
   // 
   // - `Native`: the chain's gas coin, refused while any transaction of the canister on that
-  // chain is still open (it may need the gas for a fee bump).
+  // chain is still open (it may need the gas for a fee bump), and past the balance less the
+  // sweep's own gas (the chain's `sweep` budget, or the worst L2 cost if that is more).
   // - `FeeUsdc`: `USDC.transfer` of booked fee income only: at most the chain books' fee
   // income, plus the pool's Base fee line on the pool chain. The amount leaves the books
   // as the transaction is signed and comes back if it reverts or is cancelled.
