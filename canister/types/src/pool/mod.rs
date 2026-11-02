@@ -415,6 +415,38 @@ pub struct PoolSettings {
     /// [`DEFAULT_LARGE_DEPOSIT_CONFIRMATIONS`].
     #[n(13)]
     pub large_deposit_confirmations: Option<u64>,
+    /// The least move fee a stake or a withdrawal carries, per direction of the move it
+    /// pays for; zero until a controller sets it.
+    #[n(14)]
+    pub least_move_fee: MoveFees,
+}
+
+/// One amount per direction of a rebalancing move, micro USDC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct MoveFees {
+    /// What one Base to ICP move costs: an EVM stake's and an ICP withdrawal's fee.
+    #[n(0)]
+    pub base_to_icp: TokenAmount,
+    /// What one ICP to Base move costs: an ICP stake's and an EVM withdrawal's fee.
+    #[n(1)]
+    pub icp_to_base: TokenAmount,
+}
+
+impl MoveFees {
+    /// Whether `move_fee` covers the least for the move in `direction`; the refusal names
+    /// the least.
+    pub fn admits(&self, direction: MoveDirection, move_fee: TokenAmount) -> Result<(), String> {
+        let least = match direction {
+            MoveDirection::BaseToIcp => self.base_to_icp,
+            MoveDirection::IcpToBase => self.icp_to_base,
+        };
+        if move_fee < least {
+            return Err(format!(
+                "the move fee must be at least {least}, not {move_fee}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A deposit above this (1,000 USDC) waits more blocks before it is credited (a choice made
@@ -445,6 +477,7 @@ impl Default for PoolSettings {
             routes: None,
             large_deposit_usdc: None,
             large_deposit_confirmations: None,
+            least_move_fee: MoveFees::default(),
         }
     }
 }
@@ -608,7 +641,7 @@ impl PoolSettings {
 pub struct Registration {
     #[n(0)]
     pub kind: DepositKind,
-    /// The least micro USDC an arrival under this ref must bring, as the memo commits it.
+    /// The micro USDC that arrived for this deposit, what it is credited and judged on.
     #[n(1)]
     pub min_usdc: TokenAmount,
     /// A swap's premium; zero for a stake.
@@ -633,6 +666,10 @@ pub struct Registration {
     /// stake.
     #[n(9)]
     pub icp_fees: Option<TokenAmount>,
+    /// The memo's `min_usdc`: the least an arrival under this ref must bring, committed by
+    /// the ref.
+    #[n(10)]
+    pub least_usdc: TokenAmount,
 }
 
 impl Registration {
@@ -640,7 +677,7 @@ impl Registration {
     pub fn terms(&self) -> DepositTerms {
         DepositTerms {
             kind: self.kind,
-            min_usdc: self.min_usdc,
+            min_usdc: self.least_usdc,
             premium: self.premium,
             icp_fees: self.icp_fees(),
             move_fee: self.move_fee,
@@ -729,10 +766,11 @@ impl DepositTerms {
         self.memo().ok().map(|bytes| memo::memo_ref(&bytes))
     }
 
-    /// The registration these terms make of an arrival on `rail` from `src_chain`, its payer
-    /// as the proof shows it (none: the zero address), at `now`.
+    /// The registration these terms make of an arrival of `amount` on `rail` from
+    /// `src_chain`, its payer as the proof shows it (none: the zero address), at `now`.
     pub fn registration(
         &self,
+        amount: TokenAmount,
         src_chain: ChainId,
         src_payer: Option<EvmAddress>,
         rail: PoolRail,
@@ -740,7 +778,7 @@ impl DepositTerms {
     ) -> Registration {
         Registration {
             kind: self.kind,
-            min_usdc: self.min_usdc,
+            min_usdc: amount,
             premium: self.premium,
             move_fee: self.move_fee,
             src_chain,
@@ -749,6 +787,7 @@ impl DepositTerms {
             expires_at: now,
             salt: self.salt,
             icp_fees: self.kind.is_swap().then_some(self.icp_fees),
+            least_usdc: self.min_usdc,
         }
     }
 }

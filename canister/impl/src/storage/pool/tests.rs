@@ -71,6 +71,7 @@ pub(crate) fn swap_terms(
         expires_at,
         salt: [byte; 32],
         icp_fees: Some(TokenAmount::from(FEE)),
+        least_usdc: TokenAmount::ZERO,
     }
 }
 
@@ -296,6 +297,7 @@ pub(crate) fn base_stake(staker: types::EvmAddress, amount: TokenAmount, salt: u
         expires_at: at(1_000),
         salt: [salt; 32],
         icp_fees: None,
+        least_usdc: TokenAmount::ZERO,
     };
     let r#ref = register(terms);
     record_at(

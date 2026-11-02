@@ -198,10 +198,20 @@ fn an_expired_deadline_or_terms_below_the_floors_are_refused() {
             planned(&late, &signed(&late, &key())).unwrap_err(),
             PoolError::Expired
         );
-        // the move fee has no floor on the canister
+        // no least move fee until a controller sets one; then an ICP to Base move's least
         let mut free = request(500, 7);
         free.move_fee = TokenAmount::ZERO;
         assert!(planned(&free, &signed(&free, &key())).is_ok());
+        let mut settings = ledger().settings.unwrap();
+        settings.least_move_fee.icp_to_base = TokenAmount::from(1_400_000_u64);
+        record_at(PoolStep::SettingsSet { settings }, at(9)).unwrap();
+        assert!(matches!(
+            planned(&free, &signed(&free, &key())),
+            Err(PoolError::NotAllowed(why)) if why.contains("1400000")
+        ));
+        let mut settings = ledger().settings.unwrap();
+        settings.least_move_fee.icp_to_base = TokenAmount::ZERO;
+        record_at(PoolStep::SettingsSet { settings }, at(9)).unwrap();
         let mut cheap = request(500, 7);
         cheap.network_fee = TokenAmount::from(49_999_u32);
         assert!(matches!(

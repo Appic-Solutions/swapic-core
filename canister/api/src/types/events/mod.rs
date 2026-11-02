@@ -104,6 +104,11 @@ pub enum EventType {
         asset: SweepAsset,
         to: SweepTarget,
         amount: Nat,
+        /// Of `amount`, what came off the pool ledger's fee line: `fees_base` for USDC on
+        /// the pool chain, `fees_icp` for ckUSDC. Zero for native gas, ckETH and ICP.
+        from_pool_fees: Nat,
+        /// Of `amount`, what came off the chain books' `fee_income`. Zero but for USDC.
+        from_fee_income: Nat,
     },
     /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
     /// amount is back on the books it came from.
@@ -318,6 +323,8 @@ impl From<types::EventType> for EventType {
                 asset: sweep.asset.into(),
                 to: sweep.to.into(),
                 amount: sweep.amount.into(),
+                from_pool_fees: sweep.from_pool_fees.into(),
+                from_fee_income: sweep.from_fee_income.into(),
             },
             Domain::SweepReverted { id, why } => Self::SweepReverted { id, why },
             Domain::FundsReceived { .. }
@@ -459,12 +466,18 @@ impl TryFrom<EventType> for types::EventType {
                 asset,
                 to,
                 amount,
+                from_pool_fees,
+                from_fee_income,
             } => Self::Swept {
                 sweep: types::sweep::Sweep {
                     id,
                     asset: asset.into(),
                     to: sweep_to(to)?,
                     amount: TokenAmount::try_from(amount).map_err(|_| too_large("amount"))?,
+                    from_pool_fees: TokenAmount::try_from(from_pool_fees)
+                        .map_err(|_| too_large("from_pool_fees"))?,
+                    from_fee_income: TokenAmount::try_from(from_fee_income)
+                        .map_err(|_| too_large("from_fee_income"))?,
                 },
             },
             EventType::SweepReverted { id, why } => Self::SweepReverted { id, why },

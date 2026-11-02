@@ -63,4 +63,11 @@ pub struct Sweep {
     /// In the asset's smallest unit.
     #[n(3)]
     pub amount: TokenAmount,
+    /// Of `amount`, what came off the pool ledger's fee line: `fees_base` for USDC on the
+    /// pool chain, `fees_icp` for ckUSDC. Zero for native gas, ckETH and ICP.
+    #[n(4)]
+    pub from_pool_fees: TokenAmount,
+    /// Of `amount`, what came off the chain books' `fee_income`. Zero but for USDC.
+    #[n(5)]
+    pub from_fee_income: TokenAmount,
 }

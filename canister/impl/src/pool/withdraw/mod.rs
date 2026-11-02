@@ -20,6 +20,7 @@ use crate::state::{State, Store};
 use candid::Nat;
 use settlement_api::types::pool::{amount, evm_address, u128_of, PoolError};
 use types::pool::payout::{EvmWithdrawal, PayoutKind, Undo};
+use types::pool::rebalance::MoveDirection;
 use types::pool::withdrawal::WithdrawalRequest;
 use types::pool::{NonceUse, PoolAccount, PoolStep, Shares};
 use types::{Address, ChainId, EvmAddress, Timestamp};
@@ -120,6 +121,14 @@ pub fn plan<S: Store>(
         .lines()
         .settings
         .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
+    // an EVM withdrawal pays for one ICP to Base move
+    ledger
+        .settings
+        .as_ref()
+        .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?
+        .least_move_fee
+        .admits(MoveDirection::IcpToBase, request.move_fee)
+        .map_err(PoolError::NotAllowed)?;
     if request.network_fee < payouts.min_network_fee {
         return Err(PoolError::NotAllowed(format!(
             "the network fee must be at least {}",

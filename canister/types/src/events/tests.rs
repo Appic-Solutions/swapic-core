@@ -202,6 +202,8 @@ pub(crate) fn samples() -> Vec<EventType> {
                     to: EvmAddress::new([39; 20]),
                 },
                 amount: TokenAmount::from(40_000_000_u32),
+                from_pool_fees: TokenAmount::ZERO,
+                from_fee_income: TokenAmount::from(40_000_000_u32),
             },
         },
         EventType::SweepReverted {

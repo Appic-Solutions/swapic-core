@@ -228,6 +228,12 @@ pub struct PoolSettings {
     pub large_deposit_usdc: Option<Nat>,
     /// The pool chain's blocks a large deposit waits. Absent: 6.
     pub large_deposit_confirmations: Option<u64>,
+    /// Micro USDC, the least move fee of an EVM stake and of an ICP withdrawal (each pays
+    /// for one Base to ICP move). Absent: 0.
+    pub least_move_fee_base_to_icp: Option<Nat>,
+    /// Micro USDC, the least move fee of an ICP stake and of an EVM withdrawal (each pays
+    /// for one ICP to Base move). Absent: 0.
+    pub least_move_fee_icp_to_base: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -553,6 +559,20 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
                 .map(|usdc| amount("large_deposit_usdc", usdc))
                 .transpose()?,
             large_deposit_confirmations: settings.large_deposit_confirmations,
+            least_move_fee: domain::MoveFees {
+                base_to_icp: settings
+                    .least_move_fee_base_to_icp
+                    .as_ref()
+                    .map(|fee| amount("least_move_fee_base_to_icp", fee))
+                    .transpose()?
+                    .unwrap_or(TokenAmount::ZERO),
+                icp_to_base: settings
+                    .least_move_fee_icp_to_base
+                    .as_ref()
+                    .map(|fee| amount("least_move_fee_icp_to_base", fee))
+                    .transpose()?
+                    .unwrap_or(TokenAmount::ZERO),
+            },
             // no registration (P11d): kept in the record at their defaults, read by nothing
             ..domain::PoolSettings::default()
         })
@@ -578,6 +598,8 @@ impl From<&domain::PoolSettings> for PoolSettings {
             pool_open_for_swaps: settings.open_for_swaps,
             large_deposit_usdc: Some(nat(settings.large_deposit().0)),
             large_deposit_confirmations: Some(settings.large_deposit().1.get()),
+            least_move_fee_base_to_icp: Some(nat(settings.least_move_fee.base_to_icp)),
+            least_move_fee_icp_to_base: Some(nat(settings.least_move_fee.icp_to_base)),
         }
     }
 }

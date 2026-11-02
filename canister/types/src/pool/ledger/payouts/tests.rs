@@ -56,6 +56,7 @@ fn with_base(mut pool: Pool, base: TokenAmount, salt: u8, log: u64) -> Pool {
         expires_at: Timestamp::from_nanos(1_000),
         salt: [salt; 32],
         icp_fees: None,
+        least_usdc: TokenAmount::ZERO,
     };
     let r#ref = register(&mut pool, terms);
     pool.step(PoolStep::Arrived {
@@ -626,12 +627,12 @@ impl Pool {
     }
 }
 
-/// A stake's move fee has no floor on the canister: the quoter prices it at live gas, and
-/// any fee below the stake's amount is taken.
+/// A stake's move fee is held to the least a controller set for a Base to ICP move, and to
+/// nothing while it is zero, the default.
 #[test]
-fn a_stakes_move_fee_has_no_floor() {
+fn a_stakes_move_fee_meets_the_least_the_controller_set() {
     use crate::pool::check_arrival;
-    let pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
+    let mut pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
     let terms = |move_fee: u64| Registration {
         kind: DepositKind::Stake {
             owner: PoolAccount::Evm(staker()),
@@ -645,9 +646,17 @@ fn a_stakes_move_fee_has_no_floor() {
         expires_at: Timestamp::from_nanos(1_000),
         salt: [0x4b; 32],
         icp_fees: None,
+        least_usdc: TokenAmount::ZERO,
     };
     assert_eq!(check_arrival(&pool.ledger, &terms(0)), Ok(()));
-    assert_eq!(check_arrival(&pool.ledger, &terms(19_999)), Ok(()));
+    let settings = pool.ledger.settings.as_mut().unwrap();
+    settings.least_move_fee.base_to_icp = TokenAmount::from(1_500_000_u64);
+    settings.least_move_fee.icp_to_base = TokenAmount::from(9_000_000_u64);
+    assert!(matches!(
+        check_arrival(&pool.ledger, &terms(1_499_999)),
+        Err(crate::pool::RegisterRefusal::NotAllowed(why)) if why.contains("1500000")
+    ));
+    assert_eq!(check_arrival(&pool.ledger, &terms(1_500_000)), Ok(()));
 }
 
 /// The review's double release (2026-10-23, `PayoutPaid`): an ICP swap whose ckUSDC went

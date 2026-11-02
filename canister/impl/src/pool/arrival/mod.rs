@@ -731,7 +731,9 @@ fn decide<S: Store>(
         PoolRail::Eco => given.src_chain,
         PoolRail::Cctp | PoolRail::SameChain => found.credit.chain,
     };
-    let registration = given.terms.registration(src_chain, payer, found.rail, now);
+    let registration = given
+        .terms
+        .registration(found.amount, src_chain, payer, found.rail, now);
     // one deposit per ref; a registration left waiting under it (an arrival line refused
     // after it) is the one credited
     let waiting = match state.store().pool_deposit(&given.r#ref) {
@@ -744,6 +746,13 @@ fn decide<S: Store>(
         }
         None => None,
     };
+    // the memo's least: a copy of the memo paid with less is never this deposit
+    if found.amount < given.terms.min_usdc {
+        return Err(held(&format!(
+            "{} arrived, below the memo's least of {}",
+            found.amount, given.terms.min_usdc
+        )));
+    }
     if let Some(reason) = &judge.closed {
         return Err(held(&format!("the pool is closed: {reason}")));
     }
@@ -1415,6 +1424,17 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
             .map_err(PoolError::from)?;
         Some((ChainId::new(arrival.src_chain), TxHash::new(tx)))
     };
+    // no deposit's memo is longer, and nothing is read for one that is
+    if arrival
+        .memo
+        .as_ref()
+        .is_some_and(|memo| memo.len() > types::pool::memo::MAX_MEMO_BYTES)
+    {
+        return Err(PoolError::BadArrival(format!(
+            "a memo is at most {} bytes",
+            types::pool::memo::MAX_MEMO_BYTES
+        )));
+    }
     let Some(memo) = arrival.memo else {
         todo!("C5: the memo read from the order's OrderStarted")
     };

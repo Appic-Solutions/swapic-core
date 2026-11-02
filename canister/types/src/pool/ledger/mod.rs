@@ -24,6 +24,7 @@ use crate::chain::ChainId;
 use crate::hash::{OwnerKey, PoolOpId, PoolRef};
 use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
 use crate::pool::payout::{EvmPayout, NonceUse, PayoutLines, PayoutSettingsError};
+use crate::pool::rebalance::MoveDirection;
 use crate::pool::CreditKey;
 use candid::Principal;
 use minicbor::{Decode, Encode};
@@ -2124,6 +2125,11 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
             }
         }
         DepositKind::Stake { .. } => {
+            // an EVM stake pays for one Base to ICP move
+            settings
+                .least_move_fee
+                .admits(MoveDirection::BaseToIcp, terms.move_fee)
+                .map_err(RegisterRefusal::NotAllowed)?;
             let would_be = sat_add(ledger.tvl_measure(), terms.min_usdc);
             if would_be > settings.tvl_cap {
                 return Err(RegisterRefusal::AboveTvlCap {

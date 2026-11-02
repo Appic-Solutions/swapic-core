@@ -80,6 +80,7 @@ fn a_memos_terms_reach_the_deposit_view() {
     let registration = types::pool::DepositTerms::from_memo(&memo)
         .unwrap()
         .registration(
+            TokenAmount::from(1_250_000_u64),
             types::ChainId::ARBITRUM,
             None,
             types::pool::PoolRail::Cctp,
@@ -89,7 +90,8 @@ fn a_memos_terms_reach_the_deposit_view() {
     assert_eq!(registration.src_payer, EvmAddress::ZERO);
     let view = PoolDepositView::of(r#ref, types::pool::Registered::new(registration));
     assert_eq!(view.kind, PoolDepositKind::from(terms.kind));
-    assert_eq!(view.min_usdc, Nat::from(1_100_000_u64));
+    // the view's min_usdc is what arrived; the memo's least stays committed by the ref
+    assert_eq!(view.min_usdc, Nat::from(1_250_000_u64));
     assert_eq!(view.premium, Nat::from(10_000_u64));
     assert_eq!(view.move_fee, Nat::from(0_u8));
     assert_eq!(view.status, PoolDepositStatus::Registered);
@@ -110,8 +112,17 @@ fn settings_go_to_the_domain_and_back() {
         pool_open_for_swaps: true,
         large_deposit_usdc: Some(Nat::from(1_000_000_000_u64)),
         large_deposit_confirmations: Some(6),
+        least_move_fee_base_to_icp: Some(Nat::from(1_500_000_u64)),
+        least_move_fee_icp_to_base: Some(Nat::from(1_400_000_u64)),
     };
     let domain = types::pool::PoolSettings::try_from(wire.clone()).unwrap();
+    assert_eq!(
+        domain.least_move_fee,
+        types::pool::MoveFees {
+            base_to_icp: TokenAmount::from(1_500_000_u64),
+            icp_to_base: TokenAmount::from(1_400_000_u64),
+        }
+    );
     assert_eq!(domain.arrival_backup, Duration::from_secs(300));
     assert_eq!(domain.validate(), Ok(()));
     assert!(
@@ -126,6 +137,9 @@ fn settings_go_to_the_domain_and_back() {
         PoolSettings {
             icp_tokens: vec![],
             pool_open_for_swaps: false,
+            // no least move fee until a controller sets one
+            least_move_fee_base_to_icp: Some(Nat::from(0_u8)),
+            least_move_fee_icp_to_base: Some(Nat::from(0_u8)),
             ..wire
         }
     );

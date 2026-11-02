@@ -680,6 +680,7 @@ fn transfer_lost_samples() -> Vec<Sample> {
             expires_at: Timestamp::from_nanos(1_800_000_000_000_002_208),
             salt: [0xb6; 32],
             icp_fees: Some(TokenAmount::from(2_209_u32)),
+            least_usdc: TokenAmount::ZERO,
         },
         status: DepositStatus::Paying,
         arrived: None,
@@ -755,6 +756,7 @@ fn transfer_asked_samples() -> Vec<Sample> {
             expires_at: Timestamp::from_nanos(1_800_000_000_000_002_108),
             salt: [0xc6; 32],
             icp_fees: Some(TokenAmount::from(2_109_u32)),
+            least_usdc: TokenAmount::ZERO,
         },
         status: DepositStatus::Paying,
         arrived: None,
@@ -855,6 +857,7 @@ fn held_resolution_samples() -> Vec<Sample> {
             expires_at: Timestamp::from_nanos(1_800_000_000_000_001_904),
             salt: [0xd4; 32],
             icp_fees: Some(TokenAmount::from(1_905_u32)),
+            least_usdc: TokenAmount::ZERO,
         },
         status: DepositStatus::Refunded,
         arrived: Some(Arrival {
@@ -2052,6 +2055,7 @@ fn arrival_terms_samples() -> Vec<Sample> {
         expires_at: Timestamp::from_nanos(1_800_000_000_000_000_910),
         salt: [0x9b; 32],
         icp_fees: Some(TokenAmount::from(20_000_u64)),
+        least_usdc: TokenAmount::ZERO,
     });
     let steps = [
         (
@@ -2695,6 +2699,7 @@ fn pool_deposit_sample() -> crate::pool::Registered {
         expires_at: Timestamp::from_nanos(1_800_000_000_000_000_346),
         salt: [0x47; 32],
         icp_fees: None,
+        least_usdc: TokenAmount::ZERO,
     });
     deposit.status = DepositStatus::Paying;
     deposit.arrived = Some(Arrival {
@@ -2988,6 +2993,10 @@ fn pool_samples() -> Vec<Sample> {
             // `deposit_tier_samples` pins them
             large_deposit_usdc: None,
             large_deposit_confirmations: None,
+            least_move_fee: crate::pool::MoveFees {
+                base_to_icp: TokenAmount::from(1_500_000_u64),
+                icp_to_base: TokenAmount::from(1_400_000_u64),
+            },
         }),
         pockets: Pockets {
             base: Pocket {
@@ -3105,6 +3114,7 @@ fn pool_samples() -> Vec<Sample> {
             expires_at: Timestamp::from_nanos(1_800_000_000_000_000_169),
             salt: [0xaa; 32],
             icp_fees: None,
+            least_usdc: TokenAmount::ZERO,
         },
         status: DepositStatus::PayoutFailed("the pool did not answer".to_string()),
         arrived: Some(Arrival {

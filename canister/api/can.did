@@ -248,6 +248,11 @@ type EventType = variant {
     id : nat64;
     to : SweepTarget;
     asset : SweepAsset;
+    // Of `amount`, what came off the chain books' `fee_income`. Zero but for USDC.
+    from_fee_income : nat;
+    // Of `amount`, what came off the pool ledger's fee line: `fees_base` for USDC on
+    // the pool chain, `fees_icp` for ckUSDC. Zero for native gas, ckETH and ICP.
+    from_pool_fees : nat;
     amount : nat;
   };
   // A step of a flow: a gasless relay, or a CCTP finish.
@@ -716,6 +721,9 @@ type PoolSettings = record {
   // Micro USDC, launch 10_000_000_000 ($10,000).
   tvl_cap : nat;
   icp_tokens : vec IcpTokenEntry;
+  // Micro USDC, the least move fee of an EVM stake and of an ICP withdrawal (each pays
+  // for one Base to ICP move). Absent: 0.
+  least_move_fee_base_to_icp : opt nat;
   // The pool chain's blocks a large deposit waits. Absent: 6.
   large_deposit_confirmations : opt nat64;
   // Off until a controller opens the pool for swaps.
@@ -727,6 +735,9 @@ type PoolSettings = record {
   // `large_deposit_confirmations` blocks before it is credited. Absent: 1_000_000_000
   // ($1,000).
   large_deposit_usdc : opt nat;
+  // Micro USDC, the least move fee of an ICP stake and of an EVM withdrawal (each pays
+  // for one ICP to Base move). Absent: 0.
+  least_move_fee_icp_to_base : opt nat;
 };
 type PoolStateView = record {
   icp : PocketView;

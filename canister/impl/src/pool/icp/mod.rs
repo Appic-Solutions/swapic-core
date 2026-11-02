@@ -34,6 +34,7 @@ use settlement_api::types::pool::{
     nat, PoolError, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::books::assess;
+use types::pool::rebalance::MoveDirection;
 use types::pool::{
     op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, IcpReadFailure, PayoutAttempt,
     PayoutPath, PendingOp, PoolAccount, PoolStep, PrincipalBytes, Shares,
@@ -134,6 +135,16 @@ pub fn check_stake<S: Store>(
             "the amount must be above zero".to_string(),
         ));
     }
+    // an ICP stake pays for one ICP to Base move, out of its amount
+    settings
+        .least_move_fee
+        .admits(MoveDirection::IcpToBase, request.move_fee)
+        .map_err(PoolError::NotAllowed)?;
+    if request.move_fee >= request.amount {
+        return Err(PoolError::NotAllowed(
+            "the move fee must be below the amount".to_string(),
+        ));
+    }
     if crate::pool::principal_sanctioned(request.caller, &sanctioned)
         || screen_account(&request.owner, &sanctioned)
     {
@@ -200,6 +211,16 @@ pub fn plan_withdrawal<S: Store>(
         .settings
         .clone()
         .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
+    // an ICP withdrawal pays for one Base to ICP move, out of its amount
+    settings
+        .least_move_fee
+        .admits(MoveDirection::BaseToIcp, request.move_fee)
+        .map_err(PoolError::NotAllowed)?;
+    if request.move_fee >= request.usdc {
+        return Err(PoolError::NotAllowed(
+            "the move fee must be below usdc".to_string(),
+        ));
+    }
     let owned = state
         .store()
         .pool_share(&PoolAccount::Icp(request.owner()).key())

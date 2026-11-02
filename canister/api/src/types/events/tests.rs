@@ -90,6 +90,8 @@ fn samples() -> Vec<EventType> {
                 subaccount: Some(vec![5; 32]),
             }),
             amount: Nat::from(6_000_000_u32),
+            from_pool_fees: Nat::from(0_u8),
+            from_fee_income: Nat::from(0_u8),
         },
         EventType::SweepReverted {
             id: 4,
@@ -172,6 +174,8 @@ fn a_sweep_to_a_malformed_account_is_refused() {
             subaccount: Some(vec![1; 31]),
         }),
         amount: Nat::from(1_u8),
+        from_pool_fees: Nat::from(0_u8),
+        from_fee_income: Nat::from(0_u8),
     });
     assert_eq!(
         refused,
@@ -241,6 +245,8 @@ fn golden_page() -> Vec<Event> {
                     to: "0x3E5D1A9b7c2f4E6A8b0c1D3E5F7a9B0c2D4e6f80".into(),
                 },
                 amount: Nat::from(1_000_000_u32),
+                from_pool_fees: Nat::from(400_000_u32),
+                from_fee_income: Nat::from(600_000_u32),
             },
         },
         Event {

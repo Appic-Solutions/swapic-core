@@ -295,6 +295,29 @@ fn a_transfer_to_someone_else_or_of_another_token_is_no_arrival() {
     );
 }
 
+/// A copy of a memo paid with less than the memo's least is never that deposit: it is held,
+/// and the ref stays free for the deposit that brings enough.
+#[test]
+fn an_arrival_below_the_memos_least_is_held() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let mut given = given(1);
+        given.terms.min_usdc = TokenAmount::from(1_000_001_u32);
+        given.r#ref = given.terms.pool_ref().unwrap();
+        // the receipt's one transfer of 1 USDC carries that memo's ref
+        let raw = same_chain(given.r#ref);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let found = find(&parse(&raw), None, &base()).unwrap();
+        let recorded = record(&found, &judge(Some(&given)), now);
+        assert!(matches!(
+            recorded.mine.as_slice(),
+            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("below the memo's least")
+        ));
+        assert_eq!(deposit(&given.r#ref), None);
+    });
+}
+
 /// No registration (P11d): a report's terms credit only the transfer whose proof carries
 /// their ref, at once, on what arrived; the user pays every fee, so the pool holds the
 /// arrival less the premium.
@@ -318,12 +341,10 @@ fn the_terms_credit_the_transfer_that_carries_their_ref() {
         );
         let credited = deposit(&the_ref(1)).unwrap();
         assert_eq!(credited.status, DepositStatus::Arrived);
-        // the registration holds the memo's least; what arrived is the arrival's
-        assert_eq!(credited.terms.min_usdc, TokenAmount::from(100_000_u32));
-        assert_eq!(
-            credited.arrived.map(|arrival| arrival.amount),
-            Some(TokenAmount::from(1_000_000_u32))
-        );
+        // the registration holds what arrived, and the memo's least beside it
+        assert_eq!(credited.terms.min_usdc, TokenAmount::from(1_000_000_u32));
+        assert_eq!(credited.terms.least_usdc, TokenAmount::from(100_000_u32));
+        assert_eq!(credited.terms.pool_ref(), Some(the_ref(1)));
         assert_eq!(credited.terms.src_payer, payer());
         assert_eq!(credited.terms.rail, PoolRail::SameChain);
         assert_eq!(

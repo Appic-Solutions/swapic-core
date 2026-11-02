@@ -12,6 +12,8 @@ fn wire() -> WireSettings {
         pool_open_for_swaps: false,
         large_deposit_usdc: None,
         large_deposit_confirmations: None,
+        least_move_fee_base_to_icp: None,
+        least_move_fee_icp_to_base: None,
     }
 }
 

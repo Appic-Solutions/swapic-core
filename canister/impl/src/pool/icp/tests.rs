@@ -739,3 +739,51 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
         ))
     );
 }
+
+/// Records the pool's settings with the least move fees a controller set.
+fn with_least_move_fees(base_to_icp: u64, icp_to_base: u64) {
+    let mut settings = ledger().settings.unwrap();
+    settings.least_move_fee = types::pool::MoveFees {
+        base_to_icp: TokenAmount::from(base_to_icp),
+        icp_to_base: TokenAmount::from(icp_to_base),
+    };
+    record_at(PoolStep::SettingsSet { settings }, at(3)).unwrap();
+}
+
+/// An ICP stake pays at least the least fee of an ICP to Base move, and an ICP withdrawal
+/// at least that of a Base to ICP move, each below its amount; none while they are zero.
+#[test]
+fn the_icp_doors_hold_the_move_fee_to_its_least() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let stake = |move_fee: u64| {
+            let request = StakeRequest {
+                move_fee: TokenAmount::from(move_fee),
+                ..stake_request(usdc(100))
+            };
+            read_state(|state| check_stake(state, &request, nobody))
+        };
+        let withdraw = |move_fee: u64| {
+            let request = WithdrawRequest {
+                move_fee: TokenAmount::from(move_fee),
+                ..withdrawal(usdc(100))
+            };
+            read_state(|state| plan_withdrawal(state, &request, None, nobody)).map(drop)
+        };
+        assert_eq!(stake(0), Ok(()));
+        assert_eq!(withdraw(0), Ok(()));
+        with_least_move_fees(1_500_000, 1_400_000);
+        assert!(
+            matches!(stake(1_399_999), Err(PoolError::NotAllowed(why)) if why.contains("1400000"))
+        );
+        assert_eq!(stake(1_400_000), Ok(()));
+        assert!(
+            matches!(withdraw(1_499_999), Err(PoolError::NotAllowed(why)) if why.contains("1500000"))
+        );
+        assert_eq!(withdraw(1_500_000), Ok(()));
+        assert!(
+            matches!(stake(100_000_000), Err(PoolError::NotAllowed(why)) if why.contains("below"))
+        );
+    });
+}

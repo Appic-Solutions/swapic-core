@@ -137,6 +137,7 @@ pub(crate) fn swap(byte: u8, min_usdc: TokenAmount, premium: TokenAmount) -> Reg
         expires_at: Timestamp::from_nanos(1_000),
         salt: [byte; 32],
         icp_fees: Some(TokenAmount::from(FEE)),
+        least_usdc: TokenAmount::ZERO,
     }
 }
 
@@ -154,6 +155,7 @@ fn stake(byte: u8, min_usdc: TokenAmount, move_fee: TokenAmount) -> Registration
         expires_at: Timestamp::from_nanos(1_000),
         salt: [byte; 32],
         icp_fees: None,
+        least_usdc: TokenAmount::ZERO,
     }
 }
 

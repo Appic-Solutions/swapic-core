@@ -799,3 +799,26 @@ fn an_order_started_log_reads_back_with_its_memo() {
     );
     assert_eq!(read_order_started(&topics[..3], &data), None);
 }
+
+/// The interface golden order with an empty memo, the most common case, computed with cast
+/// outside this crate: `keccak256(0x)` is the memo's word in its struct hash.
+#[test]
+fn the_interface_golden_empty_memo_order_holds() {
+    let golden = interface();
+    let golden = &golden["order_empty_memo"];
+    let order = interface_order(&golden["value"]);
+    assert!(order.memo.is_empty());
+    assert_eq!(keccak256([]).0, word(&golden["empty_memo_hash"]));
+    let chain = ChainId::new(golden["chain_id"].as_u64().unwrap());
+    let swapic: EvmAddress = text(&golden["swapic"]).parse().unwrap();
+    assert_eq!(
+        domain(chain, swapic).separator().0,
+        word(&golden["domain_separator"])
+    );
+    assert_eq!(encode_order(&order), hex_bytes(&golden["abi_encode"]));
+    assert_eq!(hash_order(&order), word(&golden["struct_hash"]));
+    assert_eq!(
+        order_id(&order, chain, swapic).into_bytes(),
+        word(&golden["order_id"])
+    );
+}

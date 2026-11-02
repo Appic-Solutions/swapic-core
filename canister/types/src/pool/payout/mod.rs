@@ -100,10 +100,10 @@ pub struct EvmWithdrawal {
     pub usdc: TokenAmount,
     #[n(2)]
     pub max_shares: Shares,
-    /// Stays in the pool.
+    /// Swapic's, the cost of one ICP to Base move: booked to the Base fee line once paid.
     #[n(3)]
     pub move_fee: TokenAmount,
-    /// Kept on Base for the payout's gas.
+    /// Swapic's, the payout's gas: booked to the Base fee line once paid.
     #[n(4)]
     pub network_fee: TokenAmount,
     /// Once per staker.
@@ -115,8 +115,8 @@ pub struct EvmWithdrawal {
 }
 
 impl EvmWithdrawal {
-    /// What the payout order spends on Base: the withdrawal less its rebalancing share and
-    /// its network fee. None when they take all of it.
+    /// What the payout order spends on Base: the withdrawal less its move fee and its
+    /// network fee. None when they take all of it.
     pub fn payout_amount(&self) -> Option<TokenAmount> {
         self.usdc
             .checked_sub(self.move_fee)?
