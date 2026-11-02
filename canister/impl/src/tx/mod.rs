@@ -207,13 +207,15 @@ fn still_holds<S: Store>(
 }
 
 /// The freshest reading of a chain, or the refusal that prices nothing: a transaction is
-/// never sent on a reading the watcher stopped refreshing, because the fee it would carry
-/// is the fee some earlier moment of the chain was asking.
+/// never sent on a reading older than `chain_data::READING_MAX_AGE`, because the fee it
+/// would carry is the fee some earlier moment of the chain was asking. The cache only, with
+/// no await: a call's reading or the canister's own (`gas::ensure_fresh`) is put there
+/// before the caller's checks.
 fn fresh_reading(chain_id: ChainId, now: Timestamp) -> Result<ChainData, TxError> {
     chain_data::fresh(chain_id, now).ok_or(TxError::StaleChainData { chain_id })
 }
 
-/// The fees to send at, from the chain data the watcher pushed: the tip it suggests, and a
+/// The fees to send at, from the freshest reading: the tip it suggests, and a
 /// ceiling of twice the base fee on top of it, which carries a transaction through several
 /// blocks of a rising base fee. A reading that prices a transaction above
 /// [`MAX_FEE_PER_GAS`] prices nothing: the bound is what a fee this canister did not compute
@@ -673,6 +675,10 @@ fn cancel_fees(chain_id: ChainId, now: Timestamp) -> Result<Fees, TxError> {
 /// instant before it existed.
 async fn cancel(key: NonceKey) {
     let NonceKey { chain_id, nonce } = key;
+    // no call brings a cancel a reading: the canister reads the chain's gas itself
+    if crate::gas::ensure_fresh(chain_id).await.is_err() {
+        return;
+    }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let gas_limit = GasAmount::from(CANCEL_GAS_LIMIT);
     let Ok(fees) = cancel_fees(chain_id, now) else {
@@ -1431,7 +1437,7 @@ async fn push_again(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) {
         if require_not_halted().is_err() {
             return;
         }
-        if replace(entry, chain_id, now).await {
+        if replace(entry, chain_id).await {
             return;
         }
         // no replacement: already bidding the ceiling, or the reading is too old to price
@@ -1464,7 +1470,12 @@ fn rebroadcast(entry: &OutboxEntry, now: Timestamp) {
 /// already bidding the ceiling [`ChainData::fee_ceiling`] allows, or the chain reading is
 /// too old to price against, or a call failed. None of those abandon the nonce; the current
 /// bytes stay on the network.
-async fn replace(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> bool {
+async fn replace(entry: &OutboxEntry, chain_id: ChainId) -> bool {
+    // no call brings a bump a reading: the canister reads the chain's gas itself
+    if crate::gas::ensure_fresh(chain_id).await.is_err() {
+        return false;
+    }
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
     // a replacement a node accepts pays at least an eighth more, so the fee doubles: the
     // fresh chain data is a floor, not the answer, because the old fee may already be
     // above it, and the ceiling is what stops the doubling from running away

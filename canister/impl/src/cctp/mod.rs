@@ -426,12 +426,16 @@ pub async fn finish_cctp(
     require_watcher().map_err(|e| format!("{e:?}"))?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
     // the reading the watcher priced this call on: stored first, so the fee rule reads it
-    // fresh (no separate push has to land before this call)
+    // fresh; with none (or one too old) the canister reads the chain's gas itself, before
+    // any check below
     take_reading(
         chain_id,
         reading,
         Timestamp::from_nanos(ic_cdk::api::time()),
     )?;
+    crate::gas::ensure_fresh(chain_id)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))?;
     if message.len() != Envelope::CCTP_MESSAGE_LENGTH {
         return Err(FinishError::MessageLength(message.len()).to_string());
     }

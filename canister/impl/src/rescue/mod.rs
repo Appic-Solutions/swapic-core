@@ -205,6 +205,9 @@ pub async fn rescue(order_id: Vec<u8>) -> Result<u64, String> {
         &data,
     )
     .ok_or("the route does not read")?;
+    crate::gas::ensure_fresh(rescue.destination)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))?;
     // the awaits are behind: rescued meanwhile, it answers that one
     if let Some(index) = rescued() {
         return Ok(index);

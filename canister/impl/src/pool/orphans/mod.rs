@@ -78,6 +78,14 @@ pub async fn resolve(
 ) -> Result<(), PoolError> {
     checked(crate::guards::require_not_halted().is_err(), is_controller)?;
     let key = key_of(&key)?;
+    // a refund is a transaction no call brings a reading for: the gas is read first, so the
+    // checks below see the orphan as it is after the read
+    if matches!(action, OrphanAction::Refund { .. }) {
+        crate::gas::ensure_fresh(key.chain)
+            .await
+            .map_err(|failure| PoolError::Unavailable(format!("the gas price: {failure:?}")))?;
+        checked(crate::guards::require_not_halted().is_err(), is_controller)?;
+    }
     let orphan = read_state(|state| state.store().pool_orphan(&key)).ok_or(PoolError::Unknown)?;
     if !orphan.status.resolvable(now) {
         return Err(PoolError::NotAllowed(

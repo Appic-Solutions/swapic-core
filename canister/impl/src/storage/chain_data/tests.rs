@@ -67,8 +67,7 @@ fn the_fresh_read_answers_nothing_once_the_data_ages_out() {
 }
 
 /// A reading a call carries is stored and fresh at once; an invalid one is refused and
-/// leaves the stored one as it was, and one whose block is not above the stored one's is
-/// kept out.
+/// leaves the stored one as it was; none leaves it too.
 #[test]
 fn a_carried_reading_is_fresh_at_once_and_an_invalid_one_is_not_stored() {
     on_fresh_memory(|| {
@@ -96,8 +95,8 @@ fn a_carried_reading_is_fresh_at_once_and_an_invalid_one_is_not_stored() {
             ..good
         };
         crate::relay::take_reading(chain, Some(older), at(102)).unwrap();
-        assert_eq!(get(chain).map(|d| d.pushed_at), Some(at(100)));
+        assert_eq!(get(chain).map(|d| d.pushed_at), Some(at(102)));
         crate::relay::take_reading(chain, None, at(103)).unwrap();
-        assert_eq!(get(chain).map(|d| d.pushed_at), Some(at(100)));
+        assert_eq!(get(chain).map(|d| d.pushed_at), Some(at(102)));
     });
 }

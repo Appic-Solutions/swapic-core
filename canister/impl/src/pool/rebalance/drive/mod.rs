@@ -15,7 +15,7 @@ use super::{cost, own::OwnRoute};
 use crate::ic::{self, Account, CallError, Dedup};
 use crate::pool::{self, payout::Busy};
 use crate::storage::events::read_state;
-use crate::storage::{chain_data, config, flow_settings, pool as pool_store};
+use crate::storage::{config, flow_settings, pool as pool_store};
 use crate::tx;
 use candid::{Nat, Principal};
 use serde_json::{json, Value};
@@ -384,13 +384,16 @@ async fn route(item: &Move, now: Timestamp) -> Result<(), String> {
         ),
         None => own_order(item, &setup, now)?,
     };
-    // a Base to ICP move by Eco is filled on Ethereum: its fill is looked for from here
-    let scan_from = (item.direction == MoveDirection::BaseToIcp && route.is_eco())
-        .then(|| {
-            chain_data::fresh(dst, now)
-                .map(|reading| BlockNumber::new(reading.block.get().saturating_sub(5)))
-        })
-        .flatten();
+    // a Base to ICP move by Eco is filled on Ethereum: its fill is looked for from a little
+    // before the head read now
+    let scan_from = if item.direction == MoveDirection::BaseToIcp && route.is_eco() {
+        crate::rpc::head(dst)
+            .await
+            .ok()
+            .map(|head| BlockNumber::new(head.get().saturating_sub(5)))
+    } else {
+        None
+    };
     record(
         PoolStep::MoveRouted {
             id: item.id,
@@ -524,7 +527,8 @@ async fn unfilled(item: &Move, ctx: &Ctx) -> Result<(), String> {
 }
 
 /// Whether the canister's address on `chain` holds the most `action`'s transaction may cost
-/// there (its gas budget): a move is never signed short of gas, and alerts (P11e).
+/// there (its gas budget): a move is never signed short of gas, and alerts. Then the chain's
+/// gas price read, which no call brings a move.
 async fn gas_in_hand(chain: ChainId, action: GasAction) -> Result<(), String> {
     let config = config::get();
     let budget = tx::budget_for(&config, chain, action).map_err(|error| error.to_string())?;
@@ -550,7 +554,9 @@ async fn gas_in_hand(chain: ChainId, action: GasAction) -> Result<(), String> {
         ));
         return Err("short of the chain's coin for gas".to_string());
     }
-    Ok(())
+    crate::gas::ensure_fresh(chain)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))
 }
 
 /// Signs `run(order)` of the pinned order on its chain, the canister the payer, against its
@@ -811,9 +817,10 @@ async fn fill(item: &Move, ctx: &Ctx) -> Result<(), String> {
         .intent
         .ok_or("its order published no intent the canister read")?;
     let portal = config.eco_portal.ok_or("no Eco Portal is configured")?;
-    let head = chain_data::fresh(ChainId::ETHEREUM, now)
-        .map(|reading| reading.block.get())
-        .ok_or("no fresh reading of Ethereum")?;
+    let head = crate::rpc::head(ChainId::ETHEREUM)
+        .await
+        .map_err(|failure| format!("Ethereum's head: {failure:?}"))?
+        .get();
     let from = item
         .scan_from
         .map_or(head.saturating_sub(FILL_BLOCKS), |from| from.get());

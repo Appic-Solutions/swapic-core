@@ -8,7 +8,8 @@ use serde::Deserialize;
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum TxError {
     Guard(GuardError),
-    /// The watcher has pushed nothing young enough to price a transaction with.
+    /// No reading young enough to price a transaction with: none came with the call, and
+    /// the canister's own read of the chain failed.
     StaleChainData {
         chain_id: u64,
     },

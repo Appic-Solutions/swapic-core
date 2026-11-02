@@ -907,10 +907,10 @@ pub fn check(
 /// one refuses the call, and nothing is stored or signed. The reading names no chain: it is
 /// the call's.
 ///
-/// A reading whose block is at or below the stored one's is kept out, and the stored one
-/// stays with its stamp: a retry resends the reading it was first priced on, and a slow
-/// call can land after a newer one, and either would otherwise put older fees in and stamp
-/// them fresh.
+/// The newest arrival wins, whatever block it names: the canister's own reads and the
+/// watcher's come from different providers, and a stored reading that aged out must never
+/// keep out the one a call brings. The bounds every price is held to (`tx::fees`) are what
+/// an old or a wrong reading meets.
 pub fn take_reading(
     chain_id: ChainId,
     reading: Option<ChainData>,
@@ -925,9 +925,6 @@ pub fn take_reading(
             settlement_api::types::chain_data::ChainDataError::from(e)
         )
     })?;
-    if chain_data::get(chain_id).is_some_and(|stored| reading.block <= stored.block) {
-        return Ok(());
-    }
     chain_data::put(chain_id, reading, at);
     Ok(())
 }
@@ -946,12 +943,16 @@ pub async fn relay_gasless(
     require_watcher().map_err(|e| format!("{e:?}"))?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
     // the reading the watcher priced this call on: stored first, so the fee rule reads it
-    // fresh (no separate push has to land before this call)
+    // fresh; with none (or one too old) the canister reads the chain's gas itself, before
+    // any check below
     take_reading(
         chain_id,
         reading,
         Timestamp::from_nanos(ic_cdk::api::time()),
     )?;
+    crate::gas::ensure_fresh(chain_id)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))?;
     let order = swapic::decode_order(order_bytes).ok_or(RelayError::NotAnOrder.to_string())?;
     let auth = swapic::decode_auth(auth_bytes).ok_or(RelayError::NotAnAuth.to_string())?;
     let config = config::get();

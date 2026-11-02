@@ -374,10 +374,14 @@ pub async fn sign_held(
     order: &Order,
     pinned: PinnedOrder,
 ) -> Result<u64, PoolError> {
-    let config = crate::storage::config::get();
-    let chain_id = config
+    let chain_id = crate::storage::config::get()
         .pool_chain
         .ok_or_else(|| PoolError::Closed("no pool chain is configured".to_string()))?;
+    // the watcher's reading when `pay_payout` brought one; the canister's own otherwise
+    crate::gas::ensure_fresh(chain_id)
+        .await
+        .map_err(|failure| PoolError::Unavailable(format!("the gas price: {failure:?}")))?;
+    let config = crate::storage::config::get();
     let swapic_address = config
         .evm_chains
         .get(chain_id)

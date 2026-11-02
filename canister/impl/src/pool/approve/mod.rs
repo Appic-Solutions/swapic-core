@@ -102,7 +102,10 @@ async fn approve(
     if in_place(allowance) {
         return Err(PoolError::Known);
     }
-    // the halt and another approval can land while the read was out
+    crate::gas::ensure_fresh(chain_id)
+        .await
+        .map_err(|failure| PoolError::Unavailable(format!("the gas price: {failure:?}")))?;
+    // the halt and another approval can land while the reads were out
     checked(require_not_halted().is_err(), is_controller)?;
     if outbox::find(TxPurpose::PoolApprove).is_some() {
         return Err(PoolError::Unavailable(

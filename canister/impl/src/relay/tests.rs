@@ -1613,7 +1613,7 @@ fn each_door_accepts_exactly_what_its_verifier_accepts() {
 
 /// What both methods do with the reading they were given, right after their guards: none
 /// leaves the stored one as it is (review focus 1); a valid one is stored and fresh at once;
-/// an invalid one refuses with the push's text and is not stored.
+/// an invalid one refuses with the reading's own error and is not stored.
 #[test]
 fn a_call_stores_the_reading_it_carries() {
     on_fresh_memory(|| {
@@ -1653,17 +1653,16 @@ fn a_call_stores_the_reading_it_carries() {
     });
 }
 
-/// Review fix: a carried reading no newer than the stored one is kept out. A retry resends
-/// the reading it was first priced on, and a slow call can land after a newer push; either
-/// would otherwise replace newer fees and be stamped fresh. It is validated all the same,
-/// and a newer one replaces the stored one.
+/// The newest arrival wins, whatever block it names: a stored reading that aged out never
+/// keeps out the one a call brings, even from a provider a block behind. An invalid one is
+/// refused all the same and stores nothing.
 #[test]
-fn a_carried_reading_no_newer_than_the_stored_one_is_kept_out() {
+fn the_newest_reading_wins_whatever_its_block() {
     on_fresh_memory(|| {
         crate::storage::init();
         let chain = ChainId::ETHEREUM;
         let first = Timestamp::from_nanos(1_700_000_000_000_000_000);
-        let later = Timestamp::from_nanos(1_700_000_005_000_000_000);
+        let later = Timestamp::from_nanos(1_700_000_015_000_000_000);
         let at_block = |block: u64| ChainData {
             base_fee_wei_per_gas: candid::Nat::from(2_000_000_000u64),
             block,
@@ -1672,28 +1671,23 @@ fn a_carried_reading_no_newer_than_the_stored_one_is_kept_out() {
         let stored = || chain_data::get(chain).map(|d| (d.block.get(), d.pushed_at));
         assert_eq!(take_reading(chain, Some(at_block(100)), first), Ok(()));
         assert_eq!(stored(), Some((100, first)));
-        // an older block: the stored reading stays, stamp and all
-        assert_eq!(take_reading(chain, Some(at_block(90)), later), Ok(()));
-        assert_eq!(stored(), Some((100, first)));
-        // the same block: nothing newer, so the stamp is not moved either
-        assert_eq!(take_reading(chain, Some(at_block(100)), later), Ok(()));
-        assert_eq!(stored(), Some((100, first)));
-        // kept out, and still refused when invalid
+        assert!(chain_data::fresh(chain, later).is_none(), "aged out");
+        // a provider a block behind, later: it is what prices now
+        assert_eq!(take_reading(chain, Some(at_block(99)), later), Ok(()));
+        assert_eq!(stored(), Some((99, later)));
+        assert!(chain_data::fresh(chain, later).is_some());
         let invalid = ChainData {
             base_fee_wei_per_gas: candid::Nat::parse(
                 b"115792089237316195423570985008687907853269984665640564039457584007913129639936",
             )
             .unwrap(),
-            ..at_block(90)
+            ..at_block(101)
         };
         assert_eq!(
             take_reading(chain, Some(invalid), later),
             Err(r#"InvalidData(FeeTooLarge { field: "base_fee_wei_per_gas" })"#.to_string())
         );
-        assert_eq!(stored(), Some((100, first)));
-        // a newer block replaces it
-        assert_eq!(take_reading(chain, Some(at_block(101)), later), Ok(()));
-        assert_eq!(stored(), Some((101, later)));
+        assert_eq!(stored(), Some((99, later)));
     });
 }
 

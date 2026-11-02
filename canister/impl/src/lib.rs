@@ -5,6 +5,7 @@ pub mod consent;
 pub mod ecdsa;
 pub mod engine;
 pub mod evm_reads;
+pub mod gas;
 pub mod guards;
 pub mod ic;
 pub mod lifecycle;

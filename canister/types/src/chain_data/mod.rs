@@ -1,6 +1,7 @@
 //! What the canister knows about a chain's head and its gas prices, and how long that
-//! knowledge stays good for. The watcher pushes readings; the canister stamps them, because
-//! the age of a reading is what every money decision on it depends on.
+//! knowledge stays good for. A reading comes with the call that makes the canister sign, or
+//! from the canister's own read of the chain; the canister stamps it, because the age of a
+//! reading is what every money decision on it depends on.
 
 #[cfg(test)]
 mod tests;
@@ -10,14 +11,14 @@ use minicbor::{Decode, Encode};
 use std::time::Duration;
 use thiserror::Error;
 
-/// One chain as the watcher last saw it: the head it had and what gas cost there. It
+/// One chain as a provider last saw it: the head it had and what gas cost there. It
 /// carries no instant, so only the canister can say when it arrived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChainReading {
     pub block: BlockNumber,
     /// The base fee of the head block.
     pub base_fee: WeiPerGas,
-    /// The tip the watcher suggests paying on top of the base fee.
+    /// The tip to pay on top of the base fee.
     pub priority_fee: WeiPerGas,
 }
 

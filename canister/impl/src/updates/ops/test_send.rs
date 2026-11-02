@@ -27,9 +27,13 @@ pub async fn test_send(
                 reason: reason.into(),
             },
         )?;
+    let chain = ChainId::new(chain_id);
+    crate::gas::ensure_fresh(chain)
+        .await
+        .map_err(|_| TxError::StaleChainData { chain_id })?;
     tx::create_and_send(
         TxPurpose::Relay(QuoteHash::new(quote_hash)),
-        ChainId::new(chain_id),
+        chain,
         parsed,
         Wei::ZERO,
         vec![0xde, 0xad, 0xbe, 0xef],
