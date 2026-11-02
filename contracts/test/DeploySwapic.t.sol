@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import "forge-std/Test.sol";
 import {DeploySwapic} from "../script/DeploySwapic.s.sol";
+import {Swapic} from "../src/Swapic.sol";
 
 /// The deploy script's per-chain table against each chain's official USDC, wrapped native and
 /// Circle CCTP domain listings (checked 2026-10-24), for the four chains deployed first and the
@@ -49,5 +50,18 @@ contract DeploySwapicTest is Test {
             vm.expectRevert("unsupported chain");
             script.domainOf(refused[i]);
         }
+    }
+
+    /// Every chain gets the same three addresses: Swapic at the deployer's nonce 0, the
+    /// CctpReceiver and the Runner at Swapic's own nonces 1 and 2.
+    function test_the_addresses_are_the_deployers_nonce_zero_ones() public {
+        address deployer = address(0xD5);
+        address swapic = vm.computeCreateAddress(deployer, 0);
+        vm.setNonce(deployer, 0);
+        vm.prank(deployer);
+        Swapic s = new Swapic(address(0x5757), address(0), address(0), address(0), address(0), deployer, address(0), address(0xCA));
+        assertEq(address(s), swapic);
+        assertEq(s.cctpReceiver(), vm.computeCreateAddress(swapic, 1));
+        assertEq(s.runner(), vm.computeCreateAddress(swapic, 2));
     }
 }

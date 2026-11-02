@@ -101,7 +101,7 @@ contract Swapic is ISwapic {
             IERC20(o.tokenIn).safeTransferFrom(msg.sender, runner, o.amountIn);
             _arrived(o.tokenIn, runner, inBaseline, o.amountIn);
         }
-        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn);
+        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn, o.memo);
         IRunner(runner).execute(o, id, inBaseline);
     }
 
@@ -112,7 +112,7 @@ contract Swapic is ISwapic {
         uint256 inBaseline = IERC20(o.tokenIn).balanceOf(runner);
         _pullPermit2(o, id, a.nonce, a.deadline, a.signature);
         _arrived(o.tokenIn, runner, inBaseline, o.amountIn);
-        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn);
+        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn, o.memo);
         IRunner(runner).execute(o, id, inBaseline);
     }
 
@@ -145,7 +145,7 @@ contract Swapic is ISwapic {
             _pullPermit2(o, id, a.nonce, a.deadline, a.signature);
         }
         _arrived(o.tokenIn, runner, inBaseline, o.amountIn);
-        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn);
+        emit OrderStarted(id, o.ref, o.payer, o.tokenIn, o.amountIn, o.memo);
         IRunner(runner).execute(o, id, inBaseline);
     }
 

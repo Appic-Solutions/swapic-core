@@ -70,7 +70,7 @@ abstract contract GoldenOrder is Test {
             "{",
             '"types":{',
             '"EIP712Domain":[{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"}],',
-            '"Order":[{"name":"ref","type":"bytes32"},{"name":"payer","type":"address"},{"name":"tokenIn","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"steps","type":"Step[]"},{"name":"payout","type":"Payout"}],',
+            '"Order":[{"name":"ref","type":"bytes32"},{"name":"payer","type":"address"},{"name":"tokenIn","type":"address"},{"name":"amountIn","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"steps","type":"Step[]"},{"name":"payout","type":"Payout"},{"name":"memo","type":"bytes"}],',
             '"Step":[{"name":"target","type":"address"},{"name":"data","type":"bytes"},{"name":"token","type":"address"},{"name":"min","type":"uint256"},{"name":"writes","type":"Write[]"}],',
             '"Write":[{"name":"at","type":"uint32"},{"name":"minus","type":"uint256"}],',
             '"Payout":[{"name":"token","type":"address"},{"name":"recipient","type":"address"},{"name":"minOut","type":"uint256"}]',
@@ -85,7 +85,8 @@ abstract contract GoldenOrder is Test {
             '{"target":"0x4444444444444444444444444444444444444444","data":"0xdeadbeef01","token":"0x3333333333333333333333333333333333333333","min":"1000000000000000000","writes":[]},',
             '{"target":"0x5555555555555555555555555555555555555555","data":"0xcafebabe00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001","token":"0x6666666666666666666666666666666666666666","min":"2500000000","writes":[{"at":4,"minus":"0"},{"at":37,"minus":"57115"}]}',
             "],",
-            '"payout":{"token":"0x7777777777777777777777777777777777777777","recipient":"0x8888888888888888888888888888888888888888","minOut":"999"}',
+            '"payout":{"token":"0x7777777777777777777777777777777777777777","recipient":"0x8888888888888888888888888888888888888888","minOut":"999"},',
+            '"memo":"0x"',
             "}}"
         );
     }
@@ -114,8 +115,6 @@ abstract contract GoldenOrder is Test {
 /// (`vm.eip712HashTypedData`), so a wrong type string, nested type order or
 /// array encoding cannot pass. Typehashes and the envelope from `cast`.
 contract OrderHashTest is GoldenOrder {
-    bytes32 constant GOLDEN_ORDER_ID = 0x2f21eee628b331d82ca45f067ec51c73de0533289d22c22328cf4ebd43e255bc;
-    bytes32 constant GOLDEN_ACCEPTANCE = 0x5058c6a5e030b5beb7c0a929627f189d69cbf98e8801d7e5bb868f4805937d0d;
 
     OrderHashHarness h;
 
@@ -126,13 +125,12 @@ contract OrderHashTest is GoldenOrder {
     function test_order_id_is_the_eip712_digest_a_client_computes() public {
         bytes32 got = h.orderId(_golden(), CHAIN, SWAPIC);
         assertEq(got, vm.eip712HashTypedData(_orderJson()));
-        assertEq(got, GOLDEN_ORDER_ID);
     }
 
     function test_acceptance_digest_is_the_eip712_digest_a_client_computes() public {
-        bytes32 got = h.acceptanceDigest(_golden(), GOLDEN_ORDER_ID, CHAIN, SWAPIC);
-        assertEq(got, vm.eip712HashTypedData(_acceptanceJson(GOLDEN_ORDER_ID)));
-        assertEq(got, GOLDEN_ACCEPTANCE);
+        bytes32 id = h.orderId(_golden(), CHAIN, SWAPIC);
+        bytes32 got = h.acceptanceDigest(_golden(), id, CHAIN, SWAPIC);
+        assertEq(got, vm.eip712HashTypedData(_acceptanceJson(id)));
     }
 
     function test_every_field_changes_the_id() public {
@@ -155,12 +153,15 @@ contract OrderHashTest is GoldenOrder {
         o = _golden();
         o.amountIn = 1;
         assertTrue(h.orderId(o, CHAIN, SWAPIC) != base);
+        o = _golden();
+        o.memo = hex"01";
+        assertTrue(h.orderId(o, CHAIN, SWAPIC) != base);
         assertTrue(h.orderId(_golden(), CHAIN + 1, SWAPIC) != base);
         assertTrue(h.orderId(_golden(), CHAIN, address(1)) != base);
     }
 
     function test_type_goldens() public pure {
-        assertEq(OrderHash.ORDER_TYPEHASH, 0xd46b04ddb0d039fd8d858827e8603da1a6d43b2e1c788328fd321b4782f2cb7d);
+        assertEq(OrderHash.ORDER_TYPEHASH, 0x391c982619bb5233046c55e62c42b9d3e4c1ec09f980e88f048c95402a61e6ec);
         assertEq(OrderHash.STEP_TYPEHASH, 0x0682eb4409dbcbd035b45046e7629810578851f37499e32990aefe0c8dbc2134);
         assertEq(OrderHash.WRITE_TYPEHASH, 0xc4688b5dd66453b7f007d0ec6009b512f5df252efe9072aff82a09a6779744c3);
         assertEq(OrderHash.PAYOUT_TYPEHASH, 0x73644d236b331510ff1d9a455c49a20d6dd646f5a4c449a25ee91053263f8369);

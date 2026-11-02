@@ -32,6 +32,8 @@ struct Payout {
     uint256 minOut;
 }
 
+/// `memo`: a pool deposit's encoded terms, whose keccak256 is `ref`; empty on
+/// every other order. Swapic only signs it into the id and emits it.
 struct Order {
     bytes32 ref;
     address payer;
@@ -40,6 +42,7 @@ struct Order {
     uint256 deadline;
     Step[] steps;
     Payout payout;
+    bytes memo;
 }
 
 enum Door {

@@ -208,7 +208,7 @@ contract SwapicTest is SwapicBase {
         Order memory o = _wethOrder();
         bytes32 id = swapic.orderId(o);
         vm.expectEmit(address(swapic));
-        emit ISwapic.OrderStarted(id, o.ref, user, address(weth), 1e18);
+        emit ISwapic.OrderStarted(id, o.ref, user, address(weth), 1e18, o.memo);
         vm.prank(user);
         assertEq(swapic.run(o), id);
         (uint256 burned,, bytes32 mintRecipient,, bytes32 caller,,,) = messenger.last();
@@ -617,6 +617,7 @@ contract ReentryTest is SwapicBase {
         ds[3] = abi.encodeCall(CctpReceiver.completeCctp, (_message(), "", _swapRecipe()));
     }
 
+
     function test_reentry_from_step_reverts() public {
         (address[] memory ts, bytes[] memory ds) = _targets();
         for (uint256 i; i < ts.length; ++i) {
@@ -738,10 +739,10 @@ contract SwapicGoldenTest is GoldenOrder {
         vm.etch(SWAPIC, address(s).code);
         vm.chainId(CHAIN);
         Swapic golden = Swapic(SWAPIC);
-        assertEq(golden.orderId(_golden()), 0x2f21eee628b331d82ca45f067ec51c73de0533289d22c22328cf4ebd43e255bc);
-        assertEq(
-            golden.acceptanceDigest(_golden()), 0x5058c6a5e030b5beb7c0a929627f189d69cbf98e8801d7e5bb868f4805937d0d
-        );
+        // foundry's own EIP-712 encoder over the client JSON, as OrderHash.t.sol pins it
+        bytes32 id = vm.eip712HashTypedData(_orderJson());
+        assertEq(golden.orderId(_golden()), id);
+        assertEq(golden.acceptanceDigest(_golden()), vm.eip712HashTypedData(_acceptanceJson(id)));
         (bytes1 fields, string memory name, string memory version, uint256 chainId, address verifying,,) =
             golden.eip712Domain();
         assertEq(fields, hex"0f");

@@ -9,12 +9,20 @@ interface ITransmitterDomain {
     function localDomain() external view returns (uint32);
 }
 
-/// Deploys Swapic on the current chain (Base, Arbitrum, Ethereum, Polygon, and
-/// the chains added on 2026-10-19: OP Mainnet, Unichain, Monad, HyperEVM, World
-/// Chain, Plasma; each chain's USDC, wrapped native and CCTP domain as its
-/// official USDC, wrapped native and Circle CCTP domain listings give them,
-/// checked 2026-10-24); its constructor deploys the CctpReceiver and the
-/// Runner, so this is the whole deployment and nothing is configured afterwards:
+/// Deploys Swapic on the current chain (Ethereum, Base, Arbitrum, Polygon, OP Mainnet,
+/// Unichain, Monad, HyperEVM, World Chain, Plasma; each chain's USDC, wrapped native and CCTP
+/// domain as its official listings give them); its constructor deploys the CctpReceiver and
+/// the Runner, so this is the whole deployment and nothing is configured afterwards.
+///
+/// The same addresses on every chain: Swapic is the deployer's first contract (nonce 0), and
+/// the Runner and the CctpReceiver are Swapic's own first two. A deployer that already sent a
+/// transaction on a chain is refused there, before anything is signed.
+///
+/// On HyperEVM the deployment (about 5.2M gas) does not fit a small block (3M gas): the
+/// deployer turns on big blocks there before running this.
+///
+/// `--rpc-url` names a chain of `foundry.toml`'s `[rpc_endpoints]`, which reads the url from
+/// the environment the kit loads; no url is ever on a command line:
 ///
 ///   forge script script/DeploySwapic.s.sol --rpc-url <chain> --broadcast
 ///       env: CANISTER (required: the canister's EVM address),
@@ -108,8 +116,11 @@ contract DeploySwapic is Script {
             vm.startBroadcast();
         }
         (, address me,) = vm.readCallers();
+        require(vm.getNonce(me) == 0, "the deployer is not fresh here: the addresses would differ across chains");
+        address predicted = vm.computeCreateAddress(me, 0);
         address owner = vm.envOr("OWNER", me);
         swapic = new Swapic(usdc, TRANSMITTER, TOKEN_MESSENGER, wrapped, ckHelper, me, guardian, canister);
+        require(address(swapic) == predicted, "Swapic is not at the deployer's nonce 0 address");
         if (owner != me) swapic.transferOwnership(owner);
         vm.stopBroadcast();
 

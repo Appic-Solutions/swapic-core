@@ -7,8 +7,14 @@ import {Order, GaslessAuth, Permit2Auth} from "../SwapicTypes.sol";
 /// `amountIn` from the payer, once per order, hands it to the Runner, and
 /// makes no other call.
 interface ISwapic {
+    /// `memo` is the order's own, so its terms can be read back from the chain.
     event OrderStarted(
-        bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn
+        bytes32 indexed id,
+        bytes32 indexed ref,
+        address indexed payer,
+        address tokenIn,
+        uint256 amountIn,
+        bytes memo
     );
     event Paused(address by);
     event Unpaused(address by);

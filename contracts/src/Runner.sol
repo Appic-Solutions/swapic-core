@@ -51,6 +51,9 @@ contract Runner is IRunner {
     // source: the signed steps
     // ------------------------------------------------------------------
 
+    /// Swapic's only. The lock is the Runner's own: Swapic is not locked while
+    /// a CCTP arrival runs `fill`, so without it a recipe could call `run` and
+    /// nest a whole order inside the arrival.
     function execute(Order calldata o, bytes32 id, uint256 inBaseline) external nonReentrant {
         if (msg.sender != swapic) revert OnlySwapic();
         if (o.payout.token != address(0)) _checkRecipient(o.payout.recipient);

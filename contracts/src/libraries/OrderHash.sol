@@ -5,9 +5,9 @@ import {Order, Step, Write, Payout} from "../SwapicTypes.sol";
 
 /// The order fingerprint: the EIP-712 digest of the whole Order under the
 /// domain {name "Swapic", version "3", chainId, verifyingContract = Swapic}.
-/// Referenced types are appended alphabetically, `bytes` hashed, arrays
-/// hashed as keccak of the concatenated struct hashes, so viem's
-/// `hashTypedData` and alloy's `eip712_signing_hash` reproduce it.
+/// Referenced types are appended alphabetically, `bytes` (a step's data, the
+/// memo) hashed, arrays hashed as keccak of the concatenated struct hashes, so
+/// viem's `hashTypedData` and alloy's `eip712_signing_hash` reproduce it.
 library OrderHash {
     string internal constant NAME = "Swapic";
     string internal constant VERSION = "3";
@@ -16,7 +16,7 @@ library OrderHash {
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     string internal constant ORDER_TYPE =
-        "Order(bytes32 ref,address payer,address tokenIn,uint256 amountIn,uint256 deadline,Step[] steps,Payout payout)";
+        "Order(bytes32 ref,address payer,address tokenIn,uint256 amountIn,uint256 deadline,Step[] steps,Payout payout,bytes memo)";
     string internal constant PAYOUT_TYPE = "Payout(address token,address recipient,uint256 minOut)";
     string internal constant STEP_TYPE = "Step(address target,bytes data,address token,uint256 min,Write[] writes)";
     string internal constant WRITE_TYPE = "Write(uint32 at,uint256 minus)";
@@ -68,7 +68,8 @@ library OrderHash {
                 o.amountIn,
                 o.deadline,
                 keccak256(abi.encodePacked(ss)),
-                hashPayout(o.payout)
+                hashPayout(o.payout),
+                keccak256(o.memo)
             )
         );
     }
