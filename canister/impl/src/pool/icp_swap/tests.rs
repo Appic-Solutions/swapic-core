@@ -64,6 +64,7 @@ fn config() -> types::Config {
         min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     types::Config {
         evm_chains: ChainTable(BTreeMap::from([
@@ -621,6 +622,7 @@ fn plan_order(planned: TokenAmount, min_out: TokenAmount) -> types::swapic::Orde
             recipient: addr(recipient()),
             minOut: U256::from_be_bytes(min_out.to_be_bytes()),
         },
+        memo: Default::default(),
     }
 }
 

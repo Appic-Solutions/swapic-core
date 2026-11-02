@@ -1,27 +1,15 @@
 use super::*;
 use crate::evm::EvmAddress;
 use ic_stable_structures::Storable;
-use std::borrow::Cow;
 
 /// The defaults are spec numbers, not preferences: this test is the spec.
 #[test]
 fn defaults_match_spec() {
     let c = Config::default();
-    assert_eq!(c.platform_fee, BasisPoints::new(0));
-    assert_eq!(c.max_fee, BasisPoints::new(30));
-    assert_eq!(c.max_swap, UsdAmount::new(1_000));
-    assert_eq!(c.quote_ttl, Duration::from_secs(45));
-    assert_eq!(c.permit_deadline, Duration::from_secs(120));
-    assert_eq!(c.chain_data_max_age, Duration::from_secs(10));
     assert_eq!(c.batch_window, Duration::from_millis(2_000));
     assert_eq!(c.max_batch_items, 10);
-    assert_eq!(c.decision_timeout, Duration::from_secs(30 * 60));
-    assert_eq!(c.rail_status_max_age, Duration::from_secs(30));
+    assert_eq!(c.backstop_interval, Duration::from_secs(30));
     assert!(!c.simulate_before_sign);
-    assert_eq!(c.expiry_check_interval, Duration::from_secs(60));
-    assert_eq!(c.replay_audit_interval, Duration::from_secs(21_600));
-    // a swap is acted on at 1 block on Ethereum too (Jeff, 2026-10-17); crediting has no
-    // depth of its own, so it reads these, and Ethereum's never below the floor
     assert_eq!(
         c.confirmations,
         BTreeMap::from(
@@ -30,16 +18,14 @@ fn defaults_match_spec() {
         )
     );
     assert_eq!(c.credit_confirmations, ChainTable::default());
-    // the widest range the read walks, 100,000 seconds of the chain whose blocks come
-    // fastest, so every deposit a claim may be asked for is in the range it reads
-    // (rewritten for fix wave 6, M1: it was a day, 345,600, which fell short)
-    assert_eq!(c.deposit_lookback_blocks, DepositLookback::new(400_000));
-    assert_eq!(c.max_refunds_per_sweep, RefundsPerSweep::new(50));
-    assert_eq!(c.max_evictions_per_sweep, EvictionsPerSweep::new(200));
-    assert_eq!(c.audit_chunk_events, AuditChunk::new(1_000));
+    assert_eq!(
+        c.books_check_interval,
+        BooksInterval(Duration::from_secs(3_600))
+    );
+    assert!(!c.eco_enabled.is_on());
     // deploy-time values, empty in code
     assert!(c.rpc_urls.is_empty());
-    assert!(c.vault_addresses.is_empty());
+    assert!(c.evm_chains.0.is_empty());
     assert_eq!(c.ecdsa_key_name, "dfx_test_key");
 }
 
@@ -48,7 +34,6 @@ const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 /// What a real deploy looks like: two provider urls, both of them secrets.
 fn secret_bearing() -> Config {
     Config {
-        platform_fee: BasisPoints::new(10),
         rpc_urls: BTreeMap::from([
             (ChainId::ETHEREUM, SECRET.parse().unwrap()),
             (
@@ -56,10 +41,30 @@ fn secret_bearing() -> Config {
                 "https://base.example/rpc?key=hunter2".parse().unwrap(),
             ),
         ]),
-        // a vault address is public on-chain data, not a secret: it must survive
-        vault_addresses: BTreeMap::from([(ChainId::ETHEREUM, "0xvault".parse().unwrap())]),
         ecdsa_key_name: "key_1".to_string(),
         ..Config::default()
+    }
+}
+
+/// A chain entry as a deploy writes one.
+fn base_chain() -> EvmChain {
+    EvmChain {
+        swapic: EvmAddress::new([0x5a; 20]),
+        runner: EvmAddress::new([0x5b; 20]),
+        cctp_receiver: EvmAddress::new([0x5c; 20]),
+        usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+            .parse()
+            .unwrap(),
+        token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+            .parse()
+            .unwrap(),
+        message_transmitter: EvmAddress::new([0x81; 20]),
+        gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
+        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: Duration::from_secs(2),
     }
 }
 
@@ -77,8 +82,7 @@ fn debug_never_prints_an_rpc_url() {
         "a stray debug print leaked: {shown}"
     );
     assert!(shown.contains("***"));
-    // everything that is not a secret still prints
-    assert!(shown.contains("0xvault") && shown.contains("key_1"));
+    assert!(shown.contains("key_1"));
 }
 
 #[test]
@@ -86,38 +90,6 @@ fn defaults_are_valid() {
     Config::default()
         .validate()
         .expect("the defaults are valid");
-}
-
-#[test]
-fn validate_rejects_a_ceiling_above_one_hundred_percent() {
-    let config = Config {
-        max_fee: BasisPoints::new(10_001),
-        ..Config::default()
-    };
-    assert_eq!(
-        config.validate(),
-        Err(ConfigError::MaxFeeAboveHundredPercent(BasisPoints::new(
-            10_001
-        )))
-    );
-}
-
-#[test]
-fn validate_rejects_a_platform_fee_above_the_ceiling() {
-    let config = Config {
-        platform_fee: BasisPoints::new(31),
-        max_fee: BasisPoints::new(30),
-        ..Config::default()
-    };
-    let err = config.validate().unwrap_err();
-    assert_eq!(
-        err,
-        ConfigError::PlatformFeeAboveMax {
-            platform_fee: BasisPoints::new(31),
-            max_fee: BasisPoints::new(30)
-        }
-    );
-    assert!(err.to_string().contains("platform_fee_bps"), "{err}");
 }
 
 #[test]
@@ -132,8 +104,6 @@ fn validate_rejects_an_empty_ecdsa_key_name() {
 /// Crediting decides money arriving at the canister, and Ethereum mainnet reorgs
 /// routinely: a config that would credit a deposit there at less than the floor is
 /// refused, whatever else it holds. Every other chain is the deploy's own call.
-/// Rewritten for P10c: the floor moved from `confirmations`, the swap depth, onto
-/// `credit_confirmations`.
 #[test]
 fn validate_rejects_a_mainnet_crediting_depth_below_the_floor() {
     for depth in [1, MIN_ETHEREUM_CONFIRMATIONS.get() - 1] {
@@ -161,156 +131,85 @@ fn validate_rejects_a_mainnet_crediting_depth_below_the_floor() {
         ..Config::default()
     };
     assert_eq!(at_the_floor.validate(), Ok(()));
-    // another chain's depth is the deploy's to size, and a chain with no depth at all is
-    // refused where money is decided, not here
     let shallow_elsewhere = Config {
         credit_confirmations: ChainTable(BTreeMap::from([(ChainId::ARBITRUM, BlockDepth::new(1))])),
         ..Config::default()
     };
     assert_eq!(shallow_elsewhere.validate(), Ok(()));
-    assert_eq!(Config::default().validate(), Ok(()));
 }
 
-/// Jeff (2026-10-17): a swap on Ethereum is acted on at 1 block; crediting money at the
-/// canister keeps Ethereum's floor of 12.
-#[test]
-fn ethereum_swaps_at_one_block_and_credits_at_twelve() {
-    let mut config = Config::default();
-    config
-        .confirmations
-        .insert(ChainId::ETHEREUM, BlockDepth::new(1));
-    assert_eq!(config.validate(), Ok(()));
-    config
-        .credit_confirmations
-        .0
-        .insert(ChainId::ETHEREUM, BlockDepth::new(1));
-    assert!(matches!(
-        config.validate(),
-        Err(ConfigError::DepthTooShallow { .. })
-    ));
-}
-
+/// Only a moved interval restarts its timer, and past a minute the backstop knob moves no
+/// drive: the backstop's period is a minute either way.
 #[test]
 fn interval_changes_flags_each_timer_for_its_own_interval_only() {
     let base = Config::default();
     let changes = |new: Config| {
         let c = base.interval_changes(&new);
-        (c.audit, c.rail_status, c.books)
+        (c.backstop, c.books)
     };
-    let fee_only = Config {
-        platform_fee: BasisPoints::new(10),
+    let unrelated = Config {
+        max_batch_items: 20,
         ..Config::default()
     };
-    assert_eq!(changes(fee_only), (false, false, false));
-    // the expiry knob stays in the config, and no timer reads it since the sweep went
-    let expiry = Config {
-        expiry_check_interval: Duration::from_secs(61),
+    assert_eq!(changes(unrelated), (false, false));
+    let backstop = Config {
+        backstop_interval: Duration::from_secs(31),
         ..Config::default()
     };
-    assert_eq!(changes(expiry), (false, false, false));
-    let audit = Config {
-        replay_audit_interval: Duration::from_secs(21_601),
+    assert_eq!(changes(backstop), (true, false));
+    let books = Config {
+        books_check_interval: BooksInterval(Duration::from_secs(1_800)),
         ..Config::default()
     };
-    assert_eq!(changes(audit), (true, false, false));
-    let rail_status = Config {
-        rail_status_max_age: Duration::from_secs(31),
-        ..Config::default()
-    };
-    assert_eq!(changes(rail_status), (false, true, false));
-    // past a minute the knob moves no tick: the engine's period is a minute either way
+    assert_eq!(changes(books), (false, true));
     let slow = Config {
-        rail_status_max_age: Duration::from_secs(600),
+        backstop_interval: Duration::from_secs(600),
         ..Config::default()
     };
     let slower = Config {
-        rail_status_max_age: Duration::from_secs(900),
+        backstop_interval: Duration::from_secs(900),
         ..Config::default()
     };
-    assert!(!slow.interval_changes(&slower).rail_status);
+    assert!(!slow.interval_changes(&slower).backstop);
 }
 
-/// The engine ticks on the interval the config names, at most every minute, and on the
-/// floor every timer is held to when the knob is below it: a zero interval would otherwise
-/// put the engine on every round of the subnet.
+/// The backstop drives on the interval the config names, at most every minute, and on the
+/// floor every timer is held to when the knob is below it.
 #[test]
-fn the_engine_ticks_on_the_configured_interval() {
-    let with = |rail_status_max_age| {
+fn the_backstop_drives_on_the_configured_interval() {
+    let with = |backstop_interval| {
         Config {
-            rail_status_max_age,
+            backstop_interval,
             ..Config::default()
         }
         .engine_every()
     };
-    assert_eq!(
-        Config::default().engine_every(),
-        Duration::from_secs(30),
-        "the spec's own interval"
-    );
+    assert_eq!(Config::default().engine_every(), Duration::from_secs(30));
     assert_eq!(with(Duration::from_secs(5)), Duration::from_secs(5));
-    assert_eq!(
-        with(Duration::from_secs(600)),
-        Duration::from_secs(60),
-        "the payouts' minute at the most"
-    );
-    assert_eq!(
-        with(Duration::ZERO),
-        Duration::from_secs(1),
-        "the floor, not every round of the subnet"
-    );
+    assert_eq!(with(Duration::from_secs(600)), Duration::from_secs(60));
+    assert_eq!(with(Duration::ZERO), Duration::from_secs(1));
 }
 
 #[test]
-fn validate_rejects_a_timer_interval_above_a_year() {
+fn validate_rejects_a_check_interval_above_a_year() {
     let over = MAX_TIMER_INTERVAL + Duration::from_secs(1);
     assert_eq!(
         Config {
-            expiry_check_interval: over,
+            books_check_interval: BooksInterval(over),
             ..Config::default()
         }
         .validate(),
         Err(ConfigError::TimerIntervalTooLong {
-            field: "expiry_check_interval_s",
-            interval: over
-        })
-    );
-    assert_eq!(
-        Config {
-            replay_audit_interval: over,
-            ..Config::default()
-        }
-        .validate(),
-        Err(ConfigError::TimerIntervalTooLong {
-            field: "replay_audit_interval_s",
+            field: "books_check_interval_s",
             interval: over
         })
     );
     Config {
-        expiry_check_interval: MAX_TIMER_INTERVAL,
-        replay_audit_interval: MAX_TIMER_INTERVAL,
+        books_check_interval: BooksInterval(MAX_TIMER_INTERVAL),
         ..Config::default()
     }
     .validate()
     .expect("a year exactly is allowed");
-}
-
-#[test]
-fn validate_rejects_an_empty_vault_address() {
-    let config = Config {
-        vault_addresses: BTreeMap::from([
-            (ChainId::ETHEREUM, "0xvault".parse().unwrap()),
-            (ChainId::BASE, "".parse().unwrap()),
-        ]),
-        ..Config::default()
-    };
-    let err = config.validate().unwrap_err();
-    assert_eq!(
-        err,
-        ConfigError::EmptyVaultAddress {
-            chain: ChainId::BASE
-        }
-    );
-    assert!(err.to_string().contains("vault_addresses[8453]"), "{err}");
 }
 
 #[test]
@@ -330,48 +229,25 @@ fn validate_rejects_an_empty_rpc_url() {
         }
     );
     assert!(err.to_string().contains("rpc_urls[42161]"), "{err}");
-    secret_bearing()
-        .validate()
-        .expect("real urls and addresses pass");
+    secret_bearing().validate().expect("real urls pass");
 }
 
-/// Every duration knob is bounded, and each rejection names its field and its cap. A knob
-/// near `u64::MAX` overflows the deadline it is added to, and the comparison that deadline
-/// feeds then never fires: no pending quote is ever evicted, no wait ever times out.
-///
-/// Rewritten for fix wave 6 (M1): a permit window at its cap, a day, passes its own bound
-/// and is then refused because the lookback cannot reach a deposit that old, so for that
-/// knob the cap itself is refused by that rule, not by its own.
+/// Each duration knob is bounded, and each rejection names its field and its cap.
 #[test]
 fn validate_rejects_every_duration_knob_above_its_cap() {
-    /// One duration knob: its wire name, its cap, and a config with that knob set.
     type Knob = (&'static str, Duration, fn(Duration) -> Config);
-    let knobs: [Knob; 5] = [
-        ("quote_ttl_s", MAX_SHORT_DURATION, |d| Config {
-            quote_ttl: d,
+    let knobs: [Knob; 2] = [
+        ("backstop_interval_s", ENGINE_EVERY_MAX, |d| Config {
+            backstop_interval: d,
             ..Config::default()
         }),
-        ("permit_deadline_s", MAX_SHORT_DURATION, |d| Config {
-            permit_deadline: d,
-            ..Config::default()
-        }),
-        ("chain_data_max_age_s", MAX_SHORT_DURATION, |d| Config {
-            chain_data_max_age: d,
-            ..Config::default()
-        }),
-        ("rail_status_max_age_s", MAX_SHORT_DURATION, |d| Config {
-            rail_status_max_age: d,
-            ..Config::default()
-        }),
-        // a batching window is the one knob measured in milliseconds, and a minute of it is
-        // already far more than a batch waits for
         ("batch_window_ms", MAX_BATCH_WINDOW, |d| Config {
             batch_window: d,
             ..Config::default()
         }),
     ];
     for (field, cap, with) in knobs {
-        let over = cap + Duration::from_secs(1);
+        let over = cap + Duration::from_millis(500);
         let err = with(over).validate().unwrap_err();
         assert_eq!(
             err,
@@ -383,105 +259,80 @@ fn validate_rejects_every_duration_knob_above_its_cap() {
         );
         assert!(err.to_string().contains(field), "{err}");
         with(cap).validate().expect("the cap itself is allowed");
-        // the near-overflow shape the bound exists for
-        assert!(with(Duration::from_secs(u64::MAX)).validate().is_err());
     }
 }
 
-/// A zero cap makes no progress at all and an outsized one is the unbounded batch the cap
-/// exists to prevent, so both are refused by name.
+/// A batch of nothing is no batch at all, and an unbounded one is the trap the caps exist
+/// to prevent.
 #[test]
-fn validate_rejects_a_cap_outside_its_range() {
-    let chunk = |cap| Config {
-        audit_chunk_events: AuditChunk::new(cap),
+fn validate_rejects_a_batch_size_outside_its_range() {
+    let batch = |items| Config {
+        max_batch_items: items,
         ..Config::default()
     };
-    assert!(chunk(0).validate().is_err());
-    assert!(chunk(AuditChunk::CEILING + 1).validate().is_err());
-    chunk(AuditChunk::CEILING)
+    for items in [0, MAX_BATCH_ITEMS + 1] {
+        assert_eq!(
+            batch(items).validate(),
+            Err(ConfigError::CapOutOfRange {
+                field: "max_batch_items",
+                cap: items,
+                ceiling: MAX_BATCH_ITEMS
+            })
+        );
+    }
+    batch(MAX_BATCH_ITEMS)
         .validate()
         .expect("the ceiling itself is allowed");
-    // the sweeps' caps went with their sweeps (2026-10-24): nothing reads them, nothing
-    // refuses them
-    Config {
-        max_refunds_per_sweep: RefundsPerSweep::new(0),
-        max_evictions_per_sweep: EvictionsPerSweep::new(0),
+    batch(1).validate().expect("one item a batch is allowed");
+}
+
+/// A chain's block time paces the outbox's receipt reads, so one outside 100 ms to a minute
+/// is a typo, refused by chain.
+#[test]
+fn validate_holds_each_block_time_to_its_range() {
+    let with = |block_time| Config {
+        evm_chains: ChainTable(BTreeMap::from([(
+            ChainId::BASE,
+            EvmChain {
+                block_time,
+                ..base_chain()
+            },
+        )])),
         ..Config::default()
+    };
+    for block_time in [Duration::from_millis(99), Duration::from_millis(60_001)] {
+        assert_eq!(
+            with(block_time).validate(),
+            Err(ConfigError::BlockTimeOutOfRange {
+                chain: ChainId::BASE,
+                block_time,
+            })
+        );
     }
-    .validate()
-    .expect("a cap no sweep reads is not refused");
+    with(MIN_BLOCK_TIME)
+        .validate()
+        .expect("the floor is allowed");
+    with(MAX_BLOCK_TIME)
+        .validate()
+        .expect("the ceiling is allowed");
 }
 
-/// A cap holding its default is absent from the stored bytes, which is what keeps the
-/// stored layout append-only: a config a wasm without these knobs wrote decodes here, and
-/// reads the defaults. The shortest encoding is the one the golden file pins.
+/// The stored copy is the operative one, so it keeps the real urls and every chain entry.
 #[test]
-fn a_cap_at_its_default_is_absent_from_storage_and_reads_back_as_the_default() {
-    let defaults = Config::default().to_bytes().into_owned();
-    // 0x91: an array of the seventeen fields that existed before the caps did
-    assert_eq!(defaults[0], 0x91, "a default cap writes nothing of its own");
-    assert_eq!(
-        Config::from_bytes(Cow::Owned(defaults.clone())),
-        Config::default(),
-        "so bytes without the caps read as the defaults"
-    );
-
-    // the interior case: a later cap set, an earlier one at its default
-    let mixed = Config {
-        max_evictions_per_sweep: EvictionsPerSweep::new(7),
-        ..Config::default()
+fn storage_keeps_the_secrets_and_the_chains() {
+    let config = Config {
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, base_chain())])),
+        cctp_domains: ChainTable(BTreeMap::from([(ChainId::BASE, CctpDomain::new(6))])),
+        eco_enabled: EcoEnabled::ON,
+        simulate_before_sign: true,
+        ..secret_bearing()
     };
-    let bytes = mixed.to_bytes().into_owned();
-    assert!(bytes.len() > defaults.len());
-    assert_eq!(Config::from_bytes(Cow::Owned(bytes)), mixed);
-
-    let both = Config {
-        max_refunds_per_sweep: RefundsPerSweep::new(9),
-        max_evictions_per_sweep: EvictionsPerSweep::new(7),
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(both.to_bytes()), both);
-}
-
-/// The other way a cap reads back as its default: a null where the knob sits, which is what
-/// an encoder that keeps every index writes for a knob it does not set. The golden file
-/// cannot pin this shape, because a golden line must encode back to itself and a cap at its
-/// default encodes as its value, so the decode is checked here instead.
-#[test]
-fn a_cap_stored_as_null_reads_back_as_the_default() {
-    let mixed = Config {
-        max_evictions_per_sweep: EvictionsPerSweep::new(7),
-        ..Config::default()
-    };
-    let mut bytes = mixed.to_bytes().into_owned();
-    // the two elements the record ends with: the refund cap at its default, written out
-    // because a later knob is set, then the eviction cap
-    let tail = bytes.split_off(bytes.len() - 3);
-    assert_eq!(
-        tail,
-        [0x18, RefundsPerSweep::DEFAULT.get() as u8, 0x07],
-        "the stored shape this test rewrites"
-    );
-    // the same record with that knob absent rather than spelled out
-    bytes.extend_from_slice(&[0xf6, 0x07]);
-    assert_eq!(
-        Config::from_bytes(Cow::Owned(bytes)),
-        mixed,
-        "a null where a cap sits is that cap's default"
-    );
-}
-
-/// The stored copy is the operative one, so it must keep the real urls.
-#[test]
-fn storage_keeps_the_secrets() {
-    let config = secret_bearing();
     let back = Config::from_bytes(config.to_bytes());
     assert_eq!(back, config);
     assert_eq!(back.rpc_urls[&ChainId::ETHEREUM].expose(), SECRET);
 }
 
-/// A duration knob is refused with the value it was set to, not a rounding of it: a
-/// batching window of 60.5s is half a second over its cap, and the error says so.
+/// A duration knob is refused with the value it was set to, not a rounding of it.
 #[test]
 fn a_duration_error_keeps_its_milliseconds() {
     let err = Config {
@@ -491,397 +342,19 @@ fn a_duration_error_keeps_its_milliseconds() {
     .validate()
     .unwrap_err();
     assert_eq!(
-        err,
-        ConfigError::DurationAboveCap {
-            field: "batch_window_ms",
-            duration: Duration::from_millis(60_500),
-            cap: MAX_BATCH_WINDOW
-        }
-    );
-    assert_eq!(
         err.to_string(),
         "batch_window_ms is 60.5s, above the cap of 60s"
     );
 }
 
-/// A batch of nothing is no batch at all, and an unbounded one is the trap the caps exist
-/// to prevent, so the batch size is held to the same rule as the per-pass caps.
-#[test]
-fn validate_rejects_a_batch_size_outside_its_range() {
-    let batch = |items| Config {
-        max_batch_items: items,
-        ..Config::default()
-    };
-    assert_eq!(
-        batch(0).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "max_batch_items",
-            cap: 0,
-            ceiling: MAX_BATCH_ITEMS
-        })
-    );
-    let over = MAX_BATCH_ITEMS + 1;
-    assert_eq!(
-        batch(over).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "max_batch_items",
-            cap: over,
-            ceiling: MAX_BATCH_ITEMS
-        })
-    );
-    batch(MAX_BATCH_ITEMS)
-        .validate()
-        .expect("the ceiling itself is allowed");
-    batch(1).validate().expect("one item a batch is allowed");
-}
-
-/// The deposit read looks back a bounded number of blocks from the chain's head for the
-/// user's deposit. A lookback of nothing finds nothing, and an unbounded one is a range no
-/// provider serves, so the knob is a cap like the per-pass ones: one to its ceiling, at its
-/// default absent from storage so the stored config's bytes do not move.
-///
-/// Rewritten for fix wave 6 (M1): the default is the ceiling. Since the v1 claim door went
-/// (2026-10-24) nothing reads the knob, and only its own range is held.
-#[test]
-fn the_deposit_lookback_is_a_cap_with_the_defaults_shape() {
-    // the widest range the read walks, which covers the longest claim at the default grace
-    assert_eq!(
-        Config::default().deposit_lookback_blocks,
-        DepositLookback::new(400_000)
-    );
-    let lookback = |blocks| Config {
-        deposit_lookback_blocks: DepositLookback::new(blocks),
-        ..Config::default()
-    };
-    assert_eq!(
-        lookback(0).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "deposit_lookback_blocks",
-            cap: 0,
-            ceiling: DepositLookback::CEILING
-        })
-    );
-    let over = DepositLookback::CEILING + 1;
-    assert_eq!(
-        lookback(over).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "deposit_lookback_blocks",
-            cap: over,
-            ceiling: DepositLookback::CEILING
-        })
-    );
-    lookback(DepositLookback::CEILING)
-        .validate()
-        .expect("the ceiling itself is allowed");
-    lookback(1)
-        .validate()
-        .expect("one block back is inside the cap");
-
-    // at its default the knob writes nothing, so the stored bytes are the ones the golden
-    // file already pins; set, it is the twenty-first element
-    let defaults = Config::default().to_bytes().into_owned();
-    assert_eq!(
-        defaults[0], 0x91,
-        "a default lookback writes nothing of its own"
-    );
-    let set = lookback(7);
-    let bytes = set.to_bytes().into_owned();
-    assert_eq!(
-        bytes[0], 0x95,
-        "a set lookback is written after the three sweep caps"
-    );
-    assert_eq!(Config::from_bytes(Cow::Owned(bytes)), set);
-}
-
-/// The lookback's ceiling is the widest range the deposit read walks, its window cap times
-/// its window, so no config the door accepts makes the read refuse every range as too
-/// wide (every claim and every arrival check would fail from then on). The old ceiling of
-/// a million blocks is refused by name, the walk's own width is accepted, and one block
-/// more is refused.
-#[test]
-fn the_lookback_ceiling_is_the_range_the_read_can_walk() {
-    let lookback = |blocks| Config {
-        deposit_lookback_blocks: DepositLookback::new(blocks),
-        ..Config::default()
-    };
-    assert_eq!(
-        lookback(1_000_000).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "deposit_lookback_blocks",
-            cap: 1_000_000,
-            ceiling: 400_000,
-        }),
-        "the ceiling the read could never walk"
-    );
-    lookback(400_000)
-        .validate()
-        .expect("forty windows of ten thousand blocks is the walk's own width");
-    assert_eq!(
-        lookback(400_001).validate(),
-        Err(ConfigError::CapOutOfRange {
-            field: "deposit_lookback_blocks",
-            cap: 400_001,
-            ceiling: 400_000,
-        })
-    );
-    assert_eq!(
-        u64::from(DepositLookback::CEILING),
-        MAX_LOGS_WINDOWS * LOGS_WINDOW_BLOCKS,
-        "the ceiling is spelled from the walk's own constants"
-    );
-}
-
-/// The rail knobs are deploy-time facts like the vault addresses: per-chain tables and
-/// three contract addresses. Unset, they are absent from the stored config, so a config
-/// written before they existed reads back with them empty and the golden lines do not
-/// move; set, they round-trip, tables by chain.
-#[test]
-fn the_rail_knobs_are_absent_while_unset_and_round_trip_when_set() {
-    let defaults = Config::default();
-    assert!(defaults.cctp_domains.0.is_empty());
-    assert!(defaults.usdc_addresses.0.is_empty());
-    assert!(defaults.evm_chains.0.is_empty());
-    assert_eq!(defaults.eco_portal, None);
-    assert_eq!(
-        defaults.to_bytes()[0],
-        0x91,
-        "unset rail knobs write nothing of their own"
-    );
-
-    let usdc: EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        .parse()
-        .unwrap();
-    let messenger: EvmAddress = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
-        .parse()
-        .unwrap();
-    let wired = Config {
-        cctp_domains: ChainTable(BTreeMap::from([
-            (ChainId::ETHEREUM, CctpDomain::new(0)),
-            (ChainId::BASE, CctpDomain::new(6)),
-            (ChainId::ARBITRUM, CctpDomain::new(3)),
-        ])),
-        usdc_addresses: ChainTable(BTreeMap::from([(ChainId::BASE, usdc)])),
-        evm_chains: ChainTable(BTreeMap::from([(
-            ChainId::BASE,
-            EvmChain {
-                swapic: EvmAddress::new([0x5a; 20]),
-                runner: EvmAddress::new([0x5b; 20]),
-                cctp_receiver: EvmAddress::new([0x5c; 20]),
-                usdc,
-                token_messenger: messenger,
-                message_transmitter: EvmAddress::new([0x81; 20]),
-                gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
-                gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
-                min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
-                usdc_name: None,
-                usdc_version: None,
-            },
-        )])),
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(wired.to_bytes()), wired);
-    assert_eq!(
-        wired.cctp_domains.get(ChainId::BASE),
-        Some(CctpDomain::new(6))
-    );
-    assert_eq!(wired.cctp_domains.get(ChainId::POLYGON), None);
-    assert_eq!(wired.usdc_addresses.get(ChainId::BASE), Some(usdc));
-    assert_eq!(
-        wired
-            .evm_chains
-            .get(ChainId::BASE)
-            .map(|chain| chain.token_messenger),
-        Some(messenger)
-    );
-
-    // the last knob set: everything before it is written, the ones after it are not
-    let portal_only = Config {
-        eco_portal: Some(messenger),
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(portal_only.to_bytes()), portal_only);
-    assert_eq!(
-        portal_only.to_bytes()[..2],
-        [0x98, 26],
-        "twenty-six fields up to the portal, a length CBOR writes in its own byte"
-    );
-    // a table written as null, by an encoder that keeps every index, reads as empty
-    let empty: ChainTable<CctpDomain> = minicbor::decode(&[0xf6]).unwrap();
-    assert!(empty.0.is_empty());
-}
-
-/// USDC's domain name and version are appended to a chain's stored entry: an entry naming
-/// none writes exactly what it wrote before the two fields existed (nine fields, so a
-/// stored config reads back unchanged), and one naming its own reads back as it.
-#[test]
-fn a_chains_usdc_domain_is_appended_to_its_stored_entry() {
-    let usual = EvmChain {
-        swapic: EvmAddress::new([0x5a; 20]),
-        runner: EvmAddress::new([0x5b; 20]),
-        cctp_receiver: EvmAddress::new([0x5c; 20]),
-        usdc: EvmAddress::new([0x5d; 20]),
-        token_messenger: EvmAddress::new([0x5e; 20]),
-        message_transmitter: EvmAddress::new([0x5f; 20]),
-        gas_limit: PerAction::all(GasAmount::from(400_000_u64)),
-        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
-        min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
-        usdc_name: None,
-        usdc_version: None,
-    };
-    let bytes = minicbor::to_vec(usual).unwrap();
-    assert_eq!(bytes[0], 0x89, "an array of nine fields, as before");
-    assert_eq!(minicbor::decode::<EvmChain>(&bytes).unwrap(), usual);
-    let named = EvmChain {
-        usdc_name: Some("USDC".parse().unwrap()),
-        ..usual
-    };
-    let bytes = minicbor::to_vec(named).unwrap();
-    assert_eq!(bytes[0], 0x8a, "ten fields: the name, the version left out");
-    assert_eq!(minicbor::decode::<EvmChain>(&bytes).unwrap(), named);
-    let both = EvmChain {
-        usdc_version: Some("2".parse().unwrap()),
-        ..named
-    };
-    assert_eq!(
-        minicbor::decode::<EvmChain>(&minicbor::to_vec(both).unwrap()).unwrap(),
-        both
-    );
-}
-
-/// The Eco rail is off until its route is designed, so the knob that turns it on is off by
-/// default and writes nothing while it is: a config written before the knob existed reads
-/// back with Eco off and the golden lines do not move. Turned on, it round-trips, and a
-/// null where it sits reads as off.
-#[test]
-fn eco_is_off_by_default_and_absent_from_storage_while_it_is() {
-    let defaults = Config::default();
-    assert!(!defaults.eco_enabled.is_on());
-    assert_eq!(
-        defaults.to_bytes()[0],
-        0x91,
-        "the knob at its default writes nothing of its own"
-    );
-    let on = Config {
-        eco_enabled: EcoEnabled::ON,
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(on.to_bytes()), on);
-    assert!(on.eco_enabled.is_on());
-    assert_eq!(
-        on.to_bytes()[..2],
-        [0x98, 27],
-        "twenty-seven fields up to the knob"
-    );
-    let off: EcoEnabled = minicbor::decode(&[0xf6]).unwrap();
-    assert!(!off.is_on(), "a null where the knob sits is Eco off");
-}
-
-/// The grace a claim is admitted in after a quote's deposit deadline is an hour unless a
-/// deploy sets it, and it writes nothing of its own at that default: a config written
-/// before the knob existed reads back with the hour and the golden lines do not move. Set,
-/// it round-trips, and a null where it sits reads as the default.
-#[test]
-fn the_claim_grace_is_an_hour_by_default_and_absent_from_storage_while_it_is() {
-    let defaults = Config::default();
-    assert_eq!(defaults.claim_grace.get(), Duration::from_secs(3_600));
-    assert_eq!(
-        defaults.to_bytes()[0],
-        0x91,
-        "the knob at its default writes nothing of its own"
-    );
-    let set = Config {
-        claim_grace: ClaimGrace::new(Duration::from_secs(900)),
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(set.to_bytes()), set);
-    assert_eq!(
-        set.to_bytes()[..2],
-        [0x98, 28],
-        "twenty-eight fields up to the knob"
-    );
-    let null: ClaimGrace = minicbor::decode(&[0xf6]).unwrap();
-    assert_eq!(
-        null,
-        ClaimGrace::DEFAULT,
-        "a null where the knob sits is the hour"
-    );
-}
-
-/// A grace shorter than a watcher restart strands the deposits the restart held up, and
-/// one longer than a day keeps a quote in the pending store for longer than any window
-/// inside one swap may be, so both are refused by name. The bounds themselves are allowed.
-///
-/// Since the v1 claim door went (2026-10-24) no lookback cross-check refuses a day of grace.
-#[test]
-fn validate_holds_the_claim_grace_between_ten_minutes_and_a_day() {
-    let with = |secs| Config {
-        claim_grace: ClaimGrace::new(Duration::from_secs(secs)),
-        ..Config::default()
-    };
-    assert_eq!(
-        with(599).validate(),
-        Err(ConfigError::DurationBelowFloor {
-            field: "claim_grace_s",
-            duration: Duration::from_secs(599),
-            floor: MIN_CLAIM_GRACE,
-        })
-    );
-    assert_eq!(
-        with(86_401).validate(),
-        Err(ConfigError::DurationAboveCap {
-            field: "claim_grace_s",
-            duration: Duration::from_secs(86_401),
-            cap: MAX_SHORT_DURATION,
-        })
-    );
-    with(600).validate().expect("the floor itself is allowed");
-    ClaimGrace::new(Duration::from_secs(86_400))
-        .validate()
-        .expect("the ceiling itself is inside the grace's own bounds");
-    with(86_400)
-        .validate()
-        .expect("and a whole config holding it");
-    assert_eq!(
-        with(599).validate().unwrap_err().to_string(),
-        "claim_grace_s is 599s, below the floor of 600s"
-    );
-}
-
-/// A claim may be asked until the quote's expiry, the permit window after it, and the
-/// grace after that: the one window the claim, the pending store's eviction and a full
-/// store's registration all read, so none of them lets a quote go before the others do.
-#[test]
-fn the_claim_window_is_the_permit_window_and_the_grace_after_it() {
-    assert_eq!(
-        Config::default().claim_window(),
-        Duration::from_secs(120 + 3_600)
-    );
-    let short = Config {
-        permit_deadline: Duration::from_secs(30),
-        claim_grace: ClaimGrace::new(Duration::from_secs(600)),
-        ..Config::default()
-    };
-    assert_eq!(short.claim_window(), Duration::from_secs(630));
-}
-
-/// The chains' CCTP minimum fees are a table like the other rail knobs: nothing of their
-/// own while it is empty, so the golden lines do not move, a round trip when set, and a
-/// minimum at or above the whole amount, which Circle's own setter refuses, is refused by
+/// A minimum at or above the whole amount, which Circle's own setter refuses, is refused by
 /// chain.
 #[test]
-fn the_cctp_minimum_fees_are_a_table_absent_while_empty_and_below_the_whole() {
-    assert!(Config::default().cctp_min_fees.0.is_empty());
-    assert_eq!(Config::default().to_bytes()[0], 0x91, "nothing of its own");
+fn a_cctp_minimum_fee_stays_below_the_whole() {
     let set = Config {
         cctp_min_fees: ChainTable(BTreeMap::from([(ChainId::BASE, CctpMinFee::new(1_000))])),
         ..Config::default()
     };
-    assert_eq!(Config::from_bytes(set.to_bytes()), set);
-    assert_eq!(
-        set.to_bytes()[..2],
-        [0x98, 29],
-        "twenty-nine fields up to the table"
-    );
     set.validate()
         .expect("a basis point is a minimum Circle may set");
     let whole = Config {
@@ -901,14 +374,14 @@ fn the_cctp_minimum_fees_are_a_table_absent_while_empty_and_below_the_whole() {
     );
 }
 
-/// The watcher and the submit API simulate before they ask the canister to sign, so the
-/// canister's own simulation is off unless a deploy turns it on.
+/// Every action has its own row, the sweep's included, and `all` sets every row.
 #[test]
-fn simulation_is_off_by_default() {
-    assert!(!Config::default().simulate_before_sign);
-    let on = Config {
-        simulate_before_sign: true,
-        ..Config::default()
-    };
-    assert_eq!(Config::from_bytes(on.to_bytes()), on);
+fn every_gas_action_has_its_row_and_its_name() {
+    let rows = PerAction::all(7_u64);
+    for action in GasAction::ALL {
+        assert_eq!(rows.get(action), Some(7));
+        assert_eq!(GasAction::from_name(action.name()), Some(action));
+    }
+    assert_eq!(GasAction::Sweep.name(), "sweep");
+    assert_eq!(PerAction::<u64>::default().get(GasAction::Sweep), None);
 }

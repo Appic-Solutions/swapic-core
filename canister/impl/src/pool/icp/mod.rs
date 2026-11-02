@@ -50,6 +50,8 @@ pub struct StakeRequest {
     pub from_subaccount: Option<[u8; 32]>,
     pub amount: TokenAmount,
     pub owner: PoolAccount,
+    /// Swapic's move fee out of `amount`.
+    pub move_fee: TokenAmount,
 }
 
 impl StakeRequest {
@@ -61,6 +63,7 @@ impl StakeRequest {
             from_subaccount: subaccount("from_subaccount", args.from_subaccount)?,
             amount: settlement_api::types::pool::amount("amount", &args.amount)?,
             owner: PoolAccount::try_from(args.owner)?,
+            move_fee: settlement_api::types::pool::amount("move_fee", &args.move_fee)?,
         })
     }
 }
@@ -75,6 +78,8 @@ pub struct WithdrawRequest {
     pub token_out: Principal,
     pub min_out: u128,
     pub to: IcpAccount,
+    /// Swapic's move fee out of `usdc`.
+    pub move_fee: TokenAmount,
 }
 
 impl WithdrawRequest {
@@ -92,6 +97,7 @@ impl WithdrawRequest {
             token_out: args.token_out,
             min_out: settlement_api::types::pool::u128_of("min_out", &args.min_out)?,
             to: args.to.try_into()?,
+            move_fee: settlement_api::types::pool::amount("move_fee", &args.move_fee)?,
         })
     }
 
@@ -293,6 +299,7 @@ pub async fn stake(
             },
             amount: request.amount,
             created_at: now(),
+            move_fee: request.move_fee,
         },
         now(),
     )
@@ -348,6 +355,7 @@ pub async fn withdraw(
                 amount: Some(plan.amount),
                 token: Some(PrincipalBytes(plan.ckusdc)),
             },
+            move_fee: request.move_fee,
         },
         at,
     )

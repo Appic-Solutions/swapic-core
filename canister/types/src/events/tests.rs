@@ -184,6 +184,30 @@ pub(crate) fn samples() -> Vec<EventType> {
                 block: BlockNumber::new(33),
             },
         },
+        EventType::TxFinal {
+            purpose: TxPurpose::Sweep(34),
+            chain_id: ChainId::BASE,
+            nonce: Nonce::new(35),
+            tx_hash: TxHash::new([36; 32]),
+            outcome: TxOutcome::Succeeded {
+                block: BlockNumber::new(37),
+            },
+        },
+        EventType::Swept {
+            sweep: crate::sweep::Sweep {
+                id: 38,
+                asset: crate::sweep::SweepAsset::FeeUsdc,
+                to: crate::sweep::SweepTo::Evm {
+                    chain: ChainId::BASE,
+                    to: EvmAddress::new([39; 20]),
+                },
+                amount: TokenAmount::from(40_000_000_u32),
+            },
+        },
+        EventType::SweepReverted {
+            id: 38,
+            why: "reverted".into(),
+        },
     ]
 }
 

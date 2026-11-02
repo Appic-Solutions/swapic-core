@@ -44,6 +44,7 @@ fn config() -> types::Config {
         min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     types::Config {
         evm_chains: ChainTable(BTreeMap::from([
@@ -76,7 +77,7 @@ fn request(usdc_out: u64, nonce: u64) -> WithdrawalRequest {
         staker,
         usdc: usdc(usdc_out),
         max_shares: burned,
-        rebalance_share: usdc(usdc_out)
+        move_fee: usdc(usdc_out)
             .checked_mul(2_u8)
             .and_then(|scaled| scaled.checked_div_ceil(10_000_u32))
             .unwrap(),
@@ -131,7 +132,7 @@ fn a_signed_withdrawal_burns_its_shares_and_waits() {
         let opened = payout(id).unwrap();
         assert_eq!(opened.status, PayoutStatus::Waiting);
         let amount = usdc(500)
-            .checked_sub(request.rebalance_share)
+            .checked_sub(request.move_fee)
             .and_then(|left| left.checked_sub(request.network_fee))
             .unwrap();
         assert_eq!(opened.amount, Some(amount));
@@ -197,12 +198,10 @@ fn an_expired_deadline_or_terms_below_the_floors_are_refused() {
             planned(&late, &signed(&late, &key())).unwrap_err(),
             PoolError::Expired
         );
-        let mut cheap = request(500, 7);
-        cheap.rebalance_share = cheap.rebalance_share.checked_sub(TokenAmount::ONE).unwrap();
-        assert!(matches!(
-            planned(&cheap, &signed(&cheap, &key())),
-            Err(PoolError::NotAllowed(why)) if why.contains("rebalancing share")
-        ));
+        // the move fee has no floor on the canister
+        let mut free = request(500, 7);
+        free.move_fee = TokenAmount::ZERO;
+        assert!(planned(&free, &signed(&free, &key())).is_ok());
         let mut cheap = request(500, 7);
         cheap.network_fee = TokenAmount::from(49_999_u32);
         assert!(matches!(
@@ -248,7 +247,7 @@ fn a_withdrawal_above_its_value_or_its_cap_is_refused() {
         // 2,001 is above the staker's 2,000
         let mut above = request(2_000, 7);
         above.usdc = usdc(2_001);
-        above.rebalance_share = usdc(1);
+        above.move_fee = usdc(1);
         above.max_shares = Shares::new(u128::MAX);
         assert!(matches!(
             planned(&above, &signed(&above, &key())),
@@ -280,6 +279,7 @@ fn a_withdrawal_the_base_pocket_cannot_cover_is_queued() {
                 from: crate::storage::pool::tests::account(9),
                 amount: usdc(1_000),
                 created_at: at(2),
+                move_fee: TokenAmount::ZERO,
             },
             at(2),
         )
@@ -290,7 +290,7 @@ fn a_withdrawal_the_base_pocket_cannot_cover_is_queued() {
                 id,
                 owner,
                 amount: usdc(1_000),
-                rebalance_share: TokenAmount::ZERO,
+                move_fee: TokenAmount::ZERO,
                 shares,
                 block: 3,
             },
@@ -307,7 +307,7 @@ fn a_withdrawal_the_base_pocket_cannot_cover_is_queued() {
         let second = WithdrawalRequest {
             usdc: TokenAmount::from(1_500_000_u32),
             max_shares: Shares::new(u128::MAX),
-            rebalance_share: TokenAmount::from(1_000_u32),
+            move_fee: TokenAmount::from(1_000_u32),
             ..request
         };
         let second = WithdrawalRequest { nonce: 8, ..second };

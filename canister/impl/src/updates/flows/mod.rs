@@ -1,18 +1,15 @@
-//! The flow doors: the gasless relay, the CCTP finish, and their settings. The ABI v2 ICP
-//! doors (`register_icp_quote`, `start_icp_swap`, `register_evm_quote`) are gone: the pool
-//! replaces them (P11a).
+//! The flow doors: the gasless relay, the CCTP finish, and their settings.
 
 use crate::guards::require_controller;
 use crate::relay;
 use crate::storage::flow_settings;
 use ic_cdk::update;
-use settlement_api::types::chain_data::ChainData;
+pub use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::events::Hash32;
 pub use settlement_api::types::flow::{FlowCallError, FlowSettings};
 use types::ChainId;
 
-/// Controller-only. The routers, the ck canisters, the ICPSwap pools a quote may name,
-/// and the windows the flows read.
+/// Controller-only. The ck canisters, the relay window and the rebalancing's addresses.
 #[update]
 pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
     require_controller().map_err(FlowCallError::Guard)?;
@@ -28,14 +25,13 @@ pub fn set_flow_settings(settings: FlowSettings) -> Result<(), FlowCallError> {
 /// chain's `min_network_fee` for its rail, plus on CCTP the destination's for the arrival;
 /// it is signed with exactly `gas_limit` (the limit the quoter charged for), refused when
 /// that is above the chain's maximum for the action, and held to the gas rule. Signed
-/// once per order id: a second call answers the first one's id. Answers the signed
-/// transaction's id in `signed_txs`; `relay_status(order_id)` follows it.
+/// once per order id: a second call answers the first one's id. An order whose memo is
+/// longer than 256 bytes is refused. Answers the signed transaction's id in `signed_txs`.
 ///
-/// `reading`, when given, is `chain_id`'s reading the watcher priced the relay on. It is
-/// stored right after the role and the halt, as `push_chain_data` stores one, so no
-/// separate push has to land before this call; an invalid one refuses the call with
-/// `push_chain_data`'s error text. A reading whose block is not above the stored one's is
-/// kept out and the stored one is used, as it is with none.
+/// `reading`, when given, is `chain_id`'s head and gas price the watcher priced the relay
+/// on, stored right after the role and the halt; an invalid one refuses the call. With none
+/// the canister reads the gas price itself. A reading whose block is not above the stored
+/// one's is kept out.
 #[update]
 pub async fn relay_gasless(
     chain_id: u64,
@@ -62,11 +58,10 @@ pub use settlement_api::types::flow::Recipe;
 /// and action, and one arrival per source transaction.
 /// Answers the signed transaction's id in `signed_txs`.
 ///
-/// `reading`, when given, is `chain_id`'s reading the watcher priced the finish on. It is
-/// stored right after the role and the halt, as `push_chain_data` stores one, so no
-/// separate push has to land before this call; an invalid one refuses the call with
-/// `push_chain_data`'s error text. A reading whose block is not above the stored one's is
-/// kept out and the stored one is used, as it is with none.
+/// `reading`, when given, is `chain_id`'s head and gas price the watcher priced the finish
+/// on, stored right after the role and the halt; an invalid one refuses the call. With none
+/// the canister reads the gas price itself. A reading whose block is not above the stored
+/// one's is kept out.
 #[update]
 pub async fn finish_cctp(
     chain_id: u64,

@@ -292,7 +292,7 @@ impl World {
             id,
             owner,
             amount: TokenAmount::from(amount),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             shares: Shares::new(shares),
             block: 0,
         });
@@ -306,7 +306,7 @@ impl World {
             kind,
             min_usdc: TokenAmount::from(usdc(100)),
             premium: TokenAmount::from(if swap { usdc(1) } else { 0 }),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             src_chain: ChainId::ARBITRUM,
             src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
                 .parse()
@@ -800,7 +800,7 @@ fn swap_world() -> (World, types::EvmAddress) {
         kind: DepositKind::Stake { owner },
         min_usdc: TokenAmount::from(usdc(1_000)),
         premium: TokenAmount::ZERO,
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         src_chain: ChainId::new(BASE),
         src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
             .parse()
@@ -837,10 +837,9 @@ fn swap_world() -> (World, types::EvmAddress) {
         "set_payout_settings",
         encode_one(PayoutSettings {
             min_network_fee: Nat::from(50_000_u32),
-            rebalance_share_floor_bps: 2,
             order_wait_s: 120,
             max_payout_gas: 2_000_000,
-            cctp_min_network_fee: None,
+            cctp_payouts: false,
         })
         .unwrap(),
     );
@@ -1494,7 +1493,7 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
                 },
                 premium: Nat::from(0_u32),
                 icp_fees: Nat::from(0_u32),
-                rebalance_share: Nat::from(0_u32),
+                move_fee: Nat::from(0_u32),
                 salt: vec![7; 32],
             },
         };

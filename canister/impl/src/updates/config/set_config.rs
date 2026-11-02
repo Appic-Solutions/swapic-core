@@ -18,10 +18,7 @@ pub fn set_config(new: Config) -> Result<(), SetConfigError> {
     })?;
     // after the write, so a timer reads its new interval; only a moved interval restarts,
     // because a restart pushes the next run a whole interval out
-    if changed.audit {
-        task_manager::restart_audit_timer();
-    }
-    if changed.rail_status {
+    if changed.backstop {
         task_manager::restart_rail_status_timer();
     }
     if changed.books {

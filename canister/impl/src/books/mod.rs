@@ -196,8 +196,7 @@ async fn check_balance(
         return Err(ReadFailure::NoRpcUrl);
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let head = chain_data::fresh(chain_id, now, config.chain_data_max_age)
-        .ok_or(ReadFailure::NoChainData)?;
+    let head = chain_data::fresh(chain_id, now).ok_or(ReadFailure::NoChainData)?;
     let depth = credit_confirmations(config, chain_id).map_err(|_| ReadFailure::NoDepth)?;
     let block = head
         .block

@@ -6,13 +6,10 @@ const SECRET: &str = "https://eth-mainnet.g.alchemy.com/v2/secret-key";
 /// What a real deploy sends: two provider urls, both of them secrets.
 fn secret_bearing() -> Config {
     Config {
-        platform_fee_bps: 10,
         rpc_urls: BTreeMap::from([
             (1, SECRET.to_string()),
             (8453, "https://base.example/rpc?key=hunter2".to_string()),
         ]),
-        // a vault address is public on-chain data, not a secret: it must survive
-        vault_addresses: BTreeMap::from([(1, "0xvault".to_string())]),
         ecdsa_key_name: "key_1".to_string(),
         ..Config::default()
     }
@@ -24,13 +21,11 @@ fn secret_bearing() -> Config {
 fn redacted_blanks_rpc_urls_and_nothing_else() {
     let full = secret_bearing();
     let public = Config::from(types::Config::try_from(full.clone()).unwrap());
-
     assert_eq!(
         public.rpc_urls,
         BTreeMap::from([(1, "***".to_string()), (8453, "***".to_string())]),
         "every value blanked, every chain id kept"
     );
-    // put the original urls back: if that restores the whole record, nothing else moved
     assert_eq!(
         Config {
             rpc_urls: full.rpc_urls.clone(),
@@ -41,8 +36,7 @@ fn redacted_blanks_rpc_urls_and_nothing_else() {
 }
 
 /// The full config crosses the wire in `get_config_full` and `set_config`, so a stray debug
-/// print of either must not show a key: every url blanks, every chain id and every other
-/// knob stays.
+/// print of either must not show a key.
 #[test]
 fn debug_never_prints_an_rpc_url() {
     let full = secret_bearing();
@@ -54,11 +48,7 @@ fn debug_never_prints_an_rpc_url() {
         shown.contains("rpc_urls: {1: \"***\", 8453: \"***\"}"),
         "{shown}"
     );
-    assert!(
-        shown.contains("0xvault")
-            && shown.contains("key_1")
-            && shown.contains("platform_fee_bps: 10")
-    );
+    assert!(shown.contains("key_1"));
 }
 
 /// The ops view carries the urls exactly as they were written.
@@ -71,7 +61,7 @@ fn unredacted_round_trips_the_whole_config() {
 
 /// The read-modify-write footgun: writing the public view back would brick rpc access.
 #[test]
-fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
+fn the_redacted_placeholder_is_no_rpc_url() {
     let public = Config::from(types::Config::try_from(secret_bearing()).unwrap());
     let err = types::Config::try_from(public).unwrap_err();
     assert_eq!(
@@ -80,54 +70,44 @@ fn validate_rejects_the_redacted_placeholder_as_an_rpc_url() {
             chain: ChainId::ETHEREUM
         }
     );
-    assert!(err.to_string().contains("rpc_urls"), "{err}");
+    assert_eq!(
+        ConfigError::from(err),
+        ConfigError::RedactedRpcUrl { chain_id: 1 }
+    );
 }
 
+/// Every duration crosses the wire in its own unit.
 #[test]
 fn every_duration_keeps_its_unit() {
     let wire = Config {
-        quote_ttl_s: 46,
         batch_window_ms: 1_500,
-        decision_timeout_min: 31,
+        backstop_interval_s: 20,
+        books_check_interval_s: 1_800,
         ..Config::default()
     };
     let domain = types::Config::try_from(wire.clone()).unwrap();
-    assert_eq!(domain.quote_ttl, Duration::from_secs(46));
     assert_eq!(domain.batch_window, Duration::from_millis(1_500));
-    assert_eq!(domain.decision_timeout, Duration::from_secs(31 * 60));
+    assert_eq!(domain.backstop_interval, Duration::from_secs(20));
+    assert_eq!(domain.books_check_interval.0, Duration::from_secs(1_800));
     assert_eq!(Config::unredacted(domain), wire);
+    assert_eq!(Config::default().books_check_interval_s, 3_600);
 }
 
-/// The per-tick caps cross the wire as plain counts. Nothing refuses them since their sweeps
-/// went (2026-10-24).
-#[test]
-fn the_sweep_caps_cross_the_wire() {
-    let wire = Config {
-        max_refunds_per_sweep: 7,
-        max_evictions_per_sweep: 9,
-        ..Config::default()
-    };
-    let domain = types::Config::try_from(wire.clone()).unwrap();
-    assert_eq!(domain.max_refunds_per_sweep.get(), 7);
-    assert_eq!(domain.max_evictions_per_sweep.get(), 9);
-    assert_eq!(Config::unredacted(domain), wire);
-}
-
-/// A duration knob above its cap is refused by name too, with the cap it broke, and in
-/// milliseconds, so the one knob set in milliseconds is reported as it was set.
+/// A duration knob above its cap is refused by name, with the cap it broke, in
+/// milliseconds.
 #[test]
 fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
     let domain = types::Config::try_from(Config {
-        permit_deadline_s: 86_401,
+        backstop_interval_s: 61,
         ..Config::default()
     })
     .unwrap();
     assert_eq!(
         ConfigError::from(domain.validate().unwrap_err()),
         ConfigError::DurationAboveCap {
-            field: "permit_deadline_s".to_string(),
-            duration_ms: 86_401_000,
-            cap_ms: 86_400_000
+            field: "backstop_interval_s".to_string(),
+            duration_ms: 61_000,
+            cap_ms: 60_000
         }
     );
     let domain = types::Config::try_from(Config {
@@ -145,7 +125,7 @@ fn a_duration_above_its_cap_names_its_knob_on_the_wire() {
     );
 }
 
-/// The batch size is a cap like the per-pass ones, and a bad one names its knob.
+/// The batch size is a cap, and a bad one names its knob.
 #[test]
 fn a_batch_size_outside_its_range_names_its_knob_on_the_wire() {
     let domain = types::Config::try_from(Config {
@@ -163,100 +143,33 @@ fn a_batch_size_outside_its_range_names_its_knob_on_the_wire() {
     );
 }
 
-#[test]
-fn a_timeout_too_long_for_a_duration_is_refused() {
-    let wire = Config {
-        decision_timeout_min: u64::MAX / 60 + 1,
-        ..Config::default()
-    };
-    assert_eq!(
-        types::Config::try_from(wire),
-        Err(types::ConfigError::DurationTooLong {
-            field: "decision_timeout_min"
-        })
-    );
-}
-
-#[test]
-fn a_vault_address_over_the_cap_is_refused() {
-    let wire = Config {
-        vault_addresses: BTreeMap::from([(8453, "a".repeat(257))]),
-        ..Config::default()
-    };
-    assert_eq!(
-        types::Config::try_from(wire),
-        Err(types::ConfigError::VaultAddressTooLong {
-            chain: ChainId::BASE,
-            len: 257
-        })
-    );
-}
-
-#[test]
-fn a_config_error_names_its_knob_on_the_wire() {
-    let redacted = Config::from(types::Config::try_from(secret_bearing()).unwrap());
-    let err = types::Config::try_from(redacted).unwrap_err();
-    assert_eq!(
-        ConfigError::from(err),
-        ConfigError::RedactedRpcUrl { chain_id: 1 }
-    );
-    let incoherent = types::Config {
-        platform_fee: types::BasisPoints::new(40),
-        ..types::Config::default()
-    };
-    assert_eq!(
-        ConfigError::from(incoherent.validate().unwrap_err()),
-        ConfigError::PlatformFeeAboveMax {
-            platform_fee_bps: 40,
-            max_fee_bps: 30
-        }
-    );
-    let empty_vault = Config {
-        vault_addresses: BTreeMap::from([(8453, String::new())]),
-        ..Config::default()
-    };
-    let err = types::Config::try_from(empty_vault)
-        .unwrap()
-        .validate()
-        .unwrap_err();
-    assert_eq!(
-        ConfigError::from(err),
-        ConfigError::EmptyVaultAddress { chain_id: 8453 }
-    );
-}
-
-/// The deposit lookback crosses the wire as a plain block count like the per-pass caps,
-/// and one outside its range comes back named.
-///
-/// Rewritten for fix wave 4 (N3): the refusal names the ceiling the read can walk,
-/// 400,000 blocks, where it named 1,000,000.
-/// Rewritten for fix wave 6 (M1): the default is that ceiling. The cross-check against
-/// the claims went with the v1 claim door (2026-10-24).
-#[test]
-fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
-    let wire = Config {
-        deposit_lookback_blocks: 4_321,
-        ..Config::default()
-    };
-    let domain = types::Config::try_from(wire.clone()).unwrap();
-    assert_eq!(domain.deposit_lookback_blocks.get(), 4_321);
-    assert_eq!(Config::unredacted(domain), wire);
-    // the widest range the read walks, which reaches every deposit a claim may be asked
-    // for at the default grace
-    assert_eq!(Config::default().deposit_lookback_blocks, 400_000);
-    let zero = types::Config::try_from(Config {
-        deposit_lookback_blocks: 0,
-        ..Config::default()
-    })
-    .unwrap();
-    assert_eq!(
-        ConfigError::from(zero.validate().unwrap_err()),
-        ConfigError::CapOutOfRange {
-            field: "deposit_lookback_blocks".to_string(),
-            cap: 0,
-            ceiling: 400_000
-        }
-    );
+/// Arbitrum as design C runs on it, USDC's domain left as `name` and `version` say.
+fn arbitrum(name: Option<&str>, version: Option<&str>) -> EvmChainConfig {
+    EvmChainConfig {
+        swapic: "0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7".to_string(),
+        runner: "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C".to_string(),
+        cctp_receiver: "0x5555555555555555555555555555555555555555".to_string(),
+        usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
+        token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
+        message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
+        gas_limit: ActionGas {
+            relay_cctp: 400_000,
+            complete_swap: 1_200_000,
+            sweep: Some(80_000),
+            ..ActionGas::default()
+        },
+        gas_budget_wei: ActionAmounts {
+            relay_cctp: Nat::from(1_000_000_000_000_000_u64),
+            ..ActionAmounts::default()
+        },
+        min_network_fee: ActionAmounts {
+            complete_swap: Nat::from(60_000_u64),
+            ..ActionAmounts::default()
+        },
+        usdc_domain_name: name.map(str::to_string),
+        usdc_domain_version: version.map(str::to_string),
+        block_time_ms: 250,
+    }
 }
 
 /// The rail knobs cross the wire as chain-keyed tables and optional addresses, print as
@@ -265,54 +178,23 @@ fn the_deposit_lookback_crosses_the_wire_and_a_bad_one_names_its_knob() {
 fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
     let wire = Config {
         cctp_domains: BTreeMap::from([(8453, 6), (42161, 3)]),
-        usdc_addresses: BTreeMap::from([(
-            8453,
-            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string(),
-        )]),
-        evm_chains: BTreeMap::from([(
-            42161,
-            EvmChainConfig {
-                swapic: "0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7".to_string(),
-                runner: "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C".to_string(),
-                cctp_receiver: "0x5555555555555555555555555555555555555555".to_string(),
-                usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
-                token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
-                message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
-                gas_limit: ActionGas {
-                    relay_cctp: 400_000,
-                    complete_swap: 1_200_000,
-                    ..ActionGas::default()
-                },
-                gas_budget_wei: ActionAmounts {
-                    relay_cctp: Nat::from(1_000_000_000_000_000_u64),
-                    ..ActionAmounts::default()
-                },
-                min_network_fee: ActionAmounts {
-                    complete_swap: Nat::from(60_000_u64),
-                    ..ActionAmounts::default()
-                },
-                usdc_domain_name: None,
-                usdc_domain_version: None,
-            },
-        )]),
+        evm_chains: BTreeMap::from([(42161, arbitrum(None, None))]),
         eco_portal: Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string()),
         ..Config::default()
     };
     let domain = types::Config::try_from(wire.clone()).unwrap();
+    let chain = domain.evm_chains.get(types::ChainId::ARBITRUM).unwrap();
     assert_eq!(
-        domain.cctp_domains.get(types::ChainId::BASE),
-        Some(types::rail::CctpDomain::new(6))
+        chain.gas_limit.complete_swap,
+        types::GasAmount::from(1_200_000_u64)
     );
     assert_eq!(
-        domain
-            .evm_chains
-            .get(types::ChainId::ARBITRUM)
-            .map(|chain| chain.gas_limit.complete_swap),
-        Some(types::GasAmount::from(1_200_000_u64))
+        chain.gas_limit.get(types::config::GasAction::Sweep),
+        Some(types::GasAmount::from(80_000_u64))
     );
+    assert_eq!(chain.block_time, Duration::from_millis(250));
     assert_eq!(Config::unredacted(domain), wire);
 
-    // a lower-case spelling comes back checksummed: the address is the bytes
     let lower = Config {
         eco_portal: Some("0xec000064576f9c95a8623bc0eff3db6d296ea6df".to_string()),
         ..Config::default()
@@ -321,19 +203,6 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
     assert_eq!(
         Config::unredacted(domain).eco_portal,
         Some("0xEC000064576f9C95a8623Bc0eff3db6d296ea6df".to_string())
-    );
-
-    let bad_usdc = Config {
-        usdc_addresses: BTreeMap::from([(8453, "usdc".to_string())]),
-        ..Config::default()
-    };
-    assert_eq!(
-        types::Config::try_from(bad_usdc).map(drop),
-        Err(types::ConfigError::NotAnAddress {
-            field: "usdc_addresses",
-            chain: Some(types::ChainId::BASE),
-            reason: types::evm::EvmAddressError::NoPrefix,
-        })
     );
     let bad_portal = Config {
         eco_portal: Some("0x12".to_string()),
@@ -350,25 +219,31 @@ fn the_rail_knobs_cross_the_wire_and_a_bad_address_names_its_knob() {
     );
 }
 
-/// Arbitrum as design C runs on it, USDC's domain left as `name` and `version` say.
-fn arbitrum(name: Option<&str>, version: Option<&str>) -> EvmChainConfig {
-    EvmChainConfig {
-        swapic: "0xF2E9d13Ba690c71cfF7788DE7273Ca7658d6D7C7".to_string(),
-        runner: "0xd9a6d4123BcF737A36e5f66D474891f15E8d2d3C".to_string(),
-        cctp_receiver: "0x5555555555555555555555555555555555555555".to_string(),
-        usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
-        token_messenger: "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d".to_string(),
-        message_transmitter: "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64".to_string(),
-        gas_limit: ActionGas::default(),
-        gas_budget_wei: ActionAmounts::default(),
-        min_network_fee: ActionAmounts::default(),
-        usdc_domain_name: name.map(str::to_string),
-        usdc_domain_version: version.map(str::to_string),
-    }
+/// A chain's block time outside 100 ms to a minute is refused by chain, in milliseconds.
+#[test]
+fn a_block_time_out_of_range_names_its_chain_on_the_wire() {
+    let domain = types::Config::try_from(Config {
+        evm_chains: BTreeMap::from([(
+            42161,
+            EvmChainConfig {
+                block_time_ms: 50,
+                ..arbitrum(None, None)
+            },
+        )]),
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(
+        ConfigError::from(domain.validate().unwrap_err()),
+        ConfigError::BlockTimeOutOfRange {
+            chain_id: 42161,
+            block_time_ms: 50
+        }
+    );
 }
 
-/// A chain's USDC domain name and version cross the wire as set, none staying none (Circle's
-/// usual pair), and a text that is no domain name or version is refused by its knob.
+/// A chain's USDC domain name and version cross the wire as set, none staying none, and a
+/// text that is no domain name or version is refused by its knob.
 #[test]
 fn a_chains_usdc_domain_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let wire = |chain: EvmChainConfig| Config {
@@ -381,75 +256,12 @@ fn a_chains_usdc_domain_crosses_the_wire_and_a_bad_one_names_its_knob() {
     let usdc = chain.usdc_domain();
     assert_eq!((usdc.name, usdc.version), ("USDC", "2"));
     assert_eq!(Config::unredacted(domain), named);
-    let usual = types::Config::try_from(wire(arbitrum(None, None))).unwrap();
-    let chain = usual.evm_chains.get(types::ChainId::ARBITRUM).unwrap();
-    let usdc = chain.usdc_domain();
-    assert_eq!((usdc.name, usdc.version), ("USD Coin", "2"));
-
     let empty = types::Config::try_from(wire(arbitrum(Some(""), None))).unwrap_err();
-    assert_eq!(
-        empty,
-        types::ConfigError::NotDomainText {
-            field: "evm_chains.usdc_domain_name",
-            chain: types::ChainId::ARBITRUM,
-            reason: types::config::NotDomainText,
-        }
-    );
     assert_eq!(
         ConfigError::from(empty),
         ConfigError::NotDomainText {
             field: "evm_chains.usdc_domain_name".to_string(),
             chain_id: 42161,
-        }
-    );
-    let long = "2".repeat(33);
-    assert_eq!(
-        types::Config::try_from(wire(arbitrum(None, Some(&long)))).map(drop),
-        Err(types::ConfigError::NotDomainText {
-            field: "evm_chains.usdc_domain_version",
-            chain: types::ChainId::ARBITRUM,
-            reason: types::config::NotDomainText,
-        })
-    );
-}
-
-/// The claim's grace crosses the wire in seconds, an hour by default, and a grace below
-/// ten minutes or above a day is refused by name, in milliseconds like every duration.
-#[test]
-fn the_claim_grace_crosses_the_wire_and_a_bad_one_names_its_knob() {
-    let wire = Config {
-        claim_grace_s: 1_800,
-        ..Config::default()
-    };
-    let domain = types::Config::try_from(wire.clone()).unwrap();
-    assert_eq!(domain.claim_grace.get(), Duration::from_secs(1_800));
-    assert_eq!(Config::unredacted(domain), wire);
-    assert_eq!(Config::default().claim_grace_s, 3_600);
-
-    let short = types::Config::try_from(Config {
-        claim_grace_s: 60,
-        ..Config::default()
-    })
-    .unwrap();
-    assert_eq!(
-        ConfigError::from(short.validate().unwrap_err()),
-        ConfigError::DurationBelowFloor {
-            field: "claim_grace_s".to_string(),
-            duration_ms: 60_000,
-            floor_ms: 600_000
-        }
-    );
-    let long = types::Config::try_from(Config {
-        claim_grace_s: 86_401,
-        ..Config::default()
-    })
-    .unwrap();
-    assert_eq!(
-        ConfigError::from(long.validate().unwrap_err()),
-        ConfigError::DurationAboveCap {
-            field: "claim_grace_s".to_string(),
-            duration_ms: 86_401_000,
-            cap_ms: 86_400_000
         }
     );
 }
@@ -463,13 +275,7 @@ fn the_cctp_minimum_fees_cross_the_wire_and_a_bad_one_names_its_chain() {
         ..Config::default()
     };
     let domain = types::Config::try_from(wire.clone()).unwrap();
-    assert_eq!(
-        domain.cctp_min_fees.get(types::ChainId::BASE),
-        Some(types::CctpMinFee::new(1_000))
-    );
     assert_eq!(Config::unredacted(domain), wire);
-    assert!(Config::default().cctp_min_fees.is_empty());
-
     let whole = types::Config::try_from(Config {
         cctp_min_fees: BTreeMap::from([(8453, 10_000_000)]),
         ..Config::default()
@@ -485,34 +291,32 @@ fn the_cctp_minimum_fees_cross_the_wire_and_a_bad_one_names_its_chain() {
     );
 }
 
-/// The pool's gas rows (P11b) are optional: absent, the domain rows are absent; set, they
-/// cross the wire and back. (The ConfigChanged JSON is pinned in `storage::config`.)
+/// The optional gas rows, the sweep's included: absent, the domain rows are absent; set,
+/// they cross the wire and back.
 #[test]
-fn the_pools_gas_rows_are_optional() {
+fn the_optional_gas_rows_cross_the_wire() {
     use candid::{Decode, Encode};
     let absent = ActionGas::default();
     let domain: types::config::PerAction<types::GasAmount> = absent.into();
     assert_eq!(domain.get(types::config::GasAction::PoolPayout), None);
+    assert_eq!(domain.get(types::config::GasAction::Sweep), None);
     let set = ActionGas {
         pool_payout: Some(500_000),
         pool_transfer: Some(80_000),
         pool_approve: Some(60_000),
-        pool_move: None,
-        pool_move_finish: None,
-        pool_ck_deposit: None,
-        eco_rescue: None,
+        sweep: Some(70_000),
         ..ActionGas::default()
     };
     let domain: types::config::PerAction<types::GasAmount> = set.into();
     assert_eq!(
-        domain.get(types::config::GasAction::PoolApprove),
-        Some(types::GasAmount::from(60_000_u64))
+        domain.get(types::config::GasAction::Sweep),
+        Some(types::GasAmount::from(70_000_u64))
     );
     assert_eq!(ActionGas::from(domain), set);
     let bytes = Encode!(&set).unwrap();
     assert_eq!(Decode!(&bytes, ActionGas).unwrap(), set);
     let amounts = ActionAmounts {
-        pool_payout: Some(candid::Nat::from(10_000_u32)),
+        sweep: Some(candid::Nat::from(10_000_u32)),
         ..ActionAmounts::default()
     };
     let bytes = Encode!(&amounts).unwrap();

@@ -10,3 +10,7 @@ types = { path = "../types" }
 candid = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+serde_json = { workspace = true }

@@ -64,6 +64,9 @@ pub fn check(
     settings: &RebalanceSettings,
     now: Timestamp,
 ) -> Result<(PinnedOrder, TokenAmount), PoolError> {
+    if !order.memo.is_empty() {
+        return Err(refused("a move's order carries no memo"));
+    }
     if !item.proposable() {
         return Err(refused(format!(
             "move {} takes no proposal now: it is {:?}{}",

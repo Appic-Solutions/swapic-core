@@ -56,69 +56,43 @@ fn a_subaccount_is_thirty_two_bytes() {
     assert_eq!(IcpAccount::from(none), icp(None));
 }
 
-fn terms() -> PoolTerms {
-    let kind = types::pool::DepositKind::Swap {
-        recipient: types::pool::IcpAccount {
-            owner: Principal::anonymous(),
-            subaccount: None,
-        },
-        token_out: ckusdc(),
-        min_out: 1_000_000,
-    };
-    PoolTerms {
-        kind: kind.into(),
-        premium: Nat::from(10_000_u64),
-        icp_fees: Nat::from(10_000_u64),
-        rebalance_share: Nat::from(0_u8),
-        salt: vec![0x11; 32],
-    }
-}
-
-/// The interface's new vector V1 (P11d) through the wire: the ref the canister recomputes
-/// from the terms handed with the arrival, the ICP fees committed.
+/// A memo's terms reach a deposit view whole: the arrival's registration carries every term
+/// the memo committed, and the view gives them back.
 #[test]
-fn terms_read_into_their_ref() {
-    let domain = terms().into_domain().unwrap();
-    assert_eq!(
-        domain.pool_ref().unwrap().to_string(),
-        "2ca558b613087d4829efcfc433da96c2803012b2840e9775d83f94e880a03a35"
-    );
-    assert!(domain.is_canonical());
-    // the arrival's registration carries every term, and the view gives them back
-    let registration = domain.registration(
-        TokenAmount::from(1_100_000_u64),
-        types::ChainId::ARBITRUM,
-        None,
-        types::pool::PoolRail::Cctp,
-        types::Timestamp::from_nanos(1_800_000_000_000_000_000),
-    );
-    assert_eq!(registration.pool_ref(), domain.pool_ref());
+fn a_memos_terms_reach_the_deposit_view() {
+    let terms = types::pool::DepositTerms {
+        kind: types::pool::DepositKind::Swap {
+            recipient: types::pool::IcpAccount {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            token_out: ckusdc(),
+            min_out: 1_000_000,
+        },
+        min_usdc: TokenAmount::from(1_100_000_u64),
+        premium: TokenAmount::from(10_000_u64),
+        icp_fees: TokenAmount::from(10_000_u64),
+        move_fee: TokenAmount::ZERO,
+        salt: [0x11; 32],
+    };
+    let memo = terms.memo().unwrap();
+    let r#ref = types::pool::memo::memo_ref(&memo);
+    let registration = types::pool::DepositTerms::from_memo(&memo)
+        .unwrap()
+        .registration(
+            types::ChainId::ARBITRUM,
+            None,
+            types::pool::PoolRail::Cctp,
+            types::Timestamp::from_nanos(1_800_000_000_000_000_000),
+        );
+    assert_eq!(registration.pool_ref(), Some(r#ref));
     assert_eq!(registration.src_payer, EvmAddress::ZERO);
-    let r#ref = domain.pool_ref().unwrap();
     let view = PoolDepositView::of(r#ref, types::pool::Registered::new(registration));
-    assert_eq!(view.kind, terms().kind);
+    assert_eq!(view.kind, PoolDepositKind::from(terms.kind));
     assert_eq!(view.min_usdc, Nat::from(1_100_000_u64));
+    assert_eq!(view.premium, Nat::from(10_000_u64));
+    assert_eq!(view.move_fee, Nat::from(0_u8));
     assert_eq!(view.status, PoolDepositStatus::Registered);
-    // a swap carrying a rebalancing share its ref does not commit is no one's terms
-    let both = PoolTerms {
-        rebalance_share: Nat::from(1_u8),
-        ..terms()
-    };
-    assert!(!both.into_domain().unwrap().is_canonical());
-    // a short salt, an amount past 128 bits
-    let short_salt = PoolTerms {
-        salt: vec![0; 33],
-        ..terms()
-    };
-    assert!(short_salt.into_domain().is_err());
-    let wide = PoolTerms {
-        icp_fees: Nat::from(u128::MAX) + Nat::from(1_u8),
-        ..terms()
-    };
-    assert_eq!(
-        wide.into_domain(),
-        Err(PoolWireError::TooLarge { field: "icp_fees" })
-    );
 }
 
 #[test]
@@ -201,7 +175,7 @@ fn every_wire_type_survives_candid() {
         base_tx: vec![0xab; 32],
         src_chain: 42_161,
         src_tx: vec![0xcd; 32],
-        terms: terms(),
+        memo: Some(vec![1, 1, 2, 3]),
     };
     let bytes = Encode!(&arrival).unwrap();
     assert_eq!(Decode!(&bytes, PoolArrival).unwrap(), arrival);

@@ -51,6 +51,7 @@ fn chain(usdc: EvmAddress) -> EvmChain {
         min_network_fee: PerAction::all(TokenAmount::ZERO),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 
@@ -212,6 +213,7 @@ fn weth_plan() -> Vec<u8> {
             recipient: swapic::addr(address("0x2222222222222222222222222222222222222222")),
             minOut: U256::from(200_000_000_000_000_000_u64),
         },
+        memo: Default::default(),
     })
 }
 
@@ -230,6 +232,7 @@ fn unlisted_plan() -> Vec<u8> {
             recipient: swapic::addr(address("0x2222222222222222222222222222222222222222")),
             minOut: U256::from(12_345_u64),
         },
+        memo: Default::default(),
     })
 }
 
@@ -261,6 +264,7 @@ fn stake_arg(owner: WirePool, from_subaccount: Option<Vec<u8>>) -> Vec<u8> {
         from_subaccount,
         amount: Nat::from(250_000_000_u64),
         owner,
+        move_fee: Nat::from(0_u8),
     })
     .unwrap()
 }
@@ -275,7 +279,7 @@ fn withdrawal_arg() -> Vec<u8> {
             staker: "0x1111111111111111111111111111111111111111".to_string(),
             usdc: Nat::from(10_000_000_u64),
             max_shares: Nat::from(10_000_000_000_000_000_000_000_u128),
-            rebalance_share: Nat::from(2_000_u64),
+            move_fee: Nat::from(2_000_u64),
             network_fee: Nat::from(50_000_u64),
             payout: WireTerms {
                 dst_chain: 42161,
@@ -451,6 +455,7 @@ fn a_withdrawal_on_icp_states_who_is_paid_at_least_what() {
             token_out,
             min_out: Nat::from(min_out),
             to,
+            move_fee: Nat::from(0_u8),
         })
         .unwrap()
     };

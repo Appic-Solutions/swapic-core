@@ -1,6 +1,6 @@
 use super::*;
 use types::numeric::WeiPerGas;
-use types::{BlockNumber, Timestamp};
+use types::BlockNumber;
 
 fn wire() -> ChainData {
     ChainData {
@@ -10,19 +10,14 @@ fn wire() -> ChainData {
     }
 }
 
-/// The wire reading crosses to the domain and back unchanged, so the query answers what the
-/// watcher pushed.
+/// The wire reading crosses to the domain and back unchanged.
 #[test]
 fn a_wire_reading_crosses_to_the_domain_and_back() {
     let domain = types::chain_data::ChainReading::try_from(wire()).unwrap();
     assert_eq!(domain.block, BlockNumber::new(19_000_000));
     assert_eq!(domain.base_fee, WeiPerGas::from(1_000_000_000_u64));
     assert_eq!(domain.priority_fee, WeiPerGas::from(100_000_000_u64));
-
-    let stamped = domain.pushed_at(Timestamp::from_nanos(1_700_000_000_000_000_000));
-    let entry = ChainDataEntry::from(stamped);
-    assert_eq!(entry.data, wire());
-    assert_eq!(entry.pushed_at_ns, 1_700_000_000_000_000_000);
+    assert_eq!(ChainData::from(domain), wire());
 }
 
 /// A fee above 256 bits is no fee this canister prices gas with, and the refusal names the

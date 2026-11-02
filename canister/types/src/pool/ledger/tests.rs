@@ -2,7 +2,7 @@ use super::*;
 use crate::evm::EvmAddress;
 use crate::hash::TxHash;
 use crate::pool::{
-    pool_ref, IcpAccount, LedgerFee, PayoutAttempt, PoolRail, PrincipalBytes, Sent, CKUSDC_LEDGER,
+    IcpAccount, LedgerFee, PayoutAttempt, PoolRail, PrincipalBytes, Sent, CKUSDC_LEDGER,
 };
 
 /// The maps the storage layer keeps beside the ledger, on the heap, and the steps applied the
@@ -130,7 +130,7 @@ pub(crate) fn swap(byte: u8, min_usdc: TokenAmount, premium: TokenAmount) -> Reg
         },
         min_usdc,
         premium,
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         src_chain: ChainId::ARBITRUM,
         src_payer: payer(),
         rail: PoolRail::Cctp,
@@ -140,14 +140,14 @@ pub(crate) fn swap(byte: u8, min_usdc: TokenAmount, premium: TokenAmount) -> Reg
     }
 }
 
-fn stake(byte: u8, min_usdc: TokenAmount, rebalance_share: TokenAmount) -> Registration {
+fn stake(byte: u8, min_usdc: TokenAmount, move_fee: TokenAmount) -> Registration {
     Registration {
         kind: DepositKind::Stake {
             owner: PoolAccount::Icp(recipient(byte)),
         },
         min_usdc,
         premium: TokenAmount::ZERO,
-        rebalance_share,
+        move_fee,
         src_chain: ChainId::BASE,
         src_payer: payer(),
         rail: PoolRail::SameChain,
@@ -190,6 +190,7 @@ pub(crate) fn funded(icp: TokenAmount) -> Pool {
         from: recipient(200),
         amount: icp,
         created_at: Timestamp::from_nanos(1),
+        move_fee: TokenAmount::ZERO,
     })
     .unwrap();
     let shares = pool.ledger.mint_now(icp).unwrap();
@@ -197,7 +198,7 @@ pub(crate) fn funded(icp: TokenAmount) -> Pool {
         id,
         owner,
         amount: icp,
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         shares,
         block: 1,
     })
@@ -319,7 +320,7 @@ fn the_fees_the_ref_commits_are_checked() {
     let terms = swap(1, usdc(100), usdc(1));
     // a swap with a rebalancing share the ref does not commit
     let both = Registration {
-        rebalance_share: TokenAmount::ONE,
+        move_fee: TokenAmount::ONE,
         ..terms.clone()
     };
     assert!(matches!(
@@ -581,6 +582,7 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
         from: b,
         amount: usdc(500),
         created_at: Timestamp::from_nanos(1),
+        move_fee: TokenAmount::ZERO,
     })
     .unwrap();
     let b_shares = pool.ledger.mint_now(usdc(500)).unwrap();
@@ -588,7 +590,7 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
         id: b_id,
         owner: PoolAccount::Icp(b),
         amount: usdc(500),
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         shares: b_shares,
         block: 2,
     })
@@ -636,6 +638,7 @@ fn a_withdrawal_during_an_unpaid_payout_takes_no_more_than_its_value() {
                 amount: None,
                 token: None,
             },
+            move_fee: TokenAmount::ZERO,
         }
     };
     // a cent more than B's value burns more than B owns
@@ -1035,7 +1038,7 @@ fn a_step_round_trips_through_its_bytes() {
             settings: settings(),
         },
         PoolStep::Registered {
-            r#ref: pool_ref(&terms.kind, 1_000_000, 0, terms.salt),
+            r#ref: terms.pool_ref().unwrap(),
             deposit: terms,
         },
         PoolStep::IcpCheckFailed {
@@ -1116,6 +1119,7 @@ fn an_arrival_is_measured_on_what_arrived() {
             amount: None,
             token: None,
         },
+        move_fee: TokenAmount::ZERO,
     };
     assert!(matches!(
         pool.step(withdraw),
@@ -1129,6 +1133,7 @@ fn an_arrival_is_measured_on_what_arrived() {
         from: recipient(201),
         amount: usdc(200),
         created_at: Timestamp::from_nanos(7),
+        move_fee: TokenAmount::ZERO,
     })
     .unwrap();
     let shares = pool.ledger.mint_now(usdc(200)).unwrap();
@@ -1136,7 +1141,7 @@ fn an_arrival_is_measured_on_what_arrived() {
         id,
         owner: PoolAccount::Icp(recipient(201)),
         amount: usdc(200),
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         shares,
         block: 3,
     })
@@ -1970,6 +1975,7 @@ fn a_stake_whose_pull_was_lost_is_resolved_once() {
             from: recipient(byte),
             amount: usdc(10),
             created_at: Timestamp::from_nanos(2),
+            move_fee: TokenAmount::ZERO,
         })
         .unwrap();
         id
@@ -2069,6 +2075,7 @@ fn a_ledger_block_resolves_one_lost_stake() {
             from: recipient(byte),
             amount: usdc(10),
             created_at: Timestamp::from_nanos(2),
+            move_fee: TokenAmount::ZERO,
         })
         .unwrap();
         id
@@ -2371,7 +2378,7 @@ fn every_step() -> Vec<PoolStep> {
             id,
             owner,
             amount,
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             shares: Shares::new(1),
             block: 1,
         },
@@ -2412,6 +2419,7 @@ fn every_step() -> Vec<PoolStep> {
             from: recipient(4),
             amount,
             created_at: at,
+            move_fee: TokenAmount::ZERO,
         },
         PoolStep::StakeFailed {
             id,
@@ -2426,6 +2434,7 @@ fn every_step() -> Vec<PoolStep> {
             token_out: ckusdc(),
             min_out: 1,
             attempt,
+            move_fee: TokenAmount::ZERO,
         },
         PoolStep::IcpChecked {
             check: IcpCheck {

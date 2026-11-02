@@ -164,6 +164,7 @@ impl OwnRoute<'_> {
                 recipient: alloy_primitives::Address::ZERO,
                 minOut: U256::ZERO,
             },
+            memo: Default::default(),
         }
     }
 }

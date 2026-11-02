@@ -61,8 +61,10 @@ pub struct EvmWithdrawal {
     /// Micro USDC taken out of the pool (shares burned = `ceil(usdc * S / A)`).
     pub usdc: Nat,
     pub max_shares: Nat,
-    /// At least the canister's floor.
-    pub rebalance_share: Nat,
+    /// Micro USDC out of `usdc`, Swapic's: the cost of one ICP to Base move at live gas, as
+    /// the quoter priced it.
+    pub move_fee: Nat,
+    /// Micro USDC out of `usdc`, Swapic's: the payout's own gas.
     pub network_fee: Nat,
     pub payout: PayoutTerms,
     /// Once per staker.
@@ -132,16 +134,15 @@ pub struct PayoutWaiting {
 pub struct PayoutSettings {
     /// Micro USDC, the least a payout's network fee may be.
     pub min_network_fee: Nat,
-    /// The least a stake's or a withdrawal's rebalancing share may be, in bps of its amount.
-    pub rebalance_share_floor_bps: u16,
     /// How long a waiting payout waits for a valid order before it is retried, then undone
     /// at its deadline.
     pub order_wait_s: u64,
     /// The most gas a payout order may be signed with on Base.
     pub max_payout_gas: u64,
-    /// Micro USDC, the least network fee a payout over CCTP carries (the user's line for the
-    /// canister's own finish on the destination). None: no CCTP payout is signed.
-    pub cctp_min_network_fee: Option<Nat>,
+    /// Whether a payout may leave Base over CCTP. Its least network fee per destination is
+    /// the pool chain's `min_network_fee.relay_cctp` plus the destination's
+    /// `min_network_fee.complete_swap` (a token out) or `relay_deliver` (USDC out).
+    pub cctp_payouts: bool,
 }
 
 impl TryFrom<PayoutTerms> for domain::PayoutTerms {
@@ -244,14 +245,9 @@ impl TryFrom<PayoutSettings> for domain::PayoutSettings {
     fn try_from(settings: PayoutSettings) -> Result<Self, Self::Error> {
         Ok(Self {
             min_network_fee: amount("min_network_fee", &settings.min_network_fee)?,
-            rebalance_share_floor_bps: settings.rebalance_share_floor_bps,
             order_wait: Duration::from_secs(settings.order_wait_s),
             max_payout_gas: settings.max_payout_gas,
-            cctp_min_network_fee: settings
-                .cctp_min_network_fee
-                .as_ref()
-                .map(|fee| amount("cctp_min_network_fee", fee))
-                .transpose()?,
+            cctp_payouts: settings.cctp_payouts,
         })
     }
 }
@@ -260,10 +256,9 @@ impl From<&domain::PayoutSettings> for PayoutSettings {
     fn from(settings: &domain::PayoutSettings) -> Self {
         Self {
             min_network_fee: nat(settings.min_network_fee),
-            rebalance_share_floor_bps: settings.rebalance_share_floor_bps,
             order_wait_s: settings.order_wait.as_secs(),
             max_payout_gas: settings.max_payout_gas,
-            cctp_min_network_fee: settings.cctp_min_network_fee.map(nat),
+            cctp_payouts: settings.cctp_payouts,
         }
     }
 }

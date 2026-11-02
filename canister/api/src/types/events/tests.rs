@@ -1,107 +1,19 @@
 use super::*;
-use types::address::MAX_TEXT_BYTES;
+use crate::types::sweep::{SweepAsset, SweepTarget};
 use types::{EventHash, EventIndex, Timestamp};
 
-/// One wire sample of every variant.
+const INTERFACE: &str = include_str!("../../../../golden/interface.json");
+
+/// One wire sample of every variant the canister writes.
 fn samples() -> Vec<EventType> {
     vec![
         EventType::ConfigChanged { json: "{}".into() },
-        EventType::FundsReceived {
-            quote_hash: [1; 32],
-            quote_bytes: vec![0xde, 0xad],
-            chain_id: 8453,
-            token: "USDC".into(),
-            amount: Nat::from(u128::MAX),
-            tx_ref: "0xfeed".into(),
-        },
-        EventType::TxSigned {
-            quote_hash: [2; 32],
-            attempt: 1,
-            chain_id: 42161,
-            tx_hash: [3; 32],
-            raw_tx: vec![0x02],
-        },
-        EventType::TxConfirmed {
-            quote_hash: [4; 32],
-            attempt: 2,
-            chain_id: 1,
-            tx_hash: [5; 32],
-            block: 19_000_000,
-        },
-        EventType::TxFailed {
-            quote_hash: [6; 32],
-            attempt: 3,
-            reason: "reverted".into(),
-        },
-        EventType::PaidInStable {
-            quote_hash: [7; 32],
-            chain_id: 8453,
-            amount: Nat::from(999_999_u32),
-        },
-        EventType::DecisionRequired {
-            quote_hash: [8; 32],
-            reason: "slippage".into(),
-        },
-        EventType::DecisionMade {
-            quote_hash: [9; 32],
-            choice: Choice::Refund,
-        },
-        EventType::RefundStarted {
-            quote_hash: [10; 32],
-            reason: "timeout".into(),
-        },
-        EventType::Refunded {
-            quote_hash: [11; 32],
-            chain_id: 137,
-            token: "USDT".into(),
-            amount: Nat::from(42_u8),
-            to: "0xUser".into(),
-        },
-        EventType::SwapDone {
-            quote_hash: [12; 32],
-        },
-        EventType::Frozen {
-            quote_hash: [13; 32],
-            reason: "griefed".into(),
-        },
-        EventType::FeeAccrued {
-            quote_hash: [14; 32],
-            amount: Nat::from(7_u8),
-        },
-        EventType::PocketFunded {
-            chain_id: 10,
-            amount: Nat::from(1u128 << 70),
-        },
-        EventType::PocketReserved {
-            quote_hash: [15; 32],
-            chain_id: 8453,
-            amount: Nat::from(3_u8),
-        },
-        EventType::PocketRebalanced {
-            from_chain: 8453,
-            to_chain: 42161,
-            amount: Nat::from(250_u8),
-            route: "cctp".into(),
-        },
-        EventType::PocketReleased {
-            quote_hash: [16; 32],
-            chain_id: 8453,
-            amount: Nat::from(150_u8),
-        },
-        EventType::PocketSpent {
-            quote_hash: [17; 32],
-            chain_id: 42161,
-            amount: Nat::from(250_u8),
-        },
         EventType::RolesChanged {
             quoter: "aaaaa-aa".into(),
             watcher: "2vxsx-fae".into(),
         },
-        EventType::WaitingRepaired {
-            quote_hash: [18; 32],
-        },
         EventType::TxCreated {
-            purpose: TxPurpose::Burn([19; 32]),
+            purpose: TxPurpose::PoolPayout(19),
             chain_id: 8453,
             nonce: 7,
             // the wire address is checksummed, and it crosses back as written
@@ -111,7 +23,7 @@ fn samples() -> Vec<EventType> {
             gas_limit: Nat::from(120_000_u32),
             max_fee_wei_per_gas: Nat::from(2_000_000_000_u64),
             max_priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
-            action: None,
+            action: Some("pool_payout".into()),
         },
         EventType::TxReplaced {
             purpose: TxPurpose::Cancel(42161),
@@ -128,12 +40,12 @@ fn samples() -> Vec<EventType> {
             tx_hash: [21; 32],
             raw_tx: vec![0x02, 0xf8, 0x6c],
         },
-        EventType::PullSigned {
-            quote_hash: [22; 32],
+        EventType::TxFinal {
+            purpose: TxPurpose::Sweep(3),
             chain_id: 8453,
             nonce: 10,
-            tx_hash: [23; 32],
-            raw_tx: vec![0x02, 0xf8, 0x6d],
+            tx_hash: [22; 32],
+            outcome: TxOutcome::Reverted { block: 23 },
         },
         {
             let step = types::FlowStep::Pulled {
@@ -170,7 +82,28 @@ fn samples() -> Vec<EventType> {
                 step_bytes: step.to_bytes(),
             }
         },
+        EventType::Swept {
+            id: 4,
+            asset: SweepAsset::CkUsdcFees,
+            to: SweepTarget::Icp(IcpAccount {
+                owner: candid::Principal::anonymous(),
+                subaccount: Some(vec![5; 32]),
+            }),
+            amount: Nat::from(6_000_000_u32),
+        },
+        EventType::SweepReverted {
+            id: 4,
+            why: "the ledger refused it".into(),
+        },
     ]
+}
+
+#[test]
+fn every_variant_survives_the_wire_both_ways() {
+    for wire in samples() {
+        let domain = types::EventType::try_from(wire.clone()).unwrap();
+        assert_eq!(EventType::from(domain), wire);
+    }
 }
 
 /// A pool line whose bytes are no pool step is refused at the edge, naming the field.
@@ -189,14 +122,13 @@ fn a_pool_line_that_is_no_pool_step_is_refused() {
     );
 }
 
-/// An address that is not an address at all is refused at the edge, naming the field AND
-/// which of the four rules the text broke. A caller replaying a log with a tampered address
-/// is otherwise told the text is too long, which is false for three of the four.
+/// An address that is not an address at all is refused at the edge, naming the field and
+/// which of the four rules the text broke.
 #[test]
 fn a_transaction_to_something_that_is_not_an_address_is_refused() {
     let to_address = |to: &str| {
         types::EventType::try_from(EventType::TxCreated {
-            purpose: TxPurpose::Burn([19; 32]),
+            purpose: TxPurpose::PoolApprove,
             chain_id: 8453,
             nonce: 7,
             to: to.into(),
@@ -229,84 +161,30 @@ fn a_transaction_to_something_that_is_not_an_address_is_refused() {
     }
 }
 
-/// Every amount field of a transaction answers for itself: "amount is above u128::MAX" is
-/// not an answer about a gas limit or a fee, and the field is exactly what the error type
-/// exists to name.
+/// A sweep to an account whose subaccount is not 32 bytes is refused at the edge.
 #[test]
-fn every_amount_field_of_a_transaction_names_itself() {
-    // above the 256 bits the domain amount holds, so the edge refuses it by name
-    let huge = Nat::from(u128::MAX) * Nat::from(u128::MAX) * Nat::from(4_u8);
-    let created = |value_wei: Nat, gas_limit: Nat, max_fee: Nat, tip: Nat| EventType::TxCreated {
-        purpose: TxPurpose::Burn([19; 32]),
-        chain_id: 8453,
-        nonce: 7,
-        to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into(),
-        value_wei,
-        data: vec![],
-        gas_limit,
-        max_fee_wei_per_gas: max_fee,
-        max_priority_fee_wei_per_gas: tip,
-        action: None,
-    };
-    let one = || Nat::from(1_u8);
-    assert!(types::EventType::try_from(created(one(), one(), one(), one())).is_ok());
-    for (field, wire) in [
-        ("value_wei", created(huge.clone(), one(), one(), one())),
-        ("gas_limit", created(one(), huge.clone(), one(), one())),
-        (
-            "max_fee_wei_per_gas",
-            created(one(), one(), huge.clone(), one()),
-        ),
-        (
-            "max_priority_fee_wei_per_gas",
-            created(one(), one(), one(), huge.clone()),
-        ),
-    ] {
-        assert_eq!(
-            types::EventType::try_from(wire),
-            Err(types::events::EventError::AmountTooLarge { field }),
-            "{field}"
-        );
-    }
-
-    let replaced = |max_fee: Nat, tip: Nat| EventType::TxReplaced {
-        purpose: TxPurpose::Cancel(42161),
-        chain_id: 42161,
-        nonce: 8,
-        max_fee_wei_per_gas: max_fee,
-        max_priority_fee_wei_per_gas: tip,
-        tx_hash: [20; 32],
-        raw_tx: vec![],
-    };
-    for (field, wire) in [
-        ("max_fee_wei_per_gas", replaced(huge.clone(), one())),
-        (
-            "max_priority_fee_wei_per_gas",
-            replaced(one(), huge.clone()),
-        ),
-    ] {
-        assert_eq!(
-            types::EventType::try_from(wire),
-            Err(types::events::EventError::AmountTooLarge { field }),
-            "{field}"
-        );
-    }
+fn a_sweep_to_a_malformed_account_is_refused() {
+    let refused = types::EventType::try_from(EventType::Swept {
+        id: 1,
+        asset: SweepAsset::Icp,
+        to: SweepTarget::Icp(IcpAccount {
+            owner: candid::Principal::anonymous(),
+            subaccount: Some(vec![1; 31]),
+        }),
+        amount: Nat::from(1_u8),
+    });
+    assert_eq!(
+        refused,
+        Err(types::events::EventError::NotAnAccount { field: "to" })
+    );
 }
 
+/// An event reads back as its index, its time and its payload: no hash, no parent.
 #[test]
-fn every_variant_survives_the_wire_both_ways() {
-    let samples = samples();
-    assert_eq!(samples.len(), types::events::EVENT_VARIANT_COUNT);
-    for wire in samples {
-        let domain = types::EventType::try_from(wire.clone()).unwrap();
-        assert_eq!(EventType::from(domain), wire);
-    }
-}
-
-#[test]
-fn an_event_reads_back_with_its_place_in_the_chain() {
-    let payload = types::EventType::SwapDone {
-        quote_hash: QuoteHash::new([1; 32]),
+fn an_event_reads_back_with_its_index_and_time() {
+    let payload = types::EventType::RolesChanged {
+        quoter: "aaaaa-aa".into(),
+        watcher: "2vxsx-fae".into(),
     };
     let sealed = types::Event::seal(
         EventIndex::new(4),
@@ -315,53 +193,83 @@ fn an_event_reads_back_with_its_place_in_the_chain() {
         payload,
     )
     .unwrap();
-    let wire = Event::from(sealed.clone());
+    let wire = Event::from(sealed);
     assert_eq!(wire.index, 4);
     assert_eq!(wire.time_ns, 1_700_000_000);
-    assert_eq!(wire.parent_hash, [9; 32]);
-    assert_eq!(wire.hash, sealed.hash.into_bytes());
     assert_eq!(
         wire.payload,
-        EventType::SwapDone {
-            quote_hash: [1; 32]
+        EventType::RolesChanged {
+            quoter: "aaaaa-aa".into(),
+            watcher: "2vxsx-fae".into(),
         }
     );
 }
 
-#[test]
-fn an_amount_above_u128_max_is_refused() {
-    let wire = EventType::PocketFunded {
-        chain_id: 8453,
-        amount: Nat::from(u128::MAX) + Nat::from(1_u8),
+/// The interface golden page of events, as `events_page` answers it: a pool line that
+/// books an ICP stake's move fee, a USDC fee sweep on Base, and that sweep's transaction
+/// reaching its end. The watcher decodes the same bytes.
+fn golden_page() -> Vec<Event> {
+    let staked = types::pool::PoolStep::StakedIcp {
+        id: types::hash::PoolOpId::new([0x51; 32]),
+        owner: types::pool::PoolAccount::Icp(types::pool::IcpAccount {
+            owner: candid::Principal::anonymous(),
+            subaccount: None,
+        }),
+        amount: types::TokenAmount::from(250_000_000_u64),
+        move_fee: types::TokenAmount::from(1_400_000_u64),
+        shares: types::pool::Shares::new(248_600_000_000_000_000_000),
+        block: 4_200_000,
     };
-    assert_eq!(
-        types::EventType::try_from(wire),
-        Err(DomainEventError::AmountTooLarge { field: "amount" })
-    );
+    vec![
+        Event {
+            index: 41,
+            time_ns: 1_900_000_000_000_000_000,
+            payload: EventType::Pool {
+                step: staked.name().to_string(),
+                detail: format!("{staked:?}"),
+                step_bytes: staked.to_bytes(),
+            },
+        },
+        Event {
+            index: 42,
+            time_ns: 1_900_000_001_000_000_000,
+            payload: EventType::Swept {
+                id: 0,
+                asset: SweepAsset::FeeUsdc,
+                to: SweepTarget::Evm {
+                    chain_id: 8453,
+                    to: "0x3E5D1A9b7c2f4E6A8b0c1D3E5F7a9B0c2D4e6f80".into(),
+                },
+                amount: Nat::from(1_000_000_u32),
+            },
+        },
+        Event {
+            index: 43,
+            time_ns: 1_900_000_060_000_000_000,
+            payload: EventType::TxFinal {
+                purpose: TxPurpose::Sweep(0),
+                chain_id: 8453,
+                nonce: 17,
+                tx_hash: [0x7f; 32],
+                outcome: TxOutcome::Succeeded { block: 30_000_000 },
+            },
+        },
+    ]
 }
 
 #[test]
-fn text_over_the_cap_is_refused_naming_the_field() {
-    let refunded = |token: String, to: String| EventType::Refunded {
-        quote_hash: [1; 32],
-        chain_id: 137,
-        token,
-        amount: Nat::from(1_u8),
-        to,
+fn the_interface_golden_events_hold() {
+    let golden: serde_json::Value = serde_json::from_str(INTERFACE).unwrap();
+    let golden = &golden["events"];
+    let hex_of = |field: &str| {
+        hex::decode(golden[field].as_str().unwrap().trim_start_matches("0x")).unwrap()
     };
-    let long = "a".repeat(MAX_TEXT_BYTES + 1);
-    assert_eq!(
-        types::EventType::try_from(refunded(long.clone(), "0xuser".into())),
-        Err(DomainEventError::TextTooLong {
-            field: "token",
-            len: MAX_TEXT_BYTES + 1
-        })
-    );
-    assert_eq!(
-        types::EventType::try_from(refunded("USDT".into(), long)),
-        Err(DomainEventError::TextTooLong {
-            field: "to",
-            len: MAX_TEXT_BYTES + 1
-        })
-    );
+    let page = golden_page();
+    let EventType::Pool { step_bytes, .. } = &page[0].payload else {
+        panic!("the first golden line is a pool line");
+    };
+    assert_eq!(*step_bytes, hex_of("staked_icp_step_bytes"));
+    assert_eq!(candid::encode_one(&page).unwrap(), hex_of("page_candid"));
+    let decoded: Vec<Event> = candid::decode_one(&hex_of("page_candid")).unwrap();
+    assert_eq!(decoded, page);
 }

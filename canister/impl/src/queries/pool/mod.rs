@@ -84,8 +84,8 @@ pub fn payouts_waiting() -> Vec<PayoutWaiting> {
 }
 
 /// The orphans held for a controller: USDC at the canister's Base address no deposit could
-/// take, not refunded or booked yet (a deposit's transfer found without its terms only once
-/// its 24 hours of waiting for them are over).
+/// take (no memo that hashes to its ref, below the memo's `min_usdc`, a ref credited
+/// already, terms the pool refused), not refunded or booked yet.
 #[query]
 pub fn pool_orphans() -> Vec<OrphanView> {
     pool::orphans::held(pool::now())

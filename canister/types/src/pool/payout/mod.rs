@@ -102,7 +102,7 @@ pub struct EvmWithdrawal {
     pub max_shares: Shares,
     /// Stays in the pool.
     #[n(3)]
-    pub rebalance_share: TokenAmount,
+    pub move_fee: TokenAmount,
     /// Kept on Base for the payout's gas.
     #[n(4)]
     pub network_fee: TokenAmount,
@@ -119,7 +119,7 @@ impl EvmWithdrawal {
     /// its network fee. None when they take all of it.
     pub fn payout_amount(&self) -> Option<TokenAmount> {
         self.usdc
-            .checked_sub(self.rebalance_share)?
+            .checked_sub(self.move_fee)?
             .checked_sub(self.network_fee)
             .filter(|amount| *amount > TokenAmount::ZERO)
     }
@@ -492,19 +492,27 @@ pub struct PayoutSettings {
     /// The least network fee a payout may carry, micro USDC.
     #[n(0)]
     pub min_network_fee: TokenAmount,
-    /// The least a stake's or a withdrawal's rebalancing share may be, in bps of its amount.
-    #[n(1)]
-    pub rebalance_share_floor_bps: u16,
     /// How long a waiting payout waits for a valid order before it is listed again.
     #[n(2)]
     pub order_wait: Duration,
     /// The most gas a payout order may be signed with on Base.
     #[n(3)]
     pub max_payout_gas: u64,
-    /// The least network fee a payout paid over CCTP carries (2026-10-21): the user's line
-    /// for the canister's own finish on the destination. None: no CCTP payout is signed.
+    /// Whether a payout may leave Base over CCTP. Its least network fee is derived per
+    /// destination chain from the chains' own least fees ([`cctp_payout_floor`]).
     #[n(4)]
-    pub cctp_min_network_fee: Option<TokenAmount>,
+    pub cctp_payouts: bool,
+}
+
+/// The least network fee a CCTP payout from the pool chain to a destination carries: the
+/// pool chain's least fee for an order that burns on CCTP (`relay_cctp`), plus the
+/// destination's least fee for the canister's own finish there (`complete_swap` for a token
+/// out, `relay_deliver` for USDC out). None when the sum leaves 256 bits.
+pub fn cctp_payout_floor(
+    pool_chain_relay_cctp: TokenAmount,
+    destination_finish: TokenAmount,
+) -> Option<TokenAmount> {
+    pool_chain_relay_cctp.checked_add(destination_finish)
 }
 
 /// The least gas any transaction has.
@@ -515,15 +523,14 @@ pub const MAX_PAYOUT_GAS: u64 = 10_000_000;
 pub const MAX_ORDER_WAIT: Duration = Duration::from_secs(3_600);
 
 impl Default for PayoutSettings {
-    /// The launch values: 5 cents of network fee at the least, a rebalancing share of 2 bps
-    /// at the least, two minutes for an order, two million gas.
+    /// The launch values: 5 cents of network fee at the least, two minutes for an order, two
+    /// million gas, CCTP payouts off until the chains' least fees are set.
     fn default() -> Self {
         Self {
             min_network_fee: TokenAmount::new(50_000),
-            rebalance_share_floor_bps: 2,
             order_wait: Duration::from_secs(120),
             max_payout_gas: 2_000_000,
-            cctp_min_network_fee: None,
+            cctp_payouts: false,
         }
     }
 }
@@ -531,8 +538,6 @@ impl Default for PayoutSettings {
 /// Why payout settings are not ones the pool runs on.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PayoutSettingsError {
-    #[error("rebalance_share_floor_bps of {0} is above 10000")]
-    FloorAboveAll(u16),
     #[error("order_wait_s must be between 1 and {}", MAX_ORDER_WAIT.as_secs())]
     OrderWait,
     #[error("max_payout_gas must be between {MIN_PAYOUT_GAS} and {MAX_PAYOUT_GAS}")]
@@ -541,23 +546,21 @@ pub enum PayoutSettingsError {
 
 impl PayoutSettings {
     /// Whether a CCTP payout of `network_fee` is one the user paid the canister's finish
-    /// for: only at `cctp_min_network_fee` or above, never while it is unset.
-    pub fn admits_cctp(&self, network_fee: TokenAmount) -> Result<(), String> {
-        match self.cctp_min_network_fee {
-            None => Err("no CCTP payout is signed: its least network fee is unset".to_string()),
-            Some(least) if network_fee < least => Err(format!(
-                "a CCTP payout's network fee must be at least {least}, not {network_fee}"
-            )),
-            Some(_) => Ok(()),
+    /// for: only while CCTP payouts are on, and at `floor` or above (the destination's
+    /// [`cctp_payout_floor`]).
+    pub fn admits_cctp(&self, network_fee: TokenAmount, floor: TokenAmount) -> Result<(), String> {
+        if !self.cctp_payouts {
+            return Err("no CCTP payout is signed: CCTP payouts are off".to_string());
         }
+        if network_fee < floor {
+            return Err(format!(
+                "a CCTP payout's network fee must be at least {floor}, not {network_fee}"
+            ));
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), PayoutSettingsError> {
-        if self.rebalance_share_floor_bps > 10_000 {
-            return Err(PayoutSettingsError::FloorAboveAll(
-                self.rebalance_share_floor_bps,
-            ));
-        }
         if self.order_wait.is_zero() || self.order_wait > MAX_ORDER_WAIT {
             return Err(PayoutSettingsError::OrderWait);
         }
@@ -565,13 +568,6 @@ impl PayoutSettings {
             return Err(PayoutSettingsError::Gas);
         }
         Ok(())
-    }
-
-    /// The least rebalancing share of `amount`, rounded up.
-    pub fn least_rebalance_share(&self, amount: TokenAmount) -> Option<TokenAmount> {
-        amount
-            .checked_mul(self.rebalance_share_floor_bps)?
-            .checked_div_ceil(10_000_u32)
     }
 }
 

@@ -15,7 +15,7 @@ use super::*;
 use crate::relay::Party;
 use alloy_sol_types::SolCall;
 use std::collections::BTreeMap;
-use types::config::{ChainTable, EvmChain, PerAction};
+use types::config::{ChainTable, EvmChain, GasAction, PerAction};
 use types::pool::payout::{EvmWithdrawal, PayoutKind, PayoutTerms, Undo};
 use types::pool::{PoolAccount, Shares};
 use types::swapic::{publishAndFundCall, NATIVE};
@@ -55,6 +55,7 @@ fn chain(usdc: EvmAddress) -> EvmChain {
         min_network_fee: PerAction::all(TokenAmount::ZERO),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 
@@ -149,7 +150,7 @@ fn waiting(order: &Order, terms: PayoutTerms) -> EvmPayout {
         staker,
         usdc: TokenAmount::from(10_000_000_u64),
         max_shares: Shares::new(1),
-        rebalance_share: TokenAmount::from(1_000_u64),
+        move_fee: TokenAmount::from(1_000_u64),
         network_fee: TokenAmount::from(50_000_u64),
         nonce: 1,
         burned: Shares::new(1),
@@ -403,8 +404,9 @@ fn a_payout_order_paying_the_canister_a_fee_is_refused() {
     ));
 }
 
-/// From P11c on a CCTP burn passes (the canister finishes its own transfer, `cctp::own`),
-/// for a payout whose network fee paid that finish (P11d's `cctp_min_network_fee`): a Deliver
+/// A CCTP burn passes (the canister finishes its own transfer, `cctp::own`) while CCTP
+/// payouts are on and the payout's network fee covers the destination's floor: the pool
+/// chain's least fee for a burning order and the destination's for the finish. A Deliver
 /// pays its recipient the destination's USDC, at least what the Runner gives the burn less
 /// the most Circle may keep.
 #[test]
@@ -412,7 +414,7 @@ fn a_cctp_payout_order_passes_the_checks() {
     let world = World::new();
     // the withdrawal's network fee in `waiting` is 50,000: exactly the least taken
     let settings = PayoutSettings {
-        cctp_min_network_fee: Some(TokenAmount::from(50_000_u64)),
+        cctp_payouts: true,
         ..PayoutSettings::default()
     };
     let check = |payout: &EvmPayout, order: &Order, world: &World, gas, sanctioned| {
@@ -443,18 +445,27 @@ fn a_cctp_payout_order_passes_the_checks() {
         check(&waiting(&order, greedy), &order, &world, 600_000, nobody),
         Err(PoolError::NotAllowed(why)) if why.contains("guarantees")
     ));
-    // no least fee set, or a network fee below it: the canister does not pay the finish
+    // CCTP payouts off, or a network fee below the floor: the canister does not pay the
+    // finish
     assert!(matches!(
         check_with(&payout, &order, &world, 600_000, nobody, &PayoutSettings::default()),
-        Err(PoolError::NotAllowed(why)) if why.contains("unset")
+        Err(PoolError::NotAllowed(why)) if why.contains("off")
     ));
-    let dearer = PayoutSettings {
-        cctp_min_network_fee: Some(TokenAmount::from(50_001_u64)),
-        ..PayoutSettings::default()
-    };
+    let mut dearer = World::new();
+    for (chain, action, fee) in [
+        (ChainId::BASE, GasAction::RelayCctp, 30_000_u64),
+        (ChainId::ARBITRUM, GasAction::RelayDeliver, 20_001),
+    ] {
+        let mut entry = dearer.evm_chains.get(chain).unwrap();
+        match action {
+            GasAction::RelayCctp => entry.min_network_fee.relay_cctp = TokenAmount::from(fee),
+            _ => entry.min_network_fee.relay_deliver = TokenAmount::from(fee),
+        }
+        dearer.evm_chains.0.insert(chain, entry);
+    }
     assert!(matches!(
-        check_with(&payout, &order, &world, 600_000, nobody, &dearer),
-        Err(PoolError::NotAllowed(why)) if why.contains("at least")
+        check(&payout, &order, &dearer, 600_000, nobody),
+        Err(PoolError::NotAllowed(why)) if why.contains("at least 50001")
     ));
 }
 
@@ -506,7 +517,7 @@ fn one_payout_is_signed_once_at_a_time_and_never_again() {
             staker,
             usdc: usdc(100),
             max_shares: burned,
-            rebalance_share: TokenAmount::from(20_000_u64),
+            move_fee: TokenAmount::from(20_000_u64),
             network_fee: TokenAmount::from(50_000_u64),
             nonce: 1,
             burned,

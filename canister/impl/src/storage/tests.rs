@@ -58,17 +58,10 @@ fn samples() -> Vec<Sample> {
         flow_settings(
             "flow settings, every field",
             Wire {
-                ethereum_chain_id: 1,
-                ethereum_usdc: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
-                ckusdc_ledger: Some(principal(0x03)),
                 ck_minter: Some(principal(0x04)),
                 cketh_ledger: Some(principal(0x05)),
                 cketh_fee_allowance: Nat::from(6_000_000_000_000_000_u64),
-                icpswap_pools: vec![principal(0x07)],
                 relay_window_s: 3_600,
-                continuation_deadline_s: 1_800,
-                max_gas_limit: 2_000_000,
-                icp_enabled: Some(false),
                 ck_helper: Some("0x18901044688D3756C35Ed2b36D93e6a5B8e00E68".to_string()),
                 eco_prover: Some("0xEC08fb4647f3f50d1162a578d481266687C60fc5".to_string()),
             },

@@ -840,8 +840,7 @@ impl PoolLedger {
                 if staker != *owner {
                     return Err(PoolStepError::Mismatch);
                 }
-                let expected =
-                    self.mint_now(sat_sub(deposit.owed(), deposit.terms.rebalance_share));
+                let expected = self.mint_now(sat_sub(deposit.owed(), deposit.terms.move_fee));
                 if expected != Some(*shares) {
                     return Err(PoolStepError::WrongMint {
                         given: *shares,
@@ -1804,6 +1803,7 @@ impl PoolLedger {
                 from,
                 amount,
                 created_at,
+                move_fee: _,
             } => {
                 self.stake_room = sat_add(self.stake_room, *amount);
                 self.pending.insert(
@@ -1830,6 +1830,7 @@ impl PoolLedger {
                 token_out,
                 min_out,
                 attempt,
+                move_fee: _,
             } => {
                 let account = PoolAccount::Icp(*owner);
                 let line = ShareLine {
@@ -2027,7 +2028,7 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
     }
     match terms.kind {
         DepositKind::Swap { .. } => {
-            if terms.rebalance_share != TokenAmount::ZERO {
+            if terms.move_fee != TokenAmount::ZERO {
                 return Err(PoolStepError::Terms("a swap carries no rebalancing share"));
             }
             let fees = terms
@@ -2046,7 +2047,7 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
                     "a stake carries no premium and no ICP fees",
                 ));
             }
-            if terms.rebalance_share >= terms.min_usdc {
+            if terms.move_fee >= terms.min_usdc {
                 return Err(PoolStepError::Terms(
                     "the rebalancing share must be below min_usdc",
                 ));
@@ -2123,17 +2124,6 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
             }
         }
         DepositKind::Stake { .. } => {
-            // the canister's floor on the staker's rebalancing share (P11b), once set
-            if let Some(payouts) = ledger.lines().settings {
-                let least = payouts
-                    .least_rebalance_share(terms.min_usdc)
-                    .unwrap_or(TokenAmount::MAX);
-                if terms.rebalance_share < least {
-                    return Err(RegisterRefusal::NotAllowed(format!(
-                        "the rebalancing share must be at least {least}"
-                    )));
-                }
-            }
             let would_be = sat_add(ledger.tvl_measure(), terms.min_usdc);
             if would_be > settings.tvl_cap {
                 return Err(RegisterRefusal::AboveTvlCap {

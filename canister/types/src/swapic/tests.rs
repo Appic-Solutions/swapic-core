@@ -35,6 +35,7 @@ fn golden() -> Order {
             recipient: address!("8888888888888888888888888888888888888888"),
             minOut: U256::from(999u64),
         },
+        memo: Default::default(),
     }
 }
 
@@ -42,20 +43,18 @@ const GOLDEN_SWAPIC: EvmAddress = EvmAddress::new([0xbb; 20]);
 const BASE: ChainId = ChainId::BASE;
 
 #[test]
-fn order_id_matches_abi_golden() {
+fn order_id_moves_with_every_part_of_the_order() {
     assert_eq!(
         domain(BASE, GOLDEN_SWAPIC).separator(),
         b256!("c395d776d27009143a498a5ebdf6ab4be54d50c85087e1f2c598ceb460bb8b51")
     );
-    assert_eq!(
-        order_id(&golden(), BASE, GOLDEN_SWAPIC).into_bytes(),
-        b256!("2f21eee628b331d82ca45f067ec51c73de0533289d22c22328cf4ebd43e255bc").0
+    // any change anywhere is another id, the memo included
+    let mut memo = golden();
+    memo.memo = bytes!("01");
+    assert_ne!(
+        order_id(&memo, BASE, GOLDEN_SWAPIC),
+        order_id(&golden(), BASE, GOLDEN_SWAPIC)
     );
-    assert_eq!(
-        acceptance_digest(&golden(), BASE, GOLDEN_SWAPIC),
-        b256!("5058c6a5e030b5beb7c0a929627f189d69cbf98e8801d7e5bb868f4805937d0d").0
-    );
-    // any change anywhere is another id
     let mut changed = golden();
     changed.steps[1].writes[1].minus = U256::from(57_116u64);
     assert_ne!(
@@ -73,7 +72,7 @@ fn typehashes_match_abi_table() {
     let typehash = |t: &str| keccak256(t).0;
     assert_eq!(
         typehash(ORDER_TYPE),
-        b256!("d46b04ddb0d039fd8d858827e8603da1a6d43b2e1c788328fd321b4782f2cb7d").0
+        b256!("391c982619bb5233046c55e62c42b9d3e4c1ec09f980e88f048c95402a61e6ec").0
     );
     assert_eq!(
         typehash(STEP_TYPE),
@@ -100,7 +99,7 @@ fn typehashes_match_abi_table() {
 #[test]
 fn selectors_and_topics_match_abi_section_8() {
     let sel = |s: [u8; 4]| hex::encode(s);
-    assert_eq!(sel(selectors::RUN_FOR), "f7ede948");
+    assert_eq!(sel(selectors::RUN_FOR), "46d6fa96");
     assert_eq!(sel(selectors::COMPLETE_CCTP), "513429dd");
     assert_eq!(sel(selectors::RELEASE), "aa30d53a");
     assert_eq!(sel(selectors::RECEIVE_MESSAGE), "57ecfd28");
@@ -108,7 +107,7 @@ fn selectors_and_topics_match_abi_section_8() {
     assert_eq!(sel(selectors::DEPOSIT_FOR_BURN_WITH_HOOK), "779b432d");
     assert_eq!(
         OrderStarted::SIGNATURE_HASH,
-        b256!("8e97ed8d4d8c9c453242f7e97e8fceb3b04813c3257d5d5a11d74b4cf89b5e82")
+        b256!("e95fa9d6e54c817e5526d084398a582163dc771d78687ec4afe3a9665ccb0adc")
     );
 }
 
@@ -240,12 +239,12 @@ fn a_fee_step_is_read_back_and_nothing_else_is_one() {
     assert_eq!(fee_transfer_of(&longer, usdc), None);
 }
 
-/// The quoter's fresh fork order (`impl/samples/quoter_order_arbitrum_cctp_gasless.json`):
-/// USDC on Arbitrum to WBTC on Polygon over CCTP, gasless through the 3009 door. Its bytes
-/// decode, its id recomputes to the one the quoter stored and the 3009 nonce carries, and
-/// its steps are the fee and the burn of abi.md 6.1 and 6.2.
+/// The quoter's fork order (`impl/samples/quoter_order_arbitrum_cctp_gasless.json`, its
+/// bytes carried to the memo ABI with an empty memo): USDC on Arbitrum to WBTC on Polygon
+/// over CCTP, gasless through the 3009 door. Its bytes decode and re-encode, and its steps
+/// are the fee and the burn of abi.md 6.1 and 6.2.
 #[test]
-fn the_real_fork_order_recomputes_its_id() {
+fn the_real_fork_order_reads_as_its_steps() {
     let json: serde_json::Value = serde_json::from_str(include_str!(
         "../../../impl/samples/quoter_order_arbitrum_cctp_gasless.json"
     ))
@@ -256,10 +255,7 @@ fn the_real_fork_order_recomputes_its_id() {
 
     let order = decode_order(&bytes_of("orderAbi")).expect("the stored order decodes");
     assert_eq!(encode_order(&order), bytes_of("orderAbi"));
-    let chain = ChainId::new(json["chainId"].as_u64().unwrap());
-    let id = order_id(&order, chain, address_of("swapic"));
-    assert_eq!(id.to_string(), text("orderId"));
-    assert_eq!(id.as_nonce().to_string(), text("nonce"));
+    assert!(order.memo.is_empty());
     assert_eq!(evm(order.tokenIn), address_of("usdc"));
     assert_eq!(order.amountIn, U256::from(100_000_000u64));
 
@@ -544,42 +540,45 @@ fn usd_coin(usdc: EvmAddress) -> UsdcDomain<'static> {
     }
 }
 
-/// The digests each gasless door's payer signs, on the quoter's real CCTP order, against
-/// goldens computed independently with `cast keccak` and `cast abi-encode` from the
-/// EIP-712 definitions: USDC's `ReceiveWithAuthorization` (the fixture's own typed data),
-/// Permit2's `PermitWitnessTransferFrom` (nonce 7, the order's deadline), and Swapic's
-/// `QuoteAcceptance`.
+/// The three doors' digests over the interface golden order, computed with cast outside
+/// this crate: the 3009 authorization (its nonce the order id), the Permit2 witness transfer
+/// and the 2612 door's QuoteAcceptance. What the app has its user sign.
 #[test]
 fn the_door_digests_are_the_cast_goldens() {
-    let (json, order) = sample_order(SAMPLES[0]);
-    let chain = ChainId::ARBITRUM;
-    let swapic: EvmAddress = json["swapic"].as_str().unwrap().parse().unwrap();
-    let usdc: EvmAddress = json["usdc"].as_str().unwrap().parse().unwrap();
+    let golden = interface();
+    let golden = &golden["order"];
+    let order = interface_order(&golden["value"]);
+    let chain = ChainId::new(golden["chain_id"].as_u64().unwrap());
+    let swapic: EvmAddress = text(&golden["swapic"]).parse().unwrap();
+    let doors = &golden["doors"];
     let id = order_id(&order, chain, swapic);
+    let usdc: EvmAddress = text(&doors["auth_3009"]["domain"]["verifyingContract"])
+        .parse()
+        .unwrap();
     let auth = GaslessAuth {
         door: DOOR_AUTH_3009,
         validAfter: U256::ZERO,
-        validBefore: json["validBefore"].as_str().unwrap().parse().unwrap(),
+        validBefore: uint(&doors["auth_3009"]["value"]["validBefore"]),
         nonce: id.as_nonce(),
         ..Default::default()
     };
     assert_eq!(
         receive_with_authorization_digest(&order, &auth, id, chain, usd_coin(usdc), swapic),
-        b256!("92c4eb4de81f76629a82f059a1f7c52e081b90bb2c49554cf6d025e47b377025").0
+        word(&doors["auth_3009"]["digest"])
     );
     let permit2 = GaslessAuth {
         door: DOOR_PERMIT2,
-        nonce: U256::from(7),
+        nonce: uint(&doors["permit2"]["value"]["nonce"]),
         deadline: order.deadline,
         ..Default::default()
     };
     assert_eq!(
         permit2_digest(&order, &permit2, id, chain, swapic),
-        b256!("e570ff79f40ea82311a91cdc14e30ec7115ab7b7ff920d35e737f772ba112eff").0
+        word(&doors["permit2"]["digest"])
     );
     assert_eq!(
         acceptance_digest(&order, chain, swapic),
-        b256!("59b9a23669995f2686ac3b22dc777977b9ae5d61fa04ec545e88fd356018d2a8").0
+        word(&doors["acceptance_2612"]["digest"])
     );
 }
 
@@ -593,7 +592,7 @@ fn the_arrival_topics_are_the_chains_own() {
     let hex = |topic: [u8; 32]| hex::encode(topic);
     assert_eq!(
         hex(topics::order_started()),
-        "8e97ed8d4d8c9c453242f7e97e8fceb3b04813c3257d5d5a11d74b4cf89b5e82"
+        "e95fa9d6e54c817e5526d084398a582163dc771d78687ec4afe3a9665ccb0adc"
     );
     assert_eq!(
         hex(topics::paid_out()),
@@ -651,4 +650,152 @@ fn a_balance_read_is_erc20_balance_of() {
         "70a08231\
          00000000000000000000000036d34038f04990a58c068e08ed9754e2e3d9ba53"
     );
+}
+
+const INTERFACE: &str = include_str!("../../../golden/interface.json");
+
+fn interface() -> serde_json::Value {
+    serde_json::from_str(INTERFACE).expect("the golden file is JSON")
+}
+
+fn text(value: &serde_json::Value) -> &str {
+    value.as_str().unwrap()
+}
+
+fn hex_bytes(value: &serde_json::Value) -> Vec<u8> {
+    hex::decode(text(value).trim_start_matches("0x")).unwrap()
+}
+
+fn word(value: &serde_json::Value) -> [u8; 32] {
+    hex_bytes(value).try_into().unwrap()
+}
+
+fn uint(value: &serde_json::Value) -> U256 {
+    match value {
+        serde_json::Value::String(text) => U256::from_str_radix(text, 10).unwrap(),
+        number => U256::from(number.as_u64().unwrap()),
+    }
+}
+
+fn address_of(value: &serde_json::Value) -> Address {
+    text(value).parse().unwrap()
+}
+
+/// The golden file's order, read field by field.
+fn interface_order(value: &serde_json::Value) -> Order {
+    Order {
+        r#ref: FixedBytes(word(&value["ref"])),
+        payer: address_of(&value["payer"]),
+        tokenIn: address_of(&value["tokenIn"]),
+        amountIn: uint(&value["amountIn"]),
+        deadline: uint(&value["deadline"]),
+        steps: value["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| Step {
+                target: address_of(&step["target"]),
+                data: hex_bytes(&step["data"]).into(),
+                token: address_of(&step["token"]),
+                min: uint(&step["min"]),
+                writes: step["writes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|write| Write {
+                        at: u32::try_from(write["at"].as_u64().unwrap()).unwrap(),
+                        minus: uint(&write["minus"]),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        payout: Payout {
+            token: address_of(&value["payout"]["token"]),
+            recipient: address_of(&value["payout"]["recipient"]),
+            minOut: uint(&value["payout"]["minOut"]),
+        },
+        memo: hex_bytes(&value["memo"]).into(),
+    }
+}
+
+/// The interface golden order, computed with cast outside this crate: its `abi.encode`
+/// bytes, its EIP-712 type string and type hash, the domain separator, its struct hash and
+/// its id, and the `OrderStarted` topic. The quoter, the watcher, the app and the contracts
+/// are held to the same file.
+#[test]
+fn the_interface_golden_order_holds() {
+    let golden = interface();
+    let golden = &golden["order"];
+    let order = interface_order(&golden["value"]);
+    let chain = ChainId::new(golden["chain_id"].as_u64().unwrap());
+    let swapic: EvmAddress = text(&golden["swapic"]).parse().unwrap();
+    assert_eq!(text(&golden["type_string"]), ORDER_TYPE);
+    assert_eq!(keccak256(ORDER_TYPE).0, word(&golden["type_hash"]));
+    assert_eq!(
+        domain(chain, swapic).separator().0,
+        word(&golden["domain_separator"])
+    );
+    assert_eq!(encode_order(&order), hex_bytes(&golden["abi_encode"]));
+    assert_eq!(
+        decode_order(&hex_bytes(&golden["abi_encode"])),
+        Some(order.clone())
+    );
+    assert_eq!(hash_order(&order), word(&golden["struct_hash"]));
+    assert_eq!(
+        order_id(&order, chain, swapic).into_bytes(),
+        word(&golden["order_id"])
+    );
+    assert_eq!(
+        topics::order_started(),
+        word(&golden["order_started_topic0"])
+    );
+    let selector = |field: &str| text(&golden["selectors"][field]).to_string();
+    assert_eq!(
+        format!("0x{}", hex::encode(selectors::RUN_FOR)),
+        selector("runFor")
+    );
+    assert_eq!(
+        format!("0x{}", hex::encode(runCall::SELECTOR)),
+        selector("run")
+    );
+    assert_eq!(
+        keccak256(text(&golden["order_started_signature"])).0,
+        topics::order_started()
+    );
+}
+
+/// An `OrderStarted` log reads back with its memo: what the canister's own Base scan and
+/// the watcher take a deposit's terms from.
+#[test]
+fn an_order_started_log_reads_back_with_its_memo() {
+    let golden = interface();
+    let order = interface_order(&golden["order"]["value"]);
+    let id = [0x5e; 32];
+    let event = OrderStarted {
+        id: FixedBytes(id),
+        r#ref: order.r#ref,
+        payer: order.payer,
+        tokenIn: order.tokenIn,
+        amountIn: order.amountIn,
+        memo: order.memo.clone(),
+    };
+    let topics: Vec<[u8; 32]> = event
+        .encode_topics()
+        .iter()
+        .map(|topic| topic.0 .0)
+        .collect();
+    let data = event.encode_data();
+    assert_eq!(topics[0], topics::order_started());
+    assert_eq!(
+        read_order_started(&topics, &data),
+        Some(StartedOrder {
+            id: OrderId::new(id),
+            r#ref: order.r#ref.0,
+            payer: evm(order.payer),
+            token_in: evm(order.tokenIn),
+            amount_in: order.amountIn,
+            memo: order.memo.to_vec(),
+        })
+    );
+    assert_eq!(read_order_started(&topics[..3], &data), None);
 }

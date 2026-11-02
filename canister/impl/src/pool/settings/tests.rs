@@ -46,10 +46,9 @@ fn set_pool_settings_refuses_a_stranger_a_halt_and_bad_settings() {
 fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
     settlement_api::types::pool::PayoutSettings {
         min_network_fee: candid::Nat::from(50_000_u64),
-        rebalance_share_floor_bps: 2,
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
-        cctp_min_network_fee: None,
+        cctp_payouts: false,
     }
 }
 

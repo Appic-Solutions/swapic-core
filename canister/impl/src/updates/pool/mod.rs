@@ -4,6 +4,7 @@ use crate::pool;
 use crate::storage::halt::is_halted;
 use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
+use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::pool::{
     DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk,
     PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError,
@@ -31,18 +32,18 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
     Ok(())
 }
 
-/// Any caller (the watcher, or the user's app as a backup), refused while halted (P11d,
-/// 2026-10-21: no registration). A USDC transfer to the canister's Base address in
-/// `base_tx` (and, for an Eco arrival, the order's `src_tx` on `src_chain`; an empty
-/// `src_tx` names none) pays the deposit whose `terms` are handed over. The canister reads
-/// the receipt itself (one batched outcall, and one more on the source chain for Eco) at
-/// the crediting depth, proves every transfer to it against its rail, recomputes the ref
-/// from the terms and credits the transfer whose proof carries it, at most once:
+/// Any caller (the watcher, or the user's app as a backup), refused while halted. A USDC
+/// transfer to the canister's Base address in `base_tx` pays the deposit its order's memo
+/// describes: the order ran in `base_tx` (same chain) or in `src_tx` on `src_chain` (CCTP,
+/// Eco). The canister reads the receipts itself at the crediting depth, proves every
+/// transfer to it against its rail, takes the memo (the one handed over, or the one in the
+/// order's `OrderStarted`) only when its keccak is the ref the proof carries, and credits
+/// the transfer at most once, and only when it brings at least the memo's `min_usdc`:
 /// `Credited` (the payout follows on the canister's timer), or `Unattributed` with why,
-/// held for a controller. `BadArrival` when no transfer carries the terms' ref. The
-/// canister trusts only the chain and the fingerprint. A caller other than the watcher is
-/// held to 10 reports a minute in total and 3 an hour per `base_tx` (P11e), refused
-/// `Unavailable` before any outcall.
+/// held for a controller. `BadArrival` when no transfer carries the memo's ref. The
+/// canister trusts only the chain and the hash. A caller other than the watcher is held to
+/// 10 reports a minute in total and 3 an hour per `base_tx`, refused `Unavailable` before
+/// any outcall.
 #[update]
 pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
     pool::arrival::note(arrival).await
@@ -52,9 +53,10 @@ pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcom
 /// five calls a minute or thirty an hour (this door and `swap_from_icp` together).
 /// Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister (its main account; the
-/// approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap; mints
-/// its shares at the pool's price before it. A pull whose answer was lost answers
-/// `Unavailable`, and the canister asks again with the same pull.
+/// approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap: books
+/// `move_fee` to Swapic's ICP fee line and mints shares on the rest at the pool's price
+/// before it. A pull whose answer was lost answers `Unavailable`, and the canister asks
+/// again with the same pull.
 #[update]
 pub async fn stake_icp(args: StakeIcpArgs) -> Result<StakeIcpOk, PoolError> {
     pool::icp::stake(args, is_sanctioned).await
@@ -62,19 +64,19 @@ pub async fn stake_icp(args: StakeIcpArgs) -> Result<StakeIcpOk, PoolError> {
 
 /// The ICP owner of the shares (the caller, at its subaccount `from`), refused while halted,
 /// while the pool is closed, and for a sanctioned party. Burns the shares `usdc` is worth
-/// (rounded up, at most `max_shares`) and pays `to` all of it as `token_out` (ckUSDC, or a
-/// listed token through its ICPSwap pool, at least `min_out`; below it, all of it as ckUSDC),
-/// every ledger fee out of `usdc`. Refused when the ICP pocket's free ckUSDC is short (the
-/// queue is P11b). A payout that does not finish in this call answers `Unavailable` with
-/// the shares burned, and the canister's timer finishes it.
+/// (rounded up, at most `max_shares`), books `move_fee` to Swapic's ICP fee line, and pays
+/// `to` the rest as `token_out` (ckUSDC, or a listed token through its ICPSwap pool, at
+/// least `min_out`; below it, all of it as ckUSDC), every ledger fee out of it. Refused when
+/// the ICP pocket's free ckUSDC is short. A payout that does not finish in this call
+/// answers `Unavailable` with the shares burned, and the canister's timer finishes it.
 #[update]
 pub async fn withdraw_icp(args: WithdrawIcpArgs) -> Result<WithdrawIcpOk, PoolError> {
     pool::icp::withdraw(args, is_sanctioned).await
 }
 
 /// Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
-/// fee, the rebalancing share's floor, how long a waiting payout waits for an order, the
-/// most gas a payout order is signed with, and the least network fee of a CCTP payout.
+/// fee, how long a waiting payout waits for an order, the most gas a payout order is signed
+/// with, and whether a payout may leave Base over CCTP.
 #[update]
 pub fn set_payout_settings(settings: PayoutSettings) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();
@@ -247,7 +249,7 @@ pub async fn resolve_stake(id: Vec<u8>, resolution: StakeResolution) -> Result<(
 /// Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's
 /// `POST /v2/withdraw` forwards here), refused while halted, while the pool is closed, and for
 /// a sanctioned party. Burns the shares `usdc` is worth (rounded up, at most `max_shares` and
-/// the staker's own), keeps the rebalancing share in the pool and the network fee on Base, and
+/// the staker's own), books the move fee and the network fee to Swapic's Base fee line, and
 /// opens a payout of the rest from the Base pocket, waiting for its order or queued while the
 /// pocket is short. One nonce per staker, once. Answers the payout's id and the shares burned.
 #[update]
@@ -264,17 +266,28 @@ pub fn withdraw_evm(
 }
 
 /// Watcher-only, refused while halted and while the pool is closed: the order the quoter
-/// built for waiting payout `id` at its exact amount (`abi.encode` of an Order), and the gas
-/// limit to sign it with. The canister checks the untrusted order against the payout's own
-/// terms (payer the canister, Base USDC in, exactly the payout's amount, no fee step, no CCTP
-/// burn, one delivery paying the recipient at least their minimum of their token on their
-/// chain, an Eco intent's reward refunding the canister, a deadline at least 60 s away and
-/// within the payout's, no sanctioned party, the gas within `max_payout_gas`) and signs
-/// `Swapic.run(order)` from its own Base pocket. A payout signed already answers its
-/// transaction's id; a retry after a revert signs only the order it pinned.
+/// built for waiting payout `id` at its exact amount (`abi.encode` of an Order, its memo
+/// empty), and the gas limit to sign it with. The canister checks the untrusted order
+/// against the payout's own terms (payer the canister, Base USDC in, exactly the payout's
+/// amount, no fee step, a CCTP burn only while CCTP payouts are on and the payout's network
+/// fee covers the destination's floor, one delivery paying the recipient at least their
+/// minimum of their token on their chain, an Eco intent's reward refunding the canister, a
+/// deadline at least 60 s away and within the payout's, no sanctioned party, the gas within
+/// `max_payout_gas`) and signs `Swapic.run(order)` from its own Base pocket. A payout signed
+/// already answers its transaction's id; a retry after a revert signs only the order it
+/// pinned.
+///
+/// `reading`, when given, is the pool chain's head and gas price the watcher priced the
+/// payout on; with none the canister reads the gas price itself. A reading whose block is
+/// not above the stored one's is kept out.
 #[update]
-pub async fn pay_payout(id: u64, order: Vec<u8>, gas_limit: u64) -> Result<PayPayoutOk, PoolError> {
-    pool::pay::pay_payout(id, order, gas_limit)
+pub async fn pay_payout(
+    id: u64,
+    order: Vec<u8>,
+    gas_limit: u64,
+    reading: Option<ChainData>,
+) -> Result<PayPayoutOk, PoolError> {
+    pool::pay::pay_payout(id, order, gas_limit, reading)
         .await
         .map(|tx_id| PayPayoutOk { tx_id })
 }

@@ -5,7 +5,6 @@
 //! without `lib.rs`'s glob imports becoming ambiguous.
 
 mod books;
-mod chain;
 mod config;
 mod flows;
 mod icrc21;
@@ -14,9 +13,9 @@ mod pool;
 mod rebalance;
 mod rescue;
 mod roles;
+mod sweep;
 
 pub use books::*;
-pub use chain::*;
 pub use config::*;
 pub use flows::*;
 pub use icrc21::*;
@@ -25,3 +24,4 @@ pub use pool::*;
 pub use rebalance::*;
 pub use rescue::*;
 pub use roles::*;
+pub use sweep::*;

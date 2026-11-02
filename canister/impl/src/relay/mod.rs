@@ -25,10 +25,8 @@ use crate::storage::chain_data;
 use crate::storage::sanctions::is_sanctioned;
 use crate::storage::{config, flow_settings};
 use crate::tx;
-use crate::updates::{store_reading, validated};
 use alloy_primitives::U256;
 use settlement_api::types::chain_data::ChainData;
-use settlement_api::types::errors::PushChainDataError;
 use std::fmt;
 use thiserror::Error;
 use types::config::{ChainTable, EvmChain, GasAction};
@@ -841,6 +839,12 @@ pub fn check(
     if order.amountIn.is_zero() {
         return Err(RelayError::Order("pays nothing"));
     }
+    // the memo rides in the calldata the canister pays for, and no deposit's is longer
+    if order.memo.len() > types::pool::memo::MAX_MEMO_BYTES {
+        return Err(RelayError::Order(
+            "carries a memo longer than any deposit's terms",
+        ));
+    }
     let earliest = now_s.saturating_add(RELAY_MARGIN_S);
     let latest = now_s.saturating_add(window_s);
     if order.deadline <= U256::from(earliest) || order.deadline > U256::from(latest) {
@@ -897,17 +901,16 @@ pub fn check(
     })
 }
 
-/// What `relay_gasless` and `finish_cctp` do with the reading the watcher priced them on,
-/// right after their guards and before anything else: it is stored as a push stores it,
-/// stamped `at`, so the fee rule reads it fresh and no separate push has to land before
-/// the call. None leaves the stored reading as it is. An invalid one refuses the call with
-/// the push's own error text, and nothing is stored or signed. The reading names no
-/// chain: it is the call's.
+/// What `relay_gasless`, `finish_cctp` and `pay_payout` do with the reading the watcher
+/// priced them on, right after their guards and before anything else: it is stored, stamped
+/// `at`, so the fee rule reads it fresh. None leaves the stored reading as it is. An invalid
+/// one refuses the call, and nothing is stored or signed. The reading names no chain: it is
+/// the call's.
 ///
 /// A reading whose block is at or below the stored one's is kept out, and the stored one
 /// stays with its stamp: a retry resends the reading it was first priced on, and a slow
-/// call can land after a newer push, and either would otherwise put older fees in and
-/// stamp them fresh. The push alone restamps a reading of the same block.
+/// call can land after a newer one, and either would otherwise put older fees in and stamp
+/// them fresh.
 pub fn take_reading(
     chain_id: ChainId,
     reading: Option<ChainData>,
@@ -916,12 +919,17 @@ pub fn take_reading(
     let Some(reading) = reading else {
         return Ok(());
     };
-    let refusal = |e: PushChainDataError| format!("{e:?}");
-    if chain_data::get(chain_id).is_some_and(|stored| reading.block <= stored.block.get()) {
-        // kept out, and still refused when it is not a reading at all
-        return validated(reading).map(drop).map_err(refusal);
+    let reading = types::ChainReading::try_from(reading).map_err(|e| {
+        format!(
+            "InvalidData({:?})",
+            settlement_api::types::chain_data::ChainDataError::from(e)
+        )
+    })?;
+    if chain_data::get(chain_id).is_some_and(|stored| reading.block <= stored.block) {
+        return Ok(());
     }
-    store_reading(chain_id, reading, at).map_err(refusal)
+    chain_data::put(chain_id, reading, at);
+    Ok(())
 }
 
 /// `relay_gasless`: answers the signed transaction's id in `signed_txs`. Its status is

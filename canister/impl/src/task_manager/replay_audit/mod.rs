@@ -3,7 +3,7 @@ use crate::state::State;
 use crate::storage::audit_cursor::{self, AuditCursor};
 use crate::storage::halt::set_halted;
 use crate::storage::replay_cursor::{self, ReplayCursor};
-use crate::storage::{config, events, events::ChainChunk};
+use crate::storage::{events, events::ChainChunk};
 
 /// One pass of the audit timer, bounded whatever the log holds: the O(1) invariant that the
 /// fold is in step with the log, then one chunk of the chain, resumed from the stable
@@ -12,6 +12,9 @@ use crate::storage::{config, events, events::ChainChunk};
 pub fn run_replay_audit() {
     record_audit(audit_pass());
 }
+
+/// The most log entries one audit pass verifies.
+const AUDIT_CHUNK: u64 = 1_000;
 
 /// Whether this pass found the canister sound. A broken link, a bad index or a recomputed
 /// hash that does not match stops the pass where it is: the cursor stays on the entry that
@@ -25,7 +28,7 @@ fn audit_pass() -> bool {
         cursor if cursor.next_index.get() >= events::event_count() => AuditCursor::GENESIS,
         cursor => cursor,
     };
-    let chunk = config::get().audit_chunk_events.get().into();
+    let chunk = AUDIT_CHUNK;
     match events::verify_chain_chunk(cursor.next_index, cursor.parent_hash, chunk) {
         Err(_) => false,
         Ok(ChainChunk {

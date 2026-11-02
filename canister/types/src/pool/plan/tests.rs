@@ -127,6 +127,7 @@ fn the_first_minimum_is_the_first_spending_steps_or_the_payouts() {
             recipient: Address::repeat_byte(0x11),
             minOut: U256::from(3_u64),
         },
+        memo: Default::default(),
     };
     assert_eq!(first_minimum(&order), usdc_micro(97));
     // no step: the payout's, when it pays the token in

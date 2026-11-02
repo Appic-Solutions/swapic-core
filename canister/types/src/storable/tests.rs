@@ -1,8 +1,6 @@
 use crate::chain::ChainId;
 use crate::chain_data::ChainReading;
-use crate::config::{
-    AuditChunk, ChainTable, Config, EvictionsPerSweep, RefundsPerSweep, MIN_ETHEREUM_CONFIRMATIONS,
-};
+use crate::config::{ChainTable, Config, MIN_ETHEREUM_CONFIRMATIONS};
 use crate::events::{Event, TxPurpose, EVENT_VARIANT_COUNT};
 use crate::hash::{EventHash, QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
@@ -141,26 +139,10 @@ fn samples() -> Vec<Sample> {
         (ChainId::ARBITRUM, BlockDepth::new(1)),
     ]);
     let config = Config {
-        platform_fee: crate::BasisPoints::new(10),
         rpc_urls: BTreeMap::from([(
             ChainId::ETHEREUM,
             "https://rpc.example/v2/key".parse().unwrap(),
         )]),
-        vault_addresses: BTreeMap::from([(ChainId::BASE, "0xvault".parse().unwrap())]),
-        ecdsa_key_name: "key_1".to_string(),
-        confirmations: depths_before_the_mainnet_floor.clone(),
-        ..Config::default()
-    };
-    // every cap of the sample above holds its default, so its bytes stop where the caps
-    // begin and pin only that one shape. This one sets an interior cap: the cap before it
-    // is written out at its default and the cap after it is still omitted, which is the
-    // other shape a stored config takes. The third, a null where a knob sits, is no golden
-    // line, because a line must encode back to itself and an unset cap encodes as its
-    // value; `config/tests.rs` decodes that one by hand.
-    let mixed_caps = Config {
-        max_refunds_per_sweep: RefundsPerSweep::DEFAULT,
-        max_evictions_per_sweep: EvictionsPerSweep::new(1_234),
-        audit_chunk_events: AuditChunk::DEFAULT,
         ecdsa_key_name: "key_1".to_string(),
         confirmations: depths_before_the_mainnet_floor,
         ..Config::default()
@@ -188,7 +170,6 @@ fn samples() -> Vec<Sample> {
         ),
         sample("pending quote", crate::quote::tests::fixed_quote()),
         sample("config", config),
-        sample("config mixed caps", mixed_caps),
         sample("quote hash key", QuoteHash::new([0x5a; 32])),
         sample("chain id key", ChainId::ARBITRUM),
         sample(
@@ -692,7 +673,7 @@ fn transfer_lost_samples() -> Vec<Sample> {
             },
             min_usdc: TokenAmount::from(2_206_000_000_u64),
             premium: TokenAmount::from(2_207_u32),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             src_chain: ChainId::ARBITRUM,
             src_payer: crate::evm::EvmAddress::new([0xb5; 20]),
             rail: PoolRail::Cctp,
@@ -767,7 +748,7 @@ fn transfer_asked_samples() -> Vec<Sample> {
             },
             min_usdc: TokenAmount::from(2_106_000_000_u64),
             premium: TokenAmount::from(2_107_u32),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             src_chain: ChainId::ARBITRUM,
             src_payer: crate::evm::EvmAddress::new([0xc5; 20]),
             rail: PoolRail::Cctp,
@@ -867,7 +848,7 @@ fn held_resolution_samples() -> Vec<Sample> {
             },
             min_usdc: TokenAmount::from(1_902_000_000_u64),
             premium: TokenAmount::from(1_903_u32),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             src_chain: ChainId::ARBITRUM,
             src_payer: crate::evm::EvmAddress::new([0xd3; 20]),
             rail: PoolRail::Cctp,
@@ -962,7 +943,7 @@ fn reverted_at_samples() -> Vec<Sample> {
             staker,
             usdc: TokenAmount::from(1_802_000_000_u64),
             max_shares: Shares::new(1_803 << 64),
-            rebalance_share: TokenAmount::from(1_804_u64),
+            move_fee: TokenAmount::from(1_804_u64),
             network_fee: TokenAmount::from(1_805_u64),
             nonce: 1_806,
             burned: Shares::new(1_807 << 64),
@@ -1083,7 +1064,7 @@ fn fill_early_samples() -> Vec<Sample> {
             staker,
             usdc: TokenAmount::from(1_702_000_000_u64),
             max_shares: Shares::new(1_703 << 64),
-            rebalance_share: TokenAmount::from(1_704_u64),
+            move_fee: TokenAmount::from(1_704_u64),
             network_fee: TokenAmount::from(1_705_u64),
             nonce: 1_706,
             burned: Shares::new(1_707 << 64),
@@ -1133,7 +1114,7 @@ fn fit_retry_samples() -> Vec<Sample> {
             staker,
             usdc: TokenAmount::from(1_602_000_000_u64),
             max_shares: Shares::new(1_603 << 64),
-            rebalance_share: TokenAmount::from(1_604_u64),
+            move_fee: TokenAmount::from(1_604_u64),
             network_fee: TokenAmount::from(1_605_u64),
             nonce: 1_606,
             burned: Shares::new(1_607 << 64),
@@ -1352,7 +1333,7 @@ fn eco_payout_samples() -> Vec<Sample> {
         staker: address(0xd1),
         usdc: TokenAmount::from(1_201_000_000_u64),
         max_shares: Shares::new(1_202 << 64),
-        rebalance_share: TokenAmount::from(1_203_000_u64),
+        move_fee: TokenAmount::from(1_203_000_u64),
         network_fee: TokenAmount::from(1_204_000_u64),
         nonce: 1_205,
         burned: Shares::new(1_206 << 64),
@@ -1501,6 +1482,7 @@ fn rescue_samples() -> Vec<Sample> {
         pool_move_finish: None,
         pool_ck_deposit: None,
         eco_rescue: Some(base + 13),
+        sweep: None,
     };
     let chain = EvmChain {
         swapic: address(0xb1),
@@ -1526,6 +1508,7 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(GasAmount::from),
+                sweep: None,
             }
         },
         gas_budget: {
@@ -1545,6 +1528,7 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(Wei::from),
+                sweep: None,
             }
         },
         min_network_fee: {
@@ -1564,10 +1548,12 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(TokenAmount::from),
+                sweep: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -1877,6 +1863,7 @@ fn rebalance_samples() -> Vec<Sample> {
         pool_move_finish: Some(base + 11),
         pool_ck_deposit: Some(base + 12),
         eco_rescue: None,
+        sweep: None,
     };
     let chain = EvmChain {
         swapic: address(0x9d),
@@ -1902,6 +1889,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move_finish: r.pool_move_finish.map(GasAmount::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(GasAmount::from),
                 eco_rescue: None,
+                sweep: None,
             }
         },
         gas_budget: {
@@ -1921,6 +1909,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move_finish: r.pool_move_finish.map(Wei::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(Wei::from),
                 eco_rescue: None,
+                sweep: None,
             }
         },
         min_network_fee: {
@@ -1940,10 +1929,12 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_move_finish: r.pool_move_finish.map(TokenAmount::from),
                 pool_ck_deposit: r.pool_ck_deposit.map(TokenAmount::from),
                 eco_rescue: None,
+                sweep: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -2054,7 +2045,7 @@ fn arrival_terms_samples() -> Vec<Sample> {
         },
         min_usdc: TokenAmount::from(904_000_000_u64),
         premium: TokenAmount::from(904_000_u64),
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         src_chain: ChainId::ARBITRUM,
         src_payer: crate::evm::EvmAddress::new([0x96; 20]),
         rail: PoolRail::Cctp,
@@ -2094,10 +2085,9 @@ fn arrival_terms_samples() -> Vec<Sample> {
             PoolStep::PayoutSettingsSet {
                 settings: PayoutSettings {
                     min_network_fee: TokenAmount::from(911_000_u64),
-                    rebalance_share_floor_bps: 912,
                     order_wait: Duration::from_secs(913),
                     max_payout_gas: 914_000,
-                    cctp_min_network_fee: Some(TokenAmount::from(915_000_u64)),
+                    cctp_payouts: true,
                 },
             },
         ),
@@ -2383,6 +2373,7 @@ fn pool_tx_samples() -> Vec<Sample> {
         pool_move_finish: None,
         pool_ck_deposit: None,
         eco_rescue: None,
+        sweep: None,
     };
     let chain = EvmChain {
         swapic: address(0x51),
@@ -2408,6 +2399,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: None,
+                sweep: None,
             }
         },
         gas_budget: {
@@ -2427,6 +2419,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: None,
+                sweep: None,
             }
         },
         min_network_fee: {
@@ -2446,10 +2439,12 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_move_finish: None,
                 pool_ck_deposit: None,
                 eco_rescue: None,
+                sweep: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -2693,7 +2688,7 @@ fn pool_deposit_sample() -> crate::pool::Registered {
         },
         min_usdc: TokenAmount::from(43_000_000_u32),
         premium: TokenAmount::from(44_000_u32),
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         src_chain: ChainId::ARBITRUM,
         src_payer: crate::evm::EvmAddress::new([0x45; 20]),
         rail: PoolRail::Eco,
@@ -2793,7 +2788,7 @@ fn payout_samples() -> Vec<Sample> {
         staker: address(0xe6),
         usdc: TokenAmount::from(231_000_000_u64),
         max_shares: Shares::new(232 << 64),
-        rebalance_share: TokenAmount::from(233_000_u64),
+        move_fee: TokenAmount::from(233_000_u64),
         network_fee: TokenAmount::from(234_000_u64),
         nonce: 235,
         burned: Shares::new(236 << 64),
@@ -2813,10 +2808,9 @@ fn payout_samples() -> Vec<Sample> {
         payouts: Some(PayoutLines {
             settings: Some(PayoutSettings {
                 min_network_fee: TokenAmount::from(238_000_u64),
-                rebalance_share_floor_bps: 239,
                 order_wait: Duration::from_secs(240),
                 max_payout_gas: 241_000,
-                cctp_min_network_fee: None,
+                cctp_payouts: false,
             }),
             next_id: 242,
             fees_icp: TokenAmount::from(243_u8),
@@ -3102,7 +3096,7 @@ fn pool_samples() -> Vec<Sample> {
             },
             min_usdc: TokenAmount::from(167_000_000_u32),
             premium: TokenAmount::from(168_000_u32),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             src_chain: ChainId::ARBITRUM,
             src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
                 .parse()

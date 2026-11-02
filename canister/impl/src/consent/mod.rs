@@ -525,7 +525,7 @@ fn withdraw_evm(door: Door, args: EvmWithdrawal, known: &Known) -> Result<Consen
                 "Kept",
                 format!(
                     "{} pool fee, {} network fee",
-                    usdc(request.rebalance_share),
+                    usdc(request.move_fee),
                     usdc(request.network_fee)
                 ),
             ),

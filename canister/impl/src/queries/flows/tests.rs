@@ -3,6 +3,7 @@ use crate::storage::events::{append_event_at, verify_replay};
 use crate::storage::on_fresh_memory;
 use types::events::TxPurpose;
 use types::flow::{finish_key, FinishAction};
+use types::QuoteHash;
 use types::{
     ChainId, EventType, EvmAddress, FlowStep, GasAmount, Nonce, Timestamp, TxHash, Wei, WeiPerGas,
 };

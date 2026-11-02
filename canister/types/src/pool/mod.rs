@@ -13,6 +13,7 @@ mod tests;
 
 pub mod callers;
 pub mod ledger;
+pub mod memo;
 pub mod payout;
 pub mod plan;
 pub mod rebalance;
@@ -198,23 +199,6 @@ pub enum PoolRail {
     SameChain,
 }
 
-/// `keccak256("swapic.pool.v1.swap")`.
-pub fn tag_swap() -> [u8; 32] {
-    keccak256(b"swapic.pool.v1.swap").0
-}
-
-/// `keccak256("swapic.pool.v1.stake")`.
-pub fn tag_stake() -> [u8; 32] {
-    keccak256(b"swapic.pool.v1.stake").0
-}
-
-/// A u128 as a 32-byte big-endian word.
-fn word(value: u128) -> [u8; 32] {
-    let mut out = [0; 32];
-    out[16..].copy_from_slice(&value.to_be_bytes());
-    out
-}
-
 /// The interface's `owner`: `keccak256(0x02 ‖ u8(len) ‖ principal ‖ subaccount32)` for an
 /// ICP account, `keccak256(0x01 ‖ address20)` for an EVM one.
 pub fn owner_hash(account: &PoolAccount) -> OwnerKey {
@@ -233,42 +217,6 @@ pub fn owner_hash(account: &PoolAccount) -> OwnerKey {
         }
     }
     OwnerKey::new(keccak256(&preimage).0)
-}
-
-/// The interface's `details` (P11d, 2026-10-21): a swap's token out, its minimum, its
-/// premium and its ICP fees (the user's own line for the ledger fees of its payout path); a
-/// stake's rebalancing share. `fee` is the premium for a swap and the rebalancing share for
-/// a stake, so the ref commits every fee.
-pub fn details_hash(kind: &DepositKind, fee: u128, icp_fees: u128) -> [u8; 32] {
-    match kind {
-        DepositKind::Swap {
-            token_out, min_out, ..
-        } => {
-            let bytes = token_out.as_slice();
-            let mut preimage = Vec::with_capacity(1 + bytes.len() + 96);
-            preimage.push(u8::try_from(bytes.len()).expect("BUG: a principal is 29 bytes at most"));
-            preimage.extend_from_slice(bytes);
-            preimage.extend_from_slice(&word(*min_out));
-            preimage.extend_from_slice(&word(fee));
-            preimage.extend_from_slice(&word(icp_fees));
-            keccak256(&preimage).0
-        }
-        DepositKind::Stake { .. } => keccak256(word(fee)).0,
-    }
-}
-
-/// The interface's `ref = keccak256(tag ‖ owner ‖ details ‖ salt32)`.
-pub fn pool_ref(kind: &DepositKind, fee: u128, icp_fees: u128, salt: [u8; 32]) -> PoolRef {
-    let tag = match kind {
-        DepositKind::Swap { .. } => tag_swap(),
-        DepositKind::Stake { .. } => tag_stake(),
-    };
-    let mut preimage = Vec::with_capacity(128);
-    preimage.extend_from_slice(&tag);
-    preimage.extend_from_slice(owner_hash(&kind.owner()).as_ref());
-    preimage.extend_from_slice(&details_hash(kind, fee, icp_fees));
-    preimage.extend_from_slice(&salt);
-    PoolRef::new(keccak256(&preimage).0)
 }
 
 /// Share units minted per micro USDC at the first mint: 18 decimals of shares.
@@ -654,20 +602,21 @@ impl PoolSettings {
     }
 }
 
-/// A deposit's terms as the quoter registers them, before anything arrived.
+/// A deposit's terms as its arrival registers them: what its memo committed, and the rail,
+/// source chain and payer its proof showed.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Registration {
     #[n(0)]
     pub kind: DepositKind,
-    /// The micro USDC that must reach the canister's Base address.
+    /// The least micro USDC an arrival under this ref must bring, as the memo commits it.
     #[n(1)]
     pub min_usdc: TokenAmount,
     /// A swap's premium; zero for a stake.
     #[n(2)]
     pub premium: TokenAmount,
-    /// A stake's rebalancing share; zero for a swap.
+    /// A stake's move fee, Swapic's; zero for a swap.
     #[n(3)]
-    pub rebalance_share: TokenAmount,
+    pub move_fee: TokenAmount,
     #[n(4)]
     pub src_chain: ChainId,
     /// Who pays the order: screened, and where an orphan goes back to.
@@ -675,36 +624,33 @@ pub struct Registration {
     pub src_payer: EvmAddress,
     #[n(6)]
     pub rail: PoolRail,
-    /// After this, plus the grace, an arrival for it is unattributed.
+    /// When the arrival registered it.
     #[n(7)]
     pub expires_at: Timestamp,
     #[cbor(n(8), with = "minicbor::bytes")]
     pub salt: [u8; 32],
-    /// A swap's ICP fees (P11d): the user's own line for its payout path's ledger fees,
-    /// committed in the ref. None on a record from before it existed, read as none.
+    /// A swap's ICP fees: the user's own line for its payout path's ledger fees. None for a
+    /// stake.
     #[n(9)]
     pub icp_fees: Option<TokenAmount>,
 }
 
 impl Registration {
-    /// The fee the ref commits: the premium for a swap, the rebalancing share for a stake.
-    pub fn fee(&self) -> TokenAmount {
-        if self.kind.is_swap() {
-            self.premium
-        } else {
-            self.rebalance_share
+    /// The terms the registration was made of.
+    pub fn terms(&self) -> DepositTerms {
+        DepositTerms {
+            kind: self.kind,
+            min_usdc: self.min_usdc,
+            premium: self.premium,
+            icp_fees: self.icp_fees(),
+            move_fee: self.move_fee,
+            salt: self.salt,
         }
     }
 
-    /// The ref these terms commit to, None for a fee no ref holds.
+    /// The ref these terms commit to: the keccak of their memo. None for terms with no memo.
     pub fn pool_ref(&self) -> Option<PoolRef> {
-        let icp_fees = self.icp_fees.unwrap_or(TokenAmount::ZERO).try_into_u128()?;
-        Some(pool_ref(
-            &self.kind,
-            self.fee().try_into_u128()?,
-            icp_fees,
-            self.salt,
-        ))
+        self.terms().pool_ref()
     }
 
     /// A swap's ICP fees, none for a stake.
@@ -738,39 +684,55 @@ impl Registration {
     }
 }
 
-/// A deposit's terms as they reach the canister with its arrival (P11d, 2026-10-21: no
-/// registration): the preimage of the ref its order carries. Nothing of it is stored but in
-/// the deposit the arrival credits.
+/// A pool deposit's terms: what its order's memo carries ([`memo`]), and so the preimage of
+/// its ref.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositTerms {
     pub kind: DepositKind,
+    /// The least micro USDC an arrival must bring to be credited under these terms: a copy
+    /// of the memo paid with less is never this deposit.
+    pub min_usdc: TokenAmount,
     /// A swap's premium, pure pool income; zero for a stake.
     pub premium: TokenAmount,
     /// A swap's ICP fees, the user's own line for its payout path's ledger fees; zero for a
     /// stake.
     pub icp_fees: TokenAmount,
-    /// A stake's rebalancing share; zero for a swap.
-    pub rebalance_share: TokenAmount,
+    /// A stake's move fee: the cost of one Base to ICP move, Swapic's, never the pool's;
+    /// zero for a swap.
+    pub move_fee: TokenAmount,
     pub salt: [u8; 32],
 }
 
 impl DepositTerms {
-    /// Whether every fee the ref does not commit is zero: a swap's rebalancing share, a
-    /// stake's premium and ICP fees. Terms that carry one could never be told apart from the
-    /// user's own by their ref, so they are no terms of anyone's.
+    /// Whether every fee the kind has no place for is zero: a swap's move fee, a stake's
+    /// premium and ICP fees. Only such terms have a memo.
     pub fn is_canonical(&self) -> bool {
         if self.kind.is_swap() {
-            self.rebalance_share == TokenAmount::ZERO
+            self.move_fee == TokenAmount::ZERO
         } else {
             self.premium == TokenAmount::ZERO && self.icp_fees == TokenAmount::ZERO
         }
     }
 
-    /// The registration these terms make of an arrival of `amount` at `now`, its rail, its
-    /// source chain and its payer as the proof shows them (none: the zero address).
+    /// The terms as their order's memo carries them.
+    pub fn memo(&self) -> Result<Vec<u8>, memo::MemoError> {
+        memo::encode(self)
+    }
+
+    /// The terms a memo holds.
+    pub fn from_memo(bytes: &[u8]) -> Result<Self, memo::MemoError> {
+        memo::decode(bytes)
+    }
+
+    /// The ref these terms commit to, `keccak256(memo)`; None for terms with no memo.
+    pub fn pool_ref(&self) -> Option<PoolRef> {
+        self.memo().ok().map(|bytes| memo::memo_ref(&bytes))
+    }
+
+    /// The registration these terms make of an arrival on `rail` from `src_chain`, its payer
+    /// as the proof shows it (none: the zero address), at `now`.
     pub fn registration(
         &self,
-        amount: TokenAmount,
         src_chain: ChainId,
         src_payer: Option<EvmAddress>,
         rail: PoolRail,
@@ -778,9 +740,9 @@ impl DepositTerms {
     ) -> Registration {
         Registration {
             kind: self.kind,
-            min_usdc: amount,
+            min_usdc: self.min_usdc,
             premium: self.premium,
-            rebalance_share: self.rebalance_share,
+            move_fee: self.move_fee,
             src_chain,
             src_payer: src_payer.unwrap_or(EvmAddress::ZERO),
             rail,
@@ -788,18 +750,6 @@ impl DepositTerms {
             salt: self.salt,
             icp_fees: self.kind.is_swap().then_some(self.icp_fees),
         }
-    }
-
-    /// The ref these terms commit to, None for a fee no ref holds.
-    pub fn pool_ref(&self) -> Option<PoolRef> {
-        self.registration(
-            TokenAmount::ZERO,
-            ChainId::new(0),
-            None,
-            PoolRail::SameChain,
-            Timestamp::from_nanos(0),
-        )
-        .pool_ref()
     }
 }
 
@@ -1498,7 +1448,7 @@ pub enum PoolStep {
         #[n(2)]
         amount: TokenAmount,
         #[n(3)]
-        rebalance_share: TokenAmount,
+        move_fee: TokenAmount,
         #[n(4)]
         shares: Shares,
         #[n(5)]
@@ -1589,6 +1539,9 @@ pub enum PoolStep {
         amount: TokenAmount,
         #[n(4)]
         created_at: Timestamp,
+        /// Swapic's move fee out of `amount`, the cost of one ICP to Base move.
+        #[n(5)]
+        move_fee: TokenAmount,
     },
     /// The ledger refused an ICP stake's pull: nothing moved, the room is released.
     #[n(16)]
@@ -1617,6 +1570,9 @@ pub enum PoolStep {
         min_out: u128,
         #[n(7)]
         attempt: PayoutAttempt,
+        /// Swapic's move fee out of `usdc`, the cost of one Base to ICP move.
+        #[n(8)]
+        move_fee: TokenAmount,
     },
     /// The ICP pocket's balance check.
     #[n(18)]

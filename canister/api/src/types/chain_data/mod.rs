@@ -3,8 +3,10 @@ use serde::Deserialize;
 use types::chain_data::{ChainDataError as DomainError, ChainReading};
 use types::numeric::{BlockNumber, WeiPerGas};
 
-/// One chain as the watcher last saw it. There is no instant on it: the canister stamps
-/// what it receives, so nothing a caller sends can date its data forward.
+/// A chain's head and gas price as the watcher read them, handed with the call that makes
+/// the canister sign (`relay_gasless`, `finish_cctp`, `pay_payout`). There is no instant on
+/// it: the canister stamps what it receives, so nothing a caller sends can date its data
+/// forward.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ChainData {
     /// The head block the watcher saw.
@@ -15,22 +17,7 @@ pub struct ChainData {
     pub priority_fee_wei_per_gas: Nat,
 }
 
-/// One chain's reading in `push_chain_data_many`: what `push_chain_data` takes, as one
-/// entry of a list.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ChainPush {
-    pub chain_id: u64,
-    pub data: ChainData,
-}
-
-/// A cached reading with the canister time it arrived at.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ChainDataEntry {
-    pub data: ChainData,
-    pub pushed_at_ns: u64,
-}
-
-/// Why a pushed reading is not one this canister prices gas with.
+/// Why a reading is not one this canister prices gas with.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ChainDataError {
     FeeTooLarge { field: String },
@@ -59,15 +46,6 @@ impl From<ChainReading> for ChainData {
             block: reading.block.get(),
             base_fee_wei_per_gas: reading.base_fee.into(),
             priority_fee_wei_per_gas: reading.priority_fee.into(),
-        }
-    }
-}
-
-impl From<types::chain_data::ChainData> for ChainDataEntry {
-    fn from(data: types::chain_data::ChainData) -> Self {
-        Self {
-            data: data.reading().into(),
-            pushed_at_ns: data.pushed_at.as_nanos(),
         }
     }
 }

@@ -24,6 +24,7 @@ fn chain(move_fee: u64, finish_fee: u64) -> EvmChain {
         },
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 

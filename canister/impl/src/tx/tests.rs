@@ -909,6 +909,7 @@ fn chain_with_budget(budget: Wei) -> types::config::EvmChain {
         min_network_fee: types::config::PerAction::all(types::TokenAmount::ZERO),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 

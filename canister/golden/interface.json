@@ -1,0 +1,376 @@
+{
+  "about": "Swapic prod interface golden vectors, computed with cast and plain Python independent of the canister. Addresses other than USDC, TokenMessengerV2 and the ckUSDC ledger are samples. Step data is sample calldata, not a valid burn.",
+  "order": {
+    "chain_id": 42161,
+    "swapic": "0x9A2D6e1C1f9c4B3E8F0AC1d2e3f4a5B6C7D8e9F0",
+    "abi_tuple_type": "(bytes32,address,address,uint256,uint256,(address,bytes,address,uint256,(uint32,uint256)[])[],(address,address,uint256),bytes)",
+    "type_string": "Order(bytes32 ref,address payer,address tokenIn,uint256 amountIn,uint256 deadline,Step[] steps,Payout payout,bytes memo)Payout(address token,address recipient,uint256 minOut)Step(address target,bytes data,address token,uint256 min,Write[] writes)Write(uint32 at,uint256 minus)",
+    "type_hash": "0x391c982619bb5233046c55e62c42b9d3e4c1ec09f980e88f048c95402a61e6ec",
+    "order_started_signature": "OrderStarted(bytes32,bytes32,address,address,uint256,bytes)",
+    "order_started_topic0": "0xe95fa9d6e54c817e5526d084398a582163dc771d78687ec4afe3a9665ccb0adc",
+    "domain_separator": "0xa9957c1526be5c5082a609df4d527853c7f560ca79ce77e57b168db196c38ab1",
+    "value": {
+      "ref": "0xf21adb411b16416c776c6efce8e8487c1fdfaa0db12d294bdc815cf2b5c0f360",
+      "payer": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e",
+      "tokenIn": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "amountIn": "250000000",
+      "deadline": "1900000000",
+      "steps": [
+        {
+          "target": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+          "data": "0xa9059cbb0000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000249f0",
+          "token": "0x0000000000000000000000000000000000000000",
+          "min": "0",
+          "writes": []
+        },
+        {
+          "target": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+          "data": "0x779b432d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e58310000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000061a800000000000000000000000000000000000000000000000000000000000003e800000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000",
+          "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+          "min": "249850000",
+          "writes": [
+            {
+              "at": 4,
+              "minus": "0"
+            }
+          ]
+        }
+      ],
+      "payout": {
+        "token": "0x0000000000000000000000000000000000000000",
+        "recipient": "0x0000000000000000000000000000000000000000",
+        "minOut": "0"
+      },
+      "memo": "0x0101feaf21a31fa62dc8c977e663cd68711f7b139bbf2dcd4a8492eb302fb1c953d40000000000000000000000000ed77040014b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e000000000000000000000000001312d0"
+    },
+    "abi_encode": "0x0000000000000000000000000000000000000000000000000000000000000020f21adb411b16416c776c6efce8e8487c1fdfaa0db12d294bdc815cf2b5c0f3600000000000000000000000004b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831000000000000000000000000000000000000000000000000000000000ee6b28000000000000000000000000000000000000000000000000000000000713fb30000000000000000000000000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000540000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000180000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e583100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000044a9059cbb0000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000249f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000028b5a0e9c621a5badaa536219b3a228c8168cf5d00000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831000000000000000000000000000000000000000000000000000000000ee4689000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000124779b432d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e58310000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000061a800000000000000000000000000000000000000000000000000000000000003e8000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000570101feaf21a31fa62dc8c977e663cd68711f7b139bbf2dcd4a8492eb302fb1c953d40000000000000000000000000ed77040014b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e000000000000000000000000001312d0000000000000000000",
+    "struct_hash": "0xd15cd34f9ed804ac2268978d6e1152905255493c6faa0a2b1b7c9b5f34a00270",
+    "order_id": "0x54d17ca89cce8fa3e5e654d19d57d5bb03f919750876a95ad31132131fbc4176",
+    "typed_data": {
+      "types": {
+        "EIP712Domain": [
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "version",
+            "type": "string"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256"
+          },
+          {
+            "name": "verifyingContract",
+            "type": "address"
+          }
+        ],
+        "Order": [
+          {
+            "name": "ref",
+            "type": "bytes32"
+          },
+          {
+            "name": "payer",
+            "type": "address"
+          },
+          {
+            "name": "tokenIn",
+            "type": "address"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256"
+          },
+          {
+            "name": "steps",
+            "type": "Step[]"
+          },
+          {
+            "name": "payout",
+            "type": "Payout"
+          },
+          {
+            "name": "memo",
+            "type": "bytes"
+          }
+        ],
+        "Step": [
+          {
+            "name": "target",
+            "type": "address"
+          },
+          {
+            "name": "data",
+            "type": "bytes"
+          },
+          {
+            "name": "token",
+            "type": "address"
+          },
+          {
+            "name": "min",
+            "type": "uint256"
+          },
+          {
+            "name": "writes",
+            "type": "Write[]"
+          }
+        ],
+        "Write": [
+          {
+            "name": "at",
+            "type": "uint32"
+          },
+          {
+            "name": "minus",
+            "type": "uint256"
+          }
+        ],
+        "Payout": [
+          {
+            "name": "token",
+            "type": "address"
+          },
+          {
+            "name": "recipient",
+            "type": "address"
+          },
+          {
+            "name": "minOut",
+            "type": "uint256"
+          }
+        ]
+      },
+      "primaryType": "Order",
+      "domain": {
+        "name": "Swapic",
+        "version": "3",
+        "chainId": 42161,
+        "verifyingContract": "0x9A2D6e1C1f9c4B3E8F0AC1d2e3f4a5B6C7D8e9F0"
+      },
+      "message": {
+        "ref": "0xf21adb411b16416c776c6efce8e8487c1fdfaa0db12d294bdc815cf2b5c0f360",
+        "payer": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e",
+        "tokenIn": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "amountIn": "250000000",
+        "deadline": "1900000000",
+        "steps": [
+          {
+            "target": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "data": "0xa9059cbb0000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000249f0",
+            "token": "0x0000000000000000000000000000000000000000",
+            "min": "0",
+            "writes": []
+          },
+          {
+            "target": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+            "data": "0x779b432d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e58310000000000000000000000007c0a7e3b5d1f2a4c6e8b0d2f4a6c8e0b2d4f6a8c00000000000000000000000000000000000000000000000000000000000061a800000000000000000000000000000000000000000000000000000000000003e800000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000",
+            "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "min": "249850000",
+            "writes": [
+              {
+                "at": 4,
+                "minus": "0"
+              }
+            ]
+          }
+        ],
+        "payout": {
+          "token": "0x0000000000000000000000000000000000000000",
+          "recipient": "0x0000000000000000000000000000000000000000",
+          "minOut": "0"
+        },
+        "memo": "0x0101feaf21a31fa62dc8c977e663cd68711f7b139bbf2dcd4a8492eb302fb1c953d40000000000000000000000000ed77040014b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e000000000000000000000000001312d0"
+      }
+    },
+    "doors": {
+      "auth_3009": {
+        "type_string": "ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)",
+        "domain": {
+          "name": "USD Coin",
+          "version": "2",
+          "chainId": 42161,
+          "verifyingContract": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        },
+        "value": {
+          "from": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e",
+          "to": "0x9A2D6e1C1f9c4B3E8F0AC1d2e3f4a5B6C7D8e9F0",
+          "value": "250000000",
+          "validAfter": "0",
+          "validBefore": "1900000000",
+          "nonce": "0x54d17ca89cce8fa3e5e654d19d57d5bb03f919750876a95ad31132131fbc4176"
+        },
+        "digest": "0x042ceaef36f384eba9cea248f2c20924e9e2017101a098b154e3fa34d06607fa"
+      },
+      "permit2": {
+        "type_string": "PermitWitnessTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline,OrderWitness witness)OrderWitness(bytes32 orderId)TokenPermissions(address token,uint256 amount)",
+        "domain": {
+          "name": "Permit2",
+          "chainId": 42161,
+          "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+        },
+        "value": {
+          "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+          "amount": "250000000",
+          "spender": "0x9A2D6e1C1f9c4B3E8F0AC1d2e3f4a5B6C7D8e9F0",
+          "nonce": "7",
+          "deadline": "1900000000",
+          "orderId": "0x54d17ca89cce8fa3e5e654d19d57d5bb03f919750876a95ad31132131fbc4176"
+        },
+        "digest": "0x24dd5bd518e118e092951cd49465eb0b0a86d4191735844abffe45ce41124333"
+      },
+      "acceptance_2612": {
+        "type_string": "QuoteAcceptance(bytes32 orderId,address payer,address tokenIn,uint256 amountIn,uint256 deadline)",
+        "domain": {
+          "name": "Swapic",
+          "version": "3",
+          "chainId": 42161,
+          "verifyingContract": "0x9A2D6e1C1f9c4B3E8F0AC1d2e3f4a5B6C7D8e9F0"
+        },
+        "value": {
+          "orderId": "0x54d17ca89cce8fa3e5e654d19d57d5bb03f919750876a95ad31132131fbc4176",
+          "payer": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e",
+          "tokenIn": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+          "amountIn": "250000000",
+          "deadline": "1900000000"
+        },
+        "digest": "0x90ee1db9c9049584ff80a8754e0a2f8c617ff55522c7338ea29fd2dadb41ca9f"
+      }
+    },
+    "selectors": {
+      "run": "0x840978e9",
+      "runFor": "0x46d6fa96",
+      "runWithPermit2": "0x21be144a"
+    }
+  },
+  "memos": [
+    {
+      "about": "an EVM stake",
+      "terms": {
+        "kind": "stake",
+        "owner": {
+          "evm": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e"
+        },
+        "min_usdc": 249000000,
+        "move_fee": 1250000,
+        "salt": "0xfeaf21a31fa62dc8c977e663cd68711f7b139bbf2dcd4a8492eb302fb1c953d4"
+      },
+      "bytes": "0x0101feaf21a31fa62dc8c977e663cd68711f7b139bbf2dcd4a8492eb302fb1c953d40000000000000000000000000ed77040014b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e000000000000000000000000001312d0",
+      "ref": "0xf21adb411b16416c776c6efce8e8487c1fdfaa0db12d294bdc815cf2b5c0f360"
+    },
+    {
+      "about": "a swap to ckUSDC on ICP",
+      "terms": {
+        "kind": "swap",
+        "recipient": {
+          "owner": "7nhpj-3ei7a-pp6bm-cg37m-7qcsw-cgapv-mhgxw-47jfi-het4p-omjts-ch2",
+          "subaccount": "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        },
+        "token_out": "xevnm-gaaaa-aaaar-qafnq-cai",
+        "min_out": 99000000,
+        "min_usdc": 100000000,
+        "premium": 100000,
+        "icp_fees": 20000,
+        "salt": "0x5644c08c29329d824a6fd3f220cce05a60338903f60f6acf7feee094e895c1ce"
+      },
+      "bytes": "0x01005644c08c29329d824a6fd3f220cce05a60338903f60f6acf7feee094e895c1ce00000000000000000000000005f5e1001d88f81eff058236fecfc052b08c07d58735edcfa4a83927c7b9899c847d0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200a000000000230015b010100000000000000000000000005e69ec0000000000000000000000000000186a000000000000000000000000000004e20",
+      "ref": "0xbe466366334d47e814516d8cb745937983b0c7f87fae1696a5b4392cbd54bd64"
+    }
+  ],
+  "withdrawal": {
+    "type_string": "Withdrawal(address staker,uint256 usdc,uint256 maxShares,uint256 moveFee,uint256 networkFee,uint64 dstChain,address recipient,address tokenOut,uint256 minOut,uint64 deadline,uint64 nonce)",
+    "domain": {
+      "name": "Swapic Pool",
+      "version": "1",
+      "chainId": 8453,
+      "verifyingContract": "0x2D9f3B1A7e5C4d8F6A0b2C4e6D8F0a1b3C5E7D90"
+    },
+    "domain_separator": "0x11fbcb569565991d70b8d572a4505992b7926252a849ecbe9334f0eeb6f32b00",
+    "value": {
+      "staker": "0x4b5c6D7E8f90a1B2C3D4E5f60718293A4b5c6D7e",
+      "usdc": "50000000",
+      "maxShares": "50000000000000000000",
+      "moveFee": "1400000",
+      "networkFee": "60000",
+      "dstChain": 8453,
+      "recipient": "0x3E5D1A9b7c2f4E6A8b0c1D3E5F7a9B0c2D4e6f80",
+      "tokenOut": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "minOut": "48540000",
+      "deadline": 1900000000,
+      "nonce": 3
+    },
+    "struct_hash": "0xe07d67de95fc1a3079989fdf6739d2edd8e1023fd3cf3fe5a5142d59f7124da0",
+    "digest": "0x4db5c92174dfa3a95f0eb0fa22ff8546f9f3caf0887e82adf48974deff223974"
+  },
+  "events": {
+    "about": "One events_page answer, `vec Event` in candid, pinned from the canister's candid encoder (no independent candid tool was at hand). A Pool line's step_bytes is the canister's minicbor PoolStep: StakedIcp is variant 9 with fields [id, owner, amount, move_fee, shares, block].",
+    "page": [
+      {
+        "index": 41,
+        "time_ns": 1900000000000000000,
+        "payload": {
+          "Pool": {
+            "step": "StakedIcp",
+            "step_fields": {
+              "id": "0x5151515151515151515151515151515151515151515151515151515151515151",
+              "owner": {
+                "Icp": {
+                  "owner": "2vxsx-fae",
+                  "subaccount": null
+                }
+              },
+              "amount": "250000000",
+              "move_fee": "1400000",
+              "shares": "248600000000000000000",
+              "block": 4200000
+            }
+          }
+        }
+      },
+      {
+        "index": 42,
+        "time_ns": 1900000001000000000,
+        "payload": {
+          "Swept": {
+            "id": 0,
+            "asset": "FeeUsdc",
+            "to": {
+              "Evm": {
+                "chain_id": 8453,
+                "to": "0x3E5D1A9b7c2f4E6A8b0c1D3E5F7a9B0c2D4e6f80"
+              }
+            },
+            "amount": "1000000"
+          }
+        }
+      },
+      {
+        "index": 43,
+        "time_ns": 1900000060000000000,
+        "payload": {
+          "TxFinal": {
+            "purpose": {
+              "Sweep": 0
+            },
+            "chain_id": 8453,
+            "nonce": 17,
+            "tx_hash": "0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+            "outcome": {
+              "Succeeded": {
+                "block": 30000000
+              }
+            }
+          }
+        }
+      }
+    ],
+    "staked_icp_step_bytes": "0x820986582051515151515151515151515151515151515151515151515151515151515151518201818141041a0ee6b2801a00155cc0c2490d7a049edc5a1c00001a00401640",
+    "page_candid": "0x4449444c186d016c0392b6d2f00b78f7e0abc70d788effd6e90e026b0be59edec901038e88ddf4020acd90abff020bb2a6989d030cfcd9d6a903108aa096d10411afeab1bc0812d7f4c6a10913b29cb4980e14a4a1dfac0e15f4de84db0e176c04dbb70178fbca0104f0d3e5b10209d8a38ca80d7d6b02bc85d30105b6f6de01066c02fbca017199e7a4cf08786c02b3b0dac30368ad86ca8305076e086d7b6b05b6f6de017fa3fda487027fd2dcd7a9057fb7fbc4b5057fb1e69dd60d7f6c04f1ddc7bf0408ccceefe2047191c5fd800771f8ef869507086c0499e7a4cf0878ef9999fe0978bb8df9eb0b08a9cf99d50c086c0599e7a4cf0878ef9999fe0978a9cf99d50c0892f1bede0d0d9ea3bfb90e0f6b03e386a1db050ec1ecf0e7090ef1cc9da00c7f6c01cdeaf1a70b786b09c2cce86478cc8bdec90178a4d2b4f30308b1cfeee9057ff1ccc1cf0708c7e891f40708add4bfdd0a78f3e8ced80b089ac3a1e60e786c03ccceefe2047191c5fd800771f8ef869507086c04ccceefe2047191c5fd800771f8ef8695070899e7a4cf08786c02dbb70178c8ceea02716c02fcc0cbca0271b6e3b2af0d716c01a884a1b304716c0afbca0171faf784047db6f798b20116aaac8d930408ffd9c1d7077d99e7a4cf0878ef9999fe09788debc5860a7dd5f8acd20a7d9ea3bfb90e0f6e716c07faf784047dffd9c1d7077d99e7a4cf0878ef9999fe0978bb8df9eb0b08a9cf99d50c089ea3bfb90e0f010003290000000000000000003ef1ee275e1a04095374616b6564496370d9025374616b6564496370207b2069643a20353135313531353135313531353135313531353135313531353135313531353135313531353135313531353135313531353135313531353135313531353135312c206f776e65723a20496370284963704163636f756e74207b206f776e65723a205072696e636970616c207b206c656e3a20312c2062797465733a205b342c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20302c20305d207d2c207375626163636f756e743a204e6f6e65207d292c20616d6f756e743a203235303030303030302c206d6f76655f6665653a20313430303030302c207368617265733a2053686172657328323438363030303030303030303030303030303030292c20626c6f636b3a2034323030303030207d45820986582051515151515151515151515151515151515151515151515151515151515151518201818141041a0ee6b2801a00155cc0c2490d7a049edc5a1c00001a004016402a0000000000000000cad82cef275e1a000000000000000000002a307833453544314139623763326634453641386230633144334535463761394230633244346536663830052100000000000001c0843d2b00000000000000005885e9fc275e1a0305210000000000001100000000000000207f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f0180c3c90100000000010000000000000000"
+  }
+}

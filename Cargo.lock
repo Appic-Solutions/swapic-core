@@ -3361,7 +3361,9 @@ name = "settlement_api"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "hex",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "types",
 ]

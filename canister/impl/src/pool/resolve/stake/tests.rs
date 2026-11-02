@@ -22,6 +22,7 @@ fn lost_stake(byte: u8) -> PoolOpId {
             from: account(byte),
             amount: usdc(10),
             created_at: at(1),
+            move_fee: TokenAmount::ZERO,
         },
         at(1),
     )

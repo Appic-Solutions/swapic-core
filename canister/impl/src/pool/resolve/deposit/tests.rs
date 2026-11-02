@@ -43,6 +43,7 @@ fn pool() {
         min_network_fee: PerAction::all(TokenAmount::from(50_000_u64)),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     };
     crate::storage::config::test_set(types::Config {
         evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, chain)])),

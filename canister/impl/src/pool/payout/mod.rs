@@ -1532,7 +1532,7 @@ pub async fn drive_deposit(
             (DepositStatus::Arrived, DepositKind::Stake { owner }) => {
                 let minted = deposit
                     .owed()
-                    .checked_sub(deposit.terms.rebalance_share)
+                    .checked_sub(deposit.terms.move_fee)
                     .and_then(|amount| ledger.mint_now(amount))
                     .ok_or_else(|| Stop::Failed("the stake mints nothing".to_string()))?;
                 return record(
@@ -1690,7 +1690,7 @@ pub async fn pull_stake(
                     id,
                     owner,
                     amount,
-                    rebalance_share: TokenAmount::ZERO,
+                    move_fee: TokenAmount::ZERO,
                     shares,
                     block,
                 },

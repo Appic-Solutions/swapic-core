@@ -1,12 +1,12 @@
 use super::*;
 use std::borrow::Cow;
 
-fn withdrawal(usdc: u64, rebalance_share: u64, network_fee: u64) -> EvmWithdrawal {
+fn withdrawal(usdc: u64, move_fee: u64, network_fee: u64) -> EvmWithdrawal {
     EvmWithdrawal {
         staker: EvmAddress::new([0x11; 20]),
         usdc: TokenAmount::from(usdc),
         max_shares: Shares::new(10),
-        rebalance_share: TokenAmount::from(rebalance_share),
+        move_fee: TokenAmount::from(move_fee),
         network_fee: TokenAmount::from(network_fee),
         nonce: 7,
         burned: Shares::new(9),
@@ -27,14 +27,6 @@ fn a_withdrawal_pays_what_is_left_after_its_share_and_its_fee() {
 fn the_settings_hold_together_or_are_refused() {
     let good = PayoutSettings::default();
     assert_eq!(good.validate(), Ok(()));
-    assert_eq!(
-        PayoutSettings {
-            rebalance_share_floor_bps: 10_001,
-            ..good
-        }
-        .validate(),
-        Err(PayoutSettingsError::FloorAboveAll(10_001))
-    );
     assert_eq!(
         PayoutSettings {
             order_wait: Duration::ZERO,
@@ -59,14 +51,31 @@ fn the_settings_hold_together_or_are_refused() {
         .validate(),
         Err(PayoutSettingsError::Gas)
     );
-    // the floor rounds up: 2 bps of 5 USDC is 1,000
+}
+
+/// A CCTP payout is signed only while CCTP payouts are on, and only when its network fee
+/// covers the destination's floor: the pool chain's least fee for a burning order and the
+/// destination's for the finish.
+#[test]
+fn a_cctp_payout_needs_the_switch_and_the_floor() {
+    let floor =
+        cctp_payout_floor(TokenAmount::from(40_000_u64), TokenAmount::from(90_000_u64)).unwrap();
+    assert_eq!(floor, TokenAmount::from(130_000_u64));
+    let off = PayoutSettings::default();
+    assert!(off
+        .admits_cctp(TokenAmount::from(1_000_000_u64), floor)
+        .is_err());
+    let on = PayoutSettings {
+        cctp_payouts: true,
+        ..off
+    };
+    assert_eq!(on.admits_cctp(floor, floor), Ok(()));
+    assert!(on
+        .admits_cctp(TokenAmount::from(129_999_u64), floor)
+        .is_err());
     assert_eq!(
-        good.least_rebalance_share(TokenAmount::from(5_000_000_u64)),
-        Some(TokenAmount::from(1_000_u32))
-    );
-    assert_eq!(
-        good.least_rebalance_share(TokenAmount::from(5_000_001_u64)),
-        Some(TokenAmount::from(1_001_u32))
+        cctp_payout_floor(TokenAmount::MAX, TokenAmount::from(1_u64)),
+        None
     );
 }
 

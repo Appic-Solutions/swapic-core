@@ -75,6 +75,7 @@ fn plan(min: u64, deadline: u64) -> PinnedOrder {
             recipient: Address::repeat_byte(0x11),
             minOut: U256::from(200_000_000_000_000_000_u64),
         },
+        memo: Default::default(),
     };
     PinnedOrder {
         order_id: [0x62; 32],

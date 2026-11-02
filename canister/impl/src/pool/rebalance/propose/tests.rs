@@ -57,6 +57,7 @@ fn chain(usdc: EvmAddress) -> EvmChain {
         min_network_fee: PerAction::all(TokenAmount::ZERO),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 

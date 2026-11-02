@@ -18,6 +18,8 @@ pub mod storage;
 pub mod task_manager;
 #[cfg(test)]
 mod test_util;
+#[cfg(test)]
+mod tests;
 pub mod tx;
 pub mod updates;
 

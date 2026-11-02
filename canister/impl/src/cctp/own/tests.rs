@@ -231,7 +231,7 @@ fn a_payouts_own_burn_keeps_the_arrivals_gas_action() {
             staker,
             usdc: TokenAmount::from(10_u64),
             max_shares: Shares::new(1),
-            rebalance_share: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
             network_fee: TokenAmount::ZERO,
             nonce: 1,
             burned: Shares::new(1),

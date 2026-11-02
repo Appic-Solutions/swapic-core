@@ -1,7 +1,7 @@
-//! The ambient chain cache: one entry per chain, pushed by the watcher rather than read by
-//! the canister, so a money decision costs an outcall only when it has to. Nothing here is
-//! a fold of the event log, so it has a map of its own and the replay audit does not
-//! compare it.
+//! The gas cache: one reading per chain, handed with the call that makes the canister sign
+//! (`relay_gasless`, `finish_cctp`, `pay_payout`) or read by the canister itself, stamped
+//! with the canister's clock and decided on only while it is younger than
+//! [`READING_MAX_AGE`]. Nothing here is a fold of the event log, so it has a map of its own.
 
 use crate::storage::memory::{chain_data_memory, Memory};
 use ic_stable_structures::StableBTreeMap;
@@ -35,12 +35,15 @@ pub fn get(chain_id: ChainId) -> Option<ChainData> {
     CHAIN_DATA.with(|cache| cache.borrow().get(&chain_id))
 }
 
-/// The chain's entry while it is younger than `max_age` at `now`, and nothing once it ages
+/// The chain's entry while it is younger than [`READING_MAX_AGE`] at `now`, and nothing once it ages
 /// out. The one door a money decision takes onto the cache, so a caller cannot decide on
 /// stale gas prices by forgetting to check the stamp.
-pub fn fresh(chain_id: ChainId, now: Timestamp, max_age: Duration) -> Option<ChainData> {
-    get(chain_id).filter(|data| data.is_fresh(now, max_age))
+pub fn fresh(chain_id: ChainId, now: Timestamp) -> Option<ChainData> {
+    get(chain_id).filter(|data| data.is_fresh(now, READING_MAX_AGE))
 }
+
+/// How long a reading prices a transaction after it arrived.
+pub const READING_MAX_AGE: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests;

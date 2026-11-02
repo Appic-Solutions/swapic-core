@@ -24,6 +24,7 @@ fn stake_request(amount: TokenAmount) -> StakeRequest {
         from_subaccount: None,
         amount,
         owner: PoolAccount::Icp(account(7)),
+        move_fee: TokenAmount::ZERO,
     }
 }
 
@@ -36,6 +37,7 @@ fn withdrawal(usdc_out: TokenAmount) -> WithdrawRequest {
         token_out: ckusdc(),
         min_out: 0,
         to: account(201),
+        move_fee: TokenAmount::ZERO,
     }
 }
 
@@ -76,6 +78,7 @@ fn a_stake_is_refused_when_it_should_be() {
                 from: account(7),
                 amount: usdc(600),
                 created_at: at(2),
+                move_fee: TokenAmount::ZERO,
             },
             at(2),
         )
@@ -395,6 +398,7 @@ fn a_stake_landing_during_the_read_is_no_shortfall() {
                 from: account(7),
                 amount: usdc(100),
                 created_at: at(2),
+                move_fee: TokenAmount::ZERO,
             },
             at(2),
         )
@@ -405,7 +409,7 @@ fn a_stake_landing_during_the_read_is_no_shortfall() {
                 id,
                 owner: PoolAccount::Icp(account(7)),
                 amount: usdc(100),
-                rebalance_share: TokenAmount::ZERO,
+                move_fee: TokenAmount::ZERO,
                 shares,
                 block: 9,
             },
@@ -669,6 +673,7 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
             from_subaccount: Some(vec![7; 32]),
             amount: Nat::from(250_000_000_u64),
             owner: WirePool::Evm("0x1111111111111111111111111111111111111111".to_string()),
+            move_fee: Nat::from(0_u8),
         },
     );
     assert_eq!(
@@ -678,6 +683,7 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
             from_subaccount: Some([7; 32]),
             amount: TokenAmount::from(250_000_000_u64),
             owner: PoolAccount::Evm(evm_owner),
+            move_fee: TokenAmount::ZERO,
         })
     );
     let short = StakeRequest::of(
@@ -689,6 +695,7 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
                 owner: caller,
                 subaccount: None,
             }),
+            move_fee: Nat::from(0_u8),
         },
     );
     assert_eq!(
@@ -707,6 +714,7 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
             owner: caller,
             subaccount: None,
         },
+        move_fee: Nat::from(0_u8),
     };
     assert_eq!(
         WithdrawRequest::of(caller, wire(Nat::from(100_000_000_u64))),
@@ -721,6 +729,7 @@ fn a_stake_and_a_withdrawal_are_read_off_the_wire_as_their_doors_read_them() {
                 owner: caller,
                 subaccount: None
             },
+            move_fee: TokenAmount::ZERO,
         })
     );
     assert_eq!(

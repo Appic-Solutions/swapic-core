@@ -1,4 +1,3 @@
-pub mod audit_replay_step;
 pub mod derive_evm_address;
 pub mod set_halted;
 pub mod set_sanctioned;
@@ -17,7 +16,6 @@ pub mod test_sign;
 #[cfg(feature = "inttest")]
 pub mod test_skew_state;
 
-pub use audit_replay_step::*;
 pub use derive_evm_address::*;
 pub use set_halted::*;
 pub use set_sanctioned::*;

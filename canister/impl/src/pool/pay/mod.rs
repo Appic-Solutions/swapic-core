@@ -30,12 +30,13 @@ use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use crate::tx::{self, Detail};
 use alloy_primitives::U256;
+use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::pool::{PayoutWaiting, PoolError};
 use types::config::GasAction;
 use types::events::TxPurpose;
 use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus, PinnedOrder};
 use types::swapic::{self, Order};
-use types::{EvmAddress, GasAmount, Timestamp, Wei};
+use types::{ChainId, EvmAddress, GasAmount, Timestamp, TokenAmount, Wei};
 
 /// The least time an order's deadline must still be ahead of the canister's clock: a
 /// signature, the watcher's broadcast and a block, with room.
@@ -52,6 +53,27 @@ pub struct Payer<'a> {
     pub usdc: EvmAddress,
     /// Eco's prover, the one a payout's onward intent may name (P11e).
     pub eco_prover: Option<EvmAddress>,
+}
+
+/// The least network fee of a CCTP payout from the pool chain: its own least fee for an
+/// order that burns, and the destination's for the canister's finish of the arrival.
+pub fn cctp_floor(
+    chains: &Chains<'_>,
+    arrival: Option<&crate::relay::Arrival>,
+) -> Result<TokenAmount, String> {
+    let arrival = arrival.ok_or("a CCTP payout names its arrival")?;
+    let least = |chain: ChainId, action: GasAction| {
+        chains
+            .evm_chains
+            .get(chain)
+            .and_then(|entry| entry.min_network_fee.get(action))
+            .ok_or_else(|| format!("chain {chain} sets no least fee for {}", action.name()))
+    };
+    types::pool::payout::cctp_payout_floor(
+        least(chains.chain_id, GasAction::RelayCctp)?,
+        least(arrival.chain_id, arrival.action)?,
+    )
+    .ok_or_else(|| "the least fees overflow".to_string())
 }
 
 /// A refusal of an order or a plan, with why.
@@ -99,6 +121,9 @@ pub fn check_order(
     if swapic::evm(order.payer) != payer.chains.canister {
         return Err(refused("the order's payer is not the canister"));
     }
+    if !order.memo.is_empty() {
+        return Err(refused("a payout order carries no memo"));
+    }
     if swapic::evm(order.tokenIn) != payer.usdc {
         return Err(refused("the order does not pay in the pool chain's USDC"));
     }
@@ -120,8 +145,9 @@ pub fn check_order(
     }
     if plan.action == GasAction::RelayCctp {
         // the canister pays a CCTP finish only where the user's network fee paid for one
+        let floor = cctp_floor(&payer.chains, plan.arrival.as_ref()).map_err(refused)?;
         settings
-            .admits_cctp(payout.network_fee())
+            .admits_cctp(payout.network_fee(), floor)
             .map_err(refused)?;
     }
     // an onward intent names Eco's own prover and Portal, and short deadlines (P11e): any
@@ -226,9 +252,19 @@ fn signable(id: u64) -> Result<Option<u64>, PoolError> {
 }
 
 /// `pay_payout`'s body: the signed transaction's id in `signed_txs`.
-pub async fn pay_payout(id: u64, order_bytes: Vec<u8>, gas_limit: u64) -> Result<u64, PoolError> {
+pub async fn pay_payout(
+    id: u64,
+    order_bytes: Vec<u8>,
+    gas_limit: u64,
+    reading: Option<ChainData>,
+) -> Result<u64, PoolError> {
     require_watcher().map_err(pool::guard_error)?;
     pool::require_running()?;
+    // the reading the watcher priced this payout on, stored before anything else so the fee
+    // rule reads it fresh; the pool chain is the chain every payout is signed on
+    if let Some(chain) = crate::storage::config::get().pool_chain {
+        crate::relay::take_reading(chain, reading, now()).map_err(PoolError::NotAllowed)?;
+    }
     pool::require_pool_open()?;
     if let Some(tx_id) = signable(id)? {
         return Ok(tx_id);

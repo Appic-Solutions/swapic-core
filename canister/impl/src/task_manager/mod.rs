@@ -1,6 +1,5 @@
 use crate::storage::config;
 use ic_cdk_timers::TimerId;
-use replay_audit::run_replay_audit;
 use std::cell::Cell;
 use std::thread::LocalKey;
 use std::time::Duration;
@@ -16,7 +15,6 @@ pub use rail_status::restart_rail_status_timer;
 thread_local! {
     // Heap by necessity: a timer id is a runtime handle that an upgrade invalidates anyway.
     // One slot per timer, so a restart replaces a timer instead of doubling it.
-    static AUDIT_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static BOOKS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static POOL_ARRIVALS_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
     static REBALANCE_TIMER: Cell<Option<TimerId>> = const { Cell::new(None) };
@@ -31,7 +29,6 @@ fn interval(every: Duration) -> Duration {
 /// Wires every repeating timer. Called from `init` and `post_upgrade`, because timers live
 /// in the heap and an upgrade clears them.
 pub fn start_timers() {
-    restart_audit_timer();
     restart_rail_status_timer();
     restart_books_timer();
     restart_pool_arrivals_timer();
@@ -44,15 +41,6 @@ pub fn restart_rebalance_timer() {
         ic_cdk_timers::set_timer_interval(rebalance::REBALANCE_EVERY, || {
             ic_cdk::spawn(rebalance::tick())
         })
-    });
-}
-
-/// Puts the audit timer on the configured interval. `set_config` calls it only when that
-/// interval changed, because a restart pushes the next audit a whole interval out.
-pub fn restart_audit_timer() {
-    let every = interval(config::get().replay_audit_interval);
-    restart(&AUDIT_TIMER, || {
-        ic_cdk_timers::set_timer_interval(every, run_replay_audit)
     });
 }
 

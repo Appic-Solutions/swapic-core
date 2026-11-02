@@ -387,7 +387,7 @@ async fn route(item: &Move, now: Timestamp) -> Result<(), String> {
     // a Base to ICP move by Eco is filled on Ethereum: its fill is looked for from here
     let scan_from = (item.direction == MoveDirection::BaseToIcp && route.is_eco())
         .then(|| {
-            chain_data::fresh(dst, now, setup.config.chain_data_max_age)
+            chain_data::fresh(dst, now)
                 .map(|reading| BlockNumber::new(reading.block.get().saturating_sub(5)))
         })
         .flatten();
@@ -811,7 +811,7 @@ async fn fill(item: &Move, ctx: &Ctx) -> Result<(), String> {
         .intent
         .ok_or("its order published no intent the canister read")?;
     let portal = config.eco_portal.ok_or("no Eco Portal is configured")?;
-    let head = chain_data::fresh(ChainId::ETHEREUM, now, config.chain_data_max_age)
+    let head = chain_data::fresh(ChainId::ETHEREUM, now)
         .map(|reading| reading.block.get())
         .ok_or("no fresh reading of Ethereum")?;
     let from = item

@@ -13,7 +13,7 @@ use ic_stable_structures::StableCell;
 use settlement_api::types::flow::FlowSettings as Wire;
 use std::cell::RefCell;
 use std::time::Duration;
-use types::{ChainId, EvmAddress, TokenAmount};
+use types::{EvmAddress, TokenAmount};
 
 thread_local! {
     static SETTINGS: RefCell<StableCell<Vec<u8>, Memory>> = RefCell::new(
@@ -24,21 +24,13 @@ thread_local! {
 /// The settings, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowSettings {
-    pub ethereum: ChainId,
-    pub ethereum_usdc: Option<EvmAddress>,
-    pub ckusdc_ledger: Option<Principal>,
     pub ck_minter: Option<Principal>,
     pub cketh_ledger: Option<Principal>,
     pub cketh_fee_allowance: TokenAmount,
-    pub icpswap_pools: Vec<Principal>,
     pub relay_window: Duration,
-    pub continuation_deadline: Duration,
-    pub max_gas_limit: u64,
-    /// Whether the ICP flows run. Off unless a controller turns them on.
-    pub icp_enabled: bool,
-    /// The ck minter's ERC-20 deposit helper on Ethereum (P11c).
+    /// The ck minter's ERC-20 deposit helper on Ethereum.
     pub ck_helper: Option<EvmAddress>,
-    /// Eco's prover a rebalance proposal's intent may name (P11c).
+    /// Eco's prover a rebalance proposal's intent may name.
     pub eco_prover: Option<EvmAddress>,
 }
 
@@ -51,20 +43,6 @@ thread_local! {
 fn parse(wire: &Wire) -> Result<FlowSettings, String> {
     #[cfg(test)]
     PARSES.with(|parses| parses.set(parses.get() + 1));
-    // the ICP flows sign router ABI v2's `swapFor`, which a design C Swapic does not
-    // have: on, they would sign it to a v3 Swapic. Refused here, so neither a write nor a
-    // stored setting can turn them on before they move to ABI v3 (P11)
-    if wire.icp_enabled == Some(true) {
-        return Err(
-            "IcpFlowsNotOnV3: the ICP flows stay off until they move to ABI v3".to_string(),
-        );
-    }
-    let ethereum_usdc = wire
-        .ethereum_usdc
-        .as_ref()
-        .map(|text| text.parse::<EvmAddress>())
-        .transpose()
-        .map_err(|e| format!("ethereum_usdc is not an address: {e:?}"))?;
     let address = |field: &str, text: &Option<String>| {
         text.as_ref()
             .map(|text| text.parse::<EvmAddress>())
@@ -76,33 +54,14 @@ fn parse(wire: &Wire) -> Result<FlowSettings, String> {
     let cketh_fee_allowance = TokenAmount::try_from(wire.cketh_fee_allowance.clone())
         .map_err(|_| "cketh_fee_allowance is too large".to_string())?;
     Ok(FlowSettings {
-        ethereum: ChainId::new(if wire.ethereum_chain_id == 0 {
-            1
-        } else {
-            wire.ethereum_chain_id
-        }),
-        ethereum_usdc,
-        ckusdc_ledger: wire.ckusdc_ledger,
         ck_minter: wire.ck_minter,
         cketh_ledger: wire.cketh_ledger,
         cketh_fee_allowance,
-        icpswap_pools: wire.icpswap_pools.clone(),
         relay_window: Duration::from_secs(if wire.relay_window_s == 0 {
             3_600
         } else {
             wire.relay_window_s
         }),
-        continuation_deadline: Duration::from_secs(if wire.continuation_deadline_s == 0 {
-            1_800
-        } else {
-            wire.continuation_deadline_s
-        }),
-        max_gas_limit: if wire.max_gas_limit == 0 {
-            2_000_000
-        } else {
-            wire.max_gas_limit
-        },
-        icp_enabled: false,
         ck_helper,
         eco_prover,
     })

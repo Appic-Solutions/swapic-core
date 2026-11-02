@@ -4,8 +4,7 @@ use crate::task_manager;
 use ic_cdk::update;
 pub use settlement_api::types::errors::GuardError;
 
-/// Controller-only, both ways: `true` is an emergency stop, `false` is the human saying
-/// the divergence has been investigated. The audit never clears it on its own.
+/// Controller-only, both ways: `true` is an emergency stop, `false` lifts it.
 ///
 /// Lifting the halt wakes the outbox: a halted canister's pass does not re-arm itself,
 /// so this is what puts it back on the window when a queued transaction or an allocation

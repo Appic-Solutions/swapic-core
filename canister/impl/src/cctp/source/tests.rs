@@ -57,6 +57,7 @@ fn base() -> EvmChain {
         min_network_fee: types::config::PerAction::all(TokenAmount::ZERO),
         usdc_name: None,
         usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
     }
 }
 

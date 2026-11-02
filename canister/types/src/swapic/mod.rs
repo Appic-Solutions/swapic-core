@@ -37,6 +37,8 @@ sol! {
     /// `token == 0`: no payout (a cross-chain order).
     struct Payout { address token; address recipient; uint256 minOut; }
 
+    /// `memo`: a pool deposit's encoded terms (`pool::memo`), whose keccak is `ref`; empty
+    /// on every other order.
     struct Order {
         bytes32 ref;
         address payer;
@@ -45,6 +47,7 @@ sol! {
         uint256 deadline;
         Step[] steps;
         Payout payout;
+        bytes memo;
     }
 
     /// `door` is the `Door` enum as the ABI carries it.
@@ -78,7 +81,7 @@ sol! {
         bytes hookData
     ) external;
 
-    event OrderStarted(bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn);
+    event OrderStarted(bytes32 indexed id, bytes32 indexed ref, address indexed payer, address tokenIn, uint256 amountIn, bytes memo);
     event Transfer(address indexed from, address indexed to, uint256 value);
     /// The Runner paid a same-chain order's payout.
     event PaidOut(bytes32 indexed id, address indexed recipient, address token, uint256 amount);
@@ -447,8 +450,9 @@ pub const VERSION: &str = "3";
 /// structs: `ref` is a Rust keyword, and the macro writes it into the type string as
 /// `r#ref`, which hashes another type.
 pub const ORDER_TYPE: &str = "Order(bytes32 ref,address payer,address tokenIn,uint256 amountIn,\
-uint256 deadline,Step[] steps,Payout payout)Payout(address token,address recipient,uint256 minOut)\
-Step(address target,bytes data,address token,uint256 min,Write[] writes)Write(uint32 at,uint256 minus)";
+uint256 deadline,Step[] steps,Payout payout,bytes memo)Payout(address token,address recipient,\
+uint256 minOut)Step(address target,bytes data,address token,uint256 min,Write[] writes)\
+Write(uint32 at,uint256 minus)";
 pub const STEP_TYPE: &str = "Step(address target,bytes data,address token,uint256 min,\
 Write[] writes)Write(uint32 at,uint256 minus)";
 pub const WRITE_TYPE: &str = "Write(uint32 at,uint256 minus)";
@@ -526,10 +530,10 @@ pub fn hash_step(s: &Step) -> [u8; 32] {
     keccak256(encoded).0
 }
 
-/// `hashStruct(Order)`, as `OrderHash.hashOrder` computes it.
+/// `hashStruct(Order)`, as `OrderHash.hashOrder` computes it: `memo` hashed as `bytes`.
 pub fn hash_order(o: &Order) -> [u8; 32] {
     let steps: Vec<u8> = o.steps.iter().flat_map(hash_step).collect();
-    let mut encoded = Vec::with_capacity(32 * 8);
+    let mut encoded = Vec::with_capacity(32 * 9);
     encoded.extend_from_slice(keccak256(ORDER_TYPE).as_slice());
     encoded.extend_from_slice(o.r#ref.as_slice());
     encoded.extend_from_slice(o.payer.into_word().as_slice());
@@ -539,6 +543,7 @@ pub fn hash_order(o: &Order) -> [u8; 32] {
     encoded.extend_from_slice(keccak256(steps).as_slice());
     // `Payout` has no keyword in it, so the macro's own type string is the contract's
     encoded.extend_from_slice(o.payout.eip712_hash_struct().as_slice());
+    encoded.extend_from_slice(keccak256(&o.memo).as_slice());
     keccak256(encoded).0
 }
 
@@ -647,6 +652,37 @@ pub fn read_intent_refunded(topics: &[[u8; 32]], data: &[u8]) -> Option<([u8; 32
     )
     .ok()?;
     Some((event.intentHash.0, evm(event.refundee)))
+}
+
+/// One `OrderStarted` log as Swapic emits it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedOrder {
+    pub id: OrderId,
+    pub r#ref: [u8; 32],
+    pub payer: EvmAddress,
+    pub token_in: EvmAddress,
+    pub amount_in: U256,
+    /// The order's memo: a pool deposit's encoded terms, or empty.
+    pub memo: Vec<u8>,
+}
+
+/// The order an `OrderStarted` log names, its memo included; None for a log that is not one.
+pub fn read_order_started(topics: &[[u8; 32]], data: &[u8]) -> Option<StartedOrder> {
+    use alloy_sol_types::SolEvent;
+    let event = OrderStarted::decode_raw_log_with_config(
+        topics.iter().map(|topic| FixedBytes(*topic)),
+        data,
+        strict(),
+    )
+    .ok()?;
+    Some(StartedOrder {
+        id: OrderId(event.id.0),
+        r#ref: event.r#ref.0,
+        payer: evm(event.payer),
+        token_in: evm(event.tokenIn),
+        amount_in: event.amountIn,
+        memo: event.memo.to_vec(),
+    })
 }
 
 /// The funded intent's hash, its funder and whether it was funded in full, from an

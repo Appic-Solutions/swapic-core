@@ -25,7 +25,7 @@ sol! {
         address staker;
         uint256 usdc;
         uint256 maxShares;
-        uint256 rebalanceShare;
+        uint256 moveFee;
         uint256 networkFee;
         uint64 dstChain;
         address recipient;
@@ -37,7 +37,7 @@ sol! {
 }
 
 pub const WITHDRAWAL_TYPE: &str = "Withdrawal(address staker,uint256 usdc,uint256 maxShares,\
-uint256 rebalanceShare,uint256 networkFee,uint64 dstChain,address recipient,address tokenOut,\
+uint256 moveFee,uint256 networkFee,uint64 dstChain,address recipient,address tokenOut,\
 uint256 minOut,uint64 deadline,uint64 nonce)";
 
 pub const DOMAIN_NAME: &str = "Swapic Pool";
@@ -49,7 +49,7 @@ pub struct WithdrawalRequest {
     pub staker: EvmAddress,
     pub usdc: TokenAmount,
     pub max_shares: Shares,
-    pub rebalance_share: TokenAmount,
+    pub move_fee: TokenAmount,
     pub network_fee: TokenAmount,
     pub payout: PayoutTerms,
     pub nonce: u64,
@@ -73,7 +73,7 @@ impl WithdrawalRequest {
             staker: addr(self.staker),
             usdc: self.usdc.to_u256(),
             maxShares: U256::from(self.max_shares.get()),
-            rebalanceShare: self.rebalance_share.to_u256(),
+            moveFee: self.move_fee.to_u256(),
             networkFee: self.network_fee.to_u256(),
             dstChain: self.payout.dst_chain.get(),
             recipient: addr(self.payout.recipient),

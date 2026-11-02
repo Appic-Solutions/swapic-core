@@ -4,7 +4,6 @@ use crate::state::transitions::ReplayError;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use crate::storage::replay_cursor::{self, ReplayCursor};
-use types::config::AuditChunk;
 use types::events::EventType;
 use types::{Attempt, ChainId, Event, EventIndex, QuoteHash, Timestamp, TransitionError, TxHash};
 
@@ -36,13 +35,6 @@ fn a_clean_replay_audit_leaves_the_canister_running() {
     assert!(!is_halted());
 }
 
-fn set_chunk(events: u32) {
-    config::test_set(types::Config {
-        audit_chunk_events: AuditChunk::new(events),
-        ..config::get()
-    });
-}
-
 /// One admissible line per `n` in `lines`, sealed at `n`: a config change, which the fold
 /// always admits.
 fn fund(lines: impl IntoIterator<Item = u64>) {
@@ -55,38 +47,6 @@ fn fund(lines: impl IntoIterator<Item = u64>) {
         )
         .expect("the fold admits it");
     }
-}
-
-fn next_index() -> u64 {
-    audit_cursor::get().next_index.get()
-}
-
-/// The chain is verified a chunk at a time, so a pass costs the same whatever the log holds,
-/// and reaching the head starts the next pass at genesis: the whole chain is re-verified on
-/// a rolling basis rather than once.
-#[test]
-fn the_cursor_advances_across_ticks_and_wraps_at_the_head() {
-    on_fresh_memory(|| {
-        set_chunk(2);
-        fund(1..=5);
-        assert_eq!(audit_cursor::get(), AuditCursor::GENESIS);
-
-        run_replay_audit();
-        assert_eq!(next_index(), 2);
-        run_replay_audit();
-        assert_eq!(next_index(), 4);
-        run_replay_audit();
-        assert_eq!(
-            audit_cursor::get(),
-            AuditCursor::GENESIS,
-            "the head sends the cursor back to the start"
-        );
-        assert!(!is_halted(), "a sound chain halts nothing");
-
-        // and around again
-        run_replay_audit();
-        assert_eq!(next_index(), 2);
-    });
 }
 
 /// What one step reports before it is finished: how far the fold got and what is left.

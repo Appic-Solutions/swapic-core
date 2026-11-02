@@ -388,10 +388,9 @@ impl From<FoldOutOfStep> for AppendError {
 impl From<AppendError> for settlement_api::types::errors::AppendError {
     fn from(error: AppendError) -> Self {
         match error {
-            AppendError::ChainDiverged { log, state } => Self::ChainDiverged {
-                log_head: log.into_bytes(),
-                state_head: state.into_bytes(),
-            },
+            AppendError::ChainDiverged { .. } | AppendError::Canonical(_) => {
+                todo!("C2: the hash chain and its errors go")
+            }
             AppendError::IndexMismatch { log_len, sealed } => Self::IndexMismatch {
                 log_len,
                 sealed: sealed.get(),
@@ -405,7 +404,6 @@ impl From<AppendError> for settlement_api::types::errors::AppendError {
                 delta_pages,
             },
             AppendError::Transition(error) => Self::Transition(error.into()),
-            AppendError::Canonical(error) => Self::Canonical(error.into()),
         }
     }
 }
@@ -633,31 +631,6 @@ pub fn replay_next(fold: &mut State<MemoryStore>, max: u64) -> Result<u64, Repla
         replay_into(fold, (start..end).map_while(|i| log.get(i)))
     })?;
     Ok(log_len.saturating_sub(fold.meta().next_event_index.get()))
-}
-
-impl From<ReplayError> for settlement_api::types::events::ReplayError {
-    fn from(error: ReplayError) -> Self {
-        match error {
-            ReplayError::OutOfSequence { expected, found } => Self::OutOfSequence {
-                expected: expected.get(),
-                found: found.get(),
-            },
-            ReplayError::Unlinked {
-                index,
-                parent,
-                head,
-            } => Self::Unlinked {
-                index: index.get(),
-                parent: parent.into_bytes(),
-                head: head.into_bytes(),
-            },
-            ReplayError::LogFull { index } => Self::LogFull { index: index.get() },
-            ReplayError::Refused { index, error } => Self::Refused {
-                index: index.get(),
-                error: error.into(),
-            },
-        }
-    }
 }
 
 /// Test-only: writes `event` into the log and moves the fold's index and head onto it, so

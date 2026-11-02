@@ -269,9 +269,10 @@ pub fn check<S: Store>(
     // the flat floor of the rail the plan takes (Jeff-delegated): the canister reads no gas
     // price in USDC of its own
     let network_fee = if read.action == GasAction::RelayCctp {
-        payouts
-            .cctp_min_network_fee
-            .ok_or_else(|| refused("no CCTP payout is signed: its least network fee is unset"))?
+        if !payouts.cctp_payouts {
+            return Err(refused("no CCTP payout is signed: CCTP payouts are off"));
+        }
+        pay::cctp_floor(&payer.chains, read.arrival.as_ref()).map_err(refused)?
     } else {
         payouts.min_network_fee
     };

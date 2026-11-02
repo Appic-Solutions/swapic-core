@@ -4,7 +4,6 @@ pub(crate) mod tests;
 use crate::address::{Address, TextTooLong, TokenId, MAX_TEXT_BYTES};
 use crate::canonical::{CanonicalError, CanonicalWriter};
 use crate::chain::ChainId;
-use crate::config::Config;
 use crate::evm::{EvmAddress, EvmAddressError};
 use crate::hash::QuoteHash;
 use crate::numeric::{TokenAmount, UnixSeconds};
@@ -466,16 +465,6 @@ pub struct PendingQuote {
     pub deadlines: Option<QuoteDeadlines>,
 }
 
-impl PendingQuote {
-    /// The deadlines the quote is held to: the ones it was registered under, or, for an
-    /// entry written before they were recorded, the ones `config` puts on it now.
-    #[cfg(test)]
-    pub fn held_to(&self, config: &Config) -> QuoteDeadlines {
-        self.deadlines
-            .unwrap_or_else(|| QuoteDeadlines::under(self.quote.expires_at, config))
-    }
-}
-
 crate::storable_as_cbor!(PendingQuote);
 
 /// The two deadlines a quote is held to, fixed when the quoter registers it (rule A3): the
@@ -498,21 +487,6 @@ pub struct QuoteDeadlines {
     /// then.
     #[n(1)]
     pub claim_until: UnixSeconds,
-}
-
-impl QuoteDeadlines {
-    /// The deadlines `config` puts on a quote expiring at `expires_at`. A deadline past the
-    /// last second a `u64` holds is that second: every deadline is judged by `>`, and
-    /// nothing is later than it, so it holds every deposit and never closes, which is what
-    /// a deadline past the end of time means.
-    pub fn under(expires_at: UnixSeconds, config: &Config) -> Self {
-        let at_most_the_end =
-            |deadline: Option<UnixSeconds>| deadline.unwrap_or(UnixSeconds::new(u64::MAX));
-        Self {
-            deposit_until: at_most_the_end(expires_at.checked_add(config.permit_deadline)),
-            claim_until: at_most_the_end(expires_at.checked_add(config.claim_window())),
-        }
-    }
 }
 
 /// A pending quote as the expiry index keys it: by the last second a claim for it may be

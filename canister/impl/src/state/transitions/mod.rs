@@ -172,6 +172,10 @@ impl<S: Store> State<S> {
             // always legal; named rather than matched by `_` so a new variant has to be
             // classified here instead of silently defaulting to legal
             EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => Ok(()),
+            EventType::TxFinal { .. } => todo!("C2: a final transaction's rules"),
+            EventType::Swept { .. } | EventType::SweepReverted { .. } => {
+                todo!("C5: a sweep's rules")
+            }
         }
     }
 
@@ -254,6 +258,7 @@ impl<S: Store> State<S> {
                 }
             }
             TxPurpose::PoolApprove => {}
+            TxPurpose::Sweep(_) => todo!("C5: a sweep's transaction rules"),
             // one rescue per order
             TxPurpose::EcoRescue(order_id) => {
                 if self
@@ -445,6 +450,10 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         | EventType::PocketRebalanced { .. }
         | EventType::PullSigned { .. }
         | EventType::WaitingRepaired { .. } => {}
+        EventType::TxFinal { .. } => todo!("C2: a final transaction's record"),
+        EventType::Swept { .. } | EventType::SweepReverted { .. } => {
+            todo!("C5: a sweep's books")
+        }
     }
 }
 

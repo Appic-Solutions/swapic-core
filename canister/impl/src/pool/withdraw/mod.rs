@@ -32,7 +32,7 @@ pub fn request_of(
         staker: evm_address("staker", &args.staker)?,
         usdc: amount("usdc", &args.usdc)?,
         max_shares: Shares::new(u128_of("max_shares", &args.max_shares)?),
-        rebalance_share: amount("rebalance_share", &args.rebalance_share)?,
+        move_fee: amount("move_fee", &args.move_fee)?,
         network_fee: amount("network_fee", &args.network_fee)?,
         payout: args.payout.try_into()?,
         nonce: args.nonce,
@@ -120,14 +120,6 @@ pub fn plan<S: Store>(
         .lines()
         .settings
         .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
-    let least_share = payouts
-        .least_rebalance_share(request.usdc)
-        .ok_or_else(|| PoolError::NotAllowed("usdc is too large".to_string()))?;
-    if request.rebalance_share < least_share {
-        return Err(PoolError::NotAllowed(format!(
-            "the rebalancing share must be at least {least_share}"
-        )));
-    }
     if request.network_fee < payouts.min_network_fee {
         return Err(PoolError::NotAllowed(format!(
             "the network fee must be at least {}",
@@ -152,7 +144,7 @@ pub fn plan<S: Store>(
         staker: request.staker,
         usdc: request.usdc,
         max_shares: request.max_shares,
-        rebalance_share: request.rebalance_share,
+        move_fee: request.move_fee,
         network_fee: request.network_fee,
         nonce: request.nonce,
         burned,

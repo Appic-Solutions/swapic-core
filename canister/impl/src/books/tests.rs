@@ -156,10 +156,10 @@ fn stale_books_close_the_pool() {
             Err(PoolClosed::NeverChecked(ChainId::BASE))
         );
         append_event_at(checked(150, 100, false), at_minute(10)).unwrap();
-        // three ten-minute intervals is the most the books may go unread
-        assert_eq!(status(false, at_minute(40)), Ok(()));
+        // three hourly intervals is the most the books may go unread
+        assert_eq!(status(false, at_minute(190)), Ok(()));
         assert!(matches!(
-            status(false, at_minute(41)),
+            status(false, at_minute(191)),
             Err(PoolClosed::Stale { .. })
         ));
         // a check on another chain is not the pool chain's
@@ -175,11 +175,11 @@ fn stale_books_close_the_pool() {
                     shortfall: false,
                 },
             },
-            at_minute(41),
+            at_minute(191),
         )
         .unwrap();
         assert!(matches!(
-            status(false, at_minute(42)),
+            status(false, at_minute(192)),
             Err(PoolClosed::Stale { .. })
         ));
     });
@@ -208,7 +208,7 @@ fn failed_read_does_not_refresh_the_check() {
         assert_eq!(books.checked_at, Some(at_minute(10)));
         assert_eq!(books.failed_at, Some(at_minute(35)));
         assert!(matches!(
-            status(false, at_minute(41)),
+            status(false, at_minute(191)),
             Err(PoolClosed::Stale { .. })
         ));
     });

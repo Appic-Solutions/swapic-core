@@ -4,71 +4,42 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
-use types::address::{RedactedRpcUrl, TextTooLong, REDACTED};
+use types::address::{RedactedRpcUrl, REDACTED};
 use types::config::{
-    AuditChunk, BooksInterval, BooksTolerance, ChainTable, ClaimGrace, DepositLookback, DomainText,
-    EcoEnabled, EvictionsPerSweep, EvmChain, PerAction, RefundsPerSweep,
+    BooksInterval, BooksTolerance, ChainTable, DomainText, EcoEnabled, EvmChain, PerAction,
 };
 use types::rail::{CctpDomain, CctpMinFee};
-use types::{
-    BasisPoints, BlockDepth, ChainId, CheckedAmountOf, EvmAddress, GasAmount, TokenAmount,
-    UsdAmount,
-};
+use types::{BlockDepth, ChainId, CheckedAmountOf, EvmAddress, GasAmount, TokenAmount};
 
-/// Every knob the canister reads at runtime. Numbers are the spec defaults; the two
-/// address maps and the key name are what a deploy fills in.
+/// Every knob the canister reads at runtime. The rpc urls, the chain table and the key name
+/// are what a deploy fills in.
 #[derive(CandidType, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Config {
-    pub platform_fee_bps: u16,
-    pub max_fee_bps: u16,
-    // a decimal string in the ConfigChanged JSON, so no reader rounds it
-    #[serde(serialize_with = "nat_as_decimal")]
-    pub max_swap_usd: Nat,
-    pub quote_ttl_s: u64,
-    pub permit_deadline_s: u64,
-    pub chain_data_max_age_s: u64,
+    /// How long the outbox holds signed transactions back to send them together.
     pub batch_window_ms: u64,
     pub max_batch_items: u32,
-    pub decision_timeout_min: u64,
-    pub rail_status_max_age_s: u64,
+    /// How often the engine's backstop drives while a payout, an ICP op or a move is open,
+    /// at most 60. Nothing drives on it while no work is open.
+    pub backstop_interval_s: u64,
     /// Whether the canister simulates a transaction itself before it signs it. False by
     /// default: the watcher and the submit API simulate before they ask.
     pub simulate_before_sign: bool,
-    pub expiry_check_interval_s: u64,
-    pub replay_audit_interval_s: u64,
     pub confirmations: BTreeMap<u64, u64>,
     pub rpc_urls: BTreeMap<u64, String>,
-    pub vault_addresses: BTreeMap<u64, String>,
     pub ecdsa_key_name: String,
-    pub max_refunds_per_sweep: u32,
-    pub max_evictions_per_sweep: u32,
-    pub audit_chunk_events: u32,
-    /// How many blocks back from a chain's head the deposit read looks for a user's
-    /// deposit: at most 400,000, the widest range the read walks, forty windows of ten
-    /// thousand blocks, and the default; and more than a claim may be asked after its
-    /// deposit at four blocks a second (the longest quote, `permit_deadline_s` and
-    /// `claim_grace_s`), which `LookbackShorterThanClaims` refuses.
-    pub deposit_lookback_blocks: u32,
     /// CCTP's domain id per chain: Circle's own numbering, never a chain id.
     pub cctp_domains: BTreeMap<u64, u32>,
-    /// The USDC contract per chain, as an EVM address.
-    pub usdc_addresses: BTreeMap<u64, String>,
     /// Eco's `Portal`, the same address on every chain.
     pub eco_portal: Option<String>,
-    /// Whether the Eco rail may be used. False until its route is designed: a quote
-    /// naming it is refused at registration and at the claim, and a swap already on it is
-    /// paused until the rail is on again (counted by `paused_swaps`).
+    /// Whether the Eco rail may be used. False until its route is designed.
     pub eco_enabled: bool,
-    /// How long after a quote's deposit deadline (its expiry plus the permit window) a
-    /// claim for a deposit that landed by that deadline is still admitted, from any
-    /// caller the claim admits, the controller included: 600 to 86,400 seconds, an hour by
-    /// default. The pending store keeps the quote until it ends.
-    pub claim_grace_s: u64,
     /// The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
     /// stores it (`minFee()`, in thousandths of a basis point, below 10,000,000). A chain
     /// with no entry is one whose messenger charges none. Every burn offers at least this
     /// much of its amount as its `maxFee`, the Standard path included.
     pub cctp_min_fees: BTreeMap<u64, u32>,
+    /// How often the pool's Base USDC and ICP ckUSDC are checked against the books: 3,600
+    /// by default.
     pub books_check_interval_s: u64,
     /// How far below what the books expect a balance may read, in micro-USDC, before the
     /// pool pauses.
@@ -88,8 +59,9 @@ pub struct Config {
     pub credit_confirmations: Option<BTreeMap<u64, u64>>,
 }
 
-/// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, and per
-/// action the gas limit, the gas budget and the least fee. Addresses are EVM addresses.
+/// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, its
+/// block time, and per action the gas limit, the gas budget and the least fee. Addresses
+/// are EVM addresses.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct EvmChainConfig {
     /// The door users approve, and the EIP-712 verifying contract of every order here.
@@ -119,6 +91,9 @@ pub struct EvmChainConfig {
     /// USDC's EIP-712 domain version on this chain, as its contract answers `version()`.
     /// None: "2". 1 to 32 printable ASCII characters.
     pub usdc_domain_version: Option<String>,
+    /// How often the chain makes a block, 100 to 60,000: the outbox reads a transaction's
+    /// receipt at this pace.
+    pub block_time_ms: u64,
 }
 
 /// One gas limit per action the canister signs.
@@ -131,26 +106,29 @@ pub struct ActionGas {
     pub complete_ck: u64,
     pub relay_deliver: u64,
     pub release: u64,
-    /// The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
-    /// ConfigChanged JSON when absent, so a config without them keeps its shape.
+    /// The pool's rows, optional: an absent one refuses its action.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_payout: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_transfer: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_approve: Option<u64>,
-    /// The rebalancing's rows (P11c), optional as the pool's: a move's own order, its CCTP
-    /// finish (the limit the watcher finishes the canister's own move with), and a Base to
-    /// ICP Eco move's ck deposit on Ethereum.
+    /// The rebalancing's rows, optional as the pool's: a move's own order, its CCTP finish
+    /// (the limit the watcher finishes the canister's own move with), and a Base to ICP Eco
+    /// move's ck deposit on Ethereum.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_move: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_move_finish: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_ck_deposit: Option<u64>,
-    /// Eco's `cancelAndProve` of an unfilled intent (P11e), optional as the pool's.
+    /// Eco's `cancelAndProve` of an unfilled intent, optional as the pool's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eco_rescue: Option<u64>,
+    /// A controller's sweep (`sweep_evm`): a native transfer or a `USDC.transfer`, optional
+    /// as the pool's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -170,8 +148,7 @@ pub struct ActionAmounts {
     pub relay_deliver: Nat,
     #[serde(serialize_with = "nat_as_decimal")]
     pub release: Nat,
-    /// The pool's rows (P11b), optional: an absent one refuses its action. Left out of the
-    /// ConfigChanged JSON when absent, so a config without them keeps its shape.
+    /// The pool's rows, optional: an absent one refuses its action.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "opt_nat_as_decimal"
@@ -187,7 +164,7 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub pool_approve: Option<Nat>,
-    /// The rebalancing's rows (P11c), optional as the pool's.
+    /// The rebalancing's rows, optional as the pool's.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "opt_nat_as_decimal"
@@ -203,12 +180,18 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub pool_ck_deposit: Option<Nat>,
-    /// Eco's `cancelAndProve` of an unfilled intent (P11e), optional as the pool's.
+    /// Eco's `cancelAndProve` of an unfilled intent, optional as the pool's.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "opt_nat_as_decimal"
     )]
     pub eco_rescue: Option<Nat>,
+    /// A controller's sweep, optional as the pool's.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub sweep: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -233,6 +216,7 @@ impl From<PerAction<GasAmount>> for ActionGas {
             pool_move_finish: gas.pool_move_finish.map(limit),
             pool_ck_deposit: gas.pool_ck_deposit.map(limit),
             eco_rescue: gas.eco_rescue.map(limit),
+            sweep: gas.sweep.map(limit),
         }
     }
 }
@@ -254,6 +238,7 @@ impl From<ActionGas> for PerAction<GasAmount> {
             pool_move_finish: gas.pool_move_finish.map(GasAmount::from),
             pool_ck_deposit: gas.pool_ck_deposit.map(GasAmount::from),
             eco_rescue: gas.eco_rescue.map(GasAmount::from),
+            sweep: gas.sweep.map(GasAmount::from),
         }
     }
 }
@@ -275,6 +260,7 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             pool_move_finish: amounts.pool_move_finish.map(Into::into),
             pool_ck_deposit: amounts.pool_ck_deposit.map(Into::into),
             eco_rescue: amounts.eco_rescue.map(Into::into),
+            sweep: amounts.sweep.map(Into::into),
         }
     }
 }
@@ -302,6 +288,7 @@ fn per_action<Unit>(
         pool_move_finish: amounts.pool_move_finish.map(amount).transpose()?,
         pool_ck_deposit: amounts.pool_ck_deposit.map(amount).transpose()?,
         eco_rescue: amounts.eco_rescue.map(amount).transpose()?,
+        sweep: amounts.sweep.map(amount).transpose()?,
     })
 }
 
@@ -319,6 +306,7 @@ impl From<EvmChain> for EvmChainConfig {
             min_network_fee: chain.min_network_fee.into(),
             usdc_domain_name: chain.usdc_name.map(|name| name.to_string()),
             usdc_domain_version: chain.usdc_version.map(|version| version.to_string()),
+            block_time_ms: millis(chain.block_time),
         }
     }
 }
@@ -351,6 +339,7 @@ fn evm_chain(chain: ChainId, config: EvmChainConfig) -> Result<EvmChain, types::
         min_network_fee: per_action("evm_chains.min_network_fee", config.min_network_fee)?,
         usdc_name: domain_text("evm_chains.usdc_domain_name", config.usdc_domain_name)?,
         usdc_version: domain_text("evm_chains.usdc_domain_version", config.usdc_domain_version)?,
+        block_time: Duration::from_millis(config.block_time_ms),
     })
 }
 
@@ -366,32 +355,16 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // exhaustive: a new field fails to compile until it decides how it prints
         let Config {
-            platform_fee_bps,
-            max_fee_bps,
-            max_swap_usd,
-            quote_ttl_s,
-            permit_deadline_s,
-            chain_data_max_age_s,
             batch_window_ms,
             max_batch_items,
-            decision_timeout_min,
-            rail_status_max_age_s,
+            backstop_interval_s,
             simulate_before_sign,
-            expiry_check_interval_s,
-            replay_audit_interval_s,
             confirmations,
             rpc_urls,
-            vault_addresses,
             ecdsa_key_name,
-            max_refunds_per_sweep,
-            max_evictions_per_sweep,
-            audit_chunk_events,
-            deposit_lookback_blocks,
             cctp_domains,
-            usdc_addresses,
             eco_portal,
             eco_enabled,
-            claim_grace_s,
             cctp_min_fees,
             books_check_interval_s,
             books_tolerance,
@@ -402,32 +375,16 @@ impl fmt::Debug for Config {
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
         f.debug_struct("Config")
-            .field("platform_fee_bps", platform_fee_bps)
-            .field("max_fee_bps", max_fee_bps)
-            .field("max_swap_usd", max_swap_usd)
-            .field("quote_ttl_s", quote_ttl_s)
-            .field("permit_deadline_s", permit_deadline_s)
-            .field("chain_data_max_age_s", chain_data_max_age_s)
             .field("batch_window_ms", batch_window_ms)
             .field("max_batch_items", max_batch_items)
-            .field("decision_timeout_min", decision_timeout_min)
-            .field("rail_status_max_age_s", rail_status_max_age_s)
+            .field("backstop_interval_s", backstop_interval_s)
             .field("simulate_before_sign", simulate_before_sign)
-            .field("expiry_check_interval_s", expiry_check_interval_s)
-            .field("replay_audit_interval_s", replay_audit_interval_s)
             .field("confirmations", confirmations)
             .field("rpc_urls", &rpc_urls)
-            .field("vault_addresses", vault_addresses)
             .field("ecdsa_key_name", ecdsa_key_name)
-            .field("max_refunds_per_sweep", max_refunds_per_sweep)
-            .field("max_evictions_per_sweep", max_evictions_per_sweep)
-            .field("audit_chunk_events", audit_chunk_events)
-            .field("deposit_lookback_blocks", deposit_lookback_blocks)
             .field("cctp_domains", cctp_domains)
-            .field("usdc_addresses", usdc_addresses)
             .field("eco_portal", eco_portal)
             .field("eco_enabled", eco_enabled)
-            .field("claim_grace_s", claim_grace_s)
             .field("cctp_min_fees", cctp_min_fees)
             .field("books_check_interval_s", books_check_interval_s)
             .field("books_tolerance", books_tolerance)
@@ -474,32 +431,16 @@ impl Config {
 impl From<types::Config> for Config {
     fn from(config: types::Config) -> Self {
         let types::Config {
-            platform_fee,
-            max_fee,
-            max_swap,
-            quote_ttl,
-            permit_deadline,
-            chain_data_max_age,
             batch_window,
             max_batch_items,
-            decision_timeout,
-            rail_status_max_age,
+            backstop_interval,
             simulate_before_sign,
-            expiry_check_interval,
-            replay_audit_interval,
             confirmations,
             rpc_urls,
-            vault_addresses,
             ecdsa_key_name,
-            max_refunds_per_sweep,
-            max_evictions_per_sweep,
-            audit_chunk_events,
-            deposit_lookback_blocks,
             cctp_domains,
-            usdc_addresses,
             eco_portal,
             eco_enabled,
-            claim_grace,
             cctp_min_fees,
             books_check_interval,
             books_tolerance,
@@ -508,20 +449,11 @@ impl From<types::Config> for Config {
             credit_confirmations,
         } = config;
         Self {
-            platform_fee_bps: platform_fee.get(),
-            max_fee_bps: max_fee.get(),
-            max_swap_usd: max_swap.into(),
-            quote_ttl_s: quote_ttl.as_secs(),
-            permit_deadline_s: permit_deadline.as_secs(),
-            chain_data_max_age_s: chain_data_max_age.as_secs(),
             batch_window_ms: u64::try_from(batch_window.as_millis())
                 .expect("BUG: batch_window enters as u64 milliseconds"),
             max_batch_items,
-            decision_timeout_min: decision_timeout.as_secs() / 60,
-            rail_status_max_age_s: rail_status_max_age.as_secs(),
+            backstop_interval_s: backstop_interval.as_secs(),
             simulate_before_sign,
-            expiry_check_interval_s: expiry_check_interval.as_secs(),
-            replay_audit_interval_s: replay_audit_interval.as_secs(),
             confirmations: confirmations
                 .into_iter()
                 .map(|(chain, depth)| (chain.get(), depth.get()))
@@ -530,28 +462,14 @@ impl From<types::Config> for Config {
                 .into_iter()
                 .map(|(chain, url)| (chain.get(), url.to_string()))
                 .collect(),
-            vault_addresses: vault_addresses
-                .into_iter()
-                .map(|(chain, address)| (chain.get(), address.to_string()))
-                .collect(),
             ecdsa_key_name,
-            max_refunds_per_sweep: max_refunds_per_sweep.get(),
-            max_evictions_per_sweep: max_evictions_per_sweep.get(),
-            audit_chunk_events: audit_chunk_events.get(),
-            deposit_lookback_blocks: deposit_lookback_blocks.get(),
             cctp_domains: cctp_domains
                 .0
                 .into_iter()
                 .map(|(chain, domain)| (chain.get(), domain.get()))
                 .collect(),
-            usdc_addresses: usdc_addresses
-                .0
-                .into_iter()
-                .map(|(chain, address)| (chain.get(), address.to_string()))
-                .collect(),
             eco_portal: eco_portal.map(|address| address.to_string()),
             eco_enabled: eco_enabled.is_on(),
-            claim_grace_s: claim_grace.get().as_secs(),
             cctp_min_fees: cctp_min_fees
                 .0
                 .into_iter()
@@ -595,29 +513,10 @@ impl TryFrom<Config> for types::Config {
 
     fn try_from(config: Config) -> Result<Self, Self::Error> {
         Ok(Self {
-            platform_fee: BasisPoints::new(config.platform_fee_bps),
-            max_fee: BasisPoints::new(config.max_fee_bps),
-            max_swap: UsdAmount::try_from(config.max_swap_usd).map_err(|_| {
-                types::ConfigError::AmountTooLarge {
-                    field: "max_swap_usd",
-                }
-            })?,
-            quote_ttl: Duration::from_secs(config.quote_ttl_s),
-            permit_deadline: Duration::from_secs(config.permit_deadline_s),
-            chain_data_max_age: Duration::from_secs(config.chain_data_max_age_s),
             batch_window: Duration::from_millis(config.batch_window_ms),
             max_batch_items: config.max_batch_items,
-            decision_timeout: config
-                .decision_timeout_min
-                .checked_mul(60)
-                .map(Duration::from_secs)
-                .ok_or(types::ConfigError::DurationTooLong {
-                    field: "decision_timeout_min",
-                })?,
-            rail_status_max_age: Duration::from_secs(config.rail_status_max_age_s),
+            backstop_interval: Duration::from_secs(config.backstop_interval_s),
             simulate_before_sign: config.simulate_before_sign,
-            expiry_check_interval: Duration::from_secs(config.expiry_check_interval_s),
-            replay_audit_interval: Duration::from_secs(config.replay_audit_interval_s),
             confirmations: config
                 .confirmations
                 .into_iter()
@@ -633,24 +532,7 @@ impl TryFrom<Config> for types::Config {
                         .map_err(|RedactedRpcUrl| types::ConfigError::RedactedRpcUrl { chain })
                 })
                 .collect::<Result<_, _>>()?,
-            vault_addresses: config
-                .vault_addresses
-                .into_iter()
-                .map(|(chain, address)| {
-                    let chain = ChainId::new(chain);
-                    address.parse().map(|address| (chain, address)).map_err(
-                        |TextTooLong { len }| types::ConfigError::VaultAddressTooLong {
-                            chain,
-                            len,
-                        },
-                    )
-                })
-                .collect::<Result<_, _>>()?,
             ecdsa_key_name: config.ecdsa_key_name,
-            max_refunds_per_sweep: RefundsPerSweep::new(config.max_refunds_per_sweep),
-            max_evictions_per_sweep: EvictionsPerSweep::new(config.max_evictions_per_sweep),
-            audit_chunk_events: AuditChunk::new(config.audit_chunk_events),
-            deposit_lookback_blocks: DepositLookback::new(config.deposit_lookback_blocks),
             cctp_domains: ChainTable(
                 config
                     .cctp_domains
@@ -658,24 +540,12 @@ impl TryFrom<Config> for types::Config {
                     .map(|(chain, domain)| (ChainId::new(chain), CctpDomain::new(domain)))
                     .collect(),
             ),
-            usdc_addresses: ChainTable(
-                config
-                    .usdc_addresses
-                    .iter()
-                    .map(|(chain, address)| {
-                        let chain = ChainId::new(*chain);
-                        evm_address("usdc_addresses", Some(chain), address)
-                            .map(|address| (chain, address))
-                    })
-                    .collect::<Result<_, _>>()?,
-            ),
             eco_portal: config
                 .eco_portal
                 .as_deref()
                 .map(|address| evm_address("eco_portal", None, address))
                 .transpose()?,
             eco_enabled: EcoEnabled::new(config.eco_enabled),
-            claim_grace: ClaimGrace::new(Duration::from_secs(config.claim_grace_s)),
             cctp_min_fees: ChainTable(
                 config
                     .cctp_min_fees
@@ -702,8 +572,6 @@ impl TryFrom<Config> for types::Config {
                     .collect::<Result<_, _>>()?,
             ),
             pool_chain: config.pool_chain.map(ChainId::new),
-            // absent is empty: a caller that predates the field credits at the swap depths,
-            // held to the floor on Ethereum
             credit_confirmations: ChainTable(
                 config
                     .credit_confirmations
@@ -719,11 +587,6 @@ impl TryFrom<Config> for types::Config {
 /// Why a config was refused, naming the knob at fault.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    MaxFeeAboveHundredPercent(u16),
-    PlatformFeeAboveMax {
-        platform_fee_bps: u16,
-        max_fee_bps: u16,
-    },
     EmptyEcdsaKeyName,
     /// The canister has already derived its EVM address under the key name it holds, and
     /// the Swapic contracts on every chain name that address.
@@ -734,11 +597,6 @@ pub enum ConfigError {
     TimerIntervalTooLong {
         field: String,
         interval_s: u64,
-    },
-    TimerIntervalTooShort {
-        field: String,
-        interval_s: u64,
-        floor_s: u64,
     },
     /// In milliseconds, so the one knob set in milliseconds is reported as it was set.
     DurationAboveCap {
@@ -781,13 +639,6 @@ pub enum ConfigError {
     RedactedRpcUrl {
         chain_id: u64,
     },
-    VaultAddressTooLong {
-        chain_id: u64,
-        len: u64,
-    },
-    EmptyVaultAddress {
-        chain_id: u64,
-    },
     EmptyRpcUrl {
         chain_id: u64,
     },
@@ -803,19 +654,15 @@ pub enum ConfigError {
         chain_id: Option<u64>,
         reason: EvmAddressError,
     },
-    /// The v1 claim's rule, kept with its knobs: a claim could be asked `span_s` after the
-    /// deposit it read for (the longest quote lifetime, `permit_deadline_s` and
-    /// `claim_grace_s`), `needed_blocks` at four blocks a second, and
-    /// `deposit_lookback_blocks` does not reach that far back.
-    LookbackShorterThanClaims {
-        lookback_blocks: u32,
-        span_s: u64,
-        needed_blocks: u64,
+    /// `evm_chains[chain_id].block_time_ms` is outside 100 to 60,000.
+    BlockTimeOutOfRange {
+        chain_id: u64,
+        block_time_ms: u64,
     },
 }
 
-/// Whole milliseconds, for an error to carry. A duration past `u64::MAX` of them, which is
-/// five hundred million years, reports as `u64::MAX`.
+/// Whole milliseconds, for an error or a wire field to carry. A duration past `u64::MAX` of
+/// them, which is five hundred million years, reports as `u64::MAX`.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -824,16 +671,6 @@ impl From<types::ConfigError> for ConfigError {
     fn from(error: types::ConfigError) -> Self {
         use types::ConfigError as Domain;
         match error {
-            Domain::MaxFeeAboveHundredPercent(max_fee) => {
-                Self::MaxFeeAboveHundredPercent(max_fee.get())
-            }
-            Domain::PlatformFeeAboveMax {
-                platform_fee,
-                max_fee,
-            } => Self::PlatformFeeAboveMax {
-                platform_fee_bps: platform_fee.get(),
-                max_fee_bps: max_fee.get(),
-            },
             Domain::EmptyEcdsaKeyName => Self::EmptyEcdsaKeyName,
             Domain::EcdsaKeyNameFixed { current, requested } => {
                 Self::EcdsaKeyNameFixed { current, requested }
@@ -841,15 +678,6 @@ impl From<types::ConfigError> for ConfigError {
             Domain::TimerIntervalTooLong { field, interval } => Self::TimerIntervalTooLong {
                 field: field.to_string(),
                 interval_s: interval.as_secs(),
-            },
-            Domain::TimerIntervalTooShort {
-                field,
-                interval,
-                floor,
-            } => Self::TimerIntervalTooShort {
-                field: field.to_string(),
-                interval_s: interval.as_secs(),
-                floor_s: floor.as_secs(),
             },
             Domain::DurationAboveCap {
                 field,
@@ -905,13 +733,6 @@ impl From<types::ConfigError> for ConfigError {
             Domain::RedactedRpcUrl { chain } => Self::RedactedRpcUrl {
                 chain_id: chain.get(),
             },
-            Domain::VaultAddressTooLong { chain, len } => Self::VaultAddressTooLong {
-                chain_id: chain.get(),
-                len: crate::types::wire_len(len),
-            },
-            Domain::EmptyVaultAddress { chain } => Self::EmptyVaultAddress {
-                chain_id: chain.get(),
-            },
             Domain::EmptyRpcUrl { chain } => Self::EmptyRpcUrl {
                 chain_id: chain.get(),
             },
@@ -928,14 +749,9 @@ impl From<types::ConfigError> for ConfigError {
                 chain_id: chain.map(ChainId::get),
                 reason: reason.into(),
             },
-            Domain::LookbackShorterThanClaims {
-                lookback,
-                span,
-                needed,
-            } => Self::LookbackShorterThanClaims {
-                lookback_blocks: lookback,
-                span_s: span.as_secs(),
-                needed_blocks: needed,
+            Domain::BlockTimeOutOfRange { chain, block_time } => Self::BlockTimeOutOfRange {
+                chain_id: chain.get(),
+                block_time_ms: millis(block_time),
             },
         }
     }

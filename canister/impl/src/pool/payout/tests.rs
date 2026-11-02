@@ -333,7 +333,7 @@ fn a_stake_mints_its_shares_at_the_price_before_it() {
         let terms = types::pool::Registration {
             kind: DepositKind::Stake { owner },
             premium: TokenAmount::ZERO,
-            rebalance_share: TokenAmount::from(500_000_u32),
+            move_fee: TokenAmount::from(500_000_u32),
             icp_fees: None,
             ..swap_terms(5, usdc(100), TokenAmount::ZERO, at(1_000))
         };
@@ -782,6 +782,7 @@ fn a_stakes_pull_is_failed_only_when_nothing_moved() {
                     from: account(byte),
                     amount: usdc(10),
                     created_at: at(2),
+                    move_fee: TokenAmount::ZERO,
                 },
                 at(2),
             )
@@ -871,6 +872,7 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
                 from: account(9),
                 amount: usdc(100),
                 created_at: at(4),
+                move_fee: TokenAmount::ZERO,
             },
             at(4),
         )
@@ -881,7 +883,7 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
                 id,
                 owner: PoolAccount::Icp(account(9)),
                 amount: usdc(100),
-                rebalance_share: TokenAmount::ZERO,
+                move_fee: TokenAmount::ZERO,
                 shares,
                 block: 2,
             },
@@ -983,6 +985,7 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
                     amount: None,
                     token: None,
                 },
+                move_fee: TokenAmount::ZERO,
             },
             at(4),
         )
@@ -1017,6 +1020,7 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
                 from: account(4),
                 amount: usdc(1),
                 created_at: at(4),
+                move_fee: TokenAmount::ZERO,
             },
             at(4),
         )
@@ -1034,7 +1038,8 @@ fn a_waiting_head_holds_back_only_what_queues_behind_it() {
             "and the stake is minted"
         );
 
-        let a_while_later = || at(4 + 601_000_000_000);
+        // past one hourly books interval, the alert's wait
+        let a_while_later = || at(4 + 3_601_000_000_000);
         block_on(drive_with(&fake, a_while_later, &open_pool));
         assert_eq!(deposit(&started).unwrap().status, DepositStatus::Paid);
         assert!(ledger().pending.is_empty(), "the withdrawal is paid");
@@ -1345,6 +1350,7 @@ fn a_retry_reuses_the_transfer_its_payout_fixed() {
                     amount: Some(fixed),
                     token: Some(PrincipalBytes(ckusdc())),
                 },
+                move_fee: TokenAmount::ZERO,
             },
             at(4),
         )
@@ -1500,6 +1506,7 @@ fn a_payout_started_before_the_upgrade_is_driven_to_its_end() {
                     amount: None,
                     token: None,
                 },
+                move_fee: TokenAmount::ZERO,
             },
             at(4),
         )

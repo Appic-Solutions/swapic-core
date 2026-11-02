@@ -12,6 +12,7 @@ use crate::numeric::{
     Attempt, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei, WeiPerGas,
 };
 use crate::pool::PoolStep;
+use crate::sweep::Sweep;
 use minicbor::{Decode, Encode};
 use sha2::Digest;
 use std::borrow::Borrow;
@@ -20,7 +21,7 @@ use thiserror::Error;
 /// The number of [`EventType`] variants. The exhaustive match in
 /// [`EventType::canonical_bytes`] is the compile-time check, the golden samples are the
 /// coverage check.
-pub const EVENT_VARIANT_COUNT: usize = 27;
+pub const EVENT_VARIANT_COUNT: usize = 30;
 
 /// What happened. Each variant's minicbor index is its canonical tag: assigned once, never
 /// renumbered, never reused, only appended.
@@ -341,6 +342,57 @@ pub enum EventType {
         #[n(0)]
         step: PoolStep,
     },
+    /// A transaction the canister signed reached its end: mined at the depth the outbox
+    /// waits for, or its nonce spent by a cancel.
+    #[n(27)]
+    TxFinal {
+        #[n(0)]
+        purpose: TxPurpose,
+        #[n(1)]
+        chain_id: ChainId,
+        #[n(2)]
+        nonce: Nonce,
+        #[n(3)]
+        tx_hash: TxHash,
+        #[n(4)]
+        outcome: TxOutcome,
+    },
+    /// A controller's sweep, its amount taken off the books it came from as it is signed
+    /// or asked of the ledger.
+    #[n(28)]
+    Swept {
+        #[n(0)]
+        sweep: Sweep,
+    },
+    /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
+    /// amount is back on the books it came from.
+    #[n(29)]
+    SweepReverted {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        why: String,
+    },
+}
+
+/// How a transaction the canister signed ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum TxOutcome {
+    /// It ran, in `block`.
+    #[n(0)]
+    Succeeded {
+        #[n(0)]
+        block: BlockNumber,
+    },
+    /// It was mined in `block` and reverted.
+    #[n(1)]
+    Reverted {
+        #[n(0)]
+        block: BlockNumber,
+    },
+    /// Its nonce was spent by a cancel: it never ran.
+    #[n(2)]
+    Cancelled,
 }
 
 /// Why an outbound transaction exists. Every transaction this canister sends is one of
@@ -400,6 +452,9 @@ pub enum TxPurpose {
     /// id that published it: one rescue per order.
     #[n(61)]
     EcoRescue(#[cbor(n(0), with = "minicbor::bytes")] [u8; 32]),
+    /// A controller's sweep from the canister's address, by the sweep's id.
+    #[n(62)]
+    Sweep(#[n(0)] u64),
 }
 
 impl TxPurpose {
@@ -423,6 +478,7 @@ impl TxPurpose {
             Self::PoolApprove => Some(pool_key(b"swapic.pool.v1.tx.approve", &[])),
             Self::PoolMove(id) => Some(pool_key(b"swapic.pool.v1.tx.move", &id.to_be_bytes())),
             Self::EcoRescue(order_id) => Some(pool_key(b"swapic.eco.v1.tx.rescue", order_id)),
+            Self::Sweep(id) => Some(pool_key(b"swapic.sweep.v1.tx", &id.to_be_bytes())),
             Self::Cancel(_) => None,
         }
     }
@@ -445,7 +501,8 @@ impl TxPurpose {
             | Self::PoolTransfer(_)
             | Self::PoolApprove
             | Self::PoolMove(_)
-            | Self::EcoRescue(_) => None,
+            | Self::EcoRescue(_)
+            | Self::Sweep(_) => None,
         }
     }
 
@@ -469,6 +526,7 @@ impl TxPurpose {
             Self::PoolApprove => w.put_u8(12),
             Self::PoolMove(id) => w.put_u8(60).put_u64(*id),
             Self::EcoRescue(order_id) => w.put_u8(61).put_hash(order_id),
+            Self::Sweep(id) => w.put_u8(62).put_u64(*id),
         };
     }
 }
@@ -532,6 +590,8 @@ pub enum EventError {
     NotAGasAction { field: &'static str },
     #[error("{field} is not a pool step")]
     NotAPoolStep { field: &'static str },
+    #[error("{field} has a subaccount that is not 32 bytes")]
+    NotAnAccount { field: &'static str },
 }
 
 impl EventError {
@@ -640,7 +700,10 @@ impl EventType {
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
             | EventType::PullSigned { .. }
-            | EventType::Books { .. } => false,
+            | EventType::Books { .. }
+            | EventType::TxFinal { .. }
+            | EventType::Swept { .. }
+            | EventType::SweepReverted { .. } => false,
             EventType::Flow { step, .. } => step.moves_a_step(),
             EventType::Pool { step } => step.moves_a_payout(),
         }
@@ -676,11 +739,19 @@ impl EventType {
             | EventType::TxReplaced { .. }
             | EventType::TxCancelled { .. }
             | EventType::PullSigned { .. }
-            // a flow's, a book's and the pool's amounts are checked by their own rules
+            // a flow's, a book's, the pool's and a sweep's amounts are checked by their own
+            // rules
             | EventType::Flow { .. }
             | EventType::Books { .. }
-            | EventType::Pool { .. } => None,
+            | EventType::Pool { .. }
+            | EventType::TxFinal { .. }
+            | EventType::Swept { .. }
+            | EventType::SweepReverted { .. } => None,
         }
+    }
+
+    fn to_cbor(&self) -> Vec<u8> {
+        minicbor::to_vec(self).expect("BUG: encoding into a Vec is infallible")
     }
 
     /// The canonical preimage: a u16 tag, then the variant's fields in declaration order,
@@ -936,6 +1007,16 @@ impl EventType {
             // the step as its minicbor bytes, as a book's are
             EventType::Pool { step } => {
                 w.put_u16(26).put_bytes(&step.to_bytes());
+            }
+            // the line as its minicbor bytes, as a step's are
+            EventType::TxFinal { .. } => {
+                w.put_u16(27).put_bytes(&self.to_cbor());
+            }
+            EventType::Swept { .. } => {
+                w.put_u16(28).put_bytes(&self.to_cbor());
+            }
+            EventType::SweepReverted { .. } => {
+                w.put_u16(29).put_bytes(&self.to_cbor());
             }
         }
         w.finish()

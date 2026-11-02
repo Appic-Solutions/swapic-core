@@ -5,7 +5,6 @@
 //! root (`lib.rs` glob-imports queries and updates together).
 
 mod books;
-mod chain;
 mod config;
 mod events;
 mod flows;
@@ -15,7 +14,6 @@ mod pool;
 mod rebalance;
 
 pub use books::*;
-pub use chain::*;
 pub use config::*;
 pub use events::*;
 pub use flows::*;

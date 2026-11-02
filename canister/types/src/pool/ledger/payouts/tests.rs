@@ -49,7 +49,7 @@ fn with_base(mut pool: Pool, base: TokenAmount, salt: u8, log: u64) -> Pool {
         },
         min_usdc: base,
         premium: TokenAmount::ZERO,
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         src_chain: ChainId::BASE,
         src_payer: payer(),
         rail: PoolRail::SameChain,
@@ -86,6 +86,7 @@ fn with_icp_for_staker(mut pool: Pool, amount: TokenAmount) -> Pool {
         from: recipient(201),
         amount,
         created_at: Timestamp::from_nanos(1),
+        move_fee: TokenAmount::ZERO,
     })
     .unwrap();
     let shares = pool.ledger.mint_now(amount).unwrap();
@@ -93,7 +94,7 @@ fn with_icp_for_staker(mut pool: Pool, amount: TokenAmount) -> Pool {
         id,
         owner,
         amount,
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         shares,
         block: 2,
     })
@@ -112,7 +113,7 @@ fn withdrawal(pool: &Pool, usdc_out: TokenAmount, nonce: u64) -> (PayoutKind, Un
         staker: staker(),
         usdc: usdc_out,
         max_shares: burned,
-        rebalance_share: TokenAmount::from(1_000_u32),
+        move_fee: TokenAmount::from(1_000_u32),
         network_fee: TokenAmount::from(50_000_u32),
         nonce,
         burned,
@@ -185,10 +186,6 @@ fn payout_settings_are_refused_when_they_do_not_hold_together() {
     let good = PayoutSettings::default();
     for bad in [
         PayoutSettings {
-            rebalance_share_floor_bps: 10_001,
-            ..good
-        },
-        PayoutSettings {
             order_wait: std::time::Duration::ZERO,
             ..good
         },
@@ -248,7 +245,7 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
         assets_before
             .checked_sub(usdc(1_000))
             .unwrap()
-            .checked_add(w.rebalance_share)
+            .checked_add(w.move_fee)
             .unwrap()
     );
     let base = pool.ledger.pockets.base;
@@ -629,19 +626,19 @@ impl Pool {
     }
 }
 
-/// A stake from EVM carries at least the canister's rebalancing share floor once the payout
-/// settings are set (interface section 3: "P11b adds the canister's floor").
+/// A stake's move fee has no floor on the canister: the quoter prices it at live gas, and
+/// any fee below the stake's amount is taken.
 #[test]
-fn a_stakes_rebalancing_share_meets_the_floor() {
+fn a_stakes_move_fee_has_no_floor() {
     use crate::pool::check_arrival;
-    let mut pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
-    let terms = |rebalance_share: u64| Registration {
+    let pool = with_base(Pool::default(), usdc(10), 0x4a, 1);
+    let terms = |move_fee: u64| Registration {
         kind: DepositKind::Stake {
             owner: PoolAccount::Evm(staker()),
         },
         min_usdc: usdc(100),
         premium: TokenAmount::ZERO,
-        rebalance_share: TokenAmount::from(rebalance_share),
+        move_fee: TokenAmount::from(move_fee),
         src_chain: ChainId::ARBITRUM,
         src_payer: payer(),
         rail: PoolRail::Cctp,
@@ -649,14 +646,8 @@ fn a_stakes_rebalancing_share_meets_the_floor() {
         salt: [0x4b; 32],
         icp_fees: None,
     };
-    // 2 bps of 100 USDC is 20,000
-    assert!(matches!(
-        check_arrival(&pool.ledger, &terms(19_999)),
-        Err(crate::pool::RegisterRefusal::NotAllowed(_))
-    ));
-    assert_eq!(check_arrival(&pool.ledger, &terms(20_000)), Ok(()));
-    pool.ledger.payouts = None;
     assert_eq!(check_arrival(&pool.ledger, &terms(0)), Ok(()));
+    assert_eq!(check_arrival(&pool.ledger, &terms(19_999)), Ok(()));
 }
 
 /// The review's double release (2026-10-23, `PayoutPaid`): an ICP swap whose ckUSDC went
@@ -1222,6 +1213,7 @@ fn plan_for(planned: TokenAmount) -> PinnedOrder {
             recipient: addr(payer()),
             minOut: alloy_primitives::U256::from(1_u8),
         },
+        memo: Default::default(),
     };
     PinnedOrder {
         order_id: [0x62; 32],

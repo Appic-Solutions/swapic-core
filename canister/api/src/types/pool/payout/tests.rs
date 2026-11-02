@@ -40,27 +40,29 @@ fn payout_terms_refuse_what_is_no_address() {
 fn payout_settings_cross_the_wire_and_back() {
     let wire = PayoutSettings {
         min_network_fee: Nat::from(50_000_u64),
-        rebalance_share_floor_bps: 2,
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
-        cctp_min_network_fee: None,
+        cctp_payouts: false,
     };
     let bytes = Encode!(&wire).unwrap();
     assert_eq!(Decode!(&bytes, PayoutSettings).unwrap(), wire);
     let domain = domain::PayoutSettings::try_from(wire.clone()).unwrap();
     assert_eq!(domain, domain::PayoutSettings::default());
     assert_eq!(PayoutSettings::from(&domain), wire);
-    // the CCTP payouts' least fee, set: a payout below it is refused, at it signed
+    // CCTP payouts on: a payout below the destination's floor is refused, at it signed
     let cctp = PayoutSettings {
-        cctp_min_network_fee: Some(Nat::from(300_000_u64)),
+        cctp_payouts: true,
         ..wire
     };
     let domain = domain::PayoutSettings::try_from(cctp.clone()).unwrap();
     assert_eq!(PayoutSettings::from(&domain), cctp);
-    assert!(domain.admits_cctp(TokenAmount::from(299_999_u64)).is_err());
-    assert_eq!(domain.admits_cctp(TokenAmount::from(300_000_u64)), Ok(()));
+    let floor = TokenAmount::from(300_000_u64);
+    assert!(domain
+        .admits_cctp(TokenAmount::from(299_999_u64), floor)
+        .is_err());
+    assert_eq!(domain.admits_cctp(floor, floor), Ok(()));
     assert!(domain::PayoutSettings::default()
-        .admits_cctp(TokenAmount::MAX)
+        .admits_cctp(TokenAmount::MAX, floor)
         .is_err());
 }
 
@@ -75,7 +77,7 @@ fn a_payout_view_says_what_the_payout_spends_and_where_it_stands() {
             staker,
             usdc: TokenAmount::from(5_000_000_u64),
             max_shares: types::pool::Shares::new(5_000_000_000_000_000_000),
-            rebalance_share: TokenAmount::from(1_000_u64),
+            move_fee: TokenAmount::from(1_000_u64),
             network_fee: TokenAmount::from(50_000_u64),
             nonce: 7,
             burned: types::pool::Shares::new(4_000_000_000_000_000_000),
@@ -149,7 +151,7 @@ fn icp_swap_terms_and_withdrawals_cross_the_wire() {
         staker: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC".to_string(),
         usdc: Nat::from(5_000_000_u64),
         max_shares: Nat::from(5_000_000_000_000_000_000_u128),
-        rebalance_share: Nat::from(1_000_u64),
+        move_fee: Nat::from(1_000_u64),
         network_fee: Nat::from(50_000_u64),
         payout: terms(),
         nonce: 7,
@@ -170,7 +172,7 @@ fn a_waiting_payout_names_its_network_fee() {
             staker,
             usdc: types::TokenAmount::from(10_000_000_u64),
             max_shares: Shares::new(1),
-            rebalance_share: types::TokenAmount::ZERO,
+            move_fee: types::TokenAmount::ZERO,
             network_fee: types::TokenAmount::from(70_000_u64),
             nonce: 1,
             burned: Shares::new(1),

@@ -1,130 +1,37 @@
-use crate::types::swap::TransitionError;
+use crate::types::pool::IcpAccount;
+use crate::types::sweep::{SweepAsset, SweepTarget};
 use candid::{CandidType, Nat};
 use serde::Deserialize;
 use types::events::EventError as DomainEventError;
 use types::{
-    Attempt, BlockNumber, ChainId, GasAmount, Nonce, QuoteHash, TokenAmount, TxHash, Wei, WeiPerGas,
+    BlockNumber, ChainId, GasAmount, Nonce, QuoteHash, TokenAmount, TxHash, Wei, WeiPerGas,
 };
 
 pub type Hash32 = [u8; 32];
-
-/// The wire amounts named `amount`. Every other amount field names itself through
-/// [`DomainEventError::amount_too_large`], because "amount is above u128::MAX" is not an
-/// answer about a gas limit.
-const AMOUNT_TOO_LARGE: DomainEventError = DomainEventError::AmountTooLarge { field: "amount" };
 
 /// The wire error a field named `field` answers when its value is above `u128::MAX`.
 fn too_large(field: &'static str) -> DomainEventError {
     DomainEventError::amount_too_large(field)
 }
 
-/// What happened. The event hash is computed over a canonical encoding of the variant,
-/// never over this candid layout.
+/// One entry of the log, kept forever. `index` counts from zero with no gap; `time_ns` is
+/// IC time in nanoseconds.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub struct Event {
+    pub index: u64,
+    pub time_ns: u64,
+    pub payload: EventType,
+}
+
+/// What happened. A `Flow`, `Books` or `Pool` line carries its step as `step_bytes`, the
+/// step's minicbor encoding, with `step` its name and `detail` a readable rendering.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub enum EventType {
     /// `json` is the public view of the config written: JSON of `Config` with every rpc url
-    /// as `"***"` and `max_swap_usd` as a decimal string.
-    ConfigChanged {
-        json: String,
-    },
-    FundsReceived {
-        quote_hash: Hash32,
-        quote_bytes: Vec<u8>,
-        chain_id: u64,
-        token: String,
-        amount: Nat,
-        tx_ref: String,
-    },
-    TxSigned {
-        quote_hash: Hash32,
-        attempt: u32,
-        chain_id: u64,
-        tx_hash: Hash32,
-        raw_tx: Vec<u8>,
-    },
-    TxConfirmed {
-        quote_hash: Hash32,
-        attempt: u32,
-        chain_id: u64,
-        tx_hash: Hash32,
-        block: u64,
-    },
-    TxFailed {
-        quote_hash: Hash32,
-        attempt: u32,
-        reason: String,
-    },
-    PaidInStable {
-        quote_hash: Hash32,
-        chain_id: u64,
-        amount: Nat,
-    },
-    DecisionRequired {
-        quote_hash: Hash32,
-        reason: String,
-    },
-    DecisionMade {
-        quote_hash: Hash32,
-        choice: Choice,
-    },
-    RefundStarted {
-        quote_hash: Hash32,
-        reason: String,
-    },
-    Refunded {
-        quote_hash: Hash32,
-        chain_id: u64,
-        token: String,
-        amount: Nat,
-        to: String,
-    },
-    SwapDone {
-        quote_hash: Hash32,
-    },
-    Frozen {
-        quote_hash: Hash32,
-        reason: String,
-    },
-    FeeAccrued {
-        quote_hash: Hash32,
-        amount: Nat,
-    },
-    PocketFunded {
-        chain_id: u64,
-        amount: Nat,
-    },
-    PocketReserved {
-        quote_hash: Hash32,
-        chain_id: u64,
-        amount: Nat,
-    },
-    PocketRebalanced {
-        from_chain: u64,
-        to_chain: u64,
-        amount: Nat,
-        route: String,
-    },
-    PocketReleased {
-        quote_hash: Hash32,
-        chain_id: u64,
-        amount: Nat,
-    },
-    PocketSpent {
-        quote_hash: Hash32,
-        chain_id: u64,
-        amount: Nat,
-    },
-    /// Principals as text, so the audit line reads without a decoder.
-    RolesChanged {
-        quoter: String,
-        watcher: String,
-    },
-    /// A swap's waiting index entries were made to agree with the swap: what no event could
-    /// have produced was dropped, and the wait the swap is in is there. Only a divergence
-    /// needs one, so this line is the repair's explanation.
-    WaitingRepaired {
-        quote_hash: Hash32,
-    },
+    /// as `"***"`.
+    ConfigChanged { json: String },
+    /// Principals as text, so the line reads without a decoder.
+    RolesChanged { quoter: String, watcher: String },
     /// A nonce was allocated to an outbound transaction, before the signature was asked
     /// for. `to` is an EIP-55 address.
     TxCreated {
@@ -138,7 +45,7 @@ pub enum EventType {
         max_fee_wei_per_gas: Nat,
         max_priority_fee_wei_per_gas: Nat,
         /// The gas action whose budget the transaction is held to (`relay_cctp`,
-        /// `complete_swap`, ...), on every line that records one.
+        /// `complete_swap`, `sweep`, ...).
         action: Option<String>,
     },
     /// An open transaction was re-sent at the same nonce with a higher fee, with the bytes
@@ -160,52 +67,70 @@ pub enum EventType {
         tx_hash: Hash32,
         raw_tx: Vec<u8>,
     },
-    /// A gasless pull was signed: the transaction that takes a user's funds into the vault
-    /// with their permit, recorded before it is broadcast. It names the quote and the nonce
-    /// and no swap, because the deposit it makes is what `claim_swap` then verifies.
-    PullSigned {
-        quote_hash: Hash32,
+    /// A transaction the canister signed reached its end: mined at the depth the outbox
+    /// waits for (`tx_hash` the one that landed), or its nonce spent by a cancel.
+    TxFinal {
+        purpose: TxPurpose,
         chain_id: u64,
         nonce: u64,
         tx_hash: Hash32,
-        raw_tx: Vec<u8>,
+        outcome: TxOutcome,
     },
-    /// A step of a flow: a gasless relay, ICP to EVM, or EVM to ICP. `step` names it,
-    /// `detail` is a readable rendering, and `step_bytes` is the step exactly as the log
-    /// hashes it.
+    /// A step of a flow: a gasless relay, or a CCTP finish.
     Flow {
         quote_hash: Hash32,
         step: String,
         detail: String,
         step_bytes: Vec<u8>,
     },
-    /// A step of a chain's USDC books, rendered and exactly as the log hashes it.
+    /// A step of a chain's USDC books: a fee earned, a check that found a shortfall or a
+    /// new surplus, a pause.
     Books {
         chain_id: u64,
         step: String,
         detail: String,
         step_bytes: Vec<u8>,
     },
-    /// A step of the pool, rendered and exactly as the log hashes it.
+    /// A step of the pool.
     Pool {
         step: String,
         detail: String,
         step_bytes: Vec<u8>,
     },
+    /// A controller's sweep, its amount taken off the books it came from as it was signed
+    /// (EVM) or asked of the ledger (ICP). `amount` is in the asset's smallest unit.
+    Swept {
+        id: u64,
+        asset: SweepAsset,
+        to: SweepTarget,
+        amount: Nat,
+    },
+    /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
+    /// amount is back on the books it came from.
+    SweepReverted { id: u64, why: String },
 }
 
-/// Why an outbound transaction exists. All but the last name the swap they belong to.
+/// How a transaction the canister signed ended.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxOutcome {
+    Succeeded {
+        block: u64,
+    },
+    Reverted {
+        block: u64,
+    },
+    /// Its nonce was spent by a cancel: it never ran.
+    Cancelled,
+}
+
+/// Why an outbound transaction exists.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxPurpose {
-    Burn(Hash32),
-    Mint(Hash32),
-    Payout(Hash32),
-    Refund(Hash32),
-    GaslessPull(Hash32),
+    /// A same-nonce zero-value self-transfer on that chain.
     Cancel(u64),
-    Reclaim(Hash32),
+    /// A gasless order relayed, by its relay key.
     Relay(Hash32),
-    Continue(Hash32),
+    /// A CCTP arrival finished, by its finish key.
     Finish(Hash32),
     /// A pool payout from the canister's Base pocket, by its payout id.
     PoolPayout(u64),
@@ -217,27 +142,35 @@ pub enum TxPurpose {
     PoolMove(u64),
     /// Eco's `cancelAndProve` of an unfilled intent, by the order id that published it.
     EcoRescue(Hash32),
+    /// A controller's sweep, by its id.
+    Sweep(u64),
+}
+
+/// A purpose the canister no longer creates is never in its log.
+fn retired(name: &str) -> ! {
+    unreachable!("BUG: the canister never writes a {name} line")
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
     fn from(purpose: types::events::TxPurpose) -> Self {
         use types::events::TxPurpose as Domain;
         match purpose {
-            Domain::Burn(hash) => Self::Burn(hash.into_bytes()),
-            Domain::Mint(hash) => Self::Mint(hash.into_bytes()),
-            Domain::Payout(hash) => Self::Payout(hash.into_bytes()),
-            Domain::Refund(hash) => Self::Refund(hash.into_bytes()),
-            Domain::GaslessPull(hash) => Self::GaslessPull(hash.into_bytes()),
             Domain::Cancel(chain_id) => Self::Cancel(chain_id.get()),
-            Domain::Reclaim(hash) => Self::Reclaim(hash.into_bytes()),
             Domain::Relay(hash) => Self::Relay(hash.into_bytes()),
-            Domain::Continue(hash) => Self::Continue(hash.into_bytes()),
             Domain::Finish(hash) => Self::Finish(hash.into_bytes()),
             Domain::PoolPayout(id) => Self::PoolPayout(id),
             Domain::PoolTransfer(key) => Self::PoolTransfer(key),
             Domain::PoolApprove => Self::PoolApprove,
             Domain::PoolMove(id) => Self::PoolMove(id),
             Domain::EcoRescue(order_id) => Self::EcoRescue(order_id),
+            Domain::Sweep(id) => Self::Sweep(id),
+            Domain::Burn(_)
+            | Domain::Mint(_)
+            | Domain::Payout(_)
+            | Domain::Refund(_)
+            | Domain::GaslessPull(_)
+            | Domain::Reclaim(_)
+            | Domain::Continue(_) => retired("v1 transaction purpose"),
         }
     }
 }
@@ -245,55 +178,40 @@ impl From<types::events::TxPurpose> for TxPurpose {
 impl From<TxPurpose> for types::events::TxPurpose {
     fn from(purpose: TxPurpose) -> Self {
         match purpose {
-            TxPurpose::Burn(hash) => Self::Burn(QuoteHash::new(hash)),
-            TxPurpose::Mint(hash) => Self::Mint(QuoteHash::new(hash)),
-            TxPurpose::Payout(hash) => Self::Payout(QuoteHash::new(hash)),
-            TxPurpose::Refund(hash) => Self::Refund(QuoteHash::new(hash)),
-            TxPurpose::GaslessPull(hash) => Self::GaslessPull(QuoteHash::new(hash)),
             TxPurpose::Cancel(chain_id) => Self::Cancel(ChainId::new(chain_id)),
-            TxPurpose::Reclaim(hash) => Self::Reclaim(QuoteHash::new(hash)),
             TxPurpose::Relay(hash) => Self::Relay(QuoteHash::new(hash)),
-            TxPurpose::Continue(hash) => Self::Continue(QuoteHash::new(hash)),
             TxPurpose::Finish(hash) => Self::Finish(QuoteHash::new(hash)),
             TxPurpose::PoolPayout(id) => Self::PoolPayout(id),
             TxPurpose::PoolTransfer(key) => Self::PoolTransfer(key),
             TxPurpose::PoolApprove => Self::PoolApprove,
             TxPurpose::PoolMove(id) => Self::PoolMove(id),
             TxPurpose::EcoRescue(order_id) => Self::EcoRescue(order_id),
+            TxPurpose::Sweep(id) => Self::Sweep(id),
         }
     }
 }
 
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub enum Choice {
-    Requote,
-    Refund,
-}
-
-/// One entry of the log. `time_ns` is IC time in nanoseconds.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
-pub struct Event {
-    pub index: u64,
-    pub time_ns: u64,
-    pub parent_hash: Hash32,
-    pub hash: Hash32,
-    pub payload: EventType,
-}
-
-impl From<types::Choice> for Choice {
-    fn from(choice: types::Choice) -> Self {
-        match choice {
-            types::Choice::Requote => Self::Requote,
-            types::Choice::Refund => Self::Refund,
+impl From<types::events::TxOutcome> for TxOutcome {
+    fn from(outcome: types::events::TxOutcome) -> Self {
+        use types::events::TxOutcome as Domain;
+        match outcome {
+            Domain::Succeeded { block } => Self::Succeeded { block: block.get() },
+            Domain::Reverted { block } => Self::Reverted { block: block.get() },
+            Domain::Cancelled => Self::Cancelled,
         }
     }
 }
 
-impl From<Choice> for types::Choice {
-    fn from(choice: Choice) -> Self {
-        match choice {
-            Choice::Requote => Self::Requote,
-            Choice::Refund => Self::Refund,
+impl From<TxOutcome> for types::events::TxOutcome {
+    fn from(outcome: TxOutcome) -> Self {
+        match outcome {
+            TxOutcome::Succeeded { block } => Self::Succeeded {
+                block: BlockNumber::new(block),
+            },
+            TxOutcome::Reverted { block } => Self::Reverted {
+                block: BlockNumber::new(block),
+            },
+            TxOutcome::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -303,8 +221,6 @@ impl From<types::Event> for Event {
         Self {
             index: event.index.get(),
             time_ns: event.timestamp.as_nanos(),
-            parent_hash: event.parent_hash.into_bytes(),
-            hash: event.hash.into_bytes(),
             payload: event.payload.into(),
         }
     }
@@ -315,147 +231,7 @@ impl From<types::EventType> for EventType {
         use types::EventType as Domain;
         match payload {
             Domain::ConfigChanged { json } => Self::ConfigChanged { json },
-            Domain::FundsReceived {
-                quote_hash,
-                quote_bytes,
-                chain_id,
-                token,
-                amount,
-                tx_ref,
-            } => Self::FundsReceived {
-                quote_hash: quote_hash.into_bytes(),
-                quote_bytes,
-                chain_id: chain_id.get(),
-                token: token.to_string(),
-                amount: amount.into(),
-                tx_ref,
-            },
-            Domain::TxSigned {
-                quote_hash,
-                attempt,
-                chain_id,
-                tx_hash,
-                raw_tx,
-            } => Self::TxSigned {
-                quote_hash: quote_hash.into_bytes(),
-                attempt: attempt.get(),
-                chain_id: chain_id.get(),
-                tx_hash: tx_hash.into_bytes(),
-                raw_tx,
-            },
-            Domain::TxConfirmed {
-                quote_hash,
-                attempt,
-                chain_id,
-                tx_hash,
-                block,
-            } => Self::TxConfirmed {
-                quote_hash: quote_hash.into_bytes(),
-                attempt: attempt.get(),
-                chain_id: chain_id.get(),
-                tx_hash: tx_hash.into_bytes(),
-                block: block.get(),
-            },
-            Domain::TxFailed {
-                quote_hash,
-                attempt,
-                reason,
-            } => Self::TxFailed {
-                quote_hash: quote_hash.into_bytes(),
-                attempt: attempt.get(),
-                reason,
-            },
-            Domain::PaidInStable {
-                quote_hash,
-                chain_id,
-                amount,
-            } => Self::PaidInStable {
-                quote_hash: quote_hash.into_bytes(),
-                chain_id: chain_id.get(),
-                amount: amount.into(),
-            },
-            Domain::DecisionRequired { quote_hash, reason } => Self::DecisionRequired {
-                quote_hash: quote_hash.into_bytes(),
-                reason,
-            },
-            Domain::DecisionMade { quote_hash, choice } => Self::DecisionMade {
-                quote_hash: quote_hash.into_bytes(),
-                choice: choice.into(),
-            },
-            Domain::RefundStarted { quote_hash, reason } => Self::RefundStarted {
-                quote_hash: quote_hash.into_bytes(),
-                reason,
-            },
-            Domain::Refunded {
-                quote_hash,
-                chain_id,
-                token,
-                amount,
-                to,
-            } => Self::Refunded {
-                quote_hash: quote_hash.into_bytes(),
-                chain_id: chain_id.get(),
-                token: token.to_string(),
-                amount: amount.into(),
-                to: to.to_string(),
-            },
-            Domain::SwapDone { quote_hash } => Self::SwapDone {
-                quote_hash: quote_hash.into_bytes(),
-            },
-            Domain::Frozen { quote_hash, reason } => Self::Frozen {
-                quote_hash: quote_hash.into_bytes(),
-                reason,
-            },
-            Domain::FeeAccrued { quote_hash, amount } => Self::FeeAccrued {
-                quote_hash: quote_hash.into_bytes(),
-                amount: amount.into(),
-            },
-            Domain::PocketFunded { chain_id, amount } => Self::PocketFunded {
-                chain_id: chain_id.get(),
-                amount: amount.into(),
-            },
-            Domain::PocketReserved {
-                quote_hash,
-                chain_id,
-                amount,
-            } => Self::PocketReserved {
-                quote_hash: quote_hash.into_bytes(),
-                chain_id: chain_id.get(),
-                amount: amount.into(),
-            },
-            Domain::PocketRebalanced {
-                from_chain,
-                to_chain,
-                amount,
-                route,
-            } => Self::PocketRebalanced {
-                from_chain: from_chain.get(),
-                to_chain: to_chain.get(),
-                amount: amount.into(),
-                route,
-            },
-            Domain::PocketReleased {
-                quote_hash,
-                chain_id,
-                amount,
-            } => Self::PocketReleased {
-                quote_hash: quote_hash.into_bytes(),
-                chain_id: chain_id.get(),
-                amount: amount.into(),
-            },
-            Domain::PocketSpent {
-                quote_hash,
-                chain_id,
-                amount,
-            } => Self::PocketSpent {
-                quote_hash: quote_hash.into_bytes(),
-                chain_id: chain_id.get(),
-                amount: amount.into(),
-            },
             Domain::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
-            Domain::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
-                quote_hash: quote_hash.into_bytes(),
-            },
             Domain::TxCreated {
                 purpose,
                 chain_id,
@@ -507,18 +283,18 @@ impl From<types::EventType> for EventType {
                 tx_hash: tx_hash.into_bytes(),
                 raw_tx,
             },
-            Domain::PullSigned {
-                quote_hash,
+            Domain::TxFinal {
+                purpose,
                 chain_id,
                 nonce,
                 tx_hash,
-                raw_tx,
-            } => Self::PullSigned {
-                quote_hash: quote_hash.into_bytes(),
+                outcome,
+            } => Self::TxFinal {
+                purpose: purpose.into(),
                 chain_id: chain_id.get(),
                 nonce: nonce.get(),
                 tx_hash: tx_hash.into_bytes(),
-                raw_tx,
+                outcome: outcome.into(),
             },
             Domain::Flow { quote_hash, step } => Self::Flow {
                 quote_hash: quote_hash.into_bytes(),
@@ -537,6 +313,32 @@ impl From<types::EventType> for EventType {
                 detail: format!("{step:?}"),
                 step_bytes: step.to_bytes(),
             },
+            Domain::Swept { sweep } => Self::Swept {
+                id: sweep.id,
+                asset: sweep.asset.into(),
+                to: sweep.to.into(),
+                amount: sweep.amount.into(),
+            },
+            Domain::SweepReverted { id, why } => Self::SweepReverted { id, why },
+            Domain::FundsReceived { .. }
+            | Domain::TxSigned { .. }
+            | Domain::TxConfirmed { .. }
+            | Domain::TxFailed { .. }
+            | Domain::PaidInStable { .. }
+            | Domain::DecisionRequired { .. }
+            | Domain::DecisionMade { .. }
+            | Domain::RefundStarted { .. }
+            | Domain::Refunded { .. }
+            | Domain::SwapDone { .. }
+            | Domain::Frozen { .. }
+            | Domain::FeeAccrued { .. }
+            | Domain::PocketFunded { .. }
+            | Domain::PocketReserved { .. }
+            | Domain::PocketRebalanced { .. }
+            | Domain::PocketReleased { .. }
+            | Domain::PocketSpent { .. }
+            | Domain::WaitingRepaired { .. }
+            | Domain::PullSigned { .. } => retired("v1 event"),
         }
     }
 }
@@ -547,157 +349,7 @@ impl TryFrom<EventType> for types::EventType {
     fn try_from(payload: EventType) -> Result<Self, Self::Error> {
         Ok(match payload {
             EventType::ConfigChanged { json } => Self::ConfigChanged { json },
-            EventType::FundsReceived {
-                quote_hash,
-                quote_bytes,
-                chain_id,
-                token,
-                amount: value,
-                tx_ref,
-            } => Self::FundsReceived {
-                quote_hash: QuoteHash::new(quote_hash),
-                quote_bytes,
-                chain_id: ChainId::new(chain_id),
-                token: token
-                    .parse()
-                    .map_err(DomainEventError::text_too_long("token"))?,
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-                tx_ref,
-            },
-            EventType::TxSigned {
-                quote_hash,
-                attempt,
-                chain_id,
-                tx_hash,
-                raw_tx,
-            } => Self::TxSigned {
-                quote_hash: QuoteHash::new(quote_hash),
-                attempt: Attempt::new(attempt),
-                chain_id: ChainId::new(chain_id),
-                tx_hash: TxHash::new(tx_hash),
-                raw_tx,
-            },
-            EventType::TxConfirmed {
-                quote_hash,
-                attempt,
-                chain_id,
-                tx_hash,
-                block,
-            } => Self::TxConfirmed {
-                quote_hash: QuoteHash::new(quote_hash),
-                attempt: Attempt::new(attempt),
-                chain_id: ChainId::new(chain_id),
-                tx_hash: TxHash::new(tx_hash),
-                block: BlockNumber::new(block),
-            },
-            EventType::TxFailed {
-                quote_hash,
-                attempt,
-                reason,
-            } => Self::TxFailed {
-                quote_hash: QuoteHash::new(quote_hash),
-                attempt: Attempt::new(attempt),
-                reason,
-            },
-            EventType::PaidInStable {
-                quote_hash,
-                chain_id,
-                amount: value,
-            } => Self::PaidInStable {
-                quote_hash: QuoteHash::new(quote_hash),
-                chain_id: ChainId::new(chain_id),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
-            EventType::DecisionRequired { quote_hash, reason } => Self::DecisionRequired {
-                quote_hash: QuoteHash::new(quote_hash),
-                reason,
-            },
-            EventType::DecisionMade { quote_hash, choice } => Self::DecisionMade {
-                quote_hash: QuoteHash::new(quote_hash),
-                choice: choice.into(),
-            },
-            EventType::RefundStarted { quote_hash, reason } => Self::RefundStarted {
-                quote_hash: QuoteHash::new(quote_hash),
-                reason,
-            },
-            EventType::Refunded {
-                quote_hash,
-                chain_id,
-                token,
-                amount: value,
-                to,
-            } => Self::Refunded {
-                quote_hash: QuoteHash::new(quote_hash),
-                chain_id: ChainId::new(chain_id),
-                token: token
-                    .parse()
-                    .map_err(DomainEventError::text_too_long("token"))?,
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-                to: to.parse().map_err(DomainEventError::text_too_long("to"))?,
-            },
-            EventType::SwapDone { quote_hash } => Self::SwapDone {
-                quote_hash: QuoteHash::new(quote_hash),
-            },
-            EventType::Frozen { quote_hash, reason } => Self::Frozen {
-                quote_hash: QuoteHash::new(quote_hash),
-                reason,
-            },
-            EventType::FeeAccrued {
-                quote_hash,
-                amount: value,
-            } => Self::FeeAccrued {
-                quote_hash: QuoteHash::new(quote_hash),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
-            EventType::PocketFunded {
-                chain_id,
-                amount: value,
-            } => Self::PocketFunded {
-                chain_id: ChainId::new(chain_id),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
-            EventType::PocketReserved {
-                quote_hash,
-                chain_id,
-                amount: value,
-            } => Self::PocketReserved {
-                quote_hash: QuoteHash::new(quote_hash),
-                chain_id: ChainId::new(chain_id),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
-            EventType::PocketRebalanced {
-                from_chain,
-                to_chain,
-                amount: value,
-                route,
-            } => Self::PocketRebalanced {
-                from_chain: ChainId::new(from_chain),
-                to_chain: ChainId::new(to_chain),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-                route,
-            },
-            EventType::PocketReleased {
-                quote_hash,
-                chain_id,
-                amount: value,
-            } => Self::PocketReleased {
-                quote_hash: QuoteHash::new(quote_hash),
-                chain_id: ChainId::new(chain_id),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
-            EventType::PocketSpent {
-                quote_hash,
-                chain_id,
-                amount: value,
-            } => Self::PocketSpent {
-                quote_hash: QuoteHash::new(quote_hash),
-                chain_id: ChainId::new(chain_id),
-                amount: TokenAmount::from_canonical_nat(value).ok_or(AMOUNT_TOO_LARGE)?,
-            },
             EventType::RolesChanged { quoter, watcher } => Self::RolesChanged { quoter, watcher },
-            EventType::WaitingRepaired { quote_hash } => Self::WaitingRepaired {
-                quote_hash: QuoteHash::new(quote_hash),
-            },
             EventType::TxCreated {
                 purpose,
                 chain_id,
@@ -758,18 +410,18 @@ impl TryFrom<EventType> for types::EventType {
                 tx_hash: TxHash::new(tx_hash),
                 raw_tx,
             },
-            EventType::PullSigned {
-                quote_hash,
+            EventType::TxFinal {
+                purpose,
                 chain_id,
                 nonce,
                 tx_hash,
-                raw_tx,
-            } => Self::PullSigned {
-                quote_hash: QuoteHash::new(quote_hash),
+                outcome,
+            } => Self::TxFinal {
+                purpose: purpose.into(),
                 chain_id: ChainId::new(chain_id),
                 nonce: Nonce::new(nonce),
                 tx_hash: TxHash::new(tx_hash),
-                raw_tx,
+                outcome: outcome.into(),
             },
             EventType::Flow {
                 quote_hash,
@@ -802,70 +454,44 @@ impl TryFrom<EventType> for types::EventType {
                     },
                 )?,
             },
+            EventType::Swept {
+                id,
+                asset,
+                to,
+                amount,
+            } => Self::Swept {
+                sweep: types::sweep::Sweep {
+                    id,
+                    asset: asset.into(),
+                    to: sweep_to(to)?,
+                    amount: TokenAmount::try_from(amount).map_err(|_| too_large("amount"))?,
+                },
+            },
+            EventType::SweepReverted { id, why } => Self::SweepReverted { id, why },
         })
     }
 }
 
-/// Why the log does not fold. The replay stopped at `index` and applied nothing from there.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
-pub enum ReplayError {
-    OutOfSequence {
-        expected: u64,
-        found: u64,
-    },
-    Unlinked {
-        index: u64,
-        parent: Hash32,
-        head: Hash32,
-    },
-    LogFull {
-        index: u64,
-    },
-    Refused {
-        index: u64,
-        error: TransitionError,
-    },
+fn sweep_to(target: SweepTarget) -> Result<types::sweep::SweepTo, DomainEventError> {
+    Ok(match target {
+        SweepTarget::Evm { chain_id, to } => types::sweep::SweepTo::Evm {
+            chain: ChainId::new(chain_id),
+            to: to.parse().map_err(DomainEventError::not_an_address("to"))?,
+        },
+        SweepTarget::Icp(account) => types::sweep::SweepTo::Icp(icp_account(account)?),
+    })
 }
 
-/// What one step of the deep check found.
-///
-/// `finished` is the field to read first: only a step that reached the head compared the
-/// fold with the live one, and `matches` is its verdict. A step short of the head reports
-/// how far the fold got and how much is left, and condemns nothing. An entry the fold
-/// refuses, or a finished fold that differs, is a divergence and halts the canister; every
-/// verdict starts the next audit over from genesis.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
-pub struct AuditProgress {
-    /// entries folded from genesis, this step's included
-    pub folded_so_far: u64,
-    /// entries between the fold and the head, as the log stood when this step read it
-    pub remaining: u64,
-    pub finished: bool,
-    /// whether the fold is the live fold, which only a finished step says
-    pub matches: bool,
-    /// why the fold stopped, if it did
-    pub refused: Option<ReplayError>,
-    /// whether this step halted the canister
-    pub halted: bool,
-}
-
-/// A value the canonical preimage has no bytes for.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum CanonicalError {
-    AmountTooLarge(Nat),
-    TooLong { len: u64 },
-}
-
-impl From<types::canonical::CanonicalError> for CanonicalError {
-    fn from(error: types::canonical::CanonicalError) -> Self {
-        use types::canonical::CanonicalError as Domain;
-        match error {
-            Domain::AmountTooLarge(amount) => Self::AmountTooLarge(amount.into()),
-            Domain::TooLong { len } => Self::TooLong {
-                len: crate::types::wire_len(len),
-            },
-        }
-    }
+fn icp_account(account: IcpAccount) -> Result<types::pool::IcpAccount, DomainEventError> {
+    let subaccount = account
+        .subaccount
+        .map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()))
+        .transpose()
+        .map_err(|_| DomainEventError::NotAnAccount { field: "to" })?;
+    Ok(types::pool::IcpAccount {
+        owner: account.owner,
+        subaccount,
+    })
 }
 
 /// Why a wire event is not a domain event, naming the field at fault.
@@ -893,6 +519,10 @@ pub enum EventError {
         field: String,
     },
     NotAPoolStep {
+        field: String,
+    },
+    /// The account in `field` has a subaccount that is not 32 bytes.
+    NotAnAccount {
         field: String,
     },
 }
@@ -947,6 +577,9 @@ impl From<types::events::EventError> for EventError {
                 field: field.to_string(),
             },
             Domain::NotAPoolStep { field } => Self::NotAPoolStep {
+                field: field.to_string(),
+            },
+            Domain::NotAnAccount { field } => Self::NotAnAccount {
                 field: field.to_string(),
             },
         }

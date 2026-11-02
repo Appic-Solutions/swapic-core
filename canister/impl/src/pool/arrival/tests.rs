@@ -103,9 +103,10 @@ fn terms(byte: u8) -> DepositTerms {
             token_out: ckusdc(),
             min_out: 1,
         },
+        min_usdc: TokenAmount::from(100_000_u32),
         premium: TokenAmount::from(10_000_u32),
         icp_fees: TokenAmount::from(FEE),
-        rebalance_share: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
         salt: [byte; 32],
     }
 }
@@ -317,7 +318,12 @@ fn the_terms_credit_the_transfer_that_carries_their_ref() {
         );
         let credited = deposit(&the_ref(1)).unwrap();
         assert_eq!(credited.status, DepositStatus::Arrived);
-        assert_eq!(credited.terms.min_usdc, TokenAmount::from(1_000_000_u32));
+        // the registration holds the memo's least; what arrived is the arrival's
+        assert_eq!(credited.terms.min_usdc, TokenAmount::from(100_000_u32));
+        assert_eq!(
+            credited.arrived.map(|arrival| arrival.amount),
+            Some(TokenAmount::from(1_000_000_u32))
+        );
         assert_eq!(credited.terms.src_payer, payer());
         assert_eq!(credited.terms.rail, PoolRail::SameChain);
         assert_eq!(

@@ -705,10 +705,10 @@ fn summary(terms: &DepositTerms) -> String {
         },
     };
     format!(
-        "{kind}, premium {}, icp_fees {}, rebalance_share {}, salt {}",
+        "{kind}, premium {}, icp_fees {}, move_fee {}, salt {}",
         terms.premium,
         terms.icp_fees,
-        terms.rebalance_share,
+        terms.move_fee,
         hex::encode(terms.salt)
     )
 }
@@ -731,9 +731,7 @@ fn decide<S: Store>(
         PoolRail::Eco => given.src_chain,
         PoolRail::Cctp | PoolRail::SameChain => found.credit.chain,
     };
-    let registration = given
-        .terms
-        .registration(found.amount, src_chain, payer, found.rail, now);
+    let registration = given.terms.registration(src_chain, payer, found.rail, now);
     // one deposit per ref; a registration left waiting under it (an arrival line refused
     // after it) is the one credited
     let waiting = match state.store().pool_deposit(&given.r#ref) {
@@ -1417,16 +1415,12 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
             .map_err(PoolError::from)?;
         Some((ChainId::new(arrival.src_chain), TxHash::new(tx)))
     };
-    let terms = arrival.terms.into_domain().map_err(PoolError::from)?;
-    // a fee the ref does not commit would let anyone hand the user's ref other terms
-    if !terms.is_canonical() {
-        return Err(PoolError::BadArrival(
-            "the terms carry a fee their ref does not commit".to_string(),
-        ));
-    }
-    let r#ref = terms
-        .pool_ref()
-        .ok_or_else(|| PoolError::BadArrival("the terms' fees fit no ref".to_string()))?;
+    let Some(memo) = arrival.memo else {
+        todo!("C5: the memo read from the order's OrderStarted")
+    };
+    let terms = DepositTerms::from_memo(&memo)
+        .map_err(|error| PoolError::BadArrival(format!("the memo: {error}")))?;
+    let r#ref = types::pool::memo::memo_ref(&memo);
     let given = Given {
         terms,
         r#ref,

@@ -11,6 +11,7 @@ pub mod pool;
 pub mod quote;
 pub mod rpc;
 pub mod swap;
+pub mod sweep;
 pub mod tx;
 
 /// A length or position as the wire carries it.

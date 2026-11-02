@@ -2,11 +2,9 @@ use super::*;
 use crate::state::transitions::tests::{relay_closed, relay_created, relay_key, relayed};
 use crate::state::transitions::ReplayError;
 use crate::state::MemoryStore;
-use crate::storage::audit_cursor;
 use crate::storage::halt::is_halted;
 use crate::storage::on_fresh_memory;
 use crate::task_manager::replay_audit::{run_audit_replay_step, run_replay_audit};
-use types::config::AuditChunk;
 use types::LedgerMeta;
 use types::{FlowStatus, FlowStep, TokenAmount, TxHash};
 
@@ -97,59 +95,6 @@ fn a_refused_append_writes_nothing() {
 
         append(relay_created(1, 0));
         assert_eq!(event_count(), 1, "and an admissible line still lands");
-    });
-}
-
-/// Moves the audit chunk, without the log line `config::set` would write: a unit test has no
-/// canister clock to seal one on.
-fn set_chunk(events: u32) {
-    crate::storage::config::test_set(types::Config {
-        audit_chunk_events: AuditChunk::new(events),
-        ..crate::storage::config::get()
-    });
-}
-
-/// A broken link inside the log, with the fold in step with it: the head check is O(1) and
-/// cannot see it, and the chain audit only reaches it once its rolling cursor gets there. So
-/// the pass that covers the entry is the pass that halts, and the cursor stops on it.
-#[test]
-fn the_chain_audit_halts_in_the_pass_that_covers_a_tampered_entry() {
-    on_fresh_memory(|| {
-        set_chunk(2);
-        for n in 1..=4 {
-            append(relay_created(n, n - 1));
-        }
-        let meta = StableStore(()).meta();
-        // sealed on a parent the log does not end with: no guard would admit it, and no
-        // append could write it
-        let tampered = Event::seal(
-            meta.next_event_index,
-            Timestamp::from_nanos(5),
-            EventHash::new([7; 32]),
-            relay_created(5, 4),
-        )
-        .expect("the payload has a preimage");
-        test_push_raw(tampered);
-        assert_eq!(
-            ensure_fold_in_step(),
-            Ok(()),
-            "the O(1) check is what cannot see this"
-        );
-
-        run_replay_audit();
-        assert!(!is_halted(), "the first chunk is sound");
-        assert_eq!(audit_cursor::get().next_index, EventIndex::new(2));
-        run_replay_audit();
-        assert!(!is_halted(), "and so is the second");
-        assert_eq!(audit_cursor::get().next_index, EventIndex::new(4));
-
-        run_replay_audit();
-        assert!(is_halted(), "the pass that reaches the entry halts");
-        assert_eq!(
-            audit_cursor::get().next_index,
-            EventIndex::new(4),
-            "and the cursor stays on the entry that failed"
-        );
     });
 }
 

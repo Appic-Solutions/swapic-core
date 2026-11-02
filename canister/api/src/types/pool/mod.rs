@@ -59,23 +59,6 @@ pub enum PoolRail {
     SameChain,
 }
 
-/// A pool deposit's terms (P11d, 2026-10-21: no registration): the preimage of the ref its
-/// order carries (section 2), handed to the canister with the arrival. Every fee is the
-/// user's own line: a swap's premium (pure pool income) and its ICP path's ledger fees
-/// (`icp_fees`, at least the path's own ckUSDC fees); a stake's rebalancing share.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct PoolTerms {
-    pub kind: PoolDepositKind,
-    /// Swap: micro USDC; Stake: 0.
-    pub premium: Nat,
-    /// Swap: micro USDC; Stake: 0.
-    pub icp_fees: Nat,
-    /// Stake: micro USDC; Swap: 0.
-    pub rebalance_share: Nat,
-    /// 32 bytes.
-    pub salt: Vec<u8>,
-}
-
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum PoolError {
     /// `require_pool_open`'s reason.
@@ -122,13 +105,18 @@ pub enum PoolError {
     Unavailable(String),
 }
 
+/// A report of USDC that reached the canister's Base address in `base_tx`.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PoolArrival {
     pub base_tx: Vec<u8>,
+    /// The chain the order ran on: the pool chain for a same-chain deposit.
     pub src_chain: u64,
+    /// The order's own transaction on `src_chain`; empty when it is `base_tx`.
     pub src_tx: Vec<u8>,
-    /// The terms of the deposit the transfer pays, whose ref its proof must carry.
-    pub terms: PoolTerms,
+    /// The order's memo, the deposit's encoded terms: taken only when its keccak is the ref
+    /// the transfer's proof carries. None: the canister reads it from the order's
+    /// `OrderStarted` itself.
+    pub memo: Option<Vec<u8>>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -174,7 +162,7 @@ pub struct PoolDepositView {
     pub kind: PoolDepositKind,
     pub min_usdc: Nat,
     pub premium: Nat,
-    pub rebalance_share: Nat,
+    pub move_fee: Nat,
     pub src_chain: u64,
     pub rail: PoolRail,
     pub status: PoolDepositStatus,
@@ -247,6 +235,9 @@ pub struct StakeIcpArgs {
     pub from_subaccount: Option<Vec<u8>>,
     pub amount: Nat,
     pub owner: PoolAccount,
+    /// Micro ckUSDC out of `amount`, Swapic's: the cost of one ICP to Base move at live gas,
+    /// as the quoter priced it. Shares are minted on the rest.
+    pub move_fee: Nat,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -272,6 +263,9 @@ pub struct WithdrawIcpArgs {
     pub token_out: Principal,
     pub min_out: Nat,
     pub to: IcpAccount,
+    /// Micro ckUSDC out of `usdc`, Swapic's: the cost of one Base to ICP move at live gas,
+    /// as the quoter priced it.
+    pub move_fee: Nat,
 }
 
 /// `swap_from_icp`'s answer: the payout's id, and where it stands as the call returns
@@ -482,19 +476,6 @@ impl From<domain::PoolRail> for PoolRail {
     }
 }
 
-impl PoolTerms {
-    /// The terms as the domain reads them.
-    pub fn into_domain(self) -> Result<domain::DepositTerms, PoolWireError> {
-        Ok(domain::DepositTerms {
-            kind: self.kind.try_into()?,
-            premium: amount("premium", &self.premium)?,
-            icp_fees: amount("icp_fees", &self.icp_fees)?,
-            rebalance_share: amount("rebalance_share", &self.rebalance_share)?,
-            salt: bytes32("salt", &self.salt)?,
-        })
-    }
-}
-
 impl From<domain::DepositStatus> for PoolDepositStatus {
     fn from(status: domain::DepositStatus) -> Self {
         match status {
@@ -518,7 +499,7 @@ impl PoolDepositView {
             kind: terms.kind.into(),
             min_usdc: nat(terms.min_usdc),
             premium: nat(terms.premium),
-            rebalance_share: nat(terms.rebalance_share),
+            move_fee: nat(terms.move_fee),
             src_chain: terms.src_chain.get(),
             rail: terms.rail.into(),
             status: deposit.status.into(),

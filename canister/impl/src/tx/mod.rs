@@ -209,8 +209,7 @@ fn still_holds<S: Store>(
 /// never sent on a reading the watcher stopped refreshing, because the fee it would carry
 /// is the fee some earlier moment of the chain was asking.
 fn fresh_reading(chain_id: ChainId, now: Timestamp) -> Result<ChainData, TxError> {
-    let max_age = config::get().chain_data_max_age;
-    chain_data::fresh(chain_id, now, max_age).ok_or(TxError::StaleChainData { chain_id })
+    chain_data::fresh(chain_id, now).ok_or(TxError::StaleChainData { chain_id })
 }
 
 /// The fees to send at, from the chain data the watcher pushed: the tip it suggests, and a
@@ -416,6 +415,7 @@ fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxErr
         (TxPurpose::EcoRescue(order_id), _) => Ok(Record::EcoRescue(order_id)),
         (TxPurpose::PoolMove(id), _) => Ok(Record::PoolMove(id)),
         (TxPurpose::Cancel(_), _) => Err(TxError::NoRecord("a cancel")),
+        (TxPurpose::Sweep(_), _) => todo!("C5: a sweep's signed record"),
         (
             TxPurpose::Burn(_)
             | TxPurpose::Mint(_)
