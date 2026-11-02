@@ -1260,6 +1260,9 @@ pub enum PendingOp {
         /// The pull's dedup pair: `created_at_time` this, memo the op id.
         #[n(3)]
         created_at: Timestamp,
+        /// Swapic's, out of `amount`, booked to the ICP fee line when the pull lands.
+        #[n(4)]
+        move_fee: TokenAmount,
     },
     #[n(1)]
     Withdraw {
@@ -1267,8 +1270,8 @@ pub enum PendingOp {
         owner: IcpAccount,
         #[n(1)]
         burned: Shares,
-        /// The ckUSDC the shares were worth, reserved on ICP: the payout's whole budget,
-        /// ledger fees included.
+        /// The ckUSDC the shares were worth less the move fee, reserved on ICP: the payout's
+        /// whole budget, ledger fees included.
         #[n(2)]
         usdc: TokenAmount,
         #[n(3)]

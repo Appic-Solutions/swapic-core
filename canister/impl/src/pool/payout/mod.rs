@@ -1664,6 +1664,7 @@ pub async fn pull_stake(
         from,
         amount,
         created_at,
+        move_fee,
     }) = ledger.pending.get(&id).cloned()
     else {
         return Ok(None);
@@ -1681,16 +1682,18 @@ pub async fn pull_stake(
         .await
     {
         Ok(block) => {
-            // priced after the await, on the pool as it is now, in this message
-            let shares = pool_store::ledger()
-                .mint_now(amount)
+            // priced after the await, on the pool as it is now, in this message, on what is
+            // left of the stake once Swapic's move fee is taken
+            let shares = amount
+                .checked_sub(move_fee)
+                .and_then(|staked| pool_store::ledger().mint_now(staked))
                 .ok_or_else(|| Stop::Failed("the stake mints nothing".to_string()))?;
             record(
                 PoolStep::StakedIcp {
                     id,
                     owner,
                     amount,
-                    move_fee: TokenAmount::ZERO,
+                    move_fee,
                     shares,
                     block,
                 },

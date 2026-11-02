@@ -1075,13 +1075,18 @@ impl PoolLedger {
     ) -> Result<(), PoolStepError> {
         match step {
             PoolStep::StakedIcp {
-                id, owner, amount, ..
+                id,
+                owner,
+                amount,
+                move_fee,
+                ..
             } => match self.pending.get(id) {
                 Some(PendingOp::Stake {
                     owner: started,
                     amount: pulled,
+                    move_fee: fee,
                     ..
-                }) if started == owner && pulled == amount => Ok(()),
+                }) if started == owner && pulled == amount && fee == move_fee => Ok(()),
                 Some(_) => Err(PoolStepError::Mismatch),
                 None => Err(PoolStepError::NotPending(*id)),
             },
@@ -1090,13 +1095,23 @@ impl PoolLedger {
                 Some(_) => Err(PoolStepError::Mismatch),
                 None => Err(PoolStepError::NotPending(*id)),
             },
-            PoolStep::StakeStarted { id, amount, .. } => {
+            PoolStep::StakeStarted {
+                id,
+                amount,
+                move_fee,
+                ..
+            } => {
                 self.settings()?;
                 if self.pending.contains_key(id) {
                     return Err(PoolStepError::Pending(*id));
                 }
                 if *amount == TokenAmount::ZERO {
                     return Err(PoolStepError::Zero("amount"));
+                }
+                if move_fee >= amount {
+                    return Err(PoolStepError::Terms(
+                        "the move fee must be below the amount",
+                    ));
                 }
                 Ok(())
             }
@@ -1131,6 +1146,7 @@ impl PoolLedger {
                 owner,
                 burned,
                 usdc,
+                move_fee,
                 ..
             } => {
                 self.settings()?;
@@ -1139,6 +1155,9 @@ impl PoolLedger {
                 }
                 if *usdc == TokenAmount::ZERO {
                     return Err(PoolStepError::Zero("usdc"));
+                }
+                if move_fee >= usdc {
+                    return Err(PoolStepError::Terms("the move fee must be below usdc"));
                 }
                 let have = lookup.shares_of(&PoolAccount::Icp(*owner).key());
                 if have < *burned {
@@ -1483,6 +1502,13 @@ impl PoolLedger {
             } => {
                 if let Some(mut deposit) = lookup.deposit(r#ref) {
                     self.close_owed(r#ref, &deposit);
+                    // the move fee is Swapic's: off the stakers' free USDC, onto the Base fee
+                    // line, in the step that mints on the rest
+                    let fee = deposit.terms.move_fee;
+                    self.pockets.base.free = sat_sub(self.pockets.base.free, fee);
+                    let mut lines = self.lines();
+                    lines.fees_base = sat_add(lines.fees_base, fee);
+                    self.payouts = Some(lines);
                     self.total_shares = self
                         .total_shares
                         .checked_add(*shares)
@@ -1725,21 +1751,27 @@ impl PoolLedger {
                 id,
                 owner,
                 amount,
+                move_fee,
                 shares,
                 ..
             } => {
                 self.pending.remove(id);
-                self.book_stake(*amount, *shares);
+                self.book_stake(*amount, *move_fee, *shares);
                 effects.shares = Some(credit_shares(lookup, owner, *shares));
             }
             PoolStep::StakeResolved { id, resolution } => {
                 match (self.pending.remove(id), resolution) {
                     // the pull landed: booked as `StakedIcp` books it
                     (
-                        Some(PendingOp::Stake { owner, amount, .. }),
+                        Some(PendingOp::Stake {
+                            owner,
+                            amount,
+                            move_fee,
+                            ..
+                        }),
                         StakeResolution::Pulled { block, shares },
                     ) => {
-                        self.book_stake(amount, *shares);
+                        self.book_stake(amount, move_fee, *shares);
                         self.resolved_pulls
                             .get_or_insert_with(BTreeSet::new)
                             .insert(*block);
@@ -1764,7 +1796,7 @@ impl PoolLedger {
                 from,
                 amount,
                 created_at,
-                move_fee: _,
+                move_fee,
             } => {
                 self.stake_room = sat_add(self.stake_room, *amount);
                 self.pending.insert(
@@ -1774,6 +1806,7 @@ impl PoolLedger {
                         from: *from,
                         amount: *amount,
                         created_at: *created_at,
+                        move_fee: *move_fee,
                     },
                 );
             }
@@ -1791,7 +1824,7 @@ impl PoolLedger {
                 token_out,
                 min_out,
                 attempt,
-                move_fee: _,
+                move_fee,
             } => {
                 let account = PoolAccount::Icp(*owner);
                 let line = ShareLine {
@@ -1806,16 +1839,22 @@ impl PoolLedger {
                     .total_shares
                     .checked_sub(*burned)
                     .unwrap_or(Shares::ZERO);
+                // the stakers lose all of `usdc`: the move fee is Swapic's at once, the rest
+                // reserved for the payout
+                let budget = sat_sub(*usdc, *move_fee);
                 let icp = &mut self.pockets.icp;
                 icp.free = sat_sub(icp.free, *usdc);
-                icp.reserved = sat_add(icp.reserved, *usdc);
-                self.owed = sat_add(self.owed, *usdc);
+                icp.reserved = sat_add(icp.reserved, budget);
+                self.owed = sat_add(self.owed, budget);
+                let mut lines = self.lines();
+                lines.fees_icp = sat_add(lines.fees_icp, *move_fee);
+                self.payouts = Some(lines);
                 self.pending.insert(
                     *id,
                     PendingOp::Withdraw {
                         owner: *owner,
                         burned: *burned,
-                        usdc: *usdc,
+                        usdc: budget,
                         to: *to,
                         token_out: *token_out,
                         min_out: *min_out,
@@ -1845,11 +1884,14 @@ impl PoolLedger {
         }
     }
 
-    /// An ICP stake's pull landed: its room taken back, its ckUSDC free on ICP, its shares
-    /// outstanding.
-    fn book_stake(&mut self, amount: TokenAmount, shares: Shares) {
+    /// An ICP stake's pull landed: its room taken back, its ckUSDC free on ICP but the move
+    /// fee, which is on the ICP fee line, its shares outstanding.
+    fn book_stake(&mut self, amount: TokenAmount, move_fee: TokenAmount, shares: Shares) {
         self.stake_room = sat_sub(self.stake_room, amount);
-        self.pockets.icp.free = sat_add(self.pockets.icp.free, amount);
+        self.pockets.icp.free = sat_add(self.pockets.icp.free, sat_sub(amount, move_fee));
+        let mut lines = self.lines();
+        lines.fees_icp = sat_add(lines.fees_icp, move_fee);
+        self.payouts = Some(lines);
         self.total_shares = self
             .total_shares
             .checked_add(shares)

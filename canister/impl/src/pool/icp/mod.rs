@@ -241,6 +241,11 @@ pub fn plan_withdrawal<S: Store>(
     if ledger.icp_available() < request.usdc {
         return Err(PoolError::Closed(POCKET_SHORT.to_string()));
     }
+    // what the payout may spend: the withdrawal less Swapic's move fee
+    let budget = request
+        .usdc
+        .checked_sub(request.move_fee)
+        .unwrap_or(TokenAmount::ZERO);
     if !settings.is_listed(request.token_out) {
         return Err(PoolError::TokenNotListed(request.token_out));
     }
@@ -250,7 +255,7 @@ pub fn plan_withdrawal<S: Store>(
     let path = path_for(&settings, request.token_out);
     match path {
         PayoutPath::Ckusdc => {
-            let sent = request.usdc.checked_sub(fee).unwrap_or(TokenAmount::ZERO);
+            let sent = budget.checked_sub(fee).unwrap_or(TokenAmount::ZERO);
             if sent == TokenAmount::ZERO || sent < TokenAmount::from(request.min_out) {
                 return Err(PoolError::NotAllowed(
                     "the withdrawal pays below min_out after the ledger's fee".to_string(),
@@ -266,14 +271,14 @@ pub fn plan_withdrawal<S: Store>(
             let fees = fee
                 .checked_mul(TOKEN_PATH_FEES * legs)
                 .unwrap_or(TokenAmount::MAX);
-            if request.usdc <= fees {
+            if budget <= fees {
                 return Err(PoolError::NotAllowed(format!(
                     "the withdrawal does not cover the {fees} of fees its token's path can cost"
                 )));
             }
         }
     }
-    let amount = payout::path_amount(request.usdc, path, fee).ok_or_else(|| {
+    let amount = payout::path_amount(budget, path, fee).ok_or_else(|| {
         PoolError::NotAllowed("the withdrawal does not cover its fees".to_string())
     })?;
     Ok(WithdrawalPlan {

@@ -240,18 +240,17 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
         received: None,
     })
     .unwrap();
-    // the stakers lose exactly the withdrawal less its rebalancing share
+    // the stakers lose exactly the withdrawal: its move fee and its network fee are
+    // Swapic's, never back in the pool
     assert_eq!(
         pool.ledger.total_assets(),
-        assets_before
-            .checked_sub(usdc(1_000))
-            .unwrap()
-            .checked_add(w.move_fee)
-            .unwrap()
+        assets_before.checked_sub(usdc(1_000)).unwrap()
     );
+    let fees = w.network_fee.checked_add(w.move_fee).unwrap();
     let base = pool.ledger.pockets.base;
     pool.step(PoolStep::PayoutWaiting { id }).unwrap();
-    let hold = amount.checked_add(w.network_fee).unwrap();
+    let hold = amount.checked_add(fees).unwrap();
+    assert_eq!(hold, usdc(1_000));
     assert_eq!(
         pool.ledger.pockets.base.free,
         base.free.checked_sub(hold).unwrap()
@@ -259,7 +258,7 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
     assert_eq!(pool.ledger.pockets.base.reserved, hold);
     pool.step(signed(id, order(1))).unwrap();
     assert_eq!(status(&pool, id), PayoutStatus::Signed(0));
-    assert_eq!(pool.ledger.pockets.base.reserved, w.network_fee);
+    assert_eq!(pool.ledger.pockets.base.reserved, fees);
     assert_eq!(pool.ledger.pockets.base.in_flight, amount);
     // signed once: a second signature is refused
     assert!(matches!(
@@ -277,13 +276,13 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
     let base = pool.ledger.pockets.base;
     assert_eq!(base.reserved, TokenAmount::ZERO);
     assert_eq!(base.in_flight, TokenAmount::ZERO);
-    assert_eq!(pool.ledger.lines().fees_base, w.network_fee);
+    assert_eq!(pool.ledger.lines().fees_base, fees);
     assert_eq!(pool.ledger.owed, TokenAmount::ZERO);
     assert!(pool.ledger.lines().open.is_empty());
-    // the fee stays at the Base address, outside the stakers' assets
+    // the fees stay at the Base address, outside the stakers' assets
     assert_eq!(
         pool.ledger.base_held(),
-        base.free.checked_add(w.network_fee).unwrap()
+        base.free.checked_add(fees).unwrap()
     );
     // never undone once paid
     assert!(pool

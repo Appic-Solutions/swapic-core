@@ -136,10 +136,8 @@ fn a_signed_withdrawal_burns_its_shares_and_waits() {
             .and_then(|left| left.checked_sub(request.network_fee))
             .unwrap();
         assert_eq!(opened.amount, Some(amount));
-        assert_eq!(
-            ledger().pockets.base.reserved,
-            amount.checked_add(request.network_fee).unwrap()
-        );
+        // the whole withdrawal is held: the payout and Swapic's two fees
+        assert_eq!(ledger().pockets.base.reserved, usdc(500));
         // used once: the same signature again is refused
         assert!(matches!(
             planned_again(&request),

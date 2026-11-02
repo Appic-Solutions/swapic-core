@@ -35,6 +35,7 @@ struct Stake {
     from: IcpAccount,
     amount: TokenAmount,
     created_at: Timestamp,
+    move_fee: TokenAmount,
 }
 
 /// Whether `transfer` is stake `id`'s own pull, as `pull_stake` asks it: by `canister` from
@@ -92,11 +93,13 @@ fn pending_stake(id: PoolOpId) -> Result<Stake, PoolError> {
             from,
             amount,
             created_at,
+            move_fee,
             ..
         }) => Ok(Stake {
             from: *from,
             amount: *amount,
             created_at: *created_at,
+            move_fee: *move_fee,
         }),
         Some(PendingOp::Withdraw { .. }) => Err(PoolError::NotAllowed(
             "the operation is a withdrawal, not a stake".to_string(),
@@ -159,8 +162,10 @@ pub async fn resolve(
                 return Err(PoolError::Halted);
             }
             let stake = pending_stake(id)?;
-            let shares = pool_store::ledger()
-                .mint_now(stake.amount)
+            let shares = stake
+                .amount
+                .checked_sub(stake.move_fee)
+                .and_then(|staked| pool_store::ledger().mint_now(staked))
                 .filter(|shares| *shares > Shares::ZERO)
                 .ok_or_else(|| PoolError::NotAllowed("the stake mints nothing".to_string()))?;
             StakeResolution::Pulled { block, shares }

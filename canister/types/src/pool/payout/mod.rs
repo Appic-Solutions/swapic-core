@@ -272,8 +272,8 @@ pub struct EvmPayout {
     /// The exact USDC the payout order spends on Base, once known.
     #[n(5)]
     pub amount: Option<TokenAmount>,
-    /// A withdrawal's network fee, held on Base with the payout and booked to the Base fee
-    /// line when it is paid.
+    /// A withdrawal's network fee and move fee, Swapic's, held on Base with the payout,
+    /// booked to the Base fee line when it is paid and back to `free` when it is undone.
     #[n(6)]
     pub base_fee: Option<TokenAmount>,
     /// An ICP swap's ckUSDC, all of it (`u`), once its legs made it.
@@ -428,7 +428,7 @@ impl EvmPayout {
     }
 
     /// What the payout puts on the pool's `owed` line once its amount is known: the order's
-    /// amount and a withdrawal's network fee, neither of them the stakers'.
+    /// amount and a withdrawal's fees, none of them the stakers'.
     pub fn owed(&self) -> TokenAmount {
         match self.amount {
             Some(_) => self.base_hold(),

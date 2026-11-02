@@ -831,7 +831,8 @@ impl PoolLedger {
                         lines.fees_icp = sat_add(lines.fees_icp, payout.icp_fee());
                     }
                     PayoutKind::Withdrawal(withdrawal) => {
-                        payout.base_fee = Some(withdrawal.network_fee);
+                        payout.base_fee =
+                            Some(sat_add(withdrawal.network_fee, withdrawal.move_fee));
                     }
                 }
                 self.owed = sat_add(self.owed, payout.owed());

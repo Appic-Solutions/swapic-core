@@ -559,11 +559,18 @@ fn a_stake_mints_at_the_price_before_it() {
     .unwrap();
     assert_eq!(pool.shares_of(&owner.key()), shares);
     assert_eq!(pool.deposits[&r#ref].minted, Some(shares));
-    assert_eq!(pool.ledger.total_assets(), usdc(1_100));
-    // worth what came in less its share, and a part of that share
+    // the move fee is Swapic's, on the Base fee line, never the stakers'
+    assert_eq!(pool.ledger.total_assets(), usdc(1_099));
+    assert_eq!(pool.ledger.lines().fees_base, usdc(1));
+    assert_eq!(
+        pool.ledger.base_held(),
+        usdc(100),
+        "all that arrived is at the address"
+    );
+    // worth what came in less the move fee
     let value = Shares::value_of(shares, pool.ledger.total_assets(), pool.ledger.total_shares);
     assert!(value >= usdc(99).checked_sub(TokenAmount::ONE).unwrap());
-    assert!(value < usdc(100));
+    assert!(value <= usdc(99));
 }
 
 /// Review Focus 3, through the fold (and the coordinator's review): what a pool swap owes is
@@ -2677,4 +2684,125 @@ fn every_step_is_routed_to_the_family_with_its_arm() {
             .clone()
             .apply_at(step, &pool, Timestamp::from_nanos(1), 1);
     }
+}
+
+/// An ICP stake's move fee is Swapic's: when the pull lands the stake's ckUSDC goes free on
+/// ICP less the fee, which goes to the ICP fee line, and shares are minted on the rest. A
+/// landed pull naming another fee than its start is refused.
+#[test]
+fn an_icp_stake_books_its_move_fee_to_swapic() {
+    let mut pool = funded(usdc(1_000));
+    let owner = PoolAccount::Icp(recipient(210));
+    let id = PoolOpId::new([0x71; 32]);
+    let fee = usdc(1);
+    pool.step(PoolStep::StakeStarted {
+        id,
+        owner,
+        from: recipient(210),
+        amount: usdc(100),
+        created_at: Timestamp::from_nanos(1),
+        move_fee: fee,
+    })
+    .unwrap();
+    let assets = pool.ledger.total_assets();
+    let free = pool.ledger.pockets.icp.free;
+    let fees = pool.ledger.lines().fees_icp;
+    let shares = pool.ledger.mint_now(usdc(99)).unwrap();
+    let landed = |move_fee| PoolStep::StakedIcp {
+        id,
+        owner,
+        amount: usdc(100),
+        move_fee,
+        shares,
+        block: 3,
+    };
+    assert_eq!(
+        pool.step(landed(TokenAmount::ZERO)),
+        Err(PoolStepError::Mismatch)
+    );
+    pool.step(landed(fee)).unwrap();
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        free.checked_add(usdc(99)).unwrap()
+    );
+    assert_eq!(pool.ledger.lines().fees_icp, fees.checked_add(fee).unwrap());
+    assert_eq!(
+        pool.ledger.total_assets(),
+        assets.checked_add(usdc(99)).unwrap()
+    );
+    assert_eq!(pool.ledger.stake_room, TokenAmount::ZERO);
+    // a fee as large as the stake is refused at the start
+    assert!(pool
+        .step(PoolStep::StakeStarted {
+            id: PoolOpId::new([0x72; 32]),
+            owner,
+            from: recipient(210),
+            amount: usdc(5),
+            created_at: Timestamp::from_nanos(2),
+            move_fee: usdc(5),
+        })
+        .is_err());
+}
+
+/// An ICP withdrawal of `usdc` costs the stakers all of it: its move fee goes to the ICP fee
+/// line at once, and only the rest is reserved and owed for the payout, which spends it.
+#[test]
+fn an_icp_withdrawal_reserves_all_but_its_move_fee() {
+    let mut pool = funded(usdc(1_000));
+    let owner = recipient(200);
+    let burned = Shares::burn_for(
+        usdc(100),
+        pool.ledger.total_assets(),
+        pool.ledger.total_shares,
+    )
+    .unwrap();
+    let assets = pool.ledger.total_assets();
+    let icp = pool.ledger.pockets.icp;
+    let fees = pool.ledger.lines().fees_icp;
+    let fee = usdc(2);
+    let id = PoolOpId::new([0x73; 32]);
+    pool.step(PoolStep::WithdrawStarted {
+        id,
+        owner,
+        burned,
+        usdc: usdc(100),
+        to: owner,
+        token_out: ckusdc(),
+        min_out: 0,
+        attempt: PayoutAttempt {
+            created_at: Timestamp::from_nanos(9),
+            memo: [0x73; 32],
+            path: PayoutPath::Ckusdc,
+            amount: None,
+            token: None,
+        },
+        move_fee: fee,
+    })
+    .unwrap();
+    assert_eq!(
+        pool.ledger.total_assets(),
+        assets.checked_sub(usdc(100)).unwrap()
+    );
+    assert_eq!(
+        pool.ledger.pockets.icp.free,
+        icp.free.checked_sub(usdc(100)).unwrap()
+    );
+    assert_eq!(
+        pool.ledger.pockets.icp.reserved,
+        icp.reserved.checked_add(usdc(98)).unwrap()
+    );
+    assert_eq!(pool.ledger.lines().fees_icp, fees.checked_add(fee).unwrap());
+    assert!(matches!(
+        pool.ledger.pending.get(&id),
+        Some(PendingOp::Withdraw { usdc: budget, .. }) if *budget == usdc(98)
+    ));
+    // what the ICP account should hold is unchanged until the payout spends its budget
+    assert_eq!(
+        pool.ledger.icp_held(),
+        icp.free
+            .checked_add(icp.reserved)
+            .unwrap()
+            .checked_add(fees)
+            .unwrap()
+    );
 }
