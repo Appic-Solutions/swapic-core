@@ -1,9 +1,11 @@
 //! The canister's USDC books, one per chain, in micro-USDC (spec 3.3, books rule).
 //!
-//! The lines say what the canister's USDC on a chain is for. A balance check compares
-//! them with the balance read at a confirmed block and records both, and nothing else:
-//! a surplus is never booked by the check, only by a controller who has looked at it, and
-//! only a shortfall beyond the tolerance pauses the pool.
+//! The lines say what the canister's USDC on a chain is for. The hourly balance check
+//! compares them with the balance read at a confirmed block. A read that passed is kept
+//! beside the timers (`timer_state::LastRead`), not in the log; the log gets a check that
+//! found a shortfall or a surplus other than the last one it holds. A surplus is never
+//! booked by the check, only by a controller who has looked at it, and only a shortfall
+//! beyond the tolerance pauses the pool.
 //!
 //! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a
 //! new field is optional.
@@ -20,7 +22,7 @@ use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::time::Duration;
 use thiserror::Error;
 
-/// One chain's book lines and its last balance check.
+/// One chain's book lines and its last recorded balance check.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Books {
     /// Network and platform fees Swapic withheld to the canister.
@@ -32,18 +34,13 @@ pub struct Books {
     /// The pool's pocket on this chain.
     #[n(2)]
     pub pool: TokenAmount,
+    /// The last check the log holds: what a controller books a surplus against.
     #[n(3)]
     pub last_check: Option<BalanceCheck>,
-    /// When the last balance check that read a balance was recorded. A failed read never
-    /// moves it: the pool's guard measures staleness from here.
-    #[n(4)]
-    pub checked_at: Option<Timestamp>,
-    /// When the last balance read that failed was recorded.
-    #[n(5)]
-    pub failed_at: Option<Timestamp>,
     /// The fees booked from a block no balance check has read at yet. A fee is booked off
     /// a receipt at the swap depth and the check reads the crediting depth behind the head,
     /// so for a while a booked fee is in the lines and not in the balance the check reads.
+    /// Only the pool chain's fees are listed: no other chain is checked.
     #[n(6)]
     pub unseen_fees: UnseenFees,
 }
@@ -130,12 +127,13 @@ pub enum BookStep {
         tx_hash: TxHash,
         #[n(1)]
         amount: TokenAmount,
-        /// The block of that receipt. None on lines written before it was recorded, whose
-        /// fee every balance check expects.
+        /// The block of that receipt, on the pool chain. None on any other chain, which no
+        /// balance check reads.
         #[n(2)]
         block: Option<BlockNumber>,
     },
-    /// A balance check; `shortfall` pauses the pool.
+    /// A balance check that found a shortfall, which pauses the pool, or a surplus other
+    /// than the last one recorded.
     #[n(1)]
     Checked {
         #[n(0)]
@@ -148,13 +146,6 @@ pub enum BookStep {
     SurplusBooked {
         #[n(0)]
         amount: TokenAmount,
-    },
-    /// A balance check that could not read the balance, and the kind of failure:
-    /// recorded, never skipped, and it refreshes nothing.
-    #[n(3)]
-    CheckFailed {
-        #[n(0)]
-        failure: ReadFailure,
     },
     /// A controller paused the pool, or reopened it, which also clears a shortfall it has
     /// looked at.
@@ -179,7 +170,6 @@ impl BookStep {
             BookStep::FeeEarned { .. } => "FeeEarned",
             BookStep::Checked { .. } => "Checked",
             BookStep::SurplusBooked { .. } => "SurplusBooked",
-            BookStep::CheckFailed { .. } => "CheckFailed",
             BookStep::PoolPaused { .. } => "PoolPaused",
         }
     }
@@ -187,38 +177,26 @@ impl BookStep {
 
 /// Why a balance check read no balance: a fixed kind, and an HTTP status at most. Never a
 /// provider's or a subnet's text, which can carry the provider's url and the api key in
-/// it, and this line is in the world-readable log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadFailure {
     /// The chain has no provider configured.
-    #[n(0)]
     NoRpcUrl,
-    /// The watcher's pushed head is missing or too old.
-    #[n(1)]
-    NoChainData,
     /// The chain has no confirmation depth configured.
-    #[n(2)]
     NoDepth,
     /// The head is below the confirmation depth.
-    #[n(3)]
     BelowDepth,
+    /// The confirmed block is below the last one a read was made at.
+    Behind,
     /// The canister's EVM address could not be derived.
-    #[n(4)]
     NoCanisterAddress,
     /// The outcall did not reach the provider.
-    #[n(5)]
     Unreachable,
     /// The provider answered with an HTTP error.
-    #[n(6)]
-    Http {
-        #[n(0)]
-        status: u16,
-    },
+    Http { status: u16 },
     /// The provider answered the call with an error, a revert included.
-    #[n(7)]
     Provider,
     /// The answer was not one the canister reads: malformed, too large, or the wrong shape.
-    #[n(8)]
     BadAnswer,
 }
 
@@ -245,9 +223,7 @@ impl Books {
                     .checked_add(*amount)
                     .ok_or(BooksError::Overflow)?;
             }
-            BookStep::Checked { .. }
-            | BookStep::CheckFailed { .. }
-            | BookStep::PoolPaused { .. } => {}
+            BookStep::Checked { .. } | BookStep::PoolPaused { .. } => {}
             BookStep::SurplusBooked { amount } => {
                 if *amount == TokenAmount::ZERO {
                     return Err(BooksError::Zero);
@@ -271,8 +247,8 @@ impl Books {
         Ok(())
     }
 
-    /// Records a step [`Books::admits`] admitted, sealed at `at`.
-    pub fn apply(mut self, step: &BookStep, at: Timestamp) -> Self {
+    /// Records a step [`Books::admits`] admitted.
+    pub fn apply(mut self, step: &BookStep) -> Self {
         match step {
             BookStep::FeeEarned { amount, block, .. } => {
                 self.fee_income = self
@@ -288,11 +264,8 @@ impl Books {
             }
             BookStep::Checked { check, .. } => {
                 self.last_check = Some(*check);
-                self.checked_at = Some(at);
-                // a fee at or below the block this check read is in its balance
-                self.unseen_fees.0.retain(|fee| fee.block > check.block);
+                self = self.seen_through(check.block);
             }
-            BookStep::CheckFailed { .. } => self.failed_at = Some(at),
             BookStep::PoolPaused { .. } => {}
             BookStep::SurplusBooked { amount } => {
                 self.unattributed = self
@@ -319,6 +292,12 @@ impl Books {
             .unwrap_or(TokenAmount::MAX)
     }
 
+    /// A balance read at `block`: every fee booked at or below it is in that balance now.
+    pub fn seen_through(mut self, block: BlockNumber) -> Self {
+        self.unseen_fees.0.retain(|fee| fee.block > block);
+        self
+    }
+
     /// The fees booked from blocks above `block`: in the lines, and not yet in a balance
     /// read at `block`.
     pub fn fees_above(&self, block: BlockNumber) -> TokenAmount {
@@ -343,6 +322,13 @@ pub fn assess(
         .checked_add(tolerance)
         .is_some_and(|ceiling| ceiling < lines);
     (lines, shortfall)
+}
+
+/// Whether a check is worth a line in the log: it found a shortfall, or a surplus other
+/// than the last one recorded (`last`), a surplus gone included. A check that matches the
+/// last one is kept beside the timers only.
+pub fn worth_recording(last: Option<i128>, surplus: i128, shortfall: bool) -> bool {
+    shortfall || last.unwrap_or(0).max(0) != surplus.max(0)
 }
 
 /// How many balance-check intervals the pool chain's books may go without a check that
@@ -384,13 +370,14 @@ pub enum PoolClosed {
 }
 
 /// Whether the pool may move money at `now`: not halted, a pool chain configured, not
-/// paused by a controller, no shortfall latched, and the pool chain's books read within
-/// [`STALE_INTERVALS`] check intervals. `pool_books` is the pool chain's.
+/// paused by a controller, no shortfall latched, and the pool chain's balance read within
+/// [`STALE_INTERVALS`] check intervals. `read_at` is when `read_at(pool_chain)` last read
+/// a balance there.
 pub fn pool_open(
     halted: bool,
     pool_chain: Option<ChainId>,
     meta: &LedgerMeta,
-    pool_books: Option<Books>,
+    read_at: impl FnOnce(ChainId) -> Option<Timestamp>,
     interval: Duration,
     now: Timestamp,
 ) -> Result<(), PoolClosed> {
@@ -404,9 +391,7 @@ pub fn pool_open(
     if let Some(short) = meta.pool_paused_by {
         return Err(PoolClosed::Shortfall(short));
     }
-    let checked_at = pool_books
-        .and_then(|books| books.checked_at)
-        .ok_or(PoolClosed::NeverChecked(chain))?;
+    let checked_at = read_at(chain).ok_or(PoolClosed::NeverChecked(chain))?;
     let since = now.saturating_duration_since(checked_at);
     if since > interval.saturating_mul(STALE_INTERVALS) {
         return Err(PoolClosed::Stale {

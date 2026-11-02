@@ -1,7 +1,8 @@
-//! The rebalancing's timer, every minute: the open moves driven a step on (their routes, their
-//! signatures, the minter's call, the landing and arrival reads, the sweep), then the books
-//! read for a move to open. The books are read after every pool movement (the pockets changed
-//! since the last read), every 15 minutes, and while a payout waits in a queue.
+//! The rebalancing's tick, on the engine's backstop while work is open and on the hourly
+//! pass: the open moves driven a step on (their routes, their signatures, the minter's call,
+//! the landing and arrival reads, the sweep), then the books read for a move to open. The
+//! books are read after every pool movement (the pockets changed since the last read), every
+//! 15 minutes while ticks come, and while a payout waits in a queue.
 
 #[cfg(test)]
 mod tests;
@@ -11,9 +12,6 @@ use crate::storage::halt::is_halted;
 use std::time::Duration;
 use types::pool::Pockets;
 use types::Timestamp;
-
-/// How often the timer runs.
-pub const REBALANCE_EVERY: Duration = Duration::from_secs(60);
 
 /// How often the books are read for a move when nothing moved.
 pub const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);

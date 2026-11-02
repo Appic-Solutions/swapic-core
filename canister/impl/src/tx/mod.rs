@@ -23,16 +23,17 @@ use crate::guards::require_not_halted;
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, RpcError, MAX_BLOCK_NUMBER_BYTES};
 use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
-use crate::storage::{chain_data, config, outbox};
+use crate::storage::{chain_data, config, outbox, timer_state};
 use crate::task_manager;
 use serde_json::{json, Value};
 use settlement_api::types::errors::GuardError;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use thiserror::Error;
 use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::config::{GasAction, MIN_ETHEREUM_CONFIRMATIONS};
 use types::events::TxPurpose;
-use types::tx::is_confirmed;
+use types::tx::{blocks_to_wait, is_confirmed, next_receipt_read, MIN_RECEIPT_PACE};
 use types::{
     BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventIndex, EventType, EvmAddress, GasAmount,
     Nonce, NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
@@ -783,12 +784,14 @@ pub async fn flush() {
         return;
     }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let limit = config::get().max_batch_items as usize;
+    let config = config::get();
+    let limit = config.max_batch_items as usize;
     for chain_id in outbox::chains() {
         let batch = outbox::by_status(chain_id, OutboxStatus::Queued, limit);
         if batch.is_empty() {
             continue;
         }
+        let mut went_out = false;
         let calls: Vec<(&str, Value)> = batch
             .iter()
             .map(|entry| ("eth_sendRawTransaction", json!([hex0x(&entry.raw_tx)])))
@@ -818,13 +821,39 @@ pub async fn flush() {
                 if current.tx_hash() == entry.tx_hash() {
                     match refusal {
                         Some(message) => current.refused(now, &message),
-                        None => current.sent(now),
+                        None => {
+                            current.sent(now);
+                            went_out = true;
+                        }
                     }
                     outbox::put(current);
                 }
             }
         }
+        // bytes that just went out are worth a read a block from now, whatever the chain's
+        // other entries wait for
+        if went_out {
+            let read = next_receipt_read(now, block_time(&config, chain_id), 1);
+            timer_state::update(|state| {
+                let due = state.receipts_due.entry(chain_id).or_insert(read);
+                let sooner = *due > read;
+                if sooner {
+                    *due = read;
+                }
+                ((), sooner)
+            });
+        }
     }
+}
+
+/// A chain's block time as the config names it, and the outbox's own floor where it names
+/// none.
+fn block_time(config: &types::Config, chain_id: ChainId) -> Duration {
+    config
+        .evm_chains
+        .0
+        .get(&chain_id)
+        .map_or(MIN_RECEIPT_PACE, |chain| chain.block_time)
 }
 
 /// What one receipt pass did. Returned rather than logged, so a pass can be read without the
@@ -840,6 +869,8 @@ pub struct ReceiptPass {
     /// entries on a chain the config lists no depth for: nothing about them is decided
     /// until a deploy names that chain's depth, and they stay in the outbox meanwhile
     pub no_depth: usize,
+    /// entries on a chain whose next read is not due yet
+    pub waiting: usize,
 }
 
 /// Reads what happened to every transaction still out, one batch per chain: the head
@@ -865,23 +896,52 @@ pub async fn check_open() -> ReceiptPass {
     let config = config::get();
     let limit = config.max_batch_items as usize;
     let mut pass = ReceiptPass::default();
+    let due = timer_state::get().receipts_due;
+    // when each chain with entries out is read next; a chain with none drops out
+    let mut next: BTreeMap<ChainId, Timestamp> = BTreeMap::new();
     for chain_id in outbox::chains() {
         let open = outbox::by_status(chain_id, OutboxStatus::Sent, limit);
+        if open.is_empty() {
+            continue;
+        }
+        // a chain read at its pace: nothing about its entries can have changed yet
+        if let Some(at) = due.get(&chain_id).filter(|at| **at > now) {
+            next.insert(chain_id, *at);
+            pass.waiting += open.len();
+            continue;
+        }
+        let pace = block_time(&config, chain_id);
         // a chain with no depth configured closes nothing: the entries wait in the outbox,
         // rebroadcast by their own clock, until a deploy names the depth to judge them at
         let Ok(depth) = confirmations(&config, chain_id) else {
             pass.no_depth += open.len();
+            next.insert(chain_id, next_receipt_read(now, pace, 1));
             continue;
         };
         // how long a closed entry keeps its bytes: never shallower than the swap depth,
         // which it falls back to
         let credit = credit_confirmations(&config, chain_id).unwrap_or(depth);
+        // the fewest blocks any entry waits before a read can decide something about it
+        let mut wait = u64::MAX;
+        let mut waits = |entry: &OutboxEntry, landed: Option<&Receipt>, latest: BlockNumber| {
+            let target = if entry.closed_at.is_some() {
+                credit
+            } else {
+                depth
+            };
+            wait = wait.min(blocks_to_wait(
+                landed.map(|receipt| receipt.block),
+                latest,
+                target,
+            ));
+        };
         // split so the answer fits one outcall: the head comes with every chunk, so each
         // chunk's receipts are read against a height from the same answer
         for chunk in receipt_chunks(open) {
             match read_receipts(chain_id, &chunk).await {
                 Ok((latest, landed)) => {
                     for (entry, landed) in chunk.iter().zip(landed) {
+                        waits(entry, landed.as_ref(), latest);
                         pass.closed +=
                             decide(entry, chain_id, landed, latest, depth, credit, now).await;
                     }
@@ -894,12 +954,14 @@ pub async fn check_open() -> ReceiptPass {
                         match read_receipts(chain_id, std::slice::from_ref(entry)).await {
                             Ok((latest, landed)) => {
                                 let landed = landed.into_iter().next().flatten();
+                                waits(entry, landed.as_ref(), latest);
                                 pass.closed +=
                                     decide(entry, chain_id, landed, latest, depth, credit, now)
                                         .await;
                             }
                             Err(_) => {
                                 pass.unread += 1;
+                                waits(entry, None, BlockNumber::new(0));
                                 push_again(entry, chain_id, now).await;
                             }
                         }
@@ -909,12 +971,19 @@ pub async fn check_open() -> ReceiptPass {
                 Err(_) => {
                     pass.unread += chunk.len();
                     for entry in &chunk {
+                        waits(entry, None, BlockNumber::new(0));
                         push_again(entry, chain_id, now).await;
                     }
                 }
             }
         }
+        next.insert(chain_id, next_receipt_read(now, pace, wait));
     }
+    timer_state::update(|state| {
+        let changed = state.receipts_due != next;
+        state.receipts_due = next;
+        ((), changed)
+    });
     pass
 }
 

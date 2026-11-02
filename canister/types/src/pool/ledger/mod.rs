@@ -104,12 +104,9 @@ pub struct PoolLedger {
     /// reopens the pool.
     #[n(11)]
     pub icp_shortfall_at: Option<Timestamp>,
+    /// The ICP pocket's last check the log holds.
     #[n(12)]
     pub icp_check: Option<IcpCheck>,
-    #[n(13)]
-    pub icp_checked_at: Option<Timestamp>,
-    #[n(14)]
-    pub icp_failed_at: Option<Timestamp>,
     /// The arrived swaps whose payouts wait for the ICP pocket's free ckUSDC, first in first
     /// out: credited and owed, and held only when they start.
     #[n(16)]
@@ -583,7 +580,6 @@ impl PoolLedger {
         match step {
             PoolStep::SettingsSet { .. }
             | PoolStep::IcpChecked { .. }
-            | PoolStep::IcpCheckFailed { .. }
             | PoolStep::IcpRoutesSet { .. } => self.admits_settings_and_reads(step),
             PoolStep::Registered { .. }
             | PoolStep::Expired { .. }
@@ -685,7 +681,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            PoolStep::IcpChecked { .. } | PoolStep::IcpCheckFailed { .. } => Ok(()),
+            PoolStep::IcpChecked { .. } => Ok(()),
             PoolStep::IcpRoutesSet { routes } => {
                 let settings = self.settings()?;
                 routes
@@ -1193,8 +1189,7 @@ impl PoolLedger {
         match step {
             PoolStep::SettingsSet { .. }
             | PoolStep::IcpRoutesSet { .. }
-            | PoolStep::IcpChecked { .. }
-            | PoolStep::IcpCheckFailed { .. } => ledger.apply_settings_and_reads(step, at),
+            | PoolStep::IcpChecked { .. } => ledger.apply_settings_and_reads(step, at),
             PoolStep::Registered { .. }
             | PoolStep::Expired { .. }
             | PoolStep::Arrived { .. }
@@ -1279,8 +1274,8 @@ impl PoolLedger {
         effects
     }
 
-    /// What the pool's knobs and its reads change: its settings and ICP routes, the ICP
-    /// pocket's balance check, the canister's read of Base.
+    /// What the pool's knobs and its reads change: its settings and ICP routes, and an ICP
+    /// check the log records.
     fn apply_settings_and_reads(&mut self, step: &PoolStep, at: Timestamp) {
         match step {
             // the routes are `IcpRoutesSet`'s: new knobs keep the routes set
@@ -1302,12 +1297,10 @@ impl PoolLedger {
             }
             PoolStep::IcpChecked { check } => {
                 self.icp_check = Some(*check);
-                self.icp_checked_at = Some(at);
                 if check.shortfall {
                     self.icp_shortfall_at = Some(at);
                 }
             }
-            PoolStep::IcpCheckFailed { .. } => self.icp_failed_at = Some(at),
             _ => unrouted_apply(step),
         }
     }

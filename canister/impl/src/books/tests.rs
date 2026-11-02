@@ -85,7 +85,7 @@ fn at_minute(minute: u64) -> Timestamp {
     Timestamp::from_nanos(minute * MINUTE)
 }
 
-/// The spec defaults (ten-minute checks) with Base as the pool chain.
+/// The spec defaults (hourly checks) with Base as the pool chain.
 fn pool_config() -> types::Config {
     types::Config {
         pool_chain: Some(ChainId::BASE),
@@ -94,7 +94,23 @@ fn pool_config() -> types::Config {
 }
 
 fn status(halted: bool, now: Timestamp) -> Result<(), PoolClosed> {
-    read_state(|state| pool_status(state, &state.pool(), &pool_config(), halted, now))
+    let reads = timer_state::get();
+    read_state(|state| pool_status(state, &state.pool(), &reads, &pool_config(), halted, now))
+}
+
+/// A read of `chain_id` that passed at `minute`, kept as the hourly check keeps it.
+fn read_passed(chain_id: ChainId, minute: u64) {
+    timer_state::update(|state| {
+        state.books_reads.entry(chain_id).or_default().read = Some((
+            at_minute(minute),
+            BalanceCheck {
+                block: BlockNumber::new(minute),
+                observed: TokenAmount::ZERO,
+                expected: TokenAmount::ZERO,
+            },
+        ));
+        ((), true)
+    });
 }
 
 fn pool_step(paused: bool) -> EventType {
@@ -111,13 +127,15 @@ fn pool_step(paused: bool) -> EventType {
 fn pool_pause_is_enforced() {
     on_fresh_memory(|| {
         crate::storage::init();
-        append_event_at(checked(150, 100, false), at_minute(1)).unwrap();
+        read_passed(ChainId::BASE, 1);
         assert_eq!(status(false, at_minute(2)), Ok(()));
         assert_eq!(status(true, at_minute(2)), Err(PoolClosed::Halted));
+        let reads = timer_state::get();
         assert_eq!(
             read_state(|state| pool_status(
                 state,
                 &state.pool(),
+                &reads,
                 &types::Config::default(),
                 false,
                 at_minute(2)
@@ -130,8 +148,8 @@ fn pool_pause_is_enforced() {
             status(false, at_minute(4)),
             Err(PoolClosed::Shortfall(ChainId::BASE))
         );
-        // a clean check does not lift a shortfall: a controller looks first
-        append_event_at(checked(150, 100, false), at_minute(5)).unwrap();
+        // a clean read does not lift a shortfall: a controller looks first
+        read_passed(ChainId::BASE, 5);
         assert_eq!(
             status(false, at_minute(6)),
             Err(PoolClosed::Shortfall(ChainId::BASE))
@@ -146,7 +164,7 @@ fn pool_pause_is_enforced() {
     });
 }
 
-/// Finding 2: books nobody has read lately close the pool, and so do books never read.
+/// Finding 2: a pool chain not read lately closes the pool, and so does one never read.
 #[test]
 fn stale_books_close_the_pool() {
     on_fresh_memory(|| {
@@ -155,29 +173,15 @@ fn stale_books_close_the_pool() {
             status(false, at_minute(1)),
             Err(PoolClosed::NeverChecked(ChainId::BASE))
         );
-        append_event_at(checked(150, 100, false), at_minute(10)).unwrap();
-        // three hourly intervals is the most the books may go unread
+        read_passed(ChainId::BASE, 10);
+        // three hourly intervals is the most the pool chain may go unread
         assert_eq!(status(false, at_minute(190)), Ok(()));
         assert!(matches!(
             status(false, at_minute(191)),
             Err(PoolClosed::Stale { .. })
         ));
-        // a check on another chain is not the pool chain's
-        append_event_at(
-            EventType::Books {
-                chain_id: ChainId::ARBITRUM,
-                step: BookStep::Checked {
-                    check: BalanceCheck {
-                        block: BlockNumber::new(10),
-                        observed: TokenAmount::from(1_u32),
-                        expected: TokenAmount::ZERO,
-                    },
-                    shortfall: false,
-                },
-            },
-            at_minute(191),
-        )
-        .unwrap();
+        // a read of another chain is not the pool chain's
+        read_passed(ChainId::ARBITRUM, 191);
         assert!(matches!(
             status(false, at_minute(192)),
             Err(PoolClosed::Stale { .. })
@@ -185,28 +189,19 @@ fn stale_books_close_the_pool() {
     });
 }
 
-/// Finding 2: a failed read is recorded, and it refreshes nothing the guard reads, so a
+/// Finding 2: a failed read writes no line and refreshes nothing the guard reads, so a
 /// chain whose balance cannot be read goes stale and closes the pool.
 #[test]
 fn failed_read_does_not_refresh_the_check() {
     on_fresh_memory(|| {
         crate::storage::init();
-        append_event_at(checked(150, 100, false), at_minute(10)).unwrap();
-        let failed = EventType::Books {
-            chain_id: ChainId::BASE,
-            step: BookStep::CheckFailed {
-                failure: ReadFailure::Unreachable,
-            },
-        };
-        let index = append_event_at(failed.clone(), at_minute(35)).unwrap();
-        assert_eq!(
-            crate::storage::events::event_at(index.get()).map(|event| event.payload),
-            Some(failed),
-            "the failure is a line in the log"
-        );
-        let books = read_state(|state| state.book(&ChainId::BASE));
-        assert_eq!(books.checked_at, Some(at_minute(10)));
-        assert_eq!(books.failed_at, Some(at_minute(35)));
+        read_passed(ChainId::BASE, 10);
+        let count = crate::storage::events::event_count();
+        read_failed(ChainId::BASE, ReadFailure::Unreachable, at_minute(35));
+        assert_eq!(crate::storage::events::event_count(), count, "no line");
+        let read = timer_state::get().books_reads[&ChainId::BASE];
+        assert_eq!(read.read_at(), Some(at_minute(10)));
+        assert_eq!(read.failed_at, Some(at_minute(35)));
         assert!(matches!(
             status(false, at_minute(191)),
             Err(PoolClosed::Stale { .. })
@@ -214,78 +209,161 @@ fn failed_read_does_not_refresh_the_check() {
     });
 }
 
-/// A failed read leaves no trace of its error's text: an outcall's refusal or a provider's
-/// answer can carry the provider's url and its api key, and the log, the books query and
-/// the events page are world-readable. Only the failure's kind is recorded.
+/// A failed read keeps no trace of its error's text: an outcall's refusal or a provider's
+/// answer can carry the provider's url and its api key. Only the failure's kind is printed,
+/// and only the time it failed at is kept.
 #[test]
-fn a_failed_read_leaves_no_secret_in_the_log() {
+fn a_failed_read_leaves_no_secret_behind() {
     use crate::rpc::{RpcError, Summary};
     const SECRET: &str = "https://base-mainnet.g.alchemy.com/v2/sk-live-0123456789";
+    let errors = [
+        RpcError::Unreachable {
+            reason: Summary::of(&format!("error trying to connect to {SECRET}: timeout")),
+        },
+        RpcError::Http {
+            status: 401,
+            body: Summary::of(&format!("{{\"error\":\"bad key for {SECRET}\"}}")),
+        },
+        RpcError::Rpc {
+            method: "eth_call".into(),
+            message: format!("upstream {SECRET} failed"),
+        },
+    ];
+    let kinds: Vec<ReadFailure> = errors.iter().map(RpcError::kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ReadFailure::Unreachable,
+            ReadFailure::Http { status: 401 },
+            ReadFailure::Provider
+        ]
+    );
+    for (error, kind) in errors.iter().zip(kinds) {
+        assert!(
+            error.to_string().contains(SECRET),
+            "the error itself carries it"
+        );
+        let printed = format!("{kind:?}");
+        for secret in [SECRET, "sk-live", "alchemy"] {
+            assert!(!printed.contains(secret), "{printed}");
+        }
+    }
+}
+
+/// The hourly check's read: one that matches the last line writes none and is kept beside
+/// the timers, dropping what its balance holds from the unseen lists; one with news is a
+/// line; a read below the last read's block is refused and keeps nothing.
+#[test]
+fn a_read_with_no_news_is_kept_without_a_line() {
     on_fresh_memory(|| {
         crate::storage::init();
-        let errors = [
-            RpcError::Unreachable {
-                reason: Summary::of(&format!("error trying to connect to {SECRET}: timeout")),
-            },
-            RpcError::Http {
-                status: 401,
-                body: Summary::of(&format!("{{\"error\":\"bad key for {SECRET}\"}}")),
-            },
-            RpcError::Rpc {
-                method: "eth_call".into(),
-                message: format!("upstream {SECRET} failed"),
-            },
-        ];
-        for error in &errors {
-            assert!(
-                error.to_string().contains(SECRET),
-                "the error itself carries it"
-            );
-            // what `record_failure` appends, at a fixed instant
-            append_event_at(
-                EventType::Books {
-                    chain_id: ChainId::BASE,
-                    step: BookStep::CheckFailed {
-                        failure: error.kind(),
-                    },
-                },
-                at_minute(1),
-            )
-            .unwrap();
-        }
+        let config = pool_config();
+        append_event_at(
+            fee_earned(ChainId::BASE, usdc_micro(400), Some(20)),
+            at_minute(1),
+        )
+        .unwrap();
         let count = crate::storage::events::event_count();
-        let page = crate::storage::events::events_page(0, count);
-        assert_eq!(page.len() as u64, count);
-        let failures: Vec<_> = page
-            .iter()
-            .filter_map(|event| match &event.payload {
-                EventType::Books {
-                    step: BookStep::CheckFailed { failure },
-                    ..
-                } => Some(*failure),
-                _ => None,
-            })
-            .collect();
+        // at block 10 the fee from block 20 is not in the balance yet: nothing is short
+        keep_read(
+            &config,
+            ChainId::BASE,
+            BlockNumber::new(10),
+            TokenAmount::ZERO,
+            at_minute(2),
+        )
+        .unwrap();
         assert_eq!(
-            failures,
-            vec![
-                ReadFailure::Unreachable,
-                ReadFailure::Http { status: 401 },
-                ReadFailure::Provider
-            ]
+            crate::storage::events::event_count(),
+            count,
+            "no news, no line"
         );
-        for event in page {
-            let wire = settlement_api::types::events::Event::from(event.clone());
-            let rendered = format!("{event:?} {wire:?}");
-            let bytes = minicbor::to_vec(&event.payload).unwrap();
-            for secret in [SECRET, "sk-live", "alchemy"] {
-                assert!(!rendered.contains(secret), "{rendered}");
-                assert!(!bytes
-                    .windows(secret.len())
-                    .any(|window| window == secret.as_bytes()));
-            }
-        }
+        assert_eq!(
+            timer_state::get().books_reads[&ChainId::BASE].read_at(),
+            Some(at_minute(2))
+        );
+        let unseen = || read_state(|state| state.book(&ChainId::BASE).unseen_fees.0.len());
+        assert_eq!(unseen(), 1, "the fee is still unseen at block 10");
+        // at block 20 it is in the balance, and leaves the list
+        keep_read(
+            &config,
+            ChainId::BASE,
+            BlockNumber::new(20),
+            usdc_micro(400),
+            at_minute(3),
+        )
+        .unwrap();
+        assert_eq!(crate::storage::events::event_count(), count);
+        assert_eq!(unseen(), 0);
+        // a read further back is refused and keeps nothing
+        assert_eq!(
+            keep_read(
+                &config,
+                ChainId::BASE,
+                BlockNumber::new(19),
+                usdc_micro(400),
+                at_minute(4)
+            ),
+            Err(ReadFailure::Behind)
+        );
+        assert_eq!(
+            timer_state::get().books_reads[&ChainId::BASE].read_at(),
+            Some(at_minute(3))
+        );
+        // a donation is news: a line, then the same surplus again is none
+        keep_read(
+            &config,
+            ChainId::BASE,
+            BlockNumber::new(30),
+            usdc_micro(900),
+            at_minute(5),
+        )
+        .unwrap();
+        assert_eq!(crate::storage::events::event_count(), count + 1);
+        keep_read(
+            &config,
+            ChainId::BASE,
+            BlockNumber::new(40),
+            usdc_micro(900),
+            at_minute(6),
+        )
+        .unwrap();
+        assert_eq!(crate::storage::events::event_count(), count + 1);
+        // a shortfall is always a line, and pauses the pool
+        keep_read(
+            &config,
+            ChainId::BASE,
+            BlockNumber::new(50),
+            TokenAmount::ZERO,
+            at_minute(7),
+        )
+        .unwrap();
+        assert_eq!(crate::storage::events::event_count(), count + 2);
+        assert_eq!(
+            status(false, at_minute(8)),
+            Err(PoolClosed::Shortfall(ChainId::BASE))
+        );
     });
+}
+
+/// Only the pool chain's fees carry their block: no other chain is checked, so another
+/// chain's fee would sit in its unseen list for good.
+#[test]
+fn only_the_pool_chains_fees_wait_for_a_check() {
+    let tx = TxHash::new([9; 32]);
+    let block = BlockNumber::new(7);
+    let fee = TokenAmount::from(5_u8);
+    let with_block = |chain| match super::fee_earned(chain, Some(ChainId::BASE), tx, block, fee) {
+        BookStep::FeeEarned { block, .. } => block,
+        _ => unreachable!(),
+    };
+    assert_eq!(with_block(ChainId::BASE), Some(block));
+    assert_eq!(with_block(ChainId::ARBITRUM), None);
+}
+
+/// Whole USDC, in micro-USDC.
+fn usdc_micro(amount: u64) -> TokenAmount {
+    TokenAmount::from(amount * 1_000_000)
 }
 
 fn fee_earned(chain_id: ChainId, amount: TokenAmount, block: Option<u64>) -> EventType {

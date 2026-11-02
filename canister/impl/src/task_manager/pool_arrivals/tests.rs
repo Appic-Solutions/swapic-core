@@ -23,10 +23,10 @@ fn a_read_covers_at_most_five_hundred_blocks_from_its_cursor() {
         range(Some(block(9_950)), Some(7), block(10_000)),
         Some((block(9_950), block(10_000)))
     );
-    // a cursor older than the lookback: from the lookback
+    // a cursor far behind: from the block after it, never skipped ahead
     assert_eq!(
         range(Some(block(1)), None, block(10_000)),
-        Some((block(9_400), block(9_899)))
+        Some((block(2), block(501)))
     );
     // nothing new
     assert_eq!(range(Some(block(10_000)), None, block(10_000)), None);
@@ -203,7 +203,7 @@ impl crate::pool::arrival::FillReads for FakeBase {
 impl BaseReads for FakeBase {
     async fn safe_block(&self) -> Result<BlockNumber, String> {
         // the lookback starts at block 100
-        Ok(BlockNumber::new(100 + MAX_LOOKBACK_BLOCKS))
+        Ok(BlockNumber::new(100 + FIRST_LOOKBACK_BLOCKS))
     }
 
     async fn transfers(&self, from: BlockNumber, to: BlockNumber) -> Result<Value, RpcError> {
@@ -372,6 +372,26 @@ fn no_pass_reads_more_receipts_than_its_cap() {
         let read: std::collections::BTreeSet<TxHash> =
             base.receipts.borrow().iter().copied().collect();
         assert!((0..61).all(|n| read.contains(&tx(n))));
+    });
+}
+
+/// A pass that moved the cursor and left it behind the safe block asks for another at once;
+/// one that caught up, or could not move, does not.
+#[test]
+fn a_pass_behind_asks_for_another_until_caught_up() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let base = FakeBase::default();
+        // the first read from 100: 500 blocks of the 601 to the safe block at 700
+        let first = pass(&base);
+        assert_eq!(first.cursor, Some((BlockNumber::new(599), None)));
+        assert!(first.again);
+        let second = pass(&base);
+        assert_eq!(second.cursor, Some((BlockNumber::new(700), None)));
+        assert!(!second.again, "caught up");
+        let third = pass(&base);
+        assert_eq!(third.cursor, None);
+        assert!(!third.again, "nothing new");
     });
 }
 

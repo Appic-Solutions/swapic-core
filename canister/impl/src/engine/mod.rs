@@ -5,9 +5,9 @@
 //! each asks for. Every line goes through `append_event`, whose guard is the authority (A2).
 //!
 //! Event-driven: every line that moves a step arms one coalesced one-shot drive
-//! ([`arm`]), so a payout moves the moment its last step completes. The repeating tick is
-//! only the backstop, for what no line announces: a call that failed and is worth trying
-//! again.
+//! ([`arm`]), so a payout moves the moment its last step completes. The backstop
+//! (`task_manager::backstop`) comes back while work is open, for what no line announces: a
+//! deadline, or a call that failed and is worth trying again.
 //!
 //! The vault-routed swaps and the ABI v2 ICP flows are gone: the Runner moves the money on
 //! EVM, the outbox moves the relays and the CCTP finishes, and the pool bridges ICP.
@@ -51,7 +51,7 @@ fn still_pending(armed_at: Option<Timestamp>, now: Timestamp) -> bool {
 
 /// Asks for one drive as soon as the current message is done. Coalesced: every line that
 /// moves a step in the same round asks for the same drive. A drive asked for while another
-/// is running runs once that one ends, so no line is ever left to the backstop tick.
+/// is running runs once that one ends, so no line is ever left to the backstop.
 pub fn arm() {
     // unit tests run off the canister, where there is no timer to set
     #[cfg(target_arch = "wasm32")]
@@ -66,9 +66,11 @@ pub fn arm() {
 }
 
 /// The one-shot drive [`arm`] schedules, and once more if a line asked for a drive while
-/// this one could not run.
+/// this one could not run. The backstop is armed first, before any await and on every path,
+/// while work is open.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 async fn drive_now() {
+    crate::task_manager::backstop::arm_if_open();
     if RUNNING.get() {
         AGAIN.set(true);
         return;

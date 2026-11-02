@@ -2,8 +2,10 @@
 //!
 //! A one-shot timer rather than a repeating one, because a canister with nothing in flight
 //! has nothing to do: the pass is armed when a transaction is queued, and it re-arms itself
-//! while the outbox is not empty. `post_upgrade` arms it again if anything is still in
-//! flight, which is rule A9.
+//! while the outbox is not empty: on the batch window while anything waits to go out, else
+//! when the soonest chain's receipts are due (each chain read at its own pace,
+//! `tx::check_open`). `post_upgrade` arms it again if anything is still in flight, which is
+//! rule A9.
 //!
 //! Rule A7: one pass at a time. A pass awaits providers, so a timer that fired while one
 //! was in flight would read the same entries and send them twice; the guard is released on
@@ -16,6 +18,8 @@ use crate::storage::{config, outbox};
 use crate::tx;
 use ic_cdk_timers::TimerId;
 use std::cell::Cell;
+use std::time::Duration;
+use types::tx::MIN_RECEIPT_PACE;
 use types::Timestamp;
 
 thread_local! {
@@ -48,17 +52,43 @@ pub fn is_armed() -> bool {
     still_waiting(due, now)
 }
 
-/// Puts the next pass on the batch window, unless one is already on its way. Called when a
-/// transaction is queued, and again at the end of every pass that leaves work behind.
+/// Puts the next pass on the batch window, unless one is due by then already. Called when a
+/// transaction is queued.
 pub fn arm() {
-    if is_armed() {
-        return;
-    }
+    arm_in(config::get().batch_window);
+}
+
+/// Puts the next pass `delay` from now, unless one is due by then already; one due later
+/// is brought forward, so a send never waits on a chain's slow receipts.
+fn arm_in(delay: Duration) {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let window = config::get().batch_window;
-    let timer = ic_cdk_timers::set_timer(window, || ic_cdk::spawn(run()));
-    let due = Timestamp::from_nanos(now.as_nanos().saturating_add(window.as_nanos() as u64));
+    let due = Timestamp::from_nanos(now.as_nanos().saturating_add(delay.as_nanos() as u64));
+    if let Some((timer, pending)) = FLUSH_TIMER.with(|slot| slot.get()) {
+        if still_waiting(Some(pending), now) {
+            if pending <= due {
+                return;
+            }
+            ic_cdk_timers::clear_timer(timer);
+        }
+    }
+    let timer = ic_cdk_timers::set_timer(delay, || ic_cdk::spawn(run()));
     FLUSH_TIMER.with(|slot| slot.set(Some((timer, due))));
+}
+
+/// How long until the next pass: the batch window while anything waits to go out, else
+/// until the soonest chain's receipts are due (`due`), never sooner than
+/// [`MIN_RECEIPT_PACE`].
+fn next_pass_in(
+    sending: bool,
+    window: Duration,
+    due: Option<Timestamp>,
+    now: Timestamp,
+) -> Duration {
+    if sending {
+        return window;
+    }
+    due.map_or(MIN_RECEIPT_PACE, |due| due.saturating_duration_since(now))
+        .max(MIN_RECEIPT_PACE)
 }
 
 /// Whether a pass still has work: bytes on their way to a chain, or a nonce that was
@@ -98,8 +128,15 @@ async fn run() {
     // it may not touch: a halt with only queued or unsigned work rests until `set_halted`
     // arms it again. The halt is read after the passes, because it can land during their
     // awaits.
-    if outbox::any_sent() || (!is_halted() && work_is_pending()) {
-        arm();
+    let sending = !is_halted()
+        && (outbox::any_queued() || read_state(|state| !state.unsigned_nonces().is_empty()));
+    if outbox::any_sent() || sending {
+        let now = Timestamp::from_nanos(ic_cdk::api::time());
+        let due = crate::storage::timer_state::get()
+            .receipts_due
+            .into_values()
+            .min();
+        arm_in(next_pass_in(sending, config::get().batch_window, due, now));
     }
 }
 

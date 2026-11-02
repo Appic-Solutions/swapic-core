@@ -74,16 +74,35 @@ pub fn require_running() -> Result<(), PoolError> {
 /// chain, a controller's pause, a latched shortfall, stale books), and settings present.
 pub fn pool_closed() -> Option<String> {
     let now = now();
+    let reads = crate::storage::timer_state::get();
     config::with(|config| {
         read_state(|state| {
             // the ledger read once for both
             let pool = state.pool();
             closed_reason(
-                books::pool_status(state, &pool, config, is_halted(), now),
+                books::pool_status(state, &pool, &reads, config, is_halted(), now),
                 &pool,
             )
         })
     })
+}
+
+/// Whether the pool has work open at `now` that a timer must come back to: anything the
+/// payout drive acts on (`payout::Work`), a Base payout not paid, undone or stopped, a
+/// queued payout, or a move not arrived and not stopped for a controller. What waits for
+/// a human keeps no timer running.
+pub fn work_is_open<S: crate::state::Store>(
+    state: &crate::state::State<S>,
+    now: Timestamp,
+) -> bool {
+    let ledger = state.pool();
+    let lines = ledger.lines();
+    !lines.open.is_empty()
+        || lines.queue_len > 0
+        || !payout::Work::of(state, now).is_empty()
+        || rebalance::open_moves(state)
+            .iter()
+            .any(|item| item.stuck.is_none())
 }
 
 /// The pool's guard in the interface's words: `Closed(reason)`.

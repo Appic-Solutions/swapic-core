@@ -325,57 +325,59 @@ fn an_icp_shortfall_closes_the_pool_until_reopened() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
-        record_at(
-            PoolStep::IcpChecked {
-                check: IcpCheck {
-                    observed: usdc(900),
-                    expected: usdc(1_000),
-                    shortfall: true,
-                },
-            },
+        note_icp_check(
+            Ok(IcpCheck {
+                observed: usdc(900),
+                expected: usdc(1_000),
+                shortfall: true,
+            }),
             at(9),
-        )
-        .unwrap();
-        assert!(ledger().icp_shortfall_at.is_some());
-        let books = |step: BookStep, nanos: u64| {
-            append_event_at(
-                EventType::Books {
-                    chain_id: ChainId::BASE,
-                    step,
-                },
-                at(nanos),
-            )
-            .unwrap();
-        };
-        books(
-            BookStep::Checked {
-                check: BalanceCheck {
-                    block: BlockNumber::new(1),
-                    observed: TokenAmount::ZERO,
-                    expected: TokenAmount::ZERO,
-                },
-                shortfall: false,
-            },
-            10,
         );
+        assert!(ledger().icp_shortfall_at.is_some());
+        base_read(10);
         let config = types::Config {
             pool_chain: Some(ChainId::BASE),
             ..types::Config::default()
         };
-        let status = || {
-            read_state(|state| {
-                crate::books::pool_status(state, &state.pool(), &config, false, at(11))
-            })
-        };
-        // the Base books are fresh and sound: the ICP latch alone closes the pool
-        assert_eq!(status(), Err(PoolClosed::IcpShortfall));
+        // the Base reads are fresh and sound: the ICP latch alone closes the pool
+        assert_eq!(status(&config, 11), Err(PoolClosed::IcpShortfall));
         assert_eq!(
-            pool::closed_reason(status(), &ledger()),
+            pool::closed_reason(status(&config, 11), &ledger()),
             Some("the balance check of the ICP pocket found a shortfall".into())
         );
-        books(BookStep::PoolPaused { paused: false }, 12);
-        assert_eq!(status(), Ok(()));
+        append_event_at(
+            EventType::Books {
+                chain_id: ChainId::BASE,
+                step: BookStep::PoolPaused { paused: false },
+            },
+            at(12),
+        )
+        .unwrap();
+        assert_eq!(status(&config, 12), Ok(()));
     });
+}
+
+/// A read of the pool chain's balance that passed at `nanos`, kept as the hourly check
+/// keeps it.
+fn base_read(nanos: u64) {
+    crate::storage::timer_state::update(|state| {
+        state.books_reads.entry(ChainId::BASE).or_default().read = Some((
+            at(nanos),
+            BalanceCheck {
+                block: BlockNumber::new(nanos),
+                observed: TokenAmount::ZERO,
+                expected: TokenAmount::ZERO,
+            },
+        ));
+        ((), true)
+    });
+}
+
+fn status(config: &types::Config, nanos: u64) -> Result<(), PoolClosed> {
+    let reads = crate::storage::timer_state::get();
+    read_state(|state| {
+        crate::books::pool_status(state, &state.pool(), &reads, config, false, at(nanos))
+    })
 }
 
 /// Review fix: a stake whose pull lands while the check's balance read is out is in the lines
@@ -448,61 +450,27 @@ fn a_failed_read_passes_nothing() {
             pool_chain: Some(ChainId::BASE),
             ..types::Config::default()
         };
-        let base_checked = |nanos: u64| {
-            append_event_at(
-                EventType::Books {
-                    chain_id: ChainId::BASE,
-                    step: BookStep::Checked {
-                        check: BalanceCheck {
-                            block: BlockNumber::new(nanos),
-                            observed: TokenAmount::ZERO,
-                            expected: TokenAmount::ZERO,
-                        },
-                        shortfall: false,
-                    },
-                },
-                at(nanos),
-            )
-            .unwrap();
-        };
-        let status = |nanos: u64| {
-            read_state(|state| {
-                crate::books::pool_status(state, &state.pool(), &config, false, at(nanos))
-            })
-        };
-        base_checked(10);
-        assert_eq!(status(11), Err(PoolClosed::IcpNeverChecked));
-        record_at(
-            PoolStep::IcpCheckFailed {
-                failure: types::pool::IcpReadFailure::CallFailed,
-            },
-            at(12),
-        )
-        .unwrap();
-        assert_eq!(status(13), Err(PoolClosed::IcpNeverChecked));
-        record_at(
-            PoolStep::IcpChecked {
-                check: IcpCheck {
-                    observed: usdc(1_000),
-                    expected: usdc(1_000),
-                    shortfall: false,
-                },
-            },
+        base_read(10);
+        assert_eq!(status(&config, 11), Err(PoolClosed::IcpNeverChecked));
+        note_icp_check(Err(IcpReadFailure::CallFailed), at(12));
+        assert_eq!(status(&config, 13), Err(PoolClosed::IcpNeverChecked));
+        note_icp_check(
+            Ok(IcpCheck {
+                observed: usdc(1_000),
+                expected: usdc(1_000),
+                shortfall: false,
+            }),
             at(14),
-        )
-        .unwrap();
-        assert_eq!(status(15), Ok(()));
+        );
+        assert_eq!(status(&config, 15), Ok(()));
         // three intervals of failed reads later
         let later = 14 + interval.as_nanos() as u64 * 3 + 1;
-        base_checked(later - 1);
-        record_at(
-            PoolStep::IcpCheckFailed {
-                failure: types::pool::IcpReadFailure::CallFailed,
-            },
-            at(later - 1),
-        )
-        .unwrap();
-        assert!(matches!(status(later), Err(PoolClosed::IcpStale { .. })));
+        base_read(later - 1);
+        note_icp_check(Err(IcpReadFailure::CallFailed), at(later - 1));
+        assert!(matches!(
+            status(&config, later),
+            Err(PoolClosed::IcpStale { .. })
+        ));
     });
 }
 
@@ -559,85 +527,96 @@ fn a_stopped_payout_is_still_pending_for_the_check() {
     });
 }
 
-/// Review fix (fail-open monitoring): every way the ICP check can fail is a failed check of
-/// its kind, recorded, never a pass and never skipped: no settings, a ledger call that failed
-/// or was refused, and an answer that is no balance the lines hold.
+/// Review fix (fail-open monitoring): every way the ICP check can fail is a failure of its
+/// kind, never a pass: a ledger call that failed or was refused, and an answer that is no
+/// balance the lines hold. A failure writes no line and refreshes nothing the guard reads.
 #[test]
 fn every_failure_of_the_icp_check_is_a_failed_check() {
     let zero = TokenAmount::ZERO;
-    let failed = |failure| PoolStep::IcpCheckFailed { failure };
+    let unknown = Err(crate::ic::CallError::Unknown("rejected".into()));
     assert_eq!(
-        check_step(None, usdc(1), usdc(1), zero),
-        failed(IcpReadFailure::NoSettings)
+        check_of(unknown, usdc(1), usdc(1), zero),
+        Err(IcpReadFailure::CallFailed)
     );
+    let refused = Err(crate::ic::CallError::Refused("no".into()));
     assert_eq!(
-        check_step(
-            Some(Err(crate::ic::CallError::Unknown("rejected".into()))),
-            usdc(1),
-            usdc(1),
-            zero
-        ),
-        failed(IcpReadFailure::CallFailed)
-    );
-    assert_eq!(
-        check_step(
-            Some(Err(crate::ic::CallError::Refused("no".into()))),
-            usdc(1),
-            usdc(1),
-            zero
-        ),
-        failed(IcpReadFailure::CallFailed)
+        check_of(refused, usdc(1), usdc(1), zero),
+        Err(IcpReadFailure::CallFailed)
     );
     // wider than the 128 bits the lines hold: no balance, and never read as a huge one
     let too_wide = Nat::from(u128::MAX) + Nat::from(1_u8);
     assert_eq!(
-        check_step(Some(Ok(too_wide)), usdc(1), usdc(1), zero),
-        failed(IcpReadFailure::BadAnswer)
+        check_of(Ok(too_wide), usdc(1), usdc(1), zero),
+        Err(IcpReadFailure::BadAnswer)
     );
     // a balance read is a check, judged on the lower of the lines
     assert_eq!(
-        check_step(Some(Ok(Nat::from(usdc(1)))), usdc(1), usdc(2), zero),
-        PoolStep::IcpChecked {
-            check: IcpCheck {
-                observed: usdc(1),
-                expected: usdc(1),
-                shortfall: false,
-            },
-        }
+        check_of(Ok(Nat::from(usdc(1))), usdc(1), usdc(2), zero),
+        Ok(IcpCheck {
+            observed: usdc(1),
+            expected: usdc(1),
+            shortfall: false,
+        })
     );
-    // and a failed check refreshes nothing the guard reads
     on_fresh_memory(move || {
         crate::storage::init();
         funded_pool(usdc(1_000));
-        for failure in [
-            IcpReadFailure::NoSettings,
-            IcpReadFailure::CallFailed,
-            IcpReadFailure::BadAnswer,
-        ] {
-            record_at(failed(failure), at(5)).unwrap();
-            assert_eq!(ledger().icp_checked_at, None);
-            assert_eq!(ledger().icp_failed_at, Some(at(5)));
+        let count = crate::storage::events::event_count();
+        for failure in [IcpReadFailure::CallFailed, IcpReadFailure::BadAnswer] {
+            note_icp_check(Err(failure), at(5));
+            let read = crate::storage::timer_state::get().icp_read;
+            assert_eq!(read.read_at(), None);
+            assert_eq!(read.failed_at, Some(at(5)));
         }
+        assert_eq!(crate::storage::events::event_count(), count, "no line");
     });
 }
 
-/// Review fix 14: a check before the pool has settings is recorded as a failed check of its
-/// kind and logs nothing; a read that failed and a shortfall each log a line.
+/// A read that failed and a shortfall each log a line; a read that passed logs none.
 #[test]
-fn a_check_before_settings_logs_nothing() {
+fn a_failed_read_and_a_shortfall_each_log_a_line() {
     let zero = TokenAmount::ZERO;
-    assert_eq!(check_log(&check_step(None, zero, zero, zero)), None);
-    let failed = check_step(
-        Some(Err(crate::ic::CallError::Unknown("rejected".into()))),
+    let failed = check_of(
+        Err(crate::ic::CallError::Unknown("rejected".into())),
         zero,
         zero,
         zero,
     );
     assert!(check_log(&failed).is_some_and(|line| line.contains("CallFailed")));
-    let short = check_step(Some(Ok(Nat::from(1_u8))), usdc(5), usdc(5), zero);
+    let short = check_of(Ok(Nat::from(1_u8)), usdc(5), usdc(5), zero);
     assert!(check_log(&short).is_some_and(|line| line.starts_with("ALERT")));
-    let fine = check_step(Some(Ok(Nat::from(usdc(5)))), usdc(5), usdc(5), zero);
+    let fine = check_of(Ok(Nat::from(usdc(5))), usdc(5), usdc(5), zero);
     assert_eq!(check_log(&fine), None);
+}
+
+/// An ICP read with no news is kept beside the timers and writes no line; a surplus other
+/// than the last one recorded, or a shortfall, is a line.
+#[test]
+fn an_icp_read_with_no_news_writes_no_line() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let count = crate::storage::events::event_count;
+        let start = count();
+        let check = |observed: u64, shortfall: bool| IcpCheck {
+            observed: usdc(observed),
+            expected: usdc(1_000),
+            shortfall,
+        };
+        note_icp_check(Ok(check(1_000, false)), at(1));
+        assert_eq!(count(), start);
+        assert_eq!(
+            crate::storage::timer_state::get().icp_read.read_at(),
+            Some(at(1))
+        );
+        note_icp_check(Ok(check(1_050, false)), at(2));
+        assert_eq!(count(), start + 1, "a new surplus");
+        note_icp_check(Ok(check(1_050, false)), at(3));
+        assert_eq!(count(), start + 1, "the same surplus again");
+        note_icp_check(Ok(check(900, true)), at(4));
+        assert_eq!(count(), start + 2, "a shortfall");
+        assert!(ledger().icp_shortfall_at.is_some());
+    });
 }
 
 /// L-01: before the pool has settings the ICP check records nothing: no failed check lands in

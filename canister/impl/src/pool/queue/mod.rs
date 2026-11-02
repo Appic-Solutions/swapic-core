@@ -1,5 +1,5 @@
-//! The Base payouts' queue, their timeouts and their undo (P11b Task 6), one pass after every
-//! pool movement (the engine's drive) and every minute (the payout timer):
+//! The Base payouts' queue, their timeouts and their undo, one pass after every pool
+//! movement (the engine's drive) and on every backstop tick while one is open:
 //!
 //! - every ICP swap still on its way is driven: a pull whose answer was lost asked again (the
 //!   same pull, within the ledger's deduplication window), its legs, an undo's refund;

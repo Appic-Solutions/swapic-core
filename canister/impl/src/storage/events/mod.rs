@@ -26,8 +26,9 @@ const MAX_PAGE: u64 = 500;
 
 thread_local! {
     // The log is the record and every map below is its fold. All are private, and every
-    // write to them goes through `append_event`, so the fold has exactly one writer. The
-    // retired v1 swaps, pockets and waits held memory ids 6, 7 and 10.
+    // write to them goes through `append_event` but one: `forget_seen`, which drops from the
+    // books' unseen lists what a balance read already holds. The retired v1 swaps, pockets
+    // and waits held memory ids 6, 7 and 10.
     static EVENTS: RefCell<StableLog<Event, Memory, Memory>> = RefCell::new(
         StableLog::init(events_index_memory(), events_data_memory()).expect("event log init"),
     );
@@ -467,12 +468,24 @@ pub fn append_event_at(
     // once the message commits the log and the fold agree
     apply_state_transition(&mut state, &event);
     // the engine acts the moment a step completes: a line that gives a swap its next move
-    // arms one coalesced drive, and the tick is only the backstop. A trap later in this
-    // message rolls the timer back with the line.
+    // arms one coalesced drive, and every pool line arms the backstop, which comes back
+    // while work is open. A trap later in this message rolls the timers back with the line.
     if event.payload.moves_a_step() {
         crate::engine::arm();
     }
+    if matches!(event.payload, EventType::Pool { .. }) {
+        crate::task_manager::backstop::arm();
+    }
     Ok(index)
+}
+
+/// A balance read of `chain_id` at `block` that passed, so no line records it: the fees
+/// and the pool's arrivals booked at or below `block` leave the unseen lists, as a
+/// `Checked` line would drop them. The one write to the fold that is not a line's. It
+/// changes no answer for a read at `block` or above, and the check never reads below the
+/// block it last read at (`LastRead::floor`).
+pub fn forget_seen(chain_id: ChainId, block: types::BlockNumber) {
+    State::new(StableStore(())).seen_through(chain_id, block);
 }
 
 /// Read-only view of the fold. There is deliberately no mutable twin.

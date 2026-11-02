@@ -30,7 +30,8 @@ fn post_upgrade() {
     // rule A9: a transaction signed before the upgrade is still in flight, and the one-shot
     // pass that would have sent it went with the old heap
     task_manager::outbox::arm_if_work_is_pending();
-    // and the engine's one-shot drive went with the old heap: drive once now rather than
-    // leave whatever was mid-step to the backstop tick
+    // and the engine's one-shot drive and backstop went with the old heap: drive once now,
+    // which arms the backstop again while work is open
     crate::engine::arm();
+    task_manager::backstop::arm_if_open();
 }

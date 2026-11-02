@@ -29,17 +29,18 @@ use crate::pool::{self, log, now};
 use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
+use crate::storage::timer_state;
 use candid::{Nat, Principal};
 use settlement_api::types::pool::{
     nat, PoolError, StakeIcpArgs, StakeIcpOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
-use types::books::assess;
+use types::books::{assess, worth_recording};
 use types::pool::rebalance::MoveDirection;
 use types::pool::{
     op_id, payout_ref, DepositStatus, IcpAccount, IcpCheck, IcpReadFailure, PayoutAttempt,
     PayoutPath, PendingOp, PoolAccount, PoolStep, PrincipalBytes, Shares,
 };
-use types::{Address, TokenAmount};
+use types::{Address, Timestamp, TokenAmount};
 
 /// Why the ICP pocket cannot pay a withdrawal now.
 pub const POCKET_SHORT: &str = "the ICP pocket is short; withdrawals queue in P11b";
@@ -479,72 +480,81 @@ pub fn icp_expected<S: Store>(
 
 /// The ICP pocket's balance check: nothing before the pool has settings.
 pub async fn check_icp_pocket(tolerance: TokenAmount) {
-    // before the pool has settings there is no pocket to check and nothing to say, every
-    // interval: no line in the permanent log (L-01)
+    // before the pool has settings there is no pocket to check and nothing to say
     let Some(settings) = pool_store::ledger().settings else {
         return;
     };
     let before = read_state(icp_lines);
-    let answer = Some(
-        ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None)).await,
-    );
+    let answer =
+        ic::icrc1_balance_of(settings.ckusdc_ledger, Account::of(ic_cdk::api::id(), None)).await;
     // the lines read again after the await: the lower of the two is expected
     let after = read_state(icp_lines);
-    let step = check_step(answer, before, after, tolerance);
-    if let Some(line) = check_log(&step) {
-        log(&line);
-    }
-    if let Err(error) = pool_store::record(step) {
-        log(&format!("the ICP pocket's check was not recorded: {error}"));
-    }
+    note_icp_check(check_of(answer, before, after, tolerance), now());
 }
 
-/// The log line one ICP check is worth: a shortfall's alert, and a read that failed. None
-/// before the pool has settings: a pool not set up yet is no news, every interval.
-pub fn check_log(step: &PoolStep) -> Option<String> {
-    match step {
-        PoolStep::IcpChecked { check } if check.shortfall => Some(format!(
+/// Keeps one ICP check at `now`: a read that failed as the time it failed at, a balance read
+/// as the pocket's last read, and in the log as well when it has news
+/// (`types::books::worth_recording`). A shortfall's line latches the pool closed; a line the
+/// log refuses keeps the read out too, so the guard sees the reads go stale.
+pub fn note_icp_check(read: Result<IcpCheck, IcpReadFailure>, now: Timestamp) {
+    if let Some(line) = check_log(&read) {
+        log(&line);
+    }
+    let check = match read {
+        Ok(check) => check,
+        Err(_) => {
+            timer_state::update(|state| {
+                state.icp_read.failed_at = Some(now);
+                ((), true)
+            });
+            return;
+        }
+    };
+    let recorded = pool_store::ledger().icp_check.map(|last| last.surplus());
+    if worth_recording(recorded, check.surplus(), check.shortfall) {
+        if let Err(error) = pool_store::record_at(PoolStep::IcpChecked { check }, now) {
+            log(&format!("the ICP pocket's check was not recorded: {error}"));
+            return;
+        }
+    }
+    timer_state::update(|state| {
+        state.icp_read.read = Some((now, check));
+        ((), true)
+    });
+}
+
+/// The log line one ICP check is worth: a shortfall's alert, and a read that failed.
+pub fn check_log(read: &Result<IcpCheck, IcpReadFailure>) -> Option<String> {
+    match read {
+        Ok(check) if check.shortfall => Some(format!(
             "ALERT: the ICP pocket holds {} ckUSDC and {} is expected; the pool closes",
             check.observed, check.expected
         )),
-        PoolStep::IcpCheckFailed {
-            failure: IcpReadFailure::NoSettings,
-        } => None,
-        PoolStep::IcpCheckFailed { failure } => Some(format!(
+        Ok(_) => None,
+        Err(failure) => Some(format!(
             "the ICP pocket's balance was not read: {failure:?}"
         )),
-        _ => None,
     }
 }
 
-/// What one ICP check records from what it read (`None`: no settings, so no ledger to ask):
-/// a failed check, of its kind, for no settings, a call that failed, and an answer that is
-/// no balance the lines hold; never a pass. Otherwise the balance judged against the lower
-/// of the lines read before and after the read.
-pub fn check_step(
-    answer: Option<Result<Nat, ic::CallError>>,
+/// What one ICP check read: a failure of its kind for a call that failed and an answer that
+/// is no balance the lines hold, never a pass. Otherwise the balance judged against the
+/// lower of the lines read before and after the read.
+pub fn check_of(
+    answer: Result<Nat, ic::CallError>,
     before: TokenAmount,
     after: TokenAmount,
     tolerance: TokenAmount,
-) -> PoolStep {
-    let failed = |failure| PoolStep::IcpCheckFailed { failure };
-    let balance = match answer {
-        None => return failed(IcpReadFailure::NoSettings),
-        Some(Err(_)) => return failed(IcpReadFailure::CallFailed),
-        Some(Ok(balance)) => balance,
-    };
-    let Some(observed) = TokenAmount::try_from(balance)
+) -> Result<IcpCheck, IcpReadFailure> {
+    let balance = answer.map_err(|_| IcpReadFailure::CallFailed)?;
+    let observed = TokenAmount::try_from(balance)
         .ok()
         .filter(|amount| amount.try_into_u128().is_some())
-    else {
-        return failed(IcpReadFailure::BadAnswer);
-    };
+        .ok_or(IcpReadFailure::BadAnswer)?;
     let (expected, shortfall) = judge(before, after, observed, tolerance);
-    PoolStep::IcpChecked {
-        check: IcpCheck {
-            observed,
-            expected,
-            shortfall,
-        },
-    }
+    Ok(IcpCheck {
+        observed,
+        expected,
+        shortfall,
+    })
 }

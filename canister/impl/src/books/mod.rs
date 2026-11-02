@@ -1,5 +1,5 @@
-//! The books' side of the canister: the balance check, and the fees read off the receipts
-//! of what the canister signed.
+//! The books' side of the canister: the hourly balance check, and the fees read off the
+//! receipts of what the canister signed.
 
 #[cfg(test)]
 mod tests;
@@ -10,10 +10,13 @@ use crate::guards::require_not_halted;
 use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::halt::is_halted;
-use crate::storage::{chain_data, config};
+use crate::storage::{config, timer_state};
 use crate::tx::credit_confirmations;
 use serde_json::Value;
-use types::books::{assess, pool_open, BalanceCheck, BookStep, PoolClosed, ReadFailure};
+use types::books::{
+    assess, pool_open, worth_recording, BalanceCheck, BookStep, PoolClosed, ReadFailure,
+};
+use types::timer_state::{LastRead, TimerState};
 use types::{BlockNumber, ChainId, EventType, EvmAddress, Timestamp, TokenAmount, TxHash};
 
 /// Appends one step of `chain_id`'s books.
@@ -50,29 +53,45 @@ pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
         .unwrap_or(TokenAmount::MAX)
 }
 
+/// The line that books `fee` withheld in `tx_hash`, whose receipt is in `block`. Only the
+/// pool chain's balance is checked, so only its fees carry the block a check waits for;
+/// another chain's would sit in its unseen list for good.
+pub fn fee_earned(
+    chain_id: ChainId,
+    pool_chain: Option<ChainId>,
+    tx_hash: TxHash,
+    block: BlockNumber,
+    fee: TokenAmount,
+) -> BookStep {
+    BookStep::FeeEarned {
+        tx_hash,
+        amount: fee,
+        block: (pool_chain == Some(chain_id)).then_some(block),
+    }
+}
+
 /// Credits `fee` withheld in `tx_hash`, whose receipt is in `block`, to `chain_id`'s fee
 /// income. A line the books refuse leaves the fee as surplus, which halts nothing.
 pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: TokenAmount) {
     if fee == TokenAmount::ZERO {
         return;
     }
+    let pool_chain = config::with(|config| config.pool_chain);
     if let Err(error) = record(
         chain_id,
-        BookStep::FeeEarned {
-            tx_hash,
-            amount: fee,
-            block: Some(block),
-        },
+        fee_earned(chain_id, pool_chain, tx_hash, block, fee),
     ) {
         ic_cdk::println!("fee {fee} of {tx_hash} on chain {chain_id} not booked: {error}");
     }
 }
 
-/// Whether the pool may move money at `now`, read from the fold: the guard every pool
-/// outflow calls first, which fails closed (`types::books::pool_open`).
+/// Whether the pool may move money at `now`, read from the fold and the pockets' balance
+/// reads (`reads`): the guard every pool outflow calls first, which fails closed
+/// (`types::books::pool_open`).
 pub fn pool_status<S: Store>(
     state: &State<S>,
     pool: &types::pool::PoolLedger,
+    reads: &TimerState,
     config: &types::Config,
     halted: bool,
     now: Timestamp,
@@ -81,7 +100,7 @@ pub fn pool_status<S: Store>(
         halted,
         config.pool_chain,
         &state.meta(),
-        config.pool_chain.map(|chain| state.book(&chain)),
+        |chain| reads.books_reads.get(&chain).and_then(LastRead::read_at),
         config.books_check_interval.0,
         now,
     )?;
@@ -93,7 +112,10 @@ pub fn pool_status<S: Store>(
     }
     if pool.settings.is_some() {
         let interval = config.books_check_interval.0;
-        let checked_at = pool.icp_checked_at.ok_or(PoolClosed::IcpNeverChecked)?;
+        let checked_at = reads
+            .icp_read
+            .read_at()
+            .ok_or(PoolClosed::IcpNeverChecked)?;
         let since = now.saturating_duration_since(checked_at);
         if since > interval.saturating_mul(types::books::STALE_INTERVALS) {
             return Err(PoolClosed::IcpStale { since, interval });
@@ -103,54 +125,56 @@ pub fn pool_status<S: Store>(
 }
 
 /// The pool's guard, now: refused on a halt, a missing pool chain, a controller's pause, a
-/// latched shortfall, or the pool chain's books not read within three check intervals,
-/// before the first check included. Every pool outflow calls it first.
+/// latched shortfall, or the pool chain's balance not read within three check intervals,
+/// before the first read included. Every pool outflow calls it first.
 pub fn require_pool_open() -> Result<(), PoolClosed> {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
+    let reads = timer_state::get();
     config::with(|config| {
-        read_state(|state| pool_status(state, &state.pool(), config, is_halted(), now))
+        read_state(|state| pool_status(state, &state.pool(), &reads, config, is_halted(), now))
     })
 }
 
-/// Records a balance check that could not read the balance: a failure is a line in the
-/// log, never a skip, and it refreshes nothing the guard reads. Only its kind is recorded
-/// or printed, never an error's text, which can carry the provider's url and its key.
-pub fn record_failure(chain_id: ChainId, failure: ReadFailure) {
+/// A balance read of `chain_id` that read no balance: printed, of its kind only (never an
+/// error's text, which can carry the provider's url and its key), and kept as the time it
+/// failed at. It refreshes nothing the guard reads.
+fn read_failed(chain_id: ChainId, failure: ReadFailure, now: Timestamp) {
     ic_cdk::println!("the balance check on chain {chain_id} failed: {failure:?}");
-    if let Err(error) = record(chain_id, BookStep::CheckFailed { failure }) {
-        ic_cdk::println!("the failed check on chain {chain_id} was not recorded: {error}");
-    }
+    timer_state::update(|state| {
+        state.books_reads.entry(chain_id).or_default().failed_at = Some(now);
+        ((), true)
+    });
 }
 
-/// The balance check, every `books_check_interval`: the pool's ICP pocket
-/// (`pool::icp::check_icp_pocket`), then per chain the canister signs on, the
-/// canister's USDC read at a confirmed block (the freshest pushed head less the chain's
-/// crediting depth) beside what the lines expect. It records what it saw and never books it;
-/// only a shortfall beyond the tolerance pauses the pool. A chain whose balance cannot be
-/// read is recorded as a failed check, so the pool's guard sees its books go stale.
-pub async fn check_balances() {
+/// The hourly balance check: the pool's ICP pocket (`pool::icp::check_icp_pocket`), then
+/// the pool chain's USDC read at a confirmed block (its own head less the crediting depth)
+/// beside what the lines expect. It never books what it saw; only a shortfall beyond the
+/// tolerance pauses the pool. A read that passed is kept beside the timers, and one with
+/// news goes to the log (`types::books::worth_recording`).
+pub async fn check_pool_books() {
     if require_not_halted().is_err() {
         return;
     }
     let config = config::get();
     // the ICP pocket's own check, which needs no EVM address
     crate::pool::icp::check_icp_pocket(config.books_tolerance.0).await;
-    let chains: Vec<(ChainId, EvmAddress)> = config
-        .evm_chains
-        .0
-        .iter()
-        .map(|(chain_id, chain)| (*chain_id, chain.usdc))
-        .collect();
-    let Ok(mine) = ecdsa::canister_address().await else {
-        for (chain_id, _) in chains {
-            record_failure(chain_id, ReadFailure::NoCanisterAddress);
-        }
+    let Some(chain_id) = config.pool_chain else {
         return;
     };
-    for (chain_id, usdc) in chains {
-        if let Err(failure) = check_balance(&config, chain_id, usdc, mine).await {
-            record_failure(chain_id, failure);
-        }
+    let Some(usdc) = config.evm_chains.0.get(&chain_id).map(|chain| chain.usdc) else {
+        ic_cdk::println!("the pool chain {chain_id} is not in the chain table: nothing to check");
+        return;
+    };
+    let read = match ecdsa::canister_address().await {
+        Ok(mine) => check_balance(&config, chain_id, usdc, mine).await,
+        Err(_) => Err(ReadFailure::NoCanisterAddress),
+    };
+    if let Err(failure) = read {
+        read_failed(
+            chain_id,
+            failure,
+            Timestamp::from_nanos(ic_cdk::api::time()),
+        );
     }
 }
 
@@ -185,7 +209,7 @@ pub fn expected_at<S: Store>(
     assess(lines, observed, tolerance)
 }
 
-/// One chain's balance check, or the kind of failure that read no balance.
+/// The pool chain's balance check, or the kind of failure that read no balance.
 async fn check_balance(
     config: &types::Config,
     chain_id: ChainId,
@@ -195,11 +219,9 @@ async fn check_balance(
     if !config.rpc_urls.contains_key(&chain_id) {
         return Err(ReadFailure::NoRpcUrl);
     }
-    let now = Timestamp::from_nanos(ic_cdk::api::time());
-    let head = chain_data::fresh(chain_id, now).ok_or(ReadFailure::NoChainData)?;
     let depth = credit_confirmations(config, chain_id).map_err(|_| ReadFailure::NoDepth)?;
+    let head = crate::rpc::head(chain_id).await?;
     let block = head
-        .block
         .get()
         .checked_sub(depth.get())
         .ok_or(ReadFailure::BelowDepth)?;
@@ -210,35 +232,76 @@ async fn check_balance(
         Ok(answer) => TokenAmount::from_be_bytes(answer.word().ok_or(ReadFailure::BadAnswer)?),
         Err(error) => return Err(error.kind()),
     };
-    // the lines as they stand now, after the read's await
-    let (expected, shortfall) = read_state(|state| {
-        expected_at(
+    keep_read(
+        config,
+        chain_id,
+        block,
+        observed,
+        Timestamp::from_nanos(ic_cdk::api::time()),
+    )
+}
+
+/// Keeps one balance read of `chain_id`, `observed` at `block`, made by `now`: refused
+/// below the last read's block; judged against the lines as they stand; in the log when it
+/// has news, a shortfall latching the pool's pause; otherwise only the unseen lists drop
+/// what it holds. Then it is the chain's last read, unless the log refused its line.
+pub fn keep_read(
+    config: &types::Config,
+    chain_id: ChainId,
+    block: BlockNumber,
+    observed: TokenAmount,
+    now: Timestamp,
+) -> Result<(), ReadFailure> {
+    // the unseen lists hold nothing at or below the last read any more, so a read further
+    // back would expect money its balance cannot hold yet
+    if timer_state::get()
+        .books_reads
+        .get(&chain_id)
+        .and_then(LastRead::floor)
+        .is_some_and(|floor| block < floor)
+    {
+        return Err(ReadFailure::Behind);
+    }
+    let (check, shortfall, recorded) = read_state(|state| {
+        let (expected, shortfall) = expected_at(
             state,
             chain_id,
             config.pool_chain,
             block,
             observed,
             config.books_tolerance.0,
-        )
-    });
-    let step = BookStep::Checked {
-        check: BalanceCheck {
+        );
+        let check = BalanceCheck {
             block,
             observed,
             expected,
-        },
-        shortfall,
-    };
-    if let Err(error) = record(chain_id, step) {
-        // the log refused the line itself: nothing more can be recorded now, and the
-        // guard sees these books go stale
-        ic_cdk::println!("the balance check on chain {chain_id} was not recorded: {error}");
-        return Ok(());
+        };
+        let recorded = state.book(&chain_id).last_check.map(|last| last.surplus());
+        (check, shortfall, recorded)
+    });
+    if worth_recording(recorded, check.surplus(), shortfall) {
+        let line = EventType::Books {
+            chain_id,
+            step: BookStep::Checked { check, shortfall },
+        };
+        if let Err(error) = crate::storage::events::append_event_at(line, now) {
+            // the log refused the line: the read is not kept either, so the guard sees the
+            // pool chain's reads go stale
+            ic_cdk::println!("the balance check on chain {chain_id} was not recorded: {error}");
+            return Ok(());
+        }
+        if shortfall {
+            ic_cdk::println!(
+                "shortfall on chain {chain_id}: {observed} at block {block}, {} expected; the pool is paused",
+                check.expected
+            );
+        }
+    } else {
+        crate::storage::events::forget_seen(chain_id, block);
     }
-    if shortfall {
-        ic_cdk::println!(
-            "shortfall on chain {chain_id}: {observed} at block {block}, {expected} expected; the pool is paused"
-        );
-    }
+    timer_state::update(|state| {
+        state.books_reads.entry(chain_id).or_default().read = Some((now, check));
+        ((), true)
+    });
     Ok(())
 }

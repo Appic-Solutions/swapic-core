@@ -456,6 +456,21 @@ pub async fn rpc_batch(
     parse_batch(&body, &methods)
 }
 
+/// The chain's head, as one provider answers `eth_blockNumber`, or the kind of failure.
+pub async fn head(chain_id: ChainId) -> Result<BlockNumber, types::books::ReadFailure> {
+    rpc_batch(
+        chain_id,
+        &[("eth_blockNumber", json!([]))],
+        MAX_BLOCK_NUMBER_BYTES,
+    )
+    .await
+    .map_err(|error| error.kind())?
+    .first()
+    .and_then(Value::as_str)
+    .and_then(parse_block_number)
+    .ok_or(types::books::ReadFailure::BadAnswer)
+}
+
 /// What an agreed read keeps of one call's answer, so every node's answer reduces to the
 /// same bytes whatever else its provider wrote: one byte per call in the transform's
 /// context.

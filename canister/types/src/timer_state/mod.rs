@@ -1,15 +1,19 @@
 //! What the canister's doors and timers remember between calls (C-09): the arrival reports
 //! let through for callers other than the watcher, when each Eco move to Base was last looked
-//! for on the Portals, the books' last read for a move and the pockets it saw, and the queue's
-//! head already alerted on. In stable memory like all the canister's state, so an upgrade
-//! forgets none of it: no extra burst of reports, no extra Portal read, no repeated alert.
+//! for on the Portals, the books' last read for a move and the pockets it saw, the queue's
+//! head already alerted on, the backup scan's cursor, the pockets' last balance reads, and
+//! when each chain's receipts are read next. In stable memory like all the canister's state,
+//! so an upgrade forgets none of it: no extra burst of reports, no extra Portal read, no
+//! repeated alert.
 
 #[cfg(test)]
 mod tests;
 
+use crate::books::BalanceCheck;
+use crate::chain::ChainId;
 use crate::hash::{PoolRef, TxHash};
 use crate::numeric::{BlockNumber, Timestamp};
-use crate::pool::Pockets;
+use crate::pool::{IcpCheck, Pockets};
 use minicbor::{Decode, Encode};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -88,6 +92,56 @@ pub struct TimerState {
     /// How far the canister's own read of Base got.
     #[n(4)]
     pub scan_cursor: Option<ScanCursor>,
+    /// The pool chain's balance reads, by chain: a read that passed is kept here and nowhere
+    /// else.
+    #[n(5)]
+    pub books_reads: BTreeMap<ChainId, LastRead<BalanceCheck>>,
+    /// The ICP pocket's balance reads.
+    #[n(6)]
+    pub icp_read: LastRead<IcpCheck>,
+    /// When the outbox reads each chain's receipts next.
+    #[n(7)]
+    pub receipts_due: BTreeMap<ChainId, Timestamp>,
+}
+
+/// A pocket's balance reads: the last one that read a balance, and when one last failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct LastRead<C> {
+    /// When the last read that read a balance was made, and what it read.
+    #[n(0)]
+    pub read: Option<(Timestamp, C)>,
+    #[n(1)]
+    pub failed_at: Option<Timestamp>,
+}
+
+impl<C> Default for LastRead<C> {
+    fn default() -> Self {
+        Self {
+            read: None,
+            failed_at: None,
+        }
+    }
+}
+
+impl<C: Copy> LastRead<C> {
+    /// When a balance was last read.
+    pub fn read_at(&self) -> Option<Timestamp> {
+        self.read.map(|(at, _)| at)
+    }
+
+    /// What the last read read.
+    pub fn last(&self) -> Option<C> {
+        self.read.map(|(_, check)| check)
+    }
+}
+
+impl LastRead<BalanceCheck> {
+    /// The block no read may go below: the last one a read was made at. A read there
+    /// dropped the fees and arrivals at or below it from the books' unseen lists, so a read
+    /// further back would expect what it cannot hold.
+    pub fn floor(&self) -> Option<BlockNumber> {
+        self.last().map(|check| check.block)
+    }
 }
 
 /// Where the canister's own read of Base stands: every transfer at or before it is done.

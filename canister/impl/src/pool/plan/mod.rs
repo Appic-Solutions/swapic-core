@@ -145,10 +145,9 @@ pub fn count_try(id: u64, why: String, now: Timestamp) {
 }
 
 /// Signs the plan fitted for payout `id`, its caller holding the payout (the door's drive,
-/// the pass): a refusal (a halt, the gas rule, a stale reading) is a try counted (the
-/// review, 2026-10-24: else the pass refits it every minute, a scaler read each time, and
-/// the watcher's relist never comes), and leaves it waiting for an order, logged. Answers
-/// whether it was signed.
+/// the pass): a refusal (a halt, the gas rule, a stale reading) is a try counted (else every
+/// pass refits it, a scaler read each time, and the watcher's relist never comes), and
+/// leaves it waiting for an order, logged. Answers whether it was signed.
 pub async fn sign_fitted(
     held: &crate::pool::payout::Busy,
     id: u64,

@@ -1,4 +1,4 @@
-//! The open moves, a step each, every minute (the rebalancing's timer): a route decided when
+//! The open moves, a step each, on every rebalance tick (the backstop's): a route decided when
 //! the window ends, the pinned order signed (and signed again, the same order, after a
 //! revert), the ck minter asked, the landing on Ethereum read, an Eco fill found and its ck
 //! deposit made, the rebalance subaccount swept. A move's own transactions close in the

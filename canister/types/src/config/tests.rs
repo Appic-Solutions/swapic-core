@@ -138,39 +138,27 @@ fn validate_rejects_a_mainnet_crediting_depth_below_the_floor() {
     assert_eq!(shallow_elsewhere.validate(), Ok(()));
 }
 
-/// Only a moved interval restarts its timer, and past a minute the backstop knob moves no
-/// drive: the backstop's period is a minute either way.
+/// Only a moved check interval restarts the hourly pass; the backstop, a one-shot, restarts
+/// nothing.
 #[test]
-fn interval_changes_flags_each_timer_for_its_own_interval_only() {
+fn interval_changes_flag_the_hourly_pass_for_its_own_interval_only() {
     let base = Config::default();
-    let changes = |new: Config| {
-        let c = base.interval_changes(&new);
-        (c.backstop, c.books)
-    };
+    let changes = |new: Config| base.interval_changes(&new).books;
     let unrelated = Config {
         max_batch_items: 20,
         ..Config::default()
     };
-    assert_eq!(changes(unrelated), (false, false));
+    assert!(!changes(unrelated));
     let backstop = Config {
         backstop_interval: Duration::from_secs(31),
         ..Config::default()
     };
-    assert_eq!(changes(backstop), (true, false));
+    assert!(!changes(backstop));
     let books = Config {
         books_check_interval: BooksInterval(Duration::from_secs(1_800)),
         ..Config::default()
     };
-    assert_eq!(changes(books), (false, true));
-    let slow = Config {
-        backstop_interval: Duration::from_secs(600),
-        ..Config::default()
-    };
-    let slower = Config {
-        backstop_interval: Duration::from_secs(900),
-        ..Config::default()
-    };
-    assert!(!slow.interval_changes(&slower).backstop);
+    assert!(changes(books));
 }
 
 /// The backstop drives on the interval the config names, at most every minute, and on the

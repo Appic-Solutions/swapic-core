@@ -8,8 +8,8 @@ use types::pool::{
     CreditKey, EvmPayout, NonceUse, PoolLedger, PoolLookup, PoolStep, Registered, ShareLine, Shares,
 };
 use types::{
-    ChainId, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp, TokenAmount,
-    TxHash, UnsignedTx,
+    BlockNumber, ChainId, EventIndex, Flow, LedgerMeta, Nonce, NonceKey, QuoteHash, Timestamp,
+    TokenAmount, TxHash, UnsignedTx,
 };
 
 pub mod transitions;
@@ -578,19 +578,24 @@ impl<S: Store> State<S> {
         self.store.book(chain_id).unwrap_or_default()
     }
 
+    /// A balance read of `chain_id` at `block`: the fees and the pool's arrivals booked at
+    /// or below it are in that balance, so neither list keeps them.
+    pub(crate) fn seen_through(&mut self, chain_id: ChainId, block: BlockNumber) {
+        let books = self.book(&chain_id).seen_through(block);
+        self.store.put_book(chain_id, books);
+        let pool = self.store.pool_ledger().seen_through(chain_id, block);
+        self.store.put_pool_ledger(pool);
+    }
+
     /// A step of a chain's books, sealed at `at`. A shortfall latches the pool's pause,
     /// and nothing else; a controller pauses the pool or reopens it, which also clears a
     /// latched shortfall it has looked at.
     fn record_books(&mut self, chain_id: ChainId, step: &BookStep, at: Timestamp) {
-        let books = self.book(&chain_id).apply(step, at);
+        let books = self.book(&chain_id).apply(step);
         self.store.put_book(chain_id, books);
-        // the pool's arrivals on this chain at or below the block a check read are in the
-        // balance it read; a controller's reopening clears the ICP latch with the Base one
+        // a controller's reopening clears the ICP latch with the Base one
         match step {
-            BookStep::Checked { check, .. } => {
-                let pool = self.store.pool_ledger().seen_through(chain_id, check.block);
-                self.store.put_pool_ledger(pool);
-            }
+            BookStep::Checked { check, .. } => self.seen_through(chain_id, check.block),
             BookStep::PoolPaused { paused: false } => {
                 let pool = self.store.pool_ledger().reopened();
                 self.store.put_pool_ledger(pool);

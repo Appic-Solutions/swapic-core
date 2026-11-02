@@ -217,8 +217,7 @@ pub struct PoolSettings {
     pub premium_bps: u16,
     pub ckusdc_ledger: Principal,
     pub icp_tokens: Vec<IcpTokenEntry>,
-    /// The canister's own Base read, its backup of the reports (default 300). (P11d drops
-    /// the registrations' knobs: `deposit_grace_s`, `max_open_per_payer`, `max_held_bps`.)
+    /// How often the canister reads Base itself, its backup of the reports (default 3,600).
     pub arrival_backup_s: u64,
     /// Off until a controller opens the pool for swaps.
     pub pool_open_for_swaps: bool,

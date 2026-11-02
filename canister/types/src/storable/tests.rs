@@ -521,8 +521,6 @@ fn samples() -> Vec<Sample> {
                     observed: TokenAmount::from(742_259_u32),
                     expected: TokenAmount::from(742_261_u32),
                 }),
-                checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_001)),
-                failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_002)),
                 unseen_fees: crate::books::UnseenFees(vec![crate::books::BookedFee {
                     block: BlockNumber::new(23_600_001),
                     amount: TokenAmount::from(157_740_u32),
@@ -1167,7 +1165,7 @@ fn resolved_payout_samples() -> Vec<Sample> {
 fn timer_state_samples() -> Vec<Sample> {
     use crate::hash::{PoolRef, TxHash};
     use crate::pool::{Pocket, Pockets};
-    use crate::timer_state::{Limiter, ScanCursor, TimerState};
+    use crate::timer_state::{LastRead, Limiter, ScanCursor, TimerState};
     let at = |n: u64| Timestamp::from_nanos(1_800_000_000_000_001_500 + n);
     vec![sample(
         "the doors' and timers' memory",
@@ -1197,6 +1195,32 @@ fn timer_state_samples() -> Vec<Sample> {
                 block: BlockNumber::new(37_000_203),
                 log: Some(204),
             }),
+            books_reads: BTreeMap::from([(
+                ChainId::BASE,
+                LastRead {
+                    read: Some((
+                        at(5),
+                        crate::books::BalanceCheck {
+                            block: BlockNumber::new(37_000_206),
+                            observed: TokenAmount::from(1_507_u32),
+                            expected: TokenAmount::from(1_508_u32),
+                        },
+                    )),
+                    failed_at: Some(at(9)),
+                },
+            )]),
+            icp_read: LastRead {
+                read: Some((
+                    at(10),
+                    crate::pool::IcpCheck {
+                        observed: TokenAmount::from(1_511_u32),
+                        expected: TokenAmount::from(1_512_u32),
+                        shortfall: true,
+                    },
+                )),
+                failed_at: Some(at(13)),
+            },
+            receipts_due: BTreeMap::from([(ChainId::ETHEREUM, at(14))]),
         },
     )]
 }
@@ -3001,8 +3025,6 @@ fn pool_samples() -> Vec<Sample> {
             expected: TokenAmount::from(161_u8),
             shortfall: true,
         }),
-        icp_checked_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_162)),
-        icp_failed_at: Some(Timestamp::from_nanos(1_800_000_000_000_000_163)),
         // empty, so this sample's bytes stay the ones the golden pins; the ledger appended
         // at the end of the pool's samples pins it
         queue: crate::pool::PayoutQueue::default(),

@@ -675,11 +675,11 @@ pub enum ConfigError {
     },
 }
 
-/// Which timer intervals a config write moved, so only those timers restart.
+/// Which repeating timers a config write moved, so only those restart. The backstop is a
+/// one-shot that reads its interval each time it arms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntervalChanges {
-    /// The engine's backstop, which runs on [`Config::engine_every`].
-    pub backstop: bool,
+    /// The hourly pass, on `books_check_interval`.
     pub books: bool,
 }
 
@@ -815,8 +815,6 @@ impl Config {
     /// Which timer intervals `new` moves, one flag per timer.
     pub fn interval_changes(&self, new: &Config) -> IntervalChanges {
         IntervalChanges {
-            // the backstop's period, not its knob: past a minute the knob moves no drive
-            backstop: self.engine_every() != new.engine_every(),
             books: self.books_check_interval != new.books_check_interval,
         }
     }

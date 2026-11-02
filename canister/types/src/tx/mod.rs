@@ -341,4 +341,30 @@ pub fn is_confirmed(block: BlockNumber, latest: BlockNumber, depth: BlockDepth) 
     confirmations.is_some_and(|confirmations| confirmations >= depth.get().max(1))
 }
 
+/// The soonest the outbox reads a chain's receipts again.
+pub const MIN_RECEIPT_PACE: Duration = Duration::from_secs(2);
+
+/// How many blocks an entry waits before a read can decide anything new about it: one while
+/// no receipt is seen, else the confirmations still missing below `depth` (the swap depth
+/// for an open attempt, the crediting depth for a closed one), and at least one.
+pub fn blocks_to_wait(landed: Option<BlockNumber>, latest: BlockNumber, depth: BlockDepth) -> u64 {
+    let Some(block) = landed else {
+        return 1;
+    };
+    let seen = latest.get().saturating_sub(block.get()).saturating_add(1);
+    depth.get().saturating_sub(seen).max(1)
+}
+
+/// When a chain's receipts are read next: `blocks` of its block time after `now`, and never
+/// sooner than [`MIN_RECEIPT_PACE`].
+pub fn next_receipt_read(now: Timestamp, block_time: Duration, blocks: u64) -> Timestamp {
+    let wait = block_time
+        .saturating_mul(u32::try_from(blocks).unwrap_or(u32::MAX))
+        .max(MIN_RECEIPT_PACE);
+    Timestamp::from_nanos(
+        now.as_nanos()
+            .saturating_add(u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX)),
+    )
+}
+
 crate::storable_as_cbor!(OutboxEntry);

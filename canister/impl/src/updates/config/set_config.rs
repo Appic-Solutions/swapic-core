@@ -16,13 +16,11 @@ pub fn set_config(new: Config) -> Result<(), SetConfigError> {
         StoreError::Invalid(e) => SetConfigError::InvalidConfig(e.into()),
         StoreError::Append(e) => SetConfigError::Append(e.into()),
     })?;
-    // after the write, so a timer reads its new interval; only a moved interval restarts,
-    // because a restart pushes the next run a whole interval out
-    if changed.backstop {
-        task_manager::restart_rail_status_timer();
-    }
+    // after the write, so the timer reads its new interval; only a moved interval restarts,
+    // because a restart pushes the next run a whole interval out. The backstop reads its
+    // interval each time it arms
     if changed.books {
-        task_manager::restart_books_timer();
+        task_manager::restart_hourly_timer();
     }
     Ok(())
 }

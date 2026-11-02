@@ -42,7 +42,7 @@ mod tests;
 
 use crate::ic::{self, Account, CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
-use crate::state::Store;
+use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
@@ -1800,38 +1800,7 @@ pub async fn drive_with(
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
     let now = clock();
-    let work = read_state(|state| {
-        let ledger = state.store().pool_ledger();
-        let mut work = Work::default();
-        for (id, op) in &ledger.pending {
-            match op {
-                // a pull too old to deduplicate is a human's (`resolve_stake`)
-                PendingOp::Stake { created_at, .. }
-                    if now.saturating_duration_since(*created_at) < DEDUP_WINDOW =>
-                {
-                    work.pulls.push(*id)
-                }
-                PendingOp::Stake { .. } => {}
-                PendingOp::Withdraw { payout, .. } if payout.failed.is_none() => {
-                    work.withdrawals.push(*id)
-                }
-                PendingOp::Withdraw { .. } => {}
-            }
-        }
-        // a payout stopped for a human stays in `paying` for the ICP check, and is not driven
-        for r#ref in &ledger.paying {
-            let Some(deposit) = state.store().pool_deposit(r#ref) else {
-                continue;
-            };
-            match (&deposit.status, deposit.terms.kind.is_swap()) {
-                (DepositStatus::Arrived, false) => work.mints.push(*r#ref),
-                (DepositStatus::Paying, true) => work.started.push(*r#ref),
-                _ => {}
-            }
-        }
-        work.queue = ledger.queue.0.iter().map(|(r#ref, _)| *r#ref).collect();
-        work
-    });
+    let work = read_state(|state| Work::of(state, now));
     let mut acted = 0;
     let mut tally = |stop: Option<Stop>, id: PoolRef, counts: bool| match stop {
         None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => acted += 1,
@@ -1907,10 +1876,57 @@ pub async fn drive_with(
 
 /// What one drive works through, read once at its start.
 #[derive(Default)]
-struct Work {
+pub struct Work {
     pulls: Vec<PoolOpId>,
     mints: Vec<PoolRef>,
     started: Vec<PoolRef>,
     queue: Vec<PoolRef>,
     withdrawals: Vec<PoolOpId>,
+}
+
+impl Work {
+    /// What the pool owes at `now` that a drive acts on: the ICP stakes' pulls young enough
+    /// to ask again, the arrived stakes' mints, the swaps' payouts started, the queue, and
+    /// the withdrawals. Whatever is held for a human is left out.
+    pub fn of<S: Store>(state: &State<S>, now: Timestamp) -> Self {
+        let ledger = state.store().pool_ledger();
+        let mut work = Work::default();
+        for (id, op) in &ledger.pending {
+            match op {
+                // a pull too old to deduplicate is a human's (`resolve_stake`)
+                PendingOp::Stake { created_at, .. }
+                    if now.saturating_duration_since(*created_at) < DEDUP_WINDOW =>
+                {
+                    work.pulls.push(*id)
+                }
+                PendingOp::Stake { .. } => {}
+                PendingOp::Withdraw { payout, .. } if payout.failed.is_none() => {
+                    work.withdrawals.push(*id)
+                }
+                PendingOp::Withdraw { .. } => {}
+            }
+        }
+        // a payout stopped for a human stays in `paying` for the ICP check, and is not driven
+        for r#ref in &ledger.paying {
+            let Some(deposit) = state.store().pool_deposit(r#ref) else {
+                continue;
+            };
+            match (&deposit.status, deposit.terms.kind.is_swap()) {
+                (DepositStatus::Arrived, false) => work.mints.push(*r#ref),
+                (DepositStatus::Paying, true) => work.started.push(*r#ref),
+                _ => {}
+            }
+        }
+        work.queue = ledger.queue.0.iter().map(|(r#ref, _)| *r#ref).collect();
+        work
+    }
+
+    /// Whether a drive has nothing to act on.
+    pub fn is_empty(&self) -> bool {
+        self.pulls.is_empty()
+            && self.mints.is_empty()
+            && self.started.is_empty()
+            && self.queue.is_empty()
+            && self.withdrawals.is_empty()
+    }
 }

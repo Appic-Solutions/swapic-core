@@ -394,7 +394,7 @@ pub struct PoolSettings {
     /// The most of the ICP pocket held for open swaps at once.
     #[n(7)]
     pub max_held_bps: u16,
-    /// How often the canister reads Base itself while registrations wait.
+    /// How often the canister reads Base itself, its backup of the reports.
     #[n(8)]
     pub arrival_backup: Duration,
     #[n(9)]
@@ -471,7 +471,7 @@ impl Default for PoolSettings {
             deposit_grace: Duration::from_secs(120),
             max_open_per_payer: 3,
             max_held_bps: 5_000,
-            arrival_backup: Duration::from_secs(300),
+            arrival_backup: Duration::from_secs(3_600),
             open_for_swaps: false,
             ledger_fees: Vec::new(),
             routes: None,
@@ -1347,7 +1347,7 @@ pub struct UnseenArrival {
     pub amount: TokenAmount,
 }
 
-/// The ICP pocket's last balance check.
+/// One balance check of the ICP pocket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct IcpCheck {
     #[n(0)]
@@ -1359,18 +1359,25 @@ pub struct IcpCheck {
 }
 
 /// Why the ICP pocket's check read no balance: a fixed kind, never a callee's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
-#[cbor(index_only)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IcpReadFailure {
-    /// The pool has no settings, so no ledger to read.
-    #[n(0)]
-    NoSettings,
     /// The ledger call failed or was refused.
-    #[n(1)]
     CallFailed,
     /// The answer is no balance the pool's lines hold (wider than 128 bits).
-    #[n(2)]
     BadAnswer,
+}
+
+impl IcpCheck {
+    /// `observed - expected`, which a donation makes positive.
+    pub fn surplus(&self) -> i128 {
+        let signed = |amount: TokenAmount| {
+            amount
+                .try_into_u128()
+                .and_then(|value| i128::try_from(value).ok())
+                .unwrap_or(i128::MAX)
+        };
+        signed(self.observed).saturating_sub(signed(self.expected))
+    }
 }
 
 /// One step of the pool, as the log records it.
@@ -1613,18 +1620,12 @@ pub enum PoolStep {
         #[n(8)]
         move_fee: TokenAmount,
     },
-    /// The ICP pocket's balance check.
+    /// The ICP pocket's balance check, when it found a shortfall or a surplus other than
+    /// the last one recorded.
     #[n(18)]
     IcpChecked {
         #[n(0)]
         check: IcpCheck,
-    },
-    /// The ICP pocket's balance check read no balance, and why: it passes nothing, and the
-    /// pool's guard sees the pocket's check go stale.
-    #[n(19)]
-    IcpCheckFailed {
-        #[n(0)]
-        failure: IcpReadFailure,
     },
     /// The ICPSwap leg's pool was approved for its amount in: one more ckUSDC fee spent.
     #[n(21)]
@@ -2238,7 +2239,6 @@ impl PoolStep {
             PoolStep::StakeFailed { .. } => "StakeFailed",
             PoolStep::WithdrawStarted { .. } => "WithdrawStarted",
             PoolStep::IcpChecked { .. } => "IcpChecked",
-            PoolStep::IcpCheckFailed { .. } => "IcpCheckFailed",
             PoolStep::SwapApproved { .. } => "SwapApproved",
             PoolStep::SwapUndone { .. } => "SwapUndone",
             PoolStep::PayoutSettingsSet { .. } => "PayoutSettingsSet",
@@ -2364,8 +2364,8 @@ impl PoolStep {
                 | PoolStep::StakeStarted { .. }
                 | PoolStep::WithdrawStarted { .. }
                 // the Base payouts: an ICP swap's next step and USDC freed on Base for the
-                // queue. A revert's retry waits for the payout timer, so an order that keeps
-                // reverting is signed at most once a minute
+                // queue. A revert's retry waits for the backstop, so an order that keeps
+                // reverting is signed at most once a backstop interval
                 | PoolStep::PayoutPulled { .. }
                 | PoolStep::PayoutUndoing { .. }
                 | PoolStep::PayoutUndone { .. }

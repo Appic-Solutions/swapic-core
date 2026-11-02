@@ -285,3 +285,46 @@ fn a_replacement_of_a_closed_entry_stays_closed() {
     );
     assert_eq!(replacement.closed_at, Some(BlockNumber::new(23_600_001)));
 }
+
+/// A read is worth making once the next thing to decide can have happened: a block after a
+/// send with no receipt, the confirmations still missing for one that landed.
+#[test]
+fn an_entry_waits_for_the_blocks_its_next_decision_needs() {
+    let block = BlockNumber::new;
+    let depth = BlockDepth::new;
+    assert_eq!(blocks_to_wait(None, block(100), depth(12)), 1);
+    // landed at 95, seen at 100: six confirmations of twelve
+    assert_eq!(blocks_to_wait(Some(block(95)), block(100), depth(12)), 6);
+    assert_eq!(
+        blocks_to_wait(Some(block(89)), block(100), depth(12)),
+        1,
+        "deep enough"
+    );
+    assert_eq!(
+        blocks_to_wait(Some(block(101)), block(100), depth(1)),
+        1,
+        "a lagging head"
+    );
+}
+
+/// The pace is the chain's own: block time times the blocks to wait, and never quicker than
+/// every two seconds.
+#[test]
+fn receipts_are_read_at_the_chains_pace_and_never_quicker_than_two_seconds() {
+    let now = Timestamp::from_secs(1_800_000_000).unwrap();
+    let after = |next: Timestamp| next.saturating_duration_since(now);
+    let ethereum = Duration::from_secs(12);
+    assert_eq!(after(next_receipt_read(now, ethereum, 1)), ethereum);
+    assert_eq!(
+        after(next_receipt_read(now, ethereum, 6)),
+        Duration::from_secs(72)
+    );
+    let base = Duration::from_secs(2);
+    assert_eq!(after(next_receipt_read(now, base, 1)), MIN_RECEIPT_PACE);
+    let arbitrum = Duration::from_millis(250);
+    assert_eq!(after(next_receipt_read(now, arbitrum, 3)), MIN_RECEIPT_PACE);
+    assert_eq!(
+        after(next_receipt_read(now, arbitrum, 20)),
+        Duration::from_secs(5)
+    );
+}

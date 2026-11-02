@@ -56,6 +56,16 @@ pub fn any_sent() -> bool {
     })
 }
 
+/// Whether any entry waits to go out: queued, or queued again to be re-sent.
+pub fn any_queued() -> bool {
+    OUTBOX.with(|outbox| {
+        outbox
+            .borrow()
+            .iter()
+            .any(|(_, entry)| entry.status == OutboxStatus::Queued)
+    })
+}
+
 /// The entry sent for `purpose`, if one is still out: an entry whose attempt has closed is
 /// kept only for its bytes, and is not. A walk of the outbox, which is small by
 /// construction (see [`chains`]): what the pull door asks before it sends a second pull

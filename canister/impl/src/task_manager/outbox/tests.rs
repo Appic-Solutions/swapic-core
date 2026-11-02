@@ -54,3 +54,23 @@ fn a_timer_whose_window_has_passed_no_longer_holds_the_slot() {
         "and one due exactly now is firing, so the next pass is armed on its own window"
     );
 }
+
+/// A pass with sends waiting comes back on the batch window; one with only receipts to read
+/// comes back when the soonest chain is due, never sooner than two seconds.
+#[test]
+fn the_next_pass_comes_on_the_window_or_at_the_soonest_chain_due() {
+    let now = Timestamp::from_nanos(10_000_000_000);
+    let window = Duration::from_millis(2_000);
+    let in_secs = |secs: u64| Timestamp::from_nanos(now.as_nanos() + secs * 1_000_000_000);
+    assert_eq!(next_pass_in(true, window, Some(in_secs(60)), now), window);
+    assert_eq!(
+        next_pass_in(false, window, Some(in_secs(60)), now),
+        Duration::from_secs(60),
+        "an Ethereum entry waiting for its depth wakes nothing in between"
+    );
+    assert_eq!(
+        next_pass_in(false, window, Some(now), now),
+        MIN_RECEIPT_PACE
+    );
+    assert_eq!(next_pass_in(false, window, None, now), MIN_RECEIPT_PACE);
+}

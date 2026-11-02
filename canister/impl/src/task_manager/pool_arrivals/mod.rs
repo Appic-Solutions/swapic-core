@@ -1,9 +1,10 @@
 //! The canister's own read of Base (spec section 5), always on once the pool has settings
 //! (P11d: no registration says when a deposit is on its way): in case the watcher stopped,
-//! every `arrival_backup` the USDC transfers to the canister's address are read from a
-//! stored cursor, at most 500 blocks a call (half as many, and half again, while the answer
-//! is too large), and each one's transaction goes through the same proof as
-//! `note_pool_arrival`. It has no terms: a deposit's transfer it proves waits 24 hours for
+//! every `arrival_backup` (an hour) the USDC transfers to the canister's address are read
+//! from a stored cursor, at most 500 blocks a pass (half as many, and half again, while the
+//! answer is too large), and each one's transaction goes through the same proof as
+//! `note_pool_arrival`. A pass that moved the cursor and left it behind the safe block is
+//! followed by another a second later, until the read is caught up. It has no terms: a deposit's transfer it proves waits 24 hours for
 //! them (anyone may hand them over), then is held for a controller. For CCTP and same-chain
 //! deposits only: an Eco proof needs the source transaction, which only the watcher brings.
 //!
@@ -45,9 +46,9 @@ use types::{BlockNumber, ChainId, Timestamp, TokenAmount, TxHash};
 /// The most blocks one `eth_getLogs` reads.
 pub const MAX_LOG_BLOCKS: u64 = 500;
 
-/// How far back a read starts when its cursor is older than this: about 20 minutes of Base
-/// blocks, longer than any registration waits (15 minutes and the grace).
-pub const MAX_LOOKBACK_BLOCKS: u64 = 600;
+/// How far back the first read starts, before there is a cursor: about 20 minutes of Base
+/// blocks. A cursor however far behind is read on from where it stands.
+pub const FIRST_LOOKBACK_BLOCKS: u64 = 600;
 
 /// The most one `eth_getLogs` answer may be.
 const MAX_LOGS_BYTES: u64 = 256 * 1024;
@@ -76,20 +77,18 @@ pub fn has_work<S: Store>(store: &S) -> bool {
 }
 
 /// The blocks the next read covers: after the cursor, from its own block when it stands
-/// inside one (`log`), or from the lookback when the cursor is older; at most
-/// [`MAX_LOG_BLOCKS`], none above `safe`.
+/// inside one (`log`), or from [`FIRST_LOOKBACK_BLOCKS`] back when there is no cursor yet;
+/// at most [`MAX_LOG_BLOCKS`], none above `safe`.
 pub fn range(
     cursor: Option<BlockNumber>,
     log: Option<u64>,
     safe: BlockNumber,
 ) -> Option<(BlockNumber, BlockNumber)> {
-    let floor = safe.get().saturating_sub(MAX_LOOKBACK_BLOCKS);
     let from = match (cursor, log) {
         (Some(at), Some(_)) => at.get(),
         (Some(at), None) => at.get().saturating_add(1),
-        (None, _) => floor,
-    }
-    .max(floor);
+        (None, _) => safe.get().saturating_sub(FIRST_LOOKBACK_BLOCKS),
+    };
     let to = from.saturating_add(MAX_LOG_BLOCKS - 1).min(safe.get());
     (from <= to).then(|| (BlockNumber::new(from), BlockNumber::new(to)))
 }
@@ -249,13 +248,9 @@ pub struct LiveBase<'a>(pub &'a PoolChain);
 impl BaseReads for LiveBase<'_> {
     async fn safe_block(&self) -> Result<BlockNumber, String> {
         let chain = self.0;
-        let head = rpc::rpc_batch(chain.chain, &[("eth_blockNumber", json!([]))], 512)
+        let head = rpc::head(chain.chain)
             .await
-            .map_err(|error| format!("{:?}", error.kind()))?
-            .first()
-            .and_then(Value::as_str)
-            .and_then(parse_block_number)
-            .ok_or("the head does not read")?;
+            .map_err(|failure| format!("the head: {failure:?}"))?;
         let depth = crate::tx::credit_confirmations(&config::get(), chain.chain)
             .map_err(|_| "no depth")?
             .get()
@@ -314,18 +309,22 @@ pub async fn run_backup() {
     let Ok(chain) = arrival::pool_chain().await else {
         return;
     };
-    if let Err(why) = backup(&LiveBase(&chain), &chain, crate::pool::now).await {
-        crate::pool::log(&format!("the pool's own read of Base stopped: {why}"));
+    match backup(&LiveBase(&chain), &chain, crate::pool::now).await {
+        Ok(report) if report.again => crate::task_manager::read_base_again(),
+        Ok(_) => {}
+        Err(why) => crate::pool::log(&format!("the pool's own read of Base stopped: {why}")),
     }
 }
 
 /// What one pass did: the receipts it read, where it left the cursor (a block, and the log
-/// of it the read is done through when it stands inside it), and its alert lines.
+/// of it the read is done through when it stands inside it), its alert lines, and whether
+/// another pass should follow at once (it moved the cursor and left it behind).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
     pub receipts: usize,
     pub cursor: Option<(BlockNumber, Option<u64>)>,
     pub alerts: Vec<String>,
+    pub again: bool,
 }
 
 impl PassReport {
@@ -455,5 +454,9 @@ pub async fn backup(
     if let Some((block, log)) = report.cursor {
         advance_cursor(ScanCursor { block, log });
     }
+    let after = crate::storage::timer_state::get().scan_cursor;
+    let moved = after.map(|at| at.position()) > stored.map(|at| at.position());
+    report.again =
+        moved && range(after.map(|at| at.block), after.and_then(|at| at.log), safe).is_some();
     Ok(report)
 }
