@@ -219,6 +219,8 @@ fn world_settled(world: World) -> World {
         pool_open_for_swaps: true,
         large_deposit_usdc: None,
         large_deposit_confirmations: None,
+        least_move_fee_base_to_icp: None,
+        least_move_fee_icp_to_base: None,
     };
     let set: Result<(), PoolError> = update(
         &world.pic,
@@ -287,6 +289,7 @@ impl World {
             },
             amount: TokenAmount::from(amount),
             created_at: self.now(),
+            move_fee: types::TokenAmount::ZERO,
         });
         self.plant(PoolStep::StakedIcp {
             id,
@@ -315,6 +318,7 @@ impl World {
             expires_at: self.now().checked_add(Duration::from_secs(600)).unwrap(),
             salt: [salt; 32],
             icp_fees: swap.then_some(TokenAmount::from(FEE)),
+            least_usdc: types::TokenAmount::ZERO,
         };
         let r#ref = terms.pool_ref().unwrap();
         self.plant(PoolStep::Registered {
@@ -577,6 +581,7 @@ fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
                 owner: staker(),
                 subaccount: None,
             }),
+            move_fee: candid::Nat::from(0_u8),
         })
         .unwrap(),
     );
@@ -610,6 +615,7 @@ fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
                 owner: staker(),
                 subaccount: None,
             },
+            move_fee: candid::Nat::from(0_u8),
         })
         .unwrap(),
     );
@@ -647,6 +653,7 @@ fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
                 owner: staker(),
                 subaccount: None,
             },
+            move_fee: candid::Nat::from(0_u8),
         })
         .unwrap(),
     );
@@ -703,6 +710,7 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
         pool_move_finish: None,
         pool_ck_deposit: None,
         eco_rescue: None,
+        sweep: None,
     };
     EvmChainConfig {
         swapic: "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406".to_string(),
@@ -726,11 +734,13 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
             pool_move_finish: None,
             pool_ck_deposit: None,
             eco_rescue: None,
+            sweep: None,
         },
         gas_budget_wei: amounts(100_000_000_000_000_000),
         min_network_fee: amounts(0),
         usdc_domain_name: None,
         usdc_domain_version: None,
+        block_time_ms: 2_000,
     }
 }
 
@@ -755,6 +765,7 @@ fn usdc_plan(canister: types::EvmAddress, payout: u64, deadline_s: u64) -> Vec<u
             recipient: addr(to),
             minOut: U256::from(usdc(1)),
         },
+        memo: Default::default(),
     })
 }
 
@@ -809,6 +820,7 @@ fn swap_world() -> (World, types::EvmAddress) {
         expires_at: world.now().checked_add(Duration::from_secs(600)).unwrap(),
         salt: [0x71; 32],
         icp_fees: None,
+        least_usdc: types::TokenAmount::ZERO,
     };
     let r#ref = stake.pool_ref().unwrap();
     world.plant(PoolStep::Registered {
@@ -938,6 +950,7 @@ fn kyber_plan(canister: types::EvmAddress, deadline_s: u64) -> Vec<u8> {
             recipient: addr(to),
             minOut: U256::from(200_000_000_000_000_000_u64),
         },
+        memo: Default::default(),
     })
 }
 
@@ -947,7 +960,7 @@ const PAYS_501_65: u64 = 502_202_203;
 impl World {
     /// A fresh Base reading: a transaction is priced from it.
     fn push_reading(&self) {
-        crate::client::settlement::push_chain_data(
+        crate::client::settlement::test_put_reading(
             &self.pic,
             self.canister,
             crate::settlement_suite::init::watcher(),
@@ -958,7 +971,7 @@ impl World {
                 priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
             },
         )
-        .expect("the watcher may push");
+        .expect("the watcher may store a reading");
     }
 
     /// The next outcall whose calls are exactly `methods`, after the rounds it takes.
@@ -1408,6 +1421,7 @@ fn a_caller_past_five_calls_a_minute_is_refused_with_nothing_written() {
                 owner: staker(),
                 subaccount: None,
             }),
+            move_fee: candid::Nat::from(0_u8),
         })
         .unwrap(),
     );
@@ -1440,9 +1454,7 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
     use pocket_ic::common::rest::{
         CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
     };
-    use settlement_api::types::pool::{
-        PoolArrival, PoolArrivalOutcome, PoolDepositKind, PoolTerms,
-    };
+    use settlement_api::types::pool::{PoolArrival, PoolArrivalOutcome};
     let world = signing_world(
         usdc(1_000),
         Config {
@@ -1485,17 +1497,19 @@ fn a_pool_arrivals_receipt_is_read_by_every_node() {
             base_tx: vec![0xab; 32],
             src_chain: BASE,
             src_tx: vec![],
-            terms: PoolTerms {
-                kind: PoolDepositKind::Stake {
-                    owner: PoolAccount::Evm(
-                        "0x1111111111111111111111111111111111111111".to_string(),
-                    ),
-                },
-                premium: Nat::from(0_u32),
-                icp_fees: Nat::from(0_u32),
-                move_fee: Nat::from(0_u32),
-                salt: vec![7; 32],
-            },
+            // an EVM stake's memo, version 1: kind 1, its salt, a least of zero, the owner
+            // 0x11..11, a move fee of zero
+            memo: Some(
+                [
+                    vec![0x01, 0x01],
+                    vec![7; 32],
+                    vec![0; 16],
+                    vec![0x01],
+                    vec![0x11; 20],
+                    vec![0; 16],
+                ]
+                .concat(),
+            ),
         };
         let call = world
             .pic
@@ -1730,6 +1744,7 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
         },
         amount: TokenAmount::from(usdc(100)),
         created_at,
+        move_fee: types::TokenAmount::ZERO,
     });
     // the pull landed: the staker's 100 ckUSDC are the canister's
     let block = world.pull_as_canister(staker(), usdc(100), id.into_bytes(), created_at.as_nanos());

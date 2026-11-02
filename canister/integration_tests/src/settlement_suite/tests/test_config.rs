@@ -36,7 +36,7 @@ fn logged_json(config: &Config) -> String {
 /// The knob the launch config actually moves.
 fn with_fee(bps: u16) -> Config {
     Config {
-        platform_fee_bps: bps,
+        max_batch_items: u32::from(bps),
         ..Config::default()
     }
 }
@@ -156,7 +156,7 @@ fn set_config_rejects_a_round_tripped_redacted_config() {
     let written = events(&pic, canister, admin).len();
 
     let mut round_tripped = get_config(&pic, canister, admin);
-    round_tripped.platform_fee_bps = 20;
+    round_tripped.max_batch_items = 20;
     let err = set_config(&pic, canister, admin, &round_tripped).unwrap_err();
     assert_eq!(
         err,
@@ -167,29 +167,6 @@ fn set_config_rejects_a_round_tripped_redacted_config() {
     // the real url is still in place and the rejected write left no event behind
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), real);
     assert_eq!(events(&pic, canister, admin).len(), written);
-}
-
-#[test]
-fn set_config_rejects_an_incoherent_fee_and_writes_nothing() {
-    let (pic, canister, admin) = setup();
-    let before = events(&pic, canister, admin);
-    let bad = Config {
-        platform_fee_bps: 40,
-        max_fee_bps: 30,
-        ..Config::default()
-    };
-    let err = set_config(&pic, canister, admin, &bad).unwrap_err();
-    assert_eq!(
-        err,
-        SetConfigError::InvalidConfig(ConfigError::PlatformFeeAboveMax {
-            platform_fee_bps: 40,
-            max_fee_bps: 30
-        }),
-        "the error must name the field"
-    );
-
-    assert_eq!(get_config(&pic, canister, admin), Config::default());
-    assert_eq!(events(&pic, canister, admin), before);
 }
 
 /// `events_page` is a public query, so anything in the log is public.

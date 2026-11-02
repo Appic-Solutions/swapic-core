@@ -6,8 +6,8 @@
 //! transaction that is not signed is not a transaction.
 
 use crate::client::settlement::{
-    append, derive_evm_address, events_page, evm_address, push_chain_data, set_halted,
-    test_outbox_armed, test_send, verify_replay,
+    append, derive_evm_address, events_page, evm_address, set_halted, test_outbox_armed,
+    test_put_reading, test_send,
 };
 use crate::settlement_suite::init::{install, quoter, upgrade, watcher};
 use candid::{encode_args, Nat, Principal};
@@ -52,6 +52,7 @@ fn outbox_config() -> Config {
         pool_move_finish: None,
         pool_ck_deposit: None,
         eco_rescue: None,
+        sweep: None,
     };
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
@@ -72,6 +73,7 @@ fn outbox_config() -> Config {
                 min_network_fee: ActionAmounts::default(),
                 usdc_domain_name: None,
                 usdc_domain_version: None,
+                block_time_ms: 2_000,
             },
         )]),
         ..Config::default()
@@ -119,7 +121,7 @@ fn setup() -> (PocketIc, Principal, Principal) {
 /// Keeps the chain reading young: a transaction is priced from it, and the default
 /// `chain_data_max_age` is ten seconds.
 fn push_reading(pic: &PocketIc, canister: Principal) {
-    push_chain_data(
+    test_put_reading(
         pic,
         canister,
         watcher(),
@@ -130,7 +132,7 @@ fn push_reading(pic: &PocketIc, canister: Principal) {
             priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
         },
     )
-    .expect("the watcher may push");
+    .expect("the watcher may store a reading");
 }
 
 fn send(
@@ -427,10 +429,6 @@ fn two_sends_for_one_swap_that_interleave_at_the_signature_allocate_once() {
     assert!(
         of_kind(events(&pic, canister), is_cancelled).is_empty(),
         "nothing was stranded, so nothing was cancelled"
-    );
-    assert!(
-        verify_replay(&pic, canister, Principal::anonymous()),
-        "the log still folds to the live fold"
     );
 }
 
@@ -809,10 +807,6 @@ fn a_refused_signature_leaves_the_nonce_unsigned_and_blocks_no_later_send() {
         vec![(BASE, 0), (BASE, 1)],
         "the next send took the next number"
     );
-    assert!(
-        verify_replay(&pic, canister, Principal::anonymous()),
-        "the log still folds to the live fold"
-    );
 }
 
 /// The repair rule A5 asks for: a number that was handed out and lost its transaction is
@@ -862,10 +856,6 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
         params(sends[0], 0),
         json!([format!("0x{}", hex::encode(&raw_tx))]),
         "the bytes broadcast are the bytes the log recorded"
-    );
-    assert!(
-        verify_replay(&pic, canister, Principal::anonymous()),
-        "the log still folds to the live fold"
     );
 
     // and the number is spent, not given back: the next send takes the one after it
@@ -1379,10 +1369,6 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
         ))),
         "the number this signature was made for is gone"
     );
-    assert!(
-        verify_replay(&pic, canister, Principal::anonymous()),
-        "the log still folds to the live fold"
-    );
 
     // the outbox holds exactly the cancel: its bytes are what is broadcast
     let pending = pic.get_canister_http();
@@ -1424,7 +1410,6 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
         vec![(BASE, 0), (BASE, 1)],
         "the allocator moved on past the cancelled number"
     );
-    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 
 /// Each cancel of a pass reads the clock for itself. The cancels before it each awaited a
@@ -1480,7 +1465,6 @@ fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
         vec![0, 1],
         "nothing was abandoned"
     );
-    assert!(verify_replay(&pic, canister, Principal::anonymous()));
 }
 
 /// The system refusing an answer bigger than the cap the outcall reserved, which is how an

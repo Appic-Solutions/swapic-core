@@ -1,14 +1,9 @@
-use crate::client::settlement::{
-    event_count, events_page, get_config_full, push_chain_data, verify_chain, verify_replay,
-};
-use crate::settlement_suite::init::{
-    empty_canister, init_arg, install, quoter, rail_usdc, watcher,
-};
+use crate::client::settlement::{event_count, events_page, get_config_full, test_put_reading};
+use crate::settlement_suite::init::{empty_canister, init_arg, install, quoter, watcher};
 use candid::{encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::chain_data::ChainData;
 use settlement_api::types::config::Config;
-use settlement_api::types::errors::{GuardError, PushChainDataError, Role};
 use settlement_api::types::events::EventType;
 use settlement_api::types::init::InitArg;
 use std::collections::BTreeMap;
@@ -33,10 +28,9 @@ fn an_install_with_an_invalid_arg_is_refused() {
         pic.add_cycles(canister, 100_000_000_000_000);
         canister
     };
-    let incoherent_fee = InitArg {
+    let slow_backstop = InitArg {
         config: Config {
-            platform_fee_bps: 40,
-            max_fee_bps: 30,
+            backstop_interval_s: 3_600,
             ..Config::default()
         },
         ..init_arg()
@@ -48,21 +42,13 @@ fn an_install_with_an_invalid_arg_is_refused() {
         },
         ..init_arg()
     };
-    let empty_vault = InitArg {
-        config: Config {
-            vault_addresses: BTreeMap::from([(8453, String::new())]),
-            ..Config::default()
-        },
-        ..init_arg()
-    };
     let anonymous_quoter = InitArg {
         quoter: Principal::anonymous(),
         ..init_arg()
     };
     for (arg, why) in [
-        (incoherent_fee, "platform_fee_bps"),
+        (slow_backstop, "backstop_interval_s"),
         (redacted_url, "rpc_urls[1]"),
-        (empty_vault, "vault_addresses[8453]"),
         (anonymous_quoter, "anonymous"),
     ] {
         let canister = fresh();
@@ -95,11 +81,8 @@ fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
     let (pic, canister, admin) = empty_canister();
     // the rails' USDC is named, which the store pins a registered quote's tokens to
     let config = Config {
-        platform_fee_bps: 10,
         rpc_urls: BTreeMap::from([(1, "https://eth.example/v2/secret-key".to_string())]),
-        vault_addresses: BTreeMap::from([(8453, "0xvault".to_string())]),
         ecdsa_key_name: "key_1".to_string(),
-        usdc_addresses: rail_usdc(),
         ..Config::default()
     };
     let arg = InitArg {
@@ -117,14 +100,10 @@ fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
         priority_fee_wei_per_gas: 100_000_000_u64.into(),
     };
     let stranger = Principal::from_slice(&[9; 29]);
+    assert!(test_put_reading(&pic, canister, admin, 8453, &reading)
+        .is_err_and(|why| why.contains("CallerNotRole")));
     assert_eq!(
-        push_chain_data(&pic, canister, admin, 8453, &reading),
-        Err(PushChainDataError::Guard(GuardError::CallerNotRole(
-            Role::Watcher
-        )))
-    );
-    assert_eq!(
-        push_chain_data(&pic, canister, watcher(), 8453, &reading),
+        test_put_reading(&pic, canister, watcher(), 8453, &reading),
         Ok(())
     );
 
@@ -148,6 +127,4 @@ fn a_fresh_install_has_the_args_config_roles_and_audit_events() {
             },
         ]
     );
-    assert!(verify_chain(&pic, canister, stranger));
-    assert!(verify_replay(&pic, canister, stranger));
 }

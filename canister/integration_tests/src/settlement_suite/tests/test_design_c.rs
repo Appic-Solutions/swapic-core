@@ -9,7 +9,7 @@
 //! simulates nothing of its own.
 
 use crate::client::pocket::{query, update};
-use crate::client::settlement::{derive_evm_address, push_chain_data};
+use crate::client::settlement::{derive_evm_address, test_put_reading};
 use crate::settlement_suite::init::{init_arg, install, quoter, watcher};
 use alloy_primitives::U256;
 use alloy_sol_types::SolCall;
@@ -80,6 +80,7 @@ fn chain(usdc: &str) -> EvmChainConfig {
         pool_move_finish: None,
         pool_ck_deposit: None,
         eco_rescue: None,
+        sweep: None,
     };
     EvmChainConfig {
         swapic: SWAPIC.to_string(),
@@ -103,6 +104,7 @@ fn chain(usdc: &str) -> EvmChainConfig {
             pool_move_finish: None,
             pool_ck_deposit: None,
             eco_rescue: None,
+            sweep: None,
         },
         // a tenth of an ether: the gas rule holds at the fees pushed below
         gas_budget_wei: amounts(100_000_000_000_000_000),
@@ -114,6 +116,7 @@ fn chain(usdc: &str) -> EvmChainConfig {
         },
         usdc_domain_name: None,
         usdc_domain_version: None,
+        block_time_ms: 2_000,
     }
 }
 
@@ -149,7 +152,7 @@ fn setup() -> (PocketIc, Principal, Principal) {
 }
 
 fn push(pic: &PocketIc, canister: Principal, chain_id: u64) {
-    push_chain_data(
+    test_put_reading(
         pic,
         canister,
         watcher(),
@@ -160,7 +163,7 @@ fn push(pic: &PocketIc, canister: Principal, chain_id: u64) {
             priority_fee_wei_per_gas: Nat::from(1_000_000_u64),
         },
     )
-    .expect("the watcher may push");
+    .expect("the watcher may store a reading");
 }
 
 fn now_s(pic: &PocketIc) -> u64 {

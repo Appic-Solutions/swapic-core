@@ -47,12 +47,9 @@ pub fn rail_usdc() -> BTreeMap<u64, String> {
     ])
 }
 
-/// The spec defaults with the rails' USDC named: the config a suite registers quotes under.
+/// The spec defaults: the config a suite that names the rails' USDC installs.
 pub fn rail_config() -> Config {
-    Config {
-        usdc_addresses: rail_usdc(),
-        ..Config::default()
-    }
+    Config::default()
 }
 
 /// `setup()` installed with [`rail_config`], for a suite that registers quotes.

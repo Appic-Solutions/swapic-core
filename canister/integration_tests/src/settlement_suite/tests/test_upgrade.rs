@@ -1,4 +1,3 @@
-use crate::client::settlement::{append, audit_replay_step, event_count, test_skew_state};
 use crate::settlement_suite::init::{setup, upgrade};
 use candid::{decode_one, encode_one, Principal};
 use settlement_api::types::errors::TestAppendError;
@@ -17,7 +16,7 @@ fn fee(units: u64) -> EventType {
 }
 
 #[test]
-fn events_survive_upgrade_and_replay_matches() {
+fn events_survive_upgrade() {
     let (pic, canister, admin) = setup();
     let raw = pic
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
@@ -31,30 +30,12 @@ fn events_survive_upgrade_and_replay_matches() {
         .unwrap()
         .unwrap();
 
-    // the stable fold was built incrementally by append_event, and the audit compares it
-    // against a fresh fold of the log, both before the upgrade and after it
-    let raw = pic
-        .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
-        .unwrap();
-    assert!(
-        decode_one::<bool>(&raw).unwrap(),
-        "incremental apply matches a fresh fold"
-    );
-
     upgrade(&pic, canister, admin).unwrap();
 
     let raw = pic
         .query_call(canister, admin, "event_count", encode_one(()).unwrap())
         .unwrap();
     assert_eq!(decode_one::<u64>(&raw).unwrap(), installed + 1);
-    let raw = pic
-        .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
-        .unwrap();
-    assert!(decode_one::<bool>(&raw).unwrap());
-    let raw = pic
-        .query_call(canister, admin, "verify_chain", encode_one(()).unwrap())
-        .unwrap();
-    assert!(decode_one::<bool>(&raw).unwrap());
 }
 
 #[test]
@@ -83,73 +64,4 @@ fn test_append_rejects_non_controller() {
         .query_call(canister, stranger, "event_count", encode_one(()).unwrap())
         .unwrap();
     assert_eq!(decode_one::<u64>(&raw).unwrap(), installed);
-}
-
-/// An upgrade over a fold out of step with its log would take and then refuse every
-/// append, so `post_upgrade` refuses it: the upgrade fails and the old wasm keeps running on
-/// untouched memory. Putting the fold back in step lets the same upgrade through.
-#[test]
-fn an_upgrade_over_a_fold_out_of_step_with_its_log_is_rejected() {
-    let (pic, canister, admin) = setup();
-    let raw = pic
-        .query_call(canister, admin, "event_count", encode_one(()).unwrap())
-        .unwrap();
-    let installed = decode_one::<u64>(&raw).unwrap();
-    let event = fee(1000);
-    let raw = pic
-        .update_call(canister, admin, "test_append", encode_one(&event).unwrap())
-        .unwrap();
-    decode_one::<Result<u64, TestAppendError>>(&raw)
-        .unwrap()
-        .unwrap();
-    test_skew_state(&pic, canister, admin).unwrap();
-
-    let err = upgrade(&pic, canister, admin)
-        .expect_err("the fold links to a head the log does not end with");
-    assert!(
-        err.reject_message.contains("out of step"),
-        "say why: {}",
-        err.reject_message
-    );
-
-    // still the old wasm and the old memory: the event is there and the skew is too
-    let raw = pic
-        .query_call(canister, admin, "event_count", encode_one(()).unwrap())
-        .unwrap();
-    assert_eq!(decode_one::<u64>(&raw).unwrap(), installed + 1);
-    test_skew_state(&pic, canister, admin).unwrap();
-
-    upgrade(&pic, canister, admin).expect("a fold in step upgrades");
-    let raw = pic
-        .query_call(canister, admin, "verify_replay", encode_one(()).unwrap())
-        .unwrap();
-    assert!(decode_one::<bool>(&raw).unwrap());
-}
-
-/// The deep audit saves its fold between steps in stable memory, so an upgrade in the
-/// middle of an audit loses nothing: the step after it carries on where the one before it
-/// stopped.
-#[test]
-fn the_replay_cursor_survives_an_upgrade() {
-    let (pic, canister, admin) = setup();
-    let installed = event_count(&pic, canister, admin);
-    for i in 1..=4_u64 {
-        let event = fee(i);
-        append(&pic, canister, admin, &event).expect("the guard admits it");
-    }
-    let total = installed + 4;
-
-    let before = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
-    assert_eq!((before.folded_so_far, before.finished), (2, false));
-
-    upgrade(&pic, canister, admin).unwrap();
-
-    let after = audit_replay_step(&pic, canister, admin, 2).expect("a controller may");
-    assert_eq!(
-        (after.folded_so_far, after.remaining, after.finished),
-        (4, total - 4, false),
-        "the fold carried on where it stopped"
-    );
-    let last = audit_replay_step(&pic, canister, admin, total).expect("a controller may");
-    assert!(last.finished && last.matches && !last.halted, "{last:?}");
 }

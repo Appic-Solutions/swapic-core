@@ -6,15 +6,14 @@ use crate::client::pocket::{query, update};
 use candid::{encode_args, encode_one, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::queries::{
-    event_count, events_page, evm_address, get_chain_data, get_config, get_config_full, halted,
-    icrc10_supported_standards, test_outbox_armed, verify_chain, verify_replay,
+    event_count, events_page, evm_address, get_config, get_config_full, halted,
+    icrc10_supported_standards, test_outbox_armed,
 };
-use settlement_api::types::errors::{GuardError, TestAppendError};
+use settlement_api::types::errors::TestAppendError;
 use settlement_api::types::events::EventType;
 use settlement_api::updates::{
-    audit_replay_step, derive_evm_address, icrc21_canister_call_consent_message, push_chain_data,
-    push_chain_data_many, set_config, set_halted, set_roles, set_sanctioned,
-    test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
+    derive_evm_address, icrc21_canister_call_consent_message, set_config, set_halted, set_roles,
+    set_sanctioned, test_rpc_batch as test_rpc_batch_api, test_send, test_sign,
 };
 
 pub fn event_count(
@@ -45,34 +44,6 @@ pub fn events_page(
         sender,
         "events_page",
         encode_args((start, len)).unwrap(),
-    )
-}
-
-pub fn verify_chain(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-) -> verify_chain::Response {
-    query(
-        pic,
-        canister,
-        sender,
-        "verify_chain",
-        encode_one(()).unwrap(),
-    )
-}
-
-pub fn verify_replay(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-) -> verify_replay::Response {
-    query(
-        pic,
-        canister,
-        sender,
-        "verify_replay",
-        encode_one(()).unwrap(),
     )
 }
 
@@ -126,54 +97,6 @@ pub fn set_roles(
     )
 }
 
-/// Positional, as the endpoint takes them.
-pub fn push_chain_data(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    chain_id: u64,
-    data: &settlement_api::types::chain_data::ChainData,
-) -> push_chain_data::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "push_chain_data",
-        encode_args((chain_id, data)).unwrap(),
-    )
-}
-
-/// Every chain's reading in one call: one result per entry, in order.
-pub fn push_chain_data_many(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    pushes: &push_chain_data_many::Args,
-) -> push_chain_data_many::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "push_chain_data_many",
-        encode_one(pushes).unwrap(),
-    )
-}
-
-pub fn get_chain_data(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    chain_id: get_chain_data::Args,
-) -> get_chain_data::Response {
-    query(
-        pic,
-        canister,
-        sender,
-        "get_chain_data",
-        encode_one(chain_id).unwrap(),
-    )
-}
-
 pub fn halted(pic: &PocketIc, canister: Principal, sender: Principal) -> halted::Response {
     query(pic, canister, sender, "halted", encode_one(()).unwrap())
 }
@@ -205,21 +128,6 @@ pub fn set_halted(
         sender,
         "set_halted",
         encode_one(halted).unwrap(),
-    )
-}
-
-pub fn audit_replay_step(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-    max_events: audit_replay_step::Args,
-) -> audit_replay_step::Response {
-    update(
-        pic,
-        canister,
-        sender,
-        "audit_replay_step",
-        encode_one(max_events).unwrap(),
     )
 }
 
@@ -323,22 +231,6 @@ pub fn append(
     )
 }
 
-/// The test-only door that flips one bit of the fold's chain head and leaves the log alone.
-/// Calling it twice puts the head back.
-pub fn test_skew_state(
-    pic: &PocketIc,
-    canister: Principal,
-    sender: Principal,
-) -> Result<(), GuardError> {
-    update(
-        pic,
-        canister,
-        sender,
-        "test_skew_state",
-        encode_one(()).unwrap(),
-    )
-}
-
 /// Positional, as the endpoint takes them: adds `add` to the sanctions set, then removes
 /// `remove`, and answers the count held after.
 pub fn set_sanctioned(
@@ -388,4 +280,23 @@ pub fn icrc10_supported_standards(
         "icrc10_supported_standards",
         encode_one(()).unwrap(),
     )
+}
+
+/// Stores a chain reading as a call's reading is stored (test-only door).
+pub fn test_put_reading(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    chain_id: u64,
+    reading: &settlement_api::types::chain_data::ChainData,
+) -> Result<(), String> {
+    let raw = pic
+        .update_call(
+            canister,
+            sender,
+            "test_put_reading",
+            encode_args((chain_id, reading.clone())).expect("the args are candid"),
+        )
+        .expect("the door answers");
+    candid::decode_one(&raw).expect("a reading answer")
 }

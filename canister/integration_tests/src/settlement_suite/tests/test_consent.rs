@@ -41,6 +41,7 @@ fn stake_arg() -> Vec<u8> {
             owner: staker(),
             subaccount: None,
         }),
+        move_fee: candid::Nat::from(0_u8),
     })
     .unwrap()
 }
@@ -148,6 +149,7 @@ fn another_method_is_unsupported_and_a_swap_before_the_address_is_unavailable() 
             recipient: addr(to),
             minOut: U256::from(4_900_000_u64),
         },
+        memo: Default::default(),
     });
     let swap = encode_one(IcpSwapTerms {
         token_in: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),

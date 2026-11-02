@@ -1,13 +1,13 @@
 //! The roles cell and its one door, `set_roles`: the install names both roles, a controller
-//! rotates them, and the watcher's own door (`push_chain_data`) shows who holds the watcher's
-//! role. No door asks for the quoter since the v1 quote doors went; the cell still holds it.
+//! rotates them, and a watcher's door (`relay_gasless`) shows who holds the watcher's role.
+//! No door asks for the quoter since the v1 quote doors went; the cell still holds it.
 
-use crate::client::settlement::{events_page, push_chain_data, set_roles};
+use crate::client::settlement::{events_page, set_roles};
 use crate::settlement_suite::init::{quoter, setup_with_rail_usdc, upgrade, watcher};
-use candid::Principal;
+use candid::{decode_one, encode_args, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::chain_data::ChainData;
-use settlement_api::types::errors::{GuardError, PushChainDataError, Role, SetRolesError};
+use settlement_api::types::errors::{Role, SetRolesError};
 use settlement_api::types::events::{Event, EventType};
 
 fn stranger() -> Principal {
@@ -18,17 +18,22 @@ fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
     events_page(pic, canister, stranger(), 0, 100)
 }
 
-/// Whether `caller` holds the watcher's role: its door answers it, a reading at `block`.
+/// Whether `caller` holds the watcher's role: `relay_gasless` checks the role before it
+/// reads anything, so a stranger is refused for the role and the watcher for its bytes.
 fn is_watcher(pic: &PocketIc, canister: Principal, caller: Principal, block: u64) -> bool {
     let reading = ChainData {
         block,
         base_fee_wei_per_gas: 1_000_000_000_u64.into(),
         priority_fee_wei_per_gas: 100_000_000_u64.into(),
     };
-    match push_chain_data(pic, canister, caller, 8453, &reading) {
-        Ok(()) => true,
-        Err(PushChainDataError::Guard(GuardError::CallerNotRole(Role::Watcher))) => false,
-        Err(error) => panic!("the reading is refused for another reason: {error:?}"),
+    let args = encode_args((8453_u64, vec![0_u8], vec![0_u8], 300_000_u64, Some(reading)))
+        .expect("relay args are candid");
+    let answer = pic
+        .update_call(canister, caller, "relay_gasless", args)
+        .expect("the relay door answers");
+    match decode_one::<Result<u64, String>>(&answer).expect("a relay answer") {
+        Err(why) if why.contains("CallerNotRole") => false,
+        _ => true,
     }
 }
 
