@@ -340,11 +340,8 @@ pub(crate) fn parse_hash32(value: Option<&Value>) -> Option<[u8; 32]> {
 
 /// The chain's provider url, or the refusal that spends no outcall.
 fn url_for(chain_id: ChainId) -> Result<RpcUrl, RpcError> {
-    config::get()
-        .rpc_urls
-        .get(&chain_id)
-        .cloned()
-        .ok_or(RpcError::NoUrl(chain_id))
+    // the one url, read in place: no copy of the whole config per outcall
+    config::with(|config| config.rpc_urls.get(&chain_id).cloned()).ok_or(RpcError::NoUrl(chain_id))
 }
 
 /// A batch as one request body: an array with one entry per call, numbered from zero in

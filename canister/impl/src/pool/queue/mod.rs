@@ -171,6 +171,9 @@ pub fn next(
 /// covers it, and the next one is looked at only then. Answers how many left the queue.
 pub fn serve(now: Timestamp) -> usize {
     let mut served = 0;
+    // the free USDC read once: no await below, so only each `PayoutWaiting` moves it, by
+    // the hold it takes
+    let mut free = pool_store::ledger().pockets.base.free;
     loop {
         let Some((_, head)) = read_state(|state| state.store().payout_queue(1).first().copied())
         else {
@@ -179,12 +182,14 @@ pub fn serve(now: Timestamp) -> usize {
         let Some(payout) = pool_store::payout(head) else {
             return served;
         };
-        if payout.base_hold() > pool_store::ledger().pockets.base.free {
+        let hold = payout.base_hold();
+        if hold > free {
             return served;
         }
         if pool_store::record_at(PoolStep::PayoutWaiting { id: head }, now).is_err() {
             return served;
         }
+        free = free.checked_sub(hold).unwrap_or(types::TokenAmount::ZERO);
         served += 1;
     }
 }
