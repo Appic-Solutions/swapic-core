@@ -123,11 +123,17 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
                     "a transaction of the canister on chain {chain} is still open: it may need gas"
                 )));
             }
-            let gas = chain_data::fresh(chain, now)
+            // what the sweep's own transaction may cost: the chain's sweep budget, which the
+            // kit sizes with an OP Stack chain's L1 data fee, or the L2 gas at worst if that
+            // is more. Sending past it would leave the transaction short of gas, and every
+            // later transaction of the canister on the chain stuck behind its nonce
+            let worst = chain_data::fresh(chain, now)
                 .and_then(|reading| reading.fees())
                 .and_then(|fees| fees.worst_cost(gas_limit))
                 .ok_or_else(|| SweepError::Unavailable("no gas price to cost the sweep".into()))?;
-            let available = balance.checked_sub(gas).unwrap_or(Wei::ZERO);
+            let budget = tx::budget_for(&config, chain, GasAction::Sweep)
+                .map_err(|error| SweepError::Invalid(error.to_string()))?;
+            let available = balance.checked_sub(worst.max(budget)).unwrap_or(Wei::ZERO);
             let value = Wei::from_be_bytes(amount.to_be_bytes());
             if value > available {
                 return Err(SweepError::AboveBooks {

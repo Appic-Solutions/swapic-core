@@ -1128,6 +1128,7 @@ async fn decide(
                     log(&line);
                 }
                 if is_confirmed(receipt.block, latest, credit) {
+                    sweep_settled(entry, receipt.success, now);
                     outbox::remove(entry.key());
                 }
             }
@@ -1225,11 +1226,9 @@ async fn decide(
                 )),
                 _ => None,
             };
-            // a sweep that reverted moved nothing: its amount goes back on its books
-            if let TxPurpose::Sweep(id) = entry.purpose {
-                if !success {
-                    crate::sweep::evm::taken_back(id, "its transaction reverted", now);
-                }
+            // a sweep closes as any transaction does; a revert is taken back only at the
+            // crediting depth, where no reorg turns it into a run (`sweep_settled`)
+            if let TxPurpose::Sweep(_) = entry.purpose {
                 settle(entry, tx_hash, block, success, latest, credit, now);
                 return 1;
             }
@@ -1368,6 +1367,15 @@ pub(crate) fn credit_confirmations(
 /// re-read: the only writer that could have put another entry at this key is
 /// `create_and_send`, which only ever writes at a number the allocator has just handed out,
 /// and this one is not.
+/// A sweep's transaction leaving the outbox at the crediting depth: one that reverted moved
+/// nothing, so its amount goes back on its books. Earlier a one-block reorg could still turn
+/// the revert into a run, and the books would hold money that left (rule A10).
+fn sweep_settled(entry: &OutboxEntry, success: bool, now: Timestamp) {
+    if let (TxPurpose::Sweep(id), false) = (entry.purpose, success) {
+        crate::sweep::evm::taken_back(id, "its transaction reverted", now);
+    }
+}
+
 fn settle(
     entry: &OutboxEntry,
     tx_hash: TxHash,
@@ -1400,6 +1408,7 @@ fn settle(
         ));
     }
     if is_confirmed(block, latest, credit) {
+        sweep_settled(entry, success, now);
         outbox::remove(entry.key());
         return;
     }
