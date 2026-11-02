@@ -1373,13 +1373,7 @@ pub enum IcpReadFailure {
 impl IcpCheck {
     /// `observed - expected`, which a donation makes positive.
     pub fn surplus(&self) -> i128 {
-        let signed = |amount: TokenAmount| {
-            amount
-                .try_into_u128()
-                .and_then(|value| i128::try_from(value).ok())
-                .unwrap_or(i128::MAX)
-        };
-        signed(self.observed).saturating_sub(signed(self.expected))
+        crate::books::surplus_of(self.observed, self.expected)
     }
 }
 

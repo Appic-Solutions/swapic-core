@@ -103,16 +103,21 @@ pub struct BalanceCheck {
     pub expected: TokenAmount,
 }
 
+/// `observed - expected`, signed: what a balance holds beyond its lines.
+pub fn surplus_of(observed: TokenAmount, expected: TokenAmount) -> i128 {
+    let signed = |amount: TokenAmount| {
+        amount
+            .try_into_u128()
+            .and_then(|value| i128::try_from(value).ok())
+            .unwrap_or(i128::MAX)
+    };
+    signed(observed).saturating_sub(signed(expected))
+}
+
 impl BalanceCheck {
     /// `observed - expected`, which a pending outflow or a donation makes positive.
     pub fn surplus(&self) -> i128 {
-        let signed = |amount: TokenAmount| {
-            amount
-                .try_into_u128()
-                .and_then(|value| i128::try_from(value).ok())
-                .unwrap_or(i128::MAX)
-        };
-        signed(self.observed).saturating_sub(signed(self.expected))
+        surplus_of(self.observed, self.expected)
     }
 }
 
