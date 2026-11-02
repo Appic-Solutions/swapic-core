@@ -39,6 +39,8 @@ fn base() -> PoolChain {
             domain: 0,
             token_messenger: address("0x28b5a0e9c621a5badaa536219b3a228c8168cf5d"),
             runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
+            chain: ChainId::ETHEREUM,
+            swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
         }],
     }
 }
@@ -1315,4 +1317,41 @@ fn a_head_a_node_lies_about_gains_no_depth() {
             Ok(receipt)
         );
     });
+}
+
+/// The same-chain sample with `memo` in its `OrderStarted` at 0x3c6 and that log's ref
+/// `r#ref`: Swapic's own log is where a deposit's terms are read back from the chain.
+fn same_chain_with_memo(r#ref: PoolRef, memo: &[u8]) -> Value {
+    let mut receipt = same_chain(r#ref);
+    let started = log_at(&mut receipt, "0x3c6");
+    let old = data_of(started);
+    // tokenIn and amountIn stay; the memo is the dynamic third word's bytes
+    let mut data = old[..64].to_vec();
+    data.extend_from_slice(&word(96));
+    data.extend_from_slice(&word(memo.len() as u64));
+    let mut padded = memo.to_vec();
+    padded.resize(memo.len().div_ceil(32) * 32, 0);
+    data.extend_from_slice(&padded);
+    set_data(started, &data);
+    receipt
+}
+
+/// A memo is read from the order's own `OrderStarted` only under the ref it hashes to, and
+/// only from the pool chain's Swapic: a log with another ref, or another emitter, gives none.
+#[test]
+fn a_memo_is_read_from_swapics_order_started_only_under_its_own_ref() {
+    let memo = b"a deposit's encoded terms".to_vec();
+    let r#ref = types::pool::memo::memo_ref(&memo);
+    let receipt = parse(&same_chain_with_memo(r#ref, &memo));
+    assert_eq!(memo_in(&receipt, base().swapic, r#ref), Some(memo.clone()));
+    assert_eq!(
+        memo_in(&receipt, base().runner, r#ref),
+        None,
+        "not Swapic's log"
+    );
+    // the log's ref is not the memo's hash: the bytes are not those terms
+    let other = PoolRef::new([0x42; 32]);
+    let forged = parse(&same_chain_with_memo(other, &memo));
+    assert_eq!(memo_in(&forged, base().swapic, other), None);
+    assert_eq!(memo_in(&forged, base().swapic, r#ref), None);
 }

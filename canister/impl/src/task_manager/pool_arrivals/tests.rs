@@ -224,6 +224,15 @@ impl BaseReads for FakeBase {
         ))
     }
 
+    async fn memo(
+        &self,
+        _tx: TxHash,
+        _base: &Receipt,
+        _found: &[crate::pool::arrival::Found],
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError> {
         self.receipts.borrow_mut().push(tx);
         if let Some((_, error)) = self.failing.iter().find(|(failing, _)| *failing == tx) {

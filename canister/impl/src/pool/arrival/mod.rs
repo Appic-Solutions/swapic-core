@@ -98,6 +98,9 @@ pub struct CctpSource {
     pub domain: u32,
     pub token_messenger: EvmAddress,
     pub runner: EvmAddress,
+    /// The chain itself and its Swapic, whose `OrderStarted` carries a deposit's memo.
+    pub chain: ChainId,
+    pub swapic: EvmAddress,
 }
 
 /// The addresses a proof on the pool chain reads, all the canister's own configuration.
@@ -1040,6 +1043,8 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
                 domain: config.cctp_domains.get(*chain)?.get(),
                 token_messenger: evm.token_messenger,
                 runner: evm.runner,
+                chain: *chain,
+                swapic: evm.swapic,
             })
         })
         .collect();
@@ -1359,7 +1364,16 @@ pub async fn read_found(
 ) -> Result<Vec<Found>, PoolError> {
     let chain = pool_chain().await?;
     let base = read_base(&chain, base_tx).await?;
-    let source = if needs_source(&base, &chain) {
+    found_in(&chain, &base, source).await
+}
+
+/// Every transfer to the canister in `base` proven, `source` read for an Eco arrival.
+async fn found_in(
+    chain: &PoolChain,
+    base: &Receipt,
+    source: Option<(ChainId, TxHash)>,
+) -> Result<Vec<Found>, PoolError> {
+    let source = if needs_source(base, chain) {
         let (src_chain, src_tx) = source
             .ok_or_else(|| PoolError::BadArrival(NoArrival::NeedsSource.why().to_string()))?;
         let at = config::with(|config| {
@@ -1379,9 +1393,9 @@ pub async fn read_found(
         None
     };
     let found = find(
-        &base,
+        base,
         source.as_ref().map(|(receipt, at)| (receipt, at)),
-        &chain,
+        chain,
     )
     .map_err(|no| PoolError::BadArrival(no.why().to_string()))?;
     Ok(prove_refunds(found, &LivePortal, pool::now()).await)
@@ -1402,6 +1416,136 @@ pub async fn read_and_record(
         given,
         closed: pool::pool_closed(),
         sanctioned: &crate::storage::sanctions::is_sanctioned,
+    };
+    Ok(record(&found, &judge, pool::now()))
+}
+
+/// The terms a memo encodes, under the ref it hashes to.
+pub(crate) fn given_of(memo: &[u8], src_chain: ChainId) -> Result<Given, PoolError> {
+    let terms = DepositTerms::from_memo(memo)
+        .map_err(|error| PoolError::BadArrival(format!("the memo: {error}")))?;
+    Ok(Given {
+        terms,
+        r#ref: types::pool::memo::memo_ref(memo),
+        src_chain,
+    })
+}
+
+/// The memo an `OrderStarted` of `swapic` in `receipt` carries under `r#ref`, taken only when
+/// its keccak is that ref.
+pub fn memo_in(receipt: &Receipt, swapic: EvmAddress, r#ref: PoolRef) -> Option<Vec<u8>> {
+    receipt
+        .logs
+        .iter()
+        .filter(|log| log.is(swapic, topics::order_started()))
+        .filter_map(|log| swapic::read_order_started(&log.topics, &log.data))
+        .find(|order| {
+            order.r#ref == r#ref.into_bytes() && types::pool::memo::memo_ref(&order.memo) == r#ref
+        })
+        .map(|order| order.memo)
+}
+
+/// The chain a CCTP deposit under `r#ref` in `base` left from, and its Swapic: by the
+/// domain of the received message whose envelope carries the ref.
+fn cctp_source_of<'a>(
+    base: &Receipt,
+    chain: &'a PoolChain,
+    r#ref: PoolRef,
+) -> Option<&'a CctpSource> {
+    let domain = received_messages(base, chain)
+        .into_iter()
+        .find_map(|(_, message)| {
+            let burn = burn_body(&message.body)?;
+            let envelope = Envelope::decode(burn.hook).ok()?;
+            (envelope.reference == r#ref.into_bytes()).then_some(message.source_domain)
+        })?;
+    chain
+        .cctp_sources
+        .iter()
+        .find(|source| source.domain == domain)
+}
+
+/// The source transaction of the CCTP message the canister finished itself in `base_tx`.
+fn own_finish_source(base_tx: TxHash) -> Option<TxHash> {
+    read_state(|state| {
+        state.store().flows().into_iter().find_map(|(_, flow)| {
+            (flow.tx_hash == Some(base_tx) || flow.landed_tx == Some(base_tx))
+                .then_some(flow.source_tx)
+                .flatten()
+        })
+    })
+}
+
+/// The memo of the first deposit in `found` the chain shows: a same-chain order's own
+/// `OrderStarted` in `base`; a CCTP deposit's in its source transaction (`source` the
+/// report's, or the canister's own finish's), read on the source chain. None when no
+/// deposit's is found.
+pub async fn memo_from_chain(
+    base_tx: TxHash,
+    base: &Receipt,
+    found: &[Found],
+    chain: &PoolChain,
+    source: Option<(ChainId, TxHash)>,
+) -> Option<Vec<u8>> {
+    for one in found {
+        let Proof::Deposit { r#ref, .. } = one.proof else {
+            continue;
+        };
+        match one.rail {
+            PoolRail::SameChain => {
+                if let Some(memo) = memo_in(base, chain.swapic, r#ref) {
+                    return Some(memo);
+                }
+            }
+            PoolRail::Cctp => {
+                let Some(from) = cctp_source_of(base, chain, r#ref) else {
+                    continue;
+                };
+                let src_tx = source
+                    .filter(|(src_chain, _)| *src_chain == from.chain)
+                    .map(|(_, tx)| tx)
+                    .or_else(|| own_finish_source(base_tx));
+                let Some(src_tx) = src_tx else {
+                    continue;
+                };
+                let Ok(receipt) = read_source(from.chain, src_tx).await else {
+                    continue;
+                };
+                if let Some(memo) = memo_in(&receipt, from.swapic, r#ref) {
+                    return Some(memo);
+                }
+            }
+            // Eco is off; its report brings the memo
+            PoolRail::Eco => {}
+        }
+    }
+    None
+}
+
+/// Reads `base_tx`, proves its transfers, and records them on the terms of the memo the
+/// chain shows (`memo_from_chain`), or with none: a deposit's transfer then awaits its
+/// terms, as the canister's own read of Base leaves it.
+async fn read_memo_and_record(
+    base_tx: TxHash,
+    source: Option<(ChainId, TxHash)>,
+    src_chain: ChainId,
+) -> Result<Recorded, PoolError> {
+    let chain = pool_chain().await?;
+    let base = read_base(&chain, base_tx).await?;
+    let found = found_in(&chain, &base, source).await?;
+    let memo = memo_from_chain(base_tx, &base, &found, &chain, source).await;
+    pool::require_running()?;
+    let given = memo
+        .as_deref()
+        .map(|memo| given_of(memo, src_chain))
+        .transpose()?;
+    let judge = match &given {
+        Some(given) => Judge {
+            given: Some(given),
+            closed: pool::pool_closed(),
+            sanctioned: &crate::storage::sanctions::is_sanctioned,
+        },
+        None => Judge::without_terms(),
     };
     Ok(record(&found, &judge, pool::now()))
 }
@@ -1435,24 +1579,28 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
             types::pool::memo::MAX_MEMO_BYTES
         )));
     }
-    let Some(memo) = arrival.memo else {
-        todo!("C5: the memo read from the order's OrderStarted")
+    let src_chain = ChainId::new(arrival.src_chain);
+    let handed = arrival.memo.is_some();
+    let recorded = match arrival.memo {
+        Some(memo) => {
+            let given = given_of(&memo, src_chain)?;
+            read_and_record(base_tx, source, Some(&given)).await?
+        }
+        // no memo handed over: the chain's own, or the transfer awaits its terms
+        None => read_memo_and_record(base_tx, source, src_chain).await?,
     };
-    let terms = DepositTerms::from_memo(&memo)
-        .map_err(|error| PoolError::BadArrival(format!("the memo: {error}")))?;
-    let r#ref = types::pool::memo::memo_ref(&memo);
-    let given = Given {
-        terms,
-        r#ref,
-        src_chain: ChainId::new(arrival.src_chain),
-    };
-    let recorded = read_and_record(base_tx, source, Some(&given)).await?;
     let credited = recorded
         .mine
         .iter()
         .find(|outcome| matches!(outcome, PoolArrivalOutcome::Credited { .. }));
     if let Some(outcome) = credited.or(recorded.mine.first()) {
         return Ok(outcome.clone());
+    }
+    // no memo anywhere: what was recorded of the receipt, its deposits awaiting their terms
+    if !handed && !recorded.carried {
+        if let Some(outcome) = recorded.outcomes.first() {
+            return Ok(outcome.clone());
+        }
     }
     if !recorded.carried {
         return Err(PoolError::BadArrival(

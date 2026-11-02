@@ -240,6 +240,8 @@ pub trait BaseReads: FillReads {
     async fn transfers(&self, from: BlockNumber, to: BlockNumber) -> Result<Value, RpcError>;
     /// The receipt of `tx`, at the crediting depth.
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError>;
+    /// The memo the chain shows for a deposit among `found` in `tx` (`arrival::memo_from_chain`).
+    async fn memo(&self, tx: TxHash, base: &Receipt, found: &[arrival::Found]) -> Option<Vec<u8>>;
 }
 
 /// Base itself, through `crate::rpc`.
@@ -277,6 +279,10 @@ impl BaseReads for LiveBase<'_> {
 
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError> {
         read_base(self.0, tx).await
+    }
+
+    async fn memo(&self, tx: TxHash, base: &Receipt, found: &[arrival::Found]) -> Option<Vec<u8>> {
+        arrival::memo_from_chain(tx, base, found, self.0, None).await
     }
 }
 
@@ -437,9 +443,30 @@ pub async fn backup(
         if held {
             failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
         }
-        // a step the fold refuses is noted, and read: only a read that failed for now holds
+        // the terms the chain shows (a same-chain order's own `OrderStarted`, a CCTP
+        // deposit's source the canister finished itself), else the transfer awaits them; a
+        // step the fold refuses is noted, and read: only a read that failed for now holds
         // the cursor back
-        record(&found, &Judge::without_terms(), clock());
+        let given = match reads.memo(tx, &base, &found).await {
+            Some(memo) => arrival::given_of(&memo, chain.chain).ok(),
+            None => None,
+        };
+        if require_not_halted().is_err() {
+            return Ok(report);
+        }
+        match &given {
+            Some(given) => {
+                let judge = Judge {
+                    given: Some(given),
+                    closed: crate::pool::pool_closed(),
+                    sanctioned: &crate::storage::sanctions::is_sanctioned,
+                };
+                record(&found, &judge, clock());
+            }
+            None => {
+                record(&found, &Judge::without_terms(), clock());
+            }
+        }
     }
     let done = if overfull {
         Done::Range
