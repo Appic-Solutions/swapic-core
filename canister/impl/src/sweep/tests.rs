@@ -206,3 +206,23 @@ fn icp_is_not_swept_while_a_withdrawal_may_hold_it() {
         );
     });
 }
+
+/// A native sweep waits for every transaction of the canister on its chain: one in the
+/// outbox, and one whose nonce is handed out and still waiting for its signature.
+#[test]
+fn a_native_sweep_waits_for_a_nonce_still_being_signed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let in_use =
+            |chain, outbox: &[ChainId]| read_state(|state| evm::gas_in_use(state, chain, outbox));
+        assert!(!in_use(ChainId::BASE, &[]));
+        assert!(in_use(ChainId::BASE, &[ChainId::BASE]), "an outbox entry");
+        // a relay's nonce handed out on Base, its signature not back yet
+        append_event_at(crate::state::transitions::tests::relay_created(1, 0), at(1)).unwrap();
+        assert!(in_use(ChainId::BASE, &[]), "a nonce being signed");
+        assert!(
+            !in_use(ChainId::ARBITRUM, &[]),
+            "another chain's is no matter"
+        );
+    });
+}

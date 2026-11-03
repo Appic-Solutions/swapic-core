@@ -46,6 +46,21 @@ pub fn fee_parts(
     Ok((pool, rest))
 }
 
+/// Whether a transaction of the canister on `chain` may still need its gas: an entry in the
+/// outbox (`outbox_chains`), or a nonce handed out and still waiting for its signature, whose
+/// transaction is not in the outbox yet. A native sweep then would leave it unable to pay.
+pub fn gas_in_use<S: Store>(
+    state: &crate::state::State<S>,
+    chain: ChainId,
+    outbox_chains: &[ChainId],
+) -> bool {
+    outbox_chains.contains(&chain)
+        || state
+            .unsigned_nonces()
+            .iter()
+            .any(|(key, _)| key.chain_id == chain)
+}
+
 /// The canister's native balance on `chain`, as one provider answers it.
 async fn native_balance(chain: ChainId, canister: EvmAddress) -> Result<Wei, String> {
     let answers = crate::rpc::rpc_batch(
@@ -118,7 +133,8 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let (target, value, data, from_pool_fees, from_fee_income) = match (asset, balance) {
         (SweepAsset::Native, Some(balance)) => {
-            if outbox::chains().contains(&chain) {
+            let outbox_chains = outbox::chains();
+            if read_state(|state| gas_in_use(state, chain, &outbox_chains)) {
                 return Err(SweepError::Busy(format!(
                     "a transaction of the canister on chain {chain} is still open: it may need gas"
                 )));
