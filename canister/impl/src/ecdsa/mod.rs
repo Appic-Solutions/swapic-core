@@ -180,6 +180,13 @@ pub fn ecrecover(digest: [u8; 32], v: u8, r: [u8; 32], s: [u8; 32]) -> Option<Ev
     let mut raw = [0_u8; 64];
     raw[..32].copy_from_slice(&r);
     raw[32..].copy_from_slice(&s);
+    // the precompile takes s in either half, the curve library a low s only: a high s is
+    // reflected and its recovery bit flipped with it, which recovers the same key
+    let signature = Signature::from_slice(&raw).ok()?;
+    let (raw, parity): ([u8; 64], bool) = match signature.normalize_s() {
+        Some(low) => (low.to_bytes().into(), !parity),
+        None => (raw, parity),
+    };
     recover_key(&raw, TxHash::new(digest), parity)
         .ok()
         .map(|key| address_of(&key))
