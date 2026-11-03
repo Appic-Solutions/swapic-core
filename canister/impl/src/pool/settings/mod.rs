@@ -5,6 +5,7 @@
 mod tests;
 
 use crate::ic;
+use futures::future::join_all;
 use settlement_api::types::pool::{
     PayoutSettings as WirePayoutSettings, PoolError, PoolSettings as WireSettings,
 };
@@ -97,27 +98,29 @@ pub fn icp_ledger_of(
 }
 
 /// `routes` with the ICP ledger read off the ICP/ckUSDC pool's metadata and every route
-/// ledger's fee read (`icrc1_fee`), then checked against the pool's ckUSDC ledger.
+/// ledger's fee read (`icrc1_fee`), then checked against the pool's ckUSDC ledger. Each pool
+/// and each ledger is asked once, and all of them at once.
 pub async fn routes_with_reads(
     mut routes: types::pool::IcpRoutes,
     ckusdc: candid::Principal,
 ) -> Result<types::pool::IcpRoutes, PoolError> {
-    if let Some(pool) = routes.icp_pool() {
-        let metadata = ic::pool_metadata(pool)
-            .await
-            .map_err(|error| PoolError::Ledger(format!("{pool}'s metadata: {error}")))?;
-        let icp = icp_ledger_of(&metadata.token0.address, &metadata.token1.address, ckusdc)
-            .ok_or_else(|| {
-                PoolError::BadSettings(format!("{pool} is no pool of ckUSDC and one other token"))
-            })?;
-        routes.icp_ledger = Some(types::pool::PrincipalBytes(icp));
-    }
-    // every route pool's tokens, read once here and never per swap
+    // every route pool's tokens, the ICP/ckUSDC pool's among them, read once here and never
+    // per swap
+    let pools = routes.pools();
+    let answers = join_all(pools.iter().map(|pool| ic::pool_metadata(*pool))).await;
     let mut pool_tokens = Vec::new();
-    for pool in routes.pools() {
-        let metadata = ic::pool_metadata(pool)
-            .await
-            .map_err(|error| PoolError::Ledger(format!("{pool}'s metadata: {error}")))?;
+    for (pool, answer) in pools.into_iter().zip(answers) {
+        let metadata =
+            answer.map_err(|error| PoolError::Ledger(format!("{pool}'s metadata: {error}")))?;
+        if routes.icp_pool() == Some(pool) {
+            let icp = icp_ledger_of(&metadata.token0.address, &metadata.token1.address, ckusdc)
+                .ok_or_else(|| {
+                    PoolError::BadSettings(format!(
+                        "{pool} is no pool of ckUSDC and one other token"
+                    ))
+                })?;
+            routes.icp_ledger = Some(types::pool::PrincipalBytes(icp));
+        }
         let token = |text: &str| {
             candid::Principal::from_text(text).map_err(|_| {
                 PoolError::BadSettings(format!("{pool} names a token that is no principal"))
@@ -130,14 +133,16 @@ pub async fn routes_with_reads(
         });
     }
     routes.pool_tokens = pool_tokens;
+    let ledgers: Vec<_> = routes
+        .ledgers()
+        .into_iter()
+        .filter(|ledger| *ledger != ckusdc)
+        .collect();
+    let answers = join_all(ledgers.iter().map(|ledger| ic::icrc1_fee(*ledger))).await;
     let mut fees = Vec::new();
-    for ledger in routes.ledgers() {
-        if ledger == ckusdc {
-            continue;
-        }
-        let fee = ic::icrc1_fee(ledger)
-            .await
-            .map_err(|error| PoolError::Ledger(format!("{ledger}'s icrc1_fee: {error}")))?;
+    for (ledger, answer) in ledgers.into_iter().zip(answers) {
+        let fee =
+            answer.map_err(|error| PoolError::Ledger(format!("{ledger}'s icrc1_fee: {error}")))?;
         let fee = TokenAmount::try_from(fee)
             .ok()
             .filter(|fee| fee.try_into_u128().is_some())

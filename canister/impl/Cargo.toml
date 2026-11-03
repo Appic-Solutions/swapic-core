@@ -20,6 +20,7 @@ types = { path = "../types" }
 alloy-primitives = { workspace = true }
 
 candid = { workspace = true }
+futures = { workspace = true }
 hex = { workspace = true }
 ic-cdk = { workspace = true }
 ic-cdk-timers = { workspace = true }

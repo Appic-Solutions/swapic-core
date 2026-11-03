@@ -3343,6 +3343,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "candid",
+ "futures",
  "hex",
  "ic-cdk",
  "ic-cdk-timers",
