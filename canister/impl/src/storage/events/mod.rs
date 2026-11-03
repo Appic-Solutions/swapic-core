@@ -338,6 +338,10 @@ impl Store for StableStore {
         FLOW_BY_TX.with(|index| index.borrow().get(tx))
     }
 
+    fn put_flow_tx(&mut self, tx: types::TxHash, quote_hash: QuoteHash) {
+        FLOW_BY_TX.with(|index| index.borrow_mut().insert(tx, quote_hash));
+    }
+
     fn sweep(&self, id: u64) -> Option<types::sweep::SweepEntry> {
         SWEEPS.with(|sweeps| sweeps.borrow().get(&id))
     }

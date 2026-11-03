@@ -25,8 +25,11 @@ pub trait Store {
     /// The finish a source transaction was finished under, as last indexed: a reader checks
     /// the flow still names it.
     fn flow_by_source(&self, tx: &TxHash) -> Option<QuoteHash>;
-    /// The flow whose own transaction is `tx`, as last indexed.
+    /// The flow one of whose transactions is `tx`: its first, a replacement, or the one that
+    /// landed.
     fn flow_by_tx(&self, tx: &TxHash) -> Option<QuoteHash>;
+    /// Indexes `tx` as one of `quote_hash`'s transactions.
+    fn put_flow_tx(&mut self, tx: TxHash, quote_hash: QuoteHash);
     fn meta(&self) -> LedgerMeta;
     fn put_meta(&mut self, meta: LedgerMeta);
     /// The number the next transaction on `chain_id` must carry. A chain nothing was ever
@@ -213,6 +216,10 @@ impl Store for MemoryStore {
 
     fn flow_by_tx(&self, tx: &TxHash) -> Option<QuoteHash> {
         self.flow_by_tx.get(tx).copied()
+    }
+
+    fn put_flow_tx(&mut self, tx: TxHash, quote_hash: QuoteHash) {
+        self.flow_by_tx.insert(tx, quote_hash);
     }
 
     fn sweep(&self, id: u64) -> Option<SweepEntry> {
@@ -876,12 +883,21 @@ impl<S: Store> State<S> {
         self.store.put_flow(quote_hash, flow);
     }
 
-    /// The CCTP finish whose own transaction is `tx` (the one that landed, once it closed).
+    /// The CCTP finish one of whose transactions is `tx`: its first or a replacement, indexed
+    /// as each is signed. Only one of them lands, so a `tx` with a receipt is the one that
+    /// did, closed or not.
     pub fn finish_landed_in(&self, tx: &TxHash) -> Option<Flow> {
         let quote_hash = self.store.flow_by_tx(tx)?;
-        self.store.flow(&quote_hash).filter(|flow| {
-            flow.kind == types::FlowKind::Finish && flow.tx_hash.as_ref() == Some(tx)
-        })
+        self.store
+            .flow(&quote_hash)
+            .filter(|flow| flow.kind == types::FlowKind::Finish)
+    }
+
+    /// A flow's replacement transaction, indexed with the flow's first.
+    fn record_flow_replaced(&mut self, purpose: TxPurpose, tx: TxHash) {
+        if let TxPurpose::Relay(quote_hash) | TxPurpose::Finish(quote_hash) = purpose {
+            self.store.put_flow_tx(tx, quote_hash);
+        }
     }
 
     /// The finish `tx` was the source transaction of, if one was.

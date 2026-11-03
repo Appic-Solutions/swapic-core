@@ -11,10 +11,6 @@ type HeapState = State<MemoryStore>;
 const BASE: ChainId = ChainId::BASE;
 const ARBITRUM: ChainId = ChainId::ARBITRUM;
 
-fn qh(byte: u8) -> QuoteHash {
-    QuoteHash::new([byte; 32])
-}
-
 /// The key of the `n`th gasless relay the fixtures send: one per relay, as each is signed
 /// once.
 pub(crate) fn relay_key(n: u64) -> QuoteHash {
@@ -434,46 +430,58 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
     assert_eq!(other.check(&relayed(1, 0)), gone(0));
 }
 
-/// A CCTP finish is found by the Base transaction that landed it: its own hash once its
-/// attempt closed, a replacement's included, and with it the source transaction a pool
-/// arrival's memo is read from. Nothing is found by a hash that is not a finish's.
+/// A CCTP finish is found by any of its transactions, its first or a replacement, from the
+/// moment each is signed: a replacement that lands before the flow closes finds it, and with
+/// it the source transaction a pool arrival's memo is read from. A relay's replacement is no
+/// finish's, and a hash that is no attempt finds nothing.
 #[test]
-fn a_finish_is_found_by_the_transaction_that_landed_it() {
+fn a_finish_is_found_by_any_of_its_transactions() {
     let signed = TxHash::new([0x51; 32]);
-    let landed = TxHash::new([0x52; 32]);
     let source = TxHash::new([0x53; 32]);
-    let mut flow = types::Flow::apply(
-        None,
-        &FlowStep::CctpFinishSigned {
-            chain_id: BASE,
-            nonce: types::Nonce::new(0),
-            tx_hash: signed,
-            raw_tx: vec![0x02],
-            action: types::flow::FinishAction::Receive,
-            arrival: [0x54; 32],
-            source_tx: Some(source),
+    let key = types::flow::finish_key([0x54; 32], types::flow::FinishAction::Receive);
+    let finish = TxPurpose::Finish(key);
+    let mut state = fold(vec![
+        created(finish, BASE, 0),
+        EventType::Flow {
+            quote_hash: key,
+            step: FlowStep::CctpFinishSigned {
+                chain_id: BASE,
+                nonce: Nonce::new(0),
+                tx_hash: signed,
+                raw_tx: vec![0x02],
+                action: types::flow::FinishAction::Receive,
+                arrival: [0x54; 32],
+                source_tx: Some(source),
+            },
         },
-        3,
-        types::Timestamp::from_nanos(1),
-    );
-    flow = types::Flow::apply(
-        Some(flow),
-        &FlowStep::TxClosed {
-            tx_hash: landed,
-            block: types::BlockNumber::new(9),
-            success: true,
+        replaced(finish, BASE, 0),
+    ]);
+    let source_of =
+        |state: &HeapState, tx: TxHash| state.finish_landed_in(&tx).and_then(|flow| flow.source_tx);
+    // the replacement landed, its flow still open
+    let replacement = TxHash::new([7; 32]);
+    assert_eq!(source_of(&state, replacement), Some(source));
+    assert_eq!(source_of(&state, signed), Some(source));
+    assert_eq!(source_of(&state, source), None);
+    admit(
+        &mut state,
+        2,
+        EventType::Flow {
+            quote_hash: key,
+            step: FlowStep::TxClosed {
+                tx_hash: replacement,
+                block: BlockNumber::new(9),
+                success: true,
+            },
         },
-        4,
-        types::Timestamp::from_nanos(2),
     );
-    let mut store = MemoryStore::default();
-    store.put_flow(qh(5), flow);
-    let state = HeapState::new(store);
-    assert_eq!(
-        state
-            .finish_landed_in(&landed)
-            .and_then(|flow| flow.source_tx),
-        Some(source)
-    );
-    assert!(state.finish_landed_in(&source).is_none());
+    assert_eq!(source_of(&state, replacement), Some(source));
+    // a relay's replacement indexes its relay, which is no finish
+    let relay = fold(vec![
+        relay_created(1, 0),
+        relayed(1, 0),
+        replaced(TxPurpose::Relay(relay_key(1)), BASE, 0),
+    ]);
+    assert_eq!(relay.store().flow_by_tx(&replacement), Some(relay_key(1)));
+    assert!(relay.finish_landed_in(&replacement).is_none());
 }

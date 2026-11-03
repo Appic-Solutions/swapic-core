@@ -318,11 +318,13 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             }
             state.record_pool(step, event.timestamp, event.index)
         }
-        // lines for deploy-time truth that lives in its own stable cell, and for a re-send
-        // that allocates nothing and closes nothing
-        EventType::ConfigChanged { .. }
-        | EventType::RolesChanged { .. }
-        | EventType::TxReplaced { .. } => {}
+        // a re-send allocates nothing and closes nothing; a flow's is indexed, so the
+        // replacement that lands finds its flow before the flow closes
+        EventType::TxReplaced {
+            purpose, tx_hash, ..
+        } => state.record_flow_replaced(*purpose, *tx_hash),
+        // lines for deploy-time truth that lives in its own stable cell
+        EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => {}
         // a final transaction's own record is the outbox's; the line is the log's
         EventType::TxFinal { .. } => {}
         EventType::Swept { sweep } => state.record_sweep(sweep),
