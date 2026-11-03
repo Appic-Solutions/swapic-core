@@ -792,6 +792,71 @@ fn finish(
     candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap()
 }
 
+/// The first pending outcall that asks for `method`, waited for over a few rounds.
+fn pending_call(pic: &PocketIc, method: &str) -> pocket_ic::common::rest::CanisterHttpRequest {
+    for _ in 0..30 {
+        pic.tick();
+        let asked = pic.get_canister_http().into_iter().find(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            body[0]["method"] == method
+        });
+        if let Some(request) = asked {
+            return request;
+        }
+    }
+    panic!("the canister never asked for {method}");
+}
+
+/// Answers one pending outcall with `result`, delivered at the next round.
+fn answer(pic: &PocketIc, request: &pocket_ic::common::rest::CanisterHttpRequest, result: Value) {
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: request.subnet_id,
+        request_id: request.request_id,
+        response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+            status: 200,
+            headers: vec![],
+            body: json!([{"jsonrpc": "2.0", "id": 0, "result": result}])
+                .to_string()
+                .into_bytes(),
+        }),
+        additional_responses: vec![],
+    });
+}
+
+/// Review fix: a finish whose reading ages past its 10 seconds while the canister reads the
+/// source transaction reads Base's gas itself and signs, instead of refusing the watcher on
+/// a stale reading it would only meet again on a retry.
+#[test]
+fn a_finish_whose_reading_ages_during_the_source_read_still_signs() {
+    let (pic, canister, admin) = setup();
+    let mine = address(&derive_evm_address(&pic, canister, admin).expect("the test key derives"));
+    let (_, _, _, envelope) = relay_for(mine, now_s(&pic));
+    let (finish_args, message, _, _) = finish_for(&envelope);
+    push(&pic, canister, BASE);
+    let call = pic
+        .submit_call(canister, watcher(), "finish_cctp", finish_args)
+        .expect("the door takes the call");
+    // the source read comes back eleven seconds on: the pushed reading is past its age
+    let source = pending_call(&pic, "eth_getTransactionReceipt");
+    answer(&pic, &source, source_receipt(&message, mine, 166_275));
+    pic.advance_time(std::time::Duration::from_secs(11));
+    // the canister reads Base's gas itself: five blocks at the pushed reading's fees
+    let gas = pending_call(&pic, "eth_feeHistory");
+    answer(
+        &pic,
+        &gas,
+        json!({
+            "oldestBlock": format!("0x{:x}", 19_000_001),
+            "baseFeePerGas": vec![format!("0x{:x}", 10_000_000); 6],
+            "gasUsedRatio": vec![0.5; 5],
+            "reward": vec![vec![format!("0x{:x}", 1_000_000)]; 5],
+        }),
+    );
+    let finished: Result<u64, String> =
+        candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap();
+    assert!(finished.is_ok(), "{finished:?}");
+}
+
 /// M-06: the canister reads a finish's source transaction itself and finishes only a message
 /// that transaction sent, from a transaction whose Runner paid the canister its fee: the
 /// watcher's word is not enough.

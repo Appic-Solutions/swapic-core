@@ -520,6 +520,18 @@ pub async fn finish_cctp(
             return Ok(id);
         }
     }
+    // a reading that aged past its limit while the reads above were out is read again, not
+    // refused; the halt and a concurrent finish are checked again after that read, and from
+    // here to the nonce's allocation there is no await
+    if crate::gas::refresh_if_aged(chain_id)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))?
+    {
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+        if let Some(id) = admit()? {
+            return Ok(id);
+        }
+    }
     let key = finish_key(arrival, plan.action);
     let signed = tx::create_and_send_with(
         TxPurpose::Finish(key),

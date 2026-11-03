@@ -1013,6 +1013,17 @@ pub async fn relay_gasless(
             return Ok(id);
         }
     }
+    // a reading that aged past its limit while the simulation was out is read again, not
+    // refused; the halt and a concurrent relay are checked again after that read
+    if crate::gas::refresh_if_aged(chain_id)
+        .await
+        .map_err(|failure| format!("the gas price: {failure:?}"))?
+    {
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+        if let Some(id) = tx::signed_once(key)? {
+            return Ok(id);
+        }
+    }
     let signed = tx::create_and_send(
         TxPurpose::Relay(key),
         chain_id,

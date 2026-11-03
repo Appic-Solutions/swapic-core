@@ -53,6 +53,18 @@ pub async fn ensure_fresh(chain_id: ChainId) -> Result<(), ReadFailure> {
     Ok(())
 }
 
+/// Reads `chain_id`'s gas again when the reading a door started with aged past its limit
+/// while the door's own reads were out, so the door signs instead of refusing. True when it
+/// read: an await ran, and the caller checks again what one can change.
+pub async fn refresh_if_aged(chain_id: ChainId) -> Result<bool, ReadFailure> {
+    let now = Timestamp::from_nanos(ic_cdk::api::time());
+    if chain_data::fresh(chain_id, now).is_some() {
+        return Ok(false);
+    }
+    ensure_fresh(chain_id).await?;
+    Ok(true)
+}
+
 /// The reading one `eth_feeHistory` answer gives: its newest block (`oldestBlock` plus the
 /// window less one), that block's own base fee (the answer's last base fee is the next
 /// block's), and the median of the window's 50th-percentile tips, zero when the chain
