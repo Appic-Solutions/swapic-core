@@ -1,4 +1,4 @@
-//! Eco's Portal as the canister reads and calls it (P11e): whether an intent was filled on its
+//! Eco's Portal as the canister reads and calls it: whether an intent was filled on its
 //! destination (`claimants`), whether its reward was refunded on its source
 //! (`getRewardStatus`), and the rescue of an unfilled one (`cancelAndProve` on the
 //! destination, which proves the cancellation to the source, where Eco refunds the reward's

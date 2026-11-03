@@ -158,7 +158,7 @@ pub enum Next {
     /// Base to ICP: the sweep's answer was lost: the same transfer again.
     Resweep,
     /// ICP to Base by Eco, past its route's deadline with no arrival: read the destination
-    /// Portal (never filled?) and the source's reward (refunded to the canister?) (P11e).
+    /// Portal (never filled?) and the source's reward (refunded to the canister?).
     Unfilled,
     Stuck(String),
 }
@@ -365,7 +365,7 @@ fn order_chain(item: &Move, pool_chain: ChainId) -> ChainId {
 /// The proposal `item` takes at `now`, pure: the cheapest one taken in the window, never for
 /// an urgent move, and only while its order is still more than [`SIGN_MARGIN_S`] from its
 /// deadline: one that close would only stop the move as stuck at its first signature
-/// (CR-07), so the canister's own route is taken instead.
+///, so the canister's own route is taken instead.
 pub fn proposal_to_take(item: &Move, now: Timestamp) -> Option<&types::pool::Proposal> {
     let proposal = item.proposal.as_ref().filter(|_| !item.urgent)?;
     (proposal.order.deadline_s > now.as_secs().get().saturating_add(SIGN_MARGIN_S))
@@ -458,7 +458,7 @@ fn own_order(
 pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
 
 /// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
-/// kept in stable memory (C-09); the last reads of moves no longer open are dropped.
+/// kept in stable memory; the last reads of moves no longer open are dropped.
 fn unfilled_due(id: u64, now: Timestamp) -> bool {
     // the open moves' ids as the ledger holds them: no move is read for them
     let mut open = read_state(|state| state.pool().moves().open);
@@ -497,7 +497,7 @@ pub fn unfilled_next(fill: types::eco::Fill, reward: u8, waited: bool) -> Result
 /// ICP to Base by Eco, past its route's deadline: the destination Portal (Base) never shows
 /// it filled and the source Portal (Ethereum) shows its reward refunded to its creator, the
 /// canister: the USDC is back at the canister's Ethereum address, and the move is routed
-/// again on its own route (P11e). It is never written off while it sits there.
+/// again on its own route. It is never written off while it sits there.
 async fn unfilled(item: &Move, ctx: &Ctx) -> Result<(), String> {
     let intent = item
         .intent
@@ -752,7 +752,7 @@ async fn landing(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), St
             transaction_hash,
             ..
         }) => transaction_hash,
-        // reimbursed: its ckUSDC back at the canister's account, back in the ICP pocket (P11e)
+        // reimbursed: its ckUSDC back at the canister's account, back in the ICP pocket
         ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Reimbursed {
             reimbursed_amount,
             reimbursed_in_block,

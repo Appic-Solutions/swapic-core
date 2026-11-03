@@ -1,5 +1,5 @@
 //! The canister's own read of Base (spec section 5), always on once the pool has settings
-//! (P11d: no registration says when a deposit is on its way): in case the watcher stopped,
+//! (no registration says when a deposit is on its way): in case the watcher stopped,
 //! every `arrival_backup` (an hour) the USDC transfers to the canister's address are read
 //! from a stored cursor, at most 500 blocks a pass (half as many, and half again, while the
 //! answer is too large), and each one's transaction goes through the same proof as
@@ -61,7 +61,7 @@ pub const MAX_TRANSFERS_PER_PASS: usize = 1_000;
 
 /// Below this (ten cents of USDC, the services' own floor: no pool route delivers less) a
 /// transfer is dust: no deposit's money, and never worth a receipt's read or an orphan a
-/// human must clear (L-15).
+/// human must clear.
 pub const DUST: u64 = 100_000;
 
 thread_local! {
@@ -70,7 +70,7 @@ thread_local! {
     static PASSING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Whether the pool's own read of Base has work (P11d: no registration tells it when a
+/// Whether the pool's own read of Base has work (no registration tells it when a
 /// deposit is on its way): once the pool has settings, always.
 pub fn has_work<S: Store>(store: &S) -> bool {
     store.pool_ledger().settings.is_some()
@@ -343,7 +343,7 @@ impl PassReport {
 
 /// Whether the read of Base stops before a transaction, for what its transfers' proofs say,
 /// and the alert's reason: a transfer not proven yet is read again next pass (an ALERT); an
-/// Eco refund read too early waits for its time with no alert (the review, 2026-10-24).
+/// Eco refund read too early waits for its time with no alert.
 pub fn holds_back(found: &[arrival::Found]) -> (bool, Option<String>) {
     let unproven = found.iter().find_map(|one| match &one.proof {
         Proof::Unproven { why } => Some(why.clone()),
@@ -426,13 +426,13 @@ pub async fn backup(
         let Ok(found) = find(&base, None, chain) else {
             continue;
         };
-        // an Eco refund only once its intent's destination shows it never filled (P11e)
+        // an Eco refund only once its intent's destination shows it never filled
         let found = crate::pool::arrival::prove_refunds(found, reads, clock()).await;
         if require_not_halted().is_err() {
             return Ok(report);
         }
         // a refund whose fill was not read is read again next pass, like a receipt that
-        // failed: the cursor stops before it, and the rest of it is credited now (M-04)
+        // failed: the cursor stops before it, and the rest of it is credited now
         let (held, why) = holds_back(&found);
         if let Some(why) = why {
             report.alert(format!(

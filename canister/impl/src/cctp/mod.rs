@@ -1,7 +1,7 @@
 //! The canister finishes CCTP arrivals itself, design C (`finish_cctp`). The watcher hands
 //! in the attested message, the source transaction that burned it, the stored recipe and
 //! the gas limit the quoter charged for. The canister reads that source transaction itself
-//! (M-06, `source`): it must have sent this message and paid the canister its fee step. The canister checks the message is a burn it may finish, decides
+//! (`source`): it must have sent this message and paid the canister its fee step. The canister checks the message is a burn it may finish, decides
 //! from the envelope's action and the clock what to call, and signs it once per arrival
 //! (the burn, by its source domain and Circle's nonce, whatever Circle rewrites in its
 //! message) and action, finishing at most one arrival per source transaction.
@@ -462,7 +462,7 @@ pub async fn finish_cctp(
     };
     let mut plan = decide(&parsed, &setup, now_s).map_err(|e| e.to_string())?;
     // the canister's own transfer (a move's, a payout's) is finished with no fee step, only
-    // from its own source transaction (P11c)
+    // from its own source transaction
     plan.gas_action =
         read_state(|state| own::finish_action(state, source_tx, &parsed, &plan, ic_cdk::api::id()))
             .map_err(|e| e.to_string())?;
@@ -474,7 +474,7 @@ pub async fn finish_cctp(
         .expect("BUG: decide found the chain in this table");
     let gas = signing_gas(chain_id, &destination, plan.gas_action, gas_limit)
         .map_err(|e| e.to_string())?;
-    // the watcher's word is not enough (M-06): the source transaction itself shows this
+    // the watcher's word is not enough: the source transaction itself shows this
     // burn and its fee step. The canister's own transfers are finished from its own
     // transactions only (`own`), and pay no fee step
     if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {

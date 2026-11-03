@@ -1,5 +1,5 @@
 //! The chain reads that decide money alone, made by every node of the subnet and agreed on
-//! (M-03): whether Swapic ran an order (before a payout or a move is undone or signed
+//!: whether Swapic ran an order (before a payout or a move is undone or signed
 //! again), and whether an Eco intent was filled on its destination (before an unfilled one
 //! is refunded or reopened). Every node reads the head, rounded down so nodes a moment apart
 //! agree on it ([`rpc::HEAD_GRAIN`]); every node then reads at one block the crediting depth

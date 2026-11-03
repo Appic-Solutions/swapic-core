@@ -1,10 +1,10 @@
-//! `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost is asked
+//! `resolve_stake`: an ICP stake whose pull's answer was lost is asked
 //! again with its own dedup pair while the ckUSDC ledger still deduplicates it. Past that
 //! window ([`DEDUP_WINDOW`]) a pull asked again could be a second one, so the payout drive
 //! leaves the stake pending for good, its room taken. A controller resolves it once:
 //!
 //! - `Pulled { block }`: the pull landed in that ledger block. The canister reads the block
-//!   on the ckUSDC ledger first (the review, 2026-10-24) and mints only on the stake's own
+//!   on the ckUSDC ledger first and mints only on the stake's own
 //!   pull: `icrc2_transfer_from` by the canister from the stake's account to its own, of the
 //!   stake's amount, the stake's op id as its memo and its start as its `created_at_time`
 //!   (as `pull_stake` asks it). Its shares are minted at the pool's price now, as a pull

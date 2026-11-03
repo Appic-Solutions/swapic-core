@@ -14,12 +14,12 @@
 //!   more read) the Portal's `IntentPublished(intentHash)` whose route is
 //!   `USDC.transfer(canister, value)` into the pool chain, beside Swapic's one
 //!   `OrderStarted(ref, payer)`. The intent's hash commits no source chain, so a copy of it
-//!   may be published anywhere (H-02): it is the order's only when its creator is the
+//!   may be published anywhere: it is the order's only when its creator is the
 //!   order's payer, its reward the source chain's USDC, and the source Runner funded it in
 //!   full in the same transaction. An intent the canister created is a move's, never a
 //!   deposit.
 //!
-//! No registration (P11d, Jeff 2026-10-21): the canister learns of a deposit only when its
+//! No registration: the canister learns of a deposit only when its
 //! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
 //! the ref the order carries; the canister recomputes the ref and credits the transfer whose
 //! proof carries it, checking the terms on what arrived: the parties not sanctioned, the
@@ -32,7 +32,7 @@
 //! hours for them on the unattributed line, then is held for a controller. Every step of
 //! one call is appended in the message that checks it, after the last read, so the same
 //! transfer reported twice is credited once. Every receipt a proof reads is read by every
-//! node of the subnet and agreed on (M-03): no one provider or node makes up a deposit.
+//! node of the subnet and agreed on: no one provider or node makes up a deposit.
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +56,7 @@ use types::swapic::{self, topics, Action, Envelope};
 use types::{Address, BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
 
 /// How long a deposit's transfer found without its terms waits for them before it is a
-/// controller's to resolve (P11d, Jeff 2026-10-21).
+/// controller's to resolve.
 pub const AWAIT_TERMS: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The terms an arrival's report hands over, the ref they commit to, and the source chain
@@ -298,7 +298,7 @@ pub enum Proof {
         payer: Option<EvmAddress>,
     },
     /// An Eco fill of an intent the canister created beside its own order under `r#ref`: a
-    /// rebalance move's arrival, never a deposit (H-02).
+    /// rebalance move's arrival, never a deposit.
     Move { r#ref: PoolRef },
     /// No deposit, for good: kept unattributed.
     Orphan {
@@ -310,7 +310,7 @@ pub enum Proof {
     Unproven { why: String },
     /// An Eco refund read too early: no block every node agrees on can be past its intent's
     /// route deadline before `from` (seconds). Left uncredited, and read again then: a
-    /// wait, not a failure (the review, 2026-10-24).
+    /// wait, not a failure.
     TooEarly { from: u64 },
     /// Eco's Portal refunded the canister, the creator, the reward of these unfilled intents
     /// in this transaction: a paid payout's whose intent is one of them, and whose amount this
@@ -801,7 +801,7 @@ pub fn steps_for<S: Store>(
     now: Timestamp,
 ) -> Result<Vec<PoolStep>, String> {
     let credited = state.store().is_pool_credited(&found.credit);
-    // a rebalance move's arrival, or an Eco refund of its intent (P11c): the move's, never a
+    // a rebalance move's arrival, or an Eco refund of its intent: the move's, never a
     // deposit's, and never awaiting terms while its own transaction closes
     if !credited {
         if let Some(step) = crate::pool::rebalance::arrival::step_for(state, found) {
@@ -849,7 +849,7 @@ pub fn steps_for<S: Store>(
         Proof::Refund { intents } => {
             // the payout whose intent was refunded, for exactly its amount: one delivering
             // (the refund proves its intent unfilled), or one whose USDC Eco still owes back.
-            // A paid payout's never: it is never paid again (2026-10-23)
+            // A paid payout's never: it is never paid again
             let owed_back = intents.iter().find_map(|intent| {
                 let id = state.store().payout_by_intent(&PoolRef::new(*intent))?;
                 let payout = state.store().pool_payout(id)?;
@@ -952,7 +952,7 @@ fn outcome_of(step: &PoolStep) -> Option<PoolArrivalOutcome> {
             r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
             amount: candid::Nat::from(*amount),
         }),
-        // a rebalance move's arrival or refund, named by the move's ref (P11c)
+        // a rebalance move's arrival or refund, named by the move's ref
         PoolStep::MoveArrived {
             id,
             credited: amount,
@@ -1137,7 +1137,7 @@ pub fn based(
 }
 
 /// The pool chain's receipt of `tx` at the crediting depth, read by every node and agreed on
-/// (M-03): one node reads the head, which only names the block every node reads beside the
+///: one node reads the head, which only names the block every node reads beside the
 /// receipt ([`HEADER_BEHIND`] below it); the depth is counted from that agreed block
 /// ([`based`]).
 pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
@@ -1173,7 +1173,7 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
 
 /// The receipt at `block` is at the pool chain's crediting depth under `head`, or, when its
 /// largest transfer to the canister (`largest`) is a large deposit, at the large deposits'
-/// depth (2026-10-23): not deep yet is asked again, never refused for good.
+/// depth: not deep yet is asked again, never refused for good.
 pub fn deep_enough(
     block: BlockNumber,
     head: BlockNumber,
@@ -1202,7 +1202,7 @@ pub fn deep_enough(
     })
 }
 
-/// The source chain's receipt of `tx`, read by every node and agreed on (M-03).
+/// The source chain's receipt of `tx`, read by every node and agreed on.
 pub(crate) async fn read_source(chain: ChainId, tx: TxHash) -> Result<Receipt, PoolError> {
     let calls = [(
         "eth_getTransactionReceipt",
@@ -1357,7 +1357,7 @@ pub async fn prove_refunds(
 }
 
 /// Reads `base_tx` on the pool chain (and `source` for an Eco arrival) and proves every
-/// transfer to the canister in it, recording nothing: what a move's arrival reads (P11c).
+/// transfer to the canister in it, recording nothing: what a move's arrival reads.
 pub async fn read_found(
     base_tx: TxHash,
     source: Option<(ChainId, TxHash)>,
@@ -1548,7 +1548,7 @@ async fn read_memo_and_record(
     Ok(record(&found, &judge, pool::now()))
 }
 
-/// Anyone's door (P11d: the watcher, or the user's app as a backup): the body of
+/// Anyone's door (the watcher, or the user's app as a backup): the body of
 /// `note_pool_arrival`. The canister trusts only the chain and the fingerprint: the terms
 /// credit only the transfer whose proof carries the ref they commit to.
 pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
@@ -1557,7 +1557,7 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
         settlement_api::types::pool::bytes32("base_tx", &arrival.base_tx)
             .map_err(PoolError::from)?,
     );
-    // the cost guard (P11e): a caller other than the watcher, before any outcall
+    // the cost guard: a caller other than the watcher, before any outcall
     pool::report_guard::admit(base_tx, pool::now())?;
     let source = if arrival.src_tx.is_empty() {
         None

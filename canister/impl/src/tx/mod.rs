@@ -47,7 +47,7 @@ const REBROADCAST_AFTER: Duration = Duration::from_secs(30);
 /// How long a transaction stays on the network before it is replaced at a higher fee,
 /// counted from the FIRST time its bytes went out. Long enough that a chain running
 /// normally lands it first, short enough that a swap is not held by an underpriced
-/// transaction. 30 s (Jeff, 2026-10-17): a transaction not in a block within 30 s is
+/// transaction. 30 s: a transaction not in a block within 30 s is
 /// replaced at a higher fee; the per-action budgets and the bounds cap the bids.
 const STUCK_AFTER: Duration = Duration::from_secs(30);
 
@@ -57,7 +57,7 @@ const STUCK_AFTER: Duration = Duration::from_secs(30);
 /// This clock is its own and is never the batch window. The signature is asked for after
 /// `TxCreated`, and that await does not run to its end inside one message on this subnet:
 /// it crosses to the signing subnet and spans the consensus rounds a threshold signature
-/// takes there, measured at 2.7 seconds for `key_1` on mainnet (2026-10-18), against a
+/// takes there, measured at 2.7 seconds for `key_1` on mainnet, against a
 /// default window of two seconds. A cancel fired inside that round trip races the signature
 /// it was meant to stand in for, and the fold refuses whichever comes second
 /// (`NonceNotUnsigned`), so nothing breaks, but a cancel that was never needed is signed
@@ -1318,7 +1318,7 @@ fn send_cap(sends: usize) -> u64 {
 }
 
 /// How deep a receipt on `chain_id` must be before it closes an attempt: the swap depth,
-/// 1 block on Ethereum too (Jeff, 2026-10-17). Money arriving at the canister is credited
+/// 1 block on Ethereum too. Money arriving at the canister is credited
 /// at [`credit_confirmations`].
 ///
 /// A chain the config lists no depth for decides nothing. The alternative, a default of
@@ -1631,7 +1631,7 @@ struct Receipt {
 }
 
 /// The hash of the one Eco intent Eco's Portal published in `receipt` whose reward's creator
-/// is the canister, if it published one (CR-17: the reader the rescue shares).
+/// is the canister, if it published one (the reader the rescue shares).
 fn eco_intent_in(receipt: &Value, path: &crate::books::FeePath) -> Option<[u8; 32]> {
     crate::pool::eco::published_intent(
         &crate::pool::arrival::logs_of(receipt),

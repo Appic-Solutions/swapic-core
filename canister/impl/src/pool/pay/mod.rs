@@ -16,7 +16,7 @@
 //! deadline is at least 60 s away and at most the payout's; no party is sanctioned; the gas
 //! limit is at most `max_payout_gas`.
 //! A payout signed once answers its transaction's id, and is never signed again: a revert
-//! undoes it (2026-10-23).
+//! undoes it.
 
 #[cfg(test)]
 mod tests;
@@ -51,7 +51,7 @@ pub struct Payer<'a> {
     pub chains: Chains<'a>,
     pub swapic: EvmAddress,
     pub usdc: EvmAddress,
-    /// Eco's prover, the one a payout's onward intent may name (P11e).
+    /// Eco's prover, the one a payout's onward intent may name.
     pub eco_prover: Option<EvmAddress>,
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn refused(why: impl Into<String>) -> PoolError {
 }
 
 /// What an order's `amountIn` is held to: the payout's exact amount, or nothing yet at a
-/// planned swap's opening (2026-10-23), where every other rule holds and the fit checks it
+/// planned swap's opening, where every other rule holds and the fit checks it
 /// again once the amount is known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AmountIn {
@@ -150,7 +150,7 @@ pub fn check_order(
             .admits_cctp(payout.network_fee(), floor)
             .map_err(refused)?;
     }
-    // an onward intent names Eco's own prover and Portal, and short deadlines (P11e): any
+    // an onward intent names Eco's own prover and Portal, and short deadlines: any
     // other prover could pay its reward, the canister's USDC, to whoever it says
     if let Some(intent) = &plan.intent {
         crate::pool::eco::check_intent(

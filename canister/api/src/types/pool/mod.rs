@@ -73,7 +73,7 @@ pub enum PoolError {
     /// No registration under this ref.
     Unknown,
     Expired,
-    /// No longer answered (2026-10-23): the canister enforces no per swap cap; kept, the wire
+    /// No longer answered: the canister enforces no per swap cap; kept, the wire
     /// being append-only.
     AboveSwapCap {
         cap: Nat,
@@ -211,7 +211,7 @@ pub struct PoolSettings {
     /// Micro USDC, launch 10_000_000_000 ($10,000).
     pub tvl_cap: Nat,
     /// Micro USDC, launch 1_000_000_000 ($1,000): the quoter's per swap cap, which the
-    /// canister stores and shows but enforces nowhere (2026-10-23).
+    /// canister stores and shows but enforces nowhere.
     pub per_swap_cap: Nat,
     /// Launch 10.
     pub premium_bps: u16,
@@ -321,7 +321,7 @@ pub struct PoolApproveOk {
     pub tx_id: u64,
 }
 
-/// `rescue_eco_intent`'s answer: the signed `cancelAndProve`'s id in `signed_txs` (P11e).
+/// `rescue_eco_intent`'s answer: the signed `cancelAndProve`'s id in `signed_txs`.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EcoRescueOk {
     pub tx_id: u64,
@@ -572,7 +572,7 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
                     .transpose()?
                     .unwrap_or(TokenAmount::ZERO),
             },
-            // no registration (P11d): kept in the record at their defaults, read by nothing
+            // no registration: kept in the record at their defaults, read by nothing
             ..domain::PoolSettings::default()
         })
     }

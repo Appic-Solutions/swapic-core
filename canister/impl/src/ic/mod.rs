@@ -159,7 +159,7 @@ pub struct LedgerTransfer {
     pub spender: Option<Party>,
 }
 
-/// What a block reads as in one read's shape (the review, 2026-10-24).
+/// What a block reads as in one read's shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parsed {
     /// The transfer it logs.
@@ -181,7 +181,7 @@ pub enum BlockRead {
     IcpBlocks,
 }
 
-/// Whether `ledger` is the ICP ledger: the one the routes name (the review, 2026-10-24).
+/// Whether `ledger` is the ICP ledger: the one the routes name.
 pub fn is_icp_ledger(ledger: Principal, configured: Option<Principal>) -> bool {
     configured == Some(ledger)
 }
@@ -865,7 +865,7 @@ pub async fn icrc2_approve(
 }
 
 /// An ICRC-2 approval of `spender` for `amount` from the canister's own account,
-/// deduplicated (P11c): a retry with the same pair is the same approval, which the ledger
+/// deduplicated: a retry with the same pair is the same approval, which the ledger
 /// answers `Duplicate`, so its fee is spent once.
 pub async fn icrc2_approve_once(
     ledger: Principal,

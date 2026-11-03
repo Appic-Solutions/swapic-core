@@ -26,7 +26,7 @@ pub struct PayoutTerms {
     pub deadline_ns: u64,
 }
 
-/// The payout plan (2026-10-23): the quoter's ready-made Swapic order for the expected
+/// The payout plan: the quoter's ready-made Swapic order for the expected
 /// payout (its `amountIn`), as `abi.encode(order)`, and the gas it is signed with, as
 /// `pay_payout` takes them. Its one delivery names the chain, the recipient, the token and
 /// the least out.
@@ -125,7 +125,7 @@ pub struct PayoutWaiting {
     pub kind: PayoutKind,
     pub amount: Nat,
     pub terms: PayoutTerms,
-    /// Micro USDC, the payout's own network fee (P11e): the watcher chooses CCTP only when it
+    /// Micro USDC, the payout's own network fee: the watcher chooses CCTP only when it
     /// covers the canister's CCTP costs.
     pub network_fee: Option<Nat>,
 }

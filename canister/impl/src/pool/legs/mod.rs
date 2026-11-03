@@ -95,7 +95,7 @@ async fn held_at(
     })
 }
 
-/// What a leg deposits once `approvals` approvals were given before its swap began (P11e):
+/// What a leg deposits once `approvals` approvals were given before its swap began:
 /// the path budgets one, and each one more (a run that stopped between its approval and its
 /// swap, then ran again) took one more fee of the canister's account, which the user pays out
 /// of what the leg deposits. None when they take all of it.
@@ -132,7 +132,7 @@ pub async fn run(
         };
         return settle(ledgers, spec, state.before, None, clock).await;
     }
-    // an approval given before this run is one fee more: the user's (P11e)
+    // an approval given before this run is one fee more: the user's
     let spec = LegSpec {
         amount_in: after_approvals(spec.amount_in, spec.fee_in, state.approvals).ok_or_else(
             || Stop::Failed("the approvals given take all the leg deposits".to_string()),

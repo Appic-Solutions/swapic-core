@@ -508,7 +508,7 @@ enum Tried {
     Undone,
 }
 
-/// One try of `payout`'s plan (the review, 2026-10-24): a plan that could only revert is
+/// One try of `payout`'s plan: a plan that could only revert is
 /// undone at once whatever the pool's guard (an undo pays nothing on Base; its refund on ICP
 /// is guarded like the deadline undo's); else the guard is read before any read, so a closed
 /// pool reads no scaler and spends no try. Fitted, or the try counted with why it waits.
@@ -699,7 +699,7 @@ async fn swap(
         .fee_of(ckusdc)
         .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
     let known = |received: TokenAmount| -> Result<(), Stop> {
-        // a planned swap's premium is the settings' share of what it made (2026-10-23)
+        // a planned swap's premium is the settings' share of what it made
         let amount = if terms.is_planned() {
             plan::payout_of(&settings, received, terms.network_fee)
         } else {

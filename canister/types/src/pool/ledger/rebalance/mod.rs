@@ -1,4 +1,4 @@
-//! The rebalancing's rules (P11c): what each move step must meet, read off the fold alone,
+//! The rebalancing's rules: what each move step must meet, read off the fold alone,
 //! and what it moves. Each pocket move is refused in `admits` before `apply` could clamp it.
 //!
 //! - Opened: the amount `free -> reserved` in the source pocket, behind that pocket's queue.
@@ -765,7 +765,7 @@ impl PoolLedger {
                 item.window_ends = None;
                 item.status = MoveStatus::Open;
                 // a refund comes days after a move is marked stuck: the money is back in
-                // the Base pocket and the move routes again on its own (L-11)
+                // the Base pocket and the move routes again on its own
                 item.stuck = None;
                 item.since = at;
                 Some(item)
@@ -818,7 +818,7 @@ impl PoolLedger {
             }
             // on from where it stood, with fresh tries; a minter's call a controller found never
             // ran is asked again, the ckUSDC approval its lost answer may have given booked as
-            // the pool's cost (P11e): on the safe side, a fee too many is a surplus
+            // the pool's cost: on the safe side, a fee too many is a surplus
             PoolStep::MoveRetried { id } => {
                 let mut item = lookup.pool_move(*id)?;
                 item.reverts = None;

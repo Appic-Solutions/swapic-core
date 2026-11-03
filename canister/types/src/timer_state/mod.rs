@@ -1,4 +1,4 @@
-//! What the canister's doors and timers remember between calls (C-09): the arrival reports
+//! What the canister's doors and timers remember between calls: the arrival reports
 //! let through for callers other than the watcher, when each Eco move to Base was last looked
 //! for on the Portals, the books' last read for a move and the pockets it saw, the queue's
 //! head already alerted on, the backup scan's cursor, the pockets' last balance reads, and
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// The most reports a minute from every caller but the watcher, together: each costs a read
-/// every node makes (M-03), so strangers cannot drain the canister's cycles with them. Users
+/// every node makes, so strangers cannot drain the canister's cycles with them. Users
 /// report only while the watcher is down, and the canister's own read of Base credits
 /// anyway.
 pub const PER_MINUTE: usize = 2;

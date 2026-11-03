@@ -1,5 +1,5 @@
 //! The per-caller limit on the doors anyone may call for free, `swap_from_icp` and
-//! `stake_icp` (Jeff, 2026-10-23): each costs no approval to call, and each call writes two
+//! `stake_icp`: each costs no approval to call, and each call writes two
 //! permanent lines before its pull is refused. Counted before anything is recorded; a call
 //! past the limit is refused with nothing written, its count included. In stable memory
 //! ([`crate::storage::callers`]).

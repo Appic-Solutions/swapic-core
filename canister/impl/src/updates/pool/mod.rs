@@ -146,7 +146,7 @@ pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolErr
     pool::icp_swap::swap_from_icp(terms, is_sanctioned).await
 }
 
-/// Controller-only, refused while halted (Jeff, 2026-10-23): a payout stopped for a human
+/// Controller-only, refused while halted: a payout stopped for a human
 /// (`Failed`), resolved once. `Refund`: back on its undo, an ICP swap's refund asked next (all
 /// its ckUSDC less one ledger fee, or its token), a withdrawal's shares minted back at once;
 /// the controller checked no refund went out before. `MarkPaid`: its signed order ran after
@@ -163,7 +163,7 @@ pub fn resolve_payout(id: u64, resolution: PayoutResolution) -> Result<(), PoolE
     )
 }
 
-/// Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
+/// Controller-only, refused while halted: an EVM to ICP deposit held for a
 /// human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
 /// started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
 /// `Retry`: back to its payout with fresh attempts. A started one whose transfer cannot land
@@ -218,7 +218,7 @@ pub async fn resolve_deposit(
     })
 }
 
-/// Controller-only, refused while halted (Jeff, 2026-10-24): an ICP stake whose pull's answer
+/// Controller-only, refused while halted: an ICP stake whose pull's answer
 /// was lost, past the ledger's deduplication window (23 hours after it started; the canister
 /// stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
 /// `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that
@@ -292,7 +292,7 @@ pub async fn pay_payout(
         .map(|tx_id| PayPayoutOk { tx_id })
 }
 
-/// Controller-only, refused while halted (Jeff, 2026-10-19: orphans are ALWAYS held for a
+/// Controller-only, refused while halted (orphans are ALWAYS held for a
 /// controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
 /// once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the
 /// fee kept for its gas; `Book` books it to the Base books' unattributed line.

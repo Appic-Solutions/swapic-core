@@ -73,7 +73,7 @@ pub struct IcpSwapTerms {
     /// Where an undone swap's money goes back to.
     #[n(6)]
     pub refund_to: IcpAccount,
-    /// The payout plan flow (2026-10-23): the user's slippage, at most 500 bps, half of it
+    /// The payout plan flow: the user's slippage, at most 500 bps, half of it
     /// the sale's. None: a swap opened before the plan flow.
     #[n(7)]
     pub slippage_bps: Option<u16>,
@@ -185,11 +185,11 @@ pub enum PayoutStatus {
     /// Stopped for a human.
     #[n(9)]
     Failed(#[n(0)] String),
-    /// Its transaction reverted at depth (2026-10-23): undone once the outbox let it go at
+    /// Its transaction reverted at depth: undone once the outbox let it go at
     /// the crediting depth and Swapic says its order never ran. Never signed again.
     #[n(10)]
     Reverted,
-    /// Its order ran on Base and published an Eco intent (2026-10-23): its ckUSDC, its owed
+    /// Its order ran on Base and published an Eco intent: its ckUSDC, its owed
     /// line, its USDC in flight and a withdrawal's fee stay as they were until the intent's
     /// fill is read past its route deadline.
     #[n(11)]
@@ -201,7 +201,7 @@ pub enum PayoutStatus {
 }
 
 /// The most times a planned swap's plan is tried before its payout is left to the watcher's
-/// order (2026-10-23): a scaler read that failed once does not give up the fast path.
+/// order: a scaler read that failed once does not give up the fast path.
 pub const MAX_FIT_TRIES: u8 = 3;
 
 /// Why a payout a controller refunded is undone.
@@ -646,7 +646,7 @@ impl Storable for NonceUse {
 }
 
 /// An orphan: USDC at the canister's Base address that no deposit could take, held for a
-/// controller to refund to its payer or book (Jeff, 2026-10-19: nothing automatic).
+/// controller to refund to its payer or book (nothing automatic).
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Orphan {
     #[n(0)]
@@ -688,7 +688,7 @@ pub enum OrphanStatus {
     /// Booked to the Base books' unattributed line.
     #[n(3)]
     Booked,
-    /// A deposit's transfer the canister's own read of Base found without its terms (P11d:
+    /// A deposit's transfer the canister's own read of Base found without its terms (
     /// nothing is registered): credited to the deposit under `r#ref` when anyone hands the
     /// terms in, held for a controller once `until` passes.
     #[n(4)]

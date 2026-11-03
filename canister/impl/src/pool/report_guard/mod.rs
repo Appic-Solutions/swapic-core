@@ -3,7 +3,7 @@
 //! caller other than the watcher is held to at most [`PER_MINUTE`] reports a minute and
 //! [`PER_HOUR`] an hour in total (each costs a read every node makes, M-03), and a given
 //! `base_tx` to at most [`PER_TX_PER_HOUR`] attempts an hour, refused before any outcall. The watcher's principal is never limited. The reports let through are kept in
-//! stable memory (C-09, `storage::timer_state`), so an upgrade grants no extra burst.
+//! stable memory (`storage::timer_state`), so an upgrade grants no extra burst.
 
 use crate::storage::{roles, timer_state};
 use settlement_api::types::pool::PoolError;

@@ -1,4 +1,4 @@
-//! The payout plan's fit (2026-10-23): the moment an ICP swap's sale made its exact ckUSDC and
+//! The payout plan's fit: the moment an ICP swap's sale made its exact ckUSDC and
 //! its payout waits with its USDC reserved, the canister fills the real amount into the plan
 //! the user handed in and signs it itself, in the same message chain: no watcher, no quoter,
 //! no `pay_payout`. The plan fits when the payout is within 5% of the plan's amount, the

@@ -1,6 +1,6 @@
 //! The flows' guard: a flow a door is acting on right now is busy, so no second door or
 //! drive acts on it at the same time. The ABI v2 ICP flows' drivers it held are gone with
-//! their doors (P11a); the pool replaces them, and the relay and the CCTP finish are moved
+//! their doors; the pool replaces them, and the relay and the CCTP finish are moved
 //! by the outbox.
 
 use std::cell::RefCell;

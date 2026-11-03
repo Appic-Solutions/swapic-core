@@ -79,17 +79,17 @@ pub trait Store {
     fn put_pool_orphan(&mut self, key: CreditKey, orphan: types::pool::Orphan);
     /// Every orphan, in key order.
     fn pool_orphans(&self) -> Vec<(CreditKey, types::pool::Orphan)>;
-    /// A rebalance move, by id (P11c).
+    /// A rebalance move, by id.
     fn pool_move(&self, id: u64) -> Option<types::pool::Move>;
     fn put_pool_move(&mut self, id: u64, item: types::pool::Move);
     /// Every move, in id order: what the audit compares.
     fn pool_moves(&self) -> Vec<(u64, types::pool::Move)>;
-    /// The canister's own transfer a source transaction is, if it is one (P11c).
+    /// The canister's own transfer a source transaction is, if it is one.
     fn pool_own_source(&self, tx: &TxHash) -> Option<types::pool::OwnSource>;
     fn put_pool_own_source(&mut self, tx: TxHash, source: types::pool::OwnSource);
     /// Every own source, in hash order: what the audit compares.
     fn pool_own_sources(&self) -> Vec<(TxHash, types::pool::OwnSource)>;
-    /// The line that signed the rescue of the intent an order published, if one did (P11e).
+    /// The line that signed the rescue of the intent an order published, if one did.
     fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64>;
     fn put_eco_rescue(&mut self, order_id: PoolRef, index: u64);
     /// Every rescue, in order id order: what the audit compares.

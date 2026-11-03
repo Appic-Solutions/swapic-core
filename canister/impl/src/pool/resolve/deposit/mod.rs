@@ -1,6 +1,6 @@
-//! `resolve_deposit` (Jeff, 2026-10-24): an EVM to ICP deposit whose payout is held for a
+//! `resolve_deposit`: an EVM to ICP deposit whose payout is held for a
 //! human (`DepositStatus::PayoutFailed`): a started payout after its tenth failure, a queued
-//! one that never started (CR-08), a stake whose mint kept failing. Its lines stayed held,
+//! one that never started, a stake whose mint kept failing. Its lines stayed held,
 //! since nothing led out of it. A controller resolves it once (the rules of the review,
 //! 2026-10-24):
 //!

@@ -1,4 +1,4 @@
-//! The canister's own CCTP transfers (P11c, interface section 3d): a rebalance move's burn, and
+//! The canister's own CCTP transfers (interface section 3d): a rebalance move's burn, and
 //! a pool payout's over CCTP. Their orders pay the canister no fee step: the canister pays its
 //! own way, so their finish is the canister's to pay as well, and it is finished only when
 //! its source transaction is the canister's own, signed for that move or payout and succeeded

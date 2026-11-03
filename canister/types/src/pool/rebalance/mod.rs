@@ -155,7 +155,7 @@ pub struct RebalanceSettings {
 }
 
 impl Default for RebalanceSettings {
-    /// 40% ICP, plus or minus 15%; $300 the least move (Jeff, 2026-10-21), $5,000 the most,
+    /// 40% ICP, plus or minus 15%; $300 the least move, $5,000 the most,
     /// $20,000 a day; a 60 s window; a 2 bps fee cap; standard finality when idle.
     fn default() -> Self {
         Self {
@@ -299,7 +299,7 @@ pub enum MoveStatus {
     #[n(9)]
     Lost(#[n(0)] String),
     /// Its money came back to its source pocket, why: an ICP to Base move the ck minter
-    /// reimbursed (P11e).
+    /// reimbursed.
     #[n(10)]
     Returned(#[n(0)] String),
 }

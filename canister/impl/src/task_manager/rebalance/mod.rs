@@ -41,7 +41,7 @@ pub async fn tick() {
     let now = pool::now();
     let ledger = crate::storage::pool::ledger();
     let queued = !ledger.queue.0.is_empty() || ledger.lines().queue_len > 0;
-    // the last read is kept in stable memory (C-09): an upgrade reads no extra time
+    // the last read is kept in stable memory: an upgrade reads no extra time
     let read = crate::storage::timer_state::update(|state| {
         let read = due(state.last_check, now, ledger.pockets, queued);
         if read {

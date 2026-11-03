@@ -776,7 +776,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
             let arrival = arrival_of(burn, &source, chains)?;
             parties.extend(arrival.parties.iter().copied());
             // a Deliver mints the destination's USDC to its recipient: at least what the
-            // Runner gives the burn less the most Circle may keep (P11c, CCTP payouts)
+            // Runner gives the burn less the most Circle may keep (CCTP payouts)
             let usdc = chains
                 .evm_chains
                 .get(arrival.chain_id)

@@ -3,7 +3,7 @@
 //! door decodes it (its types, its decoder quotas), the door's own wire conversion reads it,
 //! and a swap's payout plan is read by the canister's own reader, so the message states what
 //! the door will act on. The facts are one list, rendered twice: Markdown for a generic
-//! display, plain fields for a fields display, in the wording Jeff approved (2026-10-28).
+//! display, plain fields for a fields display, in the wording Jeff approved.
 //! Pure: nothing is written, awaited or called.
 //!
 //! The text never carries a string the caller wrote: every value is a number, a principal,

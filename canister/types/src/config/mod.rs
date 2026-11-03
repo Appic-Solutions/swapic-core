@@ -46,7 +46,7 @@ pub const MAX_BLOCK_TIME: Duration = Duration::from_secs(60);
 /// deposit, a ck minter withdrawal's USDC, the books' balance read. A one-block reorg
 /// there is routine, and crediting below this would credit money that then leaves the
 /// chain, which no later step takes back. A swap is acted on at its own depth, 1 block on
-/// Ethereum too (Jeff, 2026-10-17): that depth closes the canister's own transactions in
+/// Ethereum too: that depth closes the canister's own transactions in
 /// the outbox, and credits no money that arrived. The other chains' depths are the
 /// deploy's to size; this one bounds `credit_confirmations` at the door, and crediting
 /// reads at least this on Ethereum whatever the config holds.
@@ -262,19 +262,19 @@ pub enum GasAction {
     /// `USDC.approve(Swapic, max)` from the canister's Base address, once per deploy.
     #[n(9)]
     PoolApprove,
-    /// `Swapic.run` of a rebalance move's own order, from the canister's address (P11c).
+    /// `Swapic.run` of a rebalance move's own order, from the canister's address.
     #[n(10)]
     PoolMove,
     /// The CCTP finish of a rebalance move on its destination, the canister's own: Ethereum's
-    /// `completeCctp` with a CkDeposit, Base's `receiveMessage` (P11c).
+    /// `completeCctp` with a CkDeposit, Base's `receiveMessage`.
     #[n(11)]
     PoolMoveFinish,
     /// The ck helper's `depositErc20` for the canister's own principal and rebalance
-    /// subaccount on Ethereum, after a Base to ICP move's Eco fill (P11c).
+    /// subaccount on Ethereum, after a Base to ICP move's Eco fill.
     #[n(12)]
     PoolCkDeposit,
     /// Eco's `cancelAndProve` on an unfilled intent's destination, the proof's fee paid by the
-    /// canister (P11e).
+    /// canister.
     #[n(13)]
     EcoRescue,
     /// A controller's sweep from the canister's address: its native gas, or `USDC.transfer`
@@ -350,7 +350,7 @@ impl GasAction {
     }
 }
 
-/// One value per [`GasAction`]. The pool's three rows (P11b) are optional, so a config
+/// One value per [`GasAction`]. The pool's three rows are optional, so a config
 /// written before them reads back with them absent, and an action whose row is absent is
 /// refused at use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
@@ -375,14 +375,14 @@ pub struct PerAction<T> {
     pub pool_transfer: Option<T>,
     #[n(9)]
     pub pool_approve: Option<T>,
-    /// The rebalancing's rows (P11c), optional as the pool's.
+    /// The rebalancing's rows, optional as the pool's.
     #[n(10)]
     pub pool_move: Option<T>,
     #[n(11)]
     pub pool_move_finish: Option<T>,
     #[n(12)]
     pub pool_ck_deposit: Option<T>,
-    /// The Eco rescue's row (P11e), optional as the pool's.
+    /// The Eco rescue's row, optional as the pool's.
     #[n(13)]
     pub eco_rescue: Option<T>,
     /// The sweep's row, optional as the pool's.
@@ -693,7 +693,7 @@ impl Default for Config {
             // the watcher and the submit API simulate before they ask
             simulate_before_sign: false,
             confirmations: BTreeMap::from([
-                // a swap on Ethereum is acted on at 1 block (Jeff, 2026-10-17); crediting
+                // a swap on Ethereum is acted on at 1 block; crediting
                 // there never reads below MIN_ETHEREUM_CONFIRMATIONS
                 (ChainId::ETHEREUM, BlockDepth::new(1)),
                 (ChainId::BASE, BlockDepth::new(1)),

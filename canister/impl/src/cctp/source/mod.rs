@@ -1,4 +1,4 @@
-//! What a finish's source transaction shows (M-06): the canister reads it itself, from one
+//! What a finish's source transaction shows: the canister reads it itself, from one
 //! node, before it signs a finish the watcher asks for, rather than take the watcher's word
 //! that it paid the canister's fee. The transaction succeeded, the source chain's
 //! `MessageTransmitterV2` sent this very message (every field the burn determined: only the

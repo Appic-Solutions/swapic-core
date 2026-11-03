@@ -49,7 +49,7 @@ const POOL_MOVES_MEMORY_ID: MemoryId = MemoryId::new(40);
 const POOL_OWN_SOURCES_MEMORY_ID: MemoryId = MemoryId::new(41);
 // P11e
 const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
-// the final review round (2026-10-23): 37 to 39 lane C2's, 43 lane C1's (the per-caller
+// the final review round: 37 to 39 lane C2's, 43 lane C1's (the per-caller
 // limit on the free doors)
 const TIMER_STATE_MEMORY_ID: MemoryId = MemoryId::new(37);
 const POOL_CALLERS_MEMORY_ID: MemoryId = MemoryId::new(43);

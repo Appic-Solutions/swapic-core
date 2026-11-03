@@ -1,4 +1,4 @@
-//! What the canister's doors and timers remember between calls (C-09, `types::timer_state`):
+//! What the canister's doors and timers remember between calls (`types::timer_state`):
 //! one stable cell, so an upgrade forgets none of it.
 
 #[cfg(test)]

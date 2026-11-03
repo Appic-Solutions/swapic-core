@@ -1,4 +1,4 @@
-//! The payout plan's arithmetic (2026-10-23, the final review's M-01): an ICP user's swap is
+//! The payout plan's arithmetic: an ICP user's swap is
 //! opened with the quoter's ready-made order for the payout it expects, `planned` (the
 //! order's `amountIn`), and one slippage. Half of the slippage guards the sale on ICP; the
 //! premium and the network fee come from what the sale really made; the payout is what is

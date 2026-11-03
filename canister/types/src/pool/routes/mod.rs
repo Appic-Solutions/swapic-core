@@ -1,6 +1,6 @@
 //! How an ICP token reaches ckUSDC (the fixed interface section 3c): directly, through its
 //! own ckUSDC pool on ICPSwap, or through ICP, two legs (the token and ICP, then ICP and
-//! ckUSDC on the ICP/ckUSDC pool). No token has a size cap of its own (Jeff, 2026-10-21): the
+//! ckUSDC on the ICP/ckUSDC pool). No token has a size cap of its own: the
 //! pool's per swap cap applies, the quote shows the price impact and `min_out` protects the
 //! user. From P11b on every path of the pool reads these.
 //!

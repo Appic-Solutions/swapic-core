@@ -101,11 +101,11 @@ thread_local! {
     static POOL_ORPHANS: RefCell<StableBTreeMap<CreditKey, types::pool::Orphan, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_orphans_memory()));
 
-    // The rebalance moves by id (P11c). Part of the fold: only `Pool` lines write them.
+    // The rebalance moves by id. Part of the fold: only `Pool` lines write them.
     static POOL_MOVES: RefCell<StableBTreeMap<u64, types::pool::Move, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_moves_memory()));
 
-    // The canister's own CCTP sources by transaction hash (P11c): a move's or a payout's
+    // The canister's own CCTP sources by transaction hash: a move's or a payout's
     // transaction, once it succeeded at depth, which its finish names with no fee step.
     static POOL_OWN_SOURCES: RefCell<StableBTreeMap<types::TxHash, types::pool::OwnSource, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_own_sources_memory()));
@@ -125,7 +125,7 @@ thread_local! {
     static SWEEPS: RefCell<StableBTreeMap<u64, types::sweep::SweepEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(sweeps_memory()));
 
-    // The Eco rescues by order id (P11e): the line that signed each.
+    // The Eco rescues by order id: the line that signed each.
     static ECO_RESCUES: RefCell<StableBTreeMap<PoolRef, u64, Memory>> =
         RefCell::new(StableBTreeMap::init(eco_rescues_memory()));
 }

@@ -47,11 +47,11 @@ pub trait PoolLookup {
     fn nonce_used(&self, key: &NonceUse) -> bool;
     /// An orphan, by its credit key.
     fn orphan(&self, key: &CreditKey) -> Option<crate::pool::Orphan>;
-    /// A rebalance move, by id (P11c): none in a fold that keeps no moves.
+    /// A rebalance move, by id: none in a fold that keeps no moves.
     fn pool_move(&self, _id: u64) -> Option<crate::pool::Move> {
         None
     }
-    /// Whether the intent the order `order_id` published was rescued already (P11e): none in
+    /// Whether the intent the order `order_id` published was rescued already: none in
     /// a fold that keeps no rescues.
     fn eco_rescued(&self, _order_id: &[u8; 32]) -> bool {
         false
@@ -77,11 +77,11 @@ pub struct PoolLedger {
     #[n(3)]
     pub owed: TokenAmount,
     /// The TVL room held by an ICP stake whose pull is out, until it lands or is refused. A
-    /// registration holds none (Jeff, 2026-10-21).
+    /// registration holds none.
     #[n(4)]
     pub stake_room: TokenAmount,
     /// The refs registered and not arrived, expired or unattributed. A registration holds
-    /// nothing of the pockets (Jeff, 2026-10-21): the money is held once it is real.
+    /// nothing of the pockets: the money is held once it is real.
     #[n(5)]
     pub open: BTreeSet<PoolRef>,
     /// The refs arrived and not paid or minted, a payout stopped for a human included.
@@ -97,7 +97,7 @@ pub struct PoolLedger {
     #[n(9)]
     pub unseen: Vec<UnseenArrival>,
     /// Transfers to the canister's Base address no deposit could take: not the stakers',
-    /// held for the orphan refund (P11b).
+    /// held for the orphan refund.
     #[n(10)]
     pub unattributed: TokenAmount,
     /// When the ICP pocket's balance check found a shortfall: latched until a controller
@@ -115,14 +115,14 @@ pub struct PoolLedger {
     /// rebalance and the alert read.
     #[n(17)]
     pub head_since: Option<Timestamp>,
-    /// The Base payouts' lines (P11b): absent until their first step.
+    /// The Base payouts' lines: absent until their first step.
     #[n(19)]
     pub payouts: Option<PayoutLines>,
     /// A Base payout one step changed through its legs, on its way to the step's effects:
     /// never stored (always none between steps).
     #[cbor(skip)]
     pub evm_changed: Option<EvmPayout>,
-    /// The rebalancing's lines (P11c): absent until its first step. At 40, clear of the
+    /// The rebalancing's lines: absent until its first step. At 40, clear of the
     /// indices other plans add.
     #[n(40)]
     pub rebalance: Option<crate::pool::RebalanceLines>,
@@ -288,7 +288,7 @@ pub enum RegisterRefusal {
     Known,
     #[error("{0}")]
     NotAllowed(String),
-    /// No longer answered (2026-10-23): the canister enforces no per swap cap, the quoter's.
+    /// No longer answered: the canister enforces no per swap cap, the quoter's.
     #[error("above the per-swap cap of {cap}")]
     AboveSwapCap { cap: TokenAmount },
     #[error("the pool would hold {would_be}, above its cap of {cap}")]
@@ -478,9 +478,9 @@ impl PoolLedger {
     }
 
     /// Whether `amount` arriving for `deposit` fits the pool, measured on what arrived: a
-    /// stake within the TVL cap; a swap has no cap on the canister (2026-10-23: the per-swap
+    /// stake within the TVL cap; a swap has no cap on the canister (the per-swap
     /// cap is the quoter's own). Answers what a swap's payout
-    /// holds once it starts (P11d: the user pays every fee): everything that arrived but the
+    /// holds once it starts (the user pays every fee): everything that arrived but the
     /// premium, its payout and its own ICP fees, out of which its path's ledger fees are
     /// paid. A payout the ICP pocket cannot cover yet is queued, never refused.
     pub fn arrival_fits(
@@ -837,7 +837,7 @@ impl PoolLedger {
                 }
                 let started = deposit.payout.attempt.is_some();
                 match resolution {
-                    // keyed on its transfer (the review, 2026-10-24): one that may have
+                    // keyed on its transfer: one that may have
                     // landed is retried only with its own dedup pair, on the ckUSDC ledger
                     // the payout started with, which deduplicates it (the door holds it to
                     // the window); one that cannot land twice, whatever it pays, afresh
@@ -1007,7 +1007,7 @@ impl PoolLedger {
                     .target(r#ref, lookup)
                     .ok_or(PoolStepError::Unknown(*r#ref))?;
                 // a queued payout whose drive fails before it starts is counted too, and held
-                // for a human at the usual attempts: it never blocks the queue (CR-08)
+                // for a human at the usual attempts: it never blocks the queue
                 if self.queue.0.iter().any(|(queued, _)| queued == r#ref) {
                     return Ok(());
                 }
@@ -1538,7 +1538,7 @@ impl PoolLedger {
                                     }
                                     deposit.status = DepositStatus::Paying;
                                 }
-                                // never started (CR-08): queued again, at the back
+                                // never started: queued again, at the back
                                 None => {
                                     deposit.status = DepositStatus::Arrived;
                                     if deposit.terms.kind.is_swap() {
@@ -1673,7 +1673,7 @@ impl PoolLedger {
                         deposit.status = DepositStatus::PayoutFailed(why);
                     }
                     // one that never started leaves the queue, so the payouts behind it go
-                    // on; what it holds stays owed and was never reserved (CR-08)
+                    // on; what it holds stays owed and was never reserved
                     let head = self.queue.head().map(|(head, _)| head);
                     self.queue.0.retain(|(queued, _)| queued != r#ref);
                     if head == Some(*r#ref) {
@@ -1964,7 +1964,7 @@ fn owed_line(deposit: &Registered) -> TokenAmount {
     }
 }
 
-/// The least ICP fees a swap paying `token_out` commits (P11d, 2026-10-21): its path's own
+/// The least ICP fees a swap paying `token_out` commits: its path's own
 /// ckUSDC fees, ckUSDC alone 1, a direct token 2 (the approval and the deposit), a token
 /// through ICP 3 (the ckUSDC leg's 2 and 1 covering the ICP leg's ICP fees). None for a token
 /// not listed, or no ckUSDC fee read.
@@ -2061,11 +2061,11 @@ fn admits_terms(terms: &Registration) -> Result<(), PoolStepError> {
 }
 
 /// How much of the settings' premium share of what arrived a swap's premium must be at its
-/// arrival, in percent (P11e): the quoter prices the premium on the most a route delivers, and
+/// arrival, in percent: the quoter prices the premium on the most a route delivers, and
 /// a route delivers a little less than its most.
 pub const PREMIUM_AT_ARRIVAL_PERCENT: u32 = 90;
 
-/// The premium a swap of `min_usdc` carries at the least (P11d, 2026-10-21: no floor):
+/// The premium a swap of `min_usdc` carries at the least (no floor):
 /// exactly the settings' share of it, rounded up, pure pool income. Every ledger fee is the
 /// user's own line beside it.
 pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<TokenAmount> {
@@ -2074,7 +2074,7 @@ pub fn premium_share(settings: &PoolSettings, min_usdc: TokenAmount) -> Option<T
         .checked_div_ceil(10_000_u32)
 }
 
-/// Every rule a deposit's terms meet at its arrival (P11d, 2026-10-21: no registration),
+/// Every rule a deposit's terms meet at its arrival (no registration),
 /// `terms.min_usdc` being what arrived, read off the ledger: the fees' own rules, then for a
 /// swap the pool open for swaps, the token listed (no cap: the per-swap cap is the
 /// quoter's), the ICP fees at least the path's own ckUSDC fees and, on a ckUSDC payout, `arrived - premium - icp_fees` at
@@ -2096,7 +2096,7 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
             if !settings.is_listed(token_out) {
                 return Err(RegisterRefusal::TokenNotListed(token_out));
             }
-            // the premium at arrival (P11e): at least 90% of the settings' share of what
+            // the premium at arrival: at least 90% of the settings' share of what
             // arrived, the quoter pricing it on the most a route delivers
             let share = premium_share(settings, terms.min_usdc).ok_or(
                 RegisterRefusal::NotAllowed("the premium's share overflows".to_string()),

@@ -9,7 +9,7 @@
 //!   `payouts_waiting`;
 //! - at its deadline a payout not signed is undone: an ICP swap refunds what it pulled on ICP,
 //!   a withdrawal mints its shares back;
-//! - a payout is signed once (2026-10-23): one whose transaction reverted is undone the same
+//! - a payout is signed once: one whose transaction reverted is undone the same
 //!   way, at once, but only once its transaction is closed at the crediting depth and Swapic
 //!   says its order never ran (`used(id)` false, read by every node, `agreed::ran`), so a
 //!   reorg that turned the revert into a payment is never paid twice; an order that ran after
@@ -118,12 +118,12 @@ pub fn next(
         // reverted: undone at once, its transaction closed for good and its order unused
         PayoutStatus::Reverted if in_flight => Next::Wait,
         // no block recorded for its revert: nothing can be read at or after it, a human's
-        // (the review, 2026-10-24: once, not a log line every pass)
+        // (once, not a log line every pass)
         PayoutStatus::Reverted if payout.reverted_block.is_none() => {
             Next::Stop(NO_REVERT_BLOCK.to_string())
         }
         // whether its order ran is read once an agreed block can be at or past its revert
-        // (the review, 2026-10-24: not asked every pass before that)
+        // (not asked every pass before that)
         PayoutStatus::Reverted
             if payout
                 .reverted_at
@@ -259,7 +259,7 @@ pub trait ChainReads {
     ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead>;
 }
 
-/// The chains themselves, read by every node at an agreed block (M-03).
+/// The chains themselves, read by every node at an agreed block.
 pub struct LiveReads;
 
 impl ChainReads for LiveReads {

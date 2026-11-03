@@ -1,4 +1,4 @@
-//! The Eco rescue's door (P11e, Q8 of the 2026-10-17 decisions).
+//! The Eco rescue's door.
 
 use ic_cdk::update;
 pub use settlement_api::types::pool::EcoRescueOk;

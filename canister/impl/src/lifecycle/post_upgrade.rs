@@ -14,7 +14,7 @@ fn post_upgrade() {
     storage::init();
     // the two cells that hold candid: the roles trap above on bytes that do not decode,
     // and the flow settings here on bytes that do not decode or parse under this build's
-    // rules. Neither is ever read as the defaults after an upgrade (L-08)
+    // rules. Neither is ever read as the defaults after an upgrade
     if let Err(error) = storage::flow_settings::check() {
         ic_cdk::trap(&format!("upgrade refused: {error}"));
     }

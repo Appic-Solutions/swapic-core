@@ -8,7 +8,7 @@
 //! reserved `max_response_bytes` and ignores the replication mode entirely (measured on
 //! mainnet 2026-09-21: 87.44M replicated against 87.56M unreplicated).
 //!
-//! The reads that decide money alone (M-03: a pool arrival's receipts, `Swapic.used` before
+//! The reads that decide money alone (a pool arrival's receipts, `Swapic.used` before
 //! an undo, an Eco intent's `claimants`) are made by every node of the subnet and agreed on
 //! ([`rpc_batch_agreed`]): each node's answer goes through [`agreed_response`], which keeps
 //! only what the canister reads, and the subnet takes the answer only when enough nodes'
@@ -608,7 +608,7 @@ pub fn agreed_response(response: HttpResponse, context: &[u8]) -> HttpResponse {
     }
 }
 
-/// [`rpc_batch_each`] made by every node of the subnet and agreed on (M-03), each call's
+/// [`rpc_batch_each`] made by every node of the subnet and agreed on, each call's
 /// answer kept as its [`Keep`] says: what the canister reads decides money, so no one node
 /// or one answer may decide it. Every call must name a fixed block, never `latest`, or
 /// honest nodes disagree and the read fails. A read the nodes do not agree on fails like

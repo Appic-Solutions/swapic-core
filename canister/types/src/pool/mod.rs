@@ -107,7 +107,7 @@ impl IcpAccount {
 /// told from a new one, so the drive stops asking (a little before, for the clocks' skew).
 pub const DEDUP_WINDOW: Duration = Duration::from_secs(23 * 3_600);
 
-/// What of the ledger's window a retry must leave its next drive (the review, 2026-10-24).
+/// What of the ledger's window a retry must leave its next drive.
 pub const RETRY_MARGIN: Duration = Duration::from_secs(3_600);
 
 /// Whether a ledger still deduplicates a transfer whose dedup instant is `attempt_at` after a
@@ -370,7 +370,7 @@ pub struct PoolSettings {
     #[n(0)]
     pub tvl_cap: TokenAmount,
     /// The most one swap may move, micro USDC: the QUOTER's cap, which the canister only
-    /// stores and shows (`pool_state`). Since the final review round (2026-10-23) the canister
+    /// stores and shows (`pool_state`). Since the final review round the canister
     /// enforces it nowhere: an ICP swap to EVM opens while the Base pocket can pay it, an EVM to
     /// ICP deposit is credited whatever its size. Kept, as its wire field and the old
     /// `AboveSwapCap` refusal are: append-only.
@@ -408,7 +408,7 @@ pub struct PoolSettings {
     pub routes: Option<IcpRoutes>,
     /// A deposit whose one transfer to the canister is above this, micro USDC, is credited
     /// only once [`Self::large_deposit_confirmations`] deep; None:
-    /// [`DEFAULT_LARGE_DEPOSIT_USDC`] (2026-10-23).
+    /// [`DEFAULT_LARGE_DEPOSIT_USDC`].
     #[n(12)]
     pub large_deposit_usdc: Option<TokenAmount>,
     /// The pool chain's blocks a large deposit waits before it is credited; None:
@@ -1066,7 +1066,7 @@ pub struct PayoutProgress {
     /// A path through ICP whose second leg could not pay: the ICP swapped back to ckUSDC.
     #[n(6)]
     pub back: Option<SwapLeg>,
-    /// Its transfer to the recipient as last asked (the review, 2026-10-24): none never. A
+    /// Its transfer to the recipient as last asked: none never. A
     /// payout started by a build before `TransferAsked` existed reads none here too; hfisl's
     /// log holds no Pool event, so no such payout exists.
     #[n(7)]
@@ -1074,7 +1074,7 @@ pub struct PayoutProgress {
 }
 
 /// A payout's transfer to its recipient as the canister asked it, recorded before the call
-/// (the review, 2026-10-24): of which ledger, how much, and what it spends of the ICP pocket
+///: of which ledger, how much, and what it spends of the ICP pocket
 /// once paid; and whether the ledger refused it for sure at that ask. Asked and not refused,
 /// it may have landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
@@ -1088,7 +1088,7 @@ pub struct Sent {
     #[n(3)]
     pub refused: bool,
     /// Whether an answer of it was ever lost (unknown, or too old to tell), kept for good
-    /// (the review, 2026-10-24): a later refusal does not prove the lost ask landed nowhere.
+    ///: a later refusal does not prove the lost ask landed nowhere.
     #[n(4)]
     pub lost: crate::pool::payout::Flag,
 }
@@ -1103,7 +1103,7 @@ impl PayoutProgress {
             .any(|leg| leg.begun || leg.approvals.unwrap_or(0) > 0 || leg.out.is_some())
     }
 
-    /// Whether the canister knows nothing of it went out (the review, 2026-10-24): never
+    /// Whether the canister knows nothing of it went out: never
     /// started; or started, no ICPSwap leg moved money, and no transfer to the recipient may
     /// have landed (none asked, or the last ask refused by the ledger for sure with no answer
     /// of it ever lost).
@@ -1157,7 +1157,7 @@ pub struct Registered {
     /// What the deposit's payout holds once it arrived: its whole payout and every ledger fee
     /// its path can cost, queued until the ICP pocket's free ckUSDC covers it, then held there
     /// from its `PayoutStarted` until it is paid. None before it arrived: a registration holds
-    /// nothing (Jeff, 2026-10-21).
+    /// nothing.
     #[n(6)]
     pub held: Option<TokenAmount>,
 }
@@ -1413,7 +1413,7 @@ pub enum PoolStep {
         block: BlockNumber,
     },
     /// A transfer to the canister that proves no deposit it can credit: kept for the
-    /// orphan refund (P11b) with its payer when known.
+    /// orphan refund with its payer when known.
     #[n(4)]
     Unattributed {
         #[n(0)]
@@ -1429,7 +1429,7 @@ pub enum PoolStep {
         /// The registration it named, if any: a late or short arrival closes it.
         #[n(5)]
         r#ref: Option<PoolRef>,
-        /// A deposit's transfer the canister's own read found without its terms (P11d):
+        /// A deposit's transfer the canister's own read found without its terms:
         /// it awaits them until then under `r#ref`, then is held for a controller.
         #[n(6)]
         awaiting_until: Option<Timestamp>,
@@ -1668,7 +1668,7 @@ pub enum PoolStep {
         terms: PayoutTerms,
         #[n(3)]
         undo: Undo,
-        /// A planned ICP swap's payout plan as the user handed it in (2026-10-23), boxed.
+        /// A planned ICP swap's payout plan as the user handed it in, boxed.
         #[n(4)]
         plan: Option<Box<PinnedOrder>>,
     },
@@ -1727,7 +1727,7 @@ pub enum PoolStep {
         intent: Option<[u8; 32]>,
     },
     /// Its transaction reverted at depth: its USDC reserved again for its undo, which comes
-    /// once Swapic says its order never ran; never signed again (2026-10-23).
+    /// once Swapic says its order never ran; never signed again.
     #[n(30)]
     PayoutReverted {
         #[n(0)]
@@ -1849,7 +1849,7 @@ pub enum PoolStep {
         #[n(1)]
         success: bool,
     },
-    /// The terms of a transfer that awaited them came (P11d): out of the unattributed line,
+    /// The terms of a transfer that awaited them came: out of the unattributed line,
     /// for the deposit's own arrival line, which follows in the same message; or, `refused`,
     /// the terms the pool does not take, and the transfer is held for a controller with why.
     #[n(42)]
@@ -1859,7 +1859,7 @@ pub enum PoolStep {
         #[n(1)]
         refused: Option<String>,
     },
-    // The payout plan flow (2026-10-23): indices 43 to 59.
+    // The payout plan flow: indices 43 to 59.
     /// The Eco intent a payout's order published was filled, as its destination Portal shows
     /// it at `block` (read by every node, past the route's deadline): the payout is paid.
     #[n(43)]
@@ -1935,7 +1935,7 @@ pub enum PoolStep {
         #[n(1)]
         resolution: StakeResolution,
     },
-    /// A payout's transfer to its recipient is asked next (the review, 2026-10-24): `amount`
+    /// A payout's transfer to its recipient is asked next: `amount`
     /// of `token`, spending `spent` of the ICP pocket once paid. From here it may have
     /// landed, until the ledger refuses it for sure.
     #[n(50)]
@@ -1956,7 +1956,7 @@ pub enum PoolStep {
         r#ref: PoolRef,
     },
     /// An answer of a payout's transfer was lost (unknown, or too old to tell): it may have
-    /// landed, whatever comes after (the review, 2026-10-24). `held`, why: on a ledger the
+    /// landed, whatever comes after. `held`, why: on a ledger the
     /// canister does not know to deduplicate, never asked again, the payout held for a human
     /// at once.
     #[n(52)]
@@ -2186,14 +2186,14 @@ pub enum PoolStep {
     },
     /// ICP to Base by Eco: the destination Portal shows the intent never filled and the source
     /// Portal its reward refunded, so the move's USDC is back at the canister's Ethereum
-    /// address (P11e): landed again, routed again.
+    /// address: landed again, routed again.
     #[n(78)]
     MoveUnfilled {
         #[n(0)]
         id: u64,
     },
     /// ICP to Base: the ck minter reimbursed the withdrawal, `amount` of ckUSDC back at the
-    /// canister's account in its ledger `block` (P11e): back in the ICP pocket, the move
+    /// canister's account in its ledger `block`: back in the ICP pocket, the move
     /// closed.
     #[n(79)]
     MoveReimbursed {

@@ -3,7 +3,7 @@
 //! refunds one to an address (`USDC.transfer(to, amount - min_network_fee)` on Base, the fee
 //! kept on the Base fee line for the transfer's gas) or books it to the Base books'
 //! unattributed line; each one resolved once. A deposit's transfer found without its terms
-//! (P11d) awaits them for 24 hours first, and is a controller's only after that.
+//! awaits them for 24 hours first, and is a controller's only after that.
 
 #[cfg(test)]
 mod tests;

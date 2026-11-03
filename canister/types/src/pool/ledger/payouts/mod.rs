@@ -1,4 +1,4 @@
-//! The Base payouts' rules (P11b): what each payout step must meet, read off the fold alone,
+//! The Base payouts' rules: what each payout step must meet, read off the fold alone,
 //! and what it moves. Each pocket move is refused in `admits` before `apply` could clamp it.
 //!
 //! - Opened: an ICP swap with nothing booked yet; a withdrawal burns its shares and spends its
@@ -8,10 +8,10 @@
 //!   the ICP fee line.
 //! - Queued / Waiting: first in first out; Waiting reserves the Base hold (`free -> reserved`).
 //! - Signed: the order's amount `reserved -> in_flight`, once: a payout is never signed
-//!   again (2026-10-23). Reverted: back to `reserved`, undone once Swapic says its order
+//!   again. Reverted: back to `reserved`, undone once Swapic says its order
 //!   never ran.
 //! - Paid: `in_flight` out, a withdrawal's fee to the Base fee line, an ICP swap's ckUSDC
-//!   freed to the pool, `owed` down. An order that published an Eco intent (2026-10-23) is
+//!   freed to the pool, `owed` down. An order that published an Eco intent is
 //!   Delivering at its close, every line as it was, until its fill is read past its route
 //!   deadline: Delivered is then the paid line; Unfilled keeps its USDC in `in_flight`, owed
 //!   back by Eco, a withdrawal's fee back to `free`, and the payout is undone next. Eco's
@@ -118,7 +118,7 @@ fn dequeue(
 }
 
 impl PoolLedger {
-    /// A planned ICP swap's opening (2026-10-23): its plan, its slippage and the plan's
+    /// A planned ICP swap's opening: its plan, its slippage and the plan's
     /// amount together; a slippage of at most 500 bps; a plan that is an order of exactly
     /// that amount; a premium taken only once the amount is known; a ckUSDC swap's least
     /// ckUSDC all of it; and the Base pocket able to pay it behind an empty queue: the plan's
@@ -416,7 +416,7 @@ impl PoolLedger {
                 }
                 Ok(())
             }
-            // a payout waiting is signed once (2026-10-23): a revert undoes it, never signs it
+            // a payout waiting is signed once: a revert undoes it, never signs it
             // again, its pinned order included
             PoolStep::PayoutSigned { id, .. } => {
                 let payout = payout_of(lookup, *id)?;

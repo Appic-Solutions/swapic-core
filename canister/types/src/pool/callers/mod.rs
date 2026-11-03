@@ -1,4 +1,4 @@
-//! The per-caller limit on the doors anyone may call for free (Jeff, 2026-10-23):
+//! The per-caller limit on the doors anyone may call for free:
 //! `swap_from_icp` and `stake_icp` need no approval to be called, and each call writes two
 //! permanent lines before its pull is refused. A caller is let through at most
 //! [`PER_MINUTE`] calls a minute and [`PER_HOUR`] an hour, both doors together, each window

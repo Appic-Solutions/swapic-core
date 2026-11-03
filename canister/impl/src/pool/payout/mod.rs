@@ -328,7 +328,7 @@ impl Ledgers for Live {
 }
 
 /// One payout as the driver works it: a swap deposit's or a withdrawal's, whose own amount
-/// pays every ledger fee of its path (P11d, 2026-10-21: the user pays every fee, the pool
+/// pays every ledger fee of its path (the user pays every fee, the pool
 /// none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payout {
@@ -420,7 +420,7 @@ pub fn path_amount(amount: TokenAmount, path: PayoutPath, fee: TokenAmount) -> O
 /// What an ICPSwap leg took from the canister's ckUSDC account so far: every approval's fee,
 /// and once begun, the swap's deposit (its amount in and the pool's pull's fee), or what the
 /// deposit cost in the end once undone. The deposit is the one the leg recorded at its begin,
-/// which an approval asked again made one fee less than the amount it was handed (CR-09);
+/// which an approval asked again made one fee less than the amount it was handed;
 /// `swap_in` only for a leg from before that amount was recorded. A leg from before
 /// approvals were counted gave one once begun.
 fn leg_cost(swap: &SwapLeg, swap_in: Option<TokenAmount>, fee: TokenAmount) -> Option<TokenAmount> {
@@ -707,7 +707,7 @@ fn hold_unanswered(payout: &Payout, what: &str, now: Timestamp) -> Stop {
 }
 
 /// The payout's transfer of `amount` of `token` to its recipient, its ask recorded before the
-/// call (the review, 2026-10-24): from then on it may have landed, until the ledger refuses
+/// call: from then on it may have landed, until the ledger refuses
 /// it for sure, which is recorded too. A controller refunds a payout only when nothing of it
 /// may have landed, and marks it paid on the block of exactly this transfer.
 #[allow(clippy::too_many_arguments)]
@@ -766,7 +766,7 @@ async fn send_out(
         Ok(block) => Ok(block),
         Err(error) => {
             // an answer lost (unknown, or too old to tell) is kept for good: it may have
-            // landed whatever comes after (the review, 2026-10-24), and noted before anything
+            // landed whatever comes after, and noted before anything
             // else: a lost answer not noted stops the drive, uncounted, so no later refusal
             // can make it look safe
             if matches!(error, CallError::Unknown(_) | CallError::Expired(_)) && !deduplicates {
@@ -1187,7 +1187,7 @@ async fn swap_leg(
         return settle(ledgers, settings, payout, leg, before, None, clock).await;
     }
     // an approval given before this run is one fee more: the user's, out of what the leg
-    // deposits (P11e)
+    // deposits
     let swap_in =
         crate::pool::legs::after_approvals(swap_in, fee_ck, payout.progress.swap.approvals)
             .ok_or_else(|| {
@@ -1563,7 +1563,7 @@ pub async fn drive_deposit(
                 let fee_ck = settings
                     .fee_of(settings.ckusdc_ledger)
                     .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
-                // the user pays every fee (P11d): out of `arrived - premium`
+                // the user pays every fee: out of `arrived - premium`
                 let amount = path_amount(deposit.owed(), path, fee_ck).ok_or_else(|| {
                     Stop::Failed("the amount does not cover the fees".to_string())
                 })?;
@@ -1785,7 +1785,7 @@ fn alert_if_waited(now: Timestamp) {
     if now.saturating_duration_since(since) <= interval {
         return;
     }
-    // the head already alerted on is kept in stable memory (C-09): one line per head, an
+    // the head already alerted on is kept in stable memory: one line per head, an
     // upgrade included
     if crate::storage::timer_state::get().alerted_head == Some(head) {
         return;

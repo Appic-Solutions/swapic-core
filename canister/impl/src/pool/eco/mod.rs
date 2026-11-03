@@ -1,4 +1,4 @@
-//! Eco intents the canister signs or relies on (P11e): every intent the canister funds (a
+//! Eco intents the canister signs or relies on: every intent the canister funds (a
 //! payout's onward intent, a move's proposed route) names Eco's configured prover and
 //! Portal, and short deadlines; and the reads of Eco's Portal the canister makes itself
 //! before it trusts a refund or rescues an unfilled intent: the destination's `claimants`
@@ -20,7 +20,7 @@ pub const MAX_ROUTE_LIFE_S: u64 = 3_600;
 /// The latest an unfilled intent's reward may come back: Eco's own week, and a day.
 pub const MAX_REWARD_LIFE_S: u64 = 8 * 24 * 3_600;
 
-/// The least an intent's reward may come back after its route can last be filled (L-03):
+/// The least an intent's reward may come back after its route can last be filled:
 /// a refund in the seconds the two chains' clocks disagree could meet a fill.
 pub const MIN_REFUND_GAP_S: u64 = 3_600;
 
@@ -88,7 +88,7 @@ pub async fn fill(chain: ChainId, intent: [u8; 32], route_deadline: u64) -> Resu
 
 /// The one Eco intent `logs` show `portal` published, of `creator` when one is named: None
 /// for none, and for two, which name no one intent. The one reader of a published intent
-/// the rescue and the outbox share (CR-17); an `IntentPublished` another contract logs is
+/// the rescue and the outbox share; an `IntentPublished` another contract logs is
 /// none.
 pub fn published_intent(
     logs: &[crate::pool::arrival::Log],

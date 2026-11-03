@@ -1,6 +1,6 @@
 //! The tokens a consent message names by symbol beyond what the canister counts itself (the
 //! pool's ckUSDC, each configured chain's USDC, a named chain's native coin): a built-in list
-//! in code, no stored state (Jeff, 2026-10-28). Every id and decimals is copied from the
+//! in code, no stored state. Every id and decimals is copied from the
 //! services' curated lists at swapic-backend 8973626 (`config/tokens/*.json`, cited per row),
 //! every address in its EIP-55 spelling. Any other token is named by its full id.
 

@@ -9,7 +9,7 @@
 //! `withdraw_icp`: the caller's shares, burned with the ckUSDC they are worth reserved
 //! (`WithdrawStarted`) before any call, then the payout of Task 6 (same dedup, same all or
 //! nothing), the withdrawer's amount paying every ledger fee. The ICP pocket must hold it:
-//! a withdrawal larger than its free ckUSDC waits for the queue (P11b).
+//! a withdrawal larger than its free ckUSDC waits for the queue.
 //!
 //! The ICP pocket's check: every `books_check_interval`, the canister's ckUSDC balance read
 //! beside what the pool's lines expect, less every payout started and not recorded paid (the

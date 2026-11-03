@@ -1,4 +1,4 @@
-//! `resolve_payout` (Jeff, 2026-10-23, the review's code-review finding): a payout stopped for
+//! `resolve_payout`: a payout stopped for
 //! a human (`PayoutStopped`, status `Failed`) held its lines for good, since nothing led out
 //! of `Failed`. A controller, having looked at the ledgers and the chain, resolves it once:
 //!

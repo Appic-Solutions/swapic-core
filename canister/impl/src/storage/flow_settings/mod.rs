@@ -1,8 +1,8 @@
 //! The flows' settings: the routers, the ck canisters, the ICPSwap pools a quote may name,
 //! and the windows. Stored as their candid bytes in one stable cell, set by a controller,
 //! and read in their parsed form. Stored bytes that no longer decode or parse are never read
-//! as the defaults (L-08): `post_upgrade` traps on them, keeping the wasm that wrote them,
-//! and a read traps. Their layout is pinned by `impl/golden/candid_cells_v1.txt` (C-11).
+//! as the defaults: `post_upgrade` traps on them, keeping the wasm that wrote them,
+//! and a read traps. Their layout is pinned by `impl/golden/candid_cells_v1.txt`.
 
 #[cfg(test)]
 mod tests;
