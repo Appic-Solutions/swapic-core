@@ -54,7 +54,7 @@ const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
 const TIMER_STATE_MEMORY_ID: MemoryId = MemoryId::new(37);
 const POOL_CALLERS_MEMORY_ID: MemoryId = MemoryId::new(43);
 const SWEEPS_MEMORY_ID: MemoryId = MemoryId::new(44);
-const FLOW_BY_LANDED_MEMORY_ID: MemoryId = MemoryId::new(45);
+// 45 held flows by a landed transfer, retired before it was ever deployed
 const FLOW_BY_SOURCE_MEMORY_ID: MemoryId = MemoryId::new(46);
 const FLOW_BY_TX_MEMORY_ID: MemoryId = MemoryId::new(47);
 
@@ -176,10 +176,6 @@ pub fn pool_own_sources_memory() -> Memory {
 
 pub fn eco_rescues_memory() -> Memory {
     memory(ECO_RESCUES_MEMORY_ID)
-}
-
-pub fn flow_by_landed_memory() -> Memory {
-    memory(FLOW_BY_LANDED_MEMORY_ID)
 }
 
 pub fn flow_by_tx_memory() -> Memory {

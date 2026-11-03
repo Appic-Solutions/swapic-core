@@ -2,10 +2,10 @@ use crate::state::transitions::apply_state_transition;
 use crate::state::{State, Store};
 use crate::storage::memory::{
     books_memory, eco_rescues_memory, events_data_memory, events_index_memory,
-    flow_by_landed_memory, flow_by_source_memory, flow_by_tx_memory, flows_memory,
-    ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
-    pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
-    pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    flow_by_source_memory, flow_by_tx_memory, flows_memory, ledger_meta_memory, nonces_memory,
+    pool_credited_memory, pool_deposits_memory, pool_ledger_memory, pool_moves_memory,
+    pool_orphans_memory, pool_own_sources_memory, pool_payout_intents_memory,
+    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
     pool_withdrawal_nonces_memory, signed_memory, sweeps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -110,12 +110,8 @@ thread_local! {
     static POOL_OWN_SOURCES: RefCell<StableBTreeMap<types::TxHash, types::pool::OwnSource, Memory>> =
         RefCell::new(StableBTreeMap::init(pool_own_sources_memory()));
 
-    // The flows by the transaction that landed for them and by a finish's source
-    // transaction: what the two flow rules look up instead of walking every flow. Part of the
-    // fold: only `Flow` lines write them.
-    static FLOW_BY_LANDED: RefCell<StableBTreeMap<types::TxHash, QuoteHash, Memory>> =
-        RefCell::new(StableBTreeMap::init(flow_by_landed_memory()));
-
+    // The finishes by their source transaction: what the finish rule looks up instead of
+    // walking every flow. Part of the fold: only `Flow` lines write it and the next.
     static FLOW_BY_SOURCE: RefCell<StableBTreeMap<types::TxHash, QuoteHash, Memory>> =
         RefCell::new(StableBTreeMap::init(flow_by_source_memory()));
 
@@ -145,9 +141,6 @@ impl Store for StableStore {
 
     fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow) {
         // the two indexes the flow rules read, kept with every write of a flow
-        if let Some(tx) = flow.landed_tx {
-            FLOW_BY_LANDED.with(|index| index.borrow_mut().insert(tx, quote_hash));
-        }
         if let Some(tx) = flow.source_tx {
             FLOW_BY_SOURCE.with(|index| index.borrow_mut().insert(tx, quote_hash));
         }
@@ -337,10 +330,6 @@ impl Store for StableStore {
         POOL_OWN_SOURCES.with(|sources| sources.borrow().iter().collect())
     }
 
-    fn flow_by_landed(&self, tx: &types::TxHash) -> Option<QuoteHash> {
-        FLOW_BY_LANDED.with(|index| index.borrow().get(tx))
-    }
-
     fn flow_by_source(&self, tx: &types::TxHash) -> Option<QuoteHash> {
         FLOW_BY_SOURCE.with(|index| index.borrow().get(tx))
     }
@@ -471,7 +460,6 @@ pub fn init() {
     POOL_OWN_SOURCES.with(|_| ());
     ECO_RESCUES.with(|_| ());
     SWEEPS.with(|_| ());
-    FLOW_BY_LANDED.with(|_| ());
     FLOW_BY_SOURCE.with(|_| ());
     FLOW_BY_TX.with(|_| ());
 }

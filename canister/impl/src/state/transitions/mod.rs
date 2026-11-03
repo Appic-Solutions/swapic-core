@@ -63,28 +63,18 @@ impl<S: Store> State<S> {
             // for each Flow line
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
-                types::Flow::admits(
-                    *quote_hash,
-                    existing.as_ref(),
-                    step,
-                    |tx_hash| self.flow_landed_by(tx_hash, quote_hash),
-                    |source_tx| {
-                        self.finish_of_source(source_tx)
-                            .and_then(|(_, flow)| flow.arrival)
-                    },
-                )?;
+                types::Flow::admits(*quote_hash, existing.as_ref(), step, |source_tx| {
+                    self.finish_of_source(source_tx)
+                        .and_then(|(_, flow)| flow.arrival)
+                })?;
                 match step {
                     FlowStep::GaslessRelayed {
                         chain_id, nonce, ..
                     } => self.ensure_flow_nonce(TxPurpose::Relay(*quote_hash), *chain_id, *nonce),
-                    // no purpose signs a continuation: the ICP flows that made one are gone
-                    FlowStep::ContinuationSigned { .. } => {
-                        Err(types::FlowError::Unknown(*quote_hash).into())
-                    }
                     FlowStep::CctpFinishSigned {
                         chain_id, nonce, ..
                     } => self.ensure_flow_nonce(TxPurpose::Finish(*quote_hash), *chain_id, *nonce),
-                    _ => Ok(()),
+                    FlowStep::TxClosed { .. } => Ok(()),
                 }
             }
             // always legal; named rather than matched by `_` so a new variant has to be
@@ -303,9 +293,6 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
             // action that line recorded, which a replacement is held to
             let mut action = None;
             if let FlowStep::GaslessRelayed {
-                chain_id, nonce, ..
-            }
-            | FlowStep::ContinuationSigned {
                 chain_id, nonce, ..
             }
             | FlowStep::CctpFinishSigned {

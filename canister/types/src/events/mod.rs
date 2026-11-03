@@ -320,12 +320,6 @@ impl EventType {
                         raw_tx,
                         ..
                     }
-                    | FlowStep::ContinuationSigned {
-                        chain_id,
-                        tx_hash,
-                        raw_tx,
-                        ..
-                    }
                     | FlowStep::CctpFinishSigned {
                         chain_id,
                         tx_hash,

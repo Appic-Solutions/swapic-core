@@ -22,9 +22,8 @@ pub trait Store {
     fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow);
     /// Every flow, in quote hash order.
     fn flows(&self) -> Vec<(QuoteHash, Flow)>;
-    /// The flow a transaction landed for, and the finish a source transaction was finished
-    /// under, as last indexed: a reader checks the flow still names it.
-    fn flow_by_landed(&self, tx: &TxHash) -> Option<QuoteHash>;
+    /// The finish a source transaction was finished under, as last indexed: a reader checks
+    /// the flow still names it.
     fn flow_by_source(&self, tx: &TxHash) -> Option<QuoteHash>;
     /// The flow whose own transaction is `tx`, as last indexed.
     fn flow_by_tx(&self, tx: &TxHash) -> Option<QuoteHash>;
@@ -202,17 +201,12 @@ pub struct MemoryStore {
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
     eco_rescues: BTreeMap<PoolRef, u64>,
     sweeps: BTreeMap<u64, SweepEntry>,
-    flow_by_landed: BTreeMap<TxHash, QuoteHash>,
     flow_by_source: BTreeMap<TxHash, QuoteHash>,
     flow_by_tx: BTreeMap<TxHash, QuoteHash>,
 }
 
 #[cfg(test)]
 impl Store for MemoryStore {
-    fn flow_by_landed(&self, tx: &TxHash) -> Option<QuoteHash> {
-        self.flow_by_landed.get(tx).copied()
-    }
-
     fn flow_by_source(&self, tx: &TxHash) -> Option<QuoteHash> {
         self.flow_by_source.get(tx).copied()
     }
@@ -245,9 +239,6 @@ impl Store for MemoryStore {
     }
 
     fn put_flow(&mut self, quote_hash: QuoteHash, flow: Flow) {
-        if let Some(tx) = flow.landed_tx {
-            self.flow_by_landed.insert(tx, quote_hash);
-        }
         if let Some(tx) = flow.source_tx {
             self.flow_by_source.insert(tx, quote_hash);
         }
@@ -530,7 +521,6 @@ impl State<MemoryStore> {
             pool_own_sources,
             eco_rescues,
             sweeps,
-            flow_by_landed: _,
             flow_by_source: _,
             flow_by_tx: _,
         } = &self.store;
@@ -884,18 +874,6 @@ impl<S: Store> State<S> {
             flow.gas_action = action;
         }
         self.store.put_flow(quote_hash, flow);
-    }
-
-    /// Another flow than `quote_hash` that `tx` landed for, if one does.
-    pub fn flow_landed_by(&self, tx: &TxHash, quote_hash: &QuoteHash) -> Option<QuoteHash> {
-        self.store
-            .flow_by_landed(tx)
-            .filter(|other| other != quote_hash)
-            .filter(|other| {
-                self.store
-                    .flow(other)
-                    .is_some_and(|flow| flow.landed_tx.as_ref() == Some(tx))
-            })
     }
 
     /// The CCTP finish whose own transaction is `tx` (the one that landed, once it closed).

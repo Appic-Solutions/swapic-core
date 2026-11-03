@@ -48,9 +48,10 @@ fn samples() -> Vec<EventType> {
             outcome: TxOutcome::Reverted { block: 23 },
         },
         {
-            let step = types::FlowStep::Pulled {
-                amount: types::TokenAmount::from(25_u8),
-                block_index: 26,
+            let step = types::FlowStep::TxClosed {
+                tx_hash: types::TxHash::new([25; 32]),
+                block: types::BlockNumber::new(26),
+                success: true,
             };
             EventType::Flow {
                 quote_hash: [24; 32],
