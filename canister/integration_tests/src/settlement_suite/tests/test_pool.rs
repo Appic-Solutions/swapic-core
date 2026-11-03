@@ -18,7 +18,6 @@ use settlement_api::types::pool::{
     PoolStateView,
 };
 use std::time::Duration;
-use types::books::{BalanceCheck, BookStep};
 use types::hash::{PoolOpId, PoolRef, TxHash};
 use types::pool::{CreditKey, DepositKind, IcpAccount, PoolRail, PoolStep, Registration, Shares};
 use types::{BlockNumber, ChainId, Timestamp, TokenAmount};
@@ -251,25 +250,17 @@ impl World {
         .expect("the line is admitted");
     }
 
-    /// A balance check of the pool chain, now: the pool's guard opens on it.
+    /// A balance read of the pool chain, now, kept as the hourly check keeps the one it
+    /// read: nothing at block 1, before every planted arrival. The pool's guard opens on it.
     fn books_checked(&self) {
-        append(
+        let kept: Result<(), String> = update(
             &self.pic,
             self.canister,
             self.admin,
-            &EventType::from(types::EventType::Books {
-                chain_id: ChainId::new(BASE),
-                step: BookStep::Checked {
-                    check: BalanceCheck {
-                        block: BlockNumber::new(1),
-                        observed: TokenAmount::ZERO,
-                        expected: TokenAmount::ZERO,
-                    },
-                    shortfall: false,
-                },
-            }),
-        )
-        .expect("the check is admitted");
+            "test_keep_read",
+            candid::encode_args((BASE, 1_u64, 0_u64)).unwrap(),
+        );
+        assert_eq!(kept, Ok(()), "the read is kept");
     }
 
     /// `amount` of the canister's own ckUSDC planted as staked on ICP by `owner`, the way

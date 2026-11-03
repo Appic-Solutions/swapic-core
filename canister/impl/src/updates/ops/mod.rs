@@ -8,6 +8,8 @@ pub mod test_append;
 #[cfg(feature = "inttest")]
 pub mod test_pool_lose_next_answer;
 #[cfg(feature = "inttest")]
+pub mod test_keep_read;
+#[cfg(feature = "inttest")]
 pub mod test_put_reading;
 #[cfg(feature = "inttest")]
 pub mod test_rpc_batch;
@@ -25,6 +27,8 @@ pub use test_agreed::*;
 pub use test_append::*;
 #[cfg(feature = "inttest")]
 pub use test_pool_lose_next_answer::*;
+#[cfg(feature = "inttest")]
+pub use test_keep_read::*;
 #[cfg(feature = "inttest")]
 pub use test_put_reading::*;
 #[cfg(feature = "inttest")]
