@@ -68,8 +68,9 @@ mod tests;
 pub struct FinalizedSeen {
     /// The last finalized block a read gave; none before any did.
     pub number: Option<u64>,
-    /// When it last moved, IC time in nanoseconds (or when the first read was tried).
+    /// When it last moved, IC time in nanoseconds (or when its clock last started).
     pub moved_at_ns: u64,
-    /// It has stood still ten minutes or more: nothing on the chain closes until it moves.
+    /// It has stood still ten minutes or more while something on the chain waits: nothing
+    /// on it closes until it moves. An idle chain is never stalled.
     pub stalled: bool,
 }

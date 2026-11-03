@@ -405,9 +405,10 @@ type FieldsDisplay = record {
 };
 // A chain that waits for its finalized block, as the outbox last read it.
 type FinalizedSeen = record {
-  // It has stood still ten minutes or more: nothing on the chain closes until it moves.
+  // It has stood still ten minutes or more while something on the chain waits: nothing
+  // on it closes until it moves. An idle chain is never stalled.
   stalled : bool;
-  // When it last moved, IC time in nanoseconds (or when the first read was tried).
+  // When it last moved, IC time in nanoseconds (or when its clock last started).
   moved_at_ns : nat64;
   // The last finalized block a read gave; none before any did.
   number : opt nat64;
@@ -975,8 +976,8 @@ service : (InitArg) -> {
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
   evm_address : () -> (opt text) query;
   // Each chain that waits for its finalized block: the last finalized block a read gave, when
-  // it last moved (IC time in nanoseconds, or of the first read tried before any gave one),
-  // and whether it has stood still long enough to be a stall. Nothing on a stalled chain
+  // it last moved (IC time in nanoseconds, or when its clock last started), and whether it has
+  // stood still long enough, while something waits, to be a stall. Nothing on a stalled chain
   // closes until it moves.
   finalized_seen : () -> (vec record { nat64; FinalizedSeen }) query;
   // Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id`, the

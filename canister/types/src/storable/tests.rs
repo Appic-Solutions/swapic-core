@@ -1028,6 +1028,7 @@ fn timer_state_samples() -> Vec<Sample> {
                     number: Some(BlockNumber::new(78_000_017)),
                     moved_at: at(18),
                     alerted: true,
+                    tried_at: Some(at(19)),
                 },
             )]),
         },

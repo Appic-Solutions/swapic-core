@@ -6,8 +6,8 @@ pub use settlement_api::types::chain_data::FinalizedSeen;
 use types::Timestamp;
 
 /// Each chain that waits for its finalized block: the last finalized block a read gave, when
-/// it last moved (IC time in nanoseconds, or of the first read tried before any gave one),
-/// and whether it has stood still long enough to be a stall. Nothing on a stalled chain
+/// it last moved (IC time in nanoseconds, or when its clock last started), and whether it has
+/// stood still long enough, while something waits, to be a stall. Nothing on a stalled chain
 /// closes until it moves.
 #[query]
 pub fn finalized_seen() -> Vec<(u64, FinalizedSeen)> {

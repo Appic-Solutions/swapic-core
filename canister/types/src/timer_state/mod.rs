@@ -115,8 +115,13 @@ pub struct TimerState {
 /// Polygon's moves every few seconds.
 pub const FINALIZED_STALL: Duration = Duration::from_secs(10 * 60);
 
+/// How long with no read of a chain's finalized block means nothing on it waited: the outbox
+/// reads it only while something does, so the next read starts the stall clock anew.
+pub const FINALIZED_IDLE: Duration = Duration::from_secs(60);
+
 /// A finalized-tag chain's finalized block: the last number a read gave, and when it last
-/// moved (or when the first read was tried, before any gave one).
+/// moved (or when the clock last started, before any read gave one or after the chain was
+/// idle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct FinalizedSeen {
     #[n(0)]
@@ -126,6 +131,9 @@ pub struct FinalizedSeen {
     /// Whether this stall has raised its alert already.
     #[n(2)]
     pub alerted: bool,
+    /// When a read was last tried.
+    #[n(3)]
+    pub tried_at: Option<Timestamp>,
 }
 
 impl FinalizedSeen {
@@ -135,13 +143,20 @@ impl FinalizedSeen {
             number: None,
             moved_at: now,
             alerted: false,
+            tried_at: None,
         }
     }
 
     /// One read at `now`, a number or a failure: a higher number moves the clock; anything
     /// else leaves it, so a provider that never serves the tag stalls as surely as a chain
-    /// whose finality stopped. Answers whether this read raises the stall's one alert.
+    /// whose finality stopped. The first read after the chain was idle starts the clock
+    /// anew. Answers whether this read raises the stall's one alert.
     pub fn observe(&mut self, read: Option<BlockNumber>, now: Timestamp) -> bool {
+        if !self.is_waiting(now) {
+            self.moved_at = now;
+            self.alerted = false;
+        }
+        self.tried_at = Some(now);
         if let Some(number) = read.filter(|number| self.number.is_none_or(|last| *number > last)) {
             self.number = Some(number);
             self.moved_at = now;
@@ -153,9 +168,17 @@ impl FinalizedSeen {
         alert
     }
 
-    /// Whether the finalized block has stood still for [`FINALIZED_STALL`] at `now`.
+    /// Whether something on the chain waits at `now`: a read was tried within
+    /// [`FINALIZED_IDLE`].
+    pub fn is_waiting(&self, now: Timestamp) -> bool {
+        self.tried_at
+            .is_some_and(|at| now.saturating_duration_since(at) < FINALIZED_IDLE)
+    }
+
+    /// Whether the finalized block has stood still for [`FINALIZED_STALL`] at `now` while
+    /// something waited; an idle chain never has.
     pub fn is_stalled(&self, now: Timestamp) -> bool {
-        now.saturating_duration_since(self.moved_at) >= FINALIZED_STALL
+        self.is_waiting(now) && now.saturating_duration_since(self.moved_at) >= FINALIZED_STALL
     }
 }
 
