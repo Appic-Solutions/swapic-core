@@ -1,4 +1,4 @@
-//! The pool's rebalancing (spec 2026-10-19 section 3.4, the fixed interface section 3d): the
+//! The pool's rebalancing (spec section 3.4, the fixed interface section 3d): the
 //! canister moves USDC between its Base pocket and its ICP pocket itself, one move per
 //! direction at a time, and keeps the pool near its target split.
 //!

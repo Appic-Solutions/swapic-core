@@ -60,7 +60,7 @@ use types::{Address, EvmAddress, Timestamp, TokenAmount};
 /// The least time a payout's deadline must be ahead of its opening.
 pub const MIN_DEADLINE: Duration = Duration::from_secs(300);
 
-/// The most time a payout's deadline may be ahead of its opening (Jeff-delegated).
+/// The most time a payout's deadline may be ahead of its opening.
 pub const MAX_DEADLINE: Duration = Duration::from_secs(3_600);
 
 /// The most bytes a payout plan may have.
@@ -266,7 +266,7 @@ pub fn check<S: Store>(
         deadline: request.deadline,
     };
     check_payout_terms(config, &payout, Some(canister), &sanctioned)?;
-    // the flat floor of the rail the plan takes (Jeff-delegated): the canister reads no gas
+    // the flat floor of the rail the plan takes: the canister reads no gas
     // price in USDC of its own
     let network_fee = if read.action == GasAction::RelayCctp {
         if !payouts.cctp_payouts {

@@ -256,8 +256,7 @@ async fn lists_icrc3(reads: &impl BlockReads) -> bool {
     false
 }
 
-/// A ledger's block read through the reads chosen by what the ledger is (the review,
-/// 2026-10-24): the ICP ledger's own `query_blocks` first for the ICP ledger, no standards
+/// A ledger's block read through the reads chosen by what the ledger is: the ICP ledger's own `query_blocks` first for the ICP ledger, no standards
 /// asked; ICRC-3 when the ledger lists it among its standards; then `get_transactions`. The
 /// first that answers in its own shape decides (the transfer, or none: no such block, or a
 /// block of another kind). None answering so (a stopped ledger, no wasm, a trap, a shape

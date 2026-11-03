@@ -1,8 +1,7 @@
 //! `resolve_deposit`: an EVM to ICP deposit whose payout is held for a
 //! human (`DepositStatus::PayoutFailed`): a started payout after its tenth failure, a queued
 //! one that never started, a stake whose mint kept failing. Its lines stayed held,
-//! since nothing led out of it. A controller resolves it once (the rules of the review,
-//! 2026-10-24):
+//! since nothing led out of it. A controller resolves it once:
 //!
 //! - `Retry`: back to its payout with fresh attempts, keyed on its transfer. A started one
 //!   whose transfer cannot land twice (never asked, or refused by the ledger for sure at its

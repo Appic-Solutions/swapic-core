@@ -9,7 +9,7 @@
 //! the canister NO fee step (the canister pays itself nothing: a fee step would be booked as
 //! fee income and the books would drift), and has exactly one final delivery (its payout on
 //! the pool chain, one Eco intent whose unfilled reward refunds its creator, the canister, or
-//! from P11c on one CCTP burn, whose finish the canister pays itself: `cctp::own`, taken only
+//! one CCTP burn, whose finish the canister pays itself: `cctp::own`, taken only
 //! for a payout whose network fee is at least `cctp_min_network_fee`: the user paid the
 //! canister's finish), which pays the terms' recipient at least their minimum of their token
 //! on their chain (a CCTP Deliver: what the burn is given less the most Circle may keep); its

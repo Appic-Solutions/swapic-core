@@ -1,8 +1,7 @@
 //! The canister's own route for a move (spec 3.4: always there, built and signed by the
 //! canister itself): one USDC to USDC CCTP burn, its order the canister's (payer the
 //! canister, `amountIn` the move's whole amount, NO fee step: the canister pays itself
-//! nothing), under the move's own ref. The first order the canister builds; until P11c it only
-//! checked the quoter's. The shapes are the quoter's own (the staging canary's orders), so the
+//! nothing), under the move's own ref. The first order the canister builds itself. The shapes are the quoter's own (the staging canary's orders), so the
 //! Runner, the CctpReceiver and the watcher read them as they read every order:
 //!
 //! - Base to ICP, on Base: a burn to Ethereum minted to and called by Ethereum's

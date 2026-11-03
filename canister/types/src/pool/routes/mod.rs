@@ -2,7 +2,7 @@
 //! own ckUSDC pool on ICPSwap, or through ICP, two legs (the token and ICP, then ICP and
 //! ckUSDC on the ICP/ckUSDC pool). No token has a size cap of its own: the
 //! pool's per swap cap applies, the quote shows the price impact and `min_out` protects the
-//! user. From P11b on every path of the pool reads these.
+//! user. Every path of the pool reads these.
 //!
 //! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a new
 //! field is optional.

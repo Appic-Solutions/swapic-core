@@ -792,7 +792,7 @@ pub enum PoolStep {
         #[n(3)]
         block: BlockNumber,
     },
-    // P11e: indices 77 and up.
+    // the Eco rescues and refunds: indices 77 and up.
     /// The canister signed Eco's `cancelAndProve` of an unfilled intent on its destination,
     /// the intent published by the order `order_id` (a relay's, a payout's or a move's): the
     /// exact bytes, recorded before they are broadcast, spending the nonce `TxCreated` handed

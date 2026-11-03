@@ -47,7 +47,7 @@ const POOL_PAYOUT_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(36);
 // the rebalancing: ids 40 to 49
 const POOL_MOVES_MEMORY_ID: MemoryId = MemoryId::new(40);
 const POOL_OWN_SOURCES_MEMORY_ID: MemoryId = MemoryId::new(41);
-// P11e
+// the Eco rescues
 const ECO_RESCUES_MEMORY_ID: MemoryId = MemoryId::new(42);
 // the final review round: 37 to 39 lane C2's, 43 lane C1's (the per-caller
 // limit on the free doors)

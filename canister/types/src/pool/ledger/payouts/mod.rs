@@ -26,8 +26,8 @@
 //! Old semantics the fold still reads (before the payout plan flow): an ICP swap
 //! opened with its user's own premium and least ckUSDC (no plan); a reverted payout waiting
 //! with its order pinned to be signed again; a `Paid` payout with an Eco intent, which an Eco
-//! refund reopened, its ckUSDC released (`icp_released`). hfisl's real log (2,310 events,
-//! read 2026-10-22) holds no Pool event, so no such state exists on the deployed canister: no
+//! refund reopened, its ckUSDC released (`icp_released`). hfisl's real log holds no Pool
+//! event, so no such state exists on the deployed canister: no
 //! migration. Each place is marked "old semantics".
 
 #[cfg(test)]

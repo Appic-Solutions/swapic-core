@@ -1,6 +1,6 @@
 //! ICRC-21 (canister call consent messages) and ICRC-10 (supported standards): the shapes of
-//! `ICRC-21.did` (dfinity/wg-identity-authentication, `topics/ICRC-21/ICRC-21.did`, read
-//! 2026-10-28) under this crate's names. A signer decodes by shape, never by name. The
+//! `ICRC-21.did` (dfinity/wg-identity-authentication, `topics/ICRC-21/ICRC-21.did`)
+//! under this crate's names. A signer decodes by shape, never by name. The
 //! answer's variants are the cases this canister sends: a variant with fewer cases is a
 //! subtype of the standard's, so every signer decodes it.
 

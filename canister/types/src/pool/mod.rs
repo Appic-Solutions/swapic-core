@@ -1,4 +1,4 @@
-//! The pool (spec 2026-10-19 sections 2, 3.1, 3.3 and 4; the fixed interface section 2): its
+//! The pool (spec sections 2, 3.1, 3.3 and 4; the fixed interface section 2): its
 //! two pockets (USDC at the canister's Base address, ckUSDC on ICP), the stakers' shares,
 //! the deposits registered into it, and the one log step that moves any of them.
 //!
@@ -404,7 +404,7 @@ pub struct PoolSettings {
     /// The ckUSDC ledger's fee and every listed token's, read by `set_pool_settings`.
     #[n(10)]
     pub ledger_fees: Vec<LedgerFee>,
-    /// The routes every ICP path reads from P11b on (`set_icp_routes`): while none are set,
+    /// The routes every ICP path reads (`set_icp_routes`): while none are set,
     /// `icp_tokens` is the direct list it reads.
     #[n(11)]
     pub routes: Option<IcpRoutes>,
@@ -451,8 +451,7 @@ impl MoveFees {
     }
 }
 
-/// A deposit above this (1,000 USDC) waits more blocks before it is credited (a choice made
-/// on Jeff's behalf).
+/// A deposit above this (1,000 USDC) waits more blocks before it is credited.
 pub const DEFAULT_LARGE_DEPOSIT_USDC: TokenAmount = TokenAmount::new(1_000_000_000);
 
 /// The pool chain's blocks a large deposit waits: six Base blocks, about twelve seconds.
@@ -811,15 +810,14 @@ pub enum DepositStatus {
     Expired,
     #[n(6)]
     PayoutFailed(#[n(0)] String),
-    /// A controller sent what arrived back to its payer on Base (`resolve_deposit`, Jeff
-    /// 2026-10-24): its arrival is an orphan held under its transfer's key, refunded from
+    /// A controller sent what arrived back to its payer on Base (`resolve_deposit`): its
+    /// arrival is an orphan held under its transfer's key, refunded from
     /// there.
     #[n(7)]
     Refunded,
 }
 
-/// What a controller decided for a deposit held for a human (`resolve_deposit`, Jeff
-/// 2026-10-24).
+/// What a controller decided for a deposit held for a human (`resolve_deposit`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum DepositResolution {
     /// Back to its payout with fresh attempts: a started one whose transfer may have landed

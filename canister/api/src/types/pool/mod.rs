@@ -1,4 +1,4 @@
-//! The pool's candid types: interface section 3 (`2026-10-19-pool-interface.md`), field for
+//! The pool's candid types: interface section 3, field for
 //! field, and their conversions to and from the domain (`types::pool`) at the boundary.
 //! Amounts are micro USDC unless a field names a token.
 

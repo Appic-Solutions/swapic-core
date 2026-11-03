@@ -1,4 +1,4 @@
-//! When the canister opens a move (spec 3.4, Jeff's): the ICP pocket's share leaves
+//! When the canister opens a move (spec 3.4): the ICP pocket's share leaves
 //! `target_icp_bps ± band_bps` (the move takes it back to the target), or at once when a
 //! payout waits on a pocket that cannot cover it (urgent: what the queue needs and the way
 //! back to the target after it, at least what it needs, no least move). Never while a move in

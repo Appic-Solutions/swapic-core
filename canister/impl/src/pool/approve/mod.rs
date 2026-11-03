@@ -1,5 +1,5 @@
-//! The canister's standing USDC allowance to Swapic on the pool chain (spec 3.2, Jeff
-//! 2026-10-19): every pool payout is the canister's own `Swapic.run(order)`, which pulls the
+//! The canister's standing USDC allowance to Swapic on the pool chain (spec 3.2): every
+//! pool payout is the canister's own `Swapic.run(order)`, which pulls the
 //! order's USDC from its payer, the canister, so one approval of Swapic for everything serves
 //! every payout with ONE signature. Safe because `run` pulls only from `payer == msg.sender`:
 //! the allowance serves the canister's own calls and no one else's.
@@ -7,7 +7,7 @@
 //! `pool_approve_swapic(chain)`, controller-only: one `eth_call` of `allowance(canister,
 //! Swapic)` on that chain; below 2^255 the canister signs `approve(Swapic, 2^256 - 1)`
 //! (purpose `PoolApprove`, its gas held to the chain's `pool_approve` row), else it answers
-//! that the allowance is in place. From P11c on the chain is named: Base for the payouts and
+//! that the allowance is in place. The chain is named: Base for the payouts and
 //! a move to ICP, Ethereum for a move to Base. `pool_approve_ck_helper` does the same for the
 //! ck minter's deposit helper on Ethereum, which a move to ICP by Eco deposits through.
 

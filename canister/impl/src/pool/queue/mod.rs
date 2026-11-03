@@ -206,8 +206,8 @@ pub const REVERTED: &str = "its transaction reverted";
 pub const NO_REVERT_BLOCK: &str =
     "ALERT: its transaction reverted in no recorded block, so whether its order ran cannot be read";
 
-/// The plan's decision when a waiting planned swap's plan is tried again (the review,
-/// 2026-10-23), made once for the try (`refit` takes it): tries left (a waiting payout was
+/// The plan's decision when a waiting planned swap's plan is tried again, made once for the
+/// try (`refit` takes it): tries left (a waiting payout was
 /// never signed), and the plan's own decision before any read ([`plan::decide`]) says it can
 /// still fit, or could only revert (the fit then undoes it). None for a plan that waits
 /// whatever the time (not an Order, swapping twice, its payout outside the window, its order

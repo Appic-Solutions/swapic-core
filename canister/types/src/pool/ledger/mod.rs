@@ -517,7 +517,7 @@ impl PoolLedger {
     }
 
     /// What the queue's head still needs of the ICP pocket: what it holds, less the free
-    /// ckUSDC. Nothing when the queue is empty or its head is covered. What P11c's urgent
+    /// ckUSDC. Nothing when the queue is empty or its head is covered. What the urgent
     /// rebalance moves to ICP.
     pub fn queue_need(&self) -> Option<TokenAmount> {
         let (_, held) = self.queue.head()?;

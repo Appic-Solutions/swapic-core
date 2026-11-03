@@ -207,8 +207,8 @@ pub const MAX_FIT_TRIES: u8 = 3;
 /// Why a payout a controller refunded is undone.
 pub const REFUNDED: &str = "refunded by a controller";
 
-/// What a controller decided for a payout stopped for a human (`resolve_payout`, Jeff
-/// 2026-10-23): its money back to its user, or its money found delivered.
+/// What a controller decided for a payout stopped for a human (`resolve_payout`): its
+/// money back to its user, or its money found delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum PayoutResolution {
     /// Undone: an ICP swap's refund (all it made less one ledger fee, `refund_of`), a

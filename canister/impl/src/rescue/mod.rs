@@ -1,4 +1,4 @@
-//! The Eco rescue (Q8 of the 2026-10-17 decisions): once an Eco intent's fill deadline
+//! The Eco rescue: once an Eco intent's fill deadline
 //! passed with no fill, the watcher asks, and the canister signs Eco's `cancelAndProve` on the
 //! intent's destination, paying the proof's fee itself; Eco then refunds the reward's creator
 //! (the user, or the canister for its own payouts and moves) on the source by itself.

@@ -739,8 +739,7 @@ async fn send_out(
     }
     // an ask a rule of the fold refuses (an earlier one on other terms may have landed, or
     // any other) is a counted failure, so the payout reaches a human; only the log's own
-    // trouble (a divergence, an index, storage) is driven again, uncounted (the review,
-    // 2026-10-24)
+    // trouble (a divergence, an index, storage) is driven again, uncounted
     if !asked {
         pool_store::record_at(
             PoolStep::TransferAsked {

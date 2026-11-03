@@ -1,5 +1,4 @@
-//! Orphans held for a controller (spec 3.1, Jeff 2026-10-19: ALWAYS held, nothing
-//! automatic): USDC at the canister's Base address that no deposit could take. A controller
+//! Orphans held for a controller (spec 3.1: always held, nothing automatic): USDC at the canister's Base address that no deposit could take. A controller
 //! refunds one to an address (`USDC.transfer(to, amount - min_network_fee)` on Base, the fee
 //! kept on the Base fee line for the transfer's gas) or books it to the Base books'
 //! unattributed line; each one resolved once. A deposit's transfer found without its terms
