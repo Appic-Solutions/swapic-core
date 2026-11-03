@@ -1474,18 +1474,6 @@ pub(crate) fn credit_confirmations(
     })
 }
 
-/// Records the end of an entry's attempt on a receipt in `block` that `success`ed or not
-/// (`TxFinal`), and what the outbox keeps of the entry: nothing once that receipt is at the crediting depth `credit` against
-/// `latest`, which on a chain that credits at its swap depth is at once, as it always was.
-/// Otherwise the entry itself, marked closed with the block and the outcome: a reorg that
-/// drops the transaction before the crediting depth finds its bytes to send again, and the
-/// nonces behind it are not stranded.
-///
-/// A3: the mark is written on the entry as it is now, not as the pass read it before the
-/// receipts' await, so a broadcast recorded meanwhile is kept. The removal needs no
-/// re-read: the only writer that could have put another entry at this key is
-/// `create_and_send`, which only ever writes at a number the allocator has just handed out,
-/// and this one is not.
 /// A sweep's transaction leaving the outbox at the crediting depth: one that reverted moved
 /// nothing, so its amount goes back on its books. Earlier a one-block reorg could still turn
 /// the revert into a run, and the books would hold money that left (rule A10).
@@ -1495,6 +1483,18 @@ fn sweep_settled(entry: &OutboxEntry, success: bool, now: Timestamp) {
     }
 }
 
+/// Records the end of an entry's attempt on a receipt in `block` that `success`ed or not
+/// (`TxFinal`), and what the outbox keeps of the entry: nothing once that receipt is final
+/// under the crediting depth's `credit`, which on a chain that credits at its swap depth is
+/// at once, as it always was. Otherwise the entry itself, marked closed with the block and the outcome: a reorg that
+/// drops the transaction before the crediting depth finds its bytes to send again, and the
+/// nonces behind it are not stranded.
+///
+/// A3: the mark is written on the entry as it is now, not as the pass read it before the
+/// receipts' await, so a broadcast recorded meanwhile is kept. The removal needs no
+/// re-read: the only writer that could have put another entry at this key is
+/// `create_and_send`, which only ever writes at a number the allocator has just handed out,
+/// and this one is not.
 fn settle(
     entry: &OutboxEntry,
     tx_hash: TxHash,
