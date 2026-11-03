@@ -74,19 +74,39 @@ pub struct Given {
 /// What a report's terms are judged with beside the fold: why the pool is closed, if it is,
 /// and the sanctions set.
 pub struct Judge<'a> {
-    pub given: Option<&'a Given>,
+    /// The terms at hand, each under its own ref: a deposit's transfer takes the ones under
+    /// its ref.
+    pub givens: &'a [Given],
     pub closed: Option<String>,
     pub sanctioned: &'a dyn Fn(&Address) -> bool,
 }
 
-impl Judge<'_> {
+impl<'a> Judge<'a> {
+    /// A judge of `givens` beside the pool as it is: why it is closed, and the sanctions set.
+    /// No terms judge nothing, and read nothing of the pool.
+    pub fn of(givens: &'a [Given]) -> Self {
+        if givens.is_empty() {
+            return Judge::without_terms();
+        }
+        Judge {
+            givens,
+            closed: pool::pool_closed(),
+            sanctioned: &crate::storage::sanctions::is_sanctioned,
+        }
+    }
+
     /// A judge with no terms: every deposit's transfer awaits its own.
     pub fn without_terms() -> Judge<'static> {
         Judge {
-            given: None,
+            givens: &[],
             closed: None,
             sanctioned: &|_| false,
         }
+    }
+
+    /// The terms under `r#ref`, if they are at hand.
+    fn given(&self, r#ref: PoolRef) -> Option<&'a Given> {
+        self.givens.iter().find(|given| given.r#ref == r#ref)
     }
 }
 
@@ -876,7 +896,7 @@ pub fn steps_for<S: Store>(
             }]);
         }
     };
-    let Some(given) = judge.given.filter(|given| given.r#ref == r#ref) else {
+    let Some(given) = judge.given(r#ref) else {
         if credited {
             // it awaits its terms already
             return Ok(Vec::new());
@@ -976,8 +996,8 @@ pub fn record(found: &[Found], judge: &Judge<'_>, now: Timestamp) -> Recorded {
     let mut recorded = Recorded::default();
     for one in found {
         let mine = matches!(
-            (&one.proof, judge.given),
-            (Proof::Deposit { r#ref, .. }, Some(given)) if *r#ref == given.r#ref
+            &one.proof,
+            Proof::Deposit { r#ref, .. } if judge.given(*r#ref).is_some()
         );
         recorded.carried |= mine;
         let steps = match read_state(|state| steps_for(state, one, judge, now)) {
@@ -1401,18 +1421,17 @@ async fn found_in(
 pub async fn read_and_record(
     base_tx: TxHash,
     source: Option<(ChainId, TxHash)>,
-    given: Option<&Given>,
+    given: &Given,
 ) -> Result<Recorded, PoolError> {
     let found = read_found(base_tx, source).await?;
     // after the last read: the credited set, the pool's guard and the append are in this
     // one message
     pool::require_running()?;
-    let judge = Judge {
-        given,
-        closed: pool::pool_closed(),
-        sanctioned: &crate::storage::sanctions::is_sanctioned,
-    };
-    Ok(record(&found, &judge, pool::now()))
+    Ok(record(
+        &found,
+        &Judge::of(std::slice::from_ref(given)),
+        pool::now(),
+    ))
 }
 
 /// Anyone's door (the watcher, or the user's app as a backup): the body of
@@ -1449,7 +1468,7 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
     let recorded = match arrival.memo {
         Some(memo) => {
             let given = given_of(&memo, src_chain)?;
-            read_and_record(base_tx, source, Some(&given)).await?
+            read_and_record(base_tx, source, &given).await?
         }
         // no memo handed over: the chain's own, or the transfer awaits its terms
         None => read_memo_and_record(base_tx, source, src_chain).await?,

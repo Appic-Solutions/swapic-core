@@ -184,6 +184,8 @@ struct FakeBase {
     carrying: Vec<Receipt>,
     /// What the destination Portal answers of an intent's fill.
     fill: std::cell::RefCell<Option<Result<types::eco::Fill, String>>>,
+    /// A memo read that fails, for now or for good: none fails unless set.
+    memos: std::cell::RefCell<Option<PoolError>>,
 }
 
 impl crate::pool::arrival::FillReads for FakeBase {
@@ -224,13 +226,16 @@ impl BaseReads for FakeBase {
         ))
     }
 
-    async fn memo(
+    async fn memos(
         &self,
         _tx: TxHash,
         _base: &Receipt,
         _found: &[crate::pool::arrival::Found],
-    ) -> Option<Vec<u8>> {
-        None
+    ) -> Result<Vec<Vec<u8>>, PoolError> {
+        match self.memos.borrow().clone() {
+            Some(error) => Err(error),
+            None => Ok(Vec::new()),
+        }
     }
 
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError> {
@@ -512,6 +517,59 @@ fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
         let refunded = payout(id).unwrap();
         assert_eq!(refunded.status, PayoutStatus::Unfilled);
         assert_eq!(refunded.reclaim, Some(Reclaim::Credited));
+    });
+}
+
+/// Review fix: a memo read that failed for now holds the cursor before its transaction, as a
+/// receipt that failed to read does, and records nothing of it; the next pass reads it again
+/// and moves on once the memo reads.
+#[test]
+fn a_memo_read_that_failed_for_now_holds_the_cursor() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let logged = transfer(1, 150, 3, 5_000_000);
+        let tx = TxHash::new(parse_hash32(Some(&logged["transactionHash"])).unwrap());
+        let chain = chain();
+        // a stranger's transfer to the canister
+        let receipt = Receipt {
+            tx,
+            block: BlockNumber::new(150),
+            success: true,
+            logs: vec![crate::pool::arrival::Log {
+                index: 3,
+                address: chain.usdc,
+                topics: vec![
+                    types::swapic::topics::transfer(),
+                    types::EvmAddress::new([9; 20]).to_word(),
+                    chain.canister.to_word(),
+                ],
+                data: alloy_primitives::U256::from(5_000_000_u64)
+                    .to_be_bytes::<32>()
+                    .to_vec(),
+                block_time: None,
+            }],
+        };
+        let base = FakeBase {
+            logs: vec![logged],
+            carrying: vec![receipt],
+            ..FakeBase::default()
+        };
+        let credit = CreditKey {
+            chain: ChainId::BASE,
+            tx,
+            log_index: 3,
+        };
+        *base.memos.borrow_mut() = Some(PoolError::Unavailable("the source chain".into()));
+        let first = pass(&base);
+        assert_eq!(first.receipts, 1);
+        assert_eq!(first.cursor, None, "nothing before it to move past");
+        assert!(first.alerts[0].contains(&format!("memo in {tx} did not read")));
+        assert!(!pool_store::credited(&credit), "nothing recorded");
+        *base.memos.borrow_mut() = None;
+        let second = pass(&base);
+        assert_eq!(second.receipts, 1, "read again");
+        assert!(second.cursor > Some((BlockNumber::new(150), Some(3))));
+        assert!(pool_store::credited(&credit));
     });
 }
 

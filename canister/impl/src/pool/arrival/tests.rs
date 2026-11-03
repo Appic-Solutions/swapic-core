@@ -125,7 +125,7 @@ fn given(byte: u8) -> Given {
 /// A judge of `given` with the pool open and nobody sanctioned.
 fn judge(given: Option<&Given>) -> Judge<'_> {
     Judge {
-        given,
+        givens: given.map_or(&[], std::slice::from_ref),
         closed: None,
         sanctioned: &|_| false,
     }
@@ -783,13 +783,9 @@ fn an_eco_transfer_its_source_does_not_prove_waits_for_its_own_report() {
     });
 }
 
-/// Review fix: two mints of one value in one transaction are each matched to their own
-/// received message, so each is proven under its own ref. The second mint and message are
-/// copies of the CCTP sample's (logs 0x4a and 0x4e) at two new log indices, the second
-/// message's envelope carrying another ref.
-#[test]
-fn two_equal_mints_are_each_their_own_messages() {
-    let (first, second) = (the_ref(2), the_ref(4));
+/// The CCTP sample as two pool deposits under `first` and `second`: the second mint and
+/// message are copies of logs 0x4a and 0x4e at 0x50 and 0x51, its envelope carrying `second`.
+fn two_cctp(first: PoolRef, second: PoolRef) -> Value {
     let mut raw = cctp(first);
     let mut mint = log_at(&mut raw, "0x4a").clone();
     let mut message = log_at(&mut raw, "0x4e").clone();
@@ -801,6 +797,17 @@ fn two_equal_mints_are_each_their_own_messages() {
     let logs = raw["logs"].as_array_mut().unwrap();
     logs.push(mint);
     logs.push(message);
+    raw
+}
+
+/// Review fix: two mints of one value in one transaction are each matched to their own
+/// received message, so each is proven under its own ref. The second mint and message are
+/// copies of the CCTP sample's (logs 0x4a and 0x4e) at two new log indices, the second
+/// message's envelope carrying another ref.
+#[test]
+fn two_equal_mints_are_each_their_own_messages() {
+    let (first, second) = (the_ref(2), the_ref(4));
+    let raw = two_cctp(first, second);
     let found = find(&parse(&raw), None, &base()).unwrap();
     let proven: Vec<_> = found
         .iter()
@@ -1354,4 +1361,88 @@ fn a_memo_is_read_from_swapics_order_started_only_under_its_own_ref() {
     let forged = parse(&same_chain_with_memo(other, &memo));
     assert_eq!(memo_in(&forged, base().swapic, other), None);
     assert_eq!(memo_in(&forged, base().swapic, r#ref), None);
+}
+
+/// A source chain that answers every receipt read with `answer`, and counts the reads.
+struct FakeSource {
+    answer: Result<Receipt, PoolError>,
+    reads: std::cell::Cell<usize>,
+}
+
+impl SourceReads for FakeSource {
+    async fn source(&self, _chain: ChainId, _tx: TxHash) -> Result<Receipt, PoolError> {
+        self.reads.set(self.reads.get() + 1);
+        self.answer.clone()
+    }
+}
+
+/// Review fix: two CCTP deposits finished in one Base transaction each take their own memo,
+/// from their own `OrderStarted` in the source transaction, read once, and each is credited
+/// on its own terms. A source read that failed for now is the error the caller asks again
+/// on; one that never reads gives no memo.
+#[test]
+fn each_deposit_in_a_receipt_takes_its_own_memo() {
+    let (memo_2, memo_4) = (terms(2).memo().unwrap(), terms(4).memo().unwrap());
+    let raw = two_cctp(the_ref(2), the_ref(4));
+    let landed = parse(&raw);
+    let found = find(&landed, None, &base()).unwrap();
+    // the source transaction: each order's `OrderStarted`, the second's at 0x3f1
+    let mut source = same_chain_with_memo(the_ref(2), &memo_2);
+    let mut other = same_chain_with_memo(the_ref(4), &memo_4);
+    let mut started = log_at(&mut other, "0x3c6").clone();
+    started["logIndex"] = Value::String("0x3f1".into());
+    source["logs"].as_array_mut().unwrap().push(started);
+    let at = Some((ChainId::ETHEREUM, TxHash::new([0x5c; 32])));
+    let memos = |answer: Result<Receipt, PoolError>| {
+        let reads = FakeSource {
+            answer,
+            reads: std::cell::Cell::new(0),
+        };
+        let memos = crate::test_util::block_on(memos_from_chain(
+            landed.tx,
+            &landed,
+            &found,
+            &base(),
+            at,
+            &reads,
+        ));
+        (memos, reads.reads.get())
+    };
+    assert_eq!(
+        memos(Ok(parse(&source))),
+        (Ok(vec![memo_2.clone(), memo_4.clone()]), 1),
+        "one read for both"
+    );
+    let not_now = PoolError::Unavailable("no answer".to_string());
+    assert_eq!(memos(Err(not_now.clone())).0, Err(not_now));
+    let never = PoolError::BadArrival("the source receipt does not read".to_string());
+    assert_eq!(memos(Err(never)), (Ok(vec![]), 1));
+
+    on_fresh_memory(move || {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        let givens = givens_of(&[memo_2, memo_4], ChainId::ETHEREUM);
+        let judge = Judge {
+            givens: &givens,
+            closed: None,
+            sanctioned: &|_| false,
+        };
+        let recorded = record(&found, &judge, now);
+        let credited: Vec<_> = recorded
+            .mine
+            .iter()
+            .map(|outcome| match outcome {
+                PoolArrivalOutcome::Credited { r#ref, .. } => r#ref.clone(),
+                other => panic!("not credited: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            credited,
+            vec![
+                the_ref(2).into_bytes().to_vec(),
+                the_ref(4).into_bytes().to_vec()
+            ]
+        );
+    });
 }

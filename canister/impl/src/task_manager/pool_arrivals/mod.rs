@@ -240,8 +240,14 @@ pub trait BaseReads: FillReads {
     async fn transfers(&self, from: BlockNumber, to: BlockNumber) -> Result<Value, RpcError>;
     /// The receipt of `tx`, at the crediting depth.
     async fn receipt(&self, tx: TxHash) -> Result<Receipt, PoolError>;
-    /// The memo the chain shows for a deposit among `found` in `tx` (`arrival::memo_from_chain`).
-    async fn memo(&self, tx: TxHash, base: &Receipt, found: &[arrival::Found]) -> Option<Vec<u8>>;
+    /// The memos the chain shows for the deposits among `found` in `tx`
+    /// (`arrival::memos_from_chain`); an error for a read that failed for now.
+    async fn memos(
+        &self,
+        tx: TxHash,
+        base: &Receipt,
+        found: &[arrival::Found],
+    ) -> Result<Vec<Vec<u8>>, PoolError>;
 }
 
 /// Base itself, through `crate::rpc`.
@@ -281,8 +287,13 @@ impl BaseReads for LiveBase<'_> {
         read_base(self.0, tx).await
     }
 
-    async fn memo(&self, tx: TxHash, base: &Receipt, found: &[arrival::Found]) -> Option<Vec<u8>> {
-        arrival::memo_from_chain(tx, base, found, self.0, None).await
+    async fn memos(
+        &self,
+        tx: TxHash,
+        base: &Receipt,
+        found: &[arrival::Found],
+    ) -> Result<Vec<Vec<u8>>, PoolError> {
+        arrival::memos_from_chain(tx, base, found, self.0, None, &arrival::LiveSource).await
     }
 }
 
@@ -446,27 +457,23 @@ pub async fn backup(
         // the terms the chain shows (a same-chain order's own `OrderStarted`, a CCTP
         // deposit's source the canister finished itself), else the transfer awaits them; a
         // step the fold refuses is noted, and read: only a read that failed for now holds
-        // the cursor back
-        let given = match reads.memo(tx, &base, &found).await {
-            Some(memo) => arrival::given_of(&memo, chain.chain).ok(),
-            None => None,
+        // the cursor back, a memo's as a receipt's, and records nothing of the transaction
+        let memos = match reads.memos(tx, &base, &found).await {
+            Ok(memos) => memos,
+            Err(error) => {
+                report.alert(format!(
+                    "ALERT: a deposit's memo in {tx} did not read ({error:?}); the canister's \
+                     read of Base stops before it and asks again"
+                ));
+                failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
+                continue;
+            }
         };
         if require_not_halted().is_err() {
             return Ok(report);
         }
-        match &given {
-            Some(given) => {
-                let judge = Judge {
-                    given: Some(given),
-                    closed: crate::pool::pool_closed(),
-                    sanctioned: &crate::storage::sanctions::is_sanctioned,
-                };
-                record(&found, &judge, clock());
-            }
-            None => {
-                record(&found, &Judge::without_terms(), clock());
-            }
-        }
+        let givens = arrival::givens_of(&memos, chain.chain);
+        record(&found, &Judge::of(&givens), clock());
     }
     let done = if overfull {
         Done::Range
