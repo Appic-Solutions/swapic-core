@@ -1017,6 +1017,14 @@ fn timer_state_samples() -> Vec<Sample> {
                     created_at: at(16),
                 },
             )]),
+            finalized_seen: BTreeMap::from([(
+                ChainId::POLYGON,
+                crate::timer_state::FinalizedSeen {
+                    number: Some(BlockNumber::new(78_000_017)),
+                    moved_at: at(18),
+                    alerted: true,
+                },
+            )]),
         },
     )]
 }

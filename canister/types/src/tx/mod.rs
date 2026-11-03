@@ -341,6 +341,22 @@ pub fn is_confirmed(block: BlockNumber, latest: BlockNumber, depth: BlockDepth) 
     confirmations.is_some_and(|confirmations| confirmations >= depth.get().max(1))
 }
 
+/// The highest block a receipt may be in and be `depth` deep under the head `latest`: what
+/// [`is_confirmed`] compares against, as one number a site can hold.
+pub fn final_through(latest: BlockNumber, depth: BlockDepth) -> BlockNumber {
+    BlockNumber::new(
+        latest
+            .get()
+            .saturating_add(1)
+            .saturating_sub(depth.get().max(1)),
+    )
+}
+
+/// Whether a receipt in `block` is final under `through`; nothing is when it is unknown.
+pub fn is_final(block: BlockNumber, through: Option<BlockNumber>) -> bool {
+    through.is_some_and(|through| block <= through)
+}
+
 /// The soonest the outbox reads a chain's receipts again.
 pub const MIN_RECEIPT_PACE: Duration = Duration::from_secs(2);
 

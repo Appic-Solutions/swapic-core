@@ -57,6 +57,10 @@ pub struct Config {
     /// depth. Ethereum's is refused below 12 (`DepthTooShallow`), and crediting there never
     /// reads below 12 whatever is set.
     pub credit_confirmations: Option<BTreeMap<u64, u64>>,
+    /// The chains whose transactions are final at the chain's own finalized block (the
+    /// `finalized` tag) instead of a block count; their depths decide nothing. Only Polygon
+    /// (137) may be named (`NotFinalizable`). Absent or empty: block counts everywhere.
+    pub finalized_chains: Option<Vec<u64>>,
 }
 
 /// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, its
@@ -371,6 +375,7 @@ impl fmt::Debug for Config {
             evm_chains,
             pool_chain,
             credit_confirmations,
+            finalized_chains,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -391,6 +396,7 @@ impl fmt::Debug for Config {
             .field("evm_chains", evm_chains)
             .field("pool_chain", pool_chain)
             .field("credit_confirmations", credit_confirmations)
+            .field("finalized_chains", finalized_chains)
             .finish()
     }
 }
@@ -447,6 +453,7 @@ impl From<types::Config> for Config {
             evm_chains,
             pool_chain,
             credit_confirmations,
+            finalized,
         } = config;
         Self {
             batch_window_ms: u64::try_from(batch_window.as_millis())
@@ -490,6 +497,8 @@ impl From<types::Config> for Config {
                     .map(|(chain, depth)| (chain.get(), depth.get()))
                     .collect(),
             ),
+            finalized_chains: (!finalized.0.is_empty())
+                .then(|| finalized.0.into_iter().map(ChainId::get).collect()),
         }
     }
 }
@@ -580,6 +589,14 @@ impl TryFrom<Config> for types::Config {
                     .map(|(chain, depth)| (ChainId::new(chain), BlockDepth::new(depth)))
                     .collect(),
             ),
+            finalized: types::config::ChainSet(
+                config
+                    .finalized_chains
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(ChainId::new)
+                    .collect(),
+            ),
         })
     }
 }
@@ -653,6 +670,10 @@ pub enum ConfigError {
         field: String,
         chain_id: Option<u64>,
         reason: EvmAddressError,
+    },
+    /// `finalized_chains` names a chain that may not wait for a finalized block.
+    NotFinalizable {
+        chain_id: u64,
     },
     /// `evm_chains[chain_id].block_time_ms` is outside 100 to 60,000.
     BlockTimeOutOfRange {
@@ -748,6 +769,9 @@ impl From<types::ConfigError> for ConfigError {
                 field: field.to_string(),
                 chain_id: chain.map(ChainId::get),
                 reason: reason.into(),
+            },
+            Domain::NotFinalizable { chain } => Self::NotFinalizable {
+                chain_id: chain.get(),
             },
             Domain::BlockTimeOutOfRange { chain, block_time } => Self::BlockTimeOutOfRange {
                 chain_id: chain.get(),

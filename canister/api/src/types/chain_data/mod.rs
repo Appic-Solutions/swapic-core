@@ -62,3 +62,14 @@ impl From<DomainError> for ChainDataError {
 
 #[cfg(test)]
 mod tests;
+
+/// A chain that waits for its finalized block, as the outbox last read it.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FinalizedSeen {
+    /// The last finalized block a read gave; none before any did.
+    pub number: Option<u64>,
+    /// When it last moved, IC time in nanoseconds (or when the first read was tried).
+    pub moved_at_ns: u64,
+    /// It has stood still ten minutes or more: nothing on the chain closes until it moves.
+    pub stalled: bool,
+}

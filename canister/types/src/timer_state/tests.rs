@@ -74,3 +74,32 @@ fn a_cursor_orders_by_block_then_log() {
     assert!(at(10, Some(u64::MAX)).position() < at(10, None).position());
     assert!(at(10, None).position() < at(11, Some(0)).position());
 }
+
+/// The stall clock runs from the last read that moved the finalized block: a read that
+/// gives the same number or fails leaves it, a stall raises one alert, and a move ends it.
+#[test]
+fn a_finalized_block_standing_still_ten_minutes_alerts_once() {
+    let block = BlockNumber::new;
+    let mut seen = FinalizedSeen::first(at(0));
+    // a provider that never serves the tag stalls too
+    assert!(!seen.observe(None, at(60)));
+    assert!(
+        seen.observe(None, at(600)),
+        "ten minutes from the first try"
+    );
+    assert!(!seen.observe(None, at(700)), "one alert per stall");
+    assert!(!seen.observe(Some(block(50)), at(710)), "a move ends it");
+    assert!(!seen.is_stalled(at(1_300)));
+    assert!(
+        !seen.observe(Some(block(50)), at(1_000)),
+        "the same number moves nothing"
+    );
+    assert!(seen.observe(Some(block(50)), at(1_310)));
+    assert!(
+        !seen.observe(Some(block(49)), at(1_400)),
+        "nor does an older one"
+    );
+    assert!(seen.is_stalled(at(1_400)));
+    assert!(!seen.observe(Some(block(51)), at(1_500)));
+    assert!(!seen.is_stalled(at(1_500)));
+}

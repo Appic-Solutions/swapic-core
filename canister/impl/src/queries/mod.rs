@@ -7,6 +7,7 @@
 mod books;
 mod config;
 mod events;
+mod finalized;
 mod flows;
 mod icrc10;
 mod ops;
@@ -16,6 +17,7 @@ mod rebalance;
 pub use books::*;
 pub use config::*;
 pub use events::*;
+pub use finalized::*;
 pub use flows::*;
 pub use icrc10::*;
 pub use ops::*;

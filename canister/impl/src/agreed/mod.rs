@@ -22,7 +22,7 @@ const MAX_ANSWER_BYTES: u64 = 16_384;
 /// The most one agreed answer of a block's header and a call may be: a header comes with
 /// every transaction hash of its block (and Ethereum's withdrawals), tens of kilobytes on a
 /// busy Base or Ethereum block, which the transform then drops.
-pub const MAX_BLOCK_ANSWER_BYTES: u64 = 256 * 1024;
+pub use crate::rpc::MAX_BLOCK_ANSWER_BYTES;
 
 /// Why `claimants` was not read past the time asked.
 #[derive(Clone, Debug, PartialEq, Eq)]

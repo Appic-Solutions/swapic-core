@@ -103,6 +103,10 @@ type Config = record {
   backstop_interval_s : nat64;
   // Whether the Eco rail may be used. False until its route is designed.
   eco_enabled : bool;
+  // The chains whose transactions are final at the chain's own finalized block (the
+  // `finalized` tag) instead of a block count; their depths decide nothing. Only Polygon
+  // (137) may be named (`NotFinalizable`). Absent or empty: block counts everywhere.
+  finalized_chains : opt vec nat64;
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
   cctp_domains : vec record { nat64; nat32 };
   // The minimum fee each chain's `TokenMessengerV2` holds a burn from it to, as Circle
@@ -156,6 +160,8 @@ type ConfigError = variant {
     floor_ms : nat64;
   };
   TimerIntervalTooLong : record { field : text; interval_s : nat64 };
+  // `finalized_chains` names a chain that may not wait for a finalized block.
+  NotFinalizable : record { chain_id : nat64 };
   // The minimum fee listed for `chain_id` is at or above `ceiling`, the whole amount in
   // Circle's units, which Circle's own setter refuses.
   CctpMinFeeTooHigh : record {
@@ -396,6 +402,15 @@ type EvmWithdrawal = record {
 type FieldsDisplay = record {
   fields : vec record { text; Value };
   intent : text;
+};
+// A chain that waits for its finalized block, as the outbox last read it.
+type FinalizedSeen = record {
+  // It has stood still ten minutes or more: nothing on the chain closes until it moves.
+  stalled : bool;
+  // When it last moved, IC time in nanoseconds (or when the first read was tried).
+  moved_at_ns : nat64;
+  // The last finalized block a read gave; none before any did.
+  number : opt nat64;
 };
 // Why a flow door refused. Nothing moved.
 type FlowCallError = variant {
@@ -959,6 +974,11 @@ service : (InitArg) -> {
   // Derived once from the canister's threshold key and then read from stable memory, so it
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
   evm_address : () -> (opt text) query;
+  // Each chain that waits for its finalized block: the last finalized block a read gave, when
+  // it last moved (IC time in nanoseconds, or of the first read tried before any gave one),
+  // and whether it has stood still long enough to be a stall. Nothing on a stalled chain
+  // closes until it moves.
+  finalized_seen : () -> (vec record { nat64; FinalizedSeen }) query;
   // Watcher-only, refused while halted. Finishes a CCTP arrival on `chain_id`, the
   // destination. `message` and `attestation` are Circle's, the message 696 bytes with the
   // v3 envelope as its hook data; `src_tx_hash` is the source transaction that burned it,

@@ -328,3 +328,28 @@ fn receipts_are_read_at_the_chains_pace_and_never_quicker_than_two_seconds() {
         Duration::from_secs(5)
     );
 }
+
+/// One number per decision: a receipt `depth` deep under the head is at or below
+/// `final_through`, and an unknown finality makes nothing final.
+#[test]
+fn final_through_is_the_depth_rule_as_a_block() {
+    let block = BlockNumber::new;
+    let depth = BlockDepth::new;
+    assert_eq!(final_through(block(100), depth(1)), block(100));
+    assert_eq!(final_through(block(100), depth(12)), block(89));
+    assert_eq!(
+        final_through(block(5), depth(12)),
+        block(0),
+        "below genesis"
+    );
+    for (landed, needed) in [(100, 1), (89, 12), (90, 12), (95, 6)] {
+        assert_eq!(
+            is_final(
+                block(landed),
+                Some(final_through(block(100), depth(needed)))
+            ),
+            is_confirmed(block(landed), block(100), depth(needed))
+        );
+    }
+    assert!(!is_final(block(1), None));
+}

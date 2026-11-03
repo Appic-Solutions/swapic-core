@@ -33,7 +33,7 @@ use thiserror::Error;
 use types::chain_data::{ChainData, Fees, MAX_FEE_PER_GAS};
 use types::config::{GasAction, MIN_ETHEREUM_CONFIRMATIONS};
 use types::events::TxPurpose;
-use types::tx::{blocks_to_wait, is_confirmed, next_receipt_read, MIN_RECEIPT_PACE};
+use types::tx::{blocks_to_wait, final_through, is_final, next_receipt_read, MIN_RECEIPT_PACE};
 use types::{
     BlockDepth, BlockNumber, ChainId, Eip1559Tx, EventIndex, EventType, EvmAddress, GasAmount,
     Nonce, NonceKey, OutboxEntry, OutboxStatus, QuoteHash, Timestamp, TxHash, Wei, WeiPerGas,
@@ -132,9 +132,67 @@ const MAX_SEND_BYTES_PER_ITEM: u64 = 1_024;
 /// nobody chose is not one to claim a deposit or close an attempt at, so the chain decides
 /// nothing until the config names its depth.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-#[error("chain {chain_id} has no confirmation depth configured")]
-pub struct NoDepth {
-    pub chain_id: ChainId,
+pub enum NoDepth {
+    #[error("chain {chain_id} has no confirmation depth configured")]
+    Unset { chain_id: ChainId },
+    /// A chain listed in `finalized_chains`: a block count never decides it, so a site that
+    /// asks for one stalls instead of deciding on a number nobody meant.
+    #[error("chain {chain_id} waits for its finalized block: no block count decides it")]
+    Finalized { chain_id: ChainId },
+}
+
+/// How a chain's transactions become final.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Finality {
+    /// At block counts: the swap depth closes an attempt, the crediting depth lets an
+    /// entry go.
+    Blocks {
+        swap: BlockDepth,
+        credit: BlockDepth,
+    },
+    /// At the chain's own finalized block, for both.
+    Finalized,
+}
+
+/// How `chain_id`'s transactions become final, or why the config says nothing of it.
+pub(crate) fn finality(config: &types::Config, chain_id: ChainId) -> Result<Finality, NoDepth> {
+    if config.finalized.contains(chain_id) {
+        return Ok(Finality::Finalized);
+    }
+    let swap = confirmations(config, chain_id)?;
+    // how long a closed entry keeps its bytes: never shallower than the swap depth, which
+    // it falls back to
+    let credit = credit_confirmations(config, chain_id).unwrap_or(swap);
+    Ok(Finality::Blocks { swap, credit })
+}
+
+/// The highest block that is final on a chain, for closing an attempt (`swap`) and for
+/// letting an entry go (`credit`), as one read showed it; None when the read could not say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Finals {
+    pub swap: Option<BlockNumber>,
+    pub credit: Option<BlockNumber>,
+}
+
+impl Finals {
+    /// The finals under the head `latest` a receipt batch read, and the chain's finalized
+    /// block read before it (`finalized`, a listed chain's only). A finalized block above
+    /// that head is no reading at all.
+    pub fn of(finality: Finality, latest: BlockNumber, finalized: Option<BlockNumber>) -> Self {
+        match finality {
+            Finality::Blocks { swap, credit } => Self {
+                swap: Some(final_through(latest, swap)),
+                credit: Some(final_through(latest, credit)),
+            },
+            Finality::Finalized => {
+                let finalized = finalized.filter(|finalized| *finalized <= latest);
+                Self {
+                    swap: finalized,
+                    credit: finalized,
+                }
+            }
+        }
+    }
 }
 
 /// Why no transaction was created, or why a pass could not finish one.
@@ -867,6 +925,27 @@ pub async fn flush() {
     }
 }
 
+/// Keeps a finalized-tag chain's last finalized block and when it last moved
+/// (`TimerState.finalized_seen`, read by `finalized_seen`), from a read that gave `read` or
+/// failed; a stall raises one ALERT line. Nothing moves while it stands: no entry closes.
+fn note_finalized(chain_id: ChainId, read: Option<BlockNumber>, now: Timestamp) {
+    let alert = timer_state::update(|state| {
+        let seen = state
+            .finalized_seen
+            .entry(chain_id)
+            .or_insert_with(|| types::timer_state::FinalizedSeen::first(now));
+        let alert = seen.observe(read, now);
+        (alert.then_some(*seen), true)
+    });
+    if let Some(seen) = alert {
+        log(&format!(
+            "ALERT: chain {chain_id}'s finalized block {} has not moved for {} minutes: nothing on it closes until it does",
+            seen.number.map_or_else(|| "(never read)".to_string(), |number| number.to_string()),
+            now.saturating_duration_since(seen.moved_at).as_secs() / 60
+        ));
+    }
+}
+
 /// A chain's block time as the config names it, and the outbox's own floor where it names
 /// none.
 fn block_time(config: &types::Config, chain_id: ChainId) -> Duration {
@@ -934,27 +1013,39 @@ pub async fn check_open() -> ReceiptPass {
         let pace = block_time(&config, chain_id);
         // a chain with no depth configured closes nothing: the entries wait in the outbox,
         // rebroadcast by their own clock, until a deploy names the depth to judge them at
-        let Ok(depth) = confirmations(&config, chain_id) else {
+        let Ok(finality) = finality(&config, chain_id) else {
             pass.no_depth += open.len();
             next.insert(chain_id, next_receipt_read(now, pace, 1));
             continue;
         };
-        // how long a closed entry keeps its bytes: never shallower than the swap depth,
-        // which it falls back to
-        let credit = credit_confirmations(&config, chain_id).unwrap_or(depth);
+        // a listed chain's finalized block, read in a call of its own before the receipts
+        // (so it is never above their head): a failed read leaves every landed entry waiting
+        // and sends again only the ones with no receipt, exactly as the receipts say
+        let finalized = match finality {
+            Finality::Finalized => {
+                let read = rpc::finalized(chain_id).await.ok();
+                note_finalized(chain_id, read, now);
+                read
+            }
+            Finality::Blocks { .. } => None,
+        };
         // the fewest blocks any entry waits before a read can decide something about it
         let mut wait = u64::MAX;
         let mut waits = |entry: &OutboxEntry, landed: Option<&Receipt>, latest: BlockNumber| {
-            let target = if entry.closed_at.is_some() {
-                credit
-            } else {
-                depth
+            let blocks = match finality {
+                Finality::Blocks { swap, credit } => {
+                    let target = if entry.closed_at.is_some() {
+                        credit
+                    } else {
+                        swap
+                    };
+                    blocks_to_wait(landed.map(|receipt| receipt.block), latest, target)
+                }
+                // the finalized block moves every few blocks: one block on, a read may
+                // decide something
+                Finality::Finalized => 1,
             };
-            wait = wait.min(blocks_to_wait(
-                landed.map(|receipt| receipt.block),
-                latest,
-                target,
-            ));
+            wait = wait.min(blocks);
         };
         // split so the answer fits one outcall: the head comes with every chunk, so each
         // chunk's receipts are read against a height from the same answer
@@ -963,8 +1054,14 @@ pub async fn check_open() -> ReceiptPass {
                 Ok((latest, landed)) => {
                     for (entry, landed) in chunk.iter().zip(landed) {
                         waits(entry, landed.as_ref(), latest);
-                        pass.closed +=
-                            decide(entry, chain_id, landed, latest, depth, credit, now).await;
+                        pass.closed += decide(
+                            entry,
+                            chain_id,
+                            landed,
+                            Finals::of(finality, latest, finalized),
+                            now,
+                        )
+                        .await;
                     }
                 }
                 // only a failed call is worth splitting: a head that did not come back as
@@ -976,9 +1073,14 @@ pub async fn check_open() -> ReceiptPass {
                             Ok((latest, landed)) => {
                                 let landed = landed.into_iter().next().flatten();
                                 waits(entry, landed.as_ref(), latest);
-                                pass.closed +=
-                                    decide(entry, chain_id, landed, latest, depth, credit, now)
-                                        .await;
+                                pass.closed += decide(
+                                    entry,
+                                    chain_id,
+                                    landed,
+                                    Finals::of(finality, latest, finalized),
+                                    now,
+                                )
+                                .await;
                             }
                             Err(_) => {
                                 pass.unread += 1;
@@ -1116,9 +1218,7 @@ async fn decide(
     entry: &OutboxEntry,
     chain_id: ChainId,
     landed: Option<Receipt>,
-    latest: BlockNumber,
-    depth: BlockDepth,
-    credit: BlockDepth,
+    finals: Finals,
     now: Timestamp,
 ) -> usize {
     if entry.closed_at.is_some() {
@@ -1127,7 +1227,7 @@ async fn decide(
                 if let Some(line) = divergence(entry, &receipt) {
                     log(&line);
                 }
-                if is_confirmed(receipt.block, latest, credit) {
+                if is_final(receipt.block, finals.credit) {
                     sweep_settled(entry, receipt.success, now);
                     outbox::remove(entry.key());
                 }
@@ -1141,7 +1241,7 @@ async fn decide(
         // holds however the transaction ended. A reverted receipt closed at once would
         // free the swap to be re-signed at a fresh nonce, and a one-block reorg that drops
         // the revert and includes the replacement then pays twice.
-        Some(receipt) if is_confirmed(receipt.block, latest, depth) => {
+        Some(receipt) if is_final(receipt.block, finals.swap) => {
             let Receipt {
                 tx_hash,
                 block,
@@ -1174,7 +1274,7 @@ async fn decide(
                     None => true,
                 };
                 if appended {
-                    settle(entry, tx_hash, block, success, latest, credit, now);
+                    settle(entry, tx_hash, block, success, finals.credit, now);
                 }
                 return usize::from(appended);
             }
@@ -1229,7 +1329,7 @@ async fn decide(
             // a sweep closes as any transaction does; a revert is taken back only at the
             // crediting depth, where no reorg turns it into a run (`sweep_settled`)
             if let TxPurpose::Sweep(_) = entry.purpose {
-                settle(entry, tx_hash, block, success, latest, credit, now);
+                settle(entry, tx_hash, block, success, finals.credit, now);
                 return 1;
             }
             if let Some((what, step)) = pool_close {
@@ -1241,7 +1341,7 @@ async fn decide(
                     }
                 };
                 if appended {
-                    settle(entry, tx_hash, block, success, latest, credit, now);
+                    settle(entry, tx_hash, block, success, finals.credit, now);
                 }
                 return usize::from(appended);
             }
@@ -1258,7 +1358,7 @@ async fn decide(
                 })
                 .is_ok();
                 if appended {
-                    settle(entry, tx_hash, block, success, latest, credit, now);
+                    settle(entry, tx_hash, block, success, finals.credit, now);
                     // the closing line is appended once per transaction, so the fee is too
                     if success {
                         crate::books::credit_fee(chain_id, tx_hash, block, network_fee);
@@ -1269,7 +1369,7 @@ async fn decide(
             // a cancel closes with no line: `TxCancelled` already sealed that nonce's fate
             // before the bytes went out, so what the chain did with them changes nothing in
             // the fold
-            settle(entry, tx_hash, block, success, latest, credit, now);
+            settle(entry, tx_hash, block, success, finals.credit, now);
             1
         }
         // mined but not deep enough: nothing to do but wait
@@ -1329,11 +1429,14 @@ pub(crate) fn confirmations(
     config: &types::Config,
     chain_id: ChainId,
 ) -> Result<BlockDepth, NoDepth> {
+    if config.finalized.contains(chain_id) {
+        return Err(NoDepth::Finalized { chain_id });
+    }
     config
         .confirmations
         .get(&chain_id)
         .copied()
-        .ok_or(NoDepth { chain_id })
+        .ok_or(NoDepth::Unset { chain_id })
 }
 
 /// The depth money arriving at the canister is credited at: the chain's crediting depth, or
@@ -1344,6 +1447,9 @@ pub(crate) fn credit_confirmations(
     config: &types::Config,
     chain_id: ChainId,
 ) -> Result<BlockDepth, NoDepth> {
+    if config.finalized.contains(chain_id) {
+        return Err(NoDepth::Finalized { chain_id });
+    }
     let depth = match config.credit_confirmations.get(chain_id) {
         Some(depth) => depth,
         None => confirmations(config, chain_id)?,
@@ -1381,8 +1487,7 @@ fn settle(
     tx_hash: TxHash,
     block: BlockNumber,
     success: bool,
-    latest: BlockNumber,
-    credit: BlockDepth,
+    credit: Option<BlockNumber>,
     now: Timestamp,
 ) {
     let outcome = if success {
@@ -1407,7 +1512,7 @@ fn settle(
             entry.chain_id
         ));
     }
-    if is_confirmed(block, latest, credit) {
+    if is_final(block, credit) {
         sweep_settled(entry, success, now);
         outbox::remove(entry.key());
         return;

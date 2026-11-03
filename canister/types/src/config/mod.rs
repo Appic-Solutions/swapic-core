@@ -157,6 +157,50 @@ impl<'b, C, V: Decode<'b, C>> Decode<'b, C> for ChainTable<V> {
     }
 }
 
+/// A set of chains, stored as the list, and as nothing at all while it is empty, so a config
+/// written before the set existed reads back with it empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChainSet(pub std::collections::BTreeSet<ChainId>);
+
+impl ChainSet {
+    pub fn contains(&self, chain_id: ChainId) -> bool {
+        self.0.contains(&chain_id)
+    }
+}
+
+impl<C> Encode<C> for ChainSet {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'b, C> Decode<'b, C> for ChainSet {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(Self::default());
+        }
+        std::collections::BTreeSet::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::default())
+    }
+}
+
+/// The chains whose transactions may wait for the chain's finalized block instead of a block
+/// count: Polygon, whose finalized block trails its head by a few seconds. Base's would follow
+/// Ethereum's finality and slow every pool credit to minutes.
+pub const FINALIZABLE: [ChainId; 1] = [ChainId::POLYGON];
+
 /// Every knob the canister reads at runtime. `Debug` is safe to log: [`RpcUrl`] prints
 /// as `***`.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -225,6 +269,11 @@ pub struct Config {
     /// [`MIN_ETHEREUM_CONFIRMATIONS`].
     #[n(35)]
     pub credit_confirmations: ChainTable<BlockDepth>,
+    /// The chains whose transactions are final at the chain's own finalized block (the
+    /// `finalized` tag) instead of a block count: their `confirmations` and
+    /// `credit_confirmations` decide nothing. At most [`FINALIZABLE`].
+    #[n(36)]
+    pub finalized: ChainSet,
 }
 
 /// The kinds of transaction the canister signs and pays the gas of: the relay of a
@@ -668,6 +717,8 @@ pub enum ConfigError {
         chain: Option<ChainId>,
         reason: crate::evm::EvmAddressError,
     },
+    #[error("finalized_chains names chain {chain}, which may not wait for a finalized block")]
+    NotFinalizable { chain: ChainId },
     #[error("evm_chains[{chain}].block_time is {block_time:?}, outside {MIN_BLOCK_TIME:?} to {MAX_BLOCK_TIME:?}")]
     BlockTimeOutOfRange {
         chain: ChainId,
@@ -714,6 +765,7 @@ impl Default for Config {
             pool_chain: None,
             // crediting reads the swap depths, held to the floor on Ethereum
             credit_confirmations: ChainTable::default(),
+            finalized: ChainSet::default(),
         }
     }
 }
@@ -723,6 +775,14 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.ecdsa_key_name.is_empty() {
             return Err(ConfigError::EmptyEcdsaKeyName);
+        }
+        if let Some(chain) = self
+            .finalized
+            .0
+            .iter()
+            .find(|chain| !FINALIZABLE.contains(chain))
+        {
+            return Err(ConfigError::NotFinalizable { chain: *chain });
         }
         // a chain listed with no depth at all is refused where money is decided, so the
         // one depth checked here is the one whose shallow value is a mistake on any deploy:

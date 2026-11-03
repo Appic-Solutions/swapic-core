@@ -373,3 +373,20 @@ fn every_gas_action_has_its_row_and_its_name() {
     assert_eq!(GasAction::Sweep.name(), "sweep");
     assert_eq!(PerAction::<u64>::default().get(GasAction::Sweep), None);
 }
+
+/// Only Polygon may wait for its finalized block: any other chain is refused by name.
+#[test]
+fn only_polygon_may_wait_for_its_finalized_block() {
+    let with = |chains: &[ChainId]| Config {
+        finalized: ChainSet(chains.iter().copied().collect()),
+        ..Config::default()
+    };
+    assert_eq!(with(&[]).validate(), Ok(()));
+    assert_eq!(with(&[ChainId::POLYGON]).validate(), Ok(()));
+    assert_eq!(
+        with(&[ChainId::POLYGON, ChainId::BASE]).validate(),
+        Err(ConfigError::NotFinalizable {
+            chain: ChainId::BASE
+        })
+    );
+}

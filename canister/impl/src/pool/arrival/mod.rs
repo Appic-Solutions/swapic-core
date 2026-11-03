@@ -1141,17 +1141,9 @@ pub fn based(
 /// receipt ([`HEADER_BEHIND`] below it); the depth is counted from that agreed block
 /// ([`based`]).
 pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolError> {
-    let head = rpc::rpc_batch(
-        chain.chain,
-        &[("eth_blockNumber", json!([]))],
-        rpc::MAX_BLOCK_NUMBER_BYTES,
-    )
-    .await
-    .map_err(unavailable)?
-    .first()
-    .and_then(Value::as_str)
-    .and_then(parse_block_number)
-    .ok_or_else(|| PoolError::Unavailable("the head does not read".to_string()))?;
+    let head = rpc::head(chain.chain)
+        .await
+        .map_err(|failure| PoolError::Unavailable(format!("the head: {failure:?}")))?;
     let named = named_block(head);
     let calls = [
         (

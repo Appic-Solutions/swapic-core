@@ -453,6 +453,26 @@ pub async fn rpc_batch(
     parse_batch(&body, &methods)
 }
 
+/// The most a block answer may be: a full header with every transaction's hash.
+pub const MAX_BLOCK_ANSWER_BYTES: u64 = 256 * 1024;
+
+/// The chain's finalized block (the `finalized` tag), as one provider answers it, or the
+/// kind of failure. A full header comes back, so the cap is a block's, never a head's.
+pub async fn finalized(chain_id: ChainId) -> Result<BlockNumber, types::books::ReadFailure> {
+    rpc_batch(
+        chain_id,
+        &[("eth_getBlockByNumber", json!(["finalized", false]))],
+        MAX_BLOCK_ANSWER_BYTES,
+    )
+    .await
+    .map_err(|error| error.kind())?
+    .first()
+    .and_then(|block| block.get("number"))
+    .and_then(Value::as_str)
+    .and_then(parse_block_number)
+    .ok_or(types::books::ReadFailure::BadAnswer)
+}
+
 /// The chain's head, as one provider answers `eth_blockNumber`, or the kind of failure.
 pub async fn head(chain_id: ChainId) -> Result<BlockNumber, types::books::ReadFailure> {
     rpc_batch(

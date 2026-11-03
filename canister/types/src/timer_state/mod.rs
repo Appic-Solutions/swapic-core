@@ -105,6 +105,58 @@ pub struct TimerState {
     /// The ICP sweeps whose transfer's answer was lost, by sweep id.
     #[n(8)]
     pub icp_sweeps: BTreeMap<u64, crate::sweep::IcpSweepAsk>,
+    /// Each finalized-tag chain's finalized block as the outbox last read it, and when it
+    /// last moved.
+    #[n(9)]
+    pub finalized_seen: BTreeMap<ChainId, FinalizedSeen>,
+}
+
+/// How long a chain's finalized block may stand still before it is a stall worth an alert:
+/// Polygon's moves every few seconds.
+pub const FINALIZED_STALL: Duration = Duration::from_secs(10 * 60);
+
+/// A finalized-tag chain's finalized block: the last number a read gave, and when it last
+/// moved (or when the first read was tried, before any gave one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct FinalizedSeen {
+    #[n(0)]
+    pub number: Option<BlockNumber>,
+    #[n(1)]
+    pub moved_at: Timestamp,
+    /// Whether this stall has raised its alert already.
+    #[n(2)]
+    pub alerted: bool,
+}
+
+impl FinalizedSeen {
+    /// Before any read: the clock starts at the first try.
+    pub fn first(now: Timestamp) -> Self {
+        Self {
+            number: None,
+            moved_at: now,
+            alerted: false,
+        }
+    }
+
+    /// One read at `now`, a number or a failure: a higher number moves the clock; anything
+    /// else leaves it, so a provider that never serves the tag stalls as surely as a chain
+    /// whose finality stopped. Answers whether this read raises the stall's one alert.
+    pub fn observe(&mut self, read: Option<BlockNumber>, now: Timestamp) -> bool {
+        if let Some(number) = read.filter(|number| self.number.is_none_or(|last| *number > last)) {
+            self.number = Some(number);
+            self.moved_at = now;
+            self.alerted = false;
+            return false;
+        }
+        let alert = self.is_stalled(now) && !self.alerted;
+        self.alerted |= alert;
+        alert
+    }
+
+    /// Whether the finalized block has stood still for [`FINALIZED_STALL`] at `now`.
+    pub fn is_stalled(&self, now: Timestamp) -> bool {
+        now.saturating_duration_since(self.moved_at) >= FINALIZED_STALL
+    }
 }
 
 /// A pocket's balance reads: the last one that read a balance, and when one last failed.

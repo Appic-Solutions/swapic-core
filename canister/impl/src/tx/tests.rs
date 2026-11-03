@@ -754,11 +754,11 @@ fn a_chain_with_no_depth_configured_decides_no_money() {
     let unlisted = ChainId::new(59_144);
     assert_eq!(
         confirmations(&config, unlisted),
-        Err(NoDepth { chain_id: unlisted })
+        Err(NoDepth::Unset { chain_id: unlisted })
     );
     assert_eq!(
         credit_confirmations(&config, unlisted),
-        Err(NoDepth { chain_id: unlisted })
+        Err(NoDepth::Unset { chain_id: unlisted })
     );
 }
 
@@ -1058,8 +1058,7 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
             TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
-            BlockNumber::new(100),
-            credit,
+            Some(final_through(BlockNumber::new(100), credit)),
             Timestamp::from_nanos(1),
         );
         let kept = outbox::get(open.key()).expect("kept until the crediting depth");
@@ -1075,9 +1074,14 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
                 entry,
                 ChainId::BASE,
                 landed,
-                BlockNumber::new(latest),
-                swap,
-                credit,
+                Finals::of(
+                    Finality::Blocks {
+                        swap: swap,
+                        credit: credit,
+                    },
+                    BlockNumber::new(latest),
+                    None,
+                ),
                 now,
             ))
         };
@@ -1102,8 +1106,7 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
             TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
-            BlockNumber::new(100),
-            swap,
+            Some(final_through(BlockNumber::new(100), swap)),
             Timestamp::from_nanos(1),
         );
         assert_eq!(outbox::get(open.key()), None);
@@ -1128,8 +1131,7 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
             TxHash::new([0x7e; 32]),
             BlockNumber::new(100),
             true,
-            BlockNumber::new(100),
-            credit,
+            Some(final_through(BlockNumber::new(100), credit)),
             Timestamp::from_nanos(1),
         );
         let kept = outbox::get(open.key()).expect("kept until the crediting depth");
@@ -1152,9 +1154,14 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
                 entry,
                 ChainId::BASE,
                 landed,
-                BlockNumber::new(latest),
-                swap,
-                credit,
+                Finals::of(
+                    Finality::Blocks {
+                        swap: swap,
+                        credit: credit,
+                    },
+                    BlockNumber::new(latest),
+                    None,
+                ),
                 now,
             ))
         };
@@ -1213,9 +1220,14 @@ fn a_pool_payouts_transaction_closes_with_the_payouts_line() {
             &entry,
             ChainId::BASE,
             Some(landed),
-            BlockNumber::new(105),
-            BlockDepth::new(1),
-            BlockDepth::new(1),
+            Finals::of(
+                Finality::Blocks {
+                    swap: BlockDepth::new(1),
+                    credit: BlockDepth::new(1),
+                },
+                BlockNumber::new(105),
+                None,
+            ),
             at(1_000),
         ));
         assert_eq!(decided, 1);
@@ -1484,5 +1496,86 @@ fn a_cancel_is_never_a_pool_transaction_in_flight() {
     on_fresh_memory(|| {
         crate::storage::init();
         assert!(!in_flight(TxPurpose::Cancel(ChainId::BASE)));
+    });
+}
+
+/// A chain listed in `finalized_chains` is final at its finalized block, for closing and for
+/// letting go alike, and no block count decides it: both depth reads refuse it, even with a
+/// count configured, so a site that asks for one stalls instead of using it.
+#[test]
+fn a_finalized_chain_is_decided_by_its_finalized_block_and_never_a_count() {
+    let polygon = ChainId::POLYGON;
+    let mut config = types::Config::default();
+    config.confirmations.insert(polygon, BlockDepth::new(16));
+    config
+        .credit_confirmations
+        .0
+        .insert(polygon, BlockDepth::new(16));
+    assert_eq!(
+        finality(&config, polygon),
+        Ok(Finality::Blocks {
+            swap: BlockDepth::new(16),
+            credit: BlockDepth::new(16)
+        })
+    );
+    config.finalized.0.insert(polygon);
+    assert_eq!(finality(&config, polygon), Ok(Finality::Finalized));
+    assert_eq!(
+        confirmations(&config, polygon),
+        Err(NoDepth::Finalized { chain_id: polygon })
+    );
+    assert_eq!(
+        credit_confirmations(&config, polygon),
+        Err(NoDepth::Finalized { chain_id: polygon })
+    );
+    let block = BlockNumber::new;
+    // at the head 100 with finalized 97: 97 and below are final, 98 waits
+    let finals = Finals::of(Finality::Finalized, block(100), Some(block(97)));
+    assert_eq!(finals.swap, Some(block(97)));
+    assert_eq!(finals.credit, Some(block(97)));
+    // a finalized read that failed, or that names a block above the head, decides nothing
+    let unread = Finals::of(Finality::Finalized, block(100), None);
+    assert_eq!((unread.swap, unread.credit), (None, None));
+    let ahead = Finals::of(Finality::Finalized, block(100), Some(block(101)));
+    assert_eq!((ahead.swap, ahead.credit), (None, None));
+    // a counted chain is final at its depths under the head, its finalized read unused
+    let counted = Finals::of(
+        Finality::Blocks {
+            swap: BlockDepth::new(1),
+            credit: BlockDepth::new(12),
+        },
+        block(100),
+        Some(block(50)),
+    );
+    assert_eq!(counted.swap, Some(block(100)));
+    assert_eq!(counted.credit, Some(block(89)));
+}
+
+/// A finalized-tag chain whose finalized block could not be read: a landed transaction
+/// waits exactly as it is, never sent again and never signed again, however long the read
+/// keeps failing.
+#[test]
+fn a_landed_entry_waits_while_the_finalized_block_is_unknown() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let open = entry_with(9, 1);
+        outbox::put(open.clone());
+        let unknown = Finals {
+            swap: None,
+            credit: None,
+        };
+        let before = read_state(|state| state.meta().next_event_index);
+        for later in [1_000, 100_000, 10_000_000] {
+            let decided = poll_once(decide(
+                &open,
+                ChainId::POLYGON,
+                Some(receipt_at(100)),
+                unknown,
+                at(later),
+            ));
+            assert_eq!(decided, 0);
+            assert_eq!(outbox::get(open.key()), Some(open.clone()), "untouched");
+        }
+        assert_eq!(read_state(|state| state.meta().next_event_index), before);
     });
 }
