@@ -869,10 +869,11 @@ fn an_allocation_that_lost_its_transaction_is_spent_by_a_cancel() {
 }
 
 /// The cancel rides the outbox the way any transaction does, and its receipt closes the
-/// outbox entry and writes nothing: `TxCancelled` already sealed that number's fate before
-/// the bytes went out, so what the chain did with them changes nothing in the fold.
+/// outbox entry and writes only its end (`TxFinal`, the watcher's line, which the fold
+/// ignores): `TxCancelled` already sealed that number's fate before the bytes went out, so
+/// what the chain did with them changes nothing in the fold.
 #[test]
-fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
+fn a_cancels_receipt_closes_its_entry_and_writes_only_its_end() {
     let (pic, canister, admin) = setup();
     append(&pic, canister, admin, &created_at(0)).expect("the allocation is admitted");
     advance(&pic, canister, STRANDED_AFTER);
@@ -896,10 +897,22 @@ fn a_cancels_receipt_closes_its_entry_and_writes_no_line() {
     advance(&pic, canister, BATCH_WINDOW);
     let asked = answer_pending(&pic, 19_000_005, &receipt(19_000_005, true, cancel_hash));
     assert!(asked.contains(&"eth_getTransactionReceipt".to_string()));
+    let written: Vec<EventType> = events(&pic, canister)[before..]
+        .iter()
+        .map(|event| event.payload.clone())
+        .collect();
     assert_eq!(
-        events(&pic, canister).len(),
-        before,
-        "a cancel closes no attempt, so it writes no line"
+        written,
+        vec![EventType::TxFinal {
+            purpose: TxPurpose::Cancel(BASE),
+            chain_id: BASE,
+            nonce: 0,
+            tx_hash: cancel_hash,
+            outcome: settlement_api::types::events::TxOutcome::Succeeded {
+                block: 19_000_005
+            },
+        }],
+        "a cancel closes no attempt, so the one line its receipt writes is its end"
     );
 
     // the entry left the outbox, so nothing is read for it again (the books' own balance
