@@ -640,54 +640,39 @@ fn a_relayed_order_answers_its_id_whatever_came_after() {
     assert_eq!(again, Ok(relay_id));
 }
 
-/// P10c review focus 1, and the carried reading end to end: a relay and a finish that
-/// carry no reading still refuse on a stale stored one, and the same calls carrying a
-/// reading newer than the stored one are priced on it, with no push before them.
+/// P10c review focus 1, and the carried reading end to end: a relay that carries no reading
+/// over a stale stored one reads the chain's gas itself and signs, and a finish carrying a
+/// reading newer than the stored one is priced on it, with no read and no push before it.
 #[test]
-fn a_call_with_no_reading_refuses_a_stale_one_and_a_carried_reading_prices_it() {
+fn a_call_with_no_reading_reads_the_gas_itself_and_a_carried_reading_prices_it() {
     let (pic, canister, admin) = setup();
     let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
-    let (relay_args, order, auth, envelope) = relay_for(address(&mine), now_s(&pic));
+    let (relay_args, _, _, envelope) = relay_for(address(&mine), now_s(&pic));
     // pushed once, then older than the config's 10 seconds
     push(&pic, canister, ARBITRUM);
     push(&pic, canister, BASE);
     pic.advance_time(std::time::Duration::from_secs(11));
     pic.tick();
-    let stale = |answer: &Result<u64, String>| {
-        answer
-            .as_ref()
-            .is_err_and(|error| error.contains("no chain data young enough"))
-    };
-    // above the pushed block, so the call stores it and stamps it itself
+
+    // no reading carried, the stored one stale: the canister reads Arbitrum's gas itself
+    let call = pic
+        .submit_call(canister, watcher(), "relay_gasless", relay_args)
+        .expect("the door takes the call");
+    let gas = pending_call(&pic, "eth_feeHistory");
+    answer(&pic, &gas, fee_history());
+    let relayed: Result<u64, String> =
+        candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap();
+    assert!(relayed.is_ok(), "{relayed:?}");
+
+    // above the pushed block, so the call stores it and stamps it itself; `finish` answers
+    // the source read alone, so a gas read of the canister's own would never come back
     let reading = ChainData {
         block: 19_000_001,
         base_fee_wei_per_gas: Nat::from(10_000_000_u64),
         priority_fee_wei_per_gas: Nat::from(1_000_000_u64),
     };
-
-    let refused: Result<u64, String> =
-        update(&pic, canister, watcher(), "relay_gasless", relay_args);
-    assert!(stale(&refused), "{refused:?}");
-    let relayed: Result<u64, String> = update(
-        &pic,
-        canister,
-        watcher(),
-        "relay_gasless",
-        encode_args((
-            ARBITRUM,
-            swapic::encode_order(&order),
-            swapic::encode_auth(&auth),
-            SOURCE_GAS,
-            Some(reading.clone()),
-        ))
-        .unwrap(),
-    );
-    assert!(relayed.is_ok(), "{relayed:?}");
-
-    let (finish_args, message, attestation, stored) = finish_for(&envelope);
+    let (_, message, attestation, stored) = finish_for(&envelope);
     let receipt = source_receipt(&message, address(&mine), 166_275);
-    let refused = finish(&pic, canister, finish_args, &receipt);
-    assert!(stale(&refused), "{refused:?}");
     let recipe = Recipe {
         target: swapic::evm(stored.target).to_string(),
         data: stored.data.to_vec(),
@@ -823,6 +808,16 @@ fn answer(pic: &PocketIc, request: &pocket_ic::common::rest::CanisterHttpRequest
     });
 }
 
+/// Five blocks at the pushed reading's fees, as the canister's own gas read asks for them.
+fn fee_history() -> Value {
+    json!({
+        "oldestBlock": format!("0x{:x}", 19_000_001),
+        "baseFeePerGas": vec![format!("0x{:x}", 10_000_000); 6],
+        "gasUsedRatio": vec![0.5; 5],
+        "reward": vec![vec![format!("0x{:x}", 1_000_000)]; 5],
+    })
+}
+
 /// Review fix: a finish whose reading ages past its 10 seconds while the canister reads the
 /// source transaction reads Base's gas itself and signs, instead of refusing the watcher on
 /// a stale reading it would only meet again on a retry.
@@ -840,18 +835,9 @@ fn a_finish_whose_reading_ages_during_the_source_read_still_signs() {
     let source = pending_call(&pic, "eth_getTransactionReceipt");
     answer(&pic, &source, source_receipt(&message, mine, 166_275));
     pic.advance_time(std::time::Duration::from_secs(11));
-    // the canister reads Base's gas itself: five blocks at the pushed reading's fees
+    // the canister reads Base's gas itself
     let gas = pending_call(&pic, "eth_feeHistory");
-    answer(
-        &pic,
-        &gas,
-        json!({
-            "oldestBlock": format!("0x{:x}", 19_000_001),
-            "baseFeePerGas": vec![format!("0x{:x}", 10_000_000); 6],
-            "gasUsedRatio": vec![0.5; 5],
-            "reward": vec![vec![format!("0x{:x}", 1_000_000)]; 5],
-        }),
-    );
+    answer(&pic, &gas, fee_history());
     let finished: Result<u64, String> =
         candid::decode_one(&pic.await_call(call).expect("the door answers")).unwrap();
     assert!(finished.is_ok(), "{finished:?}");
