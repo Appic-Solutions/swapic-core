@@ -58,9 +58,9 @@ impl<S: Store> State<S> {
                     _ => Ok(()),
                 }
             }
-            // a flow's own rules, and the nonce its signed records spend; every flow is read
-            // only by the two rules that ask (a `Landed`, a finish naming its source), never
-            // for each Flow line
+            // a flow's own rules, and the nonce its signed records spend; another flow is
+            // read only by the one rule that asks (a finish naming its source), never for
+            // each Flow line
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
                 types::Flow::admits(*quote_hash, existing.as_ref(), step, |source_tx| {
