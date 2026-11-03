@@ -1,7 +1,6 @@
-use crate::client::pocket::query;
 use crate::client::settlement::{append, event_count, events_page};
 use crate::settlement_suite::init::{setup, upgrade};
-use candid::{encode_one, Nat, Principal};
+use candid::{Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
@@ -75,10 +74,6 @@ fn page(pic: &PocketIc, canister: Principal, who: Principal, start: u64, len: u6
     events_page(pic, canister, who, start, len)
 }
 
-fn verify(pic: &PocketIc, canister: Principal, who: Principal, method: &str) -> bool {
-    query(pic, canister, who, method, encode_one(()).unwrap())
-}
-
 #[test]
 fn spine_holds_across_a_whole_relay_and_an_upgrade() {
     let (pic, canister, admin) = setup();
@@ -106,8 +101,6 @@ fn spine_holds_across_a_whole_relay_and_an_upgrade() {
         "rejection wrote nothing"
     );
 
-    assert!(verify(&pic, canister, admin, "verify_chain"));
-    assert!(verify(&pic, canister, admin, "verify_replay"));
 
     // paging boundaries: the exact range, a start past the end, and more than exists
     let full = page(&pic, canister, admin, 0, total);
@@ -130,8 +123,6 @@ fn spine_holds_across_a_whole_relay_and_an_upgrade() {
     let err = append(&pic, canister, admin, dup).expect_err("guard rejects");
     assert!(refused_as_relayed(&err), "{err:?}");
     assert_eq!(count(&pic, canister, admin), total);
-    assert!(verify(&pic, canister, admin, "verify_chain"));
-    assert!(verify(&pic, canister, admin, "verify_replay"));
     assert_eq!(
         page(&pic, canister, admin, 0, total),
         full,

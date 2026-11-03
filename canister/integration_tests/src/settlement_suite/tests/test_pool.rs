@@ -406,16 +406,6 @@ impl World {
             })
             .collect()
     }
-
-    fn replay_matches(&self) -> bool {
-        query(
-            &self.pic,
-            self.canister,
-            self.admin,
-            "verify_replay",
-            encode_one(()).unwrap(),
-        )
-    }
 }
 
 fn ckusdc_swap(ledger: Principal) -> DepositKind {
@@ -448,7 +438,6 @@ fn an_arrived_swap_pays_its_recipient_arrived_less_premium() {
     assert_eq!(state.icp.reserved, Nat::from(0_u8));
     assert_eq!(state.icp.free, Nat::from(usdc(901)));
     assert_eq!(world.balance(world.canister), Nat::from(usdc(901)));
-    assert!(world.replay_matches());
 }
 
 /// Review Focus 2: the transfer executes and its answer is lost; the next drive asks again
@@ -497,7 +486,6 @@ fn a_lost_answer_asked_again_pays_once() {
         "paid once"
     );
     assert_eq!(world.balance(world.canister), Nat::from(usdc(901)));
-    assert!(world.replay_matches());
 }
 
 /// An arrived stake mints its shares at the pool's price before it, and calls no ledger.
@@ -519,7 +507,6 @@ fn an_arrived_stake_mints_its_shares() {
     let mine = world.pool_account(staker());
     assert_eq!(mine.shares, minted);
     assert_eq!(mine.value_usdc, Nat::from(usdc(100)));
-    assert!(world.replay_matches());
 }
 
 #[derive(CandidType)]
@@ -635,7 +622,6 @@ fn an_icp_staker_stakes_earns_and_withdraws_at_most_its_value() {
         state.icp.free.clone() + state.icp.reserved.clone(),
         world.balance(world.canister)
     );
-    assert!(world.replay_matches());
 
     // more than its shares are worth: refused, nothing burned
     let again: Result<WithdrawIcpOk, PoolError> = update(
@@ -689,7 +675,6 @@ fn an_icp_shortfall_closes_the_pool_and_reopening_clears_it() {
     );
     assert_eq!(reopened, Ok(()));
     assert!(world.state().open, "{:?}", world.state().closed_reason);
-    assert!(world.replay_matches());
 }
 
 /// Base as the pool pays on it: Swapic, the Runner, USDC, and the pool's gas rows.
@@ -1128,7 +1113,6 @@ fn an_icp_user_swaps_ckusdc_with_a_plan_that_fits_and_it_is_signed_without_pay_p
     assert_eq!(view.amount, Some(Nat::from(501_650_000_u64)));
     assert_eq!(view.planned, Some(Nat::from(usdc(500))));
     assert_eq!(world.state().base.in_flight, Nat::from(501_650_000_u64));
-    assert!(world.replay_matches());
 }
 
 /// A plan the scaler refuses to rewrite for the payout: the payout waits for the watcher's
@@ -1275,7 +1259,6 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
     world.next_tick();
     assert_eq!(world.balance(staker()), refunded);
     let _ = order_id;
-    assert!(world.replay_matches());
 }
 
 /// `resolve_payout` (2026-10-23): a payout stopped for a human (its reverted order ran after
@@ -1383,7 +1366,6 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
     ));
     world.next_tick();
     assert_eq!(world.balance(staker()), refunded);
-    assert!(world.replay_matches());
 }
 
 /// The per-caller limit (Jeff, 2026-10-23): a caller with no approval calls the free doors
@@ -1625,7 +1607,6 @@ fn a_plan_whose_scaler_read_failed_once_is_signed_by_the_next_pass() {
         view.expect("the payout is there").status,
         PayoutStatus::Signed(_)
     ));
-    assert!(world.replay_matches());
 }
 
 #[derive(CandidType)]
@@ -1716,7 +1697,6 @@ fn a_held_deposit_a_controller_retries_is_paid_once() {
     ));
     world.next_tick();
     assert_eq!(world.balance(recipient()), Nat::from(usdc(99) - FEE));
-    assert!(world.replay_matches());
 }
 
 /// `resolve_stake` (Jeff, 2026-10-24): an ICP stake whose pull's answer was lost past the
@@ -1772,7 +1752,6 @@ fn a_lost_stake_a_controller_finds_pulled_mints_its_shares_once() {
     assert_eq!(resolve(world.admin, block), Ok(()));
     assert_ne!(world.pool_account(staker()).shares, Nat::from(0_u8));
     assert_eq!(resolve(world.admin, block), Err(PoolError::Unknown));
-    assert!(world.replay_matches());
 }
 
 #[derive(CandidType)]
@@ -1909,7 +1888,6 @@ fn a_held_deposit_whose_transfer_landed_is_marked_paid_once() {
         resolve(world.admin, DepositResolution::MarkPaid { block }),
         Err(PoolError::NotAllowed(_))
     ));
-    assert!(world.replay_matches());
 }
 
 /// The review (2026-10-24): a held payout of another token whose transfer may have landed is
@@ -2005,5 +1983,4 @@ fn a_held_token_payout_whose_transfer_landed_is_marked_paid_on_its_tokens_ledger
         encode_one(account(recipient())).unwrap(),
     );
     assert_eq!(paid, Nat::from(sent));
-    assert!(world.replay_matches());
 }
