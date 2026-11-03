@@ -135,8 +135,14 @@ else
     --target-dir "$TARGET_DIR" -p "$CANISTER"
   # the production wasm with what no call reaches removed: a smaller module, the same
   # behaviour, and as reproducible as the build itself
+  # pinned like the compiler: another ic-wasm may shrink to other bytes
+  IC_WASM_VERSION="0.9.10"
   if ! command -v ic-wasm > /dev/null; then
-    echo "Error: ic-wasm is needed to shrink the wasm (cargo install ic-wasm)" >&2
+    echo "Error: ic-wasm $IC_WASM_VERSION is needed to shrink the wasm (cargo install ic-wasm --version $IC_WASM_VERSION --locked)" >&2
+    exit 1
+  fi
+  if [[ "$(ic-wasm --version)" != "ic-wasm $IC_WASM_VERSION" ]]; then
+    echo "Error: $(ic-wasm --version) found, the build pins ic-wasm $IC_WASM_VERSION" >&2
     exit 1
   fi
   WASM="$TARGET_DIR/wasm32-unknown-unknown/release/$CANISTER.wasm"
