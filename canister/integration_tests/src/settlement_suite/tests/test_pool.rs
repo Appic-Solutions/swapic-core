@@ -648,8 +648,8 @@ fn an_icp_shortfall_closes_the_pool_and_reopening_clears_it() {
     let world = world(usdc(500));
     world.plant_stake(world.admin, usdc(1_000), 1);
     assert!(world.state().open);
-    // the books' check, every ten minutes
-    world.pic.advance_time(Duration::from_secs(601));
+    // the books' check, every hour
+    world.pic.advance_time(Duration::from_secs(3_601));
     world.settle();
     let state = world.state();
     assert!(!state.open);
