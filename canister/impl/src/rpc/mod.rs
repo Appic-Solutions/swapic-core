@@ -456,21 +456,34 @@ pub async fn rpc_batch(
 /// The most a block answer may be: a full header with every transaction's hash.
 pub const MAX_BLOCK_ANSWER_BYTES: u64 = 256 * 1024;
 
+/// The most a one-block `eth_feeHistory` reply may be: a few hundred bytes and the JSON-RPC
+/// envelope around them.
+const MAX_FINALIZED_BYTES: u64 = 1_024;
+
 /// The chain's finalized block (the `finalized` tag), as one provider answers it, or the
-/// kind of failure. A full header comes back, so the cap is a block's, never a head's.
+/// kind of failure: the `oldestBlock` of a one-block fee history ending at the tag, which is
+/// that block. The block itself would carry every transaction's hash, and an outcall is
+/// charged on its cap.
 pub async fn finalized(chain_id: ChainId) -> Result<BlockNumber, types::books::ReadFailure> {
     rpc_batch(
         chain_id,
-        &[("eth_getBlockByNumber", json!(["finalized", false]))],
-        MAX_BLOCK_ANSWER_BYTES,
+        &[("eth_feeHistory", json!(["0x1", "finalized", []]))],
+        MAX_FINALIZED_BYTES,
     )
     .await
     .map_err(|error| error.kind())?
     .first()
-    .and_then(|block| block.get("number"))
-    .and_then(Value::as_str)
-    .and_then(parse_block_number)
+    .and_then(finalized_of)
     .ok_or(types::books::ReadFailure::BadAnswer)
+}
+
+/// The block a one-block `eth_feeHistory` answer ending at the `finalized` tag starts at,
+/// which is that block.
+pub(crate) fn finalized_of(history: &Value) -> Option<BlockNumber> {
+    history
+        .get("oldestBlock")
+        .and_then(Value::as_str)
+        .and_then(parse_block_number)
 }
 
 /// The chain's head, as one provider answers `eth_blockNumber`, or the kind of failure.

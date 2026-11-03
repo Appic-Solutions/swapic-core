@@ -1025,12 +1025,20 @@ pub async fn check_open() -> ReceiptPass {
         };
         // a listed chain's finalized block, read in a call of its own before the receipts
         // (so it is never above their head): a failed read leaves every landed entry waiting
-        // and sends again only the ones with no receipt, exactly as the receipts say
+        // and sends again only the ones with no receipt, exactly as the receipts say. It is
+        // read at its own pace; between reads the last number read stands, which only
+        // closes later, never wrongly
         let finalized = match finality {
             Finality::Finalized => {
-                let read = rpc::finalized(chain_id).await.ok();
-                note_finalized(chain_id, read, now);
-                read
+                let seen = timer_state::get().finalized_seen.get(&chain_id).copied();
+                match seen.filter(|seen| !seen.read_due(now)) {
+                    Some(seen) => seen.number,
+                    None => {
+                        let read = rpc::finalized(chain_id).await.ok();
+                        note_finalized(chain_id, read, now);
+                        read
+                    }
+                }
             }
             Finality::Blocks { .. } => None,
         };

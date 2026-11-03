@@ -115,6 +115,10 @@ pub struct TimerState {
 /// Polygon's moves every few seconds.
 pub const FINALIZED_STALL: Duration = Duration::from_secs(10 * 60);
 
+/// How often the outbox reads a chain's finalized block, slower than its receipts: between
+/// reads the last number read stands, which is never above the chain's.
+pub const FINALIZED_PACE: Duration = Duration::from_secs(6);
+
 /// How long with no read of a chain's finalized block means nothing on it waited: the outbox
 /// reads it only while something does, so the next read starts the stall clock anew.
 pub const FINALIZED_IDLE: Duration = Duration::from_secs(60);
@@ -166,6 +170,12 @@ impl FinalizedSeen {
         let alert = self.is_stalled(now) && !self.alerted;
         self.alerted |= alert;
         alert
+    }
+
+    /// Whether the next read is due at `now`: none was tried within [`FINALIZED_PACE`].
+    pub fn read_due(&self, now: Timestamp) -> bool {
+        self.tried_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= FINALIZED_PACE)
     }
 
     /// Whether something on the chain waits at `now`: a read was tried within

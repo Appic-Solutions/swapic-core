@@ -131,3 +131,19 @@ fn an_idle_chain_is_not_stalled_and_its_clock_starts_anew() {
     assert!(seen.is_stalled(at(4_200)));
     assert!(!seen.is_stalled(at(4_300)), "idle again");
 }
+
+/// Review fix: the finalized block is read at most every six seconds; between reads the
+/// last number read stands.
+#[test]
+fn the_finalized_block_is_read_at_its_own_pace() {
+    let mut seen = FinalizedSeen::first(at(0));
+    assert!(seen.read_due(at(0)), "never read");
+    seen.observe(Some(BlockNumber::new(50)), at(0));
+    assert!(!seen.read_due(at(2)));
+    assert!(!seen.read_due(at(5)));
+    assert!(seen.read_due(at(6)));
+    // a failed read counts as a try: the next waits its pace too
+    seen.observe(None, at(6));
+    assert!(!seen.read_due(at(8)));
+    assert_eq!(seen.number, Some(BlockNumber::new(50)));
+}

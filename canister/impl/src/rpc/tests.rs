@@ -461,3 +461,21 @@ fn an_agreed_read_reserves_the_replicated_price() {
     assert!(cycles_for_agreed(1_000, 16_384) >= cycles_for(1_000, 16_384));
     assert!(cycles_for_agreed(1_000, 32_768) > cycles_for_agreed(1_000, 16_384));
 }
+
+/// Review fix: the finalized block read from a one-block fee history, as Polygon's provider
+/// answered `eth_feeHistory(1, "finalized", [])` (2026-11-03, read-only), a few hundred bytes
+/// where the block would carry every transaction's hash.
+#[test]
+fn the_finalized_block_reads_from_a_one_block_fee_history() {
+    let answer = serde_json::json!({
+        "oldestBlock": "0x5c2fc54",
+        "baseFeePerGas": ["0x3a8141433d", "0x39d6c53843"],
+        "gasUsedRatio": [0.17647150625],
+        "baseFeePerBlobGas": ["0x0", "0x0"],
+        "blobGasUsedRatio": [0]
+    });
+    assert_eq!(finalized_of(&answer), Some(BlockNumber::new(96_664_660)));
+    assert!(answer.to_string().len() < 256);
+    assert_eq!(finalized_of(&serde_json::json!({"oldestBlock": 7})), None);
+    assert_eq!(finalized_of(&serde_json::Value::Null), None);
+}
