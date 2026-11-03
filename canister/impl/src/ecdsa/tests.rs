@@ -100,7 +100,7 @@ fn bytes_that_are_not_a_signature_or_a_key_are_refused() {
     // a well-formed compressed key is 33 bytes and is read
     let key = recover_key(&raw(FIXTURE_R, FIXTURE_S), hash(), false).unwrap();
     assert_eq!(
-        public_key_of(&key.serialize_compressed()).map(|key| address_of(&key)),
+        public_key_of(&key.to_encoded_point(true).as_bytes()).map(|key| address_of(&key)),
         Ok(signer())
     );
 }

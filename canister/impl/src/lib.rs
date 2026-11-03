@@ -25,8 +25,12 @@ mod tests;
 pub mod tx;
 pub mod updates;
 
+// what `export_candid!` reads the doors' types through
+#[cfg(any(test, feature = "export-candid"))]
 use lifecycle::*;
 use queries::*;
+#[cfg(any(test, feature = "export-candid"))]
 use updates::*;
 
+#[cfg(any(test, feature = "export-candid"))]
 ic_cdk::export_candid!();

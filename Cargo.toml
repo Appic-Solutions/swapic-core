@@ -19,8 +19,10 @@ hex = "0.4"
 ic-cdk = "0.17"
 ic-cdk-timers = "0.11"
 ic-stable-structures = "0.6"
-# pure Rust secp256k1, as the owner's evm-minter uses it on wasm32: no hmac, because
-# nothing here signs locally, only recovers
+# the canister's key recovery: ECDSA only, without the precomputed tables, so the wasm
+# carries the curve and not a table of it
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+# signing in tests only, as a payer would
 libsecp256k1 = { version = "0.7", default-features = false, features = ["static-context"] }
 minicbor = { version = "2", features = ["alloc", "derive"] }
 num-bigint = "0.4"

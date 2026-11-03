@@ -539,7 +539,7 @@ type OrphanView = record {
 // `pay_payout`'s answer: the signed transaction's id in `signed_txs`.
 type PayPayoutOk = record { tx_id : nat64 };
 type PayoutKind = variant { IcpSwap; Withdrawal };
-// The payout plan (2026-10-23): the quoter's ready-made Swapic order for the expected
+// The payout plan: the quoter's ready-made Swapic order for the expected
 // payout (its `amountIn`), as `abi.encode(order)`, and the gas it is signed with, as
 // `pay_payout` takes them. Its one delivery names the chain, the recipient, the token and
 // the least out.
@@ -608,7 +608,7 @@ type PayoutWaiting = record {
   terms : PayoutTerms;
   kind : PayoutKind;
   amount : nat;
-  // Micro USDC, the payout's own network fee (P11e): the watcher chooses CCTP only when it
+  // Micro USDC, the payout's own network fee: the watcher chooses CCTP only when it
   // covers the canister's CCTP costs.
   network_fee : opt nat;
 };
@@ -683,7 +683,7 @@ type PoolError = variant {
   Closed : text;
   AlreadyCredited;
   AboveTvlCap : record { cap : nat; would_be : nat };
-  // No longer answered (2026-10-23): the canister enforces no per swap cap; kept, the wire
+  // No longer answered: the canister enforces no per swap cap; kept, the wire
   // being append-only.
   AboveSwapCap : record { cap : nat };
   // The ref is registered already.
@@ -707,7 +707,7 @@ type PoolError = variant {
 type PoolRail = variant { Eco; Cctp; SameChain };
 type PoolSettings = record {
   // Micro USDC, launch 1_000_000_000 ($1,000): the quoter's per swap cap, which the
-  // canister stores and shows but enforces nowhere (2026-10-23).
+  // canister stores and shows but enforces nowhere.
   per_swap_cap : nat;
   ckusdc_ledger : principal;
   // Launch 10.
@@ -1007,7 +1007,7 @@ service : (InitArg) -> {
   // `src_chain`; an empty `src_tx` names none). The canister reads the receipts itself, proves
   // the transfer carries the move's own ref (its CCTP envelope, or the Eco source's
   // `OrderStarted`), and credits the move once. A caller other than the watcher is held to 10
-  // reports a minute in total and 3 an hour per `base_tx` (P11e), refused `Unavailable` before
+  // reports a minute in total and 3 an hour per `base_tx`, refused `Unavailable` before
   // any outcall.
   note_move_arrival : (nat64, blob, nat64, blob) -> (Result_3);
   // Any caller (the watcher, or the user's app as a backup), refused while halted. A USDC
@@ -1106,7 +1106,7 @@ service : (InitArg) -> {
   // by itself. One rescue per order: a second call answers the first one's id. Every rescue
   // is logged.
   rescue_eco_intent : (blob) -> (Result_6);
-  // Controller-only, refused while halted (Jeff, 2026-10-24): an EVM to ICP deposit held for a
+  // Controller-only, refused while halted: an EVM to ICP deposit held for a
   // human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
   // started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
   // `Retry`: back to its payout with fresh attempts. A started one whose transfer cannot land
@@ -1135,18 +1135,18 @@ service : (InitArg) -> {
   // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
   // never ran asked again; a wait read again), or written off with why (`Lost`).
   resolve_move : (nat64, MoveResolution) -> (Result_5);
-  // Controller-only, refused while halted (Jeff, 2026-10-19: orphans are ALWAYS held for a
+  // Controller-only, refused while halted (orphans are ALWAYS held for a
   // controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
   // once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the
   // fee kept for its gas; `Book` books it to the Base books' unattributed line.
   resolve_orphan : (blob, OrphanAction) -> (Result_5);
-  // Controller-only, refused while halted (Jeff, 2026-10-23): a payout stopped for a human
+  // Controller-only, refused while halted: a payout stopped for a human
   // (`Failed`), resolved once. `Refund`: back on its undo, an ICP swap's refund asked next (all
   // its ckUSDC less one ledger fee, or its token), a withdrawal's shares minted back at once;
   // the controller checked no refund went out before. `MarkPaid`: its signed order ran after
   // all, and its paid line is booked.
   resolve_payout : (nat64, PayoutResolution) -> (Result_5);
-  // Controller-only, refused while halted (Jeff, 2026-10-24): an ICP stake whose pull's answer
+  // Controller-only, refused while halted: an ICP stake whose pull's answer
   // was lost, past the ledger's deduplication window (23 hours after it started; the canister
   // stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
   // `StakeStarted` line names it). `Pulled { block }`: the controller saw the pull in that

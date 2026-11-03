@@ -3347,6 +3347,7 @@ dependencies = [
  "ic-cdk",
  "ic-cdk-timers",
  "ic-stable-structures",
+ "k256",
  "libsecp256k1",
  "minicbor",
  "serde",

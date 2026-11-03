@@ -21,7 +21,7 @@ use ic_cdk::api::management_canister::ecdsa::{
     ecdsa_public_key, EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgument, SignWithEcdsaArgument,
     SignWithEcdsaResponse,
 };
-use libsecp256k1::{recover, Message, PublicKey, PublicKeyFormat, RecoveryId, Signature};
+use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use thiserror::Error;
 use types::{EcdsaSignature, EvmAddress, TxHash};
 
@@ -60,23 +60,24 @@ fn key_id() -> EcdsaKeyId {
 }
 
 /// The EVM address of a recovered or derived key.
-fn address_of(key: &PublicKey) -> EvmAddress {
-    EvmAddress::from_public_key(&key.serialize())
+fn address_of(key: &VerifyingKey) -> EvmAddress {
+    let point = key.to_encoded_point(false);
+    let uncompressed: &[u8; 65] = point
+        .as_bytes()
+        .try_into()
+        .expect("BUG: an uncompressed SEC1 point is 65 bytes");
+    EvmAddress::from_public_key(uncompressed)
 }
 
 /// A SEC1 public key as the management canister answers it.
-fn public_key_of(bytes: &[u8]) -> Result<PublicKey, EcdsaError> {
-    PublicKey::parse_slice(bytes, Some(PublicKeyFormat::Compressed))
-        .map_err(|_| EcdsaError::UnreadablePublicKey)
+fn public_key_of(bytes: &[u8]) -> Result<VerifyingKey, EcdsaError> {
+    VerifyingKey::from_sec1_bytes(bytes).map_err(|_| EcdsaError::UnreadablePublicKey)
 }
 
 /// The key `parity` recovers `raw` to over `hash`.
-fn recover_key(raw: &[u8; 64], hash: TxHash, parity: bool) -> Result<PublicKey, EcdsaError> {
-    let signature =
-        Signature::parse_standard_slice(raw).map_err(|_| EcdsaError::UnreadableSignature)?;
-    let recovery =
-        RecoveryId::parse(u8::from(parity)).map_err(|_| EcdsaError::UnreadableSignature)?;
-    recover(&Message::parse(hash.as_ref()), &signature, &recovery)
+fn recover_key(raw: &[u8; 64], hash: TxHash, parity: bool) -> Result<VerifyingKey, EcdsaError> {
+    let signature = Signature::from_slice(raw).map_err(|_| EcdsaError::UnreadableSignature)?;
+    VerifyingKey::recover_from_prehash(hash.as_ref(), &signature, RecoveryId::new(parity, false))
         .map_err(|_| EcdsaError::NoParityRecovers)
 }
 
@@ -89,10 +90,9 @@ fn signature_for(
     hash: TxHash,
     mine: EvmAddress,
 ) -> Result<EcdsaSignature, EcdsaError> {
-    let mut signature =
-        Signature::parse_standard_slice(raw).map_err(|_| EcdsaError::UnreadableSignature)?;
-    signature.normalize_s();
-    let normalized = signature.serialize();
+    let signature = Signature::from_slice(raw).map_err(|_| EcdsaError::UnreadableSignature)?;
+    let signature = signature.normalize_s().unwrap_or(signature);
+    let normalized: [u8; 64] = signature.to_bytes().into();
     let (r, s) = normalized.split_at(32);
     for parity in [false, true] {
         if recover_key(&normalized, hash, parity).is_ok_and(|key| address_of(&key) == mine) {

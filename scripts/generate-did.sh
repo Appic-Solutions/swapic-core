@@ -3,7 +3,7 @@ set -euo pipefail
 
 show_help() {
   cat << EOF_HELP
-Build the production wasm of a canister and write its candid interface to
+Write a canister's candid interface, as its own test build exports it, to
 canister/api/can.did.
 Must be run from the repository's root folder.
 
@@ -38,10 +38,7 @@ if [[ $# -ne 1 ]]; then
 fi
 CANISTER=$1
 
-# the production build, never the inttest one, so the test doors cannot reach the did
-scripts/build-canister.sh "$CANISTER"
-
-DID_PATH="canister/api/can.did"
-candid-extractor "canister/target/wasm32-unknown-unknown/release/$CANISTER.wasm" > "$DID_PATH.tmp"
-mv "$DID_PATH.tmp" "$DID_PATH"
-echo "Wrote $DID_PATH"
+# the production wasm exports no candid: the interface is read off the canister's own
+# test build (the same macro output, never the inttest doors) by the test that pins it
+UPDATE_DID=1 cargo test --locked -p "$CANISTER" --lib -- the_committed_did_is_the_exported_one
+echo "Wrote canister/api/can.did"

@@ -133,4 +133,12 @@ else
   echo "Building canister $CANISTER"
   cargo build --locked --target wasm32-unknown-unknown --release \
     --target-dir "$TARGET_DIR" -p "$CANISTER"
+  # the production wasm with what no call reaches removed: a smaller module, the same
+  # behaviour, and as reproducible as the build itself
+  if ! command -v ic-wasm > /dev/null; then
+    echo "Error: ic-wasm is needed to shrink the wasm (cargo install ic-wasm)" >&2
+    exit 1
+  fi
+  WASM="$TARGET_DIR/wasm32-unknown-unknown/release/$CANISTER.wasm"
+  ic-wasm "$WASM" -o "$WASM" shrink
 fi
