@@ -6,7 +6,7 @@
 //! caller, and no transform to agree on. The cycle saving needs
 //! [`PRICING_VERSION_PAY_AS_YOU_GO`] as well, because version 1 prices a call by its
 //! reserved `max_response_bytes` and ignores the replication mode entirely (measured on
-//! mainnet 2026-09-21: 87.44M replicated against 87.56M unreplicated).
+//! mainnet: 87.44M replicated against 87.56M unreplicated).
 //!
 //! The reads that decide money alone (a pool arrival's receipts, `Swapic.used` before
 //! an undo, an Eco intent's `claimants`) are made by every node of the subnet and agreed on

@@ -27,7 +27,7 @@ use types::{EcdsaSignature, EvmAddress, TxHash};
 
 /// Cycles attached to one threshold signature.
 ///
-/// The measured mainnet price of a `key_1` signature on 2026-09-21 was 26,160,133,703
+/// The measured mainnet price of a `key_1` signature was 26,160,133,703
 /// cycles, and it scales with the signing subnet's node count, so this sits well above the
 /// price rather than beside it: an over-attached call is refunded the difference
 /// (measured), and an under-attached one fails outright. That is why the signing call below

@@ -3,7 +3,7 @@
 //! (`getRewardStatus`), and the rescue of an unfilled one (`cancelAndProve` on the
 //! destination, which proves the cancellation to the source, where Eco refunds the reward's
 //! creator by itself). The hashes are Eco Portal 2.12's: an intent is `keccak256(destination
-//! ‖ keccak256(route) ‖ keccak256(reward))`, pinned against a live cancel (2026-10-11,
+//! ‖ keccak256(route) ‖ keccak256(reward))`, pinned against a live cancel (
 //! `research/eco-cancel-test`).
 //!
 //! Pure: no canister calls.

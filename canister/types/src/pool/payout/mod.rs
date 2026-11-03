@@ -4,7 +4,7 @@
 //!
 //! A payout is opened with what undoes it, learns its exact amount, waits in a first in first
 //! out queue while the Base pocket cannot cover it, then waits for an order, is signed once
-//! (never again: a revert undoes it, 2026-10-23), and is paid or undone. Pure: the rules are
+//! (never again: a revert undoes it), and is paid or undone. Pure: the rules are
 //! the pool ledger's (`admits`, `apply`); this module holds the records and their policy.
 //!
 //! Stored as minicbor: `#[n]` indices are append-only, never renumbered or reused, and a new

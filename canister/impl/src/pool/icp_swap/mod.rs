@@ -1,5 +1,5 @@
 //! `swap_from_icp` (spec 3.2, the fixed interface sections 3b and 4; the payout plan of the
-//! final review fixes, 2026-10-23): an ICP user swaps ckUSDC or a listed ICP token to any
+//! final review fixes): an ICP user swaps ckUSDC or a listed ICP token to any
 //! token on an EVM chain through the pool, handing in the quoter's ready-made order for the
 //! payout it expects (the payout plan, its `amountIn` the planned payout) and one slippage.
 //! The recipient, the token, the chain and the least out are read from the plan, which goes
@@ -60,7 +60,7 @@ use types::{Address, EvmAddress, Timestamp, TokenAmount};
 /// The least time a payout's deadline must be ahead of its opening.
 pub const MIN_DEADLINE: Duration = Duration::from_secs(300);
 
-/// The most time a payout's deadline may be ahead of its opening (Jeff-delegated, 2026-10-23).
+/// The most time a payout's deadline may be ahead of its opening (Jeff-delegated).
 pub const MAX_DEADLINE: Duration = Duration::from_secs(3_600);
 
 /// The most bytes a payout plan may have.
@@ -584,7 +584,7 @@ pub async fn refit(
 pub const BASE_SHORT: &str = "the Base pocket cannot pay it now";
 
 /// Waiting when the Base pocket covers it behind an empty queue; else a planned swap is
-/// undone at once (it never queues, 2026-10-23), and any other payout queued.
+/// undone at once (it never queues), and any other payout queued.
 pub fn place(id: u64, now: Timestamp) -> Result<(), Stop> {
     let ledger = pool_store::ledger();
     let Some(payout) = pool_store::payout(id) else {

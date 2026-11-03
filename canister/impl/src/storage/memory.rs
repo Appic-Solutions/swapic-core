@@ -44,7 +44,7 @@ const POOL_PAYOUT_QUEUE_MEMORY_ID: MemoryId = MemoryId::new(33);
 const POOL_WITHDRAWAL_NONCES_MEMORY_ID: MemoryId = MemoryId::new(34);
 const POOL_ORPHANS_MEMORY_ID: MemoryId = MemoryId::new(35);
 const POOL_PAYOUT_INTENTS_MEMORY_ID: MemoryId = MemoryId::new(36);
-// P11c, the rebalancing: ids 40 to 49
+// the rebalancing: ids 40 to 49
 const POOL_MOVES_MEMORY_ID: MemoryId = MemoryId::new(40);
 const POOL_OWN_SOURCES_MEMORY_ID: MemoryId = MemoryId::new(41);
 // P11e

@@ -306,7 +306,7 @@ pub struct Pocket {
     /// Held and promised to a swap or a withdrawal in progress.
     #[n(1)]
     pub reserved: TokenAmount,
-    /// Left this pocket and not yet arrived in the other (a rebalance, P11c).
+    /// Left this pocket and not yet arrived in the other (a rebalance).
     #[n(2)]
     pub in_flight: TokenAmount,
 }
@@ -450,7 +450,7 @@ impl MoveFees {
 }
 
 /// A deposit above this (1,000 USDC) waits more blocks before it is credited (a choice made
-/// on Jeff's behalf, 2026-10-23).
+/// on Jeff's behalf).
 pub const DEFAULT_LARGE_DEPOSIT_USDC: TokenAmount = TokenAmount::new(1_000_000_000);
 
 /// The pool chain's blocks a large deposit waits: six Base blocks, about twelve seconds.
@@ -840,7 +840,7 @@ pub enum DepositResolution {
 }
 
 /// What a controller found of an ICP stake whose pull's answer was lost past the ledger's
-/// deduplication window (`resolve_stake`, Jeff 2026-10-24).
+/// deduplication window (`resolve_stake`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum StakeResolution {
     /// The pull landed in ledger `block`: its `shares`, priced when resolved, are minted.
@@ -1966,7 +1966,7 @@ pub enum PoolStep {
         #[n(1)]
         held: Option<String>,
     },
-    // P11c, the rebalancing: indices 60 to 89.
+    // the rebalancing: indices 60 to 89.
     /// A controller set the rebalancing's knobs.
     #[n(60)]
     MoveSettingsSet {

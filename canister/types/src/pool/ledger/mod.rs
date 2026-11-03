@@ -111,7 +111,7 @@ pub struct PoolLedger {
     /// out: credited and owed, and held only when they start.
     #[n(16)]
     pub queue: PayoutQueue,
-    /// When the queue's head became its head: how long it has waited, which P11c's urgent
+    /// When the queue's head became its head: how long it has waited, which the urgent
     /// rebalance and the alert read.
     #[n(17)]
     pub head_since: Option<Timestamp>,
@@ -127,7 +127,7 @@ pub struct PoolLedger {
     #[n(40)]
     pub rebalance: Option<crate::pool::RebalanceLines>,
     /// The ckUSDC ledger blocks controllers resolved lost ICP stake pulls with
-    /// (`resolve_stake`, the review, 2026-10-24): each resolves one stake. Absent until the
+    /// (`resolve_stake`): each resolves one stake. Absent until the
     /// first.
     #[n(41)]
     pub resolved_pulls: Option<BTreeSet<u64>>,
@@ -180,8 +180,8 @@ impl PoolEffects {
 pub enum PoolStepError {
     #[error("the pool has no settings")]
     NoSettings,
-    /// A payout's transfer asked on other terms while an earlier ask may have landed (the
-    /// review, 2026-10-24): the drive counts it, so the payout reaches a human.
+    /// A payout's transfer asked on other terms while an earlier ask may have landed:
+    /// the drive counts it, so the payout reaches a human.
     #[error("a transfer asked on other terms may have landed")]
     AskedOnOtherTerms,
     #[error(transparent)]
@@ -530,8 +530,8 @@ impl PoolLedger {
         Shares::mint_for(amount, self.total_assets(), self.total_shares)
     }
 
-    /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`] (the
-    /// review, 2026-10-24), whoever wrote the line: a retry's fresh dedup instant is exactly
+    /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`],
+    /// whoever wrote the line: a retry's fresh dedup instant is exactly
     /// the line's time; a retry with its own pair (its transfer may have landed) leaves its
     /// next drive inside the ledger's window less the margin. A replay reads these too, of
     /// every line in the log: the lines of builds never deployed are not grandfathered

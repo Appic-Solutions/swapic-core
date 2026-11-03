@@ -732,8 +732,7 @@ async fn send_out(
     // the ledgers the canister knows to deduplicate a transfer on its memo and
     // `created_at_time` within the window: the ckUSDC ledger the payout started with, and
     // the ICP ledger the routes name. Any other may take a re-ask as a new transfer, so a
-    // transfer there whose answer is not known is never asked again: held for a human (the
-    // review, 2026-10-24)
+    // transfer there whose answer is not known is never asked again: held for a human
     let deduplicates = deduplicates_on(token, attempt);
     if asked && !deduplicates {
         return Err(hold_unanswered(payout, what, clock()));
@@ -785,7 +784,7 @@ async fn send_out(
                 })?;
             }
             // a refusal counts whatever its line does: one not recorded leaves the transfer
-            // asked, which only blocks a refund (the safe way, the review, 2026-10-24)
+            // asked, which only blocks a refund (the safe way)
             if matches!(error, CallError::Refused(_)) {
                 if let Err(refused) =
                     pool_store::record_at(PoolStep::TransferRefused { r#ref: payout.id }, clock())
@@ -843,7 +842,7 @@ const ICP_FEES_BEFORE_SECOND: u8 = 3;
 /// its ICP pool, the token's transfer. Before the first leg both pools' quotes are read: the
 /// second leg's must reach the recipient's minimum (below it, declined once, then all of it as
 /// ckUSDC), and the first leg's minimum is what the second needs. A first leg that did not
-/// happen falls back as P11a's does. A second leg that cannot pay (its quote short twice, the
+/// happen falls back as before. A second leg that cannot pay (its quote short twice, the
 /// pool not trading the pair, its swap not happening) swaps the ICP back to ckUSDC, and all of
 /// it is paid as ckUSDC; a way back that fails too stops for a human. Each leg holds its pool.
 #[allow(clippy::too_many_arguments)]
@@ -1773,7 +1772,7 @@ pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy)
 }
 
 /// One line for ops when the queue's head has waited longer than one books interval for
-/// the ICP pocket to cover it: what P11c's urgent rebalance is for.
+/// the ICP pocket to cover it: what the urgent rebalance is for.
 fn alert_if_waited(now: Timestamp) {
     let ledger = pool_store::ledger();
     let (Some((head, _)), Some(since), Some(need)) =

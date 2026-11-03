@@ -19,11 +19,11 @@
 //!   payout again.
 //! - Undone: everything released, an ICP swap's ckUSDC out with its refund, a withdrawal's
 //!   shares minted back.
-//! - Resolved (a controller, `resolve_payout`, 2026-10-23): a payout stopped for a human is
+//! - Resolved (a controller, `resolve_payout`): a payout stopped for a human is
 //!   put back on its undo (`Refund`), or its signed order found paid (`MarkPaid`): the paid
 //!   line, from where a reverted payout's USDC sits (reserved again), once.
 //!
-//! Old semantics the fold still reads (before the payout plan flow, 2026-10-23): an ICP swap
+//! Old semantics the fold still reads (before the payout plan flow): an ICP swap
 //! opened with its user's own premium and least ckUSDC (no plan); a reverted payout waiting
 //! with its order pinned to be signed again; a `Paid` payout with an Eco intent, which an Eco
 //! refund reopened, its ckUSDC released (`icp_released`). hfisl's real log (2,310 events,

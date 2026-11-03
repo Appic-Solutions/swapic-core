@@ -1,7 +1,7 @@
 //! USDC's EIP-712 domain on a chain: the name and version its contract answers (`name()`,
 //! `version()`), which a 3009 authorization is signed under. Circle's USDC answers
 //! "USD Coin" and "2" on the chains the canister launched on, and "USDC" on several newer
-//! ones (Unichain, Monad, HyperEVM, World Chain, Plasma, measured 2026-11-01), so a chain's
+//! ones (Unichain, Monad, HyperEVM, World Chain, Plasma), so a chain's
 //! entry names its own and an entry that names none reads as Circle's usual pair.
 
 #[cfg(test)]

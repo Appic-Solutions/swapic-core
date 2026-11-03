@@ -115,7 +115,7 @@ pub async fn set_icp_routes(
 }
 
 /// Controller-only, refused while halted, once per deploy and chain (Base, and Ethereum for
-/// the moves to Base, P11c): reads the canister's USDC allowance to Swapic on `chain_id` and,
+/// the moves to Base): reads the canister's USDC allowance to Swapic on `chain_id` and,
 /// below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so every pool payout and move is one
 /// signature of `Swapic.run`. Safe because `run` pulls only from `payer == msg.sender`. An
 /// allowance already in place answers `Known`; an approval on its way answers `Unavailable`.

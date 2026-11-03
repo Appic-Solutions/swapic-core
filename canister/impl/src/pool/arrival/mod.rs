@@ -1285,7 +1285,7 @@ pub fn refund_destination<S: Store>(
 }
 
 /// An Eco refund reopens a payout or a move only once the canister read the intent's
-/// destination Portal itself and it shows the intent never filled (P11e, a HIGH of the
+/// destination Portal itself and it shows the intent never filled (a HIGH of the
 /// collected list): open at a block past its route's deadline, every node agreeing (M-03,
 /// L-03), or cancelled. A refund of an intent the destination shows filled is
 /// held for a human; one whose fill was not read waits for a read that comes back. A refund
