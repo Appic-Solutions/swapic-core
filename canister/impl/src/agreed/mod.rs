@@ -167,7 +167,10 @@ pub fn fill_wait_on(chain: ChainId) -> std::time::Duration {
     fill_wait_in(&config::get(), chain)
 }
 
-/// [`fill_wait_on`] under `config`, read once by a caller that asks for many chains.
+/// [`fill_wait_on`] under `config`, read once by a caller that asks for many chains. The
+/// wait only says when a fill is read; with no depth to count (none configured, or a chain
+/// final at its finalized block) it counts none, and the read it times is refused for that
+/// chain by name (`agreed_block`), so nothing is decided on it.
 pub fn fill_wait_in(config: &types::Config, chain: ChainId) -> std::time::Duration {
     let depth = crate::tx::credit_confirmations(config, chain).map_or(0, |depth| depth.get());
     fill_wait(chain, depth)
