@@ -163,7 +163,12 @@ pub fn check_stake<S: Store>(
             would_be: nat(would_be),
         });
     }
-    if ledger.mint_now(request.amount).is_none() {
+    // priced as its mint is: on what is left once Swapic's move fee is taken
+    let minted = request
+        .amount
+        .checked_sub(request.move_fee)
+        .and_then(|staked| ledger.mint_now(staked));
+    if minted.is_none() {
         return Err(PoolError::NotAllowed(
             "the stake mints nothing at the pool's price".to_string(),
         ));

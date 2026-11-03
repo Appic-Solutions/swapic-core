@@ -90,6 +90,31 @@ fn a_stake_is_refused_when_it_should_be() {
     });
 }
 
+/// Review fix: a stake is priced on what is left of it once Swapic's move fee is taken, as
+/// its mint is, so one that would mint nothing is refused before its pull.
+#[test]
+fn a_stake_that_mints_nothing_after_its_move_fee_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        // one share for the pool's 1000 USDC: only a full 1000 USDC mints
+        let mut pool = ledger();
+        pool.total_shares = Shares::new(1);
+        let mut store = crate::state::MemoryStore::default();
+        store.put_pool_ledger(pool);
+        let state = State::new(store);
+        let request = |move_fee: u64| StakeRequest {
+            move_fee: usdc(move_fee),
+            ..stake_request(usdc(1_500))
+        };
+        assert_eq!(check_stake(&state, &request(0), nobody), Ok(()));
+        assert!(matches!(
+            check_stake(&state, &request(600), nobody),
+            Err(PoolError::NotAllowed(why)) if why.contains("mints nothing")
+        ));
+    });
+}
+
 #[test]
 fn a_withdrawal_is_refused_when_it_should_be() {
     on_fresh_memory(|| {
