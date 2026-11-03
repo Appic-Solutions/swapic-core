@@ -218,6 +218,10 @@ pub struct OutboxEntry {
     /// reported. None while the entry is open.
     #[n(19)]
     pub closed_success: Option<bool>,
+    /// The action whose gas budget the transaction is held to, as `TxCreated` recorded it:
+    /// what a replacement is held to as well. None for a cancel, which has no action.
+    #[n(20)]
+    pub action: Option<crate::config::GasAction>,
 }
 
 impl OutboxEntry {
@@ -300,6 +304,7 @@ impl OutboxEntry {
             refusal: _,
             closed_at,
             closed_success,
+            action,
         } = self;
         Self {
             purpose: *purpose,
@@ -325,6 +330,8 @@ impl OutboxEntry {
             // a closed attempt stays closed whichever of the nonce's transactions lands
             closed_at: *closed_at,
             closed_success: *closed_success,
+            // a replacement is held to the same budget as what it replaces
+            action: *action,
         }
     }
 }

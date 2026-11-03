@@ -682,6 +682,7 @@ pub async fn create_and_send_with(
         refusal: None,
         closed_at: None,
         closed_success: None,
+        action: Some(action),
     });
     Ok(Signed { tx_hash, id })
 }
@@ -814,6 +815,7 @@ async fn cancel(key: NonceKey) {
         refusal: None,
         closed_at: None,
         closed_success: None,
+        action: None,
     });
     task_manager::outbox::arm();
 }

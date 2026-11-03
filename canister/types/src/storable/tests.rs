@@ -151,6 +151,7 @@ fn samples() -> Vec<Sample> {
                 refusal: None,
                 closed_at: None,
                 closed_success: None,
+                action: None,
             },
         ),
         sample(
@@ -194,6 +195,7 @@ fn samples() -> Vec<Sample> {
                 refusal: None,
                 closed_at: None,
                 closed_success: None,
+                action: None,
             },
         ),
         sample(
@@ -226,6 +228,7 @@ fn samples() -> Vec<Sample> {
                 refusal: Some(crate::tx::Refusal::new("transaction underpriced")),
                 closed_at: None,
                 closed_success: None,
+                action: None,
             },
         ),
         // the entry the pending store holds now: the quote with the height the watcher had
@@ -336,6 +339,7 @@ fn samples() -> Vec<Sample> {
                 refusal: None,
                 closed_at: Some(BlockNumber::new(23_600_002)),
                 closed_success: None,
+                action: Some(crate::config::GasAction::PoolPayout),
             },
         ),
         // the kept entry above leaves its outcome absent; this one pins it
@@ -363,6 +367,7 @@ fn samples() -> Vec<Sample> {
                 refusal: None,
                 closed_at: Some(BlockNumber::new(23_600_003)),
                 closed_success: Some(false),
+                action: None,
             },
         ),
     ]);

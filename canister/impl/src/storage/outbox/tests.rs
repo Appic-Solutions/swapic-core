@@ -26,6 +26,7 @@ fn entry(chain_id: ChainId, nonce: u64, status: OutboxStatus) -> OutboxEntry {
         refusal: None,
         closed_at: None,
         closed_success: None,
+        action: None,
     }
 }
 

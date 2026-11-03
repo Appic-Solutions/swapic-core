@@ -114,27 +114,29 @@ pub(super) async fn replace(entry: &OutboxEntry, chain_id: ChainId) -> bool {
 /// price a bid against.
 pub(super) fn bumped(entry: &OutboxEntry, chain_id: ChainId, now: Timestamp) -> Option<Fees> {
     let reading = fresh_reading(chain_id, now).ok()?;
-    // the budget the log holds the transaction to: its flow's gas action, as `TxCreated`
-    // recorded it; and one with none (a cancel, a line from before the action was
-    // recorded) the strictest budget its chain has. A chain that signs nothing bids
-    // nothing more
-    let config = config::get();
-    let action = match entry.purpose {
-        TxPurpose::Relay(key) | TxPurpose::Finish(key) => {
-            read_state(|state| state.flow(&key)).and_then(|flow| flow.gas_action)
-        }
-        TxPurpose::PoolPayout(_) => Some(GasAction::PoolPayout),
-        TxPurpose::PoolTransfer(_) => Some(GasAction::PoolTransfer),
-        TxPurpose::PoolApprove => Some(GasAction::PoolApprove),
-        _ => None,
-    };
-    let budget = match action {
-        Some(action) => budget_for(&config, chain_id, action).ok()?,
-        None => config.evm_chains.get(chain_id)?.gas_budget.strictest(),
-    };
-    let budget = Some(budget);
+    // the budget the transaction is held to: its own gas action, as `TxCreated` recorded
+    // it and the entry keeps; a cancel, which has none, the strictest budget its chain has.
+    // A chain that signs nothing bids nothing more
+    let budget = Some(replacement_budget(&config::get(), chain_id, entry.action)?);
     let current = Fees::new(entry.max_fee, entry.max_priority_fee)?;
     bump(chain_id, current, &reading, entry.gas_limit, budget)
+}
+
+/// The budget a replacement of a transaction created for `action` is held to: that action's
+/// own on `chain_id`, whatever its purpose; a cancel's (no action) the strictest its chain
+/// has. Nothing on a chain that signs nothing, or has no row for the action.
+pub(super) fn replacement_budget(
+    config: &types::Config,
+    chain_id: ChainId,
+    action: Option<GasAction>,
+) -> Option<Wei> {
+    match action {
+        Some(action) => budget_for(config, chain_id, action).ok(),
+        None => config
+            .evm_chains
+            .get(chain_id)
+            .map(|chain| chain.gas_budget.strictest()),
+    }
 }
 
 /// [`bumped`] on what it read. Pure, so the gas rule's hold on a replacement is a unit

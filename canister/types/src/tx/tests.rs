@@ -25,6 +25,7 @@ fn entry() -> OutboxEntry {
         refusal: None,
         closed_at: None,
         closed_success: None,
+        action: None,
     }
 }
 

@@ -535,6 +535,7 @@ fn entry_with(nonce: u64, hashes: usize) -> OutboxEntry {
         refusal: None,
         closed_at: None,
         closed_success: None,
+        action: None,
     }
 }
 
@@ -1578,4 +1579,43 @@ fn a_landed_entry_waits_while_the_finalized_block_is_unknown() {
         }
         assert_eq!(read_state(|state| state.meta().next_event_index), before);
     });
+}
+
+/// A replacement is held to its own transaction's gas budget, whatever its purpose: a move,
+/// a sweep or a rescue is no longer capped at the strictest row, which could sit below the
+/// fee it already pays and leave its nonce blocking the chain. Only a cancel, which has no
+/// action, takes the strictest.
+#[test]
+fn a_replacement_is_held_to_its_own_actions_budget() {
+    let mut chain = chain_with_budget(Wei::from(1_000_u64));
+    chain.gas_budget.pool_move = Some(Wei::from(9_000_u64));
+    chain.gas_budget.sweep = Some(Wei::from(7_000_u64));
+    chain.gas_budget.eco_rescue = Some(Wei::from(8_000_u64));
+    let config = types::Config {
+        evm_chains: types::config::ChainTable(std::collections::BTreeMap::from([(
+            ChainId::BASE,
+            chain,
+        )])),
+        ..types::Config::default()
+    };
+    let budget = |action| super::bump::replacement_budget(&config, ChainId::BASE, action);
+    assert_eq!(
+        budget(Some(GasAction::PoolMove)),
+        Some(Wei::from(9_000_u64))
+    );
+    assert_eq!(budget(Some(GasAction::Sweep)), Some(Wei::from(7_000_u64)));
+    assert_eq!(
+        budget(Some(GasAction::EcoRescue)),
+        Some(Wei::from(8_000_u64))
+    );
+    assert_eq!(
+        budget(None),
+        Some(Wei::from(1_000_u64)),
+        "a cancel: the strictest"
+    );
+    assert_eq!(
+        super::bump::replacement_budget(&config, ChainId::ARBITRUM, None),
+        None,
+        "a chain that signs nothing"
+    );
 }
