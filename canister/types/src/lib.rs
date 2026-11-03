@@ -3,7 +3,6 @@
 
 pub mod address;
 pub mod books;
-pub mod canonical;
 pub mod cctp;
 pub mod chain;
 pub mod chain_data;
@@ -17,16 +16,15 @@ pub mod hash;
 pub mod ledger;
 pub mod numeric;
 pub mod pool;
-pub mod quote;
-pub mod rail;
 pub mod storable;
-pub mod swap;
 pub mod swapic;
 pub mod sweep;
 pub mod timer_state;
+pub mod transition;
 pub mod tx;
 
 pub use address::{Address, RpcUrl, TokenId};
+pub use cctp::{CctpDomain, CctpMinFee};
 pub use chain::ChainId;
 pub use chain_data::{ChainData, ChainDataError, ChainReading};
 pub use checked_amount::CheckedAmountOf;
@@ -40,7 +38,5 @@ pub use numeric::{
     Attempt, BasisPoints, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Permit2Nonce,
     Timestamp, TokenAmount, UnixSeconds, UsdAmount, Wei, WeiPerGas,
 };
-pub use quote::{ExpiryKey, GasMode, PendingQuote, Quote, QuoteDeadlines, QuoteError};
-pub use rail::{CctpDomain, CctpMinFee, EcoIntent, Rail};
-pub use swap::{Leg, Outcome, Pocket, PocketError, Swap, SwapStatus, TransitionError, WaitingKey};
+pub use transition::TransitionError;
 pub use tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};

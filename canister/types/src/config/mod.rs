@@ -6,10 +6,10 @@ pub mod usdc_domain;
 pub use usdc_domain::{DomainText, NotDomainText, DEFAULT_USDC_NAME, DEFAULT_USDC_VERSION};
 
 use crate::address::RpcUrl;
+use crate::cctp::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use crate::chain::ChainId;
 use crate::evm::EvmAddress;
 use crate::numeric::{BlockDepth, GasAmount, TokenAmount, Wei};
-use crate::rail::{CctpDomain, CctpMinFee, MIN_FEE_MULTIPLIER};
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
 use std::collections::BTreeMap;

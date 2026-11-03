@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use types::address::{RedactedRpcUrl, REDACTED};
+use types::cctp::{CctpDomain, CctpMinFee};
 use types::config::{
     BooksInterval, BooksTolerance, ChainTable, DomainText, EcoEnabled, EvmChain, PerAction,
 };
-use types::rail::{CctpDomain, CctpMinFee};
 use types::{BlockDepth, ChainId, CheckedAmountOf, EvmAddress, GasAmount, TokenAmount};
 
 /// Every knob the canister reads at runtime. The rpc urls, the chain table and the key name

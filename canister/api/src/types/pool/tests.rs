@@ -108,7 +108,7 @@ fn settings_go_to_the_domain_and_back() {
             ledger: Principal::from_slice(&[1; 10]),
             icpswap_pool: Principal::from_slice(&[2; 10]),
         }],
-        arrival_backup_s: 300,
+        arrival_backup_s: 3_600,
         pool_open_for_swaps: true,
         large_deposit_usdc: Some(Nat::from(1_000_000_000_u64)),
         large_deposit_confirmations: Some(6),
@@ -123,7 +123,7 @@ fn settings_go_to_the_domain_and_back() {
             icp_to_base: TokenAmount::from(1_400_000_u64),
         }
     );
-    assert_eq!(domain.arrival_backup, Duration::from_secs(300));
+    assert_eq!(domain.arrival_backup, Duration::from_secs(3_600));
     assert_eq!(domain.validate(), Ok(()));
     assert!(
         domain.ledger_fees.is_empty(),
@@ -166,7 +166,7 @@ fn settings_sent_without_the_deposit_tiers_still_decode() {
         premium_bps: 10,
         ckusdc_ledger: ckusdc(),
         icp_tokens: vec![],
-        arrival_backup_s: 300,
+        arrival_backup_s: 3_600,
         pool_open_for_swaps: false,
     })
     .unwrap();

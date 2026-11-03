@@ -612,12 +612,6 @@ type PayoutWaiting = record {
   // covers the canister's CCTP costs.
   network_fee : opt nat;
 };
-// Why a pocket cannot make a move.
-type PocketError = variant {
-  Overflow;
-  InsufficientReserved : record { requested : nat; "reserved" : nat };
-  InsufficientAvailable : record { requested : nat; available : nat };
-};
 type PocketView = record { free : nat; "reserved" : nat; in_flight : nat };
 // Who owns shares.
 type PoolAccount = variant {
@@ -750,20 +744,6 @@ type PoolStateView = record {
   total_assets : nat;
   closed_reason : opt text;
 };
-// Why a quote was refused, naming the field wherever one is at fault.
-type QuoteError = variant {
-  NotUtf8 : record { field : text };
-  TextTooLong : record { len : nat64; field : text };
-  EmptyRefundAddress;
-  UnknownRail : text;
-  NotABool : record { field : text; value : nat8 };
-  NotAGasMode : nat8;
-  UnsupportedVersion : nat8;
-  EmptyText : record { field : text };
-  TrailingBytes : record { len : nat64; consumed : nat64 };
-  Truncated : record { at : nat64; len : nat64; field : text; wanted : nat64 };
-  AmountTooLarge : record { field : text };
-};
 type RebalanceSettings = record {
   max_move : nat;
   standard_when_idle : bool;
@@ -848,18 +828,6 @@ type SupportedStandard = record { url : text; name : text };
 // `swap_from_icp`'s answer: the payout's id, and where it stands as the call returns
 // (`Signed` when its plan fitted; `Waiting` when it waits for an order).
 type SwapFromIcpOk = record { id : nat64; status : PayoutStatus };
-// Where a swap is in its lifecycle. Plan 3 and the indexer read a swap's progress from it.
-type SwapStatus = variant {
-  PaidInStable;
-  Refunding;
-  WaitingForUser;
-  FundsReceived;
-  Delivering;
-  Refunded;
-  Done;
-  Executing;
-  Frozen;
-};
 // What a logged sweep sent.
 type SweepAsset = variant { Icp; FeeUsdc; CkUsdcFees; Native; CkEth };
 // Why a sweep sent nothing.
@@ -908,59 +876,23 @@ type TextValue = record { content : text };
 type TimestampSeconds = record { amount : nat64 };
 // Why an event cannot move the state it was offered to.
 type TransitionError = variant {
-  NoUnsignedNonce : record { quote_hash : blob; chain_id : nat64 };
-  // The line says the funds arrived on `logged`, and the quote it carries is for
-  // `quoted`.
-  FundsChainNotTheQuotes : record { logged : nat64; quoted : nat64 };
-  CannotAskWhileRefunding;
   NonceNeverAllocated : record {
     next : nat64;
     chain_id : nat64;
     nonce : nat64;
   };
-  WaitingForUser;
-  NotRefunding : SwapStatus;
-  Pocket : PocketError;
   // A flow step refused, with the domain's reason.
   Flow : text;
   Pool : text;
-  SwapExists : blob;
-  AttemptStillOpen : nat32;
   Books : text;
-  UnknownSwap : blob;
   NonceStillUnsigned : blob;
-  NotExecuting : SwapStatus;
-  NoOpenAttempt : blob;
-  QuoteHashMismatch : record { computed : blob; declared : blob };
-  UnparseableQuote : QuoteError;
   NonceOutOfSequence : record {
     expected : nat64;
     chain_id : nat64;
     nonce : nat64;
   };
   NonceExhausted : record { chain_id : nat64 };
-  SwapClosed : SwapStatus;
-  FeesOverflow;
-  AttemptOutOfSequence : record { attempt : nat32; expected : opt nat32 };
   NonceNotUnsigned : record { chain_id : nat64; nonce : nat64 };
-  AmountOutOfRange : nat;
-  AttemptNotOpen : nat32;
-  CannotStartRefund : SwapStatus;
-  NotInFlight : SwapStatus;
-  NotWaitingForUser : SwapStatus;
-  // The swap already holds its platform fee: one fee line per swap.
-  FeeAlreadyAccrued : blob;
-  // The line says `logged` arrived, and the quote it carries is for `quoted`.
-  FundsTokenNotTheQuotes : record { logged : text; quoted : text };
-  // The line says `logged` arrived, and the quote it carries is for `quoted`.
-  FundsAmountNotTheQuotes : record { logged : nat; quoted : nat };
-  AlreadyPaid;
-  UnknownPocket : nat64;
-  NonceNotHeldForPull : record {
-    quote_hash : blob;
-    chain_id : nat64;
-    nonce : nat64;
-  };
 };
 // How a transaction the canister signed ended.
 type TxOutcome = variant {

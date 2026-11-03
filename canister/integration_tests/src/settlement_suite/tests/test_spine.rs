@@ -5,7 +5,7 @@ use candid::{encode_one, Nat, Principal};
 use pocket_ic::PocketIc;
 use settlement_api::types::errors::{AppendError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
-use settlement_api::types::swap::TransitionError;
+use settlement_api::types::transition::TransitionError;
 
 /// The key the spine's relay is signed under.
 fn relay_key() -> Hash32 {

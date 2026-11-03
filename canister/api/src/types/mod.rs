@@ -8,10 +8,9 @@ pub mod flow;
 pub mod icrc21;
 pub mod init;
 pub mod pool;
-pub mod quote;
 pub mod rpc;
-pub mod swap;
 pub mod sweep;
+pub mod transition;
 pub mod tx;
 
 /// A length or position as the wire carries it.

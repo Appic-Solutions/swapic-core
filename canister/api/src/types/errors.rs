@@ -5,7 +5,7 @@ use crate::types::config::ConfigError;
 use crate::types::events::EventError;
 use crate::types::evm::EcdsaError;
 use crate::types::rpc::RpcError;
-use crate::types::swap::TransitionError;
+use crate::types::transition::TransitionError;
 use candid::CandidType;
 use serde::Deserialize;
 

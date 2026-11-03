@@ -5,11 +5,9 @@ use crate::events::{Event, TxPurpose};
 use crate::hash::{QuoteHash, TxHash};
 use crate::ledger::LedgerMeta;
 use crate::numeric::{
-    Attempt, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount,
-    UnixSeconds, Wei, WeiPerGas,
+    Attempt, BlockDepth, BlockNumber, EventIndex, GasAmount, Nonce, Timestamp, TokenAmount, Wei,
+    WeiPerGas,
 };
-use crate::quote::ExpiryKey;
-use crate::swap::{Pocket, Swap, SwapStatus, WaitingKey};
 use crate::tx::{NonceKey, OutboxEntry, OutboxStatus, UnsignedTx};
 use ic_stable_structures::Storable;
 use std::borrow::Cow;
@@ -84,42 +82,6 @@ fn samples() -> Vec<Sample> {
         })
         .collect();
 
-    let paid = Swap {
-        quote_bytes: vec![0xde, 0xad, 0xbe, 0xef],
-        status: SwapStatus::WaitingForUser,
-        last_attempt: Some(Attempt::new(3)),
-        open_attempt: None,
-        src_chain: ChainId::BASE,
-        src_token: "USDC".parse().unwrap(),
-        amount_in: TokenAmount::from(25_000_000_u32),
-        amount_paid: Some(TokenAmount::from(24_990_000_u32)),
-        waiting_since: Some(Timestamp::from_nanos(1_700_000_000_123_456_789)),
-        // absent, so this sample's bytes stay exactly the ones the golden already pins; the
-        // swaps appended at the end of `samples()` are the ones that pin the later fields
-        last_leg: None,
-        last_outcome: None,
-        last_tx_hash: None,
-        paid_out: None,
-        fee_accrued: None,
-        burn_max_fee: None,
-    };
-    let unpaid = Swap {
-        quote_bytes: vec![],
-        status: SwapStatus::FundsReceived,
-        last_attempt: None,
-        open_attempt: Some(Attempt::FIRST),
-        src_chain: ChainId::ARBITRUM,
-        src_token: "USDT".parse().unwrap(),
-        amount_in: TokenAmount::from(1u128 << 70),
-        amount_paid: None,
-        waiting_since: None,
-        last_leg: None,
-        last_outcome: None,
-        last_tx_hash: None,
-        paid_out: None,
-        fee_accrued: None,
-        burn_max_fee: None,
-    };
     // the depths the default held when this line was written. A default that moves changes
     // what every config encodes, and a golden line never changes, so the two lines below
     // spell the old table out and the new default is pinned by a line of its own at the
@@ -141,16 +103,6 @@ fn samples() -> Vec<Sample> {
         ..Config::default()
     };
     all.extend([
-        sample("swap paid", paid),
-        sample("swap unpaid", unpaid),
-        sample(
-            "pocket",
-            Pocket {
-                // above u64::MAX, so the bignum form is pinned next to the plain one
-                available: TokenAmount::from(1u128 << 70),
-                reserved: TokenAmount::from(250_u32),
-            },
-        ),
         sample(
             "ledger meta",
             LedgerMeta {
@@ -160,24 +112,9 @@ fn samples() -> Vec<Sample> {
                 pool_paused_at: None,
             },
         ),
-        sample("pending quote", crate::quote::tests::fixed_quote()),
         sample("config", config),
         sample("quote hash key", QuoteHash::new([0x5a; 32])),
         sample("chain id key", ChainId::ARBITRUM),
-        sample(
-            "waiting key",
-            WaitingKey {
-                since: Timestamp::from_nanos(1_700_000_000_123_456_789),
-                quote_hash: QuoteHash::new([0x5a; 32]),
-            },
-        ),
-        sample(
-            "expiry key",
-            ExpiryKey {
-                claim_until: UnixSeconds::new(1_800_000_000),
-                quote_hash: QuoteHash::new([0x5b; 32]),
-            },
-        ),
         sample(
             "chain data",
             ChainReading {
@@ -266,62 +203,6 @@ fn samples() -> Vec<Sample> {
                 .unwrap(),
         ),
         sample(
-            "swap with its latest leg known",
-            Swap {
-                quote_bytes: vec![0xca, 0xfe],
-                status: SwapStatus::Executing,
-                last_attempt: Some(Attempt::new(2)),
-                open_attempt: None,
-                src_chain: ChainId::ETHEREUM,
-                src_token: "0x1".parse().unwrap(),
-                amount_in: TokenAmount::from(5_000_000_u32),
-                amount_paid: None,
-                waiting_since: None,
-                last_leg: Some(crate::Leg::Mint),
-                last_outcome: Some(crate::Outcome::Failed),
-                // absent, so this sample's bytes stay exactly the ones the golden pins;
-                // the swap appended below is the one that pins the later fields
-                last_tx_hash: None,
-                paid_out: None,
-                fee_accrued: None,
-                burn_max_fee: None,
-            },
-        ),
-        sample(
-            "eco intent",
-            crate::EcoIntent::new(
-                ChainId::BASE,
-                vec![0x63, 0x64, 0x65],
-                UnixSeconds::new(1_788_357_691),
-                "0xeC00008537c1F26E739486BCFCC818d81234d5aD"
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap(),
-        ),
-        sample(
-            "swap with the hash its latest attempt confirmed as",
-            Swap {
-                quote_bytes: vec![0xca, 0xfe, 0x01],
-                status: SwapStatus::Executing,
-                last_attempt: Some(Attempt::new(1)),
-                open_attempt: None,
-                src_chain: ChainId::BASE,
-                src_token: "0x2".parse().unwrap(),
-                amount_in: TokenAmount::from(6_000_000_u32),
-                amount_paid: None,
-                waiting_since: None,
-                last_leg: Some(crate::Leg::Burn),
-                last_outcome: Some(crate::Outcome::Confirmed),
-                last_tx_hash: Some(TxHash::new([0x66; 32])),
-                // absent, so this sample's bytes stay exactly the ones the golden pins;
-                // the swap appended below is the one that pins the field
-                paid_out: None,
-                fee_accrued: None,
-                burn_max_fee: None,
-            },
-        ),
-        sample(
             "outbox entry the provider refused",
             OutboxEntry {
                 purpose: TxPurpose::Relay(QuoteHash::new([0x67; 32])),
@@ -347,39 +228,9 @@ fn samples() -> Vec<Sample> {
                 closed_success: None,
             },
         ),
-        sample(
-            "swap with the amount its payout was signed for",
-            Swap {
-                quote_bytes: vec![0xca, 0xfe, 0x02],
-                status: SwapStatus::Delivering,
-                last_attempt: Some(Attempt::new(3)),
-                open_attempt: None,
-                src_chain: ChainId::ARBITRUM,
-                src_token: "0x3".parse().unwrap(),
-                amount_in: TokenAmount::from(7_000_000_u32),
-                amount_paid: Some(TokenAmount::from(6_999_000_u32)),
-                waiting_since: None,
-                last_leg: Some(crate::Leg::Payout),
-                last_outcome: Some(crate::Outcome::Confirmed),
-                last_tx_hash: Some(TxHash::new([0x69; 32])),
-                paid_out: Some(TokenAmount::from(6_978_003_u32)),
-                fee_accrued: None,
-                burn_max_fee: None,
-            },
-        ),
         // the entry the pending store holds now: the quote with the height the watcher had
         // reported when it was registered. The `pending quote` line above is the quote
         // alone, which is what the entry holds inside it and what the store held before.
-        sample(
-            "pending quote entry",
-            crate::PendingQuote {
-                quote: crate::quote::tests::fixed_quote(),
-                registered_at: Some(BlockNumber::new(19_000_123)),
-                // absent, so this sample's bytes stay exactly the ones the golden pins; the
-                // entry appended at the end of `samples()` is the one that pins the field
-                deadlines: None,
-            },
-        ),
         // the depths a deploy got, mainnet's floor among them: the two config lines above
         // keep the table this one replaced, so neither of them moves. Spelled out since
         // P10c moved Ethereum's swap depth to 1, so this line does not move either
@@ -399,60 +250,9 @@ fn samples() -> Vec<Sample> {
         ),
         // the swap samples above leave the fee absent, so their bytes stay the ones the
         // golden pins; this one pins it
-        sample(
-            "swap with the fee the log accrued for it",
-            Swap {
-                quote_bytes: vec![0xca, 0xfe, 0x03],
-                status: SwapStatus::Delivering,
-                last_attempt: Some(Attempt::new(3)),
-                open_attempt: None,
-                src_chain: ChainId::ARBITRUM,
-                src_token: "0x4".parse().unwrap(),
-                amount_in: TokenAmount::from(8_000_000_u32),
-                amount_paid: Some(TokenAmount::from(7_999_000_u32)),
-                waiting_since: None,
-                last_leg: Some(crate::Leg::Payout),
-                last_outcome: Some(crate::Outcome::Confirmed),
-                last_tx_hash: Some(TxHash::new([0x6a; 32])),
-                paid_out: Some(TokenAmount::from(7_975_003_u32)),
-                fee_accrued: Some(TokenAmount::from(23_997_u32)),
-                burn_max_fee: None,
-            },
-        ),
         // the swap samples above leave the burn's fee absent; this one pins it
-        sample(
-            "swap with the fee its burn offered Circle",
-            Swap {
-                quote_bytes: vec![0xca, 0xfe, 0x04],
-                status: SwapStatus::Executing,
-                last_attempt: Some(Attempt::new(1)),
-                open_attempt: None,
-                src_chain: ChainId::BASE,
-                src_token: "0x5".parse().unwrap(),
-                amount_in: TokenAmount::from(25_000_000_u32),
-                amount_paid: None,
-                waiting_since: None,
-                last_leg: Some(crate::Leg::Burn),
-                last_outcome: Some(crate::Outcome::Confirmed),
-                last_tx_hash: Some(TxHash::new([0x6b; 32])),
-                paid_out: None,
-                fee_accrued: None,
-                burn_max_fee: Some(TokenAmount::from(12_500_u32)),
-            },
-        ),
         // the pending entry with the deadlines it was registered under: the entry above
         // leaves them absent, so its bytes stay the ones the golden pins
-        sample(
-            "pending quote entry with the deadlines it was registered under",
-            crate::PendingQuote {
-                quote: crate::quote::tests::fixed_quote(),
-                registered_at: Some(BlockNumber::new(19_000_456)),
-                deadlines: Some(crate::QuoteDeadlines {
-                    deposit_until: UnixSeconds::new(1_800_000_120),
-                    claim_until: UnixSeconds::new(1_800_003_720),
-                }),
-            },
-        ),
         // the depths a deploy gets since P10c: a swap on Ethereum is acted on at 1 block,
         // and with no crediting depth set the field is absent, as in every line above. The
         // table is spelled out, so a later default cannot move this line

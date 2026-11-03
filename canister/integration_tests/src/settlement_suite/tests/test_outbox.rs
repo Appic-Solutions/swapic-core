@@ -22,7 +22,7 @@ use settlement_api::types::config::{ActionAmounts, ActionGas, Config, EvmChainCo
 use settlement_api::types::errors::{AppendError, TestAppendError};
 use settlement_api::types::events::{Event, EventType, Hash32, TxPurpose};
 use settlement_api::types::init::InitArg;
-use settlement_api::types::swap::TransitionError;
+use settlement_api::types::transition::TransitionError;
 use settlement_api::types::tx::TxError;
 use std::collections::BTreeMap;
 use std::time::Duration;
