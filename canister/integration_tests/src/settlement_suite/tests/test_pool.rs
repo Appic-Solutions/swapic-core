@@ -832,6 +832,18 @@ fn swap_world() -> (World, types::EvmAddress) {
         .unwrap(),
     );
     assert_eq!(set, Ok(()));
+    // the canister's own reads of Base, a second after the pool's settings started them,
+    // answered until they caught up: nothing arrived, and no head read a test answers later
+    // is taken for one of these
+    for _ in 0..5 {
+        world.pic.advance_time(Duration::from_secs(1));
+        let Some(head) = world.find_outcall(&["eth_blockNumber"], 20) else {
+            break;
+        };
+        world.reply(&head, serde_json::json!("0x1ec55b90"), false);
+        let logs = world.next_outcall(&["eth_getLogs"]);
+        world.reply(&logs, serde_json::json!([]), false);
+    }
     world.books_checked();
     (world, address)
 }
@@ -952,7 +964,25 @@ impl World {
 
     /// The next outcall whose calls are exactly `methods`, after the rounds it takes.
     fn next_outcall(&self, methods: &[&str]) -> pocket_ic::common::rest::CanisterHttpRequest {
-        for _ in 0..100 {
+        if let Some(request) = self.find_outcall(methods, 100) {
+            return request;
+        }
+        let pending: Vec<serde_json::Value> = self
+            .pic
+            .get_canister_http()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        panic!("no outcall of {methods:?}; pending: {pending:?}");
+    }
+
+    /// The outcall whose calls are exactly `methods`, within `rounds` rounds, if one comes.
+    fn find_outcall(
+        &self,
+        methods: &[&str],
+        rounds: usize,
+    ) -> Option<pocket_ic::common::rest::CanisterHttpRequest> {
+        for _ in 0..rounds {
             let found = self.pic.get_canister_http().into_iter().find(|request| {
                 let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                 let asked: Vec<&str> = body
@@ -966,12 +996,44 @@ impl World {
                     .unwrap_or_default();
                 asked == methods
             });
-            if let Some(request) = found {
-                return request;
+            if found.is_some() {
+                return found;
             }
             self.pic.tick();
         }
-        panic!("no outcall of {methods:?}");
+        None
+    }
+
+    /// The staker's `swap_from_icp` with no reading stored: the canister reads the gas
+    /// itself (`eth_feeHistory`), and that read is refused, so nothing can be priced.
+    fn swap_unpriced(
+        &self,
+        terms: impl CandidType,
+    ) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
+        use pocket_ic::common::rest::{
+            CanisterHttpReject, CanisterHttpResponse, MockCanisterHttpResponse,
+        };
+        let call = self
+            .pic
+            .submit_call(
+                self.canister,
+                staker(),
+                "swap_from_icp",
+                encode_one(terms).unwrap(),
+            )
+            .expect("submitted");
+        let request = self.next_outcall(&["eth_feeHistory"]);
+        self.pic
+            .mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+                    reject_code: 2,
+                    message: "the provider is unreachable".to_string(),
+                }),
+                additional_responses: vec![],
+            });
+        candid::decode_one(&self.pic.await_call(call).expect("the swap answers")).unwrap()
     }
 
     /// Answers `request` with `result` for its one call: from one node, or from every node of
@@ -1162,20 +1224,15 @@ fn a_plan_the_scaler_refuses_waits_for_an_order() {
 /// comes back at once: all of it less one ledger fee, no Swapic fee.
 #[test]
 fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
-    use settlement_api::types::pool::{PayoutStatus, PayoutView, SwapFromIcpOk};
+    use settlement_api::types::pool::{PayoutStatus, PayoutView};
     let (world, canister_address) = swap_world();
     world.approve(staker(), usdc(100) + FEE);
     let payout = usdc(100) - 100_000 - 50_000;
     let deadline_s = world.now().as_secs().get() + 600;
     let plan = usdc_plan(canister_address, payout, deadline_s);
-    // no chain reading: the plan fits but its transaction cannot be priced, so it waits
-    let swapped: Result<SwapFromIcpOk, PoolError> = update(
-        &world.pic,
-        world.canister,
-        staker(),
-        "swap_from_icp",
-        encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
-    );
+    // the canister's own gas read fails: the plan fits but its transaction cannot be
+    // priced, so it waits
+    let swapped = world.swap_unpriced(swap_terms(&world, usdc(100), plan.clone(), 400_000));
     let swapped = swapped.expect("the swap is opened");
     assert_eq!(swapped.status, PayoutStatus::Waiting);
     let id = swapped.id;
@@ -1258,19 +1315,13 @@ fn a_reverted_payout_refunds_its_ckusdc_once_final_and_unused() {
 /// not resolve it.
 #[test]
 fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
-    use settlement_api::types::pool::{PayoutResolution, PayoutStatus, PayoutView, SwapFromIcpOk};
+    use settlement_api::types::pool::{PayoutResolution, PayoutStatus, PayoutView};
     let (world, canister_address) = swap_world();
     world.approve(staker(), usdc(100) + FEE);
     let payout = usdc(100) - 100_000 - 50_000;
     let deadline_s = world.now().as_secs().get() + 600;
     let plan = usdc_plan(canister_address, payout, deadline_s);
-    let swapped: Result<SwapFromIcpOk, PoolError> = update(
-        &world.pic,
-        world.canister,
-        staker(),
-        "swap_from_icp",
-        encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
-    );
+    let swapped = world.swap_unpriced(swap_terms(&world, usdc(100), plan.clone(), 400_000));
     let id = swapped.expect("the swap is opened").id;
     let created = types::EventType::TxCreated {
         purpose: types::events::TxPurpose::PoolPayout(id),

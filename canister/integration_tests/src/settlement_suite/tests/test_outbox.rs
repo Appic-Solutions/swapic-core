@@ -1428,8 +1428,9 @@ fn a_cancelled_nonce_refuses_the_signature_that_comes_back_late() {
 /// Each cancel of a pass reads the clock for itself. The cancels before it each awaited a
 /// signature, so the instant the pass started is stale by a round trip per cancel: priced
 /// on it, the second cancel would take a reading that aged out while the first was
-/// signing. Here the reading ages out during the first cancel's signature, the second
-/// cancel refuses to price on it, and the watcher's next push lets the next pass cancel it.
+/// signing. Here the reading ages out during the first cancel's signature, so the second
+/// cancel reads the chain's gas itself rather than pricing on the aged reading; that read
+/// fails, and the watcher's next push lets the next pass cancel it.
 #[test]
 fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
     let (pic, canister, admin) = setup();
@@ -1461,6 +1462,24 @@ fn each_cancel_of_a_pass_reads_the_clock_for_itself() {
         "the first cancel was priced before the reading aged out; the second read the clock \
          for itself and refused the reading, rather than pricing on the pass's instant"
     );
+    // its own clock says the reading aged out, so the second cancel reads the gas itself,
+    // and that read fails: nothing is priced on the aged reading
+    let pending = pic.get_canister_http();
+    assert_eq!(
+        pending.iter().map(methods).collect::<Vec<_>>(),
+        vec![vec!["eth_feeHistory".to_string()]],
+        "the second cancel's own gas read, and nothing else yet"
+    );
+    pic.mock_canister_http_response(MockCanisterHttpResponse {
+        subnet_id: pending[0].subnet_id,
+        request_id: pending[0].request_id,
+        response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+            reject_code: 2,
+            message: "the provider is unreachable".to_string(),
+        }),
+        additional_responses: vec![],
+    });
+    settle(&pic);
 
     // the pass broadcasts the one cancel it signed and reads its receipt, then re-arms for
     // the number it could not price; the next push is fresh at that pass's instant, so
