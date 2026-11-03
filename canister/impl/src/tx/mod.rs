@@ -933,12 +933,17 @@ pub async fn flush() {
 /// Keeps a finalized-tag chain's last finalized block and when it last moved
 /// (`TimerState.finalized_seen`, read by `finalized_seen`), from a read that gave `read` or
 /// failed; a stall raises one ALERT line. Nothing moves while it stands: no entry closes.
-fn note_finalized(chain_id: ChainId, read: Option<BlockNumber>, now: Timestamp) {
+/// `resumed`: the chain waits again after the last pass found nothing open on it, and its
+/// clock starts at this read.
+fn note_finalized(chain_id: ChainId, read: Option<BlockNumber>, now: Timestamp, resumed: bool) {
     let alert = timer_state::update(|state| {
         let seen = state
             .finalized_seen
             .entry(chain_id)
             .or_insert_with(|| types::timer_state::FinalizedSeen::first(now));
+        if resumed {
+            seen.restart(now);
+        }
         let alert = seen.observe(read, now);
         (alert.then_some(*seen), true)
     });
@@ -1030,12 +1035,15 @@ pub async fn check_open() -> ReceiptPass {
         // closes later, never wrongly
         let finalized = match finality {
             Finality::Finalized => {
+                // a chain the last pass found nothing open on (out of its schedule) waits
+                // again from now
+                let resumed = !due.contains_key(&chain_id);
                 let seen = timer_state::get().finalized_seen.get(&chain_id).copied();
-                match seen.filter(|seen| !seen.read_due(now)) {
+                match seen.filter(|seen| !resumed && !seen.read_due(now)) {
                     Some(seen) => seen.number,
                     None => {
                         let read = rpc::finalized(chain_id).await.ok();
-                        note_finalized(chain_id, read, now);
+                        note_finalized(chain_id, read, now, resumed);
                         read
                     }
                 }

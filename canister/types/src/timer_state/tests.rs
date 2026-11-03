@@ -114,22 +114,25 @@ fn a_finalized_block_standing_still_ten_minutes_alerts_once() {
     assert!(!seen.is_stalled(at(1_340)));
 }
 
-/// Review fix: the stall clock runs only while something waits. A chain idle past a minute
-/// is not stalled, however long ago its block moved, and the first read after the idle
-/// starts the clock anew instead of raising the alert at once.
+/// Review fix: the stall clock runs only while something waits. When the chain waits again
+/// after it was idle, the clock starts anew, so the first failed read is no alert however
+/// long ago the block last moved.
 #[test]
-fn an_idle_chain_is_not_stalled_and_its_clock_starts_anew() {
+fn the_clock_starts_anew_when_the_chain_waits_again() {
     let mut seen = FinalizedSeen::first(at(0));
     assert!(!seen.observe(Some(BlockNumber::new(50)), at(0)));
-    assert!(!seen.is_stalled(at(3_600)), "an hour with nothing waiting");
-    // waiting again, the first read failing: no alert, the clock starts at that read
+    // idle an hour, then waiting again with the first read failing
+    seen.restart(at(3_600));
     assert!(!seen.observe(None, at(3_600)));
     assert_eq!(seen.moved_at, at(3_600));
     assert!(!seen.is_stalled(at(3_630)));
     // failing ten minutes on: the stall's one alert
     assert_eq!(reads(&mut seen, 3_630, 4_200, None), 1);
-    assert!(seen.is_stalled(at(4_200)));
-    assert!(!seen.is_stalled(at(4_300)), "idle again");
+    assert_eq!(
+        seen.number,
+        Some(BlockNumber::new(50)),
+        "the last number stands"
+    );
 }
 
 /// Review fix: the finalized block is read at most every six seconds; between reads the

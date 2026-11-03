@@ -3,7 +3,11 @@
 use crate::storage::timer_state;
 use ic_cdk::query;
 pub use settlement_api::types::chain_data::FinalizedSeen;
+use types::timer_state::TimerState;
 use types::Timestamp;
+
+#[cfg(test)]
+mod tests;
 
 /// Each chain that waits for its finalized block: the last finalized block a read gave, when
 /// it last moved (IC time in nanoseconds, or when its clock last started), and whether it has
@@ -11,17 +15,25 @@ use types::Timestamp;
 /// closes until it moves.
 #[query]
 pub fn finalized_seen() -> Vec<(u64, FinalizedSeen)> {
-    let now = Timestamp::from_nanos(ic_cdk::api::time());
-    timer_state::get()
+    seen_at(
+        &timer_state::get(),
+        Timestamp::from_nanos(ic_cdk::api::time()),
+    )
+}
+
+/// What `finalized_seen` answers of `state` at `now`: a chain with nothing open (out of the
+/// outbox's receipt schedule) is idle, and an idle chain is never stalled.
+fn seen_at(state: &TimerState, now: Timestamp) -> Vec<(u64, FinalizedSeen)> {
+    state
         .finalized_seen
-        .into_iter()
+        .iter()
         .map(|(chain, seen)| {
             (
                 chain.get(),
                 FinalizedSeen {
                     number: seen.number.map(|number| number.get()),
                     moved_at_ns: seen.moved_at.as_nanos(),
-                    stalled: seen.is_stalled(now),
+                    stalled: state.receipts_due.contains_key(chain) && seen.is_stalled(now),
                 },
             )
         })
