@@ -2,10 +2,10 @@ use crate::state::transitions::apply_state_transition;
 use crate::state::{State, Store};
 use crate::storage::memory::{
     books_memory, eco_rescues_memory, events_data_memory, events_index_memory,
-    flow_by_landed_memory, flow_by_source_memory, flows_memory, ledger_meta_memory, nonces_memory,
-    pool_credited_memory, pool_deposits_memory, pool_ledger_memory, pool_moves_memory,
-    pool_orphans_memory, pool_own_sources_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    flow_by_landed_memory, flow_by_source_memory, flow_by_tx_memory, flows_memory,
+    ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
+    pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
+    pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
     pool_withdrawal_nonces_memory, signed_memory, sweeps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -119,6 +119,11 @@ thread_local! {
     static FLOW_BY_SOURCE: RefCell<StableBTreeMap<types::TxHash, QuoteHash, Memory>> =
         RefCell::new(StableBTreeMap::init(flow_by_source_memory()));
 
+    // The flows by their own transaction: a CCTP finish found from the Base transaction a
+    // pool arrival names.
+    static FLOW_BY_TX: RefCell<StableBTreeMap<types::TxHash, QuoteHash, Memory>> =
+        RefCell::new(StableBTreeMap::init(flow_by_tx_memory()));
+
     // Every controller's sweep by id, never removed: what each took off which lines, and
     // whether it was taken back. Part of the fold: only `Swept` and `SweepReverted` write it.
     static SWEEPS: RefCell<StableBTreeMap<u64, types::sweep::SweepEntry, Memory>> =
@@ -145,6 +150,9 @@ impl Store for StableStore {
         }
         if let Some(tx) = flow.source_tx {
             FLOW_BY_SOURCE.with(|index| index.borrow_mut().insert(tx, quote_hash));
+        }
+        if let Some(tx) = flow.tx_hash {
+            FLOW_BY_TX.with(|index| index.borrow_mut().insert(tx, quote_hash));
         }
         FLOWS.with(|flows| flows.borrow_mut().insert(quote_hash, flow));
     }
@@ -337,6 +345,10 @@ impl Store for StableStore {
         FLOW_BY_SOURCE.with(|index| index.borrow().get(tx))
     }
 
+    fn flow_by_tx(&self, tx: &types::TxHash) -> Option<QuoteHash> {
+        FLOW_BY_TX.with(|index| index.borrow().get(tx))
+    }
+
     fn sweep(&self, id: u64) -> Option<types::sweep::SweepEntry> {
         SWEEPS.with(|sweeps| sweeps.borrow().get(&id))
     }
@@ -461,6 +473,7 @@ pub fn init() {
     SWEEPS.with(|_| ());
     FLOW_BY_LANDED.with(|_| ());
     FLOW_BY_SOURCE.with(|_| ());
+    FLOW_BY_TX.with(|_| ());
 }
 
 /// The one and only path that writes an event, at the canister's clock.

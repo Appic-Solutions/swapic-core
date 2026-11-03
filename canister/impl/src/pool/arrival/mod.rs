@@ -1468,10 +1468,8 @@ fn cctp_source_of<'a>(
 /// The source transaction of the CCTP message the canister finished itself in `base_tx`.
 fn own_finish_source(base_tx: TxHash) -> Option<TxHash> {
     read_state(|state| {
-        let quote_hash = state.store().flow_by_landed(&base_tx)?;
         state
-            .flow(&quote_hash)
-            .filter(|flow| flow.landed_tx == Some(base_tx))
+            .finish_landed_in(&base_tx)
             .and_then(|flow| flow.source_tx)
     })
 }

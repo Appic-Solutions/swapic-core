@@ -56,6 +56,7 @@ const POOL_CALLERS_MEMORY_ID: MemoryId = MemoryId::new(43);
 const SWEEPS_MEMORY_ID: MemoryId = MemoryId::new(44);
 const FLOW_BY_LANDED_MEMORY_ID: MemoryId = MemoryId::new(45);
 const FLOW_BY_SOURCE_MEMORY_ID: MemoryId = MemoryId::new(46);
+const FLOW_BY_TX_MEMORY_ID: MemoryId = MemoryId::new(47);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -179,6 +180,10 @@ pub fn eco_rescues_memory() -> Memory {
 
 pub fn flow_by_landed_memory() -> Memory {
     memory(FLOW_BY_LANDED_MEMORY_ID)
+}
+
+pub fn flow_by_tx_memory() -> Memory {
+    memory(FLOW_BY_TX_MEMORY_ID)
 }
 
 pub fn flow_by_source_memory() -> Memory {

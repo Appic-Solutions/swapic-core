@@ -492,3 +492,47 @@ fn a_transfer_landed_for_one_flow_is_refused_for_another() {
     );
     assert_eq!(state.check(&land(TxHash::new([0x1b; 32]))), Ok(()));
 }
+
+/// A CCTP finish is found by the Base transaction that landed it: its own hash once its
+/// attempt closed, a replacement's included, and with it the source transaction a pool
+/// arrival's memo is read from. Nothing is found by a hash that is not a finish's.
+#[test]
+fn a_finish_is_found_by_the_transaction_that_landed_it() {
+    let signed = TxHash::new([0x51; 32]);
+    let landed = TxHash::new([0x52; 32]);
+    let source = TxHash::new([0x53; 32]);
+    let mut flow = types::Flow::apply(
+        None,
+        &FlowStep::CctpFinishSigned {
+            chain_id: BASE,
+            nonce: types::Nonce::new(0),
+            tx_hash: signed,
+            raw_tx: vec![0x02],
+            action: types::flow::FinishAction::Receive,
+            arrival: [0x54; 32],
+            source_tx: Some(source),
+        },
+        3,
+        types::Timestamp::from_nanos(1),
+    );
+    flow = types::Flow::apply(
+        Some(flow),
+        &FlowStep::TxClosed {
+            tx_hash: landed,
+            block: types::BlockNumber::new(9),
+            success: true,
+        },
+        4,
+        types::Timestamp::from_nanos(2),
+    );
+    let mut store = MemoryStore::default();
+    store.put_flow(qh(5), flow);
+    let state = HeapState::new(store);
+    assert_eq!(
+        state
+            .finish_landed_in(&landed)
+            .and_then(|flow| flow.source_tx),
+        Some(source)
+    );
+    assert!(state.finish_landed_in(&source).is_none());
+}

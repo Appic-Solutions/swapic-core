@@ -26,6 +26,8 @@ pub trait Store {
     /// under, as last indexed: a reader checks the flow still names it.
     fn flow_by_landed(&self, tx: &TxHash) -> Option<QuoteHash>;
     fn flow_by_source(&self, tx: &TxHash) -> Option<QuoteHash>;
+    /// The flow whose own transaction is `tx`, as last indexed.
+    fn flow_by_tx(&self, tx: &TxHash) -> Option<QuoteHash>;
     fn meta(&self) -> LedgerMeta;
     fn put_meta(&mut self, meta: LedgerMeta);
     /// The number the next transaction on `chain_id` must carry. A chain nothing was ever
@@ -202,6 +204,7 @@ pub struct MemoryStore {
     sweeps: BTreeMap<u64, SweepEntry>,
     flow_by_landed: BTreeMap<TxHash, QuoteHash>,
     flow_by_source: BTreeMap<TxHash, QuoteHash>,
+    flow_by_tx: BTreeMap<TxHash, QuoteHash>,
 }
 
 #[cfg(test)]
@@ -212,6 +215,10 @@ impl Store for MemoryStore {
 
     fn flow_by_source(&self, tx: &TxHash) -> Option<QuoteHash> {
         self.flow_by_source.get(tx).copied()
+    }
+
+    fn flow_by_tx(&self, tx: &TxHash) -> Option<QuoteHash> {
+        self.flow_by_tx.get(tx).copied()
     }
 
     fn sweep(&self, id: u64) -> Option<SweepEntry> {
@@ -243,6 +250,9 @@ impl Store for MemoryStore {
         }
         if let Some(tx) = flow.source_tx {
             self.flow_by_source.insert(tx, quote_hash);
+        }
+        if let Some(tx) = flow.tx_hash {
+            self.flow_by_tx.insert(tx, quote_hash);
         }
         self.flows.insert(quote_hash, flow);
     }
@@ -522,6 +532,7 @@ impl State<MemoryStore> {
             sweeps,
             flow_by_landed: _,
             flow_by_source: _,
+            flow_by_tx: _,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -885,6 +896,14 @@ impl<S: Store> State<S> {
                     .flow(other)
                     .is_some_and(|flow| flow.landed_tx.as_ref() == Some(tx))
             })
+    }
+
+    /// The CCTP finish whose own transaction is `tx` (the one that landed, once it closed).
+    pub fn finish_landed_in(&self, tx: &TxHash) -> Option<Flow> {
+        let quote_hash = self.store.flow_by_tx(tx)?;
+        self.store.flow(&quote_hash).filter(|flow| {
+            flow.kind == types::FlowKind::Finish && flow.tx_hash.as_ref() == Some(tx)
+        })
     }
 
     /// The finish `tx` was the source transaction of, if one was.
