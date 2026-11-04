@@ -267,27 +267,156 @@ async fn http_post(
     send(request, cycles).await
 }
 
-/// `request`, with `cycles` attached. The body of a 2xx answer, or why there is none.
+/// `request`, with `cycles` attached. The body of a 2xx answer, or why there is none. Every
+/// call leaves one line in the canister's log ([`Outcall::line`]): where it went, what it
+/// asked, how it ended and how far the balance fell over it.
 async fn send(request: HttpRequest, cycles: u128) -> Result<Vec<u8>, RpcError> {
     assert_outcall_policy(&request);
     let max_response_bytes = request.max_response_bytes.unwrap_or_default();
-    let (response,): (HttpResponse,) = call_with_payment128(
+    let seen = Outcall::of(&request, cycles);
+    let before = balance();
+    let answer = call_with_payment128(
         Principal::management_canister(),
         "http_request",
         (request,),
         cycles,
     )
-    .await
-    .map_err(|(code, message)| refusal(code, &message, max_response_bytes))?;
+    .await;
+    let fell = before.saturating_sub(balance());
+    let (response,): (HttpResponse,) = match answer {
+        Ok(answer) => answer,
+        Err((code, message)) => {
+            crate::pool::log(&seen.line(&format!("refused {code:?}: {message}"), fell));
+            return Err(refusal(code, &message, max_response_bytes));
+        }
+    };
     // a status outside a u16 is no http status at all, and is not a 2xx either
     let status: u16 = response.status.0.try_into().unwrap_or(u16::MAX);
     if !(200..300).contains(&status) {
-        return Err(RpcError::Http {
-            status,
-            body: Summary::of(&String::from_utf8_lossy(&response.body)),
-        });
+        let body = Summary::of(&String::from_utf8_lossy(&response.body));
+        crate::pool::log(&seen.line(&format!("http {status}: {body}"), fell));
+        return Err(RpcError::Http { status, body });
     }
+    let outcome = format!("ok, {} bytes", response.body.len());
+    crate::pool::log(&seen.line(&outcome, fell));
     Ok(response.body)
+}
+
+/// The canister's cycle balance; zero off the canister, where a unit test runs.
+fn balance() -> u128 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::canister_balance128()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
+/// What the log says of one outcall. It keeps the url only to take it back out of the
+/// system's and the provider's text: the url's path carries the provider's key, so a line
+/// names the host alone.
+struct Outcall {
+    url: String,
+    host: String,
+    methods: String,
+    replicated: bool,
+    cap: u64,
+    attached: u128,
+}
+
+impl Outcall {
+    fn of(request: &HttpRequest, attached: u128) -> Self {
+        Self {
+            url: request.url.clone(),
+            host: host_of(&request.url).to_string(),
+            methods: methods_of(request.body.as_deref().unwrap_or_default()),
+            replicated: request.is_replicated == Some(true),
+            cap: request.max_response_bytes.unwrap_or_default(),
+            attached,
+        }
+    }
+
+    /// The log line for this call, ended by `outcome` (the url and its key taken out), with
+    /// the cycles the balance `fell` by while it was out.
+    fn line(&self, outcome: &str, fell: u128) -> String {
+        let nodes = if self.replicated { "every node" } else { "one node" };
+        format!(
+            "outcall {} {} ({}, cap {} bytes): {}; balance fell {} cycles, {} attached",
+            self.host,
+            self.methods,
+            nodes,
+            self.cap,
+            redact(&Summary::of(outcome).0, &self.url),
+            cycles_text(fell),
+            cycles_text(self.attached),
+        )
+    }
+}
+
+/// The host of `url`, without its scheme, any user part, its path or its query.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    authority.rsplit('@').next().unwrap_or_default()
+}
+
+/// `text` with `url` taken out, and with its path's every part long enough to be a key:
+/// a refusal can quote the whole url, or only its path.
+fn redact(text: &str, url: &str) -> String {
+    let mut out = text.replace(url, "<url>");
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    if let Some((_, path)) = rest.split_once('/') {
+        out = out.replace(path, "<path>");
+        for part in path.split(['/', '?', '&', '=', '#']).filter(|part| part.len() >= 8) {
+            out = out.replace(part, "<key>");
+        }
+    }
+    out
+}
+
+/// The JSON-RPC methods a request body asks, in order, a run of one method as one name and
+/// its count.
+fn methods_of(body: &[u8]) -> String {
+    let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let calls = match &parsed {
+        Value::Array(calls) => calls.iter().collect(),
+        Value::Object(_) => vec![&parsed],
+        _ => Vec::new(),
+    };
+    let mut runs: Vec<(&str, usize)> = Vec::new();
+    for method in calls
+        .iter()
+        .map(|call| call.get("method").and_then(Value::as_str).unwrap_or("?"))
+    {
+        match runs.last_mut() {
+            Some((last, count)) if *last == method => *count += 1,
+            _ => runs.push((method, 1)),
+        }
+    }
+    let names: Vec<String> = runs
+        .iter()
+        .map(|(method, count)| match count {
+            1 => method.to_string(),
+            _ => format!("{method} x{count}"),
+        })
+        .collect();
+    match names.is_empty() {
+        true => "(no method)".to_string(),
+        false => names.join(","),
+    }
+}
+
+/// A cycle count as ops read it: billions to two places, millions to one.
+fn cycles_text(cycles: u128) -> String {
+    match cycles {
+        c if c >= 1_000_000_000 => {
+            format!("{}.{:02}B", c / 1_000_000_000, c % 1_000_000_000 / 10_000_000)
+        }
+        c if c >= 1_000_000 => format!("{}.{}M", c / 1_000_000, c % 1_000_000 / 100_000),
+        c => c.to_string(),
+    }
 }
 
 /// Why the system refused an outcall reserved at `cap` bytes, from its reject code and

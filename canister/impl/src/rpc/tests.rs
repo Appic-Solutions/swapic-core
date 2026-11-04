@@ -479,3 +479,37 @@ fn the_finalized_block_reads_from_a_one_block_fee_history() {
     assert_eq!(finalized_of(&serde_json::json!({"oldestBlock": 7})), None);
     assert_eq!(finalized_of(&serde_json::Value::Null), None);
 }
+
+/// Each outcall's log line names the host, the methods, the mode and the cycles, and never
+/// the url's path or key, whether the refusal quotes the whole url or only its path.
+#[test]
+fn an_outcall_line_names_the_host_and_never_the_key() {
+    let request = post(&url(), batch_body(&calls()), 2_048);
+    let seen = Outcall::of(&request, 26_153_846_153);
+    let line = seen.line(
+        "refused SysTransient: Failed to connect to https://base-mainnet.example/v2/secret-key: timed out (v2/secret-key)",
+        1_234_567,
+    );
+    assert_eq!(
+        line,
+        "outcall base-mainnet.example eth_blockNumber,eth_getBalance (one node, cap 2048 bytes): \
+         refused SysTransient: Failed to connect to <url>: timed out (<path>); \
+         balance fell 1.2M cycles, 26.15B attached"
+    );
+    let key_alone = seen.line("http 401: unknown key secret-key", 0);
+    assert!(!key_alone.contains("secret-key"), "{key_alone}");
+}
+
+/// A batch of one method in a row reads as the method and its count; a body that is no
+/// JSON-RPC reads as such rather than failing the call it describes.
+#[test]
+fn an_outcall_line_counts_a_run_of_one_method() {
+    let receipts = vec![("eth_getTransactionReceipt", json!(["0x1"])); 3];
+    let body = batch_body(&[vec![("eth_blockNumber", json!([]))], receipts].concat());
+    assert_eq!(methods_of(&body), "eth_blockNumber,eth_getTransactionReceipt x3");
+    assert_eq!(methods_of(br#"{"method":"eth_chainId"}"#), "eth_chainId");
+    assert_eq!(methods_of(b"not json"), "(no method)");
+    assert_eq!(host_of("https://user:pw@rpc.example:8545/v2/k?x=1"), "rpc.example:8545");
+    assert_eq!(cycles_text(26_153_846_153), "26.15B");
+    assert_eq!(cycles_text(999), "999");
+}
