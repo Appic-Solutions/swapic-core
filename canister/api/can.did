@@ -457,8 +457,13 @@ type GuardError = variant {
 };
 type IcpAccount = record { owner : principal; subaccount : opt blob };
 type IcpRoute = record { via : IcpRouteVia; ledger : principal };
-// The token/ckUSDC pool, or the token/ICP pool.
-type IcpRouteVia = variant { Icp : principal; Direct : principal };
+// The token/ckUSDC pool, the token/ICP pool, or the token's pool against a hub, a token listed
+// Direct whose own ckUSDC pool ends the route.
+type IcpRouteVia = variant {
+  Hub : record { hub : principal; pool : principal };
+  Icp : principal;
+  Direct : principal;
+};
 // `icp_routes`' answer.
 type IcpRoutesView = record {
   icp_ckusdc_pool : opt principal;

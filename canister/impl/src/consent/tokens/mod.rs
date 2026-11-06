@@ -26,8 +26,9 @@ pub struct EvmToken {
     pub decimals: u8,
 }
 
-/// `config/tokens/icp.json:4-8`.
-pub const ICP_TOKENS: [IcpToken; 5] = [
+/// `config/tokens/icp.json:4-8`, and ckXAUT, read off its ledger's own `icrc1_symbol` and
+/// `icrc1_decimals` on 2026-11-06.
+pub const ICP_TOKENS: [IcpToken; 6] = [
     IcpToken {
         ledger: "ryjl3-tyaaa-aaaaa-aaaba-cai",
         symbol: "ICP",
@@ -52,6 +53,11 @@ pub const ICP_TOKENS: [IcpToken; 5] = [
         ledger: "ss2fx-dyaaa-aaaar-qacoq-cai",
         symbol: "ckETH",
         decimals: 18,
+    },
+    IcpToken {
+        ledger: "nza5v-qaaaa-aaaar-qahzq-cai",
+        symbol: "ckXAUT",
+        decimals: 6,
     },
 ];
 

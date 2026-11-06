@@ -7,11 +7,13 @@ use candid::{CandidType, Principal};
 use serde::Deserialize;
 use types::pool as domain;
 
-/// The token/ckUSDC pool, or the token/ICP pool.
+/// The token/ckUSDC pool, the token/ICP pool, or the token's pool against a hub, a token listed
+/// Direct whose own ckUSDC pool ends the route.
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IcpRouteVia {
     Direct(Principal),
     Icp(Principal),
+    Hub { pool: Principal, hub: Principal },
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -32,6 +34,7 @@ impl From<IcpRouteVia> for domain::IcpRouteVia {
         match via {
             IcpRouteVia::Direct(pool) => Self::Direct(pool),
             IcpRouteVia::Icp(pool) => Self::Icp(pool),
+            IcpRouteVia::Hub { pool, hub } => Self::Hub { pool, hub },
         }
     }
 }
@@ -41,6 +44,7 @@ impl From<domain::IcpRouteVia> for IcpRouteVia {
         match via {
             domain::IcpRouteVia::Direct(pool) => Self::Direct(pool),
             domain::IcpRouteVia::Icp(pool) => Self::Icp(pool),
+            domain::IcpRouteVia::Hub { pool, hub } => Self::Hub { pool, hub },
         }
     }
 }

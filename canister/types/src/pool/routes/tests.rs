@@ -115,6 +115,106 @@ fn routes_that_do_not_hold_together_are_refused() {
     );
 }
 
+/// [`routes`] with 0x10 as the hub of a token 0x40 trading on its pool 0x41.
+fn hubbed() -> IcpRoutes {
+    let mut routes = routes();
+    routes.routes.push(route(
+        0x40,
+        IcpRouteVia::Hub {
+            pool: principal(0x41),
+            hub: principal(0x10),
+        },
+    ));
+    routes.ledger_fees.push(LedgerFee {
+        ledger: principal(0x40),
+        fee: TokenAmount::from(1_u8),
+    });
+    routes
+}
+
+/// A hub route is the path through ICP with the hub in ICP's place, on the hub's own ckUSDC
+/// pool, so every leg, fee and refund of that path holds for it. Its pool is traded in, and
+/// the hub's fee is read, as a listed token's.
+#[test]
+fn a_hub_takes_the_place_of_icp_on_its_own_ckusdc_pool() {
+    let routes = hubbed();
+    assert_eq!(routes.validate(ckusdc()), Ok(()));
+    assert_eq!(routes.fees_complete(ckusdc()), Ok(()));
+    let path = routes.path_of(principal(0x40), ckusdc()).unwrap();
+    assert_eq!(
+        path,
+        RoutePath::ViaIcp {
+            first: principal(0x11),
+            second: principal(0x41),
+            icp: principal(0x10),
+        }
+    );
+    assert_eq!(path.legs(), 2);
+    assert!(routes.pools().contains(&principal(0x41)));
+    assert!(routes.ledgers().contains(&principal(0x10)));
+    // a hub no longer listed Direct is no path, and a token never goes through the wrong pool
+    let mut unlisted = hubbed();
+    unlisted.routes.retain(|route| route.ledger != principal(0x10));
+    assert_eq!(unlisted.path_of(principal(0x40), ckusdc()), None);
+}
+
+#[test]
+fn a_hub_that_cannot_carry_a_route_is_refused() {
+    let token = principal(0x40);
+    let with_hub = |hub: Principal| {
+        let mut routes = hubbed();
+        routes.routes[4].via = IcpRouteVia::Hub {
+            pool: principal(0x41),
+            hub,
+        };
+        routes.validate(ckusdc())
+    };
+    // not listed, through ICP, itself, ckUSDC, ICP
+    assert_eq!(with_hub(principal(0x77)), Err(RoutesError::BadHub(token)));
+    assert_eq!(with_hub(principal(0x20)), Err(RoutesError::BadHub(token)));
+    assert_eq!(with_hub(token), Err(RoutesError::BadHub(token)));
+    assert_eq!(with_hub(ckusdc()), Err(RoutesError::BadHub(token)));
+    assert_eq!(with_hub(icp()), Err(RoutesError::BadHub(token)));
+    // a hub that is a hub itself
+    let mut chained = hubbed();
+    chained.routes.push(route(
+        0x50,
+        IcpRouteVia::Hub {
+            pool: principal(0x51),
+            hub: token,
+        },
+    ));
+    assert_eq!(
+        chained.validate(ckusdc()),
+        Err(RoutesError::BadHub(principal(0x50)))
+    );
+    // ICP and ckUSDC never take a hub
+    let mut icp_hubbed = hubbed();
+    icp_hubbed.routes[0].via = IcpRouteVia::Hub {
+        pool: principal(0x41),
+        hub: principal(0x10),
+    };
+    assert_eq!(icp_hubbed.validate(ckusdc()), Err(RoutesError::BadHub(icp())));
+    let with_pool = |pool: Principal| {
+        let mut routes = hubbed();
+        routes.routes[4].via = IcpRouteVia::Hub {
+            pool,
+            hub: principal(0x10),
+        };
+        routes.validate(ckusdc())
+    };
+    // the token, ckUSDC, the hub, the hub's own pool, the ICP/ckUSDC pool
+    for pool in [
+        token,
+        ckusdc(),
+        principal(0x10),
+        principal(0x11),
+        icp_pool(),
+    ] {
+        assert_eq!(with_pool(pool), Err(RoutesError::BadPool(token)));
+    }
+}
+
 /// A pool's stored tokens answer which way a swap goes, and nothing for a pair it does not
 /// trade; the routes list each pool they trade in once.
 #[test]

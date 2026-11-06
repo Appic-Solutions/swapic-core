@@ -1,6 +1,7 @@
 //! How an ICP token reaches ckUSDC (the fixed interface section 3c): directly, through its
-//! own ckUSDC pool on ICPSwap, or through ICP, two legs (the token and ICP, then ICP and
-//! ckUSDC on the ICP/ckUSDC pool). No token has a size cap of its own: the
+//! own ckUSDC pool on ICPSwap, through ICP, two legs (the token and ICP, then ICP and
+//! ckUSDC on the ICP/ckUSDC pool), or through a hub, two legs the same way (the token and a
+//! token listed Direct, then that token's own ckUSDC pool). No token has a size cap of its own: the
 //! pool's per swap cap applies, the quote shows the price impact and `min_out` protects the
 //! user. Every path of the pool reads these.
 //!
@@ -25,6 +26,15 @@ pub enum IcpRouteVia {
     /// The token's ICP pool: the route goes through ICP, on the ICP/ckUSDC pool as well.
     #[n(1)]
     Icp(#[cbor(n(0), with = "principal_cbor")] Principal),
+    /// The token's pool against `hub`, then `hub`'s own ckUSDC pool. The hub is a token listed
+    /// Direct, and takes ICP's place in the legs (`RoutePath::ViaIcp`).
+    #[n(2)]
+    Hub {
+        #[cbor(n(0), with = "principal_cbor")]
+        pool: Principal,
+        #[cbor(n(1), with = "principal_cbor")]
+        hub: Principal,
+    },
 }
 
 /// One listed token.
@@ -88,7 +98,8 @@ pub enum RoutePath {
     /// One leg, on the token's ckUSDC pool.
     Direct { pool: Principal },
     /// Two legs: ckUSDC and ICP on `first` (the ICP/ckUSDC pool), ICP and the token on
-    /// `second`.
+    /// `second`. A hub route is this path with `icp` the hub and `first` the hub's ckUSDC pool:
+    /// no leg asks whether the middle token is ICP.
     ViaIcp {
         first: Principal,
         second: Principal,
@@ -124,6 +135,8 @@ pub enum RoutesError {
     MissingFee(Principal),
     #[error("the ICP ledger is not known")]
     NoIcpLedger,
+    #[error("{0} goes through a hub that is not a token listed Direct, other than ICP and ckUSDC")]
+    BadHub(Principal),
 }
 
 impl IcpRoutes {
@@ -131,7 +144,9 @@ impl IcpRoutes {
     pub fn pools(&self) -> Vec<Principal> {
         let mut pools: Vec<Principal> = self.icp_pool().into_iter().collect();
         for route in &self.routes {
-            let (IcpRouteVia::Direct(pool) | IcpRouteVia::Icp(pool)) = route.via;
+            let (IcpRouteVia::Direct(pool)
+            | IcpRouteVia::Icp(pool)
+            | IcpRouteVia::Hub { pool, .. }) = route.via;
             if !pools.contains(&pool) {
                 pools.push(pool);
             }
@@ -158,8 +173,9 @@ impl IcpRoutes {
     /// The routes hold together, `ckusdc` being the pool's ckUSDC ledger: no ledger twice, a
     /// route through ICP only with the ICP/ckUSDC pool set, a pool that is
     /// neither the token's ledger nor ckUSDC's, ckUSDC (if listed) with its own ledger as its
-    /// pool, the ICP ledger known when the ICP/ckUSDC pool is set, and ICP never through
-    /// itself.
+    /// pool, the ICP ledger known when the ICP/ckUSDC pool is set, ICP never through
+    /// itself, and a hub a token listed Direct: neither ICP, ckUSDC nor the token, its pool
+    /// not one a route already ends on.
     pub fn validate(&self, ckusdc: Principal) -> Result<(), RoutesError> {
         let mut seen = std::collections::BTreeSet::new();
         if self.icp_ckusdc_pool.is_some() && self.icp_ledger.is_none() {
@@ -188,6 +204,19 @@ impl IcpRoutes {
                         return Err(RoutesError::IcpThroughIcp);
                     }
                     if pool == route.ledger || pool == ckusdc || pool == icp_pool {
+                        return Err(RoutesError::BadPool(route.ledger));
+                    }
+                }
+                IcpRouteVia::Hub { pool, hub } => {
+                    let plain = |ledger: Principal| ledger != ckusdc && Some(ledger) != self.icp();
+                    if !plain(route.ledger) || !plain(hub) || hub == route.ledger {
+                        return Err(RoutesError::BadHub(route.ledger));
+                    }
+                    let hub_pool = self
+                        .direct_pool(hub)
+                        .ok_or(RoutesError::BadHub(route.ledger))?;
+                    let taken = [route.ledger, ckusdc, hub, hub_pool];
+                    if taken.contains(&pool) || Some(pool) == self.icp_pool() {
                         return Err(RoutesError::BadPool(route.ledger));
                     }
                 }
@@ -228,6 +257,14 @@ impl IcpRoutes {
         self.routes.iter().find(|route| route.ledger == ledger)
     }
 
+    /// The ckUSDC pool of `ledger`, a token listed Direct: where a hub route ends.
+    fn direct_pool(&self, ledger: Principal) -> Option<Principal> {
+        match self.route_of(ledger)?.via {
+            IcpRouteVia::Direct(pool) => Some(pool),
+            IcpRouteVia::Icp(_) | IcpRouteVia::Hub { .. } => None,
+        }
+    }
+
     /// The path a token takes to or from ckUSDC, None for a token not listed.
     pub fn path_of(&self, ledger: Principal, ckusdc: Principal) -> Option<RoutePath> {
         if ledger == ckusdc {
@@ -239,6 +276,11 @@ impl IcpRoutes {
                 first: self.icp_pool()?,
                 second: pool,
                 icp: self.icp()?,
+            },
+            IcpRouteVia::Hub { pool, hub } => RoutePath::ViaIcp {
+                first: self.direct_pool(hub)?,
+                second: pool,
+                icp: hub,
             },
         })
     }

@@ -417,7 +417,45 @@ fn samples() -> Vec<Sample> {
             },
         },
     ));
+    all.push(hub_route_sample());
     all
+}
+
+/// The routes with a token through a hub: the variant a route of the deployed build never
+/// holds, on the same line as the Direct and Icp routes that build wrote.
+fn hub_route_sample() -> Sample {
+    use crate::pool::{IcpRoute, IcpRouteVia, IcpRoutes, PrincipalBytes};
+    let principal = |byte: u8| candid::Principal::from_slice(&[byte; 10]);
+    sample(
+        "pool routes set with a token through a hub",
+        Event {
+            index: EventIndex::new(24_000),
+            timestamp: Timestamp::from_nanos(1_800_000_000_000_002_400),
+            payload: crate::events::EventType::Pool {
+                step: crate::pool::PoolStep::IcpRoutesSet {
+                    routes: IcpRoutes {
+                        icp_ckusdc_pool: Some(PrincipalBytes(principal(0xb1))),
+                        icp_ledger: Some(PrincipalBytes(principal(0xb2))),
+                        routes: vec![
+                            IcpRoute {
+                                ledger: principal(0xb3),
+                                via: IcpRouteVia::Direct(principal(0xb4)),
+                            },
+                            IcpRoute {
+                                ledger: principal(0xb5),
+                                via: IcpRouteVia::Hub {
+                                    pool: principal(0xb6),
+                                    hub: principal(0xb3),
+                                },
+                            },
+                        ],
+                        ledger_fees: Vec::new(),
+                        pool_tokens: Vec::new(),
+                    },
+                },
+            },
+        },
+    )
 }
 
 /// A payout's transfer whose answer was once lost (the review, 2026-10-24): the deposit

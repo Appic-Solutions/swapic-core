@@ -26,6 +26,14 @@ fn the_list_names_its_tokens_on_their_chain_and_nothing_else() {
             decimals: 8
         })
     );
+    let ckxaut = Principal::from_text("nza5v-qaaaa-aaaar-qahzq-cai").unwrap();
+    assert_eq!(
+        icp_token(ckxaut),
+        Some(TokenName::Known {
+            symbol: "ckXAUT",
+            decimals: 6
+        })
+    );
     let vchf = Principal::from_text("ly36x-wiaaa-aaaai-aqj7q-cai").unwrap();
     assert_eq!(icp_token(vchf), None);
     let weth: EvmAddress = "0x4200000000000000000000000000000000000006"
