@@ -649,9 +649,8 @@ type PayoutStatus = variant {
   Paid;
   Pulling;
   Swapping;
-  // Through the ck minter: burned, the minter's withdrawal id. Its USDC reaches the
-  // recipient from the minter directly.
-  CkWithdrawn : nat64;
+  // Through the ck minter: burned. Its USDC reaches the recipient from the minter directly.
+  CkWithdrawn;
   Undone : text;
   Waiting;
   Signed : nat64;
@@ -679,6 +678,8 @@ type PayoutView = record {
   // Through the ck minter: what it burns and pays, once its withdrawal began.
   ck_amount : opt nat;
   order_id : opt blob;
+  // Through the ck minter: the minter's id of its withdrawal, once burned.
+  ck_withdrawal_id : opt nat64;
   tx_hash : opt blob;
   // The exact USDC the payout order must spend on Base.
   amount : opt nat;

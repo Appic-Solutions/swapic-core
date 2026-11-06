@@ -747,8 +747,7 @@ impl PayoutSettings {
             return Err(PayoutSettingsError::Gas);
         }
         if self.ck.is_some_and(|ck| {
-            ck.min_network_fee == TokenAmount::ZERO
-                || ck.ck_swap_fee_allowance == TokenAmount::ZERO
+            ck.min_network_fee == TokenAmount::ZERO || ck.ck_swap_fee_allowance == TokenAmount::ZERO
         }) {
             return Err(PayoutSettingsError::Ck);
         }

@@ -8,6 +8,15 @@ pub fn settlement() -> Vec<u8> {
     std::fs::read(path).expect("run `scripts/run-integration-tests.sh` first")
 }
 
+/// The stub of the ck minter the pool's tests run on: `canister/stub_minter`, never deployed.
+pub fn stub_minter() -> Vec<u8> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/inttest/wasm32-unknown-unknown/release/stub_minter.wasm"
+    );
+    std::fs::read(path).expect("run `scripts/run-integration-tests.sh` first")
+}
+
 /// The integration build of the commit deployed now, for the upgrade from it: `PRIOR_WASM`, a
 /// wasm built with `scripts/build-canister.sh --integration-test settlement` at that commit.
 pub fn prior_settlement() -> Vec<u8> {

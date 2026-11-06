@@ -22,17 +22,17 @@ use types::hash::{PoolOpId, PoolRef, TxHash};
 use types::pool::{CreditKey, DepositKind, IcpAccount, PoolRail, PoolStep, Registration, Shares};
 use types::{BlockNumber, ChainId, Timestamp, TokenAmount};
 
-const FEE: u64 = 10_000;
-const BASE: u64 = 8453;
+pub(super) const FEE: u64 = 10_000;
+pub(super) const BASE: u64 = 8453;
 
-fn usdc(whole: u64) -> u64 {
+pub(super) fn usdc(whole: u64) -> u64 {
     whole * 1_000_000
 }
 
 #[derive(CandidType)]
-struct Account {
-    owner: Principal,
-    subaccount: Option<Vec<u8>>,
+pub(super) struct Account {
+    pub(super) owner: Principal,
+    pub(super) subaccount: Option<Vec<u8>>,
 }
 
 #[derive(CandidType)]
@@ -80,7 +80,7 @@ enum LedgerArg {
     Init(LedgerInit),
 }
 
-fn account(owner: Principal) -> Account {
+pub(super) fn account(owner: Principal) -> Account {
     Account {
         owner,
         subaccount: None,
@@ -91,17 +91,17 @@ fn recipient() -> Principal {
     Principal::from_slice(&[0x51; 29])
 }
 
-fn staker() -> Principal {
+pub(super) fn staker() -> Principal {
     Principal::from_slice(&[0x52; 29])
 }
 
 /// The pool's world: the canister (pool chain Base) and a ckUSDC ledger that minted
 /// `canister_usdc` to the canister and 1,000 USDC to the staker.
-struct World {
-    pic: PocketIc,
-    canister: Principal,
-    admin: Principal,
-    ledger: Principal,
+pub(super) struct World {
+    pub(super) pic: PocketIc,
+    pub(super) canister: Principal,
+    pub(super) admin: Principal,
+    pub(super) ledger: Principal,
 }
 
 fn world(canister_usdc: u64) -> World {
@@ -167,10 +167,27 @@ fn install_ledger(
     symbol: &str,
     balances: Vec<(Principal, u64)>,
 ) -> Principal {
+    install_ledger_of(
+        pic,
+        admin,
+        symbol,
+        balances,
+        Principal::from_slice(&[0x50; 29]),
+    )
+}
+
+/// [`install_ledger`] with `minter` its minting account.
+pub(super) fn install_ledger_of(
+    pic: &PocketIc,
+    admin: Principal,
+    symbol: &str,
+    balances: Vec<(Principal, u64)>,
+    minter: Principal,
+) -> Principal {
     let ledger = pic.create_canister_with_settings(Some(admin), None);
     pic.add_cycles(ledger, 100_000_000_000_000);
     let init = LedgerArg::Init(LedgerInit {
-        minting_account: account(Principal::from_slice(&[0x50; 29])),
+        minting_account: account(minter),
         fee_collector_account: None,
         transfer_fee: Nat::from(FEE),
         decimals: Some(6),
@@ -236,11 +253,11 @@ fn world_settled(world: World) -> World {
 }
 
 impl World {
-    fn now(&self) -> Timestamp {
+    pub(super) fn now(&self) -> Timestamp {
         Timestamp::from_nanos(self.pic.get_time().as_nanos_since_unix_epoch())
     }
 
-    fn plant(&self, step: PoolStep) {
+    pub(super) fn plant(&self, step: PoolStep) {
         append(
             &self.pic,
             self.canister,
@@ -252,7 +269,7 @@ impl World {
 
     /// A balance read of the pool chain, now, kept as the hourly check keeps the one it
     /// read: nothing at block 1, before every planted arrival. The pool's guard opens on it.
-    fn books_checked(&self) {
+    pub(super) fn books_checked(&self) {
         let kept: Result<(), String> = update(
             &self.pic,
             self.canister,
@@ -265,7 +282,7 @@ impl World {
 
     /// `amount` of the canister's own ckUSDC planted as staked on ICP by `owner`, the way
     /// `stake_icp` records it.
-    fn plant_stake(&self, owner: Principal, amount: u64, shares: u128) {
+    pub(super) fn plant_stake(&self, owner: Principal, amount: u64, shares: u128) {
         let id = PoolOpId::new([0xee; 32]);
         let owner = types::pool::PoolAccount::Icp(IcpAccount {
             owner,
@@ -329,19 +346,19 @@ impl World {
         r#ref
     }
 
-    fn settle(&self) {
+    pub(super) fn settle(&self) {
         for _ in 0..10 {
             self.pic.tick();
         }
     }
 
     /// Past the engine's backstop tick.
-    fn next_tick(&self) {
+    pub(super) fn next_tick(&self) {
         self.pic.advance_time(Duration::from_secs(31));
         self.settle();
     }
 
-    fn balance(&self, owner: Principal) -> Nat {
+    pub(super) fn balance(&self, owner: Principal) -> Nat {
         query(
             &self.pic,
             self.ledger,
@@ -362,7 +379,7 @@ impl World {
         view.expect("registered")
     }
 
-    fn state(&self) -> PoolStateView {
+    pub(super) fn state(&self) -> PoolStateView {
         query(
             &self.pic,
             self.canister,
@@ -387,7 +404,7 @@ impl World {
     }
 
     /// Every pool step in the log, in order.
-    fn pool_steps(&self) -> Vec<PoolStep> {
+    pub(super) fn pool_steps(&self) -> Vec<PoolStep> {
         let count = crate::client::settlement::event_count(&self.pic, self.canister, self.admin);
         crate::client::settlement::events_page(&self.pic, self.canister, self.admin, 0, count)
             .into_iter()
@@ -514,7 +531,7 @@ struct ApproveArgs {
 
 impl World {
     /// `owner` approves the canister's main account for `amount`.
-    fn approve(&self, owner: Principal, amount: u64) {
+    pub(super) fn approve(&self, owner: Principal, amount: u64) {
         let args = ApproveArgs {
             from_subaccount: None,
             spender: account(self.canister),
@@ -828,6 +845,7 @@ fn swap_world() -> (World, types::EvmAddress) {
             order_wait_s: 120,
             max_payout_gas: 2_000_000,
             cctp_payouts: false,
+            ck: None,
         })
         .unwrap(),
     );

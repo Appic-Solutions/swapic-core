@@ -506,10 +506,16 @@ fn an_outcall_line_names_the_host_and_never_the_key() {
 fn an_outcall_line_counts_a_run_of_one_method() {
     let receipts = vec![("eth_getTransactionReceipt", json!(["0x1"])); 3];
     let body = batch_body(&[vec![("eth_blockNumber", json!([]))], receipts].concat());
-    assert_eq!(methods_of(&body), "eth_blockNumber,eth_getTransactionReceipt x3");
+    assert_eq!(
+        methods_of(&body),
+        "eth_blockNumber,eth_getTransactionReceipt x3"
+    );
     assert_eq!(methods_of(br#"{"method":"eth_chainId"}"#), "eth_chainId");
     assert_eq!(methods_of(b"not json"), "(no method)");
-    assert_eq!(host_of("https://user:pw@rpc.example:8545/v2/k?x=1"), "rpc.example:8545");
+    assert_eq!(
+        host_of("https://user:pw@rpc.example:8545/v2/k?x=1"),
+        "rpc.example:8545"
+    );
     assert_eq!(cycles_text(26_153_846_153), "26.15B");
     assert_eq!(cycles_text(999), "999");
 }

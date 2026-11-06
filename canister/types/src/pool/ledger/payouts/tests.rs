@@ -1781,9 +1781,7 @@ fn pool_with_live_lines() -> (Pool, u64, u64) {
     .unwrap();
     pool.step(PoolStep::PayoutAmountKnown {
         id: live,
-        amount: usdc(50)
-            .checked_sub(TokenAmount::from(60_000_u32))
-            .unwrap(),
+        amount: usdc(50).checked_sub(TokenAmount::from(60_000_u32)).unwrap(),
         received: Some(usdc(50)),
     })
     .unwrap();
@@ -1922,10 +1920,7 @@ fn a_reimbursed_ck_withdrawal_undoes_once_and_keeps_the_network_fee() {
     })
     .unwrap();
     assert_eq!(lines(&pool), known);
-    assert!(matches!(
-        pool.payouts[&id].status,
-        PayoutStatus::Undoing(_)
-    ));
+    assert!(matches!(pool.payouts[&id].status, PayoutStatus::Undoing(_)));
     pool.step(PoolStep::PayoutUndone {
         id,
         why: "refunded".to_string(),
@@ -2114,7 +2109,9 @@ fn a_ck_swap_opens_only_with_a_floor_that_pays_its_minimum() {
                 min_out: TokenAmount::from(CK_BURN),
                 ..self::terms()
             },
-            undo: Undo::Refund { to: terms.refund_to },
+            undo: Undo::Refund {
+                to: terms.refund_to,
+            },
             plan: None,
             ck: Flag(true),
         })

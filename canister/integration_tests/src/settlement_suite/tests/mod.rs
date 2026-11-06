@@ -1,3 +1,4 @@
+mod test_ck;
 mod test_config;
 mod test_consent;
 mod test_design_c;

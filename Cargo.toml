@@ -3,6 +3,7 @@ members = [
     "canister/api",
     "canister/impl",
     "canister/integration_tests",
+    "canister/stub_minter",
     "canister/types",
 ]
 resolver = "2"

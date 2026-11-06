@@ -123,9 +123,8 @@ pub enum PayoutStatus {
     Failed(String),
     /// Through the ck minter: its withdrawal is on its way, nothing burned yet.
     CkWithdrawing,
-    /// Through the ck minter: burned, the minter's withdrawal id. Its USDC reaches the
-    /// recipient from the minter directly.
-    CkWithdrawn(u64),
+    /// Through the ck minter: burned. Its USDC reaches the recipient from the minter directly.
+    CkWithdrawn,
 }
 
 /// A controller's answer to a payout stopped for a human (`resolve_payout`): its money back to
@@ -167,6 +166,8 @@ pub struct PayoutView {
     pub planned: Option<Nat>,
     /// Through the ck minter: what it burns and pays, once its withdrawal began.
     pub ck_amount: Option<Nat>,
+    /// Through the ck minter: the minter's id of its withdrawal, once burned.
+    pub ck_withdrawal_id: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -268,7 +269,7 @@ impl From<&domain::PayoutStatus> for PayoutStatus {
             domain::PayoutStatus::Undone(why) => Self::Undone(why.clone()),
             domain::PayoutStatus::Failed(why) => Self::Failed(why.clone()),
             domain::PayoutStatus::CkWithdrawing => Self::CkWithdrawing,
-            domain::PayoutStatus::CkWithdrawn => Self::CkWithdrawn(0),
+            domain::PayoutStatus::CkWithdrawn => Self::CkWithdrawn,
         }
     }
 }
@@ -280,7 +281,7 @@ impl From<&domain::EvmPayout> for PayoutView {
             kind: (&payout.kind).into(),
             terms: payout.terms.into(),
             amount: payout.amount.map(nat),
-            status: status_of(payout),
+            status: (&payout.status).into(),
             order_id: payout.order.as_ref().map(|order| order.order_id.to_vec()),
             tx_hash: payout.tx_hash.map(|hash| hash.into_bytes().to_vec()),
             received: payout.received.map(nat),
@@ -289,15 +290,8 @@ impl From<&domain::EvmPayout> for PayoutView {
                 domain::PayoutKind::Withdrawal(_) => None,
             },
             ck_amount: payout.ck.and_then(|ck| ck.amount).map(nat),
+            ck_withdrawal_id: payout.ck.and_then(|ck| ck.withdrawal_id),
         }
-    }
-}
-
-/// A payout's status as the wire says it: a burned ck withdrawal names its id.
-pub fn status_of(payout: &domain::EvmPayout) -> PayoutStatus {
-    match (&payout.status, payout.ck.and_then(|ck| ck.withdrawal_id)) {
-        (domain::PayoutStatus::CkWithdrawn, Some(id)) => PayoutStatus::CkWithdrawn(id),
-        (status, _) => status.into(),
     }
 }
 
@@ -335,7 +329,10 @@ impl TryFrom<CkSettings> for domain::CkSettings {
         Ok(Self {
             open: settings.open,
             min_network_fee: amount("min_network_fee", &settings.min_network_fee)?,
-            ck_swap_fee_allowance: amount("ck_swap_fee_allowance", &settings.ck_swap_fee_allowance)?,
+            ck_swap_fee_allowance: amount(
+                "ck_swap_fee_allowance",
+                &settings.ck_swap_fee_allowance,
+            )?,
         })
     }
 }

@@ -7,10 +7,9 @@ use ic_cdk::update;
 use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::pool::{
     CkResolution, CkSwapTerms, DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms,
-    OrphanAction, PayPayoutOk,
-    PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError,
-    PoolSettings, StakeIcpArgs, StakeIcpOk, StakeResolution, SwapFromIcpOk, WithdrawEvmOk,
-    WithdrawIcpArgs, WithdrawIcpOk,
+    OrphanAction, PayPayoutOk, PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival,
+    PoolArrivalOutcome, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, StakeResolution,
+    SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 

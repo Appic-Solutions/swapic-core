@@ -908,9 +908,7 @@ fn a_cancels_receipt_closes_its_entry_and_writes_only_its_end() {
             chain_id: BASE,
             nonce: 0,
             tx_hash: cancel_hash,
-            outcome: settlement_api::types::events::TxOutcome::Succeeded {
-                block: 19_000_005
-            },
+            outcome: settlement_api::types::events::TxOutcome::Succeeded { block: 19_000_005 },
         }],
         "a cancel closes no attempt, so the one line its receipt writes is its end"
     );

@@ -173,8 +173,14 @@ fn the_ck_steps_keep_their_indices_and_their_bytes() {
         assert_eq!(index(&step), expected);
         assert_eq!(PoolStep::from_bytes(&step.to_bytes()), Some(step));
     }
-    assert_eq!(ck_burn(TokenAmount::from(30_u8), TokenAmount::from(10_u8)), Some(TokenAmount::from(10_u8)));
-    assert_eq!(ck_burn(TokenAmount::from(20_u8), TokenAmount::from(10_u8)), None);
+    assert_eq!(
+        ck_burn(TokenAmount::from(30_u8), TokenAmount::from(10_u8)),
+        Some(TokenAmount::from(10_u8))
+    );
+    assert_eq!(
+        ck_burn(TokenAmount::from(20_u8), TokenAmount::from(10_u8)),
+        None
+    );
     assert_eq!(
         ck_least_usdc(
             TokenAmount::from(5_u8),

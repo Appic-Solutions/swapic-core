@@ -42,6 +42,9 @@ if [[ $# -gt 0 && "$1" == "--" ]]; then shift; fi
 
 if [[ $BUILD == 1 ]]; then
   scripts/build-canister.sh --integration-test settlement
+  # the ck minter of the pool's tests; never deployed
+  cargo build --locked --target wasm32-unknown-unknown --release -p stub_minter \
+    --target-dir canister/target/inttest
 fi
 
 if [[ -z "${POCKET_IC_BIN:-}" ]]; then

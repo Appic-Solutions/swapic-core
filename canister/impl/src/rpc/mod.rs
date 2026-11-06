@@ -341,7 +341,11 @@ impl Outcall {
     /// The log line for this call, ended by `outcome` (the url and its key taken out), with
     /// the cycles the balance `fell` by while it was out.
     fn line(&self, outcome: &str, fell: u128) -> String {
-        let nodes = if self.replicated { "every node" } else { "one node" };
+        let nodes = if self.replicated {
+            "every node"
+        } else {
+            "one node"
+        };
         format!(
             "outcall {} {} ({}, cap {} bytes): {}; balance fell {} cycles, {} attached",
             self.host,
@@ -369,7 +373,10 @@ fn redact(text: &str, url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     if let Some((_, path)) = rest.split_once('/') {
         out = out.replace(path, "<path>");
-        for part in path.split(['/', '?', '&', '=', '#']).filter(|part| part.len() >= 8) {
+        for part in path
+            .split(['/', '?', '&', '=', '#'])
+            .filter(|part| part.len() >= 8)
+        {
             out = out.replace(part, "<key>");
         }
     }
@@ -412,7 +419,11 @@ fn methods_of(body: &[u8]) -> String {
 fn cycles_text(cycles: u128) -> String {
     match cycles {
         c if c >= 1_000_000_000 => {
-            format!("{}.{:02}B", c / 1_000_000_000, c % 1_000_000_000 / 10_000_000)
+            format!(
+                "{}.{:02}B",
+                c / 1_000_000_000,
+                c % 1_000_000_000 / 10_000_000
+            )
         }
         c if c >= 1_000_000 => format!("{}.{}M", c / 1_000_000, c % 1_000_000 / 100_000),
         c => c.to_string(),

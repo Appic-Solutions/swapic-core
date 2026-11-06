@@ -150,7 +150,9 @@ fn open(request: &CkRequest) -> u64 {
             id,
             kind: Box::new(PayoutKind::IcpSwap(terms)),
             terms: request.terms,
-            undo: Undo::Refund { to: request.refund_to },
+            undo: Undo::Refund {
+                to: request.refund_to,
+            },
             plan: None,
             ck: Flag(true),
         },
@@ -279,12 +281,7 @@ impl Ledgers for Stub {
         unreachable!("a ckUSDC swap has no leg")
     }
 
-    async fn quote(
-        &self,
-        _: Principal,
-        _: TokenAmount,
-        _: bool,
-    ) -> Result<TokenAmount, CallError> {
+    async fn quote(&self, _: Principal, _: TokenAmount, _: bool) -> Result<TokenAmount, CallError> {
         unreachable!("a ckUSDC swap has no leg")
     }
 
@@ -450,7 +447,9 @@ impl CkCalls for Stub {
             }
             Ask::BurnUnlisted => {
                 burnt(false);
-                Err(WithdrawFailure::Unknown("a trap after the burn".to_string()))
+                Err(WithdrawFailure::Unknown(
+                    "a trap after the burn".to_string(),
+                ))
             }
             Ask::Trap => Err(WithdrawFailure::Unknown("a guard trapped".to_string())),
             Ask::Refuse(refusal) => Err(WithdrawFailure::Refused(refusal)),
@@ -465,7 +464,10 @@ impl CkCalls for Stub {
         if self.minter_down.get() {
             return Err(CallError::Unknown("the minter is down".to_string()));
         }
-        assert!(account.subaccount.is_some(), "only the payout's own account");
+        assert!(
+            account.subaccount.is_some(),
+            "only the payout's own account"
+        );
         Ok(self.list.borrow().clone())
     }
 
@@ -556,12 +558,11 @@ fn a_ckusdc_swap_burns_its_hold_less_both_ledger_fees_and_lands() {
         go(&stub, id, 120).unwrap();
         assert_eq!(status(id), PayoutStatus::CkWithdrawn);
 
-        *stub.status.borrow_mut() = Some(WithdrawalStatus::TxFinalized(
-            TxFinalizedStatus::Success {
+        *stub.status.borrow_mut() =
+            Some(WithdrawalStatus::TxFinalized(TxFinalizedStatus::Success {
                 transaction_hash: format!("0x{}", "ab".repeat(32)),
                 effective_transaction_fee: None,
-            },
-        ));
+            }));
         go(&stub, id, 130).unwrap();
         assert_eq!(status(id), PayoutStatus::Paid);
         assert!(ledger().lines().open.is_empty());
@@ -808,7 +809,10 @@ fn a_quarantined_reimbursement_waits_and_a_controller_can_end_it() {
         assert!(resolve(CkResolution::Reimbursed, false).is_err());
         // nothing in the subaccount: no way back on anyone's word
         assert!(resolve(CkResolution::Reimbursed, true).is_err());
-        assert!(resolve(CkResolution::Retry, true).is_err(), "it is not stopped");
+        assert!(
+            resolve(CkResolution::Retry, true).is_err(),
+            "it is not stopped"
+        );
         stub.sub.set(burn);
         resolve(CkResolution::Reimbursed, true).unwrap();
         go(&stub, id, 210).unwrap();
@@ -1045,12 +1049,7 @@ fn each_refusal_comes_before_anything_is_recorded() {
             |r| r.terms.min_out = TokenAmount::from(FEE),
             // below the floor, and F3: min_usdc short of min_out, the fee and both ledger fees
             |r| r.network_fee = TokenAmount::from(NETWORK_FEE - 1),
-            |r| {
-                r.min_usdc = r
-                    .min_usdc
-                    .checked_sub(TokenAmount::from(1_u8))
-                    .unwrap()
-            },
+            |r| r.min_usdc = r.min_usdc.checked_sub(TokenAmount::from(1_u8)).unwrap(),
             |r| r.min_usdc = r.amount_in.checked_add(TokenAmount::from(1_u8)).unwrap(),
         ] {
             assert!(matches!(refused(change), PoolError::NotAllowed(_)));
@@ -1068,9 +1067,14 @@ fn no_sanctioned_party_gets_in() {
         crate::storage::init();
         pool();
         let answer = read_state(|state| {
-            check(state, &config(), &hundred(), seconds(100), None, |address| {
-                *address == Address::from(recipient())
-            })
+            check(
+                state,
+                &config(),
+                &hundred(),
+                seconds(100),
+                None,
+                |address| *address == Address::from(recipient()),
+            )
         });
         assert!(matches!(answer, Err(PoolError::Sanctioned(_))));
     });
@@ -1133,7 +1137,9 @@ fn a_hundred_swaps_never_drift_the_books() {
                     id,
                     kind: Box::new(PayoutKind::IcpSwap(terms)),
                     terms: request.terms,
-                    undo: Undo::Refund { to: request.refund_to },
+                    undo: Undo::Refund {
+                        to: request.refund_to,
+                    },
                     plan: None,
                     ck: Flag(true),
                 },
@@ -1163,7 +1169,8 @@ fn a_hundred_swaps_never_drift_the_books() {
                     effective_transaction_fee: None,
                 })
             } else {
-                stub.sub.set(stub.sub.get() + units(TokenAmount::from(burn)));
+                stub.sub
+                    .set(stub.sub.get() + units(TokenAmount::from(burn)));
                 stub.burned.set(0);
                 WithdrawalStatus::TxFinalized(TxFinalizedStatus::Reimbursed {
                     transaction_hash: format!("0x{}", "cd".repeat(32)),

@@ -213,8 +213,7 @@ impl PoolLedger {
         let fee = settings
             .fee_of(settings.ckusdc_ledger)
             .ok_or(PoolStepError::Terms("no ckUSDC fee was read"))?;
-        let least =
-            ck_least_usdc(min_out, swap.network_fee, fee).ok_or(PoolStepError::Overflow)?;
+        let least = ck_least_usdc(min_out, swap.network_fee, fee).ok_or(PoolStepError::Overflow)?;
         if swap.min_usdc < least {
             return Err(PoolStepError::Terms(
                 "min_usdc is below min_out, the network fee and both ledger fees",

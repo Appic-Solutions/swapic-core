@@ -419,7 +419,7 @@ pub(crate) fn answer(id: u64) -> Result<SwapFromIcpOk, PoolError> {
         }) => Err(PoolError::Ledger(why)),
         Some(payout) => Ok(SwapFromIcpOk {
             id,
-            status: settlement_api::types::pool::status_of(&payout),
+            status: (&payout.status).into(),
         }),
         None => Err(PoolError::Unknown),
     }

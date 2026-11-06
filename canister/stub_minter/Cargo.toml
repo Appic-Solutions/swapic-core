@@ -1,0 +1,14 @@
+[package]
+name = "stub_minter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+candid = { workspace = true }
+ic-cdk = { workspace = true }
+serde = { workspace = true }

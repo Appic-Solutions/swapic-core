@@ -718,19 +718,14 @@ async fn withdraw(
             way_back(calls, payout, &fixed, minter.minter, clock).await
         }
         // never read as nothing burned, nor asked again before the minter's list says
-        Err(WithdrawFailure::Unknown(why)) => Err(Stop::Retry(format!(
-            "the minter's answer was lost: {why}"
-        ))),
+        Err(WithdrawFailure::Unknown(why)) => {
+            Err(Stop::Retry(format!("the minter's answer was lost: {why}")))
+        }
     }
 }
 
 /// The minter could not be read: asked again next pass, and a controller's in the end.
-fn read_failed(
-    payout: &EvmPayout,
-    ck: CkLeg,
-    why: &str,
-    now: Timestamp,
-) -> Result<Flow, Stop> {
+fn read_failed(payout: &EvmPayout, ck: CkLeg, why: &str, now: Timestamp) -> Result<Flow, Stop> {
     let begun = ck.created_at.unwrap_or(payout.opened_at);
     if now.saturating_duration_since(begun) >= STUCK_AFTER {
         let why = format!("ALERT: the ck minter's list was not read: {why}");
@@ -919,9 +914,7 @@ async fn bring_back(
         .await
     {
         Ok(_) => Ok(()),
-        Err(error @ CallError::Unknown(_)) => {
-            Err(Stop::Retry(format!("the way back: {error}")))
-        }
+        Err(error @ CallError::Unknown(_)) => Err(Stop::Retry(format!("the way back: {error}"))),
         Err(error) => {
             let why = format!("ALERT: the way back was refused: {error}");
             icp_swap::stop(id, &why, clock())?;

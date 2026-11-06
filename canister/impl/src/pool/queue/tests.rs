@@ -1455,7 +1455,10 @@ fn a_ck_payout_is_driven_and_past_its_withdrawal_no_deadline_undoes_it() {
         assert_eq!(at(&payout, 50), Next::Ck);
     }
     payout.status = PayoutStatus::Known;
-    assert!(matches!(at(&payout, 100), Next::Undo { checked: false, .. }));
+    assert!(matches!(
+        at(&payout, 100),
+        Next::Undo { checked: false, .. }
+    ));
     for status in [PayoutStatus::CkWithdrawing, PayoutStatus::CkWithdrawn] {
         payout.status = status;
         assert_eq!(at(&payout, 50), Next::Ck);
