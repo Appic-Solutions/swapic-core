@@ -76,12 +76,15 @@ pub async fn withdraw_icp(args: WithdrawIcpArgs) -> Result<WithdrawIcpOk, PoolEr
 
 /// Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
 /// fee, how long a waiting payout waits for an order, the most gas a payout order is signed
-/// with, and whether a payout may leave Base over CCTP.
+/// with, whether a payout may leave Base over CCTP, and the ck route. Settings that name no ck
+/// route shut its door and keep its numbers.
 #[update]
 pub fn set_payout_settings(settings: PayoutSettings) -> Result<(), PoolError> {
     let caller = ic_cdk::api::caller();
     let settings =
         pool::settings::payout_checked(is_halted(), ic_cdk::api::is_controller(&caller), settings)?;
+    let stored = crate::storage::pool::ledger().lines().settings;
+    let settings = settings.keeping_ck(stored.and_then(|settings| settings.ck));
     crate::storage::pool::record(PoolStep::PayoutSettingsSet { settings })
         .map_err(|error| PoolError::BadSettings(error.to_string()))?;
     Ok(())

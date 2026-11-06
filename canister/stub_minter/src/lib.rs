@@ -270,6 +270,8 @@ fn state<T>(read: impl FnOnce(&mut State) -> T) -> T {
     STATE.with(|state| read(&mut state.borrow_mut()))
 }
 
+// the minter's own candid sets the size of its refusals
+#[allow(clippy::result_large_err)]
 #[update]
 async fn withdraw_erc20(arg: WithdrawErc20Arg) -> Result<RetrieveErc20Request, WithdrawErc20Error> {
     let ask = state(|state| {

@@ -1270,7 +1270,8 @@ service : (InitArg) -> {
   set_icp_routes : (opt principal, vec IcpRoute) -> (Result_5);
   // Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
   // fee, how long a waiting payout waits for an order, the most gas a payout order is signed
-  // with, and whether a payout may leave Base over CCTP.
+  // with, whether a payout may leave Base over CCTP, and the ck route. Settings that name no ck
+  // route shut its door and keep its numbers.
   set_payout_settings : (PayoutSettings) -> (Result_5);
   // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
   // shortfall the last balance check latched, once someone has looked at it. Recorded in

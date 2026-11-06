@@ -650,6 +650,36 @@ fn a_hundred_swaps_keep_the_books_and_a_fee_sweep_leaves_stakers_whole() {
     hourly_check_passes(&ck);
 }
 
+/// A kit run that names no ck route shuts the door, and a swap on its way still has its numbers.
+#[test]
+fn settings_that_name_no_ck_route_strand_no_swap_on_its_way() {
+    let ck = ck_world(1);
+    ck.script(vec![Ask::Trap]);
+    let ok = ck.swap(user(0));
+    assert_eq!(ok.status, PayoutStatus::CkWithdrawing);
+    let set: Result<(), PoolError> = update(
+        &ck.world.pic,
+        ck.world.canister,
+        ck.world.admin,
+        "set_payout_settings",
+        encode_one(PayoutSettings {
+            min_network_fee: Nat::from(50_000_u32),
+            order_wait_s: 120,
+            max_payout_gas: 2_000_000,
+            cctp_payouts: false,
+            ck: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(set, Ok(()));
+    assert!(matches!(
+        ck.door(user(0), ck.terms(usdc(100))),
+        Err(PoolError::Closed(_))
+    ));
+    ck.passes(3, Duration::from_secs(61));
+    assert_eq!(ck.payout(ok.id).status, PayoutStatus::CkWithdrawn);
+}
+
 /// Two swaps in a row reach the minter one at a time, each with its own ckETH approval.
 #[test]
 fn two_swaps_in_a_row_each_approve_their_own_gas() {

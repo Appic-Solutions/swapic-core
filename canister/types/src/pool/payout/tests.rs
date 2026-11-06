@@ -193,3 +193,31 @@ fn the_ck_steps_keep_their_indices_and_their_bytes() {
     assert_ne!(ck_subaccount(1), crate::pool::rebalance_subaccount());
     assert_ne!(ck_memo(1), ck_back_memo(1));
 }
+
+/// A settings run that does not name the ck route shuts its door and keeps its numbers.
+#[test]
+fn settings_that_name_no_ck_route_shut_its_door_and_keep_its_numbers() {
+    let stored = CkSettings {
+        open: true,
+        min_network_fee: TokenAmount::from(670_000_u32),
+        ck_swap_fee_allowance: TokenAmount::from(300_u32),
+    };
+    let kept = PayoutSettings::default().keeping_ck(Some(stored));
+    assert_eq!(
+        kept.ck,
+        Some(CkSettings {
+            open: false,
+            ..stored
+        })
+    );
+    assert_eq!(PayoutSettings::default().keeping_ck(None).ck, None);
+    let named = CkSettings {
+        min_network_fee: TokenAmount::from(1_u8),
+        ..stored
+    };
+    let set = PayoutSettings {
+        ck: Some(named),
+        ..PayoutSettings::default()
+    };
+    assert_eq!(set.keeping_ck(Some(stored)).ck, Some(named));
+}

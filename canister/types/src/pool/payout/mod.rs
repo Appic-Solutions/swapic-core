@@ -724,6 +724,16 @@ pub enum PayoutSettingsError {
 }
 
 impl PayoutSettings {
+    /// These settings over the ones `stored`: named ck settings stand, and none shut the door
+    /// and keep the numbers. A swap on its way reads them for its gas, whatever the door says,
+    /// so a run that does not name them turns the route off and strands nothing.
+    pub fn keeping_ck(self, stored: Option<CkSettings>) -> Self {
+        Self {
+            ck: self.ck.or(stored.map(|ck| CkSettings { open: false, ..ck })),
+            ..self
+        }
+    }
+
     /// Whether a CCTP payout of `network_fee` is one the user paid the canister's finish
     /// for: only while CCTP payouts are on, and at `floor` or above (the destination's
     /// [`cctp_payout_floor`]).
