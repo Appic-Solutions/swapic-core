@@ -120,3 +120,70 @@ fn a_payout_holds_its_amount_and_a_withdrawals_fee_on_base() {
     assert_eq!(payout.icp_hold(), TokenAmount::ZERO);
     assert!(!payout.status.is_final());
 }
+
+/// The ck steps sit at the indices services decode, c's stay free, and a ck payout's record
+/// and a line that carries the ck mark read back whole.
+#[test]
+fn the_ck_steps_keep_their_indices_and_their_bytes() {
+    use crate::hash::TxHash;
+    use crate::pool::PoolStep;
+    let at = Timestamp::from_nanos(1);
+    let amount = TokenAmount::from(5_u8);
+    let index = |step: &PoolStep| {
+        let bytes = step.to_bytes();
+        let mut decoder = minicbor::Decoder::new(&bytes);
+        decoder.array().unwrap();
+        decoder.u32().unwrap()
+    };
+    for (expected, step) in [
+        (
+            83,
+            PoolStep::PayoutCkWithdrawing {
+                id: 1,
+                created_at: at,
+                amount,
+                fee: amount,
+            },
+        ),
+        (
+            84,
+            PoolStep::PayoutCkWithdrawn {
+                id: 1,
+                withdrawal_id: 2,
+            },
+        ),
+        (
+            85,
+            PoolStep::PayoutCkLanded {
+                id: 1,
+                tx_hash: TxHash::new([3; 32]),
+                by_controller: false,
+            },
+        ),
+        (
+            86,
+            PoolStep::PayoutCkReimbursed {
+                id: 1,
+                left: amount,
+                block: None,
+                burned: true,
+            },
+        ),
+    ] {
+        assert_eq!(index(&step), expected);
+        assert_eq!(PoolStep::from_bytes(&step.to_bytes()), Some(step));
+    }
+    assert_eq!(ck_burn(TokenAmount::from(30_u8), TokenAmount::from(10_u8)), Some(TokenAmount::from(10_u8)));
+    assert_eq!(ck_burn(TokenAmount::from(20_u8), TokenAmount::from(10_u8)), None);
+    assert_eq!(
+        ck_least_usdc(
+            TokenAmount::from(5_u8),
+            TokenAmount::from(6_u8),
+            TokenAmount::from(1_u8)
+        ),
+        Some(TokenAmount::from(13_u8))
+    );
+    assert_ne!(ck_subaccount(1), ck_subaccount(2));
+    assert_ne!(ck_subaccount(1), crate::pool::rebalance_subaccount());
+    assert_ne!(ck_memo(1), ck_back_memo(1));
+}

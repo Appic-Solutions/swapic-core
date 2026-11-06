@@ -679,8 +679,8 @@ fn any_other_method_is_refused_by_name_bounded() {
     let ask = |method: &str| answer(&request(method, vec![]), &known(&config, staker()));
     assert_eq!(
         unsupported(ask("set_config")),
-        "set_config has no consent message: Swapic describes only swap_from_icp, stake_icp, \
-         withdraw_icp and withdraw_evm"
+        "set_config has no consent message: Swapic describes only swap_from_icp, \
+         swap_from_icp_ck, stake_icp, withdraw_icp and withdraw_evm"
     );
     let description = unsupported(ask(&"a".repeat(100_000)));
     assert!(
@@ -833,4 +833,40 @@ fn a_quoter_built_eco_plan_is_described_with_the_terms_it_was_built_for() {
         text.contains("\n- Recipient: 0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC\n"),
         "{text}"
     );
+}
+
+fn ck_terms() -> settlement_api::types::pool::CkSwapTerms {
+    settlement_api::types::pool::CkSwapTerms {
+        token_in: ckusdc(),
+        amount_in: candid::Nat::from(100_000_000_u64),
+        from_subaccount: None,
+        refund_to: None,
+        deadline_ns: 1_800_000_000_000_000_000,
+        dst_chain: 1,
+        recipient: EvmAddress::new([0x11; 20]).to_string(),
+        token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+        min_out: candid::Nat::from(99_310_000_u64),
+        min_usdc: candid::Nat::from(100_000_000_u64),
+        network_fee: candid::Nat::from(670_000_u64),
+    }
+}
+
+/// `swap_from_icp_ck` is a door a wallet calls for its user: the message says its network fee,
+/// the route, and that a refund after the burn keeps that fee, read exactly as the door reads it.
+#[test]
+fn a_ck_swaps_message_says_its_fee_and_its_way_back() {
+    let config = config();
+    let arg = candid::encode_one(ck_terms()).unwrap();
+    let consent = consent("swap_from_icp_ck", &arg, &known(&config, staker())).unwrap();
+    assert_eq!(consent.intent, "Swap ckUSDC to Ethereum");
+    let shown = consent.markdown(UtcOffset::of(None));
+    for line in [
+        "You send: 100 ckUSDC, plus the ledger fee",
+        "Recipient gets at least: 99.31 USDC on Ethereum",
+        "Network fee: 0.67 ckUSDC",
+        "Route: the ckETH minter pays the recipient",
+        "less the network fee if the minter already burned it",
+    ] {
+        assert!(shown.contains(line), "{line} in {shown}");
+    }
 }

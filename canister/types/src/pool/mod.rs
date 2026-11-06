@@ -25,7 +25,8 @@ pub use routes::{IcpRoute, IcpRouteVia, IcpRoutes, PoolTokens, RoutePath, Routes
 pub use step::PoolStep;
 
 pub use payout::{
-    evm_payout_id, evm_payout_ref, orphan_key, EvmPayout, EvmWithdrawal, IcpSwapTerms, NonceUse,
+    ck_back_memo, ck_burn, ck_least_usdc, ck_memo, ck_subaccount, evm_payout_id, evm_payout_ref,
+    orphan_key, CkBack, CkLeg, CkSettings, EvmPayout, EvmWithdrawal, Flag, IcpSwapTerms, NonceUse,
     Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutResolution, PayoutSettings,
     PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
 };

@@ -187,6 +187,7 @@ pub fn record(planned: Planned, terms: types::pool::PayoutTerms, now: Timestamp)
                 shares: withdrawal.burned,
             },
             plan: None,
+            ck: types::pool::Flag(false),
         },
         now,
     )

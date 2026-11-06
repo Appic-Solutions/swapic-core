@@ -23,6 +23,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::pool::ck::{self, CkCalls};
 use crate::pool::payout::{Busy, Ledgers, Stop, DEDUP_WINDOW};
 use crate::pool::plan::{Decided, Fit, PlanReads};
 use crate::pool::{icp_swap, log};
@@ -51,6 +52,8 @@ pub enum Next {
     Wait,
     /// An ICP swap on its way: its own drive.
     Drive,
+    /// A swap through the ck minter on its way: its own drive (`ck::drive`).
+    Ck,
     /// Listed again: it waited `order_wait` with no order.
     Relist,
     /// A planned swap's plan tried again: an earlier try waited. The plan's decision rides
@@ -72,6 +75,19 @@ pub enum Next {
 /// The pass's decision for `payout` at `now`, pure: `in_flight` says a transaction for it is
 /// still being signed or is in the outbox; `waits` are its chains' [`Waits`].
 pub fn next(
+    payout: &EvmPayout,
+    settings: &PayoutSettings,
+    now: Timestamp,
+    in_flight: bool,
+    waits: Waits,
+) -> Next {
+    match decide(payout, settings, now, in_flight, waits) {
+        Next::Drive if payout.ck.is_some() => Next::Ck,
+        decided => decided,
+    }
+}
+
+fn decide(
     payout: &EvmPayout,
     settings: &PayoutSettings,
     now: Timestamp,
@@ -159,6 +175,9 @@ pub fn next(
             why: UNFILLED.to_string(),
             checked: false,
         },
+        // past its withdrawal the deadline undoes nothing: its drive decides on the minter's
+        // word and its own reads
+        PayoutStatus::CkWithdrawing | PayoutStatus::CkWithdrawn => Next::Ck,
         // signed: never undone until its transaction is closed
         PayoutStatus::Signed(_)
         | PayoutStatus::Paid
@@ -310,7 +329,7 @@ fn undo(payout: &EvmPayout, why: String, now: Timestamp) -> bool {
 /// One pass over the Base payouts, reading the chains themselves: answers how many it acted
 /// on.
 pub async fn pass(
-    ledgers: &(impl Ledgers + PlanReads),
+    ledgers: &(impl Ledgers + PlanReads + CkCalls),
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
@@ -320,7 +339,7 @@ pub async fn pass(
 /// One pass over the Base payouts, with `reads` for the chain reads: answers how many it
 /// acted on.
 pub async fn pass_with(
-    ledgers: &(impl Ledgers + PlanReads),
+    ledgers: &(impl Ledgers + PlanReads + CkCalls),
     reads: &impl ChainReads,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
@@ -377,6 +396,10 @@ pub async fn pass_with(
                     log(&format!("the pool payout {id} waits: {why}"))
                 }
                 Err(stop) => log(&format!("the pool payout {id} stopped: {stop:?}")),
+            },
+            Next::Ck => match ck::drive(ledgers, id, clock, guard).await {
+                Ok(()) => acted += 1,
+                Err(stop) => log(&format!("the ck payout {id} waits: {stop:?}")),
             },
             Next::Relist => acted += usize::from(record(PoolStep::PayoutRelisted { id }, now)),
             Next::Fit(decided) => {

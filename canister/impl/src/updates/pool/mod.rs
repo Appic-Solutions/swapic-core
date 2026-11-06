@@ -6,7 +6,8 @@ use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::pool::{
-    DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms, OrphanAction, PayPayoutOk,
+    CkResolution, CkSwapTerms, DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms,
+    OrphanAction, PayPayoutOk,
     PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival, PoolArrivalOutcome, PoolError,
     PoolSettings, StakeIcpArgs, StakeIcpOk, StakeResolution, SwapFromIcpOk, WithdrawEvmOk,
     WithdrawIcpArgs, WithdrawIcpOk,
@@ -144,6 +145,40 @@ pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolErr
 #[update]
 pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolError> {
     pool::icp_swap::swap_from_icp(terms, is_sanctioned).await
+}
+
+/// Any caller but the anonymous one, refused while halted, while the pool is closed, while the
+/// route's switch is off, short of ckETH, for a sanctioned party, and past five calls a minute
+/// or thirty an hour for that caller (this door, `swap_from_icp` and `stake_icp` together): an
+/// ICP user swaps `amount_in` of ckUSDC or a listed ICP token to USDC on Ethereum through the
+/// ck minter, when the pool cannot carry it. The minter pays the recipient directly.
+/// `network_fee` is at least the route's floor (`payout_settings`), no premium is taken, and
+/// both ckUSDC ledger fees of the way out are the user's: at least `min_usdc` must come of the
+/// sale, or it is refunded. The recipient gets what the sale made less those, at least
+/// `min_out`, or a refund on ICP, all or nothing; a refund after the minter burned keeps the
+/// network fee. Answers like `swap_from_icp`, and `payout(id)` tells where it stands.
+#[update]
+pub async fn swap_from_icp_ck(terms: CkSwapTerms) -> Result<SwapFromIcpOk, PoolError> {
+    pool::ck::swap_from_icp_ck(terms, is_sanctioned).await
+}
+
+/// Controller-only, refused while halted. A withdrawal through the ck minter that the canister
+/// stopped, or that the minter leaves open: `Retry` reads a stopped one again, `Delivered`
+/// closes one found paid on Ethereum, `Reimbursed` starts the way back for one whose ckUSDC is
+/// back in its subaccount without the minter's word (a quarantined reimbursement), and only
+/// then. Nothing here refunds on a controller's word alone.
+#[update]
+pub async fn resolve_ck_withdrawal(id: u64, resolution: CkResolution) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    pool::ck::resolve(
+        &pool::payout::Live,
+        is_halted(),
+        ic_cdk::api::is_controller(&caller),
+        id,
+        resolution,
+        pool::now(),
+    )
+    .await
 }
 
 /// Controller-only, refused while halted: a payout stopped for a human

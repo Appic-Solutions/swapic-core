@@ -53,6 +53,35 @@ pub struct IcpSwapTerms {
     pub plan: PayoutPlan,
 }
 
+/// An ICP user's swap through the ck minter, when the pool cannot carry it: USDC on Ethereum,
+/// paid by the minter to the recipient.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CkSwapTerms {
+    /// ckUSDC or a listed ICP token.
+    pub token_in: Principal,
+    /// Pulled with `icrc2_transfer_from` from the caller's account.
+    pub amount_in: Nat,
+    pub from_subaccount: Option<Vec<u8>>,
+    /// Default: the caller's account.
+    pub refund_to: Option<IcpAccount>,
+    /// 5 minutes to 1 hour ahead: at its burn the swap is past undoing, and before it the
+    /// deadline refunds it.
+    pub deadline_ns: u64,
+    /// Ethereum.
+    pub dst_chain: u64,
+    /// An EVM address: the minter pays it directly.
+    pub recipient: String,
+    /// USDC on Ethereum.
+    pub token_out: String,
+    /// The least USDC the recipient gets.
+    pub min_out: Nat,
+    /// The least ckUSDC the sale must make: at least `min_out`, `network_fee` and two ckUSDC
+    /// ledger fees.
+    pub min_usdc: Nat,
+    /// Micro USDC: at least the route's least network fee (`payout_settings`).
+    pub network_fee: Nat,
+}
+
 /// An EVM staker's withdrawal, signed by the staker (EIP-712).
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EvmWithdrawal {
@@ -92,6 +121,11 @@ pub enum PayoutStatus {
     Refunding(String),
     Undone(String),
     Failed(String),
+    /// Through the ck minter: its withdrawal is on its way, nothing burned yet.
+    CkWithdrawing,
+    /// Through the ck minter: burned, the minter's withdrawal id. Its USDC reaches the
+    /// recipient from the minter directly.
+    CkWithdrawn(u64),
 }
 
 /// A controller's answer to a payout stopped for a human (`resolve_payout`): its money back to
@@ -101,6 +135,20 @@ pub enum PayoutStatus {
 pub enum PayoutResolution {
     Refund,
     MarkPaid,
+    /// Back on the path it stopped on: stopped legs quoted again, a ck withdrawal read again.
+    Retry,
+}
+
+/// A controller's answer to a withdrawal through the ck minter (`resolve_ck_withdrawal`).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CkResolution {
+    /// A stopped withdrawal read again: nothing moves.
+    Retry,
+    /// Its USDC was found paid on Ethereum in this transaction, the minter's word not come.
+    Delivered { tx_hash: Vec<u8> },
+    /// Its ckUSDC is back in its burn subaccount though the minter never said so: the way
+    /// back starts. Refused unless the subaccount holds the whole sum.
+    Reimbursed,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -117,6 +165,8 @@ pub struct PayoutView {
     pub received: Option<Nat>,
     /// The plan's amount (`amountIn`), for a swap opened with a plan.
     pub planned: Option<Nat>,
+    /// Through the ck minter: what it burns and pays, once its withdrawal began.
+    pub ck_amount: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -143,6 +193,20 @@ pub struct PayoutSettings {
     /// the pool chain's `min_network_fee.relay_cctp` plus the destination's
     /// `min_network_fee.complete_swap` (a token out) or `relay_deliver` (USDC out).
     pub cctp_payouts: bool,
+    /// The ck minter's slow route. None: off.
+    pub ck: Option<CkSettings>,
+}
+
+/// The ck minter's slow route, the numbers door and quote read alike.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CkSettings {
+    /// Whether `swap_from_icp_ck` takes new swaps.
+    pub open: bool,
+    /// Micro USDC, the least network fee a swap carries: at or above
+    /// `ck_swap_fee_allowance` at ETH's price.
+    pub min_network_fee: Nat,
+    /// Wei of ckETH, the most the minter may burn for one swap's gas.
+    pub ck_swap_fee_allowance: Nat,
 }
 
 impl TryFrom<PayoutTerms> for domain::PayoutTerms {
@@ -203,6 +267,8 @@ impl From<&domain::PayoutStatus> for PayoutStatus {
             domain::PayoutStatus::Undoing(why) => Self::Refunding(why.clone()),
             domain::PayoutStatus::Undone(why) => Self::Undone(why.clone()),
             domain::PayoutStatus::Failed(why) => Self::Failed(why.clone()),
+            domain::PayoutStatus::CkWithdrawing => Self::CkWithdrawing,
+            domain::PayoutStatus::CkWithdrawn => Self::CkWithdrawn(0),
         }
     }
 }
@@ -214,7 +280,7 @@ impl From<&domain::EvmPayout> for PayoutView {
             kind: (&payout.kind).into(),
             terms: payout.terms.into(),
             amount: payout.amount.map(nat),
-            status: (&payout.status).into(),
+            status: status_of(payout),
             order_id: payout.order.as_ref().map(|order| order.order_id.to_vec()),
             tx_hash: payout.tx_hash.map(|hash| hash.into_bytes().to_vec()),
             received: payout.received.map(nat),
@@ -222,7 +288,16 @@ impl From<&domain::EvmPayout> for PayoutView {
                 domain::PayoutKind::IcpSwap(terms) => terms.planned.map(nat),
                 domain::PayoutKind::Withdrawal(_) => None,
             },
+            ck_amount: payout.ck.and_then(|ck| ck.amount).map(nat),
         }
+    }
+}
+
+/// A payout's status as the wire says it: a burned ck withdrawal names its id.
+pub fn status_of(payout: &domain::EvmPayout) -> PayoutStatus {
+    match (&payout.status, payout.ck.and_then(|ck| ck.withdrawal_id)) {
+        (domain::PayoutStatus::CkWithdrawn, Some(id)) => PayoutStatus::CkWithdrawn(id),
+        (status, _) => status.into(),
     }
 }
 
@@ -248,7 +323,30 @@ impl TryFrom<PayoutSettings> for domain::PayoutSettings {
             order_wait: Duration::from_secs(settings.order_wait_s),
             max_payout_gas: settings.max_payout_gas,
             cctp_payouts: settings.cctp_payouts,
+            ck: settings.ck.map(TryInto::try_into).transpose()?,
         })
+    }
+}
+
+impl TryFrom<CkSettings> for domain::CkSettings {
+    type Error = PoolWireError;
+
+    fn try_from(settings: CkSettings) -> Result<Self, Self::Error> {
+        Ok(Self {
+            open: settings.open,
+            min_network_fee: amount("min_network_fee", &settings.min_network_fee)?,
+            ck_swap_fee_allowance: amount("ck_swap_fee_allowance", &settings.ck_swap_fee_allowance)?,
+        })
+    }
+}
+
+impl From<&domain::CkSettings> for CkSettings {
+    fn from(settings: &domain::CkSettings) -> Self {
+        Self {
+            open: settings.open,
+            min_network_fee: nat(settings.min_network_fee),
+            ck_swap_fee_allowance: nat(settings.ck_swap_fee_allowance),
+        }
     }
 }
 
@@ -259,6 +357,7 @@ impl From<&domain::PayoutSettings> for PayoutSettings {
             order_wait_s: settings.order_wait.as_secs(),
             max_payout_gas: settings.max_payout_gas,
             cctp_payouts: settings.cctp_payouts,
+            ck: settings.ck.as_ref().map(Into::into),
         }
     }
 }

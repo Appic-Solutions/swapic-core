@@ -86,8 +86,12 @@ pub fn icp_tokens_held<S: Store>(state: &State<S>) -> Option<String> {
         .pool_payouts()
         .into_iter()
         .find(|(_, payout)| {
+            // a burned ck withdrawal holds no token and spends no more ckETH, for days at worst
             matches!(payout.kind, PayoutKind::IcpSwap(_))
-                && !matches!(payout.status, PayoutStatus::Paid | PayoutStatus::Undone(_))
+                && !matches!(
+                    payout.status,
+                    PayoutStatus::Paid | PayoutStatus::Undone(_) | PayoutStatus::CkWithdrawn
+                )
         })
         .map(|(id, _)| format!("the ICP swap payout {id} is open"))
 }

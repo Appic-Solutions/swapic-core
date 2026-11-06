@@ -227,6 +227,7 @@ fn the_queue_is_served_in_order_when_the_pocket_refills() {
                         shares: w.burned,
                     },
                     plan: None,
+                    ck: Default::default(),
                 },
                 PoolStep::PayoutAmountKnown {
                     id: next_id,
@@ -276,6 +277,70 @@ impl PlanReads for Fake {
         Err(settlement_api::types::pool::PoolError::Unavailable(
             "no checks here".to_string(),
         ))
+    }
+}
+
+// the pass drives a ck payout through `ck::drive`; `ck/tests.rs` covers it
+impl crate::pool::ck::CkCalls for Fake {
+    fn own_principal(&self) -> Principal {
+        Principal::management_canister()
+    }
+
+    async fn ck_balance(
+        &self,
+        _: Principal,
+        _: crate::ic::Account,
+    ) -> Result<TokenAmount, CallError> {
+        unreachable!("no ck payout in this suite")
+    }
+
+    async fn ck_transfer(
+        &self,
+        _: Principal,
+        _: Option<[u8; 32]>,
+        _: crate::ic::Account,
+        _: TokenAmount,
+        _: Dedup,
+    ) -> Result<u64, CallError> {
+        unreachable!("no ck payout in this suite")
+    }
+
+    async fn ck_approve(
+        &self,
+        _: Principal,
+        _: Option<[u8; 32]>,
+        _: Principal,
+        _: TokenAmount,
+        _: Dedup,
+    ) -> Result<(), CallError> {
+        unreachable!("no ck payout in this suite")
+    }
+
+    async fn ck_withdraw(
+        &self,
+        _: Principal,
+        _: Principal,
+        _: TokenAmount,
+        _: String,
+        _: [u8; 32],
+    ) -> Result<crate::ic::RetrieveErc20Request, crate::ic::WithdrawFailure> {
+        unreachable!("no ck payout in this suite")
+    }
+
+    async fn ck_listed(
+        &self,
+        _: Principal,
+        _: crate::ic::Account,
+    ) -> Result<Vec<crate::ic::WithdrawalDetail>, CallError> {
+        unreachable!("no ck payout in this suite")
+    }
+
+    async fn ck_status(
+        &self,
+        _: Principal,
+        _: u64,
+    ) -> Result<Vec<crate::ic::WithdrawalDetail>, CallError> {
+        unreachable!("no ck payout in this suite")
     }
 }
 
@@ -406,6 +471,7 @@ fn an_undo_at_the_deadline_is_exact() {
                 terms: terms(deadline),
                 undo: Undo::Refund { to: account(6) },
                 plan: None,
+                ck: Default::default(),
             },
             at(2),
         )
@@ -530,6 +596,7 @@ fn waiting_withdrawal_again(staker: EvmAddress) -> u64 {
                 shares: burned,
             },
             plan: None,
+            ck: Default::default(),
         },
         PoolStep::PayoutAmountKnown {
             id,
@@ -929,6 +996,7 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
                 terms: terms(at(1_000_000_000_000)),
                 undo: Undo::Refund { to: account(6) },
                 plan: None,
+                ck: Default::default(),
             },
             at(2),
         )
@@ -1072,6 +1140,7 @@ fn a_stopped_icp_swap_a_controller_refunds_is_refunded_by_the_pass() {
                 terms: terms(at(1_000_000_000_000)),
                 undo: Undo::Refund { to: account(6) },
                 plan: None,
+                ck: Default::default(),
             },
             at(2),
         )
@@ -1329,4 +1398,67 @@ fn a_fill_read_too_early_is_not_asked_again_within_one_wait() {
 fn base_depth() -> u64 {
     crate::tx::credit_confirmations(&crate::storage::config::get(), ChainId::BASE)
         .map_or(0, |depth| depth.get())
+}
+
+/// A ck payout's places in the pass: its drive while it moves, today's undo up to its known
+/// amount, and from its withdrawal on no deadline undoes it.
+#[test]
+fn a_ck_payout_is_driven_and_past_its_withdrawal_no_deadline_undoes_it() {
+    let settings = PayoutSettings::default();
+    let terms = PayoutTerms {
+        dst_chain: types::ChainId::ETHEREUM,
+        recipient: EvmAddress::new([1; 20]),
+        token_out: EvmAddress::new([2; 20]),
+        min_out: TokenAmount::from(1_u8),
+        deadline: Timestamp::from_nanos(100),
+    };
+    let swap = IcpSwapTerms {
+        token_in: Principal::anonymous(),
+        amount_in: TokenAmount::from(10_u8),
+        from: types::pool::IcpAccount {
+            owner: Principal::anonymous(),
+            subaccount: None,
+        },
+        min_usdc: TokenAmount::from(10_u8),
+        premium: TokenAmount::ZERO,
+        network_fee: TokenAmount::from(1_u8),
+        refund_to: types::pool::IcpAccount {
+            owner: Principal::anonymous(),
+            subaccount: None,
+        },
+        slippage_bps: None,
+        planned: None,
+    };
+    let mut payout = EvmPayout::new(
+        1,
+        types::pool::PayoutKind::IcpSwap(swap),
+        terms,
+        types::pool::Undo::Refund { to: swap.refund_to },
+        Timestamp::from_nanos(1),
+    );
+    payout.ck = Some(types::pool::CkLeg::default());
+    let at = |payout: &EvmPayout, nanos: u64| {
+        next(
+            payout,
+            &settings,
+            Timestamp::from_nanos(nanos),
+            false,
+            Waits::default(),
+        )
+    };
+    for status in [
+        PayoutStatus::Opened,
+        PayoutStatus::Swapping,
+        PayoutStatus::Known,
+    ] {
+        payout.status = status;
+        assert_eq!(at(&payout, 50), Next::Ck);
+    }
+    payout.status = PayoutStatus::Known;
+    assert!(matches!(at(&payout, 100), Next::Undo { checked: false, .. }));
+    for status in [PayoutStatus::CkWithdrawing, PayoutStatus::CkWithdrawn] {
+        payout.status = status;
+        assert_eq!(at(&payout, 50), Next::Ck);
+        assert_eq!(at(&payout, 1_000), Next::Ck);
+    }
 }

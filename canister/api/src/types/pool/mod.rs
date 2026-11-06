@@ -13,7 +13,9 @@ pub use rebalance::{MoveDirection, MoveResolution, MoveStatus, MoveView, Rebalan
 pub use routes::{IcpRoute, IcpRouteVia, IcpRoutesView};
 
 pub use payout::{
-    EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutPlan, PayoutResolution, PayoutSettings,
+    status_of,
+    CkResolution, CkSettings, CkSwapTerms, EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutPlan,
+    PayoutResolution, PayoutSettings,
     PayoutStatus, PayoutTerms, PayoutView, PayoutWaiting,
 };
 

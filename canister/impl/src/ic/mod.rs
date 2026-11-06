@@ -863,17 +863,18 @@ pub async fn icrc2_approve(
     }
 }
 
-/// An ICRC-2 approval of `spender` for `amount` from the canister's own account,
-/// deduplicated: a retry with the same pair is the same approval, which the ledger
-/// answers `Duplicate`, so its fee is spent once.
+/// An ICRC-2 approval of `spender` for `amount` from the canister's account at
+/// `from_subaccount`, deduplicated: a retry with the same pair is the same approval, which the
+/// ledger answers `Duplicate`, so its fee is spent once.
 pub async fn icrc2_approve_once(
     ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
     spender: Principal,
     amount: Nat,
     dedup: Dedup,
 ) -> Result<(), CallError> {
     let arg = ApproveArgs {
-        from_subaccount: None,
+        from_subaccount: from_subaccount.map(|bytes| bytes.to_vec()),
         spender: Account::of(spender, None),
         amount,
         expected_allowance: None,
@@ -1232,8 +1233,9 @@ pub enum WithdrawFailure {
     Unknown(String),
 }
 
-/// `withdraw_erc20` to `recipient`. The withdrawal id is the ckETH burn's block index, as
-/// the minter numbers withdrawals.
+/// `withdraw_erc20` to `recipient`, the ckERC20 burned from the canister's account at
+/// `from_subaccount`. The withdrawal id is the ckETH burn's block index, as the minter numbers
+/// withdrawals.
 // the minter's own candid sets the size of its refusals
 #[allow(clippy::result_large_err)]
 pub async fn withdraw_erc20(
@@ -1241,13 +1243,14 @@ pub async fn withdraw_erc20(
     ckerc20_ledger: Principal,
     amount: Nat,
     recipient: String,
+    from_subaccount: Option<[u8; 32]>,
 ) -> Result<RetrieveErc20Request, WithdrawFailure> {
     let arg = WithdrawErc20Arg {
         amount,
         ckerc20_ledger_id: ckerc20_ledger,
         recipient,
         from_cketh_subaccount: None,
-        from_ckerc20_subaccount: None,
+        from_ckerc20_subaccount: from_subaccount.map(|bytes| bytes.to_vec()),
     };
     let (answer,): (Result<RetrieveErc20Request, WithdrawErc20Error>,) =
         call(minter, "withdraw_erc20", (arg,))
@@ -1265,6 +1268,20 @@ pub async fn withdrawal_status(
         minter,
         "withdrawal_status",
         (WithdrawalSearchParameter::ByWithdrawalId(withdrawal_id),),
+    )
+    .await?;
+    Ok(details)
+}
+
+/// The minter's withdrawals from `account`: a per payout subaccount names at most its own.
+pub async fn withdrawals_of(
+    minter: Principal,
+    account: Account,
+) -> Result<Vec<WithdrawalDetail>, CallError> {
+    let (details,): (Vec<WithdrawalDetail>,) = call(
+        minter,
+        "withdrawal_status",
+        (WithdrawalSearchParameter::BySenderAccount(account),),
     )
     .await?;
     Ok(details)

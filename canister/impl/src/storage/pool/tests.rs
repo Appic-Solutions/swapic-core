@@ -368,6 +368,7 @@ fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
                     shares: burned,
                 },
                 plan: None,
+                ck: Default::default(),
             },
             PoolStep::PayoutAmountKnown {
                 id: 0,
@@ -506,6 +507,7 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
                 shares: burned,
             },
             plan: None,
+            ck: Default::default(),
         },
         PoolStep::PayoutAmountKnown {
             id,

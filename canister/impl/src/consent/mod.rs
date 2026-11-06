@@ -1,5 +1,5 @@
-//! ICRC-21 consent messages for the four doors a wallet calls for its user: `swap_from_icp`,
-//! `stake_icp`, `withdraw_icp` and `withdraw_evm`. The argument is decoded exactly as the
+//! ICRC-21 consent messages for the five doors a wallet calls for its user: `swap_from_icp`,
+//! `swap_from_icp_ck`, `stake_icp`, `withdraw_icp` and `withdraw_evm`. The argument is decoded exactly as the
 //! door decodes it (its types, its decoder quotas), the door's own wire conversion reads it,
 //! and a swap's payout plan is read by the canister's own reader, so the message states what
 //! the door will act on. The facts are one list, rendered twice: Markdown for a generic
@@ -16,7 +16,7 @@ pub mod text;
 pub mod tokens;
 
 use crate::pool::icp::{StakeRequest, WithdrawRequest};
-use crate::pool::{icp_swap, pay, withdraw};
+use crate::pool::{ck, icp_swap, pay, withdraw};
 use candid::de::DecoderConfig;
 use candid::utils::ArgumentDecoder;
 use candid::Principal;
@@ -26,7 +26,7 @@ use settlement_api::types::icrc21::{
     TextValue, TimestampSeconds, Value,
 };
 use settlement_api::types::pool::{
-    EvmWithdrawal, IcpSwapTerms, PoolError, StakeIcpArgs, WithdrawIcpArgs,
+    CkSwapTerms, EvmWithdrawal, IcpSwapTerms, PoolError, StakeIcpArgs, WithdrawIcpArgs,
 };
 use std::fmt;
 use text::{
@@ -53,6 +53,7 @@ pub const LANGUAGE: &str = "en";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Door {
     SwapFromIcp,
+    SwapFromIcpCk,
     StakeIcp,
     WithdrawIcp,
     WithdrawEvm,
@@ -62,6 +63,7 @@ impl Door {
     pub fn of(method: &str) -> Option<Self> {
         match method {
             "swap_from_icp" => Some(Self::SwapFromIcp),
+            "swap_from_icp_ck" => Some(Self::SwapFromIcpCk),
             "stake_icp" => Some(Self::StakeIcp),
             "withdraw_icp" => Some(Self::WithdrawIcp),
             "withdraw_evm" => Some(Self::WithdrawEvm),
@@ -72,6 +74,7 @@ impl Door {
     pub const fn method(self) -> &'static str {
         match self {
             Self::SwapFromIcp => "swap_from_icp",
+            Self::SwapFromIcpCk => "swap_from_icp_ck",
             Self::StakeIcp => "stake_icp",
             Self::WithdrawIcp => "withdraw_icp",
             Self::WithdrawEvm => "withdraw_evm",
@@ -89,8 +92,8 @@ impl fmt::Display for Door {
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Refusal {
     #[error(
-        "{method} has no consent message: Swapic describes only swap_from_icp, stake_icp, \
-         withdraw_icp and withdraw_evm"
+        "{method} has no consent message: Swapic describes only swap_from_icp, \
+         swap_from_icp_ck, stake_icp, withdraw_icp and withdraw_evm"
     )]
     NoMessage { method: String },
     /// Candid's own reason, bounded.
@@ -308,6 +311,10 @@ pub fn consent(method: &str, arg: &[u8], known: &Known) -> Result<Consent, Refus
             let (terms,): (IcpSwapTerms,) = decode(door, arg)?;
             swap(door, terms, known)
         }
+        Door::SwapFromIcpCk => {
+            let (terms,): (CkSwapTerms,) = decode(door, arg)?;
+            swap_ck(door, terms, known)
+        }
         Door::StakeIcp => {
             let (args,): (StakeIcpArgs,) = decode(door, arg)?;
             stake(door, args, known)
@@ -372,6 +379,62 @@ fn token_line(chain: ChainId, token: EvmAddress, name: TokenName) -> String {
         TokenName::NativeOf(_) => format!("{}'s own coin", ChainText(chain)),
         TokenName::IcpLedger(_) | TokenName::Evm(_) => token.to_string(),
     }
+}
+
+/// `swap_from_icp_ck`: the words of `swap_from_icp`, with what this route adds said plainly:
+/// its network fee, and that a refund after the minter burned keeps it.
+fn swap_ck(door: Door, terms: CkSwapTerms, known: &Known) -> Result<Consent, Refusal> {
+    let request = ck::request_of(known.caller, terms).map_err(refused(door))?;
+    let sent = known.icp_token(request.token_in);
+    let chain = ChainText(request.terms.dst_chain);
+    let gets = Amount {
+        units: request.terms.min_out,
+        token: known.evm_token(request.terms.dst_chain, request.terms.token_out),
+    };
+    let refund = known.account(request.refund_to, request.from);
+    Ok(Consent {
+        intent: format!("Swap {} to {chain}", sent.short()),
+        lines: vec![
+            Line::text(
+                "You send",
+                format!(
+                    "{}, plus the ledger fee",
+                    Amount {
+                        units: request.amount_in,
+                        token: sent
+                    }
+                ),
+            ),
+            Line::text(
+                "From",
+                AccountText::Yours {
+                    subaccount: request.from.subaccount,
+                },
+            ),
+            Line::text("Recipient gets at least", format!("{gets} on {chain}")),
+            Line::text(
+                "Token",
+                token_line(request.terms.dst_chain, request.terms.token_out, gets.token),
+            ),
+            Line::text("Recipient", request.terms.recipient),
+            Line::text(
+                "Network fee",
+                Amount {
+                    units: request.network_fee,
+                    token: CKUSDC,
+                },
+            ),
+            Line::text("Route", "the ckETH minter pays the recipient"),
+            Line::time("Deadline", request.terms.deadline),
+            Line::text(
+                "If it can't finish",
+                format!(
+                    "refunded to {refund}, in ckUSDC or the token you sent, less ledger fees, \
+                     and less the network fee if the minter already burned it"
+                ),
+            ),
+        ],
+    })
 }
 
 fn swap(door: Door, terms: IcpSwapTerms, known: &Known) -> Result<Consent, Refusal> {

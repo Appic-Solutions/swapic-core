@@ -198,6 +198,14 @@ pub enum PayoutStatus {
     /// (`reclaim`).
     #[n(12)]
     Unfilled,
+    /// A swap through the ck minter ([`CkLeg`]): its lines are down and its withdrawal is on
+    /// its way, nothing burned yet that the canister knows of.
+    #[n(13)]
+    CkWithdrawing,
+    /// The ck minter burned its ckUSDC: never undone on ICP from here but by the minter's own
+    /// reimbursement. The withdrawal's id is on its [`CkLeg`].
+    #[n(14)]
+    CkWithdrawn,
 }
 
 /// The most times a planned swap's plan is tried before its payout is left to the watcher's
@@ -207,8 +215,14 @@ pub const MAX_FIT_TRIES: u8 = 3;
 /// Why a payout a controller refunded is undone.
 pub const REFUNDED: &str = "refunded by a controller";
 
+/// Why a ck withdrawal the minter reimbursed is undone.
+pub const CK_REIMBURSED: &str = "the ck minter reimbursed the withdrawal";
+
+/// Why a ck withdrawal that burned nothing is undone.
+pub const CK_NOT_BURNED: &str = "the ck minter burned nothing";
+
 /// What a controller decided for a payout stopped for a human (`resolve_payout`): its
-/// money back to its user, or its money found delivered.
+/// money back to its user, its money found delivered, or the drive asked to go on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum PayoutResolution {
     /// Undone: an ICP swap's refund (all it made less one ledger fee, `refund_of`), a
@@ -218,6 +232,10 @@ pub enum PayoutResolution {
     /// Paid: its signed order ran after all, and the paid line is booked, once.
     #[n(1)]
     MarkPaid,
+    /// Back on the path it stopped on: legs that stopped on their way back are quoted again,
+    /// a ck withdrawal is read again. Moves no money and no line.
+    #[n(2)]
+    Retry,
 }
 
 /// Where the Base pocket's USDC of an unfilled Eco intent stands: owed back by Eco (in the
@@ -254,6 +272,118 @@ pub struct PinnedOrder {
     /// The order's own deadline, in seconds.
     #[n(3)]
     pub deadline_s: u64,
+}
+
+/// The burn's outcome a way back acts on, fixed when it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct CkBack {
+    /// What the burn subaccount holds to bring back to the main account: none when the
+    /// funding transfer never landed, so nothing left the main account.
+    #[n(0)]
+    pub left: TokenAmount,
+    /// The minter burned the ckUSDC and reimbursed it: its gas is spent, so the network fee
+    /// stays. Otherwise nothing was burned and the network fee goes back with the refund.
+    #[n(1)]
+    pub burned: bool,
+}
+
+/// A swap's payout through the ck minter (d1): the minter pays USDC on Ethereum to the
+/// recipient from the payout's own burn subaccount, and the canister signs nothing there.
+///
+/// Who pays the two ledger fees of the way out: the user, out of the hold, so the main
+/// account falls by exactly what `icp.reserved` and `owed` fall by and `fees_icp` keeps the
+/// whole network fee. The hold funds the subaccount with `amount` and one fee (the main
+/// account's transfer takes the other), and the approval takes that one, leaving `amount`
+/// for the burn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct CkLeg {
+    /// The funding transfer's and approval's `created_at_time`, once its withdrawal began.
+    #[n(0)]
+    pub created_at: Option<Timestamp>,
+    /// What the minter burns and pays on Ethereum, fixed when its withdrawal began: the hold
+    /// less `fee` twice.
+    #[n(1)]
+    pub amount: Option<TokenAmount>,
+    /// The ckUSDC ledger's fee, fixed with it: every retry is the same transfer.
+    #[n(2)]
+    pub fee: Option<TokenAmount>,
+    /// The minter's id of the withdrawal, once it burned.
+    #[n(3)]
+    pub withdrawal_id: Option<u64>,
+    /// Its way back, once proven: the lines are up again and the refund is on its way.
+    #[n(4)]
+    pub back: Option<CkBack>,
+}
+
+impl CkLeg {
+    /// Whether its withdrawal began, so its lines are down until a way back brings them up.
+    pub fn began(&self) -> bool {
+        self.created_at.is_some()
+    }
+
+    /// Whether a refund is still barred: its withdrawal began and nothing proved a way back.
+    pub fn refund_barred(&self) -> bool {
+        self.began() && self.back.is_none()
+    }
+
+    /// What the funding transfer moves to the subaccount: the burn and the approval's fee.
+    pub fn funding(&self) -> Option<TokenAmount> {
+        self.amount?.checked_add(self.fee?)
+    }
+
+    /// What a way back moves to the main account, and what is then held for the refund.
+    pub fn brought_back(&self, hold: TokenAmount) -> Option<TokenAmount> {
+        let back = self.back?;
+        if back.left == TokenAmount::ZERO {
+            return Some(hold);
+        }
+        back.left.checked_sub(self.fee?)
+    }
+}
+
+/// The two ledger fees a ck payout's way out takes: its funding transfer and its approval.
+pub const CK_LEDGER_FEES: u8 = 2;
+
+/// What the minter burns of a ck payout's `hold`: the hold less both ledger fees. None when
+/// they take all of it.
+pub fn ck_burn(hold: TokenAmount, fee: TokenAmount) -> Option<TokenAmount> {
+    hold.checked_sub(fee.checked_mul(CK_LEDGER_FEES)?)
+        .filter(|amount| *amount > TokenAmount::ZERO)
+}
+
+/// The least `min_usdc` a ck swap may carry: its `min_out`, its network fee and both ledger
+/// fees, so a sale at its floor still pays `min_out`.
+pub fn ck_least_usdc(
+    min_out: TokenAmount,
+    network_fee: TokenAmount,
+    fee: TokenAmount,
+) -> Option<TokenAmount> {
+    min_out
+        .checked_add(network_fee)?
+        .checked_add(fee.checked_mul(CK_LEDGER_FEES)?)
+}
+
+/// A ck payout's burn subaccount, `keccak256("swapic.pool.v1.ck" ‖ id)` (the id as 8 bytes,
+/// big endian). Its own for each payout: once emptied a second burn cannot happen, and the
+/// minter's `BySenderAccount` names its one withdrawal.
+pub fn ck_subaccount(id: u64) -> [u8; 32] {
+    let mut preimage = b"swapic.pool.v1.ck".to_vec();
+    preimage.extend_from_slice(&id.to_be_bytes());
+    alloy_primitives::keccak256(&preimage).0
+}
+
+/// The memo of a ck payout's transfers and approvals on the way out.
+pub fn ck_memo(id: u64) -> [u8; 32] {
+    let mut preimage = b"swapic.pool.v1.ck.out".to_vec();
+    preimage.extend_from_slice(&id.to_be_bytes());
+    alloy_primitives::keccak256(&preimage).0
+}
+
+/// The memo of the transfer that brings a ck payout's ckUSDC back to the main account.
+pub fn ck_back_memo(id: u64) -> [u8; 32] {
+    let mut preimage = b"swapic.pool.v1.ck.back".to_vec();
+    preimage.extend_from_slice(&id.to_be_bytes());
+    alloy_primitives::keccak256(&preimage).0
 }
 
 /// A payout from the Base pocket.
@@ -343,6 +473,9 @@ pub struct EvmPayout {
     /// revert's before). None on a revert recorded before it was, read at once.
     #[n(25)]
     pub reverted_at: Option<Timestamp>,
+    /// A swap paid through the ck minter, never from the Base pocket.
+    #[n(26)]
+    pub ck: Option<CkLeg>,
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -415,6 +548,7 @@ impl EvmPayout {
             fill_early_at: None,
             reverted_block: None,
             reverted_at: None,
+            ck: None,
         }
     }
 
@@ -447,11 +581,33 @@ impl EvmPayout {
         }
     }
 
-    /// An ICP swap's network fee, on the ICP fee line once its ckUSDC is known.
+    /// An ICP swap's network fee, on the ICP fee line once its ckUSDC is known and until its
+    /// undo gives it back. A burned ck withdrawal's stays there: its gas was spent.
     pub fn icp_fee(&self) -> TokenAmount {
+        if self.ck_back().is_some_and(|back| back.burned) {
+            return TokenAmount::ZERO;
+        }
         match (&self.kind, self.received) {
             (PayoutKind::IcpSwap(terms), Some(_)) => terms.network_fee,
             _ => TokenAmount::ZERO,
+        }
+    }
+
+    /// Its ck way back, once proven.
+    pub fn ck_back(&self) -> Option<CkBack> {
+        self.ck.as_ref()?.back
+    }
+
+    /// What its undo refunds after a ck way back, before the refund's own fee: what came
+    /// back to the main account, and the network fee when nothing was burned.
+    pub fn ck_refundable(&self) -> Option<TokenAmount> {
+        let ck = self.ck.as_ref()?;
+        let back = ck.back?;
+        let held = ck.brought_back(self.owed())?;
+        if back.burned {
+            Some(held)
+        } else {
+            held.checked_add(self.network_fee())
         }
     }
 
@@ -502,6 +658,26 @@ pub struct PayoutSettings {
     /// destination chain from the chains' own least fees ([`cctp_payout_floor`]).
     #[n(4)]
     pub cctp_payouts: bool,
+    /// The ck minter's slow route. None: off.
+    #[n(5)]
+    pub ck: Option<CkSettings>,
+}
+
+/// The ck minter's slow route, one set of numbers the door and the quote read alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct CkSettings {
+    /// Whether the door takes new swaps. Those already on their way go on whatever it says.
+    #[n(0)]
+    pub open: bool,
+    /// The least network fee a swap carries, micro USDC: at or above
+    /// `ck_swap_fee_allowance` at ETH's price, so the canister never loses on the burn. The
+    /// canister reads no price: a controller sets it.
+    #[n(1)]
+    pub min_network_fee: TokenAmount,
+    /// The most ckETH, in wei, the minter may burn for one swap's gas: a higher price of the
+    /// moment fails with nothing burned. Apart from `cketh_fee_allowance`, which moves use.
+    #[n(2)]
+    pub ck_swap_fee_allowance: TokenAmount,
 }
 
 /// The least network fee a CCTP payout from the pool chain to a destination carries: the
@@ -531,6 +707,7 @@ impl Default for PayoutSettings {
             order_wait: Duration::from_secs(120),
             max_payout_gas: 2_000_000,
             cctp_payouts: false,
+            ck: None,
         }
     }
 }
@@ -542,6 +719,8 @@ pub enum PayoutSettingsError {
     OrderWait,
     #[error("max_payout_gas must be between {MIN_PAYOUT_GAS} and {MAX_PAYOUT_GAS}")]
     Gas,
+    #[error("the ck route's least network fee and its ckETH allowance must be above zero")]
+    Ck,
 }
 
 impl PayoutSettings {
@@ -566,6 +745,12 @@ impl PayoutSettings {
         }
         if !(MIN_PAYOUT_GAS..=MAX_PAYOUT_GAS).contains(&self.max_payout_gas) {
             return Err(PayoutSettingsError::Gas);
+        }
+        if self.ck.is_some_and(|ck| {
+            ck.min_network_fee == TokenAmount::ZERO
+                || ck.ck_swap_fee_allowance == TokenAmount::ZERO
+        }) {
+            return Err(PayoutSettingsError::Ck);
         }
         Ok(())
     }

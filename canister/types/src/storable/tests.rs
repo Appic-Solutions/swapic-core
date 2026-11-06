@@ -1069,6 +1069,8 @@ fn timer_state_samples() -> Vec<Sample> {
                     tried_at: Some(at(19)),
                 },
             )]),
+            // absent, so this sample's bytes stay the ones the golden pins
+            ck_reads: None,
         },
     )]
 }
@@ -1152,6 +1154,7 @@ fn planned_swap_samples() -> Vec<Sample> {
         terms,
         undo,
         plan: Some(Box::new(plan)),
+        ck: Default::default(),
     };
     vec![
         sample("payout of a planned ICP swap", payout),
@@ -1920,6 +1923,7 @@ fn arrival_terms_samples() -> Vec<Sample> {
                     order_wait: Duration::from_secs(913),
                     max_payout_gas: 914_000,
                     cctp_payouts: true,
+                    ck: None,
                 },
             },
         ),
@@ -2605,6 +2609,7 @@ fn payout_samples() -> Vec<Sample> {
         fill_early_at: None,
         reverted_block: None,
         reverted_at: None,
+        ck: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
@@ -2633,6 +2638,7 @@ fn payout_samples() -> Vec<Sample> {
                 order_wait: Duration::from_secs(240),
                 max_payout_gas: 241_000,
                 cctp_payouts: false,
+                ck: None,
             }),
             next_id: 242,
             fees_icp: TokenAmount::from(243_u8),
@@ -2661,6 +2667,7 @@ fn payout_samples() -> Vec<Sample> {
                 terms,
                 undo: Undo::Refund { to: swap.refund_to },
                 plan: None,
+                ck: Default::default(),
             },
         ),
         (
@@ -2671,6 +2678,7 @@ fn payout_samples() -> Vec<Sample> {
                 terms,
                 undo: withdrawn.undo,
                 plan: None,
+                ck: Default::default(),
             },
         ),
         (

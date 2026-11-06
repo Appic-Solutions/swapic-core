@@ -4,7 +4,7 @@ use crate::consent::{self, Known};
 use ic_cdk::update;
 pub use settlement_api::types::icrc21::{ConsentMessageRequest, ConsentMessageResponse};
 
-/// ICRC-21: a plain-words description of a call to `swap_from_icp`, `stake_icp`,
+/// ICRC-21: a plain-words description of a call to `swap_from_icp`, `swap_from_icp_ck`, `stake_icp`,
 /// `withdraw_icp` or `withdraw_evm`, read from its argument exactly as that door reads it,
 /// for a wallet to show its user before it signs; an ICRC-21 error for any other call or an
 /// argument the door would not take. Any caller, anonymous included; never halted; writes

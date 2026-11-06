@@ -626,6 +626,10 @@ impl PoolLedger {
             | PoolStep::PayoutResolved { .. }
             | PoolStep::PayoutFitWaited { .. }
             | PoolStep::PayoutFillEarly { .. }
+            | PoolStep::PayoutCkWithdrawing { .. }
+            | PoolStep::PayoutCkWithdrawn { .. }
+            | PoolStep::PayoutCkLanded { .. }
+            | PoolStep::PayoutCkReimbursed { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }
@@ -981,6 +985,10 @@ impl PoolLedger {
             | PoolStep::PayoutResolved { .. }
             | PoolStep::PayoutFitWaited { .. }
             | PoolStep::PayoutFillEarly { .. }
+            | PoolStep::PayoutCkWithdrawing { .. }
+            | PoolStep::PayoutCkWithdrawn { .. }
+            | PoolStep::PayoutCkLanded { .. }
+            | PoolStep::PayoutCkReimbursed { .. }
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }

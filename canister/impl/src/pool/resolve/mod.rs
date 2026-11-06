@@ -9,6 +9,8 @@
 //!   transfer), else now; a withdrawal's shares are minted back in the same call.
 //! - `MarkPaid`: its signed order ran after all (a reorg turned its revert into a payment):
 //!   the paid line, once.
+//! - `Retry`: back on the path it stopped on, nothing moved: an ICP swap's legs that stopped on
+//!   their way back are quoted again, once the pool is healthy.
 //!
 //! A deposit's payout stopped on ICP (`DepositStatus::PayoutFailed`) and an ICP stake whose
 //! pull can no longer be asked are not payouts from the Base pocket, keyed by a ref and an op
@@ -118,6 +120,7 @@ pub fn resolve(
     let (resolution, refund_at) = match resolution {
         WireResolution::Refund => (PayoutResolution::Refund, Some(refund_at(&payout, now))),
         WireResolution::MarkPaid => (PayoutResolution::MarkPaid, None),
+        WireResolution::Retry => (PayoutResolution::Retry, None),
     };
     record(
         PoolStep::PayoutResolved {

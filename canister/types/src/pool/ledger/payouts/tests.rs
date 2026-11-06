@@ -4,8 +4,8 @@ use crate::evm::EvmAddress;
 use crate::hash::TxHash;
 use crate::numeric::{BlockNumber, Nonce, Timestamp, TokenAmount};
 use crate::pool::payout::{
-    EvmWithdrawal, IcpSwapTerms, PayoutKind, PayoutSettings, PayoutStatus, PayoutTerms,
-    PinnedOrder, Undo,
+    CkSettings, EvmWithdrawal, Flag, IcpSwapTerms, PayoutKind, PayoutResolution, PayoutSettings,
+    PayoutStatus, PayoutTerms, PinnedOrder, Undo,
 };
 use crate::pool::{
     DepositKind, PoolAccount, PoolRail, PoolStep, PoolStepError, Registration, Shares,
@@ -152,6 +152,7 @@ fn open(pool: &mut Pool, kind: PayoutKind, undo: Undo) -> u64 {
         terms: terms(),
         undo,
         plan: None,
+        ck: Default::default(),
     })
     .unwrap();
     id
@@ -307,6 +308,7 @@ fn a_withdrawal_is_refused_on_a_used_nonce_a_small_burn_or_a_burn_above_its_cap(
         terms: terms(),
         undo,
         plan: None,
+        ck: Default::default(),
     };
     assert_eq!(
         pool.step(step(kind, undo)),
@@ -348,6 +350,7 @@ fn a_withdrawal_is_refused_on_a_used_nonce_a_small_burn_or_a_burn_above_its_cap(
             terms: terms(),
             undo,
             plan: None,
+            ck: Default::default(),
         }),
         Err(PoolStepError::PayoutId { expected: id })
     );
@@ -1262,6 +1265,7 @@ fn open_planned(
         terms: terms(),
         undo: Undo::Refund { to: swap.refund_to },
         plan: Some(Box::new(plan)),
+        ck: Default::default(),
     })?;
     Ok(id)
 }
@@ -1741,4 +1745,381 @@ fn a_fill_read_too_early_is_noted_on_a_delivering_payout_only() {
     })
     .unwrap();
     assert!(pool.step(PoolStep::PayoutFillEarly { id }).is_err());
+}
+
+/// What a ck swap holds: 100 USDC made, 0.67 network fee, 99.33 held and owed.
+const CK_RECEIVED: u64 = 100_000_000;
+const CK_NETWORK_FEE: u64 = 670_000;
+const CK_HOLD: u64 = CK_RECEIVED - CK_NETWORK_FEE;
+/// The ledger's fee in `settings_with_fee`.
+const CK_FEE: u64 = 10_000;
+const CK_BURN: u64 = CK_HOLD - 2 * CK_FEE;
+
+/// A pool whose lines a double subtraction would show on: ICP stake on `free`, a Base payout
+/// in flight, and another swap's ckUSDC reserved.
+fn pool_with_live_lines() -> (Pool, u64, u64) {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(500), 9, 90);
+    pool.step(PoolStep::PayoutSettingsSet {
+        settings: PayoutSettings {
+            ck: Some(CkSettings {
+                open: true,
+                min_network_fee: TokenAmount::from(CK_NETWORK_FEE),
+                ck_swap_fee_allowance: TokenAmount::from(1_u8),
+            }),
+            ..PayoutSettings::default()
+        },
+    })
+    .unwrap();
+    // a planless swap paying from Base, reserved on ICP and in flight on Base
+    let (kind, undo) = icp_swap(usdc(50));
+    let live = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutPulled {
+        id: live,
+        block: 1,
+        attempt: None,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutAmountKnown {
+        id: live,
+        amount: usdc(50)
+            .checked_sub(TokenAmount::from(60_000_u32))
+            .unwrap(),
+        received: Some(usdc(50)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id: live }).unwrap();
+    pool.step(signed(live, order(1))).unwrap();
+    let ck = ck_known(&mut pool);
+    (pool, live, ck)
+}
+
+/// A ck swap with its amount known.
+fn ck_known(pool: &mut Pool) -> u64 {
+    let swap = IcpSwapTerms {
+        token_in: candid::Principal::from_slice(&[0x31; 10]),
+        amount_in: TokenAmount::from(CK_RECEIVED),
+        from: recipient(5),
+        min_usdc: TokenAmount::from(CK_RECEIVED),
+        premium: TokenAmount::ZERO,
+        network_fee: TokenAmount::from(CK_NETWORK_FEE),
+        refund_to: recipient(6),
+        slippage_bps: None,
+        planned: None,
+    };
+    let id = pool.ledger.lines().next_id;
+    pool.step(PoolStep::PayoutOpened {
+        id,
+        kind: Box::new(PayoutKind::IcpSwap(swap)),
+        terms: PayoutTerms {
+            min_out: TokenAmount::from(CK_BURN),
+            ..terms()
+        },
+        undo: Undo::Refund { to: swap.refund_to },
+        plan: None,
+        ck: Flag(true),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutPulled {
+        id,
+        block: 2,
+        attempt: None,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount: TokenAmount::from(CK_HOLD),
+        received: Some(TokenAmount::from(CK_RECEIVED)),
+    })
+    .unwrap();
+    id
+}
+
+fn withdrawing(pool: &mut Pool, id: u64) {
+    pool.step(PoolStep::PayoutCkWithdrawing {
+        id,
+        created_at: Timestamp::from_nanos(9),
+        amount: TokenAmount::from(CK_BURN),
+        fee: TokenAmount::from(CK_FEE),
+    })
+    .unwrap();
+}
+
+/// Every line the ck steps must leave alone, and those they move.
+#[derive(Debug, PartialEq, Eq)]
+struct Lines {
+    icp_free: TokenAmount,
+    icp_reserved: TokenAmount,
+    base: crate::pool::Pocket,
+    owed: TokenAmount,
+    fees_icp: TokenAmount,
+    assets: TokenAmount,
+}
+
+fn lines(pool: &Pool) -> Lines {
+    Lines {
+        icp_free: pool.ledger.pockets.icp.free,
+        icp_reserved: pool.ledger.pockets.icp.reserved,
+        base: pool.ledger.pockets.base,
+        owed: pool.ledger.owed,
+        fees_icp: pool.ledger.lines().fees_icp,
+        assets: pool.ledger.total_assets(),
+    }
+}
+
+/// F6: its withdrawal takes its hold off `icp.reserved` and `owed`, once and only its own, and
+/// the fee line keeps the whole network fee; another swap's reserve and the Base pocket's
+/// flight stand. A landing moves nothing more.
+#[test]
+fn a_ck_withdrawal_takes_its_hold_alone_and_a_landing_moves_nothing() {
+    let (mut pool, _, id) = pool_with_live_lines();
+    let before = lines(&pool);
+    withdrawing(&mut pool, id);
+    let after = lines(&pool);
+    let hold = TokenAmount::from(CK_HOLD);
+    assert_eq!(
+        after.icp_reserved,
+        before.icp_reserved.checked_sub(hold).unwrap()
+    );
+    assert_eq!(after.owed, before.owed.checked_sub(hold).unwrap());
+    assert_eq!(after.fees_icp, before.fees_icp);
+    assert_eq!(after.icp_free, before.icp_free);
+    assert_eq!(after.base, before.base);
+    assert_eq!(after.assets, before.assets);
+    pool.step(PoolStep::PayoutCkWithdrawn {
+        id,
+        withdrawal_id: 12,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutCkLanded {
+        id,
+        tx_hash: TxHash::new([7; 32]),
+        by_controller: false,
+    })
+    .unwrap();
+    assert_eq!(lines(&pool), after);
+    assert_eq!(pool.payouts[&id].status, PayoutStatus::Paid);
+    assert!(!pool.ledger.lines().open.contains(&id));
+}
+
+/// A reimbursement adds back exactly what the withdrawal took, and its undo takes it once: no
+/// other reserve pays for it, and the network fee stays.
+#[test]
+fn a_reimbursed_ck_withdrawal_undoes_once_and_keeps_the_network_fee() {
+    let (mut pool, _, id) = pool_with_live_lines();
+    let known = lines(&pool);
+    withdrawing(&mut pool, id);
+    pool.step(PoolStep::PayoutCkWithdrawn {
+        id,
+        withdrawal_id: 12,
+    })
+    .unwrap();
+    let gone = lines(&pool);
+    pool.step(PoolStep::PayoutCkReimbursed {
+        id,
+        left: TokenAmount::from(CK_BURN),
+        block: Some(77),
+        burned: true,
+    })
+    .unwrap();
+    assert_eq!(lines(&pool), known);
+    assert!(matches!(
+        pool.payouts[&id].status,
+        PayoutStatus::Undoing(_)
+    ));
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: "refunded".to_string(),
+        block: Some(5),
+    })
+    .unwrap();
+    assert_eq!(lines(&pool), gone);
+    // what the user gets: the burn less the way back's fee and the refund's own
+    assert_eq!(
+        pool.payouts[&id].ck_refundable(),
+        Some(TokenAmount::from(CK_BURN - CK_FEE))
+    );
+}
+
+/// Nothing burned: the same, and the network fee goes back with the refund.
+#[test]
+fn a_ck_withdrawal_that_burned_nothing_gives_the_network_fee_back() {
+    let (mut pool, _, id) = pool_with_live_lines();
+    withdrawing(&mut pool, id);
+    let gone = lines(&pool);
+    pool.step(PoolStep::PayoutCkReimbursed {
+        id,
+        left: TokenAmount::from(CK_BURN),
+        block: None,
+        burned: false,
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutUndone {
+        id,
+        why: "refunded".to_string(),
+        block: Some(5),
+    })
+    .unwrap();
+    let done = lines(&pool);
+    assert_eq!(
+        done.fees_icp,
+        gone.fees_icp
+            .checked_sub(TokenAmount::from(CK_NETWORK_FEE))
+            .unwrap()
+    );
+    assert_eq!(done.icp_reserved, gone.icp_reserved);
+    assert_eq!(done.owed, gone.owed);
+    assert_eq!(
+        pool.payouts[&id].ck_refundable(),
+        Some(TokenAmount::from(CK_BURN - CK_FEE + CK_NETWORK_FEE))
+    );
+}
+
+/// None of what reaches the Base pocket reaches a ck swap, nor any undo past its withdrawal,
+/// and a withdrawal burns its hold less both ledger fees and nothing else.
+#[test]
+fn a_ck_swap_refuses_every_base_step_and_any_undo_past_its_withdrawal() {
+    let (mut pool, _, id) = pool_with_live_lines();
+    for step in [
+        PoolStep::PayoutQueued { id },
+        PoolStep::PayoutWaiting { id },
+    ] {
+        assert!(pool.step(step).is_err());
+    }
+    for (amount, fee) in [
+        (CK_BURN + 1, CK_FEE),
+        (CK_BURN - 1, CK_FEE),
+        (CK_BURN, CK_FEE - 1),
+    ] {
+        assert!(pool
+            .step(PoolStep::PayoutCkWithdrawing {
+                id,
+                created_at: Timestamp::from_nanos(9),
+                amount: TokenAmount::from(amount),
+                fee: TokenAmount::from(fee),
+            })
+            .is_err());
+    }
+    // nothing burned past the start: a reimbursement of a burn that was never recorded
+    assert!(pool
+        .step(PoolStep::PayoutCkReimbursed {
+            id,
+            left: TokenAmount::ZERO,
+            block: None,
+            burned: false,
+        })
+        .is_err());
+    withdrawing(&mut pool, id);
+    for step in [
+        PoolStep::PayoutUndoing {
+            id,
+            why: "late".to_string(),
+        },
+        PoolStep::PayoutUndone {
+            id,
+            why: "late".to_string(),
+            block: None,
+        },
+        PoolStep::PayoutCkReimbursed {
+            id,
+            left: TokenAmount::ZERO,
+            block: None,
+            burned: true,
+        },
+    ] {
+        assert!(pool.step(step).is_err());
+    }
+    pool.step(PoolStep::PayoutCkWithdrawn {
+        id,
+        withdrawal_id: 12,
+    })
+    .unwrap();
+    for step in [
+        PoolStep::PayoutUndoing {
+            id,
+            why: "late".to_string(),
+        },
+        PoolStep::PayoutUndone {
+            id,
+            why: "late".to_string(),
+            block: None,
+        },
+        PoolStep::PayoutStopped {
+            id,
+            why: "stop".to_string(),
+        },
+        PoolStep::PayoutCkReimbursed {
+            id,
+            left: TokenAmount::ZERO,
+            block: None,
+            burned: false,
+        },
+    ] {
+        assert!(pool.step(step).is_err());
+    }
+}
+
+/// F9: a stopped withdrawal is refunded by no controller until a proof brings its lines up.
+#[test]
+fn a_stopped_ck_withdrawal_refuses_a_refund_and_only_goes_on() {
+    let (mut pool, _, id) = pool_with_live_lines();
+    withdrawing(&mut pool, id);
+    pool.step(PoolStep::PayoutStopped {
+        id,
+        why: "short".to_string(),
+    })
+    .unwrap();
+    assert!(!pool.ledger.lines().open.contains(&id));
+    let held = lines(&pool);
+    for resolution in [PayoutResolution::Refund, PayoutResolution::MarkPaid] {
+        assert!(pool
+            .step(PoolStep::PayoutResolved {
+                id,
+                resolution,
+                refund_at: None,
+            })
+            .is_err());
+    }
+    pool.step(PoolStep::PayoutResolved {
+        id,
+        resolution: PayoutResolution::Retry,
+        refund_at: None,
+    })
+    .unwrap();
+    assert_eq!(pool.payouts[&id].status, PayoutStatus::CkWithdrawing);
+    assert!(pool.ledger.lines().open.contains(&id));
+    assert_eq!(lines(&pool), held);
+}
+
+/// F3 at the fold: a ck swap's floor pays `min_out`, the network fee and both ledger fees.
+#[test]
+fn a_ck_swap_opens_only_with_a_floor_that_pays_its_minimum() {
+    let (mut pool, _, _) = pool_with_live_lines();
+    let swap = |min_usdc: u64, premium: u64| IcpSwapTerms {
+        token_in: candid::Principal::from_slice(&[0x31; 10]),
+        amount_in: TokenAmount::from(CK_RECEIVED),
+        from: recipient(5),
+        min_usdc: TokenAmount::from(min_usdc),
+        premium: TokenAmount::from(premium),
+        network_fee: TokenAmount::from(CK_NETWORK_FEE),
+        refund_to: recipient(6),
+        slippage_bps: None,
+        planned: None,
+    };
+    let opened = |pool: &mut Pool, terms: IcpSwapTerms| {
+        let id = pool.ledger.lines().next_id;
+        pool.step(PoolStep::PayoutOpened {
+            id,
+            kind: Box::new(PayoutKind::IcpSwap(terms)),
+            terms: PayoutTerms {
+                min_out: TokenAmount::from(CK_BURN),
+                ..self::terms()
+            },
+            undo: Undo::Refund { to: terms.refund_to },
+            plan: None,
+            ck: Flag(true),
+        })
+    };
+    assert!(opened(&mut pool, swap(CK_RECEIVED - 1, 0)).is_err());
+    assert!(opened(&mut pool, swap(CK_RECEIVED, 1)).is_err());
+    assert!(opened(&mut pool, swap(CK_RECEIVED, 0)).is_ok());
 }

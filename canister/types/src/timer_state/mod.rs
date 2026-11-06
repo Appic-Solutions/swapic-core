@@ -109,6 +109,10 @@ pub struct TimerState {
     /// last moved.
     #[n(9)]
     pub finalized_seen: BTreeMap<ChainId, FinalizedSeen>,
+    /// When each ck payout last asked or read the minter, by payout id: none for a state
+    /// written before there were any.
+    #[n(10)]
+    pub ck_reads: Option<BTreeMap<u64, Timestamp>>,
 }
 
 /// How long a chain's finalized block may stand still before it is a stall worth an alert:

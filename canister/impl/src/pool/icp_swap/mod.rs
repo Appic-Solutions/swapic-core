@@ -386,6 +386,7 @@ pub async fn swap_from_icp(
                 to: opening.terms.refund_to,
             },
             plan: Some(Box::new(opening.plan)),
+            ck: types::pool::Flag(false),
         },
         at,
     )
@@ -404,6 +405,11 @@ pub async fn swap_from_icp(
             crate::pool::plan::sign_fitted(&busy, id, fitted, now).await;
         }
     }
+    answer(id)
+}
+
+/// A swap door's answer once it drove the payout as far as it goes in its call.
+pub(crate) fn answer(id: u64) -> Result<SwapFromIcpOk, PoolError> {
     match pool_store::payout(id) {
         // the pull was refused: nothing moved
         Some(EvmPayout {
@@ -413,7 +419,7 @@ pub async fn swap_from_icp(
         }) => Err(PoolError::Ledger(why)),
         Some(payout) => Ok(SwapFromIcpOk {
             id,
-            status: (&payout.status).into(),
+            status: settlement_api::types::pool::status_of(&payout),
         }),
         None => Err(PoolError::Unknown),
     }
@@ -459,6 +465,10 @@ pub async fn drive(
         let Some(payout) = pool_store::payout(id) else {
             return Ok(None);
         };
+        // a swap through the ck minter is never placed: its withdrawal is `ck::drive`'s
+        if payout.status == PayoutStatus::Known && payout.ck.is_some() {
+            return Ok(None);
+        }
         // a payout whose amount is known takes its place, whatever it is: a planned swap the
         // Base pocket cannot pay any more is undone, its refund next
         if payout.status == PayoutStatus::Known {
@@ -675,7 +685,7 @@ async fn pull(
     }
 }
 
-fn undo(id: u64, why: String, now: Timestamp) -> Result<(), Stop> {
+pub(crate) fn undo(id: u64, why: String, now: Timestamp) -> Result<(), Stop> {
     record(PoolStep::PayoutUndoing { id, why }, now)
 }
 
@@ -883,6 +893,9 @@ async fn swap(
                     clock(),
                 );
             }
+            let sold = progress.swap.amount_in.unwrap_or(in0);
+            let least_back = way_back_least(sold)
+                .ok_or_else(|| Stop::Failed("the token sold overflows".to_string()))?;
             let spec = LegSpec {
                 id,
                 leg: Some(LEG_BACK),
@@ -890,18 +903,33 @@ async fn swap(
                 token_in: icp,
                 token_out: terms.token_in,
                 amount_in: amount_back,
-                least: TokenAmount::ONE,
+                least: least_back,
                 fee_in: fee_icp,
                 fee_out: fee_in,
                 pays_out: false,
             };
-            match run_leg(ledgers, spec, progress.leg(Some(LEG_BACK)), clock, guard).await? {
+            let back = progress.leg(Some(LEG_BACK));
+            match run_leg(ledgers, spec, back, clock, guard).await? {
                 LegEnd::Out(_) => undo(
                     payout.id,
                     "the second leg could not give min_usdc; the ICP went back into the token"
                         .to_string(),
                     clock(),
                 ),
+                // never at any price: once more on the next pass, then a human
+                LegEnd::Short(quoted) if back.declined == 0 => {
+                    record(
+                        PoolStep::SwapDeclined {
+                            r#ref: id,
+                            why: format!(
+                                "the way back quotes {quoted}, below the {least_back} it must give"
+                            ),
+                            leg: Some(LEG_BACK),
+                        },
+                        clock(),
+                    )?;
+                    Err(Stop::Later)
+                }
                 LegEnd::Short(_) | LegEnd::NoPair | LegEnd::NotDone(_) => stop(
                     payout.id,
                     "ALERT: the ICP could not be swapped back into the token; the swap waits for a human",
@@ -912,7 +940,7 @@ async fn swap(
     }
 }
 
-fn stop(id: u64, why: &str, now: Timestamp) -> Result<(), Stop> {
+pub(crate) fn stop(id: u64, why: &str, now: Timestamp) -> Result<(), Stop> {
     record(
         PoolStep::PayoutStopped {
             id,
@@ -951,9 +979,22 @@ async fn run_leg(
     legs::run(ledgers, spec, state, clock, guard).await
 }
 
+/// How far below the token its first leg sold a way back from ICP may buy it: wide enough
+/// for two pool fees and a price move, so a healthy way back never stops, and never a sale at
+/// any price into a pool someone pushed.
+pub const WAY_BACK_FLOOR_BPS: u16 = 500;
+
+/// The least the way back from ICP must buy of the token, `sold` being what its first leg
+/// sold.
+pub fn way_back_least(sold: TokenAmount) -> Option<TokenAmount> {
+    plan::sale_floor(sold, 2 * WAY_BACK_FLOOR_BPS).filter(|least| *least > TokenAmount::ZERO)
+}
+
 /// What an undone swap gives back, and in which token: its ckUSDC (all it made, less the
 /// ledger's fee) once known; else the token, all of it less what its legs spent and the
-/// transfer's fee (a way back from ICP adds what it bought).
+/// transfer's fee (a way back from ICP adds what it bought). After a ck withdrawal began, what
+/// came back to the main account and the network fee when nothing burned, less the transfer's
+/// fee: the fees the trip spent are the user's.
 pub fn refund_of(
     payout: &EvmPayout,
     settings: &types::pool::PoolSettings,
@@ -961,6 +1002,15 @@ pub fn refund_of(
     let PayoutKind::IcpSwap(terms) = payout.kind else {
         return None;
     };
+    if let Some(refundable) = payout.ck_refundable() {
+        let fee = settings.fee_of(settings.ckusdc_ledger)?;
+        return Some((
+            settings.ckusdc_ledger,
+            refundable
+                .checked_sub(fee)
+                .filter(|left| *left > TokenAmount::ZERO)?,
+        ));
+    }
     if let Some(received) = payout.received {
         let fee = settings.fee_of(settings.ckusdc_ledger)?;
         return Some((

@@ -51,6 +51,7 @@ fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
+        ck: None,
     }
 }
 

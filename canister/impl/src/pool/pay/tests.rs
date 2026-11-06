@@ -539,6 +539,7 @@ fn one_payout_is_signed_once_at_a_time_and_never_again() {
                     shares: burned,
                 },
                 plan: None,
+                ck: Default::default(),
             },
             PoolStep::PayoutAmountKnown {
                 id: 0,

@@ -297,6 +297,9 @@ pub enum PoolStep {
         /// A planned ICP swap's payout plan as the user handed it in, boxed.
         #[n(4)]
         plan: Option<Box<PinnedOrder>>,
+        /// A swap paid through the ck minter ([`CkLeg`]), never from the Base pocket.
+        #[n(5)]
+        ck: Flag,
     },
     /// The payout's exact amount is known: what its order spends on Base. An ICP swap's
     /// ckUSDC (`received`) is held on ICP until it is paid, its network fee on the ICP fee
@@ -845,6 +848,59 @@ pub enum PoolStep {
         #[cbor(n(4), with = "minicbor::bytes")]
         raw_tx: Vec<u8>,
     },
+    // 81 and 82 are reserved for the cancelled EVM to ICP token route: never reused.
+    /// A ck payout's withdrawal begins: `icp.reserved` and `owed` fall by its hold before any
+    /// of it leaves, so the hourly check sees a surplus, and what it burns and the ledger's
+    /// fee are fixed for every retry.
+    #[n(83)]
+    PayoutCkWithdrawing {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        created_at: Timestamp,
+        /// What the minter burns.
+        #[n(2)]
+        amount: TokenAmount,
+        #[n(3)]
+        fee: TokenAmount,
+    },
+    /// The minter holds the ckUSDC of its withdrawal `withdrawal_id`: by its answer, or by
+    /// `BySenderAccount` after a lost one.
+    #[n(84)]
+    PayoutCkWithdrawn {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        withdrawal_id: u64,
+    },
+    /// Its USDC was paid on Ethereum: the minter's `TxFinalized` success, or a controller's
+    /// word (`resolve_ck_withdrawal`). No line moves: they fell at its withdrawal.
+    #[n(85)]
+    PayoutCkLanded {
+        #[n(0)]
+        id: u64,
+        #[n(1)]
+        tx_hash: TxHash,
+        #[n(2)]
+        by_controller: bool,
+    },
+    /// The way back of a ck payout, on proof only: the minter reimbursed it (`burned`), or
+    /// nothing was burned. Adds back exactly what `PayoutCkWithdrawing` took and begins its
+    /// undo, so the hourly check leaves its refund out while the ckUSDC comes home.
+    #[n(86)]
+    PayoutCkReimbursed {
+        #[n(0)]
+        id: u64,
+        /// What the burn subaccount holds to bring back ([`CkBack::left`]).
+        #[n(1)]
+        left: TokenAmount,
+        /// The ledger block of a reimbursement.
+        #[n(2)]
+        block: Option<u64>,
+        #[n(3)]
+        burned: bool,
+    },
+    // 87 is reserved for the cancelled EVM to ICP token route: never reused.
 }
 
 impl PoolStep {
@@ -930,6 +986,10 @@ impl PoolStep {
             PoolStep::EcoRescueSigned { .. } => "EcoRescueSigned",
             PoolStep::MoveUnfilled { .. } => "MoveUnfilled",
             PoolStep::MoveReimbursed { .. } => "MoveReimbursed",
+            PoolStep::PayoutCkWithdrawing { .. } => "PayoutCkWithdrawing",
+            PoolStep::PayoutCkWithdrawn { .. } => "PayoutCkWithdrawn",
+            PoolStep::PayoutCkLanded { .. } => "PayoutCkLanded",
+            PoolStep::PayoutCkReimbursed { .. } => "PayoutCkReimbursed",
         }
     }
 
@@ -1019,6 +1079,7 @@ impl PoolStep {
                 | PoolStep::PayoutRefunded { .. }
                 | PoolStep::PayoutUnfilled { .. }
                 | PoolStep::PayoutResolved { .. }
+                | PoolStep::PayoutCkReimbursed { .. }
                 | PoolStep::Minted { .. }
                 // a deposit retried pays again; one refunded frees ckUSDC for the queue
                 | PoolStep::DepositResolved { .. }

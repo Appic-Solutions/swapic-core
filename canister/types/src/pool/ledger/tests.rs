@@ -2188,7 +2188,7 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
 }
 
 /// How many variants `PoolStep` has: [`place`] gives each its own place below it.
-const STEP_COUNT: usize = 72;
+const STEP_COUNT: usize = 76;
 
 /// Each step's place in `PoolStep`'s order. The match has no catch-all, so a step added to
 /// `PoolStep` does not compile here until it has a place, and a sample in [`every_step`].
@@ -2266,6 +2266,10 @@ fn place(step: &PoolStep) -> usize {
         PoolStep::MoveUnfilled { .. } => 69,
         PoolStep::MoveReimbursed { .. } => 70,
         PoolStep::SweepSigned { .. } => 71,
+        PoolStep::PayoutCkWithdrawing { .. } => 72,
+        PoolStep::PayoutCkWithdrawn { .. } => 73,
+        PoolStep::PayoutCkLanded { .. } => 74,
+        PoolStep::PayoutCkReimbursed { .. } => 75,
     }
 }
 
@@ -2454,6 +2458,7 @@ fn every_step() -> Vec<PoolStep> {
                 to: swap_terms.refund_to,
             },
             plan: None,
+            ck: Default::default(),
         },
         PoolStep::PayoutAmountKnown {
             id: 0,
@@ -2663,6 +2668,27 @@ fn every_step() -> Vec<PoolStep> {
             nonce,
             tx_hash,
             raw_tx: vec![0x02],
+        },
+        PoolStep::PayoutCkWithdrawing {
+            id: 0,
+            created_at: at,
+            amount,
+            fee: amount,
+        },
+        PoolStep::PayoutCkWithdrawn {
+            id: 0,
+            withdrawal_id: 1,
+        },
+        PoolStep::PayoutCkLanded {
+            id: 0,
+            tx_hash,
+            by_controller: false,
+        },
+        PoolStep::PayoutCkReimbursed {
+            id: 0,
+            left: amount,
+            block: None,
+            burned: true,
         },
     ]
 }

@@ -22,6 +22,11 @@
 //! - Resolved (a controller, `resolve_payout`): a payout stopped for a human is
 //!   put back on its undo (`Refund`), or its signed order found paid (`MarkPaid`): the paid
 //!   line, from where a reverted payout's USDC sits (reserved again), once.
+//! - A swap through the ck minter (`EvmPayout::ck`) never touches the Base pocket: no queue,
+//!   no order, no paid line. Withdrawing lowers `icp.reserved` and `owed` by its hold before
+//!   any of it leaves. Withdrawn moves nothing, and Landed closes it. Reimbursed, on proof
+//!   only, adds back exactly what Withdrawing took and begins its undo: the undo then takes
+//!   them once, today's way, and the network fee only when nothing was burned.
 //!
 //! Old semantics the fold still reads (before the payout plan flow): an ICP swap
 //! opened with its user's own premium and least ckUSDC (no plan); a reverted payout waiting
@@ -39,8 +44,8 @@ use super::{
 };
 use crate::numeric::{Timestamp, TokenAmount};
 use crate::pool::payout::{
-    EvmPayout, IcpSwapTerms, NonceUse, PayoutKind, PayoutLines, PayoutResolution, PayoutStatus,
-    PinnedOrder, Reclaim, Undo,
+    ck_burn, ck_least_usdc, CkBack, CkLeg, EvmPayout, IcpSwapTerms, NonceUse, PayoutKind,
+    PayoutLines, PayoutResolution, PayoutStatus, PinnedOrder, Reclaim, Undo,
 };
 use crate::pool::plan;
 use crate::pool::{PoolAccount, PoolStep, ShareLine, Shares};
@@ -60,6 +65,23 @@ fn not_from(step: &'static str, payout: &EvmPayout) -> PoolStepError {
         step,
         id: payout.id,
         status: status_of(payout),
+    }
+}
+
+/// Where a stopped payout goes on from, if it can: a ck withdrawal back to its withdrawing,
+/// legs back to their swap. A payout with its amount known, or signed, has no legs left.
+fn retried_status(payout: &EvmPayout) -> Option<PayoutStatus> {
+    match payout.ck {
+        Some(ck) if ck.refund_barred() => Some(if ck.withdrawal_id.is_some() {
+            PayoutStatus::CkWithdrawn
+        } else {
+            PayoutStatus::CkWithdrawing
+        }),
+        Some(ck) if ck.began() => None,
+        _ if payout.received.is_none() && payout.icp_block.is_some() && payout.is_icp_swap() => {
+            Some(PayoutStatus::Swapping)
+        }
+        _ => None,
     }
 }
 
@@ -175,6 +197,32 @@ impl PoolLedger {
         Ok(())
     }
 
+    /// A ck swap's opening: no plan and no premium, and `min_usdc` covers `min_out`, the
+    /// network fee and both ledger fees, so a sale at its floor still pays `min_out`.
+    fn admits_ck_opening(
+        &self,
+        swap: &IcpSwapTerms,
+        min_out: TokenAmount,
+    ) -> Result<(), PoolStepError> {
+        if swap.is_planned() || swap.premium != TokenAmount::ZERO {
+            return Err(PoolStepError::Terms(
+                "a ck swap has no plan and pays no premium",
+            ));
+        }
+        let settings = self.settings()?;
+        let fee = settings
+            .fee_of(settings.ckusdc_ledger)
+            .ok_or(PoolStepError::Terms("no ckUSDC fee was read"))?;
+        let least =
+            ck_least_usdc(min_out, swap.network_fee, fee).ok_or(PoolStepError::Overflow)?;
+        if swap.min_usdc < least {
+            return Err(PoolStepError::Terms(
+                "min_usdc is below min_out, the network fee and both ledger fees",
+            ));
+        }
+        Ok(())
+    }
+
     /// What the Base pocket's free USDC covers behind the queue.
     pub fn base_available(&self) -> TokenAmount {
         sat_sub(self.pockets.base.free, self.lines().queued)
@@ -206,6 +254,10 @@ impl PoolLedger {
             | PoolStep::PayoutStopped { .. }
             | PoolStep::PayoutUndoing { .. }
             | PoolStep::PayoutUndone { .. } => self.admits_payout_undo(step, lookup),
+            PoolStep::PayoutCkWithdrawing { .. }
+            | PoolStep::PayoutCkWithdrawn { .. }
+            | PoolStep::PayoutCkLanded { .. }
+            | PoolStep::PayoutCkReimbursed { .. } => self.admits_payout_ck(step, lookup),
             PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::TermsClaimed { .. }
@@ -228,6 +280,7 @@ impl PoolLedger {
                 terms,
                 undo,
                 plan,
+                ck,
             } => {
                 self.settings()?;
                 lines.settings.ok_or(PoolStepError::NoPayoutSettings)?;
@@ -257,9 +310,12 @@ impl PoolLedger {
                             return Err(PoolStepError::Mismatch);
                         }
                         self.admits_plan(swap, plan.as_deref())?;
+                        if ck.0 {
+                            self.admits_ck_opening(swap, terms.min_out)?;
+                        }
                     }
                     PayoutKind::Withdrawal(withdrawal) => {
-                        if plan.is_some() {
+                        if plan.is_some() || ck.0 {
                             return Err(PoolStepError::Mismatch);
                         }
                         withdrawal.payout_amount().ok_or(PoolStepError::Terms(
@@ -381,7 +437,7 @@ impl PoolLedger {
         match step {
             PoolStep::PayoutQueued { id } => {
                 let payout = payout_of(lookup, *id)?;
-                if payout.status != PayoutStatus::Known {
+                if payout.status != PayoutStatus::Known || payout.ck.is_some() {
                     return Err(not_from("PayoutQueued", &payout));
                 }
                 Ok(())
@@ -390,6 +446,9 @@ impl PoolLedger {
             // only from the head; and only once the free USDC covers its whole hold
             PoolStep::PayoutWaiting { id } => {
                 let payout = payout_of(lookup, *id)?;
+                if payout.ck.is_some() {
+                    return Err(not_from("PayoutWaiting", &payout));
+                }
                 let need = payout.base_hold();
                 match payout.status {
                     PayoutStatus::Known if lines.queue_len > 0 => {
@@ -423,6 +482,7 @@ impl PoolLedger {
                 if payout.status != PayoutStatus::Waiting
                     || !payout.base_reserved
                     || payout.order.is_some()
+                    || payout.ck.is_some()
                 {
                     return Err(not_from("PayoutSigned", &payout));
                 }
@@ -547,7 +607,19 @@ impl PoolLedger {
                     return Err(not_from("PayoutResolved", &payout));
                 }
                 match resolution {
+                    PayoutResolution::Retry => {
+                        retried_status(&payout).ok_or(PoolStepError::Terms(
+                            "only stopped legs or a stopped ck withdrawal go on",
+                        ))?;
+                    }
                     PayoutResolution::Refund => {
+                        // the lines fell with its withdrawal, and only proof brings them up:
+                        // a refund now would pay from stakers
+                        if payout.ck.is_some_and(|ck| ck.refund_barred()) {
+                            return Err(PoolStepError::Terms(
+                                "a ck withdrawal refunds only once it is reimbursed",
+                            ));
+                        }
                         if let Undo::Remint { shares, .. } = payout.undo {
                             self.total_shares
                                 .checked_add(shares)
@@ -595,6 +667,7 @@ impl PoolLedger {
                         | PayoutStatus::Swapping
                         | PayoutStatus::Undoing(_)
                         | PayoutStatus::Reverted
+                        | PayoutStatus::CkWithdrawing
                 ) {
                     return Err(not_from("PayoutStopped", &payout));
                 }
@@ -652,6 +725,70 @@ impl PoolLedger {
                         free: self.pockets.icp.free,
                         need: payout.icp_hold(),
                     });
+                }
+                Ok(())
+            }
+            _ => Err(unrouted(step)),
+        }
+    }
+
+    /// The rules of a ck withdrawal: begun once from a known amount, burned once, then landed
+    /// or reimbursed; its way back on proof, and its lines able to fall.
+    fn admits_payout_ck(
+        &self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+    ) -> Result<(), PoolStepError> {
+        match step {
+            PoolStep::PayoutCkWithdrawing {
+                id, amount, fee, ..
+            } => {
+                let payout = payout_of(lookup, *id)?;
+                let ck = payout.ck.ok_or(PoolStepError::Mismatch)?;
+                if payout.status != PayoutStatus::Known || ck.began() {
+                    return Err(not_from("PayoutCkWithdrawing", &payout));
+                }
+                let hold = payout.icp_hold();
+                if hold != payout.owed() {
+                    return Err(PoolStepError::Mismatch);
+                }
+                // who pays the two ledger fees: the hold, so the books never drift
+                if ck_burn(hold, *fee) != Some(*amount) {
+                    return Err(PoolStepError::Terms(
+                        "a withdrawal burns its hold less both ledger fees",
+                    ));
+                }
+                if *amount < payout.terms.min_out {
+                    return Err(PoolStepError::Terms("the withdrawal is below min_out"));
+                }
+                if hold > self.pockets.icp.reserved || hold > self.owed {
+                    return Err(PoolStepError::Overflow);
+                }
+                Ok(())
+            }
+            PoolStep::PayoutCkWithdrawn { id, .. } => {
+                let payout = payout_of(lookup, *id)?;
+                if payout.status != PayoutStatus::CkWithdrawing {
+                    return Err(not_from("PayoutCkWithdrawn", &payout));
+                }
+                Ok(())
+            }
+            PoolStep::PayoutCkLanded { id, .. } => {
+                let payout = payout_of(lookup, *id)?;
+                if payout.status != PayoutStatus::CkWithdrawn {
+                    return Err(not_from("PayoutCkLanded", &payout));
+                }
+                Ok(())
+            }
+            PoolStep::PayoutCkReimbursed { id, burned, .. } => {
+                let payout = payout_of(lookup, *id)?;
+                let expected = if *burned {
+                    PayoutStatus::CkWithdrawn
+                } else {
+                    PayoutStatus::CkWithdrawing
+                };
+                if payout.status != expected {
+                    return Err(not_from("PayoutCkReimbursed", &payout));
                 }
                 Ok(())
             }
@@ -763,6 +900,12 @@ impl PoolLedger {
             | PoolStep::PayoutUndone { .. } => {
                 self.apply_payout_undo(step, lookup, at, &mut lines, effects)
             }
+            PoolStep::PayoutCkWithdrawing { .. }
+            | PoolStep::PayoutCkWithdrawn { .. }
+            | PoolStep::PayoutCkLanded { .. }
+            | PoolStep::PayoutCkReimbursed { .. } => {
+                self.apply_payout_ck(step, lookup, at, &mut lines, effects)
+            }
             PoolStep::OrphanBooked { .. }
             | PoolStep::TermsClaimed { .. }
             | PoolStep::OrphanRefundSigned { .. }
@@ -792,6 +935,7 @@ impl PoolLedger {
                 terms,
                 undo,
                 plan,
+                ck,
             } => {
                 lines.next_id = id.saturating_add(1);
                 lines.open.insert(*id);
@@ -813,6 +957,7 @@ impl PoolLedger {
                 }
                 let mut payout = EvmPayout::new(*id, **kind, *terms, *undo, at);
                 payout.plan = plan.as_deref().cloned();
+                payout.ck = ck.0.then(CkLeg::default);
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutAmountKnown {
@@ -1034,6 +1179,17 @@ impl PoolLedger {
             } => {
                 let mut payout = lookup.payout(*id)?;
                 match resolution {
+                    // what stopped it is the drive's to read again
+                    PayoutResolution::Retry => {
+                        payout.status = retried_status(&payout)?;
+                        if let Some(legs) = payout.legs.as_mut() {
+                            legs.failed = None;
+                            if let Some(back) = legs.back.as_mut() {
+                                back.declined = 0;
+                            }
+                        }
+                        lines.open.insert(*id);
+                    }
                     PayoutResolution::Refund => {
                         if payout.icp_released.0 {
                             let held = payout.icp_hold();
@@ -1110,6 +1266,81 @@ impl PoolLedger {
                 lines.open.remove(id);
                 payout.status = PayoutStatus::Undone(why.clone());
                 payout.icp_block = *block;
+                effects.payout = Some(payout);
+            }
+            _ => unrouted_apply(step),
+        }
+        Some(())
+    }
+
+    /// What a ck withdrawal's steps change: only Withdrawing and Reimbursed move a line.
+    fn apply_payout_ck(
+        &mut self,
+        step: &PoolStep,
+        lookup: &impl PoolLookup,
+        at: Timestamp,
+        lines: &mut PayoutLines,
+        effects: &mut PoolEffects,
+    ) -> Option<()> {
+        match step {
+            PoolStep::PayoutCkWithdrawing {
+                id,
+                created_at,
+                amount,
+                fee,
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                let hold = payout.icp_hold();
+                let icp = &mut self.pockets.icp;
+                icp.reserved = sat_sub(icp.reserved, hold);
+                self.owed = sat_sub(self.owed, hold);
+                payout.ck = Some(CkLeg {
+                    created_at: Some(*created_at),
+                    amount: Some(*amount),
+                    fee: Some(*fee),
+                    ..payout.ck.unwrap_or_default()
+                });
+                payout.status = PayoutStatus::CkWithdrawing;
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutCkWithdrawn { id, withdrawal_id } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.ck = payout.ck.map(|ck| CkLeg {
+                    withdrawal_id: Some(*withdrawal_id),
+                    ..ck
+                });
+                payout.status = PayoutStatus::CkWithdrawn;
+                effects.payout = Some(payout);
+            }
+            PoolStep::PayoutCkLanded { id, tx_hash, .. } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.tx_hash = Some(*tx_hash);
+                payout.status = PayoutStatus::Paid;
+                lines.open.remove(id);
+                effects.payout = Some(payout);
+            }
+            // back exactly what Withdrawing took, so the undo takes it once
+            PoolStep::PayoutCkReimbursed {
+                id, left, burned, ..
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                let hold = payout.icp_hold();
+                let icp = &mut self.pockets.icp;
+                icp.reserved = sat_add(icp.reserved, hold);
+                self.owed = sat_add(self.owed, hold);
+                payout.ck = payout.ck.map(|ck| CkLeg {
+                    back: Some(CkBack {
+                        left: *left,
+                        burned: *burned,
+                    }),
+                    ..ck
+                });
+                payout.status = PayoutStatus::Undoing(if *burned {
+                    crate::pool::payout::CK_REIMBURSED.to_string()
+                } else {
+                    crate::pool::payout::CK_NOT_BURNED.to_string()
+                });
+                payout.undoing_at = Some(at);
                 effects.payout = Some(payout);
             }
             _ => unrouted_apply(step),

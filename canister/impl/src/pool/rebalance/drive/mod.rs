@@ -20,6 +20,7 @@ mod tests;
 use super::{cost, own::OwnRoute};
 use crate::evm_reads::TransferRead;
 use crate::ic::{self, Account, CallError, Dedup};
+use crate::pool::ck::AtMinter;
 use crate::pool::{self, payout::Busy};
 use crate::storage::events::read_state;
 use crate::storage::{config, flow_settings, pool as pool_store};
@@ -103,7 +104,7 @@ impl IcpCalls for Live {
         amount: Nat,
         dedup: Dedup,
     ) -> Result<(), CallError> {
-        ic::icrc2_approve_once(ledger, spender, amount, dedup).await
+        ic::icrc2_approve_once(ledger, None, spender, amount, dedup).await
     }
 
     async fn transfer(
@@ -124,7 +125,7 @@ impl IcpCalls for Live {
         amount: Nat,
         recipient: String,
     ) -> Result<ic::RetrieveErc20Request, ic::WithdrawFailure> {
-        ic::withdraw_erc20(minter, ledger, amount, recipient).await
+        ic::withdraw_erc20(minter, ledger, amount, recipient, None).await
     }
 
     async fn withdrawal_status(
@@ -637,8 +638,13 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
 /// the minter answers burned no ckUSDC, so the move goes back to wait for the next tick,
 /// and a refusal that cannot pass also stops for a controller. With no answer the ckUSDC may
 /// be burned: the move stays withdrawing, and the next tick stops it for a controller, never
-/// asking again by itself, as a second call could burn twice.
+/// asking again by itself, as a second call could burn twice. The minter takes one call at a
+/// time from a caller and traps on a second, so the whole of it holds [`AtMinter`], taken
+/// before anything is recorded: a move that missed it has not begun.
 pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), String> {
+    let Some(_at_minter) = AtMinter::take() else {
+        return Err("another withdrawal is at the ck minter".to_string());
+    };
     let flow = flow_settings::get();
     let minter = flow.ck_minter.ok_or("no ck minter is configured")?;
     let cketh = flow.cketh_ledger.ok_or("no ckETH ledger is configured")?;
@@ -805,7 +811,7 @@ pub enum MinterSays {
 }
 
 impl MinterSays {
-    fn of(status: ic::WithdrawalStatus) -> Result<Self, String> {
+    pub(crate) fn of(status: ic::WithdrawalStatus) -> Result<Self, String> {
         let tx = |hash: &str| hash32(hash).ok_or("the minter's transaction hash does not read");
         Ok(match status {
             ic::WithdrawalStatus::TxSent(sent) => Self::Sent(tx(&sent.transaction_hash)?),

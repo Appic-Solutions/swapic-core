@@ -175,6 +175,7 @@ fn open(request: &Legacy) -> u64 {
                 to: request.terms.refund_to,
             },
             plan: None,
+            ck: Default::default(),
         },
         at(10),
     )
@@ -596,6 +597,196 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
     });
 }
 
+/// `pool_with`, and `token()` routed through ICP.
+fn routed_through_icp() {
+    pool_with(usdc(500));
+    record_at(
+        PoolStep::IcpRoutesSet {
+            routes: IcpRoutes {
+                icp_ckusdc_pool: Some(PrincipalBytes(icp_pool())),
+                icp_ledger: Some(PrincipalBytes(icp_ledger())),
+                routes: vec![
+                    IcpRoute {
+                        ledger: icp_ledger(),
+                        via: IcpRouteVia::Direct(icp_pool()),
+                    },
+                    IcpRoute {
+                        ledger: token(),
+                        via: IcpRouteVia::Icp(token_pool()),
+                    },
+                ],
+                ledger_fees: vec![
+                    LedgerFee {
+                        ledger: token(),
+                        fee: TokenAmount::from(TOKEN_FEE),
+                    },
+                    LedgerFee {
+                        ledger: icp_ledger(),
+                        fee: TokenAmount::from(10_u32),
+                    },
+                ],
+                pool_tokens: Vec::new(),
+            },
+        },
+        at(2),
+    )
+    .unwrap();
+}
+
+/// What a swap through ICP sold on its first leg, in the token.
+const SOLD: u64 = 4_998_000;
+
+/// A swap through ICP whose first leg ran: its ICP is at the canister, its second leg next.
+fn past_the_first_leg() -> u64 {
+    routed_through_icp();
+    let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
+    request.terms.premium = TokenAmount::from(8 * FEE);
+    let id = open(&request);
+    let r#ref = evm_payout_ref(id);
+    record_at(
+        PoolStep::PayoutPulled {
+            id,
+            block: 7,
+            attempt: Some(PayoutAttempt {
+                created_at: at(10),
+                memo: r#ref.into_bytes(),
+                path: PayoutPath::IcpswapVia {
+                    first: token_pool(),
+                    second: icp_pool(),
+                    icp: icp_ledger(),
+                },
+                amount: Some(TokenAmount::from(5_000_000_u64)),
+                token: Some(PrincipalBytes(token())),
+            }),
+        },
+        at(10),
+    )
+    .unwrap();
+    record_at(
+        PoolStep::SwapBegun {
+            r#ref,
+            before: Some(types::pool::PoolHeld {
+                ckusdc: TokenAmount::ZERO,
+                token: TokenAmount::ZERO,
+            }),
+            leg: None,
+            amount_in: Some(TokenAmount::from(SOLD)),
+        },
+        at(10),
+    )
+    .unwrap();
+    record_at(
+        PoolStep::Swapped {
+            r#ref,
+            out: TokenAmount::from(400_030_u64),
+            send: None,
+            leg: None,
+        },
+        at(10),
+    )
+    .unwrap();
+    id
+}
+
+/// The second leg short, and the token's pool quoting `back` for the way back.
+fn second_leg_short(back: u64) -> Fake {
+    let fake = Fake::default();
+    fake.quotes
+        .borrow_mut()
+        .insert(icp_pool(), TokenAmount::from(1_000_u64));
+    fake.quotes
+        .borrow_mut()
+        .insert(token_pool(), TokenAmount::from(back));
+    fake.outs
+        .borrow_mut()
+        .insert(token_pool(), TokenAmount::from(back));
+    fake
+}
+
+fn swaps(fake: &Fake) -> Vec<String> {
+    fake.calls
+        .borrow()
+        .iter()
+        .filter(|call| call.starts_with("swap"))
+        .cloned()
+        .collect()
+}
+
+/// F2: someone pushed the token's pool while the second leg cannot pay. The way back quotes
+/// below its least, so it never sells: once more on the next pass, then a human, who has it
+/// quoted again once the pool is healthy. The door here is the pool's own: `swap_from_icp`
+/// and the ck door share this path.
+#[test]
+fn a_way_back_with_the_pool_pushed_stops_and_does_not_sell() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = past_the_first_leg();
+        let fake = second_leg_short(1_000);
+        assert!(matches!(
+            block_on(drive(&fake, id, clock, &open_pool)),
+            Err(Stop::Later)
+        ));
+        assert_eq!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Swapping
+        );
+        assert_eq!(
+            pool_store::payout(id)
+                .unwrap()
+                .legs
+                .unwrap()
+                .leg(Some(LEG_BACK))
+                .declined,
+            1
+        );
+        // the next pass quotes again and stops for a human
+        assert!(matches!(
+            block_on(drive(&fake, id, clock, &open_pool)),
+            Err(Stop::Failed(_))
+        ));
+        assert!(matches!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Failed(_)
+        ));
+        assert!(swaps(&fake).is_empty(), "the way back sold into the push");
+
+        // the pool healthy again: a controller has it quoted anew, and it goes back
+        crate::pool::resolve::resolve(
+            false,
+            true,
+            id,
+            settlement_api::types::pool::PayoutResolution::Retry,
+            at(11),
+        )
+        .unwrap();
+        let healthy = second_leg_short(SOLD / 1_000 * 994);
+        block_on(drive(&healthy, id, clock, &open_pool)).unwrap();
+        assert_eq!(
+            swaps(&healthy),
+            vec![format!(
+                "swap 400000 at least {}",
+                way_back_least(TokenAmount::from(SOLD)).unwrap()
+            )]
+        );
+        assert!(matches!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Undone(_)
+        ));
+    });
+}
+
+/// A way back's least leaves room for the two pool fees of the trip and a price move, so a
+/// healthy way back never waits for a human.
+#[test]
+fn a_way_backs_least_is_five_percent_below_what_was_sold() {
+    let least = way_back_least(TokenAmount::from(10_000_000_u64)).unwrap();
+    assert_eq!(least, TokenAmount::from(9_500_000_u64));
+    assert_eq!(way_back_least(TokenAmount::ZERO), None);
+    // 0.3% each way
+    let round_trip = 10_000_000_u64 * 997 / 1_000 * 997 / 1_000;
+    assert!(TokenAmount::from(round_trip) > least);
+}
+
 fn canister() -> EvmAddress {
     EvmAddress::new([0x36; 20])
 }
@@ -683,6 +874,7 @@ fn open_planned(request: &SwapRequest) -> u64 {
                 to: opening.terms.refund_to,
             },
             plan: Some(Box::new(opening.plan)),
+            ck: Default::default(),
         },
         at(10),
     )

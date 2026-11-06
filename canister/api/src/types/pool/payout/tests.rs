@@ -43,6 +43,7 @@ fn payout_settings_cross_the_wire_and_back() {
         order_wait_s: 120,
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
+        ck: None,
     };
     let bytes = Encode!(&wire).unwrap();
     assert_eq!(Decode!(&bytes, PayoutSettings).unwrap(), wire);
