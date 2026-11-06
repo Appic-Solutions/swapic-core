@@ -101,6 +101,7 @@ fn spine_holds_across_a_whole_relay_and_an_upgrade() {
         "rejection wrote nothing"
     );
 
+
     // paging boundaries: the exact range, a start past the end, and more than exists
     let full = page(&pic, canister, admin, 0, total);
     assert_eq!(full.len() as u64, total);
