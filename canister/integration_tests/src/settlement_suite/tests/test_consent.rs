@@ -126,9 +126,10 @@ fn another_method_is_unsupported_and_a_swap_before_the_address_is_unavailable() 
     assert_eq!(
         other,
         ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(ErrorInfo {
-            description: "set_config has no consent message: Swapic describes only \
+            description:
+                "set_config has no consent message: Swapic describes only \
                           swap_from_icp, swap_from_icp_ck, stake_icp, withdraw_icp and withdraw_evm"
-                .to_string()
+                    .to_string()
         }))
     );
     let usdc: types::EvmAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
