@@ -127,7 +127,7 @@ fn another_method_is_unsupported_and_a_swap_before_the_address_is_unavailable() 
         other,
         ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(ErrorInfo {
             description: "set_config has no consent message: Swapic describes only \
-                          swap_from_icp, stake_icp, withdraw_icp and withdraw_evm"
+                          swap_from_icp, swap_from_icp_ck, stake_icp, withdraw_icp and withdraw_evm"
                 .to_string()
         }))
     );
