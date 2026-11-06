@@ -99,6 +99,10 @@ fn relay_key(n: u64) -> Hash32 {
 /// A canister on a network holding the test threshold keys, with a provider for Base and a
 /// fresh chain reading.
 fn setup() -> (PocketIc, Principal, Principal) {
+    setup_on(outbox_config())
+}
+
+fn setup_on(config: Config) -> (PocketIc, Principal, Principal) {
     let pic = PocketIcBuilder::new()
         .with_ii_subnet()
         .with_application_subnet()
@@ -108,7 +112,7 @@ fn setup() -> (PocketIc, Principal, Principal) {
     let canister = pic.create_canister_on_subnet(Some(admin), None, subnet);
     pic.add_cycles(canister, 1_000_000_000_000_000);
     let arg = InitArg {
-        config: outbox_config(),
+        config,
         quoter: quoter(),
         watcher: watcher(),
     };
@@ -1671,5 +1675,144 @@ fn a_halted_canister_rests_until_the_halt_lifts() {
         tx_cancelled(&events(&pic, canister)).len(),
         1,
         "and it does what it could not while halted"
+    );
+}
+
+const POLYGON: u64 = 137;
+
+/// A network whose Polygon waits for its finalized block, as prod's does.
+fn polygon_setup() -> (PocketIc, Principal, Principal) {
+    let mut config = outbox_config();
+    let base = config.evm_chains[&BASE].clone();
+    config.evm_chains.insert(POLYGON, base);
+    config.rpc_urls.insert(
+        POLYGON,
+        "https://polygon-mainnet.example/v2/key".to_string(),
+    );
+    config.finalized_chains = Some(vec![POLYGON]);
+    setup_on(config)
+}
+
+fn send_on_polygon(pic: &PocketIc, canister: Principal, admin: Principal, n: u64) -> Hash32 {
+    test_put_reading(
+        pic,
+        canister,
+        watcher(),
+        POLYGON,
+        &ChainData {
+            block: 19_000_000,
+            base_fee_wei_per_gas: Nat::from(1_000_000_000_u64),
+            priority_fee_wei_per_gas: Nat::from(100_000_000_u64),
+        },
+    )
+    .expect("the watcher may store a reading");
+    test_send(
+        pic,
+        canister,
+        admin,
+        relay_key(n),
+        POLYGON,
+        VAULT,
+        GAS_LIMIT,
+    )
+    .expect("the send goes through")
+}
+
+/// Polygon's stall as the watcher reads it, its one row or false.
+fn polygon_stalled(pic: &PocketIc, canister: Principal, admin: Principal) -> bool {
+    let seen: Vec<(u64, settlement_api::types::chain_data::FinalizedSeen)> =
+        crate::client::pocket::query(
+            pic,
+            canister,
+            admin,
+            "finalized_seen",
+            candid::encode_one(()).unwrap(),
+        );
+    seen.iter()
+        .find(|(chain, _)| *chain == POLYGON)
+        .is_some_and(|(_, row)| row.stalled)
+}
+
+/// `by` of chain time with Polygon's finalized block at `finalized`, every outcall answered:
+/// the broadcast, the finalized read, and `receipt` for what is out.
+fn polygon_passes(pic: &PocketIc, canister: Principal, by: Duration, finalized: u64, tx: Value) {
+    let steps = (by.as_secs() / 3).max(1);
+    for _ in 0..steps {
+        advance(pic, canister, Duration::from_secs(3));
+        for _ in 0..4 {
+            for request in pic.get_canister_http() {
+                let results = methods(&request)
+                    .iter()
+                    .map(|method| match method.as_str() {
+                        "eth_feeHistory" => {
+                            json!({"oldestBlock": format!("0x{finalized:x}"), "baseFeePerGas": [], "gasUsedRatio": []})
+                        }
+                        "eth_blockNumber" => json!(format!("0x{:x}", finalized + 500)),
+                        "eth_getTransactionReceipt" => tx.clone(),
+                        _ => json!(
+                            "0x1111111111111111111111111111111111111111111111111111111111111111"
+                        ),
+                    })
+                    .collect();
+                reply(pic, &request, results);
+            }
+        }
+    }
+}
+
+/// Seen live on prod: the last entry on a finalized-tag chain closed, the chain stayed in the
+/// receipts' schedule with no pass ever coming back for it, and ten quiet minutes later it read
+/// as a stall. An idle chain is never stalled; a stall with an entry open still is.
+#[test]
+fn a_chain_whose_last_entry_closed_is_idle_and_a_real_stall_still_reads_as_one() {
+    let (pic, canister, admin) = polygon_setup();
+    let finalized = 19_000_100;
+    let first = send_on_polygon(&pic, canister, admin, 0);
+    polygon_passes(
+        &pic,
+        canister,
+        Duration::from_secs(15),
+        finalized,
+        receipt(19_000_005, true, first),
+    );
+    assert_eq!(
+        of_kind(events(&pic, canister), is_confirmed).len(),
+        1,
+        "the entry closed at the finalized block"
+    );
+
+    // nothing open: no pass comes back, and the clock of an idle chain says nothing
+    advance(&pic, canister, Duration::from_secs(660));
+    assert!(pic.get_canister_http().is_empty(), "nothing is read for it");
+    assert!(
+        !polygon_stalled(&pic, canister, admin),
+        "an idle chain read as a stall"
+    );
+
+    // an entry open, its receipt above a finalized block that stands still: that is a stall,
+    // and its clock started when the chain waited again, not an idle ten minutes ago
+    let second = send_on_polygon(&pic, canister, admin, 1);
+    polygon_passes(
+        &pic,
+        canister,
+        Duration::from_secs(15),
+        finalized,
+        receipt(19_000_400, true, second),
+    );
+    assert!(
+        !polygon_stalled(&pic, canister, admin),
+        "the chain waits again from now"
+    );
+    polygon_passes(
+        &pic,
+        canister,
+        Duration::from_secs(620),
+        finalized,
+        receipt(19_000_400, true, second),
+    );
+    assert_eq!(of_kind(events(&pic, canister), is_confirmed).len(), 1);
+    assert!(
+        polygon_stalled(&pic, canister, admin),
+        "ten minutes of a still block with an entry open is a stall"
     );
 }

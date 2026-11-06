@@ -1123,6 +1123,9 @@ pub async fn check_open() -> ReceiptPass {
         }
         next.insert(chain_id, next_receipt_read(now, pace, wait));
     }
+    // a chain whose last entry this pass closed has nothing to read: no pass comes back for it,
+    // so it must not stay in the schedule, or an idle chain reads as one that waits
+    next.retain(|chain_id, _| !outbox::by_status(*chain_id, OutboxStatus::Sent, 1).is_empty());
     timer_state::update(|state| {
         let changed = state.receipts_due != next;
         state.receipts_due = next;
