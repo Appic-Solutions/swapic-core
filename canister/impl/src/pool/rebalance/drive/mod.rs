@@ -70,7 +70,7 @@ pub trait IcpCalls {
         ledger: Principal,
         amount: Nat,
         recipient: String,
-    ) -> Result<ic::RetrieveErc20Request, CallError>;
+    ) -> Result<ic::RetrieveErc20Request, ic::WithdrawFailure>;
     async fn withdrawal_status(
         &self,
         minter: Principal,
@@ -113,7 +113,7 @@ impl IcpCalls for Live {
         ledger: Principal,
         amount: Nat,
         recipient: String,
-    ) -> Result<ic::RetrieveErc20Request, CallError> {
+    ) -> Result<ic::RetrieveErc20Request, ic::WithdrawFailure> {
         ic::withdraw_erc20(minter, ledger, amount, recipient).await
     }
 
@@ -614,8 +614,11 @@ async fn sign(item: &Move, again: bool) -> Result<(), String> {
 /// The ck minter's `withdraw_erc20` of the move's ckUSDC to the canister's own Ethereum
 /// address: its ckUSDC in flight first, then the approvals of the minter on the ckUSDC and
 /// the ckETH ledgers (each with the move's dedup pair, so a retried one is the same), then
-/// the call. Refused while the canister's ckETH cannot pay the withdrawal's gas. An answer
-/// lost leaves the move withdrawing, and the next tick stops it for a controller.
+/// the call. Refused while the canister's ckETH cannot pay the withdrawal's gas. A refusal
+/// the minter answers burned no ckUSDC, so the move goes back to wait for the next tick,
+/// and a refusal that cannot pass also stops for a controller. With no answer the ckUSDC may
+/// be burned: the move stays withdrawing, and the next tick stops it for a controller, never
+/// asking again by itself, as a second call could burn twice.
 pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), String> {
     let flow = flow_settings::get();
     let minter = flow.ck_minter.ok_or("no ck minter is configured")?;
@@ -694,8 +697,19 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
             },
             ctx.now,
         ),
-        Err(CallError::Refused(why)) => refused(why, fee),
-        Err(error) => Err(format!("the minter's call: {error}")),
+        Err(ic::WithdrawFailure::Refused(refusal)) => {
+            let why = refusal.to_string();
+            refused(why.clone(), fee)?;
+            if refusal.may_pass() {
+                if matches!(refusal, ic::WithdrawErc20Error::CkEthLedgerError { .. }) {
+                    pool::log(&format!("ALERT: rebalance move {} waits: {why}", item.id));
+                }
+                return Ok(());
+            }
+            pool::log(&format!("ALERT: rebalance move {} stopped: {why}", item.id));
+            record(PoolStep::MoveStuck { id: item.id, why }, ctx.now)
+        }
+        Err(ic::WithdrawFailure::Unknown(why)) => Err(format!("the minter's call: {why}")),
     }
 }
 

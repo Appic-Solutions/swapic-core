@@ -201,7 +201,7 @@ enum Asked {
 struct Fake {
     asked: RefCell<Vec<Asked>>,
     balance: Nat,
-    withdraw: Option<Result<u64, CallError>>,
+    withdraw: Option<Result<u64, ic::WithdrawFailure>>,
     transfer: Option<Result<u64, CallError>>,
     status: Option<ic::WithdrawalStatus>,
 }
@@ -255,7 +255,7 @@ impl IcpCalls for Fake {
         ledger: Principal,
         amount: Nat,
         recipient: String,
-    ) -> Result<ic::RetrieveErc20Request, CallError> {
+    ) -> Result<ic::RetrieveErc20Request, ic::WithdrawFailure> {
         self.asked
             .borrow_mut()
             .push(Asked::Withdraw(ledger, amount, recipient));
@@ -419,12 +419,15 @@ fn a_refusing_minter_puts_the_ckusdc_back_and_short_ckether_asks_nothing() {
         assert_eq!(super::super::item(id).unwrap().status, MoveStatus::Open);
         let refusing = Fake {
             balance: Nat::from(30_000_000_000_000_u64),
-            withdraw: Some(Err(CallError::Refused("no".to_string()))),
+            withdraw: Some(Err(ic::WithdrawFailure::Refused(
+                ic::WithdrawErc20Error::TemporarilyUnavailable("no".to_string()),
+            ))),
             ..Fake::default()
         };
         block_on(withdraw(&refusing, &item, &ctx())).unwrap();
         let item = super::super::item(id).unwrap();
         assert_eq!(item.status, MoveStatus::Open);
+        assert_eq!(item.stuck, None, "a passing refusal is asked again");
         let icp = ledger().pockets.icp;
         assert_eq!(
             (icp.reserved, icp.in_flight),
@@ -630,6 +633,113 @@ fn a_reimbursed_withdrawal_returns_to_the_icp_pocket() {
             icp.free,
             usdc(4_000).checked_sub(TokenAmount::from(FEE)).unwrap()
         );
+    });
+}
+
+fn ledger_error() -> ic::LedgerError {
+    ic::LedgerError::InsufficientFunds {
+        balance: Nat::from(1_u8),
+        failed_burn_amount: Nat::from(2_u8),
+        token_symbol: "ckUSDC".to_string(),
+        ledger_id: Principal::from_slice(&[0x60; 10]),
+    }
+}
+
+/// What a typed refusal does to a move, ckUSDC never burned in any of them: back to wait for
+/// the next tick, and the ones that cannot pass held for a controller, not asked again each
+/// minute at a ledger fee.
+#[test]
+fn a_refusal_that_cannot_pass_stops_and_one_that_can_is_asked_again() {
+    use ic::{LedgerError, WithdrawErc20Error as Refusal};
+    let busy = || LedgerError::TemporarilyUnavailable("busy".to_string());
+    let cases = [
+        (Refusal::TemporarilyUnavailable("gas".to_string()), false),
+        (
+            Refusal::CkEthLedgerError {
+                error: ledger_error(),
+            },
+            false,
+        ),
+        (
+            Refusal::CkErc20LedgerError {
+                cketh_block_index: Nat::from(9_u8),
+                error: busy(),
+            },
+            false,
+        ),
+        (
+            Refusal::CkErc20LedgerError {
+                cketh_block_index: Nat::from(9_u8),
+                error: ledger_error(),
+            },
+            true,
+        ),
+        (
+            Refusal::RecipientAddressBlocked {
+                address: "0x01".to_string(),
+            },
+            true,
+        ),
+        (
+            Refusal::TokenNotSupported {
+                supported_tokens: vec![],
+            },
+            true,
+        ),
+    ];
+    for (refusal, stops) in cases {
+        on_fresh_memory(move || {
+            let id = pool_with_move(MoveDirection::IcpToBase, usdc(1_000), TokenAmount::ZERO);
+            let item = super::super::item(id).unwrap();
+            let fake = Fake {
+                balance: Nat::from(30_000_000_000_000_u64),
+                withdraw: Some(Err(ic::WithdrawFailure::Refused(refusal.clone()))),
+                ..Fake::default()
+            };
+            block_on(withdraw(&fake, &item, &ctx())).unwrap();
+            let item = super::super::item(id).unwrap();
+            assert_eq!(item.status, MoveStatus::Open, "{refusal:?}");
+            assert_eq!(item.stuck.is_some(), stops, "{refusal:?}");
+            assert!(!item.left, "{refusal:?}: nothing left the pocket");
+            let icp = ledger().pockets.icp;
+            assert_eq!(
+                (icp.reserved, icp.in_flight),
+                (usdc(1_000), TokenAmount::ZERO)
+            );
+            let expected = if stops { Next::Wait } else { Next::Withdraw };
+            assert_eq!(next(&item, at(200), false, FILL_WAIT), expected);
+        });
+    }
+}
+
+/// A trap of the minter's (its guards answer that way) or a lost reply is no refusal: the
+/// ckUSDC may be burned, so nothing is reserved again and nothing is asked again. The move
+/// holds its line in flight and stops for a controller at the next tick.
+#[test]
+fn a_lost_answer_is_never_read_as_nothing_burned() {
+    on_fresh_memory(|| {
+        let id = pool_with_move(MoveDirection::IcpToBase, usdc(1_000), TokenAmount::ZERO);
+        let item = super::super::item(id).unwrap();
+        let trapped = Fake {
+            balance: Nat::from(30_000_000_000_000_u64),
+            withdraw: Some(Err(ic::WithdrawFailure::Unknown(
+                "Failed retrieving guard for principal".to_string(),
+            ))),
+            ..Fake::default()
+        };
+        assert!(block_on(withdraw(&trapped, &item, &ctx())).is_err());
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Withdrawing);
+        assert!(item.left);
+        let icp = ledger().pockets.icp;
+        assert_eq!(
+            (icp.reserved, icp.in_flight),
+            (TokenAmount::ZERO, usdc(1_000))
+        );
+        assert!(matches!(
+            next(&item, at(200), false, FILL_WAIT),
+            Next::Stuck(why) if why.contains("lost")
+        ));
     });
 }
 

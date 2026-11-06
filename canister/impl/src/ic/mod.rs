@@ -1129,14 +1129,119 @@ enum WithdrawalSearchParameter {
     ByWithdrawalId(u64),
 }
 
+/// One token the minter supports, as a `TokenNotSupported` refusal lists them.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CkErc20Token {
+    pub ckerc20_token_symbol: String,
+    pub erc20_contract_address: String,
+    pub ledger_canister_id: Principal,
+}
+
+/// Why a burn of the minter's failed, its candid's `LedgerError`.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum LedgerError {
+    InsufficientFunds {
+        balance: Nat,
+        failed_burn_amount: Nat,
+        token_symbol: String,
+        ledger_id: Principal,
+    },
+    InsufficientAllowance {
+        allowance: Nat,
+        failed_burn_amount: Nat,
+        token_symbol: String,
+        ledger_id: Principal,
+    },
+    AmountTooLow {
+        minimum_burn_amount: Nat,
+        failed_burn_amount: Nat,
+        token_symbol: String,
+        ledger_id: Principal,
+    },
+    TemporarilyUnavailable(String),
+}
+
+/// The minter's refusals of a `withdraw_erc20`, its candid's `WithdrawErc20Error`. Each is a
+/// reply, and in each no ckUSDC was burned: the minter burns ckETH first, then ckUSDC, and
+/// answers `CkErc20LedgerError` when the second burn failed, the ckETH reimbursed.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum WithdrawErc20Error {
+    TokenNotSupported {
+        supported_tokens: Vec<CkErc20Token>,
+    },
+    RecipientAddressBlocked {
+        address: String,
+    },
+    CkEthLedgerError {
+        error: LedgerError,
+    },
+    CkErc20LedgerError {
+        cketh_block_index: Nat,
+        error: LedgerError,
+    },
+    TemporarilyUnavailable(String),
+}
+
+impl WithdrawErc20Error {
+    /// Whether asking again may pass: a minter or ledger out for now, or ckETH short of the
+    /// gas of the moment. A token, a recipient or a ckUSDC burn refused stays refused.
+    pub fn may_pass(&self) -> bool {
+        match self {
+            Self::TemporarilyUnavailable(_) | Self::CkEthLedgerError { .. } => true,
+            Self::CkErc20LedgerError { error, .. } => {
+                matches!(error, LedgerError::TemporarilyUnavailable(_))
+            }
+            Self::TokenNotSupported { .. } | Self::RecipientAddressBlocked { .. } => false,
+        }
+    }
+}
+
+impl std::fmt::Display for WithdrawErc20Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenNotSupported { .. } => write!(f, "the minter does not support the token"),
+            Self::RecipientAddressBlocked { address } => {
+                write!(f, "the minter blocks the recipient {address}")
+            }
+            Self::CkEthLedgerError { error } => {
+                write!(f, "the minter's ckETH burn failed: {error:?}")
+            }
+            Self::CkErc20LedgerError {
+                cketh_block_index,
+                error,
+            } => write!(
+                f,
+                "the minter's ckUSDC burn failed after its ckETH burn at {cketh_block_index}: {error:?}"
+            ),
+            Self::TemporarilyUnavailable(why) => {
+                write!(f, "the minter is unavailable for now: {why}")
+            }
+        }
+    }
+}
+
+/// How a `withdraw_erc20` that made no withdrawal ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WithdrawFailure {
+    /// The minter answered: no ckUSDC was burned.
+    Refused(WithdrawErc20Error),
+    /// No answer to go on: the system rejected the call, its reply did not decode, or the
+    /// minter trapped. The minter's guards trap before any burn (one call per caller, 100
+    /// pending, 100 at once), but nothing tells such a trap from one after a burn, so this
+    /// never says nothing was burned.
+    Unknown(String),
+}
+
 /// `withdraw_erc20` to `recipient`. The withdrawal id is the ckETH burn's block index, as
-/// the minter numbers withdrawals. A refusal the minter answers moved nothing.
+/// the minter numbers withdrawals.
+// the minter's own candid sets the size of its refusals
+#[allow(clippy::result_large_err)]
 pub async fn withdraw_erc20(
     minter: Principal,
     ckerc20_ledger: Principal,
     amount: Nat,
     recipient: String,
-) -> Result<RetrieveErc20Request, CallError> {
+) -> Result<RetrieveErc20Request, WithdrawFailure> {
     let arg = WithdrawErc20Arg {
         amount,
         ckerc20_ledger_id: ckerc20_ledger,
@@ -1144,11 +1249,11 @@ pub async fn withdraw_erc20(
         from_cketh_subaccount: None,
         from_ckerc20_subaccount: None,
     };
-    // the error variant is read as text: the canister acts on its being an error, and the
-    // ops read which one
-    let (answer,): (Result<RetrieveErc20Request, candid::Reserved>,) =
-        call(minter, "withdraw_erc20", (arg,)).await?;
-    answer.map_err(|_| CallError::Refused("the minter refused the withdrawal".to_string()))
+    let (answer,): (Result<RetrieveErc20Request, WithdrawErc20Error>,) =
+        call(minter, "withdraw_erc20", (arg,))
+            .await
+            .map_err(|error| WithdrawFailure::Unknown(error.to_string()))?;
+    answer.map_err(WithdrawFailure::Refused)
 }
 
 /// The minter's view of one withdrawal.

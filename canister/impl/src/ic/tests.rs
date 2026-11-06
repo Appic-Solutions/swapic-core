@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_util::block_on;
+use candid::{Decode, Encode};
 
 /// Review Focus 2: a retried transfer the ledger has seen answers `Duplicate`, which is
 /// the earlier transfer's block: paid, once.
@@ -292,4 +293,78 @@ fn the_block_read_is_chosen_by_the_ledgers_own_standards() {
         Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
         None
     ));
+}
+
+/// Replies of `withdraw_erc20` as the live minter's own candid encodes them: every line of
+/// `samples/minter_withdraw_erc20_replies.txt` was written from `candid:service` of
+/// `sv3dd-oaaaa-aaaar-qacoa-cai` (read 2026-11-06), not from these types.
+fn minter_reply(name: &str) -> Vec<u8> {
+    let line = include_str!("../../samples/minter_withdraw_erc20_replies.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name} ")))
+        .unwrap();
+    hex::decode(line).unwrap()
+}
+
+#[allow(clippy::result_large_err)]
+fn decoded(name: &str) -> Result<RetrieveErc20Request, WithdrawErc20Error> {
+    let bytes = minter_reply(name);
+    Decode!(&bytes, Result<RetrieveErc20Request, WithdrawErc20Error>).unwrap()
+}
+
+#[test]
+fn the_minters_own_replies_read_as_their_typed_refusals() {
+    let request = decoded("ok").unwrap();
+    assert_eq!(request.cketh_block_index, Nat::from(7_u8));
+    assert_eq!(request.ckerc20_block_index, Nat::from(8_u8));
+    let refusal = |name: &str| decoded(name).unwrap_err();
+    assert_eq!(
+        refusal("temporarily"),
+        WithdrawErc20Error::TemporarilyUnavailable(
+            "Failed to retrieve current gas fee".to_string()
+        )
+    );
+    assert!(matches!(
+        refusal("blocked"),
+        WithdrawErc20Error::RecipientAddressBlocked { .. }
+    ));
+    assert!(matches!(
+        refusal("unsupported"),
+        WithdrawErc20Error::TokenNotSupported { supported_tokens } if supported_tokens.len() == 1
+    ));
+    assert!(matches!(
+        refusal("cketh"),
+        WithdrawErc20Error::CkEthLedgerError {
+            error: LedgerError::InsufficientAllowance { .. }
+        }
+    ));
+    assert!(matches!(
+        refusal("ckerc20_funds"),
+        WithdrawErc20Error::CkErc20LedgerError {
+            error: LedgerError::InsufficientFunds { .. },
+            ..
+        }
+    ));
+    // passing: the minter or a ledger out for now, ckETH short of the gas of the moment
+    for name in ["temporarily", "cketh", "ckerc20_busy"] {
+        assert!(refusal(name).may_pass(), "{name}");
+    }
+    for name in ["blocked", "unsupported", "ckerc20_funds", "ckerc20_low"] {
+        assert!(!refusal(name).may_pass(), "{name}");
+    }
+}
+
+/// A refusal this build does not know does not decode, and `ic_cdk` answers a reply that does
+/// not decode as a rejection: `Unknown`, never a refusal, so it is never read as nothing burned.
+#[test]
+fn a_refusal_of_a_kind_not_known_is_no_refusal() {
+    #[derive(CandidType)]
+    enum Newer {
+        BrandNew(String),
+    }
+    let bytes = Encode!(&Err::<RetrieveErc20Request, Newer>(Newer::BrandNew(
+        "a new refusal".to_string()
+    )))
+    .unwrap();
+    assert!(Decode!(&bytes, Result<RetrieveErc20Request, WithdrawErc20Error>).is_err());
 }
