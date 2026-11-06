@@ -154,7 +154,9 @@ fn a_hub_takes_the_place_of_icp_on_its_own_ckusdc_pool() {
     assert!(routes.ledgers().contains(&principal(0x10)));
     // a hub no longer listed Direct is no path, and a token never goes through the wrong pool
     let mut unlisted = hubbed();
-    unlisted.routes.retain(|route| route.ledger != principal(0x10));
+    unlisted
+        .routes
+        .retain(|route| route.ledger != principal(0x10));
     assert_eq!(unlisted.path_of(principal(0x40), ckusdc()), None);
 }
 
@@ -194,7 +196,10 @@ fn a_hub_that_cannot_carry_a_route_is_refused() {
         pool: principal(0x41),
         hub: principal(0x10),
     };
-    assert_eq!(icp_hubbed.validate(ckusdc()), Err(RoutesError::BadHub(icp())));
+    assert_eq!(
+        icp_hubbed.validate(ckusdc()),
+        Err(RoutesError::BadHub(icp()))
+    );
     let with_pool = |pool: Principal| {
         let mut routes = hubbed();
         routes.routes[4].via = IcpRouteVia::Hub {

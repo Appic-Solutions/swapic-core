@@ -688,6 +688,8 @@ impl PoolLedger {
                 });
                 if item.direction == MoveDirection::IcpToBase {
                     item.window_ends = *window_ends;
+                    // the minter's word can come days after the move stopped: it goes on
+                    item.stuck = None;
                 }
                 item.status = MoveStatus::Landed;
                 item.since = at;

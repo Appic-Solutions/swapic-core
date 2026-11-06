@@ -1024,3 +1024,44 @@ fn a_refunded_eco_move_is_no_longer_stuck() {
     assert_eq!(item.status, MoveStatus::Open);
     assert!(item.routable());
 }
+
+/// A withdrawal stopped for a controller still hears the minter: its landing lifts the stop,
+/// so the move goes on with no controller; nothing else at `Withdrawn` does.
+#[test]
+fn a_late_landing_lifts_a_withdrawals_stop() {
+    let mut world = World::new();
+    let id = world.open(MoveDirection::IcpToBase, usdc(1_000), false);
+    world
+        .step(PoolStep::MoveWithdrawing {
+            id,
+            created_at: world.at(),
+        })
+        .unwrap();
+    world
+        .step(PoolStep::MoveWithdrawn {
+            id,
+            withdrawal_id: 9,
+            fee: TokenAmount::ZERO,
+        })
+        .unwrap();
+    world
+        .step(PoolStep::MoveStuck {
+            id,
+            why: "a wait".to_string(),
+        })
+        .unwrap();
+    assert!(world.item(id).stuck.is_some());
+    world
+        .step(PoolStep::MoveLanded {
+            id,
+            tx_hash: TxHash::new([0x71; 32]),
+            block: BlockNumber::new(1),
+            amount: usdc(1_000),
+            window_ends: None,
+        })
+        .unwrap();
+    let item = world.item(id);
+    assert_eq!(item.status, MoveStatus::Landed);
+    assert_eq!(item.stuck, None);
+    assert!(item.routable());
+}
