@@ -652,7 +652,7 @@ fn a_hundred_swaps_keep_the_books_and_a_fee_sweep_leaves_stakers_whole() {
 
 /// Two swaps in a row reach the minter one at a time, each with its own ckETH approval.
 #[test]
-fn two_swaps_at_once_reach_the_minter_one_at_a_time() {
+fn two_swaps_in_a_row_each_approve_their_own_gas() {
     let ck = ck_world(2);
     let first = ck.swap(user(0));
     let second = ck.swap(user(1));
