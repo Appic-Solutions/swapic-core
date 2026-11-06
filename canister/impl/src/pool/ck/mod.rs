@@ -884,8 +884,11 @@ async fn read_minter(
     }
 }
 
-/// The ckUSDC of a way back to the main account, all of it less the transfer's fee, under the
-/// undo's own pair. Moved already once the subaccount holds less than that.
+/// The ckUSDC of a way back to the main account, all of it less the transfer's fee. Moved
+/// already once the subaccount holds less than that, which is read before every ask, so a lost
+/// answer never moves it twice and a reimbursement days late is no older than its ask. This
+/// never stops: its lines are up and the hourly check leaves the hold out only while it is
+/// undoing, so a refusal is an alert and asked again.
 async fn bring_back(
     calls: &impl CkCalls,
     payout: &EvmPayout,
@@ -900,25 +903,24 @@ async fn bring_back(
         return Ok(());
     }
     let id = payout.id;
-    let Some(amount) = ck.fee.and_then(|fee| back.left.checked_sub(fee)) else {
-        return Err(Stop::Failed(
-            "the way back does not cover its fee".to_string(),
-        ));
-    };
+    let amount = ck
+        .fee
+        .and_then(|fee| back.left.checked_sub(fee))
+        .ok_or_else(|| Stop::Failed("the way back does not cover its fee".to_string()))?;
     let dedup = Dedup {
         memo: ck_back_memo(id),
-        created_at_nanos: payout.undoing_at.unwrap_or(payout.opened_at).as_nanos(),
+        created_at_nanos: clock().as_nanos(),
     };
     match calls
         .ck_transfer(fixed.ckusdc, Some(fixed.sub), fixed.main, amount, dedup)
         .await
     {
         Ok(_) => Ok(()),
-        Err(error @ CallError::Unknown(_)) => Err(Stop::Retry(format!("the way back: {error}"))),
         Err(error) => {
-            let why = format!("ALERT: the way back was refused: {error}");
-            icp_swap::stop(id, &why, clock())?;
-            Err(Stop::Failed(why))
+            if !matches!(error, CallError::Unknown(_)) {
+                log(&format!("ALERT: the ck payout {id}'s way back: {error}"));
+            }
+            Err(Stop::Retry(format!("the way back: {error}")))
         }
     }
 }

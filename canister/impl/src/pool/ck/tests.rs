@@ -188,6 +188,7 @@ struct Stub {
     ledger_down: Cell<bool>,
     minter_down: Cell<bool>,
     funding_refused: Cell<bool>,
+    back_refused: Cell<bool>,
     asks: RefCell<VecDeque<Ask>>,
     asked: Cell<u32>,
     list: RefCell<Vec<WithdrawalDetail>>,
@@ -364,6 +365,9 @@ impl CkCalls for Stub {
         }
         if self.funding_refused.get() && from_subaccount.is_none() {
             return Err(CallError::Refused("InsufficientFunds".to_string()));
+        }
+        if self.back_refused.get() && from_subaccount.is_some() {
+            return Err(CallError::Refused("GenericError".to_string()));
         }
         let amount = units(amount);
         if self.fresh(dedup) {
@@ -774,6 +778,36 @@ fn a_reimbursed_withdrawal_refunds_and_keeps_the_network_fee() {
         assert_eq!(stub.sub.get(), 0);
         assert_eq!(ledger().lines().fees_icp, TokenAmount::from(NETWORK_FEE));
         assert_books(&stub, assets);
+    });
+}
+
+/// A way back the ledger refuses stays undoing, asked again: a stop would leave its lines up
+/// outside the hourly check, and close the pool over money that is safe in the subaccount.
+#[test]
+fn a_refused_way_back_never_stops_and_is_asked_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        let stub = Stub::with(vec![Ask::Refuse(
+            WithdrawErc20Error::RecipientAddressBlocked {
+                address: recipient().to_string(),
+            },
+        )]);
+        stub.main.set(units(usdc(1_000)));
+        let id = open(&hundred());
+        stub.back_refused.set(true);
+        assert!(matches!(go(&stub, id, 110), Err(Stop::Retry(_))));
+        assert!(matches!(status(id), PayoutStatus::Undoing(_)));
+        assert!(ledger().lines().open.contains(&id));
+        assert_eq!(
+            read_state(pending_payouts),
+            TokenAmount::from(100_000_000_u64)
+        );
+        assert_eq!(stub.refunded.get(), 0);
+        stub.back_refused.set(false);
+        go(&stub, id, 170).unwrap();
+        assert!(matches!(status(id), PayoutStatus::Undone(_)));
+        assert_eq!(stub.refunded.get(), 100_000_000 - 4 * FEE);
     });
 }
 
