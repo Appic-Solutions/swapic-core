@@ -42,6 +42,7 @@ pub use memo::*;
 
 use crate::cctp::parse_address;
 use crate::ecdsa;
+use crate::evm_reads::TransferRead;
 use crate::pool;
 use crate::rpc::{self, hex0x, parse_block_number, parse_hash32, Keep, RpcError};
 use crate::state::{State, Store};
@@ -56,7 +57,9 @@ use types::pool::{
     PoolRail, PoolStep, Registered,
 };
 use types::swapic::{self, topics, Action, Envelope};
-use types::{Address, BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash};
+use types::{
+    Address, BlockDepth, BlockNumber, ChainId, EvmAddress, Timestamp, TokenAmount, TxHash,
+};
 
 /// How long a deposit's transfer found without its terms waits for them before it is a
 /// controller's to resolve.
@@ -297,10 +300,19 @@ impl Receipt {
 
     /// Every USDC transfer to the canister: its log, sender and value.
     fn transfers_to(&self, chain: &PoolChain) -> Vec<(&Log, EvmAddress, TokenAmount)> {
+        self.transfers_of(chain.usdc, chain.canister)
+    }
+
+    /// Every transfer of `token` to `to`: its log, sender and value.
+    fn transfers_of(
+        &self,
+        token: EvmAddress,
+        to: EvmAddress,
+    ) -> Vec<(&Log, EvmAddress, TokenAmount)> {
         self.logs
             .iter()
-            .filter(|log| log.is(chain.usdc, topics::transfer()))
-            .filter(|log| log.topics.len() == 3 && log.topics[2] == chain.canister.to_word())
+            .filter(|log| log.is(token, topics::transfer()))
+            .filter(|log| log.topics.len() == 3 && log.topics[2] == to.to_word())
             .filter_map(|log| {
                 let from = swapic::evm_of_word(log.topics[1])?;
                 let value: [u8; 32] = log.data.as_slice().try_into().ok()?;
@@ -1184,6 +1196,71 @@ pub async fn read_base(chain: &PoolChain, tx: TxHash) -> Result<Receipt, PoolErr
         .await
         .map_err(unavailable)?;
     based(tx, head, answers, chain)
+}
+
+/// What the agreed `answers` (a receipt of `tx` and the header of the block named from `head`)
+/// show `tx` moved of `token` to `to`, pure: the depth counted from a block every node saw, as
+/// [`based`] counts it, and the sum of the transfers of a receipt that succeeded.
+pub fn agreed_transfer(
+    tx: TxHash,
+    head: BlockNumber,
+    answers: Vec<Result<Value, RpcError>>,
+    token: EvmAddress,
+    to: EvmAddress,
+    depth: BlockDepth,
+) -> Result<TransferRead, PoolError> {
+    let named = named_block(head);
+    let receipt = agreed_receipt(tx, named, answers)?;
+    if !types::tx::is_confirmed(receipt.block, named, depth) {
+        return Ok(TransferRead::NotYet);
+    }
+    if !receipt.success {
+        return Ok(TransferRead::Reverted);
+    }
+    let amount = receipt
+        .transfers_of(token, to)
+        .into_iter()
+        .fold(TokenAmount::ZERO, |sum, (_, _, value)| {
+            sum.checked_add(value).unwrap_or(TokenAmount::MAX)
+        });
+    if amount == TokenAmount::ZERO {
+        return Ok(TransferRead::NoTransfer);
+    }
+    Ok(TransferRead::Landed {
+        amount,
+        block: receipt.block,
+    })
+}
+
+/// [`crate::evm_reads::transfer_to`] made by every node of the subnet and agreed on, the way
+/// [`read_base`] reads a pool arrival: for a transfer whose receipt decides money alone, with
+/// no one node's or one provider's word behind it.
+pub async fn read_transfer(
+    chain: ChainId,
+    tx: TxHash,
+    token: EvmAddress,
+    to: EvmAddress,
+    depth: BlockDepth,
+) -> Result<TransferRead, PoolError> {
+    let head = rpc::head(chain)
+        .await
+        .map_err(|failure| PoolError::Unavailable(format!("the head: {failure:?}")))?;
+    let calls = [
+        (
+            "eth_getTransactionReceipt",
+            json!([hex0x(tx.as_ref())]),
+            Keep::Receipt,
+        ),
+        (
+            "eth_getBlockByNumber",
+            json!([format!("0x{:x}", named_block(head).get()), false]),
+            Keep::Header,
+        ),
+    ];
+    let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_RECEIPT_BYTES)
+        .await
+        .map_err(unavailable)?;
+    agreed_transfer(tx, head, answers, token, to, depth)
 }
 
 /// The receipt at `block` is at the pool chain's crediting depth under `head`, or, when its

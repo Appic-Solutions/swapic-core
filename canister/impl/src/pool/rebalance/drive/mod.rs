@@ -7,11 +7,18 @@
 //!
 //! Every outflow (a signature, the minter's call) waits while the pool is closed. A move
 //! that cannot go on stops for a controller (`MoveStuck`), its lines where they are.
+//!
+//! A withdrawal has landed when its transaction is mined at the crediting depth, successful,
+//! with the USDC at the canister's Ethereum address, every node agreeing on that receipt: the
+//! minter's `TxFinalized` can lag the mined transaction by days (measured: 336 of 1,617 over 3
+//! hours, 7.8 days at worst). Stopped, a withdrawal still hears the minter, so a reimbursement
+//! that comes days late is booked with no controller.
 
 #[cfg(test)]
 mod tests;
 
 use super::{cost, own::OwnRoute};
+use crate::evm_reads::TransferRead;
 use crate::ic::{self, Account, CallError, Dedup};
 use crate::pool::{self, payout::Busy};
 use crate::storage::events::read_state;
@@ -31,8 +38,9 @@ use types::pool::{
 use types::swapic;
 use types::{BlockNumber, ChainId, EvmAddress, GasAmount, Timestamp, TokenAmount, TxHash, Wei};
 
-/// How long a move may wait in one position before it stops for a controller: the ck
-/// minter's 20 minutes and CCTP's standard attestation, many times over.
+/// How long a move may wait in one position before it stops for a controller: the minter's
+/// mined transaction (1.8 minutes at the median, 3 hours at the worst of 885) and CCTP's
+/// standard attestation, many times over.
 pub const STUCK_AFTER: Duration = Duration::from_secs(3 * 3_600);
 
 /// How many times a move's order may revert before it stops for a controller.
@@ -44,8 +52,8 @@ pub const SIGN_MARGIN_S: u64 = 120;
 /// The most blocks one read for an Eco fill looks at.
 pub const FILL_BLOCKS: u64 = 500;
 
-/// The ICP calls a move's legs make, so the driver runs the same against the ledgers and the
-/// minter, and against a fake.
+/// The calls a move's legs make, so the driver runs the same against the ledgers, the minter
+/// and Ethereum, and against a fake.
 #[allow(async_fn_in_trait)]
 pub trait IcpCalls {
     async fn balance(&self, ledger: Principal, account: Account) -> Result<Nat, CallError>;
@@ -76,6 +84,8 @@ pub trait IcpCalls {
         minter: Principal,
         id: u64,
     ) -> Result<Vec<ic::WithdrawalDetail>, CallError>;
+    /// What the minter's transaction `tx` moved of USDC to the canister on Ethereum.
+    async fn landing(&self, tx: TxHash, canister: EvmAddress) -> Result<TransferRead, String>;
 }
 
 /// The real ledgers and minter.
@@ -124,6 +134,10 @@ impl IcpCalls for Live {
     ) -> Result<Vec<ic::WithdrawalDetail>, CallError> {
         ic::withdrawal_status(minter, id).await
     }
+
+    async fn landing(&self, tx: TxHash, canister: EvmAddress) -> Result<TransferRead, String> {
+        landing_read(tx, canister).await
+    }
 }
 
 /// Who and when a step acts as: the clock it records at, the canister's principal and its
@@ -147,7 +161,8 @@ pub enum Next {
     },
     /// ICP to Base: ask the ck minter.
     Withdraw,
-    /// ICP to Base: read the minter's withdrawal and its landing on Ethereum.
+    /// ICP to Base: read the minter's withdrawal and its landing on Ethereum; a stopped one
+    /// only for the minter's final word.
     Landing,
     /// Base to ICP by Eco: find the fill on Ethereum.
     Fill,
@@ -178,8 +193,13 @@ pub fn eco_route_deadline(order: &[u8]) -> Option<u64> {
 /// or is out; `fill_wait`: how long past an Eco route's deadline its fill is first looked for
 /// on the pool chain (`agreed::fill_wait`, the payouts' own rule).
 pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -> Next {
-    if item.stuck.is_some() || item.status.is_final() || in_flight {
+    if item.status.is_final() || in_flight {
         return Next::Wait;
+    }
+    if item.stuck.is_some() {
+        let withdrawn =
+            item.direction == MoveDirection::IcpToBase && item.status == MoveStatus::Withdrawn;
+        return if withdrawn { Next::Landing } else { Next::Wait };
     }
     let waited = now.saturating_duration_since(item.since) >= STUCK_AFTER;
     let window_over = item.urgent || item.window_ends.is_none_or(|end| now >= end);
@@ -199,9 +219,6 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -
              whether it took the ckUSDC"
                 .to_string(),
         ),
-        (MoveDirection::IcpToBase, MoveStatus::Withdrawn) if waited => {
-            Next::Stuck("the minter's USDC did not land on Ethereum".to_string())
-        }
         (MoveDirection::IcpToBase, MoveStatus::Withdrawn) => Next::Landing,
         (MoveDirection::BaseToIcp, MoveStatus::Landed) => Next::Deposit,
         (_, MoveStatus::Routed) => {
@@ -308,7 +325,9 @@ async fn act(item: &Move, step: Next, now: Timestamp) -> Result<(), String> {
         step,
         Next::Route | Next::Sign { .. } | Next::Withdraw | Next::Deposit
     );
-    if step == Next::Unfilled && !unfilled_due(item.id, now) {
+    // a stopped withdrawal waits on the minter, for days at the worst
+    let late = step == Next::Unfilled || (step == Next::Landing && item.stuck.is_some());
+    if late && !late_read_due(item.id, now) {
         return Ok(());
     }
     if outflow {
@@ -454,12 +473,13 @@ fn own_order(
     Ok((MoveRoute::Own { max_fee, fast }, pinned))
 }
 
-/// How often an Eco move to Base past its deadline is looked for on the Portals.
-pub const UNFILLED_EVERY: Duration = Duration::from_secs(600);
+/// How often a move past its time is read: an Eco move to Base past its deadline on the
+/// Portals, a stopped withdrawal at the minter.
+pub const LATE_READ_EVERY: Duration = Duration::from_secs(600);
 
-/// Whether move `id`'s Portals are read now: at most every [`UNFILLED_EVERY`], the last read
-/// kept in stable memory; the last reads of moves no longer open are dropped.
-fn unfilled_due(id: u64, now: Timestamp) -> bool {
+/// Whether move `id` is read now: at most every [`LATE_READ_EVERY`], the last read kept in
+/// stable memory; the last reads of moves no longer open are dropped.
+fn late_read_due(id: u64, now: Timestamp) -> bool {
     // the open moves' ids as the ledger holds them: no move is read for them
     let mut open = read_state(|state| state.pool().moves().open);
     open.insert(id);
@@ -470,7 +490,7 @@ fn unfilled_due(id: u64, now: Timestamp) -> bool {
         let dropped = reads.len() != kept;
         let due = reads
             .get(&id)
-            .is_none_or(|last| now.saturating_duration_since(*last) >= UNFILLED_EVERY);
+            .is_none_or(|last| now.saturating_duration_since(*last) >= LATE_READ_EVERY);
         if due {
             reads.insert(id, now);
         }
@@ -730,11 +750,37 @@ async fn landed_by(
     match crate::evm_reads::transfer_to(ChainId::ETHEREUM, tx, usdc, canister, depth).await {
         Ok(crate::evm_reads::TransferRead::Landed { amount, block }) => Ok(Some((amount, block))),
         Ok(crate::evm_reads::TransferRead::NotYet) => Ok(None),
-        Ok(crate::evm_reads::TransferRead::NoTransfer) => {
-            Err("the transaction moved no USDC to the canister".to_string())
-        }
+        Ok(
+            crate::evm_reads::TransferRead::NoTransfer | crate::evm_reads::TransferRead::Reverted,
+        ) => Err("the transaction moved no USDC to the canister".to_string()),
         Err(error) => Err(format!("the landing read: {:?}", error.kind())),
     }
+}
+
+/// What the minter's transaction `tx` moved of USDC to the canister. One node's read says when
+/// it is worth asking: only a landing moves money on, and a node that says otherwise only
+/// delays it. A landing is read again by every node: `TxSent` is no word of the minter's that
+/// the transaction ran, so the receipt alone decides, and such a read is agreed
+/// (`rpc`'s module doc). A move landed on one node's false receipt could never book its
+/// reimbursement, and its order would spend other USDC at this address.
+async fn landing_read(tx: TxHash, canister: EvmAddress) -> Result<TransferRead, String> {
+    let config = config::get();
+    let usdc = config
+        .evm_chains
+        .get(ChainId::ETHEREUM)
+        .map(|evm| evm.usdc)
+        .ok_or("Ethereum is not a chain the canister signs on")?;
+    let depth = crate::tx::credit_confirmations(&config, ChainId::ETHEREUM)
+        .map_err(|error| error.to_string())?;
+    let one_node = crate::evm_reads::transfer_to(ChainId::ETHEREUM, tx, usdc, canister, depth)
+        .await
+        .map_err(|error| format!("the landing read: {:?}", error.kind()))?;
+    if !matches!(one_node, TransferRead::Landed { .. }) {
+        return Ok(one_node);
+    }
+    crate::pool::arrival::read_transfer(ChainId::ETHEREUM, tx, usdc, canister, depth)
+        .await
+        .map_err(|error| format!("the agreed landing read: {error:?}"))
 }
 
 /// The window an ICP to Base move takes proposals in, from its landing: none for an urgent
@@ -745,9 +791,115 @@ fn window_from(item: &Move, settings: &RebalanceSettings, now: Timestamp) -> Opt
         .flatten()
 }
 
-/// ICP to Base: the minter's withdrawal, and its USDC at the canister's Ethereum address.
-async fn landing(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), String> {
-    let settings = read_state(super::settings_in);
+/// What the minter says of a withdrawal, as a landing acts on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MinterSays {
+    /// Nothing to act on: no transaction yet, or a failed one's reimbursement on its way.
+    Nothing,
+    /// `TxSent`: its latest transaction. The minter can replace it, so it is read anew on every
+    /// pass and kept only once a receipt proves it.
+    Sent(TxHash),
+    /// `TxFinalized`, a success.
+    Succeeded(TxHash),
+    /// `TxFinalized`, reimbursed: the ckUSDC is back at the canister's account.
+    Reimbursed { amount: TokenAmount, block: u64 },
+}
+
+impl MinterSays {
+    fn of(status: ic::WithdrawalStatus) -> Result<Self, String> {
+        let tx = |hash: &str| hash32(hash).ok_or("the minter's transaction hash does not read");
+        Ok(match status {
+            ic::WithdrawalStatus::TxSent(sent) => Self::Sent(tx(&sent.transaction_hash)?),
+            ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Success {
+                transaction_hash,
+                ..
+            }) => Self::Succeeded(tx(&transaction_hash)?),
+            ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Reimbursed {
+                reimbursed_amount,
+                reimbursed_in_block,
+                ..
+            }) => Self::Reimbursed {
+                amount: TokenAmount::try_from(reimbursed_amount)
+                    .map_err(|_| "the reimbursement does not fit")?,
+                block: u64::try_from(reimbursed_in_block.0).unwrap_or(u64::MAX),
+            },
+            _ => Self::Nothing,
+        })
+    }
+}
+
+/// What a landing read comes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LandingStep {
+    /// The USDC is at the canister's Ethereum address.
+    Land {
+        tx: TxHash,
+        amount: TokenAmount,
+        block: BlockNumber,
+    },
+    /// The ckUSDC is back in the ICP pocket.
+    Reimburse {
+        amount: TokenAmount,
+        block: u64,
+    },
+    Wait,
+    /// Past its time with neither: a controller looks, and the minter is still heard.
+    Stop(String),
+}
+
+/// The step a withdrawal of `amount` takes on what the minter `says` and what its transaction
+/// showed on Ethereum (`read`, none where it was not asked), `waited` past [`STUCK_AFTER`],
+/// pure. Only a transaction that moved at least `amount` to the canister lands: a revert, a
+/// transfer short of it or none at all never does, whichever word of the minter's stands
+/// beside it. A failed withdrawal's way out is the minter's reimbursement, however late.
+pub fn landing_step(
+    says: &MinterSays,
+    read: Option<TransferRead>,
+    amount: TokenAmount,
+    waited: bool,
+) -> LandingStep {
+    match (says, read) {
+        (MinterSays::Reimbursed { amount, block }, _) => LandingStep::Reimburse {
+            amount: *amount,
+            block: *block,
+        },
+        (
+            MinterSays::Sent(tx) | MinterSays::Succeeded(tx),
+            Some(TransferRead::Landed {
+                amount: landed,
+                block,
+            }),
+        ) if landed >= amount => LandingStep::Land {
+            tx: *tx,
+            amount: landed,
+            block,
+        },
+        (_, read) if waited => LandingStep::Stop(match read {
+            Some(TransferRead::Reverted) => {
+                "the minter's transaction reverted: its reimbursement ends this stop".to_string()
+            }
+            Some(TransferRead::Landed { amount, .. }) => {
+                format!("the minter's transaction moved only {amount} to the canister")
+            }
+            Some(TransferRead::NoTransfer) => {
+                "the minter's transaction moved no USDC to the canister".to_string()
+            }
+            Some(TransferRead::NotYet) | None => {
+                "the minter's USDC did not land on Ethereum".to_string()
+            }
+        }),
+        _ => LandingStep::Wait,
+    }
+}
+
+/// What the minter says of `item`'s withdrawal, and what its transaction shows on Ethereum. A
+/// stopped move reads Ethereum only for what the minter finalized: `TxSent` is what it has
+/// waited on for hours, and each of its reads is an outcall.
+async fn landing_reads(
+    calls: &impl IcpCalls,
+    item: &Move,
+    ctx: &Ctx,
+) -> Result<(MinterSays, Option<TransferRead>), String> {
     let minter = flow_settings::get()
         .ck_minter
         .ok_or("no ck minter is configured")?;
@@ -761,50 +913,61 @@ async fn landing(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), St
         .find(|detail| detail.withdrawal_id == id)
         .map(|detail| detail.status)
         .ok_or("the minter knows no such withdrawal")?;
-    let hash = match status {
-        ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Success {
-            transaction_hash,
-            ..
-        }) => transaction_hash,
-        // reimbursed: its ckUSDC back at the canister's account, back in the ICP pocket
-        ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Reimbursed {
-            reimbursed_amount,
-            reimbursed_in_block,
-            ..
-        }) => {
-            let amount = TokenAmount::try_from(reimbursed_amount)
-                .map_err(|_| "the reimbursement does not fit")?;
+    let says = MinterSays::of(status)?;
+    let tx = match says {
+        MinterSays::Sent(tx) if item.stuck.is_none() => Some(tx),
+        MinterSays::Succeeded(tx) => Some(tx),
+        _ => None,
+    };
+    let read = match tx {
+        Some(tx) => Some(calls.landing(tx, ctx.canister).await?),
+        None => None,
+    };
+    Ok((says, read))
+}
+
+/// ICP to Base: the minter's withdrawal, and its USDC at the canister's Ethereum address. A
+/// read that keeps failing stops the move like any other wait.
+async fn landing(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(), String> {
+    let settings = read_state(super::settings_in);
+    let waited = ctx.now.saturating_duration_since(item.since) >= STUCK_AFTER;
+    let step = match landing_reads(calls, item, ctx).await {
+        Ok((says, read)) => landing_step(&says, read, item.amount, waited),
+        Err(why) if waited => LandingStep::Stop(why),
+        Err(why) => return Err(why),
+    };
+    match step {
+        LandingStep::Land { tx, amount, block } => record(
+            PoolStep::MoveLanded {
+                id: item.id,
+                tx_hash: tx,
+                block,
+                amount,
+                window_ends: window_from(item, &settings, ctx.now),
+            },
+            ctx.now,
+        ),
+        // its ckUSDC back at the canister's account, back in the ICP pocket
+        LandingStep::Reimburse { amount, block } => {
             pool::log(&format!(
                 "rebalance: move {}'s withdrawal was reimbursed: {amount} back in the ICP pocket",
                 item.id
             ));
-            return record(
+            record(
                 PoolStep::MoveReimbursed {
                     id: item.id,
                     amount: amount.min(item.amount),
-                    block: u64::try_from(reimbursed_in_block.0).unwrap_or(u64::MAX),
+                    block,
                 },
                 ctx.now,
-            );
+            )
         }
-        // a reimbursement on its way: it is read again
-        ic::WithdrawalStatus::TxFinalized(_) => return Ok(()),
-        _ => return Ok(()),
-    };
-    let tx = hash32(&hash).ok_or("the minter's transaction hash does not read")?;
-    let Some((amount, block)) = landed_by(tx, ctx.canister).await? else {
-        return Ok(());
-    };
-    record(
-        PoolStep::MoveLanded {
-            id: item.id,
-            tx_hash: tx,
-            block,
-            amount,
-            window_ends: window_from(item, &settings, ctx.now),
-        },
-        ctx.now,
-    )
+        LandingStep::Stop(why) if item.stuck.is_none() => {
+            pool::log(&format!("ALERT: rebalance move {} stopped: {why}", item.id));
+            record(PoolStep::MoveStuck { id: item.id, why }, ctx.now)
+        }
+        LandingStep::Stop(_) | LandingStep::Wait => Ok(()),
+    }
 }
 
 fn hash32(text: &str) -> Option<TxHash> {

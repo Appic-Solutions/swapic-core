@@ -154,7 +154,9 @@ pub enum TransferRead {
         amount: TokenAmount,
         block: BlockNumber,
     },
-    /// Mined at depth, and it moved none of the token to that address.
+    /// Mined at depth, and it reverted: it moved nothing.
+    Reverted,
+    /// Mined at depth, it succeeded, and it moved none of the token to that address.
     NoTransfer,
 }
 
@@ -198,7 +200,7 @@ pub async fn transfer_to(
         return Ok(TransferRead::NotYet);
     }
     if receipt.get("status").and_then(Value::as_str) != Some("0x1") {
-        return Ok(TransferRead::NoTransfer);
+        return Ok(TransferRead::Reverted);
     }
     let topic = types::swapic::topics::transfer();
     let mut total = TokenAmount::ZERO;

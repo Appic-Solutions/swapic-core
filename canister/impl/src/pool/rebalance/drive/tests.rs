@@ -1,6 +1,6 @@
 //! The driver's steps (P11c Task 4): what a move does next, and the ICP legs on a fake ledger
-//! and minter: the minter's call with its approvals, and the sweep, credited at most the
-//! move's amount (a donation is never the pool's).
+//! and minter: the minter's call with its approvals, its landing, and the sweep, credited at
+//! most the move's amount (a donation is never the pool's).
 
 use super::*;
 use crate::storage::on_fresh_memory;
@@ -74,10 +74,20 @@ fn a_move_to_base_asks_the_minter_then_reads_its_landing_then_takes_its_window()
         ..open.clone()
     };
     assert_eq!(next(&withdrawn, at(600), false, FILL_WAIT), Next::Landing);
-    assert!(matches!(
+    // past its time it is still read: the landing stops it, and hears the minter after
+    assert_eq!(
         next(&withdrawn, at(3 * 3_600), false, FILL_WAIT),
-        Next::Stuck(_)
-    ));
+        Next::Landing
+    );
+    let stopped = Move {
+        stuck: Some("a test".to_string()),
+        ..withdrawn
+    };
+    assert_eq!(
+        next(&stopped, at(4 * 3_600), false, FILL_WAIT),
+        Next::Landing
+    );
+    assert_eq!(next(&stopped, at(4 * 3_600), true, FILL_WAIT), Next::Wait);
     let landed = Move {
         status: MoveStatus::Landed,
         window_ends: Some(at(1_260)),
@@ -195,6 +205,7 @@ enum Asked {
     Approve(Principal, Principal, Nat, [u8; 32], u64),
     Transfer(Option<[u8; 32]>, Account, Nat, [u8; 32], u64),
     Withdraw(Principal, Nat, String),
+    Landing(TxHash),
 }
 
 #[derive(Default)]
@@ -204,6 +215,10 @@ struct Fake {
     withdraw: Option<Result<u64, ic::WithdrawFailure>>,
     transfer: Option<Result<u64, CallError>>,
     status: Option<ic::WithdrawalStatus>,
+    /// The minter's status read answers this instead.
+    status_fails: Option<CallError>,
+    /// What the landing read answers.
+    landed: Option<Result<TransferRead, String>>,
 }
 
 impl IcpCalls for Fake {
@@ -273,6 +288,9 @@ impl IcpCalls for Fake {
         minter: Principal,
         id: u64,
     ) -> Result<Vec<ic::WithdrawalDetail>, CallError> {
+        if let Some(error) = &self.status_fails {
+            return Err(error.clone());
+        }
         Ok(self
             .status
             .clone()
@@ -288,6 +306,11 @@ impl IcpCalls for Fake {
             })
             .into_iter()
             .collect())
+    }
+
+    async fn landing(&self, tx: TxHash, _canister: EvmAddress) -> Result<TransferRead, String> {
+        self.asked.borrow_mut().push(Asked::Landing(tx));
+        self.landed.clone().unwrap_or(Ok(TransferRead::NotYet))
     }
 }
 
@@ -636,6 +659,288 @@ fn a_reimbursed_withdrawal_returns_to_the_icp_pocket() {
     });
 }
 
+const WITHDRAWAL_TX: TxHash = TxHash::new([0x44; 32]);
+
+fn sent() -> ic::WithdrawalStatus {
+    ic::WithdrawalStatus::TxSent(ic::EthTransaction {
+        transaction_hash: format!("0x{}", hex::encode(WITHDRAWAL_TX.as_ref())),
+    })
+}
+
+fn succeeded() -> ic::WithdrawalStatus {
+    ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Success {
+        transaction_hash: format!("0x{}", hex::encode(WITHDRAWAL_TX.as_ref())),
+        effective_transaction_fee: None,
+    })
+}
+
+fn reimbursed(amount: TokenAmount) -> ic::WithdrawalStatus {
+    ic::WithdrawalStatus::TxFinalized(ic::TxFinalizedStatus::Reimbursed {
+        transaction_hash: format!("0x{}", hex::encode(WITHDRAWAL_TX.as_ref())),
+        reimbursed_amount: Nat::from(amount),
+        reimbursed_in_block: Nat::from(55_u8),
+    })
+}
+
+fn landed(amount: TokenAmount) -> TransferRead {
+    TransferRead::Landed {
+        amount,
+        block: BlockNumber::new(90),
+    }
+}
+
+/// A move of $1,000 at `Withdrawn`, its minter's call answered.
+fn withdrawn_move() -> u64 {
+    let id = pool_with_move(MoveDirection::IcpToBase, usdc(1_000), TokenAmount::ZERO);
+    let item = super::super::item(id).unwrap();
+    let fake = Fake {
+        balance: Nat::from(30_000_000_000_000_u64),
+        ..Fake::default()
+    };
+    block_on(withdraw(&fake, &item, &ctx())).unwrap();
+    id
+}
+
+fn context_at(secs: u64) -> Ctx {
+    Ctx {
+        now: at(secs),
+        ..ctx()
+    }
+}
+
+/// A clock past the move's wait, from its `since` at `ctx().now`.
+const PAST_WAIT: u64 = 100 + 3 * 3_600;
+
+#[test]
+fn only_a_transaction_that_moved_the_whole_amount_lands() {
+    let amount = usdc(1_000);
+    let (hash, tx) = (WITHDRAWAL_TX, MinterSays::Sent(WITHDRAWAL_TX));
+    let block = BlockNumber::new(90);
+    let land = LandingStep::Land {
+        tx: hash,
+        amount,
+        block,
+    };
+    // mined, at depth, successful, all of it at the canister: landed, with or without the
+    // minter's finalized word, and however long it took
+    for waited in [false, true] {
+        assert_eq!(
+            landing_step(&tx, Some(landed(amount)), amount, waited),
+            land
+        );
+        assert_eq!(
+            landing_step(
+                &MinterSays::Succeeded(hash),
+                Some(landed(amount)),
+                amount,
+                waited
+            ),
+            land
+        );
+    }
+    let stops = |says: &MinterSays, read: Option<TransferRead>| {
+        assert_eq!(
+            landing_step(says, read, amount, false),
+            LandingStep::Wait,
+            "it waits at first"
+        );
+        assert!(matches!(
+            landing_step(says, read, amount, true),
+            LandingStep::Stop(_)
+        ));
+    };
+    let short = amount.checked_sub(TokenAmount::ONE).unwrap();
+    stops(&tx, Some(TransferRead::NotYet));
+    stops(&tx, Some(TransferRead::Reverted));
+    stops(&tx, Some(TransferRead::NoTransfer));
+    stops(&tx, Some(landed(short)));
+    stops(&MinterSays::Succeeded(hash), Some(TransferRead::Reverted));
+    stops(&MinterSays::Succeeded(hash), Some(TransferRead::NoTransfer));
+    stops(&MinterSays::Nothing, None);
+    // the reimbursement is the minter's final word, whatever else was read
+    let reimbursed = MinterSays::Reimbursed { amount, block: 55 };
+    assert_eq!(
+        landing_step(&reimbursed, Some(TransferRead::Reverted), amount, true),
+        LandingStep::Reimburse { amount, block: 55 }
+    );
+}
+
+/// The fix: a transaction the minter still calls `TxSent` lands once it is mined at depth,
+/// long before `TxFinalized`, and such a move goes on to Base as any other: routed, burned and
+/// credited there, nothing left in flight.
+#[test]
+fn a_sent_and_mined_withdrawal_lands_and_arrives_on_base() {
+    on_fresh_memory(|| {
+        let id = withdrawn_move();
+        let item = super::super::item(id).unwrap();
+        let unmined = Fake {
+            status: Some(sent()),
+            ..Fake::default()
+        };
+        block_on(landing(&unmined, &item, &context_at(160))).unwrap();
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Withdrawn);
+        let mined = Fake {
+            status: Some(sent()),
+            landed: Some(Ok(landed(usdc(1_000)))),
+            ..Fake::default()
+        };
+        block_on(landing(&mined, &item, &context_at(220))).unwrap();
+        assert_eq!(
+            mined.asked.borrow().as_slice(),
+            &[Asked::Landing(WITHDRAWAL_TX)]
+        );
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Landed);
+        assert_eq!(item.landed.map(|landing| landing.tx), Some(WITHDRAWAL_TX));
+        assert_eq!(item.stuck, None);
+        // on from there as ever: its window, its route, its burn, its arrival on Base
+        record_at(
+            PoolStep::MoveRouted {
+                id,
+                route: MoveRoute::Own {
+                    max_fee: TokenAmount::ZERO,
+                    fast: false,
+                },
+                order: PinnedOrder {
+                    order_id: [1; 32],
+                    order: vec![],
+                    gas_limit: 300_000,
+                    deadline_s: at(3_600).as_secs().get(),
+                },
+                scan_from: None,
+            },
+            at(230),
+        )
+        .unwrap();
+        sign_and_burn(id);
+        let credit = types::pool::CreditKey {
+            chain: ChainId::BASE,
+            tx: TxHash::new([0x72; 32]),
+            log_index: 3,
+        };
+        record_at(
+            PoolStep::MoveArrived {
+                id,
+                credited: usdc(1_000),
+                credit: Some(credit),
+                block: Some(BlockNumber::new(50)),
+                ledger_block: None,
+            },
+            at(300),
+        )
+        .unwrap();
+        let pockets = ledger().pockets;
+        assert_eq!(pockets.icp.in_flight, TokenAmount::ZERO);
+        assert_eq!(pockets.base.free, usdc(1_000));
+        assert_eq!(super::super::item(id).unwrap().status, MoveStatus::Arrived);
+    });
+}
+
+/// A failed withdrawal is never a landing, and its reimbursement is booked whenever it comes:
+/// the real one took the transaction's finalized word, which can lag by days. The stop is an
+/// alert, not the end: no controller is needed for the money to come back.
+#[test]
+fn a_reverted_withdrawal_stops_and_its_late_reimbursement_is_still_booked() {
+    on_fresh_memory(|| {
+        let id = withdrawn_move();
+        let reverted = Fake {
+            status: Some(sent()),
+            landed: Some(Ok(TransferRead::Reverted)),
+            ..Fake::default()
+        };
+        let item = super::super::item(id).unwrap();
+        block_on(landing(&reverted, &item, &context_at(600))).unwrap();
+        let item = super::super::item(id).unwrap();
+        assert_eq!(
+            (item.status.clone(), item.stuck.clone()),
+            (MoveStatus::Withdrawn, None)
+        );
+        block_on(landing(&reverted, &item, &context_at(PAST_WAIT))).unwrap();
+        let stopped = super::super::item(id).unwrap();
+        assert!(stopped.stuck.as_deref().unwrap().contains("reverted"));
+        assert_eq!(stopped.status, MoveStatus::Withdrawn);
+        assert_eq!(ledger().pockets.icp.in_flight, usdc(1_000));
+        // still `TxSent`, days on: no outcall, no second stop
+        assert_eq!(
+            next(&stopped, at(PAST_WAIT), false, FILL_WAIT),
+            Next::Landing
+        );
+        let quiet = Fake {
+            status: Some(sent()),
+            ..Fake::default()
+        };
+        block_on(landing(&quiet, &stopped, &context_at(PAST_WAIT + 3_600))).unwrap();
+        assert!(quiet.asked.borrow().is_empty(), "no read of Ethereum");
+        // the minter reimburses, 7 days on
+        let paid = Fake {
+            status: Some(reimbursed(usdc(1_000))),
+            ..Fake::default()
+        };
+        let days = 7 * 24 * 3_600;
+        block_on(landing(&paid, &stopped, &context_at(days))).unwrap();
+        let returned = super::super::item(id).unwrap();
+        assert!(matches!(returned.status, MoveStatus::Returned(_)));
+        assert_eq!(returned.stuck, None);
+        let icp = ledger().pockets.icp;
+        assert_eq!(icp.in_flight, TokenAmount::ZERO);
+        assert_eq!(
+            icp.free,
+            usdc(4_000).checked_sub(TokenAmount::from(FEE)).unwrap()
+        );
+    });
+}
+
+/// The minter's latest hash may not be the one mined (it replaces a transaction with a dearer
+/// one): nothing lands on it, and its finalized word names the mined one, after a stop.
+#[test]
+fn a_stopped_withdrawal_lands_when_the_minter_finalizes_it() {
+    on_fresh_memory(|| {
+        let id = withdrawn_move();
+        let replaced = Fake {
+            status: Some(sent()),
+            ..Fake::default()
+        };
+        let item = super::super::item(id).unwrap();
+        block_on(landing(&replaced, &item, &context_at(PAST_WAIT))).unwrap();
+        let stopped = super::super::item(id).unwrap();
+        assert!(stopped.stuck.is_some());
+        let finalized = Fake {
+            status: Some(succeeded()),
+            landed: Some(Ok(landed(usdc(1_000)))),
+            ..Fake::default()
+        };
+        block_on(landing(&finalized, &stopped, &context_at(PAST_WAIT + 600))).unwrap();
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Landed);
+        assert_eq!(item.stuck, None, "it goes on with no controller");
+        assert!(item.routable());
+    });
+}
+
+/// A wait is a wait whichever way it fails: a minter that does not answer, or does not know
+/// the withdrawal, still stops the move at its time, as `next` once did on its own, and a
+/// stopped move is never stopped twice.
+#[test]
+fn a_landing_read_that_keeps_failing_still_stops_the_move() {
+    for answers in [false, true] {
+        on_fresh_memory(move || {
+            let id = withdrawn_move();
+            let fake = Fake {
+                status_fails: (!answers).then(|| CallError::Unknown("no answer".to_string())),
+                ..Fake::default()
+            };
+            let item = super::super::item(id).unwrap();
+            assert!(block_on(landing(&fake, &item, &context_at(600))).is_err());
+            assert_eq!(super::super::item(id).unwrap().stuck, None);
+            block_on(landing(&fake, &item, &context_at(PAST_WAIT))).unwrap();
+            let stopped = super::super::item(id).unwrap();
+            assert!(stopped.stuck.is_some());
+            block_on(landing(&fake, &stopped, &context_at(PAST_WAIT + 600))).unwrap();
+        });
+    }
+}
+
 fn ledger_error() -> ic::LedgerError {
     ic::LedgerError::InsufficientFunds {
         balance: Nat::from(1_u8),
@@ -785,7 +1090,7 @@ fn the_unfilled_reads_of_closed_moves_are_dropped() {
             state.unfilled_reads.insert(4_242, at(0));
             ((), true)
         });
-        assert!(unfilled_due(7, at(1)));
+        assert!(late_read_due(7, at(1)));
         let reads = crate::storage::timer_state::get().unfilled_reads;
         assert!(!reads.contains_key(&4_242), "no move 4242 is open");
     });

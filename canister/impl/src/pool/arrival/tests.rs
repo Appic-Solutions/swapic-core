@@ -1446,3 +1446,170 @@ fn each_deposit_in_a_receipt_takes_its_own_memo() {
         );
     });
 }
+
+/// The minter's real ckUSDC withdrawal of 10,999.2 USDC, read off a public node, and the one
+/// real failure of the 885 measured: 100 USDC, reverted, then reimbursed.
+fn minter_receipt(reverted: bool) -> Value {
+    let text = if reverted {
+        include_str!("../../../samples/minter_usdc_withdrawal_reverted_receipt.json")
+    } else {
+        include_str!("../../../samples/minter_usdc_withdrawal_receipt.json")
+    };
+    serde_json::from_str(text).unwrap()
+}
+
+/// Both answers of the agreed read, the receipt reduced as every node reduces it, and the
+/// head that names a block `above` the receipt's.
+fn agreed_answers(
+    receipt: &Value,
+    above: u64,
+) -> (TxHash, BlockNumber, Vec<Result<Value, RpcError>>) {
+    let tx = TxHash::new(crate::rpc::parse_hash32(receipt.get("transactionHash")).unwrap());
+    let block = crate::rpc::parse_block_number(receipt["blockNumber"].as_str().unwrap()).unwrap();
+    let head = BlockNumber::new(block.get() + above + HEADER_BEHIND);
+    let named = named_block(head);
+    let header = serde_json::json!({
+        "number": format!("0x{:x}", named.get()),
+        "hash": format!("0x{}", "11".repeat(32)),
+        "timestamp": "0x66000000",
+    });
+    let body = serde_json::json!([
+        {"jsonrpc": "2.0", "id": 0, "result": receipt},
+        {"jsonrpc": "2.0", "id": 1, "result": header},
+    ]);
+    let kept = crate::rpc::agreed_body(body.to_string().as_bytes(), &[Keep::Receipt, Keep::Header]);
+    let replies: Vec<Value> = serde_json::from_slice(&kept).unwrap();
+    let answers = replies
+        .into_iter()
+        .map(|mut reply| Ok(reply["result"].take()))
+        .collect();
+    (tx, head, answers)
+}
+
+fn usdc_on_ethereum() -> EvmAddress {
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        .parse()
+        .unwrap()
+}
+
+/// What this withdrawal paid its real recipient, the canister's place in the test.
+fn withdrawal_recipient() -> EvmAddress {
+    "0xb0117CC08BCC339890A0792a1fd7A35173fd714f"
+        .parse()
+        .unwrap()
+}
+
+const DEPTH: types::BlockDepth = types::BlockDepth::new(12);
+
+#[test]
+fn a_mined_withdrawal_at_depth_reads_its_whole_amount() {
+    let receipt = minter_receipt(false);
+    let (tx, head, answers) = agreed_answers(&receipt, 12);
+    let read = agreed_transfer(
+        tx,
+        head,
+        answers,
+        usdc_on_ethereum(),
+        withdrawal_recipient(),
+        DEPTH,
+    )
+    .unwrap();
+    assert_eq!(
+        read,
+        TransferRead::Landed {
+            amount: TokenAmount::from(0x2_8fa3_6035_u64),
+            block: BlockNumber::new(0x192_2372),
+        }
+    );
+}
+
+#[test]
+fn a_withdrawal_not_deep_enough_reads_not_yet() {
+    let receipt = minter_receipt(false);
+    let (tx, head, answers) = agreed_answers(&receipt, 5);
+    assert_eq!(
+        agreed_transfer(
+            tx,
+            head,
+            answers,
+            usdc_on_ethereum(),
+            withdrawal_recipient(),
+            DEPTH
+        ),
+        Ok(TransferRead::NotYet)
+    );
+}
+
+/// The one real failure reads as a revert, never a landing, at any depth.
+#[test]
+fn the_reverted_withdrawal_reads_as_reverted() {
+    let receipt = minter_receipt(true);
+    let (tx, head, answers) = agreed_answers(&receipt, 500);
+    assert_eq!(
+        agreed_transfer(
+            tx,
+            head,
+            answers,
+            usdc_on_ethereum(),
+            withdrawal_recipient(),
+            DEPTH
+        ),
+        Ok(TransferRead::Reverted)
+    );
+}
+
+/// USDC to someone else is no landing, nor is another token's transfer to the canister.
+#[test]
+fn a_transfer_to_another_or_of_another_token_is_no_landing() {
+    let receipt = minter_receipt(false);
+    let (tx, head, answers) = agreed_answers(&receipt, 12);
+    assert_eq!(
+        agreed_transfer(
+            tx,
+            head,
+            answers.clone(),
+            usdc_on_ethereum(),
+            usdc_on_ethereum(),
+            DEPTH
+        ),
+        Ok(TransferRead::NoTransfer)
+    );
+    assert_eq!(
+        agreed_transfer(
+            tx,
+            head,
+            answers.clone(),
+            withdrawal_recipient(),
+            withdrawal_recipient(),
+            DEPTH
+        ),
+        Ok(TransferRead::NoTransfer)
+    );
+    // a receipt of another transaction decides nothing
+    assert!(agreed_transfer(
+        TxHash::new([0x99; 32]),
+        head,
+        answers,
+        usdc_on_ethereum(),
+        withdrawal_recipient(),
+        DEPTH
+    )
+    .is_err());
+}
+
+/// A head one node named past the real one names no block every node sees: no depth.
+#[test]
+fn a_head_no_node_agrees_on_is_no_depth() {
+    let receipt = minter_receipt(false);
+    let (tx, head, mut answers) = agreed_answers(&receipt, 12);
+    answers[1] = Ok(Value::Null);
+    assert!(agreed_transfer(
+        tx,
+        head,
+        answers,
+        usdc_on_ethereum(),
+        withdrawal_recipient(),
+        DEPTH
+    )
+    .is_err());
+}
