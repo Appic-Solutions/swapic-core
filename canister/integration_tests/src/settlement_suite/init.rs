@@ -90,6 +90,17 @@ pub fn install(
     })
 }
 
+/// `setup()` on `wasm`, a build other than the suite's: where an upgrade starts from.
+pub fn setup_on(wasm: Vec<u8>) -> (PocketIc, Principal, Principal) {
+    let (pic, canister, admin) = empty_canister();
+    let arg = encode_one(init_arg()).expect("an init arg is candid");
+    through_the_install_rate_limit(&pic, || {
+        pic.reinstall_canister(canister, wasm.clone(), arg.clone(), Some(admin))
+    })
+    .expect("the prior build installs");
+    (pic, canister, admin)
+}
+
 /// Upgrades the canister onto the wasm the suite builds, and answers what the management
 /// canister answered.
 pub fn upgrade(

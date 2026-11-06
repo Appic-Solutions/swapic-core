@@ -8,6 +8,14 @@ pub fn settlement() -> Vec<u8> {
     std::fs::read(path).expect("run `scripts/run-integration-tests.sh` first")
 }
 
+/// The integration build of the commit deployed now, for the upgrade from it: `PRIOR_WASM`, a
+/// wasm built with `scripts/build-canister.sh --integration-test settlement` at that commit.
+pub fn prior_settlement() -> Vec<u8> {
+    let path = std::env::var("PRIOR_WASM")
+        .expect("set PRIOR_WASM to the deployed commit's integration build");
+    std::fs::read(path).expect("PRIOR_WASM names no file")
+}
+
 /// The ICRC-1/ICRC-2 ledger wasm the pool's suite runs ckUSDC on: `LEDGER_WASM`, or the
 /// legacy evm-minter's `ledger_canister_u256.wasm.gz` beside the repository, which is not
 /// committed here.
