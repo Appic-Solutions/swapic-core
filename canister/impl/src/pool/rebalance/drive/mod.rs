@@ -11,8 +11,8 @@
 //! A withdrawal has landed when its transaction is mined at the crediting depth, successful,
 //! with the USDC at the canister's Ethereum address, every node agreeing on that receipt: the
 //! minter's `TxFinalized` can lag the mined transaction by days (measured: 336 of 1,617 over 3
-//! hours, 7.8 days at worst). Stopped, a withdrawal still hears the minter, so a reimbursement
-//! that comes days late is booked with no controller.
+//! hours, 7.8 days at worst). A stopped withdrawal is still read, so a transaction mined past
+//! the stop lands, and a reimbursement that comes days late is booked, with no controller.
 
 #[cfg(test)]
 mod tests;
@@ -161,8 +161,7 @@ pub enum Next {
     },
     /// ICP to Base: ask the ck minter.
     Withdraw,
-    /// ICP to Base: read the minter's withdrawal and its landing on Ethereum; a stopped one
-    /// only for the minter's final word.
+    /// ICP to Base: read the minter's withdrawal and its landing on Ethereum.
     Landing,
     /// Base to ICP by Eco: find the fill on Ethereum.
     Fill,
@@ -893,8 +892,8 @@ pub fn landing_step(
 }
 
 /// What the minter says of `item`'s withdrawal, and what its transaction shows on Ethereum. A
-/// stopped move reads Ethereum only for what the minter finalized: `TxSent` is what it has
-/// waited on for hours, and each of its reads is an outcall.
+/// stopped move reads both too, at most every [`LATE_READ_EVERY`]: a transaction mined past
+/// the stop lands then, not days later at the minter's `TxFinalized`.
 async fn landing_reads(
     calls: &impl IcpCalls,
     item: &Move,
@@ -915,9 +914,8 @@ async fn landing_reads(
         .ok_or("the minter knows no such withdrawal")?;
     let says = MinterSays::of(status)?;
     let tx = match says {
-        MinterSays::Sent(tx) if item.stuck.is_none() => Some(tx),
-        MinterSays::Succeeded(tx) => Some(tx),
-        _ => None,
+        MinterSays::Sent(tx) | MinterSays::Succeeded(tx) => Some(tx),
+        MinterSays::Nothing | MinterSays::Reimbursed { .. } => None,
     };
     let read = match tx {
         Some(tx) => Some(calls.landing(tx, ctx.canister).await?),

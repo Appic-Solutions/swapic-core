@@ -861,17 +861,15 @@ fn a_reverted_withdrawal_stops_and_its_late_reimbursement_is_still_booked() {
         assert!(stopped.stuck.as_deref().unwrap().contains("reverted"));
         assert_eq!(stopped.status, MoveStatus::Withdrawn);
         assert_eq!(ledger().pockets.icp.in_flight, usdc(1_000));
-        // still `TxSent`, days on: no outcall, no second stop
+        // still `TxSent`, days on: it is still read, never lands, and is not stopped twice
         assert_eq!(
             next(&stopped, at(PAST_WAIT), false, FILL_WAIT),
             Next::Landing
         );
-        let quiet = Fake {
-            status: Some(sent()),
-            ..Fake::default()
-        };
-        block_on(landing(&quiet, &stopped, &context_at(PAST_WAIT + 3_600))).unwrap();
-        assert!(quiet.asked.borrow().is_empty(), "no read of Ethereum");
+        block_on(landing(&reverted, &stopped, &context_at(PAST_WAIT + 3_600))).unwrap();
+        let same = super::super::item(id).unwrap();
+        assert_eq!(same.status, MoveStatus::Withdrawn);
+        assert_eq!(same.stuck, stopped.stuck);
         // the minter reimburses, 7 days on
         let paid = Fake {
             status: Some(reimbursed(usdc(1_000))),
@@ -888,6 +886,34 @@ fn a_reverted_withdrawal_stops_and_its_late_reimbursement_is_still_booked() {
             icp.free,
             usdc(4_000).checked_sub(TokenAmount::from(FEE)).unwrap()
         );
+    });
+}
+
+/// A transaction mined past the stop (the worst of 885 took 181.7 minutes, then its depth) lands
+/// when it is read, with the minter still at `TxSent`: not at its `TxFinalized`, 56.9 hours at the
+/// p90, and with no controller.
+#[test]
+fn a_stopped_withdrawal_lands_when_its_transaction_is_mined() {
+    on_fresh_memory(|| {
+        let id = withdrawn_move();
+        let unmined = Fake {
+            status: Some(sent()),
+            ..Fake::default()
+        };
+        let item = super::super::item(id).unwrap();
+        block_on(landing(&unmined, &item, &context_at(PAST_WAIT))).unwrap();
+        let stopped = super::super::item(id).unwrap();
+        assert!(stopped.stuck.is_some());
+        let mined = Fake {
+            status: Some(sent()),
+            landed: Some(Ok(landed(usdc(1_000)))),
+            ..Fake::default()
+        };
+        block_on(landing(&mined, &stopped, &context_at(PAST_WAIT + 600))).unwrap();
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Landed);
+        assert_eq!(item.stuck, None);
+        assert!(item.routable());
     });
 }
 
