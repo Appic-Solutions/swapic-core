@@ -1,4 +1,4 @@
-use crate::settlement_suite::init::{setup, setup_on, upgrade};
+use crate::settlement_suite::init::{setup, setup_on, upgrade, watcher};
 use crate::wasms;
 use candid::{decode_one, encode_one, Principal};
 use pocket_ic::PocketIc;
@@ -305,4 +305,43 @@ fn the_deployed_builds_state_survives_this_upgrade_and_takes_a_hub() {
     upgrade(&pic, canister, admin).unwrap();
     assert_eq!(read_hub(), Some(hub));
     assert_eq!(read::<u64>(&pic, canister, "event_count"), events + 1);
+}
+
+/// The fix round of 2026-11-08 (fix-canister 78a254c) upgrades in place from the deployed
+/// build (`PRIOR_WASM`, its integration build of ck-part-6 398aeca): every line it wrote is read
+/// by this build, its routes and its moves answer the same, the timers (the pool's own read of
+/// Base among them, which now retries a failed read in 30 s) run five minutes over that state
+/// with the canister answering throughout, and the new cycles door answers the watcher alone.
+#[test]
+#[ignore = "needs PRIOR_WASM: scripts/build-canister.sh --integration-test settlement at the deployed commit"]
+fn the_deployed_state_survives_the_fix_round_upgrade() {
+    let (pic, canister, admin) = setup_on(wasms::prior_settlement());
+    seed_with_a_stopped_withdrawal(&pic, canister, admin);
+    let events: u64 = read(&pic, canister, "event_count");
+    let routes: IcpRoutesView = read(&pic, canister, "icp_routes");
+    let moves: Vec<MoveView> = read(&pic, canister, "rebalance_moves");
+    let stuck: Vec<MoveView> = read(&pic, canister, "rebalance_stuck");
+
+    upgrade(&pic, canister, admin).unwrap();
+
+    assert_eq!(read::<u64>(&pic, canister, "event_count"), events);
+    assert_eq!(read::<IcpRoutesView>(&pic, canister, "icp_routes"), routes);
+    assert_eq!(read::<Vec<MoveView>>(&pic, canister, "rebalance_moves"), moves);
+    assert_eq!(read::<Vec<MoveView>>(&pic, canister, "rebalance_stuck"), stuck);
+
+    for _ in 0..10 {
+        pic.advance_time(std::time::Duration::from_secs(30));
+        pic.tick();
+    }
+    assert_eq!(read::<Vec<MoveView>>(&pic, canister, "rebalance_stuck"), stuck);
+
+    let cycles = |caller: Principal| -> Result<u64, String> {
+        let raw = pic
+            .query_call(canister, caller, "watcher_cycles_balance", encode_one(()).unwrap())
+            .expect("the cycles door answers");
+        decode_one(&raw).unwrap()
+    };
+    assert!(cycles(watcher()).is_ok_and(|balance| balance > 0), "the watcher reads the balance");
+    assert!(cycles(admin).is_err(), "a controller is not the watcher");
+    assert!(cycles(Principal::anonymous()).is_err(), "nobody else reads it");
 }
