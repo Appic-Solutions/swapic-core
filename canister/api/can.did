@@ -1360,6 +1360,10 @@ service : (InitArg) -> {
   // ledger block of its transfer.
   sweep_icp : (SweepIcpArgs) -> (Result_16);
   version : () -> (text) query;
+  // The canister's cycles balance, for the watcher's low cycles alert alone: a balance anyone
+  // could read would tell an outsider how far the canister is from freezing. Any other caller is
+  // refused. The balance saturates at `u64::MAX` (about 18 million T), far above any real one.
+  watcher_cycles_balance : () -> (Result_1) query;
   // Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's
   // `POST /v2/withdraw` forwards here), refused while halted, while the pool is closed, and for
   // a sanctioned party. Burns the shares `usdc` is worth (rounded up, at most `max_shares` and

@@ -628,3 +628,15 @@ fn a_refund_read_too_early_holds_the_cursor_with_no_alert() {
         (false, None)
     );
 }
+
+/// A failed read is tried again soon five times in a row, then waits for its next interval; a
+/// new interval (or a read that went through) gives the next failures their retries again.
+#[test]
+fn a_failed_read_is_tried_again_soon_a_few_times_in_a_row() {
+    retries_reset();
+    let soon: Vec<bool> = (0..RETRIES_IN_A_ROW + 2).map(|_| retry_soon()).collect();
+    assert_eq!(soon.iter().filter(|again| **again).count() as u32, RETRIES_IN_A_ROW);
+    assert!(!soon[RETRIES_IN_A_ROW as usize], "past the limit it waits for the interval");
+    retries_reset();
+    assert!(retry_soon(), "a new interval tries again");
+}

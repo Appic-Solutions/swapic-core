@@ -68,6 +68,34 @@ thread_local! {
     // Heap by necessity: whether a pass is out right now. Two passes from one cursor would
     // read and record the same transfers twice over.
     static PASSING: Cell<bool> = const { Cell::new(false) };
+    // Heap by necessity too, like PASSING: the failed reads in a row since the last good one;
+    // an upgrade that clears it only gives the next failure one more retry.
+    static RETRIES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How many times in a row a failed read of Base is tried again soon before it waits for its
+/// next interval: about 1 in 50 single node reads fails with a passing connection error (prod,
+/// 2026-11-07), and giving up for the whole hour left the read 7 to 12 hours behind.
+pub const RETRIES_IN_A_ROW: u32 = 5;
+
+/// How long after a failed read it is tried again.
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A new interval, or a read that went through: the next failure may be tried again soon.
+pub fn retries_reset() {
+    RETRIES.with(|retries| retries.set(0));
+}
+
+/// Whether a failed read is tried again soon: at most [`RETRIES_IN_A_ROW`] times in a row.
+pub fn retry_soon() -> bool {
+    RETRIES.with(|retries| {
+        let tried = retries.get();
+        let again = tried < RETRIES_IN_A_ROW;
+        if again {
+            retries.set(tried + 1);
+        }
+        again
+    })
 }
 
 /// Whether the pool's own read of Base has work (no registration tells it when a
@@ -327,9 +355,22 @@ pub async fn run_backup() {
         return;
     };
     match backup(&LiveBase(&chain), &chain, crate::pool::now).await {
-        Ok(report) if report.again => crate::task_manager::read_base_again(),
-        Ok(_) => {}
-        Err(why) => crate::pool::log(&format!("the pool's own read of Base stopped: {why}")),
+        Ok(report) => {
+            retries_reset();
+            if report.again {
+                crate::task_manager::read_base_again();
+            }
+        }
+        Err(why) if retry_soon() => {
+            crate::pool::log(&format!(
+                "the pool's own read of Base failed for now, read again in {} s: {why}",
+                RETRY_AFTER.as_secs()
+            ));
+            crate::task_manager::read_base_after(RETRY_AFTER);
+        }
+        Err(why) => crate::pool::log(&format!(
+            "the pool's own read of Base stopped until its next interval: {why}"
+        )),
     }
 }
 

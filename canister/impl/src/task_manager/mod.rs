@@ -68,17 +68,23 @@ pub fn restart_pool_arrivals_timer() {
             .arrival_backup,
     );
     restart(&POOL_ARRIVALS_TIMER, || {
-        ic_cdk_timers::set_timer_interval(every, || ic_cdk::spawn(pool_arrivals::run_backup()))
+        ic_cdk_timers::set_timer_interval(every, || {
+            pool_arrivals::retries_reset();
+            ic_cdk::spawn(pool_arrivals::run_backup())
+        })
     });
     read_base_again();
 }
 
 /// One more read of Base a second from now: the read is behind and moved last time.
 pub fn read_base_again() {
+    read_base_after(types::config::TIMER_FLOOR);
+}
+
+/// One more read of Base after `delay`: the last one failed for now, or is behind.
+pub fn read_base_after(delay: Duration) {
     restart(&POOL_ARRIVALS_AGAIN, || {
-        ic_cdk_timers::set_timer(types::config::TIMER_FLOOR, || {
-            ic_cdk::spawn(pool_arrivals::run_backup())
-        })
+        ic_cdk_timers::set_timer(delay, || ic_cdk::spawn(pool_arrivals::run_backup()))
     });
 }
 
