@@ -100,6 +100,22 @@ pub fn icp_ledger_of(
 /// `routes` with the ICP ledger read off the ICP/ckUSDC pool's metadata and every route
 /// ledger's fee read (`icrc1_fee`), then checked against the pool's ckUSDC ledger. Each pool
 /// and each ledger is asked once, and all of them at once.
+/// The most calls a route set's reads keep open at once. On prod, 22 reads at once failed
+/// with "Couldn't send message" on whichever call went 22nd, and 21 passed.
+pub const READS_AT_ONCE: usize = 8;
+
+/// `read` of every item, at most [`READS_AT_ONCE`] open at a time, the answers in order.
+async fn in_batches<T, A, F>(items: &[T], read: impl Fn(&T) -> F) -> Vec<A>
+where
+    F: std::future::Future<Output = A>,
+{
+    let mut answers = Vec::with_capacity(items.len());
+    for batch in items.chunks(READS_AT_ONCE) {
+        answers.extend(join_all(batch.iter().map(&read)).await);
+    }
+    answers
+}
+
 pub async fn routes_with_reads(
     mut routes: types::pool::IcpRoutes,
     ckusdc: candid::Principal,
@@ -107,7 +123,7 @@ pub async fn routes_with_reads(
     // every route pool's tokens, the ICP/ckUSDC pool's among them, read once here and never
     // per swap
     let pools = routes.pools();
-    let answers = join_all(pools.iter().map(|pool| ic::pool_metadata(*pool))).await;
+    let answers = in_batches(&pools, |pool| ic::pool_metadata(*pool)).await;
     let mut pool_tokens = Vec::new();
     for (pool, answer) in pools.into_iter().zip(answers) {
         let metadata =
@@ -138,7 +154,7 @@ pub async fn routes_with_reads(
         .into_iter()
         .filter(|ledger| *ledger != ckusdc)
         .collect();
-    let answers = join_all(ledgers.iter().map(|ledger| ic::icrc1_fee(*ledger))).await;
+    let answers = in_batches(&ledgers, |ledger| ic::icrc1_fee(*ledger)).await;
     let mut fees = Vec::new();
     for (ledger, answer) in ledgers.into_iter().zip(answers) {
         let fee =

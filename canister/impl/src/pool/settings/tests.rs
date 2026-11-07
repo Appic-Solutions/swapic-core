@@ -120,3 +120,26 @@ fn set_icp_routes_refuses_a_stranger_and_a_halt_and_reads_icp_off_its_pool() {
         None
     );
 }
+
+/// A route set's reads never keep more than [`READS_AT_ONCE`] calls open at once, and the
+/// answers keep the items' order.
+#[test]
+fn a_route_sets_reads_go_out_in_batches_in_order() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let open = Rc::new(Cell::new(0usize));
+    let most = Rc::new(Cell::new(0usize));
+    let items: Vec<usize> = (0..27).collect();
+    let answers = futures::executor::block_on(in_batches(&items, |i| {
+        let (open, most, i) = (open.clone(), most.clone(), *i);
+        open.set(open.get() + 1);
+        most.set(most.get().max(open.get()));
+        async move {
+            open.set(open.get() - 1);
+            i * 2
+        }
+    }));
+    assert_eq!(answers, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+    assert!(most.get() <= READS_AT_ONCE, "{} open at once", most.get());
+    assert_eq!(most.get(), READS_AT_ONCE);
+}
