@@ -791,6 +791,33 @@ fn main() {
         );
     }
 
+    // the services' run (fork/run_services.sh): the fork is left as it is for the real quoter and watcher,
+    // with attested messages they could not get any other way, and held until they are done
+    if only == "hold" {
+        let mut crafted = Vec::new();
+        for (mint, label) in [(BONK, "bonk"), (SOL, "sol")] {
+            let r = random_ref();
+            let shard = shard_of(&r);
+            let mint_key = base58::decode_pubkey(mint).unwrap();
+            let hook = SolanaEnvelope { ref_bytes: r, action: SOLANA_ACTION_SWAP, deadline: (f.now() + 3600) as u32, recipient: wallet, mint_out: mint_key, min_out: 1 };
+            let (nonce, message, attestation) = craft(&f, shard, &a, &hook.encode());
+            let hex_of = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            crafted.push(json!({"label": label, "shard": shard, "mint": mint, "nonce": hex_of(&nonce), "message": hex_of(&message), "attestation": hex_of(&attestation)}));
+        }
+        let hold = json!({
+            "program": encode(&program), "canister": encode(&canister), "admin": encode(&admin),
+            "user": encode(&user), "wallet": encode(&wallet),
+            "table": encode(&table.address), "entries": table.entries.iter().map(|e| encode(e)).collect::<Vec<_>>(),
+            "arrivals": crafted, "minted": ARRIVAL_AMOUNT - ARRIVAL_FEE,
+        });
+        std::fs::write(&report, serde_json::to_string_pretty(&hold).unwrap()).unwrap();
+        let stop = format!("{report}.stop");
+        while !std::path::Path::new(&stop).exists() {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        return;
+    }
+
     let want = |name: &str| only.is_empty() || name.contains(&only);
     let memo = [0x5au8; 180];
     let principal = [0x77u8; 32];
