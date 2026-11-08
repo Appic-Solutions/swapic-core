@@ -301,3 +301,6 @@ pub async fn transaction(sol_rpc: Principal, signature: &[u8; 64]) -> Result<Opt
         block_time_s: confirmed.blockTime.and_then(|t| u64::try_from(t).ok()),
     }))
 }
+
+#[cfg(test)]
+mod tests;

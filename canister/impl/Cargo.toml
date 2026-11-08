@@ -35,6 +35,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+candid_parser = "0.2"
 alloy-sol-types = { workspace = true }
 # signing, for tests that sign as a payer; the canister itself only recovers
 libsecp256k1 = { workspace = true, features = ["hmac"] }
