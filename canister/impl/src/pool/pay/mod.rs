@@ -192,9 +192,9 @@ pub fn check_order(
             order.deadline
         )));
     }
-    // the order's own bytes are less than its run(order) calldata, so this floor is never
-    // above what the signed transaction needs; signing holds the exact one (`tx::least_gas`)
-    let least = MIN_GAS_LIMIT.max(crate::tx::least_gas(order_bytes));
+    // the floor signing holds (`tx::least_gas`) on the calldata it signs: a limit under it is
+    // refused here, before the payout opens, never answered "try later" at every signature
+    let least = MIN_GAS_LIMIT.max(crate::tx::least_gas(&swapic::run_calldata(order)));
     if !(least..=settings.max_payout_gas).contains(&gas_limit) {
         return Err(refused(format!(
             "a gas limit of {gas_limit} is not between {least} and {}",

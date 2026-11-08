@@ -583,10 +583,7 @@ async fn gas_in_hand(chain: ChainId, action: GasAction) -> Result<(), String> {
     )
     .await
     .map_err(|error| format!("the balance read: {:?}", error.kind()))?;
-    let balance = answers
-        .first()
-        .and_then(Value::as_str)
-        .and_then(|text| Wei::from_str_hex(text.strip_prefix("0x")?).ok())
+    let balance = crate::rpc::wei_answer(answers.first())
         .ok_or("the balance read answered no amount")?;
     if balance < budget {
         pool::log(&format!(
