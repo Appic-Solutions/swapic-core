@@ -135,6 +135,8 @@ type Config = record {
   // How long the outbox holds signed transactions back to send them together.
   batch_window_ms : nat64;
   ecdsa_key_name : text;
+  // The Solana line. Absent: the canister signs nothing on Solana.
+  solana : opt SolanaConfig;
   // The chain the pool's EVM pocket is on, whose books the pool's guard reads. None:
   // the pool is closed.
   pool_chain : opt nat64;
@@ -189,6 +191,8 @@ type ConfigError = variant {
   // The text in `field` at `chain_id` is not an EIP-712 domain name or version: 1 to 32
   // printable ASCII characters.
   NotDomainText : record { field : text; chain_id : nat64 };
+  // The Solana config is not one the canister can sign with.
+  Solana : record { why : text };
   // The text in `field` (for a table, at `chain_id`) is not an EVM address.
   NotAnAddress : record {
     field : text;
@@ -342,6 +346,8 @@ type EventType = variant {
     step_bytes : blob;
     chain_id : nat64;
   };
+  // A step of the Solana line.
+  Solana : record { step : text; detail : text; step_bytes : blob };
   // A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
   // amount is back on the books it came from.
   SweepReverted : record { id : nat64; why : text };
@@ -459,6 +465,18 @@ type FinalizedSeen = record {
   moved_at_ns : nat64;
   // The last finalized block a read gave; none before any did.
   number : opt nat64;
+};
+type FinishSolanaArgs = record {
+  action : SolanaFinishAction;
+  src_tx_hash : blob;
+  attestation : blob;
+  create_account : bool;
+  lifetime : SolanaLifetime;
+  cu_limit : nat32;
+  message : blob;
+  // The output token is a Token-2022 token: its account derives under that program.
+  token_2022 : bool;
+  route : opt SolanaRoute;
 };
 // Why a flow door refused. Nothing moved.
 type FlowCallError = variant {
@@ -657,6 +675,8 @@ type PayoutStatus = variant {
 };
 // Where and how a payout pays the user.
 type PayoutTerms = record {
+  // Paid on Solana: `dst_chain` is then the pool chain, and the EVM fields are zero.
+  solana : opt SolanaPayoutTerms;
   // A chain the canister signs on, Base included.
   dst_chain : nat64;
   // In `token_out`'s units.
@@ -827,6 +847,11 @@ type PoolStateView = record {
   total_assets : nat;
   closed_reason : opt text;
 };
+type ProposeSolanaUpgradeArgs = record {
+  source_commit : text;
+  buffer : text;
+  build_hash : blob;
+};
 // A pull a door made before writing anything whose outcome nobody could tell (audit C15):
 // nothing is written of it, so a human checks `ledger` for a transfer from `from` with this
 // memo and gives back what moved. The watcher alerts each once.
@@ -854,26 +879,42 @@ type RebalanceSettings = record {
 // `data` paying the Runner, rescaled to what arrived by `scaler` when one is named.
 // Addresses are EVM addresses.
 type Recipe = record { scaler : opt text; data : blob; target : text };
-type Result = variant { Ok : text; Err : SignError };
+type RelaySolanaForwardArgs = record {
+  src_tx_hash : blob;
+  attestation : blob;
+  lifetime : SolanaLifetime;
+  message : blob;
+};
+type ReleaseMisroutedArgs = record {
+  attestation : blob;
+  lifetime : SolanaLifetime;
+  order_ref : blob;
+  message : blob;
+  payer : text;
+};
+type Result = variant { Ok; Err : text };
 type Result_1 = variant { Ok : nat64; Err : text };
-type Result_10 = variant { Ok; Err : GuardError };
-type Result_11 = variant { Ok; Err : text };
-type Result_12 = variant { Ok; Err : SetRolesError };
-type Result_13 = variant { Ok : nat64; Err : SetSanctionedError };
-type Result_14 = variant { Ok : StakeIcpOk; Err : PoolError };
-type Result_15 = variant { Ok : SwapFromIcpOk; Err : PoolError };
-type Result_16 = variant { Ok : SweepEvmOk; Err : SweepError };
-type Result_17 = variant { Ok : SweepIcpOk; Err : SweepError };
-type Result_18 = variant { Ok : WithdrawEvmOk; Err : PoolError };
-type Result_19 = variant { Ok : WithdrawIcpOk; Err : PoolError };
-type Result_2 = variant { Ok : Config; Err : GuardError };
-type Result_3 = variant { Ok : PoolArrivalOutcome; Err : PoolError };
-type Result_4 = variant { Ok : PayPayoutOk; Err : PoolError };
-type Result_5 = variant { Ok; Err : PoolError };
-type Result_6 = variant { Ok : vec PullToCheck; Err : text };
-type Result_7 = variant { Ok : PayPayoutOk; Err : text };
-type Result_8 = variant { Ok; Err : SetConfigError };
-type Result_9 = variant { Ok; Err : FlowCallError };
+type Result_10 = variant { Ok : bool; Err : text };
+type Result_11 = variant { Ok : PayPayoutOk; Err : text };
+type Result_12 = variant { Ok; Err : SetConfigError };
+type Result_13 = variant { Ok; Err : FlowCallError };
+type Result_14 = variant { Ok; Err : GuardError };
+type Result_15 = variant { Ok; Err : SetRolesError };
+type Result_16 = variant { Ok : nat64; Err : SetSanctionedError };
+type Result_17 = variant { Ok : StakeIcpOk; Err : PoolError };
+type Result_18 = variant { Ok : SwapFromIcpOk; Err : PoolError };
+type Result_19 = variant { Ok : SweepEvmOk; Err : SweepError };
+type Result_2 = variant { Ok : text; Err : SignError };
+type Result_20 = variant { Ok : SweepIcpOk; Err : SweepError };
+type Result_21 = variant { Ok : WithdrawEvmOk; Err : PoolError };
+type Result_22 = variant { Ok : WithdrawIcpOk; Err : PoolError };
+type Result_3 = variant { Ok : SolanaAddresses; Err : text };
+type Result_4 = variant { Ok : opt nat64; Err : text };
+type Result_5 = variant { Ok : Config; Err : GuardError };
+type Result_6 = variant { Ok : PoolArrivalOutcome; Err : PoolError };
+type Result_7 = variant { Ok : PayPayoutOk; Err : PoolError };
+type Result_8 = variant { Ok; Err : PoolError };
+type Result_9 = variant { Ok : vec PullToCheck; Err : text };
 // A service role the canister hands out.
 type Role = variant { Quoter; Watcher };
 // Why `set_config` wrote nothing.
@@ -906,6 +947,90 @@ type SignedTx = record {
   hash : blob;
   chain : ChainRef;
   signed_at_ns : nat64;
+};
+// The canister's two Solana keys.
+type SolanaAddresses = record { admin : text; payer : text };
+// What `solana_budget` shows ops and the watcher.
+type SolanaBudget = record {
+  cosigns_this_hour : nat32;
+  failures_this_hour : nat32;
+};
+// The Solana line's config. Absent: the canister signs nothing on Solana.
+type SolanaConfig = record {
+  upgrade_delay_s : nat64;
+  program_min_deadline_s : nat64;
+  max_cu_price : nat64;
+  max_release_attempts : nat32;
+  rent_float_low : nat64;
+  loaded_data_limit : nat32;
+  cosign_global_per_hour : nat32;
+  program_id : text;
+  gasless_min_usdc : nat64;
+  deadline_margin_s : nat64;
+  arrival_table : opt SolanaTableConfig;
+  max_priority_lamports : nat64;
+  sol_rpc : principal;
+  min_network_fee : SolanaFeesConfig;
+  program_min_burn : nat64;
+  enabled_arrivals : bool;
+  program_event_keypair_allowed : bool;
+  max_fee_deci_bps : nat16;
+  key_name : text;
+  max_forward_fee : nat64;
+  rent_float_target : nat64;
+  complete_margin_s : nat64;
+  cosign_per_signer_per_hour : nat32;
+  max_cu_limit : nat32;
+  enabled_gasless : bool;
+  cosign_failures_per_hour : nat32;
+  max_complete_attempts : nat32;
+};
+// The least network fee of each Solana action, in micro USDC.
+type SolanaFeesConfig = record {
+  complete_new_account : nat;
+  reclaim : nat;
+  release_new_account : nat;
+  forward_relay : nat;
+  gasless_burn : nat;
+};
+// What `finish_solana` is asked to do.
+type SolanaFinishAction = variant { Release; Complete };
+// A blockhash and when it stops being valid: the watcher's, and it decides no money.
+type SolanaLifetime = record {
+  blockhash : text;
+  last_valid_block_height : nat64;
+};
+// Who a payout pays on Solana, and in what: both base58.
+type SolanaPayoutTerms = record { recipient : text; mint_out : text };
+// The program's settings. Nothing here moves money: its keys and receiver are compiled in.
+type SolanaProgramConfigArgs = record {
+  event_keypair_allowed : bool;
+  max_deadline_s : nat32;
+  min_burn : nat64;
+  ck_domains : nat64;
+  lifetime : SolanaLifetime;
+  swap_domains : nat64;
+  min_deadline_s : nat32;
+  paused : bool;
+};
+type SolanaReclaimItem = record {
+  ref : blob;
+  attestation : blob;
+  destination_message : blob;
+};
+type SolanaRoute = record { data : blob; accounts : vec SolanaRouteAccount };
+// One account of a route: the program sets the signer flag, so none is taken here.
+type SolanaRouteAccount = record { writable : bool; address : text };
+// The frozen Swapic lookup table: its address and every entry, in order.
+type SolanaTableConfig = record { entries : vec text; address : text };
+type SolanaUpgradeView = record {
+  id : nat64;
+  status : text;
+  proposed_at_s : nat64;
+  source_commit : text;
+  buffer : text;
+  not_before_s : nat64;
+  build_hash : blob;
 };
 type StakeIcpArgs = record {
   owner : PoolAccount;
@@ -962,6 +1087,11 @@ type SweepIcpArgs = record {
 };
 // `sweep_icp`'s answer: the sweep's id, and the ledger block of its transfer.
 type SweepIcpOk = record { id : nat64; block : nat };
+type SweepSolanaFeesArgs = record {
+  to : text;
+  lifetime : SolanaLifetime;
+  amount : nat64;
+};
 // Where a logged sweep sent to.
 type SweepTarget = variant {
   // An EIP-55 address on `chain_id`.
@@ -1041,11 +1171,18 @@ type WithdrawIcpOk = record { paid : nat; burned : nat };
 service : (InitArg) -> {
   // The book lines of every chain, in micro-USDC, with the last balance read.
   books : () -> (vec record { nat64; BookLines }) query;
+  // Controller-only, at any time before execution.
+  cancel_solana_upgrade : (nat64) -> (Result);
+  // Watcher-only. Co-signs a gasless user burn as its fee payer, if every rule of design 5.2.4 passes.
+  // Answers the id in `signed_txs`.
+  cosign_solana : (blob, nat64) -> (Result_1);
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
   // it, or answers the cached one. Deploy needs this before anything else: the Swapic
   // contracts are configured with this address and it has to be funded for gas, and neither
   // can wait for the first transaction to derive it.
-  derive_evm_address : () -> (Result);
+  derive_evm_address : () -> (Result_2);
+  // Controller-only, once. Derives the payer key and the admin key, and answers both.
+  derive_solana_keys : () -> (Result_3);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through. A page may be
   // shorter than asked (its size): read on until a page comes back empty.
@@ -1057,6 +1194,9 @@ service : (InitArg) -> {
   // Derived once from the canister's threshold key and then read from stable memory, so it
   // is fixed for the life of the canister. `derive_evm_address` is the door that derives it.
   evm_address : () -> (opt text) query;
+  // Controller-only. Signs exactly one loader `Upgrade`, once the delay has passed and the buffer holds
+  // the published bytes under the admin key's authority.
+  execute_solana_upgrade : (nat64, SolanaLifetime) -> (Result_1);
   // Each chain that waits for its finalized block: the last finalized block a read gave, when
   // it last moved (IC time in nanoseconds, or when its clock last started), and whether it has
   // stood still long enough, while something waits, to be a stall. Nothing on a stalled chain
@@ -1082,11 +1222,14 @@ service : (InitArg) -> {
   finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64, opt ChainData) -> (
       Result_1,
     );
+  // Watcher-only. Finishes an arrival on Solana (design 5.2.7): answers the id in `signed_txs`, or
+  // nothing when the message was already received, and then nothing more is ever signed for it.
+  finish_solana : (FinishSolanaArgs) -> (Result_4);
   // Public, so it answers with the redacted view; `get_config_full` is the ops door onto
   // the real thing.
   get_config : () -> (Config) query;
   // The unredacted config, for ops. Controller-only, because `rpc_urls` holds api keys.
-  get_config_full : () -> (Result_2) query;
+  get_config_full : () -> (Result_5) query;
   // The flows' settings.
   get_flow_settings : () -> (FlowSettings) query;
   // True once a controller stopped the canister with `set_halted`. While it is set nothing
@@ -1112,7 +1255,7 @@ service : (InitArg) -> {
   // `OrderStarted`), and credits the move once. A caller other than the watcher is held to 10
   // reports a minute in total and 3 an hour per `base_tx`, refused `Unavailable` before
   // any outcall.
-  note_move_arrival : (nat64, blob, nat64, blob) -> (Result_3);
+  note_move_arrival : (nat64, blob, nat64, blob) -> (Result_6);
   // Any caller (the watcher, or the user's app as a backup), refused while halted. A USDC
   // transfer to the canister's Base address in `base_tx` pays the deposit its order's memo
   // describes: the order ran in `base_tx` (same chain) or in `src_tx` on `src_chain` (CCTP,
@@ -1127,7 +1270,7 @@ service : (InitArg) -> {
   // `base_tx`, refused `Unavailable` before any outcall; a report bringing the terms of a
   // transfer the canister already awaits is held only to its own 3 an hour per `base_tx`. While
   // the pool is closed a report with terms answers `Closed`, with nothing read or recorded.
-  note_pool_arrival : (PoolArrival) -> (Result_3);
+  note_pool_arrival : (PoolArrival) -> (Result_6);
   // Watcher-only, refused while halted and while the pool is closed: the order the quoter
   // built for waiting payout `id` at its exact amount (`abi.encode` of an Order, its memo
   // empty), and the gas limit to sign it with. The canister checks the untrusted order
@@ -1143,7 +1286,7 @@ service : (InitArg) -> {
   // `reading`, when given, is the pool chain's head and gas price the watcher priced the
   // payout on; with none the canister reads the gas price itself. A reading whose block is
   // not above the stored one's is kept out.
-  pay_payout : (nat64, blob, nat64, opt ChainData) -> (Result_4);
+  pay_payout : (nat64, blob, nat64, opt ChainData) -> (Result_7);
   // A payout from the Base pocket by its id, if one was opened under it.
   payout : (nat64) -> (opt PayoutView) query;
   // The Base payouts' knobs; the launch defaults while none are set.
@@ -1157,13 +1300,13 @@ service : (InitArg) -> {
   // Controller-only, refused while halted, once per deploy: the canister's standing USDC
   // allowance to the ck minter's deposit helper on Ethereum (flow settings' `ck_helper`), which
   // a move to ICP by Eco deposits through. An allowance in place answers `Known`.
-  pool_approve_ck_helper : () -> (Result_4);
+  pool_approve_ck_helper : () -> (Result_7);
   // Controller-only, refused while halted, once per deploy and chain (Base, and Ethereum for
   // the moves to Base): reads the canister's USDC allowance to Swapic on `chain_id` and,
   // below 2^255, signs `USDC.approve(Swapic, 2^256 - 1)`, so every pool payout and move is one
   // signature of `Swapic.run`. Safe because `run` pulls only from `payer == msg.sender`. An
   // allowance already in place answers `Known`; an approval on its way answers `Unavailable`.
-  pool_approve_swapic : (nat64) -> (Result_4);
+  pool_approve_swapic : (nat64) -> (Result_7);
   // A deposit by its ref, if one is registered under it.
   pool_deposit : (blob) -> (opt PoolDepositView) query;
   // The orphans held for a controller: USDC at the canister's Base address no deposit could
@@ -1179,17 +1322,24 @@ service : (InitArg) -> {
   // an Order) for move `id`, signed with `gas_limit` if its route is taken. Checked as
   // untrusted input, every rule of the spec's section 3.4; taken only within the move's window
   // and when cheaper than any taken before: the cheapest at the window's end wins.
-  propose_rebalance : (nat64, blob, nat64) -> (Result_5);
+  propose_rebalance : (nat64, blob, nat64) -> (Result_8);
+  // Controller-only. Publishes a build: a line every reader sees, and the watcher raises an urgent alert.
+  propose_solana_upgrade : (ProposeSolanaUpgradeArgs) -> (Result_1);
+  // Controller-only. The proof of rollout step 4: a v1 memo transaction signed by the payer key, that
+  // the watcher broadcasts. Whether it lands sets the arrival mode (design decision 8).
+  prove_solana_send : (SolanaLifetime) -> (Result_1);
   // The doors' pulls whose outcome nobody could tell, oldest first, for the watcher's alert and
   // a controller's check (audit C15: nothing is written of a pull before its money is in). Any
   // other caller is refused.
-  pulls_to_check : () -> (Result_6) query;
+  pulls_to_check : () -> (Result_9) query;
   // The open and in-flight moves, in id order.
   rebalance_moves : () -> (vec MoveView) query;
   // The rebalancing's knobs; the defaults while none are set.
   rebalance_settings : () -> (RebalanceSettings) query;
   // The moves stopped for a controller, held where they are (in flight where they left).
   rebalance_stuck : () -> (vec MoveView) query;
+  // Watcher-only. Reclaims the rent of burns the canister recorded, at least five days old.
+  reclaim_solana : (vec SolanaReclaimItem, SolanaLifetime) -> (Result_1);
   // Watcher-only (the submit API runs as the watcher), refused while halted. Relays a
   // user's gasless order through Swapic on `chain_id` as `runFor(order, auth)`: `order` is
   // `abi.encode(Order)` of ABI v3 and `auth` is `abi.encode(GaslessAuth)`, each one dynamic
@@ -1207,6 +1357,15 @@ service : (InitArg) -> {
   // the canister reads the gas price itself. A reading whose block is not above the stored
   // one's is kept out.
   relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result_1);
+  // Watcher-only. A Forwarder message not delivered after 10 minutes, whose source paid `ForwardRelay`
+  // or is the canister's own payout. The money goes to the mint recipient whoever submits.
+  relay_solana_forward : (RelaySolanaForwardArgs) -> (Result_4);
+  // Controller-only. A message whose hook is unreadable or whose recipient is a program address (design
+  // 4.8 step 5): `release` to Swapic's fee account, recording the order and the EVM payer to refund.
+  release_solana_misrouted : (ReleaseMisroutedArgs) -> (Result_4);
+  // Watcher-only. A co-signed transaction landed and failed: the canister reads it itself, and only
+  // then blocks the signer and charges the failure budget. The watcher's word decides nothing.
+  report_solana_failure : (blob) -> (Result_10);
   // Watcher-only, refused while halted: for the Eco intent the order `order_id` published (a
   // relayed order's, a pool payout's or a move's: one the canister signed for), once its fill
   // deadline passed with no fill, the canister reads the order's own transaction and the
@@ -1214,13 +1373,13 @@ service : (InitArg) -> {
   // fee (the `eco_rescue` gas row bounds both); Eco refunds the reward's creator on the source
   // by itself. One rescue per order: a second call answers the first one's id. Every rescue
   // is logged.
-  rescue_eco_intent : (blob) -> (Result_7);
+  rescue_eco_intent : (blob) -> (Result_11);
   // Controller-only, refused while halted. A withdrawal through the ck minter that the canister
   // stopped, or that the minter leaves open: `Retry` reads a stopped one again, `Delivered`
   // closes one found paid on Ethereum, `Reimbursed` starts the way back for one whose ckUSDC is
   // back in its subaccount without the minter's word (a quarantined reimbursement), and only
   // then. Nothing here refunds on a controller's word alone.
-  resolve_ck_withdrawal : (nat64, CkResolution) -> (Result_5);
+  resolve_ck_withdrawal : (nat64, CkResolution) -> (Result_8);
   // Controller-only, refused while halted: an EVM to ICP deposit held for a
   // human (`PayoutFailed`: a payout stopped after its tenth failure, a queued one that never
   // started, a stake whose mint kept failing), resolved once by its ref (its 32 bytes).
@@ -1245,22 +1404,22 @@ service : (InitArg) -> {
   // `created_at_time`); a ledger not read now (none of its reads answering) answers
   // `Unavailable` naming it, to be asked again. A refusal names what to search the ledger
   // for.
-  resolve_deposit : (blob, DepositResolution) -> (Result_5);
+  resolve_deposit : (blob, DepositResolution) -> (Result_8);
   // Controller-only, refused while halted: a stuck move sent on from where it stands
   // (`Retry`: a reverted order signed again, the same one; a minter's call a controller found
   // never ran asked again; a wait read again), or written off with why (`Lost`).
-  resolve_move : (nat64, MoveResolution) -> (Result_5);
+  resolve_move : (nat64, MoveResolution) -> (Result_8);
   // Controller-only, refused while halted (orphans are ALWAYS held for a
   // controller): resolves the orphan under `key` (its 48 bytes, as `pool_orphans` lists it)
   // once. `Refund { to }` signs `USDC.transfer(to, amount - min_network_fee)` on Base, the
   // fee kept for its gas; `Book` books it to the Base books' unattributed line.
-  resolve_orphan : (blob, OrphanAction) -> (Result_5);
+  resolve_orphan : (blob, OrphanAction) -> (Result_8);
   // Controller-only, refused while halted: a payout stopped for a human
   // (`Failed`), resolved once. `Refund`: back on its undo, an ICP swap's refund asked next (all
   // its ckUSDC less one ledger fee, or its token), a withdrawal's shares minted back at once;
   // the controller checked no refund went out before. `MarkPaid`: its signed order ran after
   // all, and its paid line is booked.
-  resolve_payout : (nat64, PayoutResolution) -> (Result_5);
+  resolve_payout : (nat64, PayoutResolution) -> (Result_8);
   // Controller-only, refused while halted: an ICP stake whose pull's answer
   // was lost, past the ledger's deduplication window (23 hours after it started; the canister
   // stops asking its pull again then), resolved once by its op id (its 32 bytes, as its
@@ -1271,42 +1430,42 @@ service : (InitArg) -> {
   // the memo, its start as `created_at_time`), one block for one stake; a ledger not reached
   // now answers `Unavailable`, to be asked again. `NotPulled`: it never landed (on the
   // controller's word: no read proves a pull absent), and it is dropped, its room freed.
-  resolve_stake : (blob, StakeResolution) -> (Result_5);
+  resolve_stake : (blob, StakeResolution) -> (Result_8);
   // Controller-only, and it takes the whole record, so editing one knob is a
   // read-modify-write: read with `get_config_full`, never with the redacted `get_config`,
   // or the write puts "***" into `rpc_urls` and is refused.
-  set_config : (Config) -> (Result_8);
+  set_config : (Config) -> (Result_12);
   // Controller-only. The ck canisters, the relay window and the rebalancing's addresses.
-  set_flow_settings : (FlowSettings) -> (Result_9);
+  set_flow_settings : (FlowSettings) -> (Result_13);
   // Controller-only, both ways: `true` is an emergency stop, `false` lifts it.
   // 
   // Lifting the halt wakes the outbox and the engine's backstop: neither re-arms itself on a
   // halted canister, so this is what puts them back when a queued transaction, an allocation
   // waiting for its cancel or an open payout was held back by the halt.
-  set_halted : (bool) -> (Result_10);
+  set_halted : (bool) -> (Result_14);
   // Controller-only, refused while halted. Sets the ICP routes (interface section 3c): the
   // ICP/ckUSDC pool, and each listed token's route, directly through its ckUSDC pool or
   // through ICP. Reads the ICP ledger off the ICP/ckUSDC pool and every route ledger's fee.
   // No token has a size cap of its own: the pool's per swap cap applies.
-  set_icp_routes : (opt principal, vec IcpRoute) -> (Result_5);
+  set_icp_routes : (opt principal, vec IcpRoute) -> (Result_8);
   // Controller-only, refused while halted. Sets the Base payouts' knobs: the least network
   // fee, how long a waiting payout waits for an order, the most gas a payout order is signed
   // with, whether a payout may leave Base over CCTP, and the ck route. Settings that name no ck
   // route shut its door and keep its numbers.
-  set_payout_settings : (PayoutSettings) -> (Result_5);
+  set_payout_settings : (PayoutSettings) -> (Result_8);
   // Controller-only. Pauses the pool (`true`), or reopens it (`false`), which also clears a
   // shortfall the last balance check latched, once someone has looked at it. Recorded in
   // the log on the pool chain's books; the pool's guard reads it.
-  set_pool_paused : (bool) -> (Result_11);
+  set_pool_paused : (bool) -> (Result);
   // Controller-only, refused while halted. Sets the pool's knobs after reading the ckUSDC
   // ledger's fee and every listed token's (`icrc1_fee`), which the ICP fees' floor at an
   // arrival reads.
-  set_pool_settings : (PoolSettings) -> (Result_5);
+  set_pool_settings : (PoolSettings) -> (Result_8);
   // Controller-only, refused while halted: the rebalancing's knobs, held together.
-  set_rebalance_settings : (RebalanceSettings) -> (Result_5);
+  set_rebalance_settings : (RebalanceSettings) -> (Result_8);
   // Controller-only, and it sets both roles at once: a deploy hands out the pair, and
   // there is no path that leaves one of them stale.
-  set_roles : (principal, principal) -> (Result_12);
+  set_roles : (principal, principal) -> (Result_15);
   // The watcher's, or a controller's. Adds `add` to the sanctions set and then removes
   // `remove` from it, and answers how many addresses the set holds after. An EVM address is
   // held by its bytes, so any spelling of it is the same entry; other text is held exactly.
@@ -1316,11 +1475,19 @@ service : (InitArg) -> {
   // The set is bounded, and a call that would take it past the bound is refused whole, with
   // nothing of it written. Every text is held to the 256-byte cap and a longer one is refused
   // by its position, also with nothing written.
-  set_sanctioned : (vec text, vec text) -> (Result_13);
+  set_sanctioned : (vec text, vec text) -> (Result_16);
+  // Controller-only, immediate: the program's settings, signed by the admin key. They move no money.
+  set_solana_program_config : (SolanaProgramConfigArgs) -> (Result_1);
   // Every transaction the canister signed after `after_id`, oldest first, at most `limit`
   // of them (capped). The watcher broadcasts them; the canister's own broadcast is the
   // backup.
   signed_txs : (nat64, nat64) -> (vec SignedTx) query;
+  // The canister's two Solana addresses, or nothing before they are derived. World-readable.
+  solana_addresses : () -> (opt SolanaAddresses) query;
+  // What the co-sign limits have counted this hour.
+  solana_budget : () -> (SolanaBudget) query;
+  // The program upgrade waiting out its delay. World-readable: anyone may rebuild it and compare.
+  solana_live_upgrade : () -> (opt SolanaUpgradeView) query;
   // Any caller but the anonymous one, refused while halted, while the pool is closed, and for
   // a sanctioned party; the pull comes before anything is written (audit C15).
   // Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
@@ -1329,7 +1496,7 @@ service : (InitArg) -> {
   // `move_fee` to Swapic's ICP fee line and mints shares on the rest at the pool's price
   // before it. A pull whose outcome is unclear answers `Unavailable` with nothing written, and
   // is kept in `pulls_to_check` for a human to check and give back.
-  stake_icp : (StakeIcpArgs) -> (Result_14);
+  stake_icp : (StakeIcpArgs) -> (Result_17);
   // Any caller but the anonymous one, refused while halted, while the pool is closed, and for a
   // sanctioned party; the pull comes before anything is written (audit C15): an
   // ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
@@ -1341,7 +1508,7 @@ service : (InitArg) -> {
   // to `refund_to`); the payout from the Base pocket is the ckUSDC less the pool's premium on
   // it and the flat network fee, paid with an order built at that exact amount. Answers the
   // payout's id and where it stands; a pull the ledger refused answers its refusal.
-  swap_from_icp : (IcpSwapTerms) -> (Result_15);
+  swap_from_icp : (IcpSwapTerms) -> (Result_18);
   // Any caller but the anonymous one, refused while halted, while the pool is closed, while the
   // route's switch is off, short of ckETH, and for a sanctioned party; the pull comes before
   // anything is written (audit C15): an
@@ -1352,7 +1519,7 @@ service : (InitArg) -> {
   // sale, or it is refunded. The recipient gets what the sale made less those, at least
   // `min_out`, or a refund on ICP, all or nothing; a refund after the minter burned keeps the
   // network fee. Answers like `swap_from_icp`, and `payout(id)` tells where it stands.
-  swap_from_icp_ck : (CkSwapTerms) -> (Result_15);
+  swap_from_icp_ck : (CkSwapTerms) -> (Result_18);
   // Controller-only, refused while halted. Sends `amount` of the canister's own `asset` on
   // `chain_id` to `to`, signed from the canister's address with the chain's `sweep` gas row
   // at a gas price the canister reads itself:
@@ -1366,7 +1533,7 @@ service : (InitArg) -> {
   // 
   // Refused for the canister's own address, the zero address and a sanctioned one. Answers
   // the sweep's id and its transaction's id in `signed_txs`.
-  sweep_evm : (SweepEvmArgs) -> (Result_16);
+  sweep_evm : (SweepEvmArgs) -> (Result_19);
   // Controller-only, refused while halted. Sends `amount` of the canister's own `asset` on
   // ICP to `to`, the ledger's fee paid on top from the same account:
   // 
@@ -1379,7 +1546,13 @@ service : (InitArg) -> {
   // The amount leaves the books before the transfer is asked and comes back if the ledger
   // refuses it. Refused for the canister's own account. Answers the sweep's id and the
   // ledger block of its transfer.
-  sweep_icp : (SweepIcpArgs) -> (Result_17);
+  sweep_icp : (SweepIcpArgs) -> (Result_20);
+  // Controller-only, a money step Jeff runs. A Token transfer from the fee account, signed by the admin
+  // key, with the payer key as fee payer.
+  sweep_solana_fees : (SweepSolanaFeesArgs) -> (Result_1);
+  // Watcher-only. Below `rent_float_low`, one System transfer from the payer key up to the target, at
+  // most once an hour, from the canister's own balance read.
+  top_up_solana_rent : (SolanaLifetime) -> (Result_4);
   version : () -> (text) query;
   // The canister's cycles balance, for the watcher's low cycles alert alone: a balance anyone
   // could read would tell an outsider how far the canister is from freezing. Any other caller is
@@ -1391,7 +1564,7 @@ service : (InitArg) -> {
   // the staker's own), books the move fee and the network fee to Swapic's Base fee line, and
   // opens a payout of the rest from the Base pocket, waiting for its order or queued while the
   // pocket is short. One nonce per staker, once. Answers the payout's id and the shares burned.
-  withdraw_evm : (EvmWithdrawal, blob) -> (Result_18);
+  withdraw_evm : (EvmWithdrawal, blob) -> (Result_21);
   // The ICP owner of the shares (the caller, at its subaccount `from`), refused while halted,
   // while the pool is closed, and for a sanctioned party. Burns the shares `usdc` is worth
   // (rounded up, at most `max_shares`), books `move_fee` to Swapic's ICP fee line, and pays
@@ -1399,5 +1572,5 @@ service : (InitArg) -> {
   // least `min_out`; below it, all of it as ckUSDC), every ledger fee out of it. Refused when
   // the ICP pocket's free ckUSDC is short. A payout that does not finish in this call
   // answers `Unavailable` with the shares burned, and the canister's timer finishes it.
-  withdraw_icp : (WithdrawIcpArgs) -> (Result_19);
+  withdraw_icp : (WithdrawIcpArgs) -> (Result_22);
 }

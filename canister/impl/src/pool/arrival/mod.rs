@@ -119,11 +119,15 @@ const MAX_RECEIPT_BYTES: u64 = 512 * 1024;
 /// A chain a CCTP arrival may leave from, as the canister's config names it: its CCTP domain,
 /// its `TokenMessengerV2` (a burn's sender), and its Runner (the burn's `messageSender`: the
 /// Runner makes an order's burn step).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CctpSource {
     pub domain: u32,
-    pub token_messenger: EvmAddress,
-    pub runner: EvmAddress,
+    /// The header's sender on that domain, as a 32-byte word: an EVM chain's token messenger, or
+    /// Solana's token messenger minter.
+    pub token_messenger: [u8; 32],
+    /// Who may burn there: an EVM chain's Runner, or any of the Solana program's four `auth`s. Only the
+    /// program can sign as those, as only the Runner can burn as the Runner.
+    pub senders: Vec<[u8; 32]>,
     /// The chain itself and its Swapic, whose `OrderStarted` carries a deposit's memo.
     pub chain: ChainId,
     pub swapic: EvmAddress,
@@ -586,8 +590,8 @@ fn cctp(
     // TokenMessengerV2: a burn anyone else made carries a ref it does not own
     let ours = chain.cctp_sources.iter().any(|source| {
         source.domain == message.source_domain
-            && source.token_messenger.to_word() == message.sender
-            && source.runner.to_word() == burn.message_sender
+            && source.token_messenger == message.sender
+            && source.senders.contains(&burn.message_sender)
     });
     if !ours {
         return orphan("the burn was not made by Swapic's Runner on a chain the canister knows");
@@ -1076,20 +1080,31 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
     let canister = ecdsa::canister_address()
         .await
         .map_err(|_| PoolError::Unavailable("the canister's address".to_string()))?;
-    let cctp_sources = config
+    let mut cctp_sources: Vec<CctpSource> = config
         .evm_chains
         .0
         .iter()
         .filter_map(|(chain, evm)| {
             Some(CctpSource {
                 domain: config.cctp_domains.get(*chain)?.get(),
-                token_messenger: evm.token_messenger,
-                runner: evm.runner,
+                token_messenger: evm.token_messenger.to_word(),
+                senders: vec![evm.runner.to_word()],
                 chain: *chain,
                 swapic: evm.swapic,
             })
         })
         .collect();
+    // Solana as a source: a deposit's terms ride in the program's instruction, and its reporter hands
+    // over the memo, so no `OrderStarted` is read for it
+    if let Some(d) = crate::solana::chains_of(&config) {
+        cctp_sources.push(CctpSource {
+            domain: swapic_solana_wire::consts::SOLANA_DOMAIN,
+            token_messenger: swapic_solana_wire::consts::TMM,
+            senders: d.a.auth.iter().map(|(auth, _)| *auth).collect(),
+            chain,
+            swapic: EvmAddress::ZERO,
+        });
+    }
     Ok(PoolChain {
         chain,
         usdc: evm.usdc,

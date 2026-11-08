@@ -160,6 +160,7 @@ fn request(token_in: Principal, amount_in: TokenAmount, min_usdc: TokenAmount) -
                 .unwrap(),
             min_out: TokenAmount::from(1_u8),
             deadline: at(10).checked_add(MIN_DEADLINE).unwrap(),
+            solana: None,
         },
     }
 }
@@ -1009,6 +1010,7 @@ fn the_payout_terms_are_read_from_the_plan() {
                 token_out: base_usdc(),
                 min_out: usdc(1),
                 deadline: request.deadline,
+                solana: None,
             }
         );
         assert_eq!(opening.terms.min_usdc, usdc(100));
@@ -1618,6 +1620,7 @@ fn a_plan_is_decoded_and_its_delivery_read_as_check_reads_them() {
             recipient: recipient(),
             token: base_usdc(),
             min_out: TokenAmount::from(4_900_000_u64),
+            solana: None,
         }
     );
     let mut nobody = order;

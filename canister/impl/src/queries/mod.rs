@@ -13,6 +13,7 @@ mod icrc10;
 mod ops;
 mod pool;
 mod rebalance;
+mod solana;
 
 pub use books::*;
 pub use config::*;
@@ -23,3 +24,4 @@ pub use icrc10::*;
 pub use ops::*;
 pub use pool::*;
 pub use rebalance::*;
+pub use solana::*;

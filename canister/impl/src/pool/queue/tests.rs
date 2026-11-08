@@ -30,6 +30,7 @@ fn terms(deadline: Timestamp) -> PayoutTerms {
         token_out: staker(),
         min_out: TokenAmount::ONE,
         deadline,
+        solana: None,
     }
 }
 
@@ -1411,6 +1412,7 @@ fn a_ck_payout_is_driven_and_past_its_withdrawal_no_deadline_undoes_it() {
         token_out: EvmAddress::new([2; 20]),
         min_out: TokenAmount::from(1_u8),
         deadline: Timestamp::from_nanos(100),
+        solana: None,
     };
     let swap = IcpSwapTerms {
         token_in: Principal::anonymous(),

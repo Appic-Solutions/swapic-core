@@ -57,6 +57,9 @@ const SWEEPS_MEMORY_ID: MemoryId = MemoryId::new(44);
 // 45 held flows by a landed transfer, retired before it was ever deployed
 const FLOW_BY_SOURCE_MEMORY_ID: MemoryId = MemoryId::new(46);
 const FLOW_BY_TX_MEMORY_ID: MemoryId = MemoryId::new(47);
+// the Solana line: 60 and 61 (50 to 59 are left for the BNB Chain line)
+const SOLANA_KEYS_MEMORY_ID: MemoryId = MemoryId::new(60);
+const SOLANA_FOLD_MEMORY_ID: MemoryId = MemoryId::new(61);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -184,6 +187,14 @@ pub fn flow_by_tx_memory() -> Memory {
 
 pub fn flow_by_source_memory() -> Memory {
     memory(FLOW_BY_SOURCE_MEMORY_ID)
+}
+
+pub fn solana_keys_memory() -> Memory {
+    memory(SOLANA_KEYS_MEMORY_ID)
+}
+
+pub fn solana_fold_memory() -> Memory {
+    memory(SOLANA_FOLD_MEMORY_ID)
 }
 
 pub fn sweeps_memory() -> Memory {

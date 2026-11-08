@@ -197,6 +197,7 @@ fn the_canisters_reader_reads_an_icp_to_base_order_as_a_delivery_to_itself() {
             domains: &domains,
             canister: canister(),
             eco_portal: None,
+            solana: None,
         },
     )
     .unwrap();
@@ -237,6 +238,7 @@ fn a_base_to_icp_order_is_a_ck_deposit_for_the_canister_itself() {
             domains: &domains,
             canister: canister(),
             eco_portal: None,
+            solana: None,
         },
     )
     .unwrap();

@@ -418,7 +418,123 @@ fn samples() -> Vec<Sample> {
         },
     ));
     all.push(hub_route_sample());
+    all.extend(solana_samples());
     all
+}
+
+/// The Solana line's stored types: an `Event` per step, a fold value per kind, and a config with the
+/// line switched on.
+fn solana_samples() -> Vec<Sample> {
+    use crate::solana::{
+        SolanaConfig, SolanaEntry, SolanaFees, SolanaProposal, SolanaProposalStatus, SolanaPurpose, SolanaStep, SolanaTable,
+        SolanaTxVersion,
+    };
+    let proposal = SolanaProposal {
+        id: 4,
+        buffer: [0x51; 32],
+        build_hash: [0x52; 32],
+        source_commit: "abcdef".to_string(),
+        proposed_at_s: 1_800_000_000,
+        not_before_s: 1_800_172_800,
+        status: SolanaProposalStatus::Waiting,
+    };
+    let signed = |purpose: SolanaPurpose, version| SolanaStep::Signed {
+        purpose,
+        version,
+        signature: [0x53; 64],
+        raw: vec![0x54; 12],
+        last_valid_block_height: 123_456,
+    };
+    let steps = vec![
+        SolanaStep::KeysDerived { payer: [0x55; 32], admin: [0x56; 32] },
+        signed(SolanaPurpose::Cosign { r#ref: [0x57; 32], signer: [0x58; 32], message_hash: [0x59; 32] }, SolanaTxVersion::V0),
+        signed(SolanaPurpose::Complete { arrival: [0x5a; 32] }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Release { arrival: [0x5b; 32] }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::MisroutedRelease { arrival: [0x5c; 32] }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Reclaim { refs: vec![[0x5d; 32]] }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::TopUp, SolanaTxVersion::V1),
+        signed(SolanaPurpose::ForwardRelay { arrival: [0x5e; 32] }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Config, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Upgrade { proposal: 4 }, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Sweep, SolanaTxVersion::V1),
+        signed(SolanaPurpose::Proof, SolanaTxVersion::V1),
+        SolanaStep::CosignFailed { signer: [0x5f; 32], signature: [0x60; 64] },
+        SolanaStep::UpgradeProposed { proposal: proposal.clone() },
+        SolanaStep::UpgradeCancelled { id: 4 },
+        SolanaStep::UpgradeExecuted { id: 5 },
+        SolanaStep::RefFinished { r#ref: [0x61; 32], arrival: [0x62; 32], burned_at_s: 1_800_000_001 },
+        SolanaStep::ArrivalFinished { arrival: [0x63; 32] },
+        SolanaStep::Misrouted { arrival: [0x64; 32], order_ref: [0x65; 32], payer: [0x66; 20] },
+    ];
+    let mut out: Vec<Sample> = steps
+        .into_iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let i = i as u64;
+            sample(
+                format!("Solana step {}", step.name()),
+                Event {
+                    index: EventIndex::new(30_000 + i),
+                    timestamp: Timestamp::from_nanos(1_800_000_000_000_003_000 + i),
+                    payload: crate::events::EventType::Solana { step },
+                },
+            )
+        })
+        .collect();
+    let entries = vec![
+        SolanaEntry::Count(7),
+        SolanaEntry::Done,
+        SolanaEntry::Cosigned { message_hash: [0x67; 32], line: 8, at_s: 9, signer: [0x68; 32] },
+        SolanaEntry::Signer { blocked: true, succeeded: false, hour: 500_000, count: 3 },
+        SolanaEntry::Global { hour: 500_001, count: 4, failures: 2 },
+        SolanaEntry::Finished { arrival: [0x69; 32] },
+        SolanaEntry::Burn { at_s: 10, reclaim_tries: 1 },
+        SolanaEntry::Proposal(proposal),
+        SolanaEntry::Time(11),
+    ];
+    out.extend(entries.into_iter().enumerate().map(|(i, entry)| sample(format!("Solana entry {i}"), entry)));
+    out.push(sample(
+        "a config with the Solana line on",
+        Config {
+            solana: Some(SolanaConfig {
+                program_id: [0x6a; 32],
+                sol_rpc: candid::Principal::from_slice(&[1, 2, 3]),
+                key_name: "key_1".to_string(),
+                min_network_fee: SolanaFees {
+                    gasless_burn: TokenAmount::from(1_u64),
+                    complete_new_account: TokenAmount::from(2_u64),
+                    release_new_account: TokenAmount::from(3_u64),
+                    forward_relay: TokenAmount::from(4_u64),
+                    reclaim: TokenAmount::from(5_u64),
+                },
+                max_cu_limit: 6,
+                max_cu_price: 7,
+                max_priority_lamports: 8,
+                loaded_data_limit: 9,
+                rent_float_low: 10,
+                rent_float_target: 11,
+                max_complete_attempts: 12,
+                max_release_attempts: 13,
+                complete_margin_s: 14,
+                cosign_per_signer_per_hour: 15,
+                cosign_global_per_hour: 16,
+                cosign_failures_per_hour: 17,
+                gasless_min_usdc: 18,
+                deadline_margin_s: 19,
+                program_min_deadline_s: 20,
+                program_min_burn: 21,
+                max_fee_deci_bps: 22,
+                max_forward_fee: 23,
+                upgrade_delay_s: 24,
+                enabled_gasless: true,
+                enabled_arrivals: false,
+                arrival_table: Some(SolanaTable { address: [0x6b; 32], entries: vec![[0x6c; 32]] }),
+                program_event_keypair_allowed: true,
+            }),
+            ..Config::default()
+        },
+    ));
+    out
 }
 
 /// The routes with a token through a hub: the variant a route of the deployed build never
@@ -760,6 +876,7 @@ fn reverted_at_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0xe4; 20]),
             min_out: TokenAmount::from(1_808_u64),
             deadline: Timestamp::from_nanos(1_800_000_000_000_001_809),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(staker),
@@ -804,6 +921,7 @@ fn reverted_block_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0xf7; 20]),
             min_out: TokenAmount::from(1_605_u32),
             deadline: Timestamp::from_nanos(1_800_000_000_000_001_606),
+            solana: None,
         },
         Undo::Refund {
             to: IcpAccount {
@@ -877,6 +995,7 @@ fn fill_early_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0xf7; 20]),
             min_out: TokenAmount::from(1_708_u64),
             deadline: Timestamp::from_nanos(1_800_000_000_000_001_709),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(staker),
@@ -925,6 +1044,7 @@ fn fit_retry_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0xf4; 20]),
             min_out: TokenAmount::from(1_608_u64),
             deadline: Timestamp::from_nanos(1_800_000_000_000_001_609),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(staker),
@@ -1134,6 +1254,7 @@ fn planned_swap_samples() -> Vec<Sample> {
         token_out: crate::evm::EvmAddress::new([0xe5; 20]),
         min_out: TokenAmount::from(1_306_u64),
         deadline: Timestamp::from_nanos(1_800_000_000_000_001_307),
+        solana: None,
     };
     let plan = PinnedOrder {
         order_id: [0xe6; 32],
@@ -1195,6 +1316,7 @@ fn eco_payout_samples() -> Vec<Sample> {
             token_out: address(0xd3),
             min_out: TokenAmount::from(1_208_u64),
             deadline: Timestamp::from_nanos(1_800_000_000_000_001_209),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(address(0xd1)),
@@ -2040,6 +2162,7 @@ fn queue_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0x74; 20]),
             min_out: TokenAmount::from(605_u32),
             deadline: Timestamp::from_nanos(1_800_000_000_000_000_606),
+            solana: None,
         },
         Undo::Refund { to: account },
         Timestamp::from_nanos(1_800_000_000_000_000_607),
@@ -2127,6 +2250,7 @@ fn icp_swap_samples() -> Vec<Sample> {
             token_out: crate::evm::EvmAddress::new([0x6a; 20]),
             min_out: TokenAmount::from(503_u32),
             deadline: Timestamp::from_nanos(1_800_000_000_000_000_504),
+            solana: None,
         },
         Undo::Refund { to: swap.refund_to },
         Timestamp::from_nanos(1_800_000_000_000_000_505),
@@ -2558,6 +2682,7 @@ fn payout_samples() -> Vec<Sample> {
         token_out: address(0xd2),
         min_out: TokenAmount::from(1u128 << 80),
         deadline: Timestamp::from_nanos(1_800_000_000_000_000_211),
+        solana: None,
     };
     let swap = IcpSwapTerms {
         token_in: principal(0xd3),

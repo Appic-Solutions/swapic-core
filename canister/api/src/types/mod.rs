@@ -8,6 +8,7 @@ pub mod flow;
 pub mod icrc21;
 pub mod init;
 pub mod pool;
+pub mod solana;
 pub mod rpc;
 pub mod sweep;
 pub mod transition;

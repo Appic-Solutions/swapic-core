@@ -121,6 +121,8 @@ pub struct Setup<'a> {
     pub evm_chains: &'a ChainTable<EvmChain>,
     pub domains: &'a ChainTable<CctpDomain>,
     pub canister: EvmAddress,
+    /// The Solana deployment, when there is one: domain 5 as a source.
+    pub solana: Option<&'a swapic_solana_wire::pda::SwapicAddresses>,
 }
 
 /// One finish, decided: what to call, where, under which gas action, and who the message
@@ -169,15 +171,31 @@ pub fn decide(message: &BurnMessage, setup: &Setup, now_s: u64) -> Result<Plan, 
     if message.recipient != destination.token_messenger.to_word() {
         return Err(FinishError::NotABurn);
     }
-    let (_, source) = source_of(message, setup)?;
-    if message.sender != source.token_messenger.to_word() {
-        return Err(FinishError::NotABurn);
-    }
-    if message.body.burn_token != source.usdc.to_word() {
-        return Err(FinishError::NotUsdc);
-    }
-    if message.body.message_sender != source.runner.to_word() {
-        return Err(FinishError::NotTheRunner);
+    if message.source_domain == swapic_solana_wire::consts::SOLANA_DOMAIN {
+        // only the program can burn as an `auth`, as only the Runner can burn as the Runner
+        let solana = setup
+            .solana
+            .ok_or(FinishError::UnknownSource(message.source_domain))?;
+        if message.sender != swapic_solana_wire::consts::TMM {
+            return Err(FinishError::NotABurn);
+        }
+        if message.body.burn_token != swapic_solana_wire::consts::USDC_MINT {
+            return Err(FinishError::NotUsdc);
+        }
+        if solana.auth_index(&message.body.message_sender).is_none() {
+            return Err(FinishError::NotTheRunner);
+        }
+    } else {
+        let (_, source) = source_of(message, setup)?;
+        if message.sender != source.token_messenger.to_word() {
+            return Err(FinishError::NotABurn);
+        }
+        if message.body.burn_token != source.usdc.to_word() {
+            return Err(FinishError::NotUsdc);
+        }
+        if message.body.message_sender != source.runner.to_word() {
+            return Err(FinishError::NotTheRunner);
+        }
     }
     let envelope = Envelope::decode(&message.body.hook_data)?;
     let mint_recipient = swapic::evm_of_word(message.body.mint_recipient).ok_or(
@@ -440,12 +458,26 @@ pub async fn finish_cctp(
     if message.len() != Envelope::CCTP_MESSAGE_LENGTH {
         return Err(FinishError::MessageLength(message.len()).to_string());
     }
-    let source_tx = TxHash::new(
-        src_tx_hash
-            .try_into()
-            .map_err(|_| FinishError::SourceTxLength(src_tx_hash.len()).to_string())?,
-    );
     let parsed = BurnMessage::parse(message).map_err(|e| e.to_string())?;
+    // a Solana source is named by its 64-byte signature, and keyed in the fold by a 32-byte hash of it
+    let from_solana = parsed.source_domain == swapic_solana_wire::consts::SOLANA_DOMAIN;
+    let solana_signature: Option<[u8; 64]> = if from_solana {
+        Some(
+            src_tx_hash
+                .try_into()
+                .map_err(|_| FinishError::SourceTxLength(src_tx_hash.len()).to_string())?,
+        )
+    } else {
+        None
+    };
+    let source_tx = match &solana_signature {
+        Some(signature) => crate::solana::source::source_key(signature),
+        None => TxHash::new(
+            src_tx_hash
+                .try_into()
+                .map_err(|_| FinishError::SourceTxLength(src_tx_hash.len()).to_string())?,
+        ),
+    };
     // an arrival already finished answers its finish, whatever came after it
     let arrival = types::cctp::arrival_id(&parsed);
     if let Some(id) = answered_arrival(arrival)? {
@@ -455,11 +487,13 @@ pub async fn finish_cctp(
     let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
     let config = config::get();
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
+    let solana = crate::solana::deployment().ok();
     let setup = Setup {
         chain_id,
         evm_chains: &config.evm_chains,
         domains: &config.cctp_domains,
         canister,
+        solana: solana.as_ref().map(|d| &d.a),
     };
     let mut plan = decide(&parsed, &setup, now_s).map_err(|e| e.to_string())?;
     // the canister's own transfer (a move's, a payout's) is finished with no fee step, only
@@ -479,7 +513,27 @@ pub async fn finish_cctp(
     // burn and its fee step. The canister's own transfers are finished from its own
     // transactions only (`own`), and pay no fee step
     let mut paid = 1;
-    if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {
+    // a burn out of Solana: one finish per `(domain 5, ref)`, its fee read from the program's instruction
+    let mut solana_burn = None;
+    if let (Some(signature), Some(d)) = (&solana_signature, &solana) {
+        let needed = destination
+            .min_network_fee
+            .get(source::charged_action(&plan.envelope))
+            .unwrap_or(types::TokenAmount::MAX);
+        let landed = crate::solana::rpc::transaction(d.config.sol_rpc, signature)
+            .await?
+            .ok_or("the Solana transaction is not found at confirmed")?;
+        let proved = crate::solana::source::proves(
+            &landed,
+            message,
+            &d.a,
+            needed,
+            d.config.min_network_fee.gasless_burn,
+        )?;
+        paid = u32::MAX;
+        solana_burn = Some((proved.r#ref, landed.block_time_s.unwrap_or(now_s)));
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+    } else if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {
         let (source_chain, source) = source_of(&parsed, &setup).map_err(|e| e.to_string())?;
         // the least the quoter charges for the arrival it charged for; an absent row asks
         // the most, as the relay's rule does
@@ -501,6 +555,11 @@ pub async fn finish_cctp(
         }
         if read_state(|state| finished_others(state, source_tx, arrival, paid)) {
             return Err(FinishError::SourceFinished(source_tx).to_string());
+        }
+        if let Some((r#ref, _)) = &solana_burn {
+            if read_state(|state| state.solana_finished_ref(r#ref)).is_some_and(|done| done != arrival) {
+                return Err("this ref already finished another message".to_string());
+            }
         }
         Ok(None)
     };
@@ -534,6 +593,12 @@ pub async fn finish_cctp(
         if let Some(id) = admit()? {
             return Ok(id);
         }
+    }
+    if let Some((r#ref, burned_at_s)) = solana_burn {
+        crate::storage::events::append_event(types::EventType::Solana {
+            step: types::solana::SolanaStep::RefFinished { r#ref, arrival, burned_at_s },
+        })
+        .map_err(|e| e.to_string())?;
     }
     let key = finish_key(arrival, plan.action);
     let signed = tx::create_and_send_with(

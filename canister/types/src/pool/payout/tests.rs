@@ -105,6 +105,7 @@ fn a_payout_holds_its_amount_and_a_withdrawals_fee_on_base() {
             token_out: EvmAddress::new([0x33; 20]),
             min_out: TokenAmount::from(1_u8),
             deadline: Timestamp::from_nanos(9),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(EvmAddress::new([0x11; 20])),

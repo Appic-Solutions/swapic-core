@@ -202,6 +202,7 @@ impl Sample {
             domains: &self.domains,
             canister: self.canister,
             eco_portal: Some(address(ECO_PORTAL)),
+            solana: None,
         };
         check(order, auth, self.gas, &chains, self.now(), 3_600)
     }
@@ -255,6 +256,7 @@ fn the_real_order_is_relayed_as_the_quoter_built_it() {
             parties: vec![Party::Evm(address(
                 sample.json["recipient"].as_str().unwrap()
             ))],
+            solana: None,
         })
     );
     // exactly the limit the quoter charged for
@@ -360,6 +362,7 @@ fn wrong_order_id_refused() {
         domains: &sample.domains,
         canister: sample.canister,
         eco_portal: Some(address(ECO_PORTAL)),
+        solana: None,
     };
     assert_eq!(
         check(
@@ -383,6 +386,7 @@ fn the_deadline_must_leave_time_to_land_and_not_be_far_ahead() {
         domains: &sample.domains,
         canister: sample.canister,
         eco_portal: Some(address(ECO_PORTAL)),
+        solana: None,
     };
     let at = |now: u64, window: u64| {
         check(
@@ -1222,6 +1226,7 @@ fn every_real_order_reads_as_the_quoter_built_it() {
             domains: &sample.domains,
             canister: sample.canister,
             eco_portal: Some(address(ECO_PORTAL)),
+            solana: None,
         };
         let plan = read_plan(&sample.order, &chains).unwrap_or_else(|e| panic!("{flow}: {e}"));
         assert_eq!(plan.action, action, "{flow}");

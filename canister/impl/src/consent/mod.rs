@@ -453,6 +453,36 @@ fn swap(door: Door, terms: IcpSwapTerms, known: &Known) -> Result<Consent, Refus
         token: known.evm_token(delivery.chain, delivery.token),
     };
     let refund = known.account(request.refund_to, request.from);
+    // on Solana the wallet signs words too: its chain, its mint and its recipient, spelled in full
+    if let Some(solana) = delivery.solana {
+        let recipient = swapic_solana_wire::base58::encode(&solana.recipient);
+        let mint = swapic_solana_wire::base58::encode(&solana.mint_out);
+        let token = if solana.mint_out == swapic_solana_wire::consts::WSOL_MINT {
+            "SOL (Solana's own coin)".to_string()
+        } else if solana.mint_out == swapic_solana_wire::consts::USDC_MINT {
+            format!("USDC ({mint})")
+        } else {
+            mint
+        };
+        return Ok(Consent {
+            intent: format!("Swap {} to Solana", sent.short()),
+            lines: vec![
+                Line::text(
+                    "You send",
+                    format!("{}, plus the ledger fee", Amount { units: request.amount_in, token: sent }),
+                ),
+                Line::text("From", AccountText::Yours { subaccount: request.from.subaccount }),
+                Line::text("Recipient gets at least", format!("{} of this token on Solana", delivery.min_out)),
+                Line::text("Token", token),
+                Line::text("Recipient", recipient),
+                Line::time("Deadline", request.deadline),
+                Line::text(
+                    "If it can't finish",
+                    format!("refunded to {refund} before the transfer; after it, all USDC to the recipient on Solana"),
+                ),
+            ],
+        });
+    }
     Ok(Consent {
         intent: format!("Swap {} to {chain}", sent.short()),
         lines: vec![

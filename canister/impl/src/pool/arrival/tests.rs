@@ -37,8 +37,8 @@ fn base() -> PoolChain {
         // by Swapic's Runner (one address on every chain)
         cctp_sources: vec![CctpSource {
             domain: 0,
-            token_messenger: address("0x28b5a0e9c621a5badaa536219b3a228c8168cf5d"),
-            runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
+            token_messenger: address("0x28b5a0e9c621a5badaa536219b3a228c8168cf5d").to_word(),
+            senders: vec![address("0x7e345acab79102ac9588c60b9358ec4d79438eee").to_word()],
             chain: ChainId::ETHEREUM,
             swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
         }],
@@ -719,8 +719,8 @@ fn a_cctp_burn_is_swapics_runners_or_proves_nothing() {
     assert!(orphaned(&cctp(r#ref), &unknown));
     let other_messenger = PoolChain {
         cctp_sources: vec![CctpSource {
-            token_messenger: EvmAddress::new([0x98; 20]),
-            ..base().cctp_sources[0]
+            token_messenger: EvmAddress::new([0x98; 20]).to_word(),
+            ..base().cctp_sources[0].clone()
         }],
         ..base()
     };

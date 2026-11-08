@@ -152,6 +152,12 @@ pub enum EventType {
     },
     /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
     /// amount is back on the books it came from.
+    /// A step of the Solana line.
+    #[n(40)]
+    Solana {
+        #[n(0)]
+        step: crate::solana::SolanaStep,
+    },
     #[n(29)]
     SweepReverted {
         #[n(0)]
@@ -274,6 +280,8 @@ pub enum EventError {
     NotAGasAction { field: &'static str },
     #[error("{field} is not a pool step")]
     NotAPoolStep { field: &'static str },
+    #[error("{field} is not a Solana step")]
+    NotASolanaStep { field: &'static str },
     #[error("{field} has a subaccount that is not 32 bytes")]
     NotAnAccount { field: &'static str },
 }
@@ -311,6 +319,7 @@ impl EventType {
                 ..
             } => raw_tx.clear(),
             EventType::Pool { step } => step.clear_raw_tx(),
+            EventType::Solana { step } => step.clear_raw(),
             _ => {}
         }
         self
@@ -368,7 +377,8 @@ impl EventType {
             | EventType::Books { .. }
             | EventType::TxFinal { .. }
             | EventType::Swept { .. }
-            | EventType::SweepReverted { .. } => false,
+            | EventType::SweepReverted { .. }
+            | EventType::Solana { .. } => false,
             EventType::Flow { step, .. } => step.moves_a_step(),
             EventType::Pool { step } => step.moves_a_payout(),
         }

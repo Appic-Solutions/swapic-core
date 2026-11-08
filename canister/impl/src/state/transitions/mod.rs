@@ -86,6 +86,7 @@ impl<S: Store> State<S> {
             EventType::TxFinal {
                 chain_id, nonce, ..
             } => self.ensure_allocated_nonce(*chain_id, *nonce),
+            EventType::Solana { step } => self.admits_solana(step),
             EventType::Swept { sweep } => Ok(crate::sweep::admits(self, sweep)?),
             EventType::SweepReverted { id, .. } => Ok(crate::sweep::admits_revert(self, *id)?),
         }
@@ -329,6 +330,7 @@ pub fn apply_state_transition<S: Store>(state: &mut State<S>, event: &Event) {
         EventType::ConfigChanged { .. } | EventType::RolesChanged { .. } => {}
         // a final transaction's own record is the outbox's; the line is the log's
         EventType::TxFinal { .. } => {}
+        EventType::Solana { step } => state.record_solana(step, event.index, event.timestamp),
         EventType::Swept { sweep } => state.record_sweep(sweep),
         EventType::SweepReverted { id, .. } => state.record_sweep_reverted(*id),
     }

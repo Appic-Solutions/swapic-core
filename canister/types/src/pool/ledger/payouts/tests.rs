@@ -26,6 +26,7 @@ fn terms() -> PayoutTerms {
             .unwrap(),
         min_out: TokenAmount::from(1_u8),
         deadline: Timestamp::from_nanos(1_800_000_000_000_000_000),
+        solana: None,
     }
 }
 

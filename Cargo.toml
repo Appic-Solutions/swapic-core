@@ -6,9 +6,12 @@ members = [
     "canister/stub_minter",
     "canister/types",
 ]
+exclude = ["solana"]
 resolver = "2"
 
 [workspace.dependencies]
+swapic-solana-wire = { path = "solana/wire", features = ["offchain"] }
+ed25519-dalek = { version = "2", default-features = false }
 # one alloy release train, pinned together: primitives and sol-types share their
 # encoding, and a mixed pair encodes a different call
 alloy-primitives = { version = "1.7", default-features = false, features = ["std"] }

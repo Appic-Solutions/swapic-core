@@ -40,6 +40,17 @@ pub fn signed_page(after_id: u64, limit: u64, sees_all: bool, now: u64) -> Vec<S
                     >= crate::queries::events::HIDE_TX_BYTES_NS
         })
         .filter_map(|event| {
+            // a Solana transaction's hash is its 64-byte signature
+            if let types::EventType::Solana { step } = &event.payload {
+                let (signature, raw) = step.signed()?;
+                return Some(SignedTx {
+                    id: event.index.get(),
+                    chain: ChainRef::Solana,
+                    raw: raw.to_vec(),
+                    hash: signature.to_vec(),
+                    signed_at_ns: event.timestamp.as_nanos(),
+                });
+            }
             let (chain_id, tx_hash, raw) = event.payload.signed_tx()?;
             Some(SignedTx {
                 id: event.index.get(),

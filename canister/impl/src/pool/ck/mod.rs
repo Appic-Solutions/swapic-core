@@ -258,6 +258,7 @@ pub fn request_of(caller: Principal, args: CkSwapTerms) -> Result<CkRequest, Poo
             token_out: evm_address("token_out", &args.token_out)?,
             min_out: amount("min_out", &args.min_out)?,
             deadline: Timestamp::from_nanos(args.deadline_ns),
+            solana: None,
         },
         min_usdc: amount("min_usdc", &args.min_usdc)?,
         network_fee: amount("network_fee", &args.network_fee)?,

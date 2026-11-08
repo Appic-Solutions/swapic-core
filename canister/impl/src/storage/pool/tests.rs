@@ -357,6 +357,7 @@ fn the_replay_of_a_log_with_payout_lines_matches_the_live_state() {
             token_out: staker,
             min_out: TokenAmount::from(1_u8),
             deadline: at(1_000_000),
+            solana: None,
         };
         let steps = [
             PoolStep::PayoutOpened {
@@ -501,6 +502,7 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
                     .unwrap(),
                 min_out: TokenAmount::ONE,
                 deadline: at(1_000_000_000_000),
+                solana: None,
             },
             undo: Undo::Remint {
                 owner: PoolAccount::Evm(staker),

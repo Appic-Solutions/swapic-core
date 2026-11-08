@@ -144,6 +144,16 @@ pub fn check_payout_terms(
             "min_out must be above zero".to_string(),
         ));
     }
+    // paid on Solana: the plan's burn is read against this; the EVM fields are zero
+    if let Some(solana) = terms.solana {
+        let a = crate::solana::addresses().ok_or_else(|| PoolError::NotAllowed("the canister has no Solana config".to_string()))?;
+        crate::solana::arrival::check_recipient(&solana.recipient, &a).map_err(|why| PoolError::NotAllowed(why.to_string()))?;
+        let text = swapic_solana_wire::base58::encode(&solana.recipient);
+        if text.parse::<Address>().map_or(true, |text| sanctioned(&text)) {
+            return Err(PoolError::Sanctioned("the recipient is sanctioned".to_string()));
+        }
+        return Ok(());
+    }
     if terms.token_out == EvmAddress::ZERO {
         return Err(PoolError::NotAllowed(
             "token_out is the zero address".to_string(),
@@ -269,6 +279,7 @@ pub fn check<S: Store>(
         token_out: delivery.token,
         min_out: delivery.min_out,
         deadline: request.deadline,
+        solana: delivery.solana.map(|s| types::pool::payout::SolanaPayout { recipient: s.recipient, mint_out: s.mint_out }),
     };
     check_payout_terms(config, &payout, Some(canister), &sanctioned)?;
     // the flat floor of the rail the plan takes: the canister reads no gas
@@ -342,6 +353,9 @@ pub fn check<S: Store>(
         |party| match party {
             Party::Evm(address) => sanctioned(&Address::from(*address)),
             Party::Icp(principal) => pool::principal_sanctioned(*principal, &sanctioned),
+            Party::Solana(address) => swapic_solana_wire::base58::encode(address)
+                .parse::<Address>()
+                .map_or(true, |text| sanctioned(&text)),
         },
         AmountIn::NotKnownYet,
     )?;

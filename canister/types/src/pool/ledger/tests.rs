@@ -2314,6 +2314,7 @@ fn every_step() -> Vec<PoolStep> {
         token_out: payer(),
         min_out: amount,
         deadline: at,
+        solana: None,
     };
     let swap_terms = IcpSwapTerms {
         token_in: ckusdc(),

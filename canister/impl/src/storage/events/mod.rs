@@ -125,6 +125,10 @@ thread_local! {
     static SWEEPS: RefCell<StableBTreeMap<u64, types::sweep::SweepEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(sweeps_memory()));
 
+    // The Solana fold: attempts, finishes, co-signs and proposals. Only `Solana` lines write it.
+    static SOLANA_FOLD: RefCell<StableBTreeMap<types::solana::SolanaKey, types::solana::SolanaEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(crate::storage::memory::solana_fold_memory()));
+
     // The Eco rescues by order id: the line that signed each.
     static ECO_RESCUES: RefCell<StableBTreeMap<PoolRef, u64, Memory>> =
         RefCell::new(StableBTreeMap::init(eco_rescues_memory()));
@@ -356,6 +360,18 @@ impl Store for StableStore {
 
     fn sweep_count(&self) -> u64 {
         SWEEPS.with(|sweeps| sweeps.borrow().len())
+    }
+
+    fn solana_entry(&self, key: &types::solana::SolanaKey) -> Option<types::solana::SolanaEntry> {
+        SOLANA_FOLD.with(|fold| fold.borrow().get(key))
+    }
+
+    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry) {
+        SOLANA_FOLD.with(|fold| fold.borrow_mut().insert(key, entry));
+    }
+
+    fn solana_entries(&self) -> Vec<(types::solana::SolanaKey, types::solana::SolanaEntry)> {
+        SOLANA_FOLD.with(|fold| fold.borrow().iter().collect())
     }
 
     fn eco_rescue(&self, order_id: &PoolRef) -> Option<u64> {

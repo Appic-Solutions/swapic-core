@@ -5,6 +5,7 @@ description = "Candid types and endpoint signatures of the settlement canister."
 edition = "2021"
 
 [dependencies]
+swapic-solana-wire = { workspace = true }
 types = { path = "../types" }
 
 candid = { workspace = true }

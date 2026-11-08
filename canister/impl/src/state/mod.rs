@@ -13,6 +13,7 @@ use types::{
     TokenAmount, TxHash, UnsignedTx,
 };
 
+pub mod solana;
 pub mod transitions;
 
 /// Where the event log's fold lives. [`State`] reads and writes only through this, so one
@@ -104,6 +105,11 @@ pub trait Store {
     fn sweeps(&self) -> Vec<(u64, SweepEntry)>;
     /// How many sweeps were ever made: the next one's id.
     fn sweep_count(&self) -> u64;
+    /// A value of the Solana fold.
+    fn solana_entry(&self, key: &types::solana::SolanaKey) -> Option<types::solana::SolanaEntry>;
+    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry);
+    /// Every value of the Solana fold, in key order: what the audit compares.
+    fn solana_entries(&self) -> Vec<(types::solana::SolanaKey, types::solana::SolanaEntry)>;
     /// Indexes a line that records a signed transaction's bytes.
     fn put_signed(&mut self, index: EventIndex);
     /// At most `limit` of the indexed lines in `range`, in log order.
@@ -204,6 +210,7 @@ pub struct MemoryStore {
     pool_own_sources: BTreeMap<TxHash, types::pool::OwnSource>,
     eco_rescues: BTreeMap<PoolRef, u64>,
     sweeps: BTreeMap<u64, SweepEntry>,
+    solana: BTreeMap<types::solana::SolanaKey, types::solana::SolanaEntry>,
     flow_by_source: BTreeMap<TxHash, QuoteHash>,
     flow_by_tx: BTreeMap<TxHash, QuoteHash>,
 }
@@ -239,6 +246,18 @@ impl Store for MemoryStore {
 
     fn sweep_count(&self) -> u64 {
         self.sweeps.len() as u64
+    }
+
+    fn solana_entry(&self, key: &types::solana::SolanaKey) -> Option<types::solana::SolanaEntry> {
+        self.solana.get(key).cloned()
+    }
+
+    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry) {
+        self.solana.insert(key, entry);
+    }
+
+    fn solana_entries(&self) -> Vec<(types::solana::SolanaKey, types::solana::SolanaEntry)> {
+        self.solana.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
@@ -530,6 +549,7 @@ impl State<MemoryStore> {
             sweeps,
             flow_by_source: _,
             flow_by_tx: _,
+            solana,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -603,6 +623,9 @@ impl State<MemoryStore> {
             && sweeps
                 .iter()
                 .eq(other.store.sweeps().iter().map(|(id, entry)| (id, entry)))
+            && solana
+                .iter()
+                .eq(other.store.solana_entries().iter().map(|(key, entry)| (key, entry)))
     }
 }
 

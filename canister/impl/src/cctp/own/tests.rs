@@ -242,6 +242,7 @@ fn a_payouts_own_burn_keeps_the_arrivals_gas_action() {
             token_out: staker,
             min_out: TokenAmount::ONE,
             deadline: Timestamp::from_nanos(9),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(staker),

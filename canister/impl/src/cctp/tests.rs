@@ -95,6 +95,7 @@ fn decide_on(chain_id: ChainId, message: &BurnMessage, now_s: u64) -> Result<Pla
         evm_chains: &evm_chains,
         domains: &domains,
         canister: CANISTER,
+        solana: None,
     };
     decide(message, &setup, now_s)
 }
@@ -693,4 +694,73 @@ fn a_release_screens_only_the_recipient_it_pays() {
             Err(FinishError::Sanctioned(Party::Evm(USER)))
         );
     });
+}
+
+mod solana_source {
+    use super::*;
+    use swapic_solana_wire::consts::{TMM, USDC_MINT};
+    use swapic_solana_wire::pda::SwapicAddresses;
+
+    fn a() -> SwapicAddresses {
+        SwapicAddresses::derive([1; 32], [2; 32], [3; 32])
+    }
+
+    /// A Deliver from Solana to Base: a burn the program made, minted to its recipient.
+    fn message(sender: [u8; 32], burn_token: [u8; 32], message_sender: [u8; 32]) -> BurnMessage {
+        let recipient = EvmAddress::new([0x55; 20]);
+        let mut envelope = vec![0u8; 320];
+        envelope[31] = 3;
+        envelope[32..64].copy_from_slice(&[9; 32]);
+        envelope[120..128].copy_from_slice(&DEADLINE.to_be_bytes());
+        envelope[140..160].copy_from_slice(recipient.as_bytes());
+        let mut bytes = vec![0u8; 376];
+        bytes[0..4].copy_from_slice(&1u32.to_be_bytes());
+        bytes[4..8].copy_from_slice(&5u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&6u32.to_be_bytes());
+        bytes[44..76].copy_from_slice(&sender);
+        bytes[76..108].copy_from_slice(&MESSENGER.to_word());
+        bytes[148..152].copy_from_slice(&1u32.to_be_bytes());
+        bytes[152..184].copy_from_slice(&burn_token);
+        bytes[184..216].copy_from_slice(&recipient.to_word());
+        bytes[248..280].copy_from_slice(&message_sender);
+        bytes.extend_from_slice(&envelope);
+        BurnMessage::parse(&bytes).unwrap()
+    }
+
+    fn decide_with(message: &BurnMessage, solana: Option<&SwapicAddresses>) -> Result<Plan, FinishError> {
+        let (evm_chains, domains) = (evm_chains(), domains());
+        let setup = Setup {
+            chain_id: BASE,
+            evm_chains: &evm_chains,
+            domains: &domains,
+            canister: CANISTER,
+            solana,
+        };
+        decide(message, &setup, NOW)
+    }
+
+    #[test]
+    fn a_burn_the_program_made_is_finished_like_any_other() {
+        let a = a();
+        let plan = decide_with(&message(TMM, USDC_MINT, a.auth[2].0), Some(&a)).unwrap();
+        assert_eq!(plan.action, FinishAction::Receive);
+        assert_eq!(plan.gas_action, GasAction::RelayDeliver);
+    }
+
+    #[test]
+    fn domain_five_is_unknown_without_a_deployment() {
+        let a = a();
+        assert_eq!(decide_with(&message(TMM, USDC_MINT, a.auth[0].0), None), Err(FinishError::UnknownSource(5)));
+    }
+
+    #[test]
+    fn a_burn_anyone_else_made_on_solana_is_refused() {
+        let a = a();
+        // a user who burned directly
+        assert_eq!(decide_with(&message(TMM, USDC_MINT, [0x66; 32]), Some(&a)), Err(FinishError::NotTheRunner));
+        // a message that is not from the token messenger
+        assert_eq!(decide_with(&message([0x77; 32], USDC_MINT, a.auth[0].0), Some(&a)), Err(FinishError::NotABurn));
+        // not USDC
+        assert_eq!(decide_with(&message(TMM, [0x88; 32], a.auth[0].0), Some(&a)), Err(FinishError::NotUsdc));
+    }
 }

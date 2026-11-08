@@ -45,6 +45,19 @@ pub struct PayoutTerms {
     /// After this, nothing is signed and the payout is undone.
     #[n(4)]
     pub deadline: Timestamp,
+    /// Paid on Solana: `dst_chain` is then the pool chain, and the EVM fields are zero.
+    #[n(5)]
+    pub solana: Option<SolanaPayout>,
+}
+
+/// Who a payout pays on Solana, and in what. The USDC mint means USDC through the Forwarder; the wSOL
+/// mint means native SOL to the wallet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct SolanaPayout {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub recipient: [u8; 32],
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub mint_out: [u8; 32],
 }
 
 /// An ICP user's swap through the pool, as `swap_from_icp` takes it.

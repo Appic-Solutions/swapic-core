@@ -287,6 +287,7 @@ fn withdrawal_arg() -> Vec<u8> {
                 token_out: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
                 min_out: Nat::from(9_900_000_u64),
                 deadline_ns: DEADLINE_NS,
+                solana: None,
             },
             nonce: 7,
         },

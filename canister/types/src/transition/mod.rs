@@ -32,4 +32,6 @@ pub enum TransitionError {
     Books(#[from] crate::books::BooksError),
     #[error(transparent)]
     Pool(#[from] crate::pool::PoolStepError),
+    #[error("Solana: {why}")]
+    Solana { why: &'static str },
 }

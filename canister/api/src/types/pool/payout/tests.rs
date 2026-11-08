@@ -10,6 +10,7 @@ fn terms() -> PayoutTerms {
         token_out: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(),
         min_out: Nat::from(4_949_000_u64),
         deadline_ns: 1_800_000_000_000_000_000,
+        solana: None,
     }
 }
 
@@ -184,6 +185,7 @@ fn a_waiting_payout_names_its_network_fee() {
             token_out: staker,
             min_out: types::TokenAmount::ONE,
             deadline: types::Timestamp::from_nanos(9),
+            solana: None,
         },
         Undo::Remint {
             owner: PoolAccount::Evm(staker),

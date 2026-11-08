@@ -90,6 +90,7 @@ fn request(usdc_out: u64, nonce: u64) -> WithdrawalRequest {
                 .unwrap(),
             min_out: TokenAmount::from(1_u8),
             deadline: at(10).checked_add(MIN_DEADLINE).unwrap(),
+            solana: None,
         },
         nonce,
     }

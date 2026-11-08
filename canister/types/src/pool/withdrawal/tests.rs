@@ -20,6 +20,7 @@ fn fixed() -> WithdrawalRequest {
                 .unwrap(),
             min_out: TokenAmount::from(4_949_000_u64),
             deadline: Timestamp::from_secs(1_800_000_000).unwrap(),
+            solana: None,
         },
         nonce: 7,
     }
@@ -64,6 +65,7 @@ fn the_interface_golden_withdrawal_holds() {
             token_out: text(&value["tokenOut"]).parse().unwrap(),
             min_out: amount(&value["minOut"]),
             deadline: Timestamp::from_secs(value["deadline"].as_u64().unwrap()).unwrap(),
+            solana: None,
         },
         nonce: value["nonce"].as_u64().unwrap(),
     };

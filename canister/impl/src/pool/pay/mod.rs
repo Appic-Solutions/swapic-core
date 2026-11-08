@@ -62,6 +62,20 @@ pub fn cctp_floor(
     arrival: Option<&crate::relay::Arrival>,
 ) -> Result<TokenAmount, String> {
     let arrival = arrival.ok_or("a CCTP payout names its arrival")?;
+    if let Some(action) = arrival.solana {
+        let solana = chains.solana.as_ref().ok_or("the canister has no Solana config")?;
+        let row = match action {
+            // a swap arrival always pays the dearer of its two ends (attack L1)
+            types::solana::SolanaAction::CompleteNewAccount => solana.config.min_network_fee.arrival(),
+            other => solana.config.min_network_fee.get(other),
+        };
+        let own = chains
+            .evm_chains
+            .get(chains.chain_id)
+            .and_then(|entry| entry.min_network_fee.get(GasAction::RelayCctp))
+            .ok_or_else(|| format!("chain {} sets no least fee for a CCTP relay", chains.chain_id))?;
+        return types::pool::payout::cctp_payout_floor(own, row).ok_or_else(|| "the least fees overflow".to_string());
+    }
     let least = |chain: ChainId, action: GasAction| {
         chains
             .evm_chains
@@ -177,6 +191,9 @@ pub fn check_order(
     }
     if delivery.token != terms.token_out {
         return Err(refused("the order pays another token"));
+    }
+    if delivery.solana.map(|s| (s.recipient, s.mint_out)) != terms.solana.map(|s| (s.recipient, s.mint_out)) {
+        return Err(refused("the order pays another Solana recipient or token"));
     }
     if delivery.min_out < terms.min_out {
         return Err(refused(format!(
@@ -307,6 +324,7 @@ pub fn payer_of(
             domains: &config.cctp_domains,
             canister,
             eco_portal: config.eco_portal,
+            solana: crate::solana::chains_of(config),
         },
         swapic: chain.swapic,
         usdc: chain.usdc,

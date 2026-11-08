@@ -64,6 +64,7 @@ impl From<types::TransitionError> for TransitionError {
             Domain::Flow(error) => Self::Flow(error.to_string()),
             Domain::Books(error) => Self::Books(error.to_string()),
             Domain::Pool(error) => Self::Pool(error.to_string()),
+            Domain::Solana { why } => Self::Pool(format!("Solana: {why}")),
         }
     }
 }

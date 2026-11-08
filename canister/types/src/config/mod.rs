@@ -274,6 +274,9 @@ pub struct Config {
     /// `credit_confirmations` decide nothing. At most [`FINALIZABLE`].
     #[n(36)]
     pub finalized: ChainSet,
+    /// The Solana line. None: the canister signs nothing on Solana.
+    #[n(50)]
+    pub solana: Option<crate::solana::SolanaConfig>,
 }
 
 /// The kinds of transaction the canister signs and pays the gas of: the relay of a
@@ -719,6 +722,8 @@ pub enum ConfigError {
     },
     #[error("finalized_chains names chain {chain}, which may not wait for a finalized block")]
     NotFinalizable { chain: ChainId },
+    #[error("the Solana config: {why}")]
+    Solana { why: String },
     #[error("evm_chains[{chain}].block_time is {block_time:?}, outside {MIN_BLOCK_TIME:?} to {MAX_BLOCK_TIME:?}")]
     BlockTimeOutOfRange {
         chain: ChainId,
@@ -766,6 +771,7 @@ impl Default for Config {
             // crediting reads the swap depths, held to the floor on Ethereum
             credit_confirmations: ChainTable::default(),
             finalized: ChainSet::default(),
+            solana: None,
         }
     }
 }
@@ -773,6 +779,9 @@ impl Default for Config {
 impl Config {
     /// What a stored config must satisfy.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(solana) = &self.solana {
+            solana.validate().map_err(|why| ConfigError::Solana { why: why.to_string() })?;
+        }
         if self.ecdsa_key_name.is_empty() {
             return Err(ConfigError::EmptyEcdsaKeyName);
         }

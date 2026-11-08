@@ -122,6 +122,7 @@ fn request(amount_in: TokenAmount, min_out: TokenAmount, min_usdc: TokenAmount) 
             token_out: eth_usdc(),
             min_out,
             deadline: seconds(DEADLINE_S),
+            solana: None,
         },
         min_usdc,
         network_fee: TokenAmount::from(NETWORK_FEE),

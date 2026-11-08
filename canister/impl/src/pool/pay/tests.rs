@@ -86,6 +86,7 @@ impl World {
                 domains: &self.domains,
                 canister: canister(),
                 eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
+                solana: None,
             },
             swapic: swapic_address(),
             usdc: base_usdc(),
@@ -140,6 +141,7 @@ fn terms_of(order: &Order, world: &World) -> PayoutTerms {
         token_out: delivery.token,
         min_out: delivery.min_out,
         deadline: Timestamp::from_secs(deadline_of(order)).unwrap(),
+        solana: None,
     }
 }
 
@@ -528,6 +530,7 @@ fn one_payout_is_signed_once_at_a_time_and_never_again() {
             token_out: base_usdc(),
             min_out: TokenAmount::ONE,
             deadline: at(1_000_000),
+            solana: None,
         };
         for step in [
             PoolStep::PayoutOpened {

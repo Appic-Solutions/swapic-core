@@ -10,6 +10,7 @@ pub mod outbox;
 pub mod pool;
 pub mod roles;
 pub mod sanctions;
+pub mod solana_keys;
 pub mod timer_state;
 
 #[cfg(test)]

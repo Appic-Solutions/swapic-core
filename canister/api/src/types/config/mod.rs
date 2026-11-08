@@ -61,6 +61,8 @@ pub struct Config {
     /// `finalized` tag) instead of a block count; their depths decide nothing. Only Polygon
     /// (137) may be named (`NotFinalizable`). Absent or empty: block counts everywhere.
     pub finalized_chains: Option<Vec<u64>>,
+    /// The Solana line. Absent: the canister signs nothing on Solana.
+    pub solana: Option<super::solana::SolanaConfig>,
 }
 
 /// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, its
@@ -376,6 +378,7 @@ impl fmt::Debug for Config {
             pool_chain,
             credit_confirmations,
             finalized_chains,
+            solana,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -397,6 +400,7 @@ impl fmt::Debug for Config {
             .field("pool_chain", pool_chain)
             .field("credit_confirmations", credit_confirmations)
             .field("finalized_chains", finalized_chains)
+            .field("solana", solana)
             .finish()
     }
 }
@@ -454,6 +458,7 @@ impl From<types::Config> for Config {
             pool_chain,
             credit_confirmations,
             finalized,
+            solana,
         } = config;
         Self {
             batch_window_ms: u64::try_from(batch_window.as_millis())
@@ -499,6 +504,7 @@ impl From<types::Config> for Config {
             ),
             finalized_chains: (!finalized.0.is_empty())
                 .then(|| finalized.0.into_iter().map(ChainId::get).collect()),
+            solana: solana.map(Into::into),
         }
     }
 }
@@ -597,6 +603,11 @@ impl TryFrom<Config> for types::Config {
                     .map(ChainId::new)
                     .collect(),
             ),
+            solana: config
+                .solana
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|why| types::ConfigError::Solana { why })?,
         })
     }
 }
@@ -675,6 +686,10 @@ pub enum ConfigError {
     NotFinalizable {
         chain_id: u64,
     },
+    /// The Solana config is not one the canister can sign with.
+    Solana {
+        why: String,
+    },
     /// `evm_chains[chain_id].block_time_ms` is outside 100 to 60,000.
     BlockTimeOutOfRange {
         chain_id: u64,
@@ -693,6 +708,7 @@ impl From<types::ConfigError> for ConfigError {
         use types::ConfigError as Domain;
         match error {
             Domain::EmptyEcdsaKeyName => Self::EmptyEcdsaKeyName,
+            Domain::Solana { why } => Self::Solana { why },
             Domain::EcdsaKeyNameFixed { current, requested } => {
                 Self::EcdsaKeyNameFixed { current, requested }
             }

@@ -342,6 +342,8 @@ pub enum PoolWireError {
     NotAnAddress { field: &'static str },
     #[error("{field} does not fit 128 bits")]
     TooLarge { field: &'static str },
+    #[error("{field} is not a Solana address")]
+    NotASolanaAddress { field: &'static str },
 }
 
 impl From<PoolWireError> for PoolError {

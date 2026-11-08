@@ -97,6 +97,12 @@ pub enum EventType {
         detail: String,
         step_bytes: Vec<u8>,
     },
+    /// A step of the Solana line.
+    Solana {
+        step: String,
+        detail: String,
+        step_bytes: Vec<u8>,
+    },
     /// A controller's sweep, its amount taken off the books it came from as it was signed
     /// (EVM) or asked of the ledger (ICP). `amount` is in the asset's smallest unit.
     Swept {
@@ -306,6 +312,11 @@ impl From<types::EventType> for EventType {
                 detail: detail_of(&step),
                 step_bytes: step.to_bytes(),
             },
+            Domain::Solana { step } => Self::Solana {
+                step: step.name().to_string(),
+                detail: detail_of(&step),
+                step_bytes: step.to_bytes(),
+            },
             Domain::Swept { sweep } => Self::Swept {
                 id: sweep.id,
                 asset: sweep.asset.into(),
@@ -430,6 +441,13 @@ impl TryFrom<EventType> for types::EventType {
                     },
                 )?,
             },
+            EventType::Solana { step_bytes, .. } => Self::Solana {
+                step: types::solana::SolanaStep::from_bytes(&step_bytes).ok_or(
+                    DomainEventError::NotASolanaStep {
+                        field: "step_bytes",
+                    },
+                )?,
+            },
             EventType::Swept {
                 id,
                 asset,
@@ -503,6 +521,9 @@ pub enum EventError {
     NotAPoolStep {
         field: String,
     },
+    NotASolanaStep {
+        field: String,
+    },
     /// The account in `field` has a subaccount that is not 32 bytes.
     NotAnAccount {
         field: String,
@@ -559,6 +580,9 @@ impl From<types::events::EventError> for EventError {
                 field: field.to_string(),
             },
             Domain::NotAPoolStep { field } => Self::NotAPoolStep {
+                field: field.to_string(),
+            },
+            Domain::NotASolanaStep { field } => Self::NotASolanaStep {
                 field: field.to_string(),
             },
             Domain::NotAnAccount { field } => Self::NotAnAccount {

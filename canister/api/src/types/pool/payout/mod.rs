@@ -24,6 +24,15 @@ pub struct PayoutTerms {
     pub min_out: Nat,
     /// After this, nothing is signed and the payout is undone.
     pub deadline_ns: u64,
+    /// Paid on Solana: `dst_chain` is then the pool chain, and the EVM fields are zero.
+    pub solana: Option<SolanaPayoutTerms>,
+}
+
+/// Who a payout pays on Solana, and in what: both base58.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SolanaPayoutTerms {
+    pub recipient: String,
+    pub mint_out: String,
 }
 
 /// The payout plan: the quoter's ready-made Swapic order for the expected
@@ -220,6 +229,15 @@ impl TryFrom<PayoutTerms> for domain::PayoutTerms {
             token_out: evm_address("token_out", &terms.token_out)?,
             min_out: amount("min_out", &terms.min_out)?,
             deadline: Timestamp::from_nanos(terms.deadline_ns),
+            solana: terms
+                .solana
+                .map(|s| -> Result<domain::SolanaPayout, PoolWireError> {
+                    let key = |field: &'static str, text: &str| {
+                        swapic_solana_wire::base58::decode_pubkey(text).ok_or(PoolWireError::NotASolanaAddress { field })
+                    };
+                    Ok(domain::SolanaPayout { recipient: key("solana.recipient", &s.recipient)?, mint_out: key("solana.mint_out", &s.mint_out)? })
+                })
+                .transpose()?,
         })
     }
 }
@@ -232,6 +250,10 @@ impl From<domain::PayoutTerms> for PayoutTerms {
             token_out: terms.token_out.to_string(),
             min_out: nat(terms.min_out),
             deadline_ns: terms.deadline.as_nanos(),
+            solana: terms.solana.map(|s| SolanaPayoutTerms {
+                recipient: swapic_solana_wire::base58::encode(&s.recipient),
+                mint_out: swapic_solana_wire::base58::encode(&s.mint_out),
+            }),
         }
     }
 }

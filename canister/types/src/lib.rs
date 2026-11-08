@@ -16,6 +16,7 @@ pub mod hash;
 pub mod ledger;
 pub mod numeric;
 pub mod pool;
+pub mod solana;
 pub mod storable;
 pub mod swapic;
 pub mod sweep;

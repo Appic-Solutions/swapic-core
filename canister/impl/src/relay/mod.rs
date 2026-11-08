@@ -153,6 +153,18 @@ pub struct Chains<'a> {
     /// Eco's Portal, the one target an Eco intent is published on. None: no Eco order is
     /// relayed.
     pub eco_portal: Option<EvmAddress>,
+    /// The Solana line, when the canister has one: domain 5 as a destination.
+    pub solana: Option<SolanaChains>,
+}
+
+/// What a burn into Solana is read against.
+#[derive(Clone)]
+pub struct SolanaChains {
+    pub a: swapic_solana_wire::pda::SwapicAddresses,
+    pub config: types::solana::SolanaConfig,
+    pub now_s: u64,
+    /// The owner a 32-byte Forwarder hook's token account holds, read from Solana by the door.
+    pub forward_owner: Option<[u8; 32]>,
 }
 
 /// A party an order or a message pays, screened against the sanctions set: an EVM
@@ -161,6 +173,8 @@ pub struct Chains<'a> {
 pub enum Party {
     Evm(EvmAddress),
     Icp(candid::Principal),
+    /// A Solana address, held in the sanctions set as its case-exact base58 text.
+    Solana([u8; 32]),
 }
 
 impl fmt::Display for Party {
@@ -168,6 +182,7 @@ impl fmt::Display for Party {
         match self {
             Party::Evm(address) => write!(f, "{address}"),
             Party::Icp(principal) => write!(f, "{principal}"),
+            Party::Solana(address) => write!(f, "{}", swapic_solana_wire::base58::encode(address)),
         }
     }
 }
@@ -181,6 +196,9 @@ impl Party {
             // would not fit is refused as if it were listed
             Party::Icp(principal) => principal
                 .to_text()
+                .parse::<types::Address>()
+                .map_or(true, |text| is_sanctioned(&text)),
+            Party::Solana(address) => swapic_solana_wire::base58::encode(address)
                 .parse::<types::Address>()
                 .map_or(true, |text| is_sanctioned(&text)),
         }
@@ -229,6 +247,8 @@ pub struct Arrival {
     pub recipient: EvmAddress,
     /// Who the arrival pays: the recipient, and a CkDeposit's principal.
     pub parties: Vec<Party>,
+    /// On Solana: the action its fee pays for. `chain_id` is then the source chain and names nothing.
+    pub solana: Option<types::solana::SolanaAction>,
 }
 
 /// The limit a transaction for `action` on `chain` is signed with: exactly the one asked
@@ -430,6 +450,9 @@ fn arrival_of(burn: &CctpBurn, source: &EvmChain, chains: &Chains) -> Result<Arr
     if burn.burn_token != source.usdc {
         return Err(RelayError::Burn("is not of the chain's USDC"));
     }
+    if burn.destination_domain == swapic_solana_wire::consts::SOLANA_DOMAIN {
+        return solana_arrival_of(burn, chains).map(|(arrival, _)| arrival);
+    }
     let chain_id = chains
         .domains
         .0
@@ -497,7 +520,46 @@ fn arrival_of(burn: &CctpBurn, source: &EvmChain, chains: &Chains) -> Result<Arr
         action,
         recipient,
         parties: envelope_parties(&envelope).map_err(RelayError::Arrival)?,
+        solana: None,
     })
+}
+
+/// The arrival of a burn into Solana, and what it delivers there.
+fn solana_arrival_of(burn: &CctpBurn, chains: &Chains) -> Result<(Arrival, SolanaDelivery), RelayError> {
+    use crate::solana::arrival::{read_burn, BurnFields, SolanaBurn};
+    use types::solana::SolanaAction;
+    let solana = chains.solana.as_ref().ok_or(RelayError::UnknownDestination(burn.destination_domain))?;
+    let source_domain = chains.domains.get(chains.chain_id).map_or(0, |domain| domain.get());
+    let fields = BurnFields {
+        source_domain,
+        mint_recipient: &burn.mint_recipient,
+        destination_caller: &burn.destination_caller,
+        hook: &burn.hook_data,
+        max_fee: u128::try_from(burn.max_fee).unwrap_or(u128::MAX),
+    };
+    let read = read_burn(&fields, &solana.a, &solana.config, solana.forward_owner, solana.now_s).map_err(RelayError::Arrival)?;
+    let (recipient, action, delivery) = match read {
+        SolanaBurn::Swap(hook) => (
+            hook.recipient,
+            SolanaAction::CompleteNewAccount,
+            SolanaDelivery { recipient: hook.recipient, mint_out: hook.mint_out, min_out: Some(hook.min_out) },
+        ),
+        SolanaBurn::Forwarder { owner } => (
+            owner,
+            SolanaAction::ForwardRelay,
+            SolanaDelivery { recipient: owner, mint_out: swapic_solana_wire::consts::USDC_MINT, min_out: None },
+        ),
+    };
+    Ok((
+        Arrival {
+            chain_id: chains.chain_id,
+            action: GasAction::RelayDeliver,
+            recipient: EvmAddress::ZERO,
+            parties: vec![Party::Solana(recipient)],
+            solana: Some(action),
+        },
+        delivery,
+    ))
 }
 
 /// The parties an Eco intent pays, read as the destination will run its route: the
@@ -625,6 +687,17 @@ pub struct Delivery {
     pub recipient: EvmAddress,
     pub token: EvmAddress,
     pub min_out: TokenAmount,
+    /// A delivery on Solana: `chain` is then the burn's own, and the EVM fields are zero.
+    pub solana: Option<SolanaDelivery>,
+}
+
+/// Where a burn into Solana pays. A USDC arrival names no minimum of its own: it is what the burn is
+/// given less the most Circle may keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SolanaDelivery {
+    pub recipient: [u8; 32],
+    pub mint_out: [u8; 32],
+    pub min_out: Option<u64>,
 }
 
 /// What an order does, read in full: the fee steps it pays the canister, its rail and
@@ -650,6 +723,7 @@ fn envelope_delivery(envelope: &Envelope, chain: ChainId) -> Option<Delivery> {
         recipient: envelope.recipient,
         token: envelope.token_out,
         min_out: TokenAmount::from_u256(envelope.min_out),
+        solana: None,
     })
 }
 
@@ -747,6 +821,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
         recipient: swapic::evm(order.payout.recipient),
         token: swapic::evm(order.payout.token),
         min_out: TokenAmount::from_u256(order.payout.minOut),
+        solana: None,
     });
     let (action, arrival, delivery) = match (burns.as_slice(), intents.as_slice()) {
         ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
@@ -764,6 +839,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                         recipient,
                         token: intent.token,
                         min_out: TokenAmount::from_u256(min.saturating_sub(fee)),
+                        solana: None,
                     })
                 }
                 EcoArrival::Fill { envelope, .. } => envelope_delivery(&envelope, destination),
@@ -771,6 +847,26 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
             // an intent and a payout too are two deliveries: none is the order's
             let delivery = if payout.is_some() { None } else { delivered };
             (GasAction::RelayEco, None, delivery)
+        }
+        ([(burn, min)], []) if burn.destination_domain == swapic_solana_wire::consts::SOLANA_DOMAIN => {
+            if burn.burn_token != source.usdc {
+                return Err(RelayError::Burn("is not of the chain's USDC"));
+            }
+            let (arrival, solana) = solana_arrival_of(burn, chains)?;
+            parties.extend(arrival.parties.iter().copied());
+            let min_out = match solana.min_out {
+                Some(min_out) => TokenAmount::from(min_out),
+                None => TokenAmount::from_u256(min.saturating_sub(burn.max_fee)),
+            };
+            let delivered = Delivery {
+                chain: chain_id,
+                recipient: EvmAddress::ZERO,
+                token: EvmAddress::ZERO,
+                min_out,
+                solana: Some(solana),
+            };
+            let delivery = if payout.is_some() { None } else { Some(delivered) };
+            (GasAction::RelayCctp, Some(arrival), delivery)
         }
         ([(burn, min)], []) => {
             let arrival = arrival_of(burn, &source, chains)?;
@@ -788,6 +884,7 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                         recipient: envelope.recipient,
                         token: usdc,
                         min_out: TokenAmount::from_u256(min.saturating_sub(burn.max_fee)),
+                        solana: None,
                     }),
                     _ => envelope_delivery(&envelope, arrival.chain_id),
                 }
@@ -874,18 +971,20 @@ pub fn check(
         .get(action)
         .unwrap_or(TokenAmount::MAX);
     if let Some(arrival) = &arrival {
-        let destination = chains
-            .evm_chains
-            .get(arrival.chain_id)
-            .expect("BUG: arrival_of found the destination in this table");
-        needed = needed
-            .checked_add(
-                destination
-                    .min_network_fee
-                    .get(arrival.action)
-                    .unwrap_or(TokenAmount::MAX),
-            )
-            .unwrap_or(TokenAmount::MAX);
+        let row = match (arrival.solana, chains.solana.as_ref()) {
+            // a swap arrival always pays the dearer of its two ends (attack L1)
+            (Some(types::solana::SolanaAction::CompleteNewAccount), Some(solana)) => solana.config.min_network_fee.arrival(),
+            (Some(action), Some(solana)) => solana.config.min_network_fee.get(action),
+            (Some(_), None) => TokenAmount::MAX,
+            (None, _) => chains
+                .evm_chains
+                .get(arrival.chain_id)
+                .expect("BUG: arrival_of found the destination in this table")
+                .min_network_fee
+                .get(arrival.action)
+                .unwrap_or(TokenAmount::MAX),
+        };
+        needed = needed.checked_add(row).unwrap_or(TokenAmount::MAX);
     }
     if fee < needed {
         return Err(RelayError::FeeBelowMinimum { paid: fee, needed });
@@ -970,12 +1069,24 @@ pub async fn relay_gasless(
     let canister = ecdsa::canister_address().await.map_err(|e| e.to_string())?;
     let settings = flow_settings::get();
     let now_s = Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get();
+    let solana = crate::solana::deployment().ok();
+    // the 32-byte Forwarder form's owner is read from Solana, before the pure checks
+    let forward_owner = match &solana {
+        Some(d) => crate::solana::arrival::forward_owner_of(&order, d, &source).await?,
+        None => None,
+    };
     let chains = Chains {
         chain_id,
         evm_chains: &config.evm_chains,
         domains: &config.cctp_domains,
         canister,
         eco_portal: config.eco_portal,
+        solana: solana.map(|d| SolanaChains {
+            a: d.a,
+            config: d.config,
+            now_s,
+            forward_owner,
+        }),
     };
     let relay = check(
         &order,
