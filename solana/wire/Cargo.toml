@@ -1,0 +1,20 @@
+[package]
+name = "swapic-solana-wire"
+version = "0.1.0"
+edition = "2021"
+description = "Every byte layout of the Swapic Solana line: one source for the program, the canister and the quoter"
+
+[features]
+default = []
+# Vec-based helpers: compiled messages and instruction data
+alloc = []
+# Everything off chain: PDA derivation, keccak, base58 text
+offchain = ["alloc", "dep:sha2", "dep:curve25519-dalek", "dep:tiny-keccak"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false, optional = true }
+curve25519-dalek = { version = "4", default-features = false, optional = true }
+tiny-keccak = { version = "2", features = ["keccak"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"

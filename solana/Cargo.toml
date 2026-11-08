@@ -1,0 +1,11 @@
+# The Swapic Solana line: its own workspace, so the canister's and the services' crates
+# never pull a Solana build tool, and the program builds with the Solana toolchain alone.
+[workspace]
+members = ["wire", "program", "test_router"]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = 3

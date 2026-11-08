@@ -1,0 +1,8 @@
+# The constants of the program's tests. Public keys of throwaway test keys only: nothing here exists
+# on mainnet. `solana/tests/src/keys.rs` derives the same keys from their labelled seeds.
+program_id = "ArwwXL4UJ73aXH8JSCJM4yZcvixjRm8YWmFkmNuGbR7Q"
+canister = "989k4z3pXEw2u7N47Ex58GTyLTaJ32KfFJzpoFaHAvSK"
+admin = "DQXL1uic1VmgU1wnpw3WX1YStyCRPmWyip2RvYX93aZ8"
+cctp_receiver = "0x404056Ab781D713B8f5Dc55F5B9592962B187099"
+swapic_evm = "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"
+runner_evm = "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5"

@@ -1,0 +1,29 @@
+[package]
+name = "swapic-solana-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The program's tests: the real CCTP programs and state from mainnet in LiteSVM, a hostile stand-in at Jupiter's address"
+
+# its own workspace: the test VM's dependency tree stays out of the program's build
+[workspace]
+
+[dependencies]
+litesvm = "=0.18.2"
+solana-account = "4"
+solana-address = "2"
+solana-clock = "3"
+solana-instruction = "3"
+solana-instruction-error = "2"
+solana-keypair = "3"
+solana-message = "4"
+solana-rent = "4"
+solana-signer = "3"
+solana-transaction = "4"
+solana-transaction-error = "3"
+
+swapic-solana-wire = { path = "../wire", features = ["offchain"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+serde_json = "1"
+base64 = "0.22"

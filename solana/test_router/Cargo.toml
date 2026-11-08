@@ -1,0 +1,13 @@
+[package]
+name = "swapic-test-router"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A stand-in for Jupiter in the program's tests, honest or hostile on request. Never deployed to mainnet."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pinocchio = { version = "=0.12.0", default-features = false, features = ["cpi", "alloc"] }
+swapic-solana-wire = { path = "../wire" }

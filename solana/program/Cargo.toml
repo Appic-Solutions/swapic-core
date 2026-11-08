@@ -1,0 +1,27 @@
+[package]
+name = "swapic-solana-program"
+version = "0.1.0"
+edition = "2021"
+description = "The Swapic Solana program: swap and burn out of Solana, receive and swap into it, nothing held between transactions"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Off chain builds (tests, the canister's comparison) get the constants without the entrypoint.
+no-entrypoint = []
+# Test builds only: asks the user for one byte less rent than CCTP takes, to prove the float check.
+test-short-rent = []
+
+[dependencies]
+pinocchio = { version = "=0.12.0", default-features = false, features = ["cpi", "alloc"] }
+swapic-solana-wire = { path = "../wire" }
+solana-security-txt = "1"
+
+[build-dependencies]
+swapic-solana-wire = { path = "../wire", features = ["offchain"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

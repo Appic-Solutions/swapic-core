@@ -1,0 +1,12 @@
+# The values compiled into the Swapic Solana program (design 4.2). Changing any of them is a
+# program upgrade. `solana/program/build.rs` reads this file, or the file SWAPIC_SOLANA_CONSTS names.
+#
+# The three keys stay UNSET until the canister has derived them and the program keypair exists
+# (rollout steps 4 and 5): a build refuses UNSET, so no build can carry a placeholder.
+program_id = "UNSET"
+canister = "UNSET"
+admin = "UNSET"
+# one address on all ten Swapic EVM chains, read from the prod kit's state on 2026-11-08
+cctp_receiver = "0x404056Ab781D713B8f5Dc55F5B9592962B187099"
+swapic_evm = "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"
+runner_evm = "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5"
