@@ -18,3 +18,8 @@ tiny-keccak = { version = "2", features = ["keccak"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+ed25519-dalek = "2"
+
+[[example]]
+name = "kit"
+required-features = ["offchain"]
