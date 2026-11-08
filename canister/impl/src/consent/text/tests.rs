@@ -50,8 +50,8 @@ fn amounts_name_their_token_or_its_id() {
         "12345 units of token 0x3333333333333333333333333333333333333333"
     );
     assert_eq!(
-        amount(5, TokenName::NativeOf(ChainId::new(5042))),
-        "5 units of chain 5042's own coin"
+        amount(5, TokenName::NativeOf(ChainId::new(4663))),
+        "5 units of chain 4663's own coin"
     );
     assert_eq!(CKUSDC.short(), "ckUSDC");
     assert_eq!(TokenName::IcpLedger(vchf).short(), "an ICP token");
@@ -60,7 +60,9 @@ fn amounts_name_their_token_or_its_id() {
 #[test]
 fn chains_are_named_or_numbered() {
     assert_eq!(ChainText(ChainId::ARBITRUM).to_string(), "Arbitrum");
-    assert_eq!(ChainText(ChainId::new(5042)).to_string(), "chain 5042");
+    assert_eq!(ChainText(ChainId::new(5042)).to_string(), "Arc");
+    assert_eq!(ChainText(ChainId::new(43114)).to_string(), "Avalanche");
+    assert_eq!(ChainText(ChainId::new(4663)).to_string(), "chain 4663");
 }
 
 /// Review Focus 1 and 2.

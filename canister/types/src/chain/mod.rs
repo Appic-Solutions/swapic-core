@@ -35,8 +35,8 @@ impl ChainId {
             10 | 137 | 8453 | 43114 | 59144 => 2,
             // BSC
             56 => 3,
-            // Arbitrum's quarter seconds
-            42161 => 1,
+            // Arbitrum's quarter seconds, Arc's half seconds
+            42161 | 5042 => 1,
             _ => 12,
         }
     }
@@ -55,12 +55,15 @@ impl ChainId {
             8453 => Some("Base"),
             9745 => Some("Plasma"),
             42161 => Some("Arbitrum"),
+            43114 => Some("Avalanche"),
+            5042 => Some("Arc"),
             _ => None,
         }
     }
 
     /// The symbol of the chain's native coin, which every EVM chain counts in wei (18
-    /// decimals); None for a chain [`Self::name`] does not name.
+    /// decimals; Arc's coin is its USDC, 18 decimals as gas); None for a chain [`Self::name`]
+    /// does not name.
     pub const fn native_symbol(self) -> Option<&'static str> {
         match self.0 {
             1 | 10 | 130 | 480 | 8453 | 42161 => Some("ETH"),
@@ -68,6 +71,8 @@ impl ChainId {
             143 => Some("MON"),
             999 => Some("HYPE"),
             9745 => Some("XPL"),
+            43114 => Some("AVAX"),
+            5042 => Some("USDC"),
             _ => None,
         }
     }
