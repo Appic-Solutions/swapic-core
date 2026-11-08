@@ -6,9 +6,9 @@ import {DeploySwapic} from "../script/DeploySwapic.s.sol";
 import {Swapic} from "../src/Swapic.sol";
 
 /// The deploy script's per-chain table against each chain's official USDC, wrapped native and
-/// Circle CCTP domain listings (checked 2026-10-24), for the four chains deployed first and the
-/// six added on 2026-10-19. A chain not offered is refused: Arc (5042, later: USDC is its gas
-/// token and it has no wrapped native), and any chain not listed.
+/// Circle CCTP domain listings (checked 2026-10-24), for the four chains deployed first, the
+/// six added on 2026-10-19 and the two added on 2026-11-08 (read on chain that day). A chain not
+/// offered is refused.
 contract DeploySwapicTest is Test {
     DeploySwapic script = new DeploySwapic();
 
@@ -40,8 +40,15 @@ contract DeploySwapicTest is Test {
         _check(9745, 0x2d661C89D812261039AF9764eceaAee884f5F67F, 0x6100E367285b01F48D07953803A2d8dCA5D19873, 33);
     }
 
+    function test_the_chains_added_on_2026_11_08() public view {
+        // Avalanche C-Chain: USDC, WAVAX, domain 1
+        _check(43114, 0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E, 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7, 1);
+        // Arc: USDC (its gas coin), no wrapped native, domain 26
+        _check(5042, 0x3600000000000000000000000000000000000000, address(0), 26);
+    }
+
     function test_a_chain_the_doc_leaves_open_is_refused() public {
-        uint256[3] memory refused = [uint256(5042), 146, 57073];
+        uint256[3] memory refused = [uint256(4663), 146, 57073];
         for (uint256 i; i < refused.length; ++i) {
             vm.expectRevert("unsupported chain");
             script.usdcOf(refused[i]);

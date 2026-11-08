@@ -34,6 +34,9 @@ monad = "${MONAD_RPC_URL}"
 hyperevm = "${HYPEREVM_RPC_URL}"
 worldchain = "${WORLDCHAIN_RPC_URL}"
 plasma = "${PLASMA_RPC_URL}"
+# the chains added on 2026-11-08
+avalanche = "${AVALANCHE_RPC_URL}"
+arc = "${ARC_RPC_URL}"
 
 [lint]
 lint_on_build = false
