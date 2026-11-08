@@ -234,6 +234,15 @@ pub enum TxError {
     #[error("{0}: no signed transaction is recorded for it here")]
     NoRecord(&'static str),
     #[error(
+        "a gas limit of {gas_limit} on chain {chain_id} is below the {least} its data needs to \
+         be mined at all"
+    )]
+    GasBelowIntrinsic {
+        chain_id: ChainId,
+        gas_limit: GasAmount,
+        least: u64,
+    },
+    #[error(
         "nonce {nonce} on chain {chain_id} was cancelled while swap {quote_hash}'s signature \
          was on its way, so the signed bytes carrying it are not recorded"
     )]
@@ -406,6 +415,8 @@ pub enum Detail {
         action: types::flow::FinishAction,
         arrival: [u8; 32],
         source_tx: TxHash,
+        /// How many arrivals the source transaction paid for.
+        paid: u32,
     },
 }
 
@@ -427,6 +438,7 @@ enum Record {
         action: types::flow::FinishAction,
         arrival: [u8; 32],
         source_tx: TxHash,
+        paid: u32,
     },
     /// A pool payout's, which moves it to signed.
     PoolPayout {
@@ -462,11 +474,13 @@ fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxErr
                 action,
                 arrival,
                 source_tx,
+                paid,
             }),
         ) => Ok(Record::Finish {
             action,
             arrival,
             source_tx,
+            paid,
         }),
         (TxPurpose::Finish(_), _) => Err(TxError::NoRecord("a finish with no detail")),
         (TxPurpose::PoolPayout(id), Some(Detail::PoolPayout { order })) => {
@@ -509,6 +523,7 @@ impl Record {
                 action,
                 arrival,
                 source_tx,
+                paid,
             } => flow(types::FlowStep::CctpFinishSigned {
                 chain_id,
                 nonce,
@@ -517,6 +532,7 @@ impl Record {
                 action,
                 arrival,
                 source_tx: Some(source_tx),
+                paid: Some(paid),
             }),
             Record::PoolPayout { id, order } => pool(PoolStep::PayoutSigned {
                 id,
@@ -587,6 +603,15 @@ pub async fn create_and_send(
     create_and_send_with(purpose, chain_id, to, value, data, gas_limit, action, None).await
 }
 
+/// The least gas a transaction carrying `data` needs before a node takes it (no access list):
+/// 21,000 plus the larger of EIP-2028's calldata cost and EIP-7623's floor, with tokens
+/// counted as zero bytes plus four per nonzero byte.
+pub fn least_gas(data: &[u8]) -> u64 {
+    let zero = data.iter().filter(|byte| **byte == 0).count() as u64;
+    let tokens = zero + 4 * (data.len() as u64 - zero);
+    21_000 + (4 * tokens).max(10 * tokens)
+}
+
 /// [`create_and_send`] for a flow whose signed record carries a [`Detail`].
 #[allow(clippy::too_many_arguments)]
 pub async fn create_and_send_with(
@@ -604,6 +629,16 @@ pub async fn create_and_send_with(
     // out: a purpose with none here is refused with nothing allocated
     let record = record_of(purpose, detail)?;
     let quote_hash = purpose.quote_hash().ok_or(TxError::NoRecord("a cancel"))?;
+    // a limit no node takes would hold its nonce, and every later transaction on the chain,
+    // for good: refused before any number is handed out
+    let least = least_gas(&data);
+    if gas_limit < GasAmount::from(least) {
+        return Err(TxError::GasBelowIntrinsic {
+            chain_id,
+            gas_limit,
+            least,
+        });
+    }
     let now = Timestamp::from_nanos(ic_cdk::api::time());
     let fees = fees(chain_id, now)?;
     affordable(chain_id, fees, gas_limit)?;
@@ -1672,6 +1707,17 @@ impl From<TxError> for settlement_api::types::tx::TxError {
                 action: format!("{action:?}"),
                 cost_wei: cost.into(),
                 budget_wei: budget.into(),
+            },
+            // the wire keeps its variants: the refusal's words carry the limit and the floor
+            TxError::GasBelowIntrinsic {
+                chain_id,
+                gas_limit,
+                least,
+            } => Self::NoGasBudget {
+                chain_id: chain_id.get(),
+                action: format!(
+                    "a transaction with a gas limit of {gas_limit}, below the {least} its data needs"
+                ),
             },
             TxError::NoRecord(purpose) => Self::PurposeNeedsASwap {
                 purpose: purpose.to_string(),

@@ -402,7 +402,8 @@ fn a_swap_of_an_unlisted_token_to_an_unlisted_token_names_both_by_id() {
 fn a_stake_is_described_to_its_staker_and_to_a_cold_signer() {
     let header = "## Stake ckUSDC in the Swapic pool\n\n\
                   - You stake: 250 ckUSDC, plus the ledger fee\n\
-                  - From: your account\n";
+                  - From: your account\n\
+                  - Kept: 0 ckUSDC Swapic fee; 250 ckUSDC is staked\n";
     let own = stake_arg(icp_account(staker(), None), None);
     assert_eq!(
         generic("stake_icp", own.clone(), staker()).unwrap(),
@@ -474,7 +475,7 @@ fn a_withdrawal_on_icp_states_who_is_paid_at_least_what() {
          - You withdraw: 100 USDC from your stake\n\
          - Paid to: your account\n\
          - Paid at least: 99.99 ckUSDC\n\
-         - Fees: ledger fees come out of the 100"
+         - Fees: 0 USDC Swapic fee, and ledger fees, come out of the 100"
     );
     let as_icp = wire(
         Some(vec![7; 32]),
@@ -492,7 +493,7 @@ fn a_withdrawal_on_icp_states_who_is_paid_at_least_what() {
              - You withdraw: 100 USDC from your stake (subaccount {SEVENS})\n\
              - Paid to: im66i-jsrkf-ivcuk-rkfiv-cukrk-fivcu-krkfi-vcukr-kfivc-ukrkf-ivc\n\
              - Paid at least: 12.5 ICP\n\
-             - Fees: ledger fees come out of the 100\n\
+             - Fees: 0 USDC Swapic fee, and ledger fees, come out of the 100\n\
              - If the swap pays less: all of it is paid as ckUSDC"
         )
     );
@@ -868,5 +869,78 @@ fn a_ck_swaps_message_says_its_fee_and_its_way_back() {
         "less the network fee if the minter already burned it",
     ] {
         assert!(shown.contains(line), "{line} in {shown}");
+    }
+}
+
+/// A stake or a withdrawal naming an account the anonymous principal owns is refused, so a
+/// cold signer is never told it is theirs (audit C4).
+#[test]
+fn an_account_the_anonymous_principal_owns_is_never_yours() {
+    let anonymous_owned = stake_arg(icp_account(Principal::anonymous(), None), None);
+    let answer = generic("stake_icp", anonymous_owned, Principal::anonymous());
+    assert!(answer.is_err(), "{answer:?}");
+}
+
+/// A stake and a withdrawal say what the signed `move_fee` takes: messages for a large fee
+/// differ from those for none and name it (audit C11).
+#[test]
+fn the_move_fee_is_named_in_the_stake_and_withdrawal_messages() {
+    let stake = |move_fee: u64| {
+        encode_one(StakeIcpArgs {
+            from_subaccount: None,
+            amount: Nat::from(100_000_000_u64),
+            owner: icp_account(staker(), None),
+            move_fee: Nat::from(move_fee),
+        })
+        .unwrap()
+    };
+    let zero = generic("stake_icp", stake(0), staker()).unwrap();
+    let huge = generic("stake_icp", stake(99_999_999), staker()).unwrap();
+    assert_ne!(zero, huge);
+    assert!(huge.contains("99.999999 ckUSDC Swapic fee"), "{huge}");
+    assert!(huge.contains("0.000001 ckUSDC is staked"), "{huge}");
+    let withdraw = |move_fee: u64| {
+        encode_one(WithdrawIcpArgs {
+            from: None,
+            usdc: Nat::from(100_000_000_u64),
+            max_shares: Nat::from(100_000_000_000_000_000_000_000_u128),
+            token_out: icp(),
+            min_out: Nat::from(1_250_000_000_u64),
+            to: WireAccount {
+                owner: staker(),
+                subaccount: None,
+            },
+            move_fee: Nat::from(move_fee),
+        })
+        .unwrap()
+    };
+    let zero = generic("withdraw_icp", withdraw(0), staker()).unwrap();
+    let most = generic("withdraw_icp", withdraw(99_000_000), staker()).unwrap();
+    assert_ne!(zero, most);
+    assert!(most.contains("99 USDC Swapic fee"), "{most}");
+}
+
+/// The rest of audit C4: a withdrawal or a swap's refund naming the anonymous principal is
+/// refused whoever asks, and a swap asked anonymously with no refund named still says "your
+/// account", which is true of the account the door falls back to.
+#[test]
+fn no_account_the_anonymous_principal_owns_is_described() {
+    let anonymous = Principal::anonymous();
+    let to_anonymous = encode_one(WithdrawIcpArgs {
+        from: None,
+        usdc: Nat::from(100_000_000_u64),
+        max_shares: Nat::from(100_000_000_000_000_000_000_000_u128),
+        token_out: icp(),
+        min_out: Nat::from(1_250_000_000_u64),
+        to: WireAccount {
+            owner: anonymous,
+            subaccount: None,
+        },
+        move_fee: Nat::from(0_u8),
+    })
+    .unwrap();
+    for asker in [anonymous, staker()] {
+        let answer = generic("withdraw_icp", to_anonymous.clone(), asker);
+        assert!(answer.is_err(), "{answer:?}");
     }
 }

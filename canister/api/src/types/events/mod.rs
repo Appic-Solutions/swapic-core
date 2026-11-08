@@ -292,18 +292,18 @@ impl From<types::EventType> for EventType {
             Domain::Flow { quote_hash, step } => Self::Flow {
                 quote_hash: quote_hash.into_bytes(),
                 step: step.name().to_string(),
-                detail: format!("{step:?}"),
+                detail: detail_of(&step),
                 step_bytes: step.to_bytes(),
             },
             Domain::Books { chain_id, step } => Self::Books {
                 chain_id: chain_id.get(),
                 step: step.name().to_string(),
-                detail: format!("{step:?}"),
+                detail: detail_of(&step),
                 step_bytes: step.to_bytes(),
             },
             Domain::Pool { step } => Self::Pool {
                 step: step.name().to_string(),
-                detail: format!("{step:?}"),
+                detail: detail_of(&step),
                 step_bytes: step.to_bytes(),
             },
             Domain::Swept { sweep } => Self::Swept {
@@ -570,3 +570,17 @@ impl From<types::events::EventError> for EventError {
 
 #[cfg(test)]
 mod tests;
+
+/// A line's readable copy of its step, cut to [`MAX_DETAIL`] characters: `step_bytes` carry
+/// the step whole, so the copy is for a human reading the log and never doubles a line's size
+/// (audit C15).
+fn detail_of(step: &impl std::fmt::Debug) -> String {
+    let full = format!("{step:?}");
+    match full.char_indices().nth(MAX_DETAIL) {
+        None => full,
+        Some((at, _)) => format!("{}...", &full[..at]),
+    }
+}
+
+/// The most characters of a line's readable detail.
+pub const MAX_DETAIL: usize = 512;

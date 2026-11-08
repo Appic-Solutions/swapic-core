@@ -59,7 +59,8 @@ fn generic(text: &str) -> ConsentMessageResponse {
 /// Jeff's approved shape (2026-10-28).
 const STAKE_HEADER: &str = "## Stake ckUSDC in the Swapic pool\n\n\
     - You stake: 250 ckUSDC, plus the ledger fee\n\
-    - From: your account\n";
+    - From: your account\n\
+    - Kept: 0 ckUSDC Swapic fee; 250 ckUSDC is staked\n";
 
 #[test]
 fn icrc10_lists_icrc10_and_icrc21() {

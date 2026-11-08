@@ -136,6 +136,42 @@ fn a_routed_move_signs_its_pinned_order_again_only_within_its_deadline_and_rever
     ));
 }
 
+/// Prod, 2026-11-08: a move that could not sign for an hour stopped on its order's deadline, and
+/// neither a retry (the same order) nor a write-off (out of the pool's books) could send it on.
+#[test]
+fn a_move_never_signed_takes_a_fresh_order_past_its_deadline() {
+    let mut routed = item(MoveDirection::BaseToIcp, MoveStatus::Routed);
+    routed.order = Some(PinnedOrder {
+        order_id: [1; 32],
+        order: vec![],
+        gas_limit: 300_000,
+        deadline_s: at(3_600).as_secs().get(),
+    });
+    assert_eq!(
+        next(&routed, at(3_479), false, FILL_WAIT),
+        Next::Sign { again: false }
+    );
+    assert_eq!(next(&routed, at(3_480), false, FILL_WAIT), Next::Route);
+    assert_eq!(
+        next(&routed, at(3_480), true, FILL_WAIT),
+        Next::Wait,
+        "a signature under way"
+    );
+    routed.stuck = Some("its order's deadline passed before it ran".to_string());
+    assert_eq!(
+        next(&routed, at(3_480), false, FILL_WAIT),
+        Next::Wait,
+        "stopped: a retry sends it on"
+    );
+    routed.stuck = None;
+    routed.tx_hash = Some(TxHash::new([2; 32]));
+    routed.reverted_block = Some(BlockNumber::new(500));
+    assert!(matches!(
+        next(&routed, at(3_480), false, FILL_WAIT),
+        Next::Stuck(why) if why.contains("deadline")
+    ));
+}
+
 #[test]
 fn a_burned_move_to_icp_sweeps_or_looks_for_its_eco_fill() {
     let mut own = item(MoveDirection::BaseToIcp, MoveStatus::Burned);
@@ -219,9 +255,20 @@ struct Fake {
     status_fails: Option<CallError>,
     /// What the landing read answers.
     landed: Option<Result<TransferRead, String>>,
+    /// What the minter may still pull on either ledger (none: approved again).
+    allowance: Nat,
 }
 
 impl IcpCalls for Fake {
+    async fn allowance(
+        &self,
+        _ledger: Principal,
+        _owner: Principal,
+        _spender: Principal,
+    ) -> Result<Nat, CallError> {
+        Ok(self.allowance.clone())
+    }
+
     async fn balance(&self, ledger: Principal, account: Account) -> Result<Nat, CallError> {
         self.asked
             .borrow_mut()
@@ -377,6 +424,35 @@ fn pool_with_move(direction: MoveDirection, amount: TokenAmount, base: TokenAmou
     0
 }
 
+/// With the minter's standing approvals in place a move approves nothing and books no fee,
+/// so a move that took all of the ICP pocket's free line still books the minter's answer
+/// (audit C2).
+#[test]
+fn a_standing_approval_is_not_asked_again_and_the_answer_books_with_no_fee() {
+    on_fresh_memory(|| {
+        let id = pool_with_move(MoveDirection::IcpToBase, usdc(1_000), TokenAmount::ZERO);
+        let fake = Fake {
+            balance: Nat::from(30_000_000_000_000_u64),
+            allowance: Nat::from(STANDING_APPROVAL),
+            ..Fake::default()
+        };
+        let free = ledger().pockets.icp.free;
+        let item = super::super::item(id).unwrap();
+        block_on(withdraw(&fake, &item, &ctx())).unwrap();
+        // ckETH only, at the withdrawal's gas: the ckUSDC approval stands
+        assert!(!fake
+            .asked
+            .borrow()
+            .iter()
+            .any(|asked| matches!(asked, Asked::Approve(ledger, ..) if *ledger != cketh())));
+        let item = super::super::item(id).unwrap();
+        assert_eq!(item.status, MoveStatus::Withdrawn);
+        assert_eq!(item.withdrawal, Some(42));
+        assert_eq!(ledger().pockets.icp.free, free);
+        assert_eq!(ledger().moves().cost, TokenAmount::ZERO);
+    });
+}
+
 #[test]
 fn the_minter_is_approved_on_both_ledgers_with_the_moves_pair_then_asked() {
     on_fresh_memory(|| {
@@ -393,13 +469,7 @@ fn the_minter_is_approved_on_both_ledgers_with_the_moves_pair_then_asked() {
         assert_eq!(
             fake.asked.borrow()[1..],
             [
-                Asked::Approve(
-                    ckusdc,
-                    minter(),
-                    Nat::from(usdc(1_000).checked_add(TokenAmount::from(FEE)).unwrap()),
-                    memo,
-                    nanos
-                ),
+                Asked::Approve(ckusdc, minter(), Nat::from(STANDING_APPROVAL), memo, nanos),
                 Asked::Approve(
                     cketh(),
                     minter(),
@@ -1120,4 +1190,32 @@ fn the_unfilled_reads_of_closed_moves_are_dropped() {
         let reads = crate::storage::timer_state::get().unfilled_reads;
         assert!(!reads.contains_key(&4_242), "no move 4242 is open");
     });
+}
+
+/// Audit C2's scenario: a move takes all of the ICP pocket's free line. Whether the approval
+/// stands or is to be made, the minter's answer is recorded and the move goes on: the fee the
+/// free line cannot carry never refuses it.
+#[test]
+fn a_move_that_took_all_of_free_never_loses_the_minters_answer() {
+    for allowance in [Nat::from(STANDING_APPROVAL), Nat::from(0_u8)] {
+        on_fresh_memory(move || {
+            let id = pool_with_move(MoveDirection::IcpToBase, usdc(4_000), TokenAmount::ZERO);
+            assert_eq!(
+                ledger().pockets.icp.free,
+                TokenAmount::ZERO,
+                "the move took all of free"
+            );
+            let item = super::super::item(id).unwrap();
+            let fake = Fake {
+                balance: Nat::from(30_000_000_000_000_u64),
+                allowance: allowance.clone(),
+                ..Fake::default()
+            };
+            block_on(withdraw(&fake, &item, &ctx())).unwrap();
+            let item = super::super::item(id).unwrap();
+            assert_eq!(item.status, MoveStatus::Withdrawn);
+            assert_eq!(item.withdrawal, Some(42));
+            assert_eq!(ledger().moves().cost, TokenAmount::ZERO);
+        });
+    }
 }

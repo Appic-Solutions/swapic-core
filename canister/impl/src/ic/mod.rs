@@ -840,6 +840,74 @@ pub async fn icrc2_transfer_from(
     }
 }
 
+/// How a door's own pull, made before anything is written, ended without moving money for
+/// certain, or with an outcome nobody can tell yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FreshPull {
+    /// The ledger refused it: nothing moved.
+    Refused(String),
+    /// Never ran (not delivered, the ledger busy, or a trap the ledger rolled back): nothing
+    /// moved, the caller may ask again.
+    NotNow(String),
+    /// It may have moved money: a human checks the ledger by its memo.
+    Unclear(String),
+}
+
+/// `icrc2_transfer_from` into the canister's own account for a door that writes nothing
+/// before the money is in (audit C15): every ending is classified, and a `Duplicate` is never
+/// taken as paid (an identical pull in the same instant is another call's money).
+pub async fn icrc2_pull_fresh(
+    ledger: Principal,
+    from: Account,
+    amount: Nat,
+    dedup: Dedup,
+) -> Result<u64, FreshPull> {
+    use ic_cdk::api::call::RejectionCode;
+    let arg = TransferFromArgs {
+        spender_subaccount: None,
+        from,
+        to: Account::of(ic_cdk::api::id(), None),
+        amount,
+        fee: None,
+        memo: Some(dedup.memo.to_vec()),
+        created_at_time: Some(dedup.created_at_nanos),
+    };
+    let bytes = candid::encode_one(&arg)
+        .map_err(|error| FreshPull::Refused(format!("the pull's argument: {error}")))?;
+    // the raw reply, decoded here: a reply that came back but does not decode is a transfer
+    // that may have run, never one that did not
+    let answer = ic_cdk::api::call::call_raw(ledger, "icrc2_transfer_from", bytes, 0)
+        .await
+        .map(|reply| candid::decode_one::<Result<Nat, TransferFromError>>(&reply));
+    match answer {
+        Ok(Ok(Ok(block))) => Ok(nat_u64(&block)),
+        Ok(Ok(Err(TransferFromError::TemporarilyUnavailable))) => Err(FreshPull::NotNow(
+            "the ledger is temporarily unavailable".to_string(),
+        )),
+        Ok(Ok(Err(TransferFromError::Duplicate { .. }))) => Err(FreshPull::Refused(
+            "the same pull was just made: ask again".to_string(),
+        )),
+        Ok(Ok(Err(error))) => Err(FreshPull::Refused(format!("{error:?}"))),
+        Ok(Err(error)) => Err(FreshPull::Unclear(format!(
+            "the ledger's reply did not decode: {error}"
+        ))),
+        // under a call that always gets its answer, these never ran or were rolled back
+        Err((
+            code @ (RejectionCode::CanisterReject
+            | RejectionCode::CanisterError
+            | RejectionCode::SysTransient
+            | RejectionCode::DestinationInvalid),
+            _,
+        )) => Err(FreshPull::NotNow(format!(
+            "the ledger call was rejected ({code:?})"
+        ))),
+        // the reply itself may be what was lost: only the ledger tells
+        Err((code, _)) => Err(FreshPull::Unclear(format!(
+            "the ledger call ended with {code:?}"
+        ))),
+    }
+}
+
 /// An ICRC-2 approval of `spender` for `amount` from the canister's own account.
 pub async fn icrc2_approve(
     ledger: Principal,
@@ -894,6 +962,33 @@ pub async fn icrc2_approve_once(
         )),
         Err(error) => Err(CallError::Refused(format!("{error:?}"))),
     }
+}
+
+#[derive(CandidType)]
+struct AllowanceArgs {
+    account: Account,
+    spender: Account,
+}
+
+#[derive(CandidType, Deserialize)]
+struct Allowance {
+    allowance: Nat,
+    #[allow(dead_code)]
+    expires_at: Option<u64>,
+}
+
+/// What `spender` may still pull from `owner`'s main account on `ledger` (ICRC-2).
+pub async fn icrc2_allowance(
+    ledger: Principal,
+    owner: Principal,
+    spender: Principal,
+) -> Result<Nat, CallError> {
+    let arg = AllowanceArgs {
+        account: Account::of(owner, None),
+        spender: Account::of(spender, None),
+    };
+    let (answer,): (Allowance,) = call(ledger, "icrc2_allowance", (arg,)).await?;
+    Ok(answer.allowance)
 }
 
 // ICPSwap's SwapPool, the calls made.

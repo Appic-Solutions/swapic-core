@@ -182,7 +182,7 @@ impl PoolLedger {
                 id, route, order, ..
             } => {
                 let item = move_of(lookup, *id)?;
-                if !item.routable() {
+                if !item.routable() && !item.reroutable() {
                     return Err(not_from("MoveRouted", &item));
                 }
                 // a proposal routes the move only as it was taken

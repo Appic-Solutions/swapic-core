@@ -41,22 +41,24 @@ pub async fn set_pool_settings(settings: PoolSettings) -> Result<(), PoolError> 
 /// the transfer at most once, and only when it brings at least the memo's `min_usdc`:
 /// `Credited` (the payout follows on the canister's timer), or `Unattributed` with why,
 /// held for a controller. `BadArrival` when no transfer carries the memo's ref. The
-/// canister trusts only the chain and the hash. A caller other than the watcher is held to
-/// 10 reports a minute in total and 3 an hour per `base_tx`, refused `Unavailable` before
-/// any outcall.
+/// canister trusts only the chain and the hash. A caller other than the watcher and the
+/// controllers is held to 2 reports a minute and 20 an hour in total and 3 an hour per
+/// `base_tx`, refused `Unavailable` before any outcall; a report bringing the terms of a
+/// transfer the canister already awaits is held only to its own 3 an hour per `base_tx`. While
+/// the pool is closed a report with terms answers `Closed`, with nothing read or recorded.
 #[update]
 pub async fn note_pool_arrival(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError> {
     pool::arrival::note(arrival).await
 }
 
-/// Any caller, refused while halted, while the pool is closed, for a sanctioned party, and past
-/// five calls a minute or thirty an hour (this door and `swap_from_icp` together).
+/// Any caller but the anonymous one, refused while halted, while the pool is closed, and for
+/// a sanctioned party; the pull comes before anything is written (audit C15).
 /// Stakes `amount` of the caller's own ckUSDC (from `from_subaccount`), pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister (its main account; the
 /// approval covers `amount` and the ledger's fee), for `owner`, within the TVL cap: books
 /// `move_fee` to Swapic's ICP fee line and mints shares on the rest at the pool's price
-/// before it. A pull whose answer was lost answers `Unavailable`, and the canister asks
-/// again with the same pull.
+/// before it. A pull whose outcome is unclear answers `Unavailable` with nothing written, and
+/// is kept in `pulls_to_check` for a human to check and give back.
 #[update]
 pub async fn stake_icp(args: StakeIcpArgs) -> Result<StakeIcpOk, PoolError> {
     pool::icp::stake(args, is_sanctioned).await
@@ -133,8 +135,8 @@ pub async fn pool_approve_swapic(chain_id: u64) -> Result<PoolApproveOk, PoolErr
     .map(|tx_id| PoolApproveOk { tx_id })
 }
 
-/// Any caller, refused while halted, while the pool is closed, for a sanctioned party, and
-/// past five calls a minute or thirty an hour (this door and `stake_icp` together): an
+/// Any caller but the anonymous one, refused while halted, while the pool is closed, and for a
+/// sanctioned party; the pull comes before anything is written (audit C15): an
 /// ICP user swaps `amount_in` of ckUSDC or a listed ICP token (pulled with
 /// `icrc2_transfer_from` on the caller's approval of the canister) to any token on an EVM
 /// chain, with the quoter's payout plan (the order for the payout it expects, its gas) and
@@ -150,8 +152,8 @@ pub async fn swap_from_icp(terms: IcpSwapTerms) -> Result<SwapFromIcpOk, PoolErr
 }
 
 /// Any caller but the anonymous one, refused while halted, while the pool is closed, while the
-/// route's switch is off, short of ckETH, for a sanctioned party, and past five calls a minute
-/// or thirty an hour for that caller (this door, `swap_from_icp` and `stake_icp` together): an
+/// route's switch is off, short of ckETH, and for a sanctioned party; the pull comes before
+/// anything is written (audit C15): an
 /// ICP user swaps `amount_in` of ckUSDC or a listed ICP token to USDC on Ethereum through the
 /// ck minter, when the pool cannot carry it. The minter pays the recipient directly.
 /// `network_fee` is at least the route's floor (`payout_settings`), no premium is taken, and

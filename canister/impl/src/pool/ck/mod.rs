@@ -239,7 +239,11 @@ pub fn request_of(caller: Principal, args: CkSwapTerms) -> Result<CkRequest, Poo
         subaccount: from_subaccount,
     };
     let refund_to = match args.refund_to {
-        Some(account) => account.try_into()?,
+        Some(account) => {
+            let account: IcpAccount = account.try_into()?;
+            crate::pool::not_anonymous("the refund account", account.owner)?;
+            account
+        }
         None => from,
     };
     Ok(CkRequest {
@@ -413,8 +417,6 @@ pub async fn swap_from_icp_ck(
     if caller == Principal::anonymous() {
         return Err(refused("the anonymous caller cannot swap"));
     }
-    // counted before anything is recorded, per caller: nobody spends another's calls
-    crate::pool::callers::admit(caller, now())?;
     let request = request_of(caller, args)?;
     let config = crate::storage::config::get();
     let canister = crate::storage::ecdsa_address::get();
@@ -429,28 +431,86 @@ pub async fn swap_from_icp_ck(
             "the ck route is short of ckETH now".to_string(),
         ));
     }
-    // read again after the await: no await from here to the line
+    // read again after the await, then the money first: nothing is written before it is in
+    // (audit C15)
     pool::require_running()?;
     pool::require_pool_open()?;
     let at = now();
-    let (id, terms) = read_state(|state| -> Result<(u64, IcpSwapTerms), PoolError> {
-        let terms = check(state, &config, &request, at, canister, &sanctioned)?;
-        Ok((state.pool().lines().next_id, terms))
-    })?;
-    pool_store::record_at(
-        PoolStep::PayoutOpened {
-            id,
-            kind: Box::new(PayoutKind::IcpSwap(terms)),
-            terms: request.terms,
-            undo: Undo::Refund {
-                to: terms.refund_to,
-            },
-            plan: None,
-            ck: Flag(true),
-        },
+    read_state(|state| check(state, &config, &request, at, canister, &sanctioned))?;
+    crate::pool::pull_first::worth_pulling(request.token_in, request.amount_in)?;
+    let pair = crate::pool::pull_first::dedup(
+        "swap_from_icp_ck",
+        &request.from,
+        request.token_in,
+        request.amount_in,
+        at,
+    );
+    let block = crate::pool::pull_first::pull(
+        "swap_from_icp_ck",
+        request.token_in,
+        request.from,
+        request.amount_in,
+        pair,
         at,
     )
-    .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
+    .await?;
+    // the money is in: its lines in this one message, the checks run again on the pool as it
+    // is now; money no line takes goes back at once
+    let at = now();
+    let opened = (|| -> Result<u64, PoolError> {
+        // the pool may have closed while the pull was out: then the money goes back
+        pool::require_running()?;
+        pool::require_pool_open()?;
+        let (id, terms) = read_state(|state| -> Result<(u64, IcpSwapTerms), PoolError> {
+            let terms = check(state, &config, &request, at, canister, &sanctioned)?;
+            Ok((state.pool().lines().next_id, terms))
+        })?;
+        let settings = pool_store::ledger()
+            .settings
+            .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
+        pool_store::record_at(
+            PoolStep::PayoutOpened {
+                id,
+                kind: Box::new(PayoutKind::IcpSwap(terms)),
+                terms: request.terms,
+                undo: Undo::Refund {
+                    to: terms.refund_to,
+                },
+                plan: None,
+                ck: Flag(true),
+            },
+            at,
+        )
+        .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
+        icp_swap::pulled_line(
+            id,
+            &settings,
+            at,
+            block,
+            request.token_in,
+            request.amount_in,
+        )?;
+        Ok(id)
+    })();
+    let id = match opened {
+        Ok(id) => id,
+        Err(why) => {
+            let fee = pool_store::ledger()
+                .settings
+                .and_then(|settings| settings.fee_of(request.token_in));
+            crate::pool::pull_first::give_back(
+                "swap_from_icp_ck",
+                request.token_in,
+                request.from,
+                request.amount_in,
+                fee,
+                pair,
+                &format!("{why:?}"),
+            )
+            .await;
+            return Err(why);
+        }
+    };
     if let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
         // whatever stops it, the payout timer carries it on
         let _ = drive(&Live, id, now, &crate::pool::payout::guard).await;

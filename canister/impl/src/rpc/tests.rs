@@ -513,3 +513,18 @@ fn an_outcall_line_counts_a_run_of_one_method() {
     assert_eq!(cycles_text(26_153_846_153), "26.15B");
     assert_eq!(cycles_text(999), "999");
 }
+
+/// A real node's answer (the canister's balance on Base, 2026-11-08): the parser takes its `0x`
+/// itself, and with it stripped every balance read failed, so no pool move ever signed.
+#[test]
+fn a_balance_answer_reads_as_its_wei() {
+    let read = |answer: Value| wei_answer(Some(&answer));
+    assert_eq!(
+        read(json!("0x107f9e6efcf44e")),
+        Some(Wei::from(4_643_918_071_002_190_u64))
+    );
+    assert_eq!(read(json!("0x0")), Some(Wei::ZERO));
+    assert_eq!(read(json!("107f9e")), None, "not a node's form");
+    assert_eq!(read(json!(null)), None);
+    assert_eq!(wei_answer(None), None);
+}

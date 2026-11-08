@@ -394,15 +394,16 @@ pub fn answered_arrival(arrival: [u8; 32]) -> Result<Option<u64>, String> {
     Ok(None)
 }
 
-/// Whether `source_tx` already finished an arrival other than this one. One fee pays for
-/// one arrival and the fold refuses a second message too; this is the door's read of the
-/// same rule, before a nonce is spent on it.
-pub fn finished_another<S: Store>(state: &State<S>, source_tx: TxHash, arrival: [u8; 32]) -> bool {
-    state
-        .store()
-        .flows()
-        .iter()
-        .any(|(_, flow)| flow.source_tx == Some(source_tx) && flow.arrival != Some(arrival))
+/// Whether `source_tx` already finished as many arrivals other than this one as it paid for
+/// (`paid`). One fee pays for one arrival and the fold holds the same count; this is the door's
+/// read of the rule, before a nonce is spent on it.
+pub fn finished_others<S: Store>(
+    state: &State<S>,
+    source_tx: TxHash,
+    arrival: [u8; 32],
+    paid: u32,
+) -> bool {
+    state.other_arrivals_of_source(&source_tx, arrival) >= paid.max(1)
 }
 
 /// The key two calls for one source transaction serialize on.
@@ -477,6 +478,7 @@ pub async fn finish_cctp(
     // the watcher's word is not enough: the source transaction itself shows this
     // burn and its fee step. The canister's own transfers are finished from its own
     // transactions only (`own`), and pay no fee step
+    let mut paid = 1;
     if read_state(|state| state.store().pool_own_source(&source_tx)).is_none() {
         let (source_chain, source) = source_of(&parsed, &setup).map_err(|e| e.to_string())?;
         // the least the quoter charges for the arrival it charged for; an absent row asks
@@ -486,7 +488,8 @@ pub async fn finish_cctp(
             .get(source::charged_action(&plan.envelope))
             .unwrap_or(types::TokenAmount::MAX);
         let receipt = source::read(source_chain, source_tx).await?;
-        source::proves(&receipt, &parsed, &source, canister, needed).map_err(|e| e.to_string())?;
+        paid = source::proves(&receipt, &parsed, &source, canister, needed)
+            .map_err(|e| e.to_string())?;
         require_not_halted().map_err(|e| format!("{e:?}"))?;
     }
 
@@ -496,7 +499,7 @@ pub async fn finish_cctp(
         if let Some(id) = answered(plan.action, arrival)? {
             return Ok(Some(id));
         }
-        if read_state(|state| finished_another(state, source_tx, arrival)) {
+        if read_state(|state| finished_others(state, source_tx, arrival, paid)) {
             return Err(FinishError::SourceFinished(source_tx).to_string());
         }
         Ok(None)
@@ -545,6 +548,7 @@ pub async fn finish_cctp(
             action: plan.action,
             arrival,
             source_tx,
+            paid,
         }),
     )
     .await

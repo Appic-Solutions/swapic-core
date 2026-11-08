@@ -63,10 +63,12 @@ impl<S: Store> State<S> {
             // each Flow line
             EventType::Flow { quote_hash, step } => {
                 let existing = self.store().flow(quote_hash);
-                types::Flow::admits(*quote_hash, existing.as_ref(), step, |source_tx| {
-                    self.finish_of_source(source_tx)
-                        .and_then(|(_, flow)| flow.arrival)
-                })?;
+                types::Flow::admits(
+                    *quote_hash,
+                    existing.as_ref(),
+                    step,
+                    |source_tx, arrival| self.other_arrivals_of_source(source_tx, arrival),
+                )?;
                 match step {
                     FlowStep::GaslessRelayed {
                         chain_id, nonce, ..

@@ -514,7 +514,14 @@ pub async fn backup(
             return Ok(report);
         }
         let givens = arrival::givens_of(&memos, chain.chain);
-        record(&found, &Judge::of(&givens), clock());
+        let judge = Judge::of(&givens);
+        // a deposit while the pool is closed is not now (audit C13): the cursor stops before
+        // it, and the same transfer is credited once the pool reopens
+        if judge.closed.is_some() && !givens.is_empty() {
+            failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
+            continue;
+        }
+        record(&found, &judge, clock());
     }
     let done = if overfull {
         Done::Range

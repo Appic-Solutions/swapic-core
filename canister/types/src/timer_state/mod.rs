@@ -40,6 +40,11 @@ pub struct Limiter {
     pub recent: Vec<Timestamp>,
     #[n(1)]
     pub by_tx: BTreeMap<TxHash, Vec<Timestamp>>,
+    /// The last hour's reports of transfers the canister awaits terms for, by `base_tx`: a lane
+    /// of their own, so no stranger's report spends it, and still bounded, since each costs a
+    /// read every node makes. None for a state written before there were any.
+    #[n(2)]
+    pub awaited: Option<BTreeMap<TxHash, Vec<Timestamp>>>,
 }
 
 impl Limiter {
@@ -62,13 +67,37 @@ impl Limiter {
                 "at most {PER_HOUR} arrival reports an hour are read for callers other than the watcher: ask again later"
             ));
         }
+        self.admit_tx(tx, now)?;
+        self.recent.push(now);
+        Ok(())
+    }
+
+    /// Lets one report through that brings the terms of a transfer of `tx` the canister awaits
+    /// (audit C16): held to [`PER_TX_PER_HOUR`] of its own, never to the counts a stranger's
+    /// reports fill.
+    pub fn admit_awaited(&mut self, tx: TxHash, now: Timestamp) -> Result<(), String> {
+        let awaited = self.awaited.get_or_insert_with(BTreeMap::new);
+        awaited.retain(|_, attempts| {
+            attempts.retain(|at| now.saturating_duration_since(*at) < HOUR);
+            !attempts.is_empty()
+        });
+        let attempts = awaited.entry(tx).or_default();
+        if attempts.len() >= PER_TX_PER_HOUR {
+            return Err(format!(
+                "these terms were reported {PER_TX_PER_HOUR} times within the hour: ask again later"
+            ));
+        }
+        attempts.push(now);
+        Ok(())
+    }
+
+    fn admit_tx(&mut self, tx: TxHash, now: Timestamp) -> Result<(), String> {
         let attempts = self.by_tx.get(&tx).map_or(0, Vec::len);
         if attempts >= PER_TX_PER_HOUR {
             return Err(format!(
                 "this transaction was reported {PER_TX_PER_HOUR} times within the hour: ask again later"
             ));
         }
-        self.recent.push(now);
         self.by_tx.entry(tx).or_default().push(now);
         Ok(())
     }
@@ -113,6 +142,34 @@ pub struct TimerState {
     /// written before there were any.
     #[n(10)]
     pub ck_reads: Option<BTreeMap<u64, Timestamp>>,
+    /// The doors' pulls whose outcome nobody could tell (audit C15): nothing is written of
+    /// them, so a human checks the ledger by the memo and gives back what moved. The watcher
+    /// alerts each once. None for a state written before there were any.
+    #[n(11)]
+    pub pulls_to_check: Option<Vec<PullToCheck>>,
+}
+
+/// The most pulls to check kept: the oldest goes first.
+pub const MAX_PULLS_TO_CHECK: usize = 100;
+
+/// One pull to check by hand: what it asked of which ledger, from whom.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PullToCheck {
+    #[n(0)]
+    pub at: Timestamp,
+    #[n(1)]
+    pub ledger: crate::pool::PrincipalBytes,
+    #[n(2)]
+    pub from: crate::pool::IcpAccount,
+    #[n(3)]
+    pub amount: crate::TokenAmount,
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub memo: [u8; 32],
+    /// The door, and whether it was the pull or the give-back that ended unclear.
+    #[n(5)]
+    pub what: String,
+    #[n(6)]
+    pub why: String,
 }
 
 /// How long a chain's finalized block may stand still before it is a stall worth an alert:

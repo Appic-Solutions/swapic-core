@@ -1000,6 +1000,7 @@ fn timer_state_samples() -> Vec<Sample> {
             reports: Limiter {
                 recent: vec![at(1), at(2)],
                 by_tx: BTreeMap::from([(TxHash::new([0xf1; 32]), vec![at(1)])]),
+                awaited: None,
             },
             unfilled_reads: BTreeMap::from([(1_502, at(3))]),
             last_check: Some((
@@ -1071,6 +1072,7 @@ fn timer_state_samples() -> Vec<Sample> {
             )]),
             // absent, so this sample's bytes stay the ones the golden pins
             ck_reads: None,
+            pulls_to_check: None,
         },
     )]
 }

@@ -13,9 +13,10 @@
 //! the watcher's order (`pay_payout`).
 //!
 //! Each line before the call it guards:
-//! - `PayoutOpened` with the plan, the undo account and the pull's dedup pair (the payout's
-//!   own instant, memo its ref), then `icrc2_transfer_from`: refused, nothing moved, the
-//!   payout is undone; an answer lost, asked again by the payout timer with the same pair.
+//! - The pull first, under the door's own pair, before any line (audit C15): refused, nothing
+//!   is written; unclear, it is kept in `pulls_to_check` for a human, nothing written.
+//! - `PayoutOpened` with the plan and the undo account once the money is in, in the same
+//!   message as its pull's line; money no line takes is given back at once.
 //! - `PayoutPulled` with the legs' path; each leg recorded before its call
 //!   ([`crate::pool::legs`]). `min_usdc` is the ckUSDC the canister holds after the last
 //!   leg's output is withdrawn (one ckUSDC fee, interface section 4): a leg that cannot give
@@ -98,7 +99,11 @@ pub fn request_of(
         subaccount: from_subaccount,
     };
     let refund_to = match args.refund_to {
-        Some(account) => account.try_into()?,
+        Some(account) => {
+            let account: IcpAccount = account.try_into()?;
+            crate::pool::not_anonymous("the refund account", account.owner)?;
+            account
+        }
         None => from,
     };
     if args.plan.order.len() > MAX_PLAN_BYTES {
@@ -358,39 +363,67 @@ pub async fn swap_from_icp(
 ) -> Result<SwapFromIcpOk, PoolError> {
     pool::require_running()?;
     pool::require_pool_open()?;
-    // counted before anything is recorded: past the limit, nothing is written
-    crate::pool::callers::admit(ic_cdk::api::caller(), now())?;
+    pool::caller_not_anonymous(ic_cdk::api::caller())?;
     let request = request_of(ic_cdk::api::caller(), args)?;
     let config = crate::storage::config::get();
     let canister = crate::storage::ecdsa_address::get();
     let eco_prover = crate::storage::flow_settings::get().eco_prover;
+    let opening = |at: Timestamp| {
+        read_state(|state| -> Result<(u64, Opening), PoolError> {
+            let opening = check(
+                state,
+                &config,
+                &request,
+                at,
+                canister,
+                eco_prover,
+                &sanctioned,
+            )?;
+            Ok((state.pool().lines().next_id, opening))
+        })
+    };
+    // every check first; nothing is written before the money is in (audit C15)
     let at = now();
-    let (id, opening) = read_state(|state| -> Result<(u64, Opening), PoolError> {
-        let opening = check(
-            state,
-            &config,
-            &request,
-            at,
-            canister,
-            eco_prover,
-            &sanctioned,
-        )?;
-        Ok((state.pool().lines().next_id, opening))
-    })?;
-    pool_store::record_at(
-        PoolStep::PayoutOpened {
-            id,
-            kind: Box::new(PayoutKind::IcpSwap(opening.terms)),
-            terms: opening.payout,
-            undo: Undo::Refund {
-                to: opening.terms.refund_to,
-            },
-            plan: Some(Box::new(opening.plan)),
-            ck: types::pool::Flag(false),
-        },
+    opening(at)?;
+    crate::pool::pull_first::worth_pulling(request.token_in, request.amount_in)?;
+    let pair = crate::pool::pull_first::dedup(
+        "swap_from_icp",
+        &request.from,
+        request.token_in,
+        request.amount_in,
+        at,
+    );
+    let block = crate::pool::pull_first::pull(
+        "swap_from_icp",
+        request.token_in,
+        request.from,
+        request.amount_in,
+        pair,
         at,
     )
-    .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
+    .await?;
+    // the money is in: the lines in this one message, the checks run again on the pool as
+    // it is now; money no line takes goes back at once
+    let at = now();
+    let id = match opened_and_pulled(&opening, at, block, request.token_in, request.amount_in) {
+        Ok(id) => id,
+        Err(why) => {
+            let fee = pool_store::ledger()
+                .settings
+                .and_then(|settings| settings.fee_of(request.token_in));
+            crate::pool::pull_first::give_back(
+                "swap_from_icp",
+                request.token_in,
+                request.from,
+                request.amount_in,
+                fee,
+                pair,
+                &format!("{why:?}"),
+            )
+            .await;
+            return Err(why);
+        }
+    };
     if let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
         // whatever stops it, the payout timer carries it on; a plan that fits is signed in
         // this same message chain, and one that is not waits for the watcher's order
@@ -406,6 +439,73 @@ pub async fn swap_from_icp(
         }
     }
     answer(id)
+}
+
+/// The swap's opening and its pull, both written once the money is in, with no await between:
+/// the opening checked again on the pool as it is now. Answers the payout's id.
+fn opened_and_pulled(
+    opening: &impl Fn(Timestamp) -> Result<(u64, Opening), PoolError>,
+    at: Timestamp,
+    block: u64,
+    token_in: Principal,
+    amount_in: TokenAmount,
+) -> Result<u64, PoolError> {
+    // the pool may have closed while the pull was out: then the money goes back
+    pool::require_running()?;
+    pool::require_pool_open()?;
+    let (id, opening) = opening(at)?;
+    let settings = pool_store::ledger()
+        .settings
+        .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?;
+    pool_store::record_at(
+        PoolStep::PayoutOpened {
+            id,
+            kind: Box::new(PayoutKind::IcpSwap(opening.terms)),
+            terms: opening.payout,
+            undo: Undo::Refund {
+                to: opening.terms.refund_to,
+            },
+            plan: Some(Box::new(opening.plan)),
+            ck: types::pool::Flag(false),
+        },
+        at,
+    )
+    .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
+    pulled_line(id, &settings, at, block, token_in, amount_in)?;
+    Ok(id)
+}
+
+/// The pull's own line, written in the opening's message: the legs' path, as a pull the
+/// drive made writes it. A line the fold refuses here undoes the payout with nothing moved
+/// on its account, and the caller gives the money back.
+pub(crate) fn pulled_line(
+    id: u64,
+    settings: &types::pool::PoolSettings,
+    at: Timestamp,
+    block: u64,
+    token_in: Principal,
+    amount_in: TokenAmount,
+) -> Result<(), PoolError> {
+    let attempt = inbound_path(settings, token_in).map(|path| PayoutAttempt {
+        created_at: at,
+        memo: evm_payout_ref(id).into_bytes(),
+        path,
+        amount: Some(amount_in),
+        token: Some(PrincipalBytes(token_in)),
+    });
+    if let Err(error) = pool_store::record_at(PoolStep::PayoutPulled { id, block, attempt }, at) {
+        let why = format!("the pull's line was refused: {error}");
+        let _ = pool_store::record_at(
+            PoolStep::PayoutUndone {
+                id,
+                why: why.clone(),
+                block: None,
+            },
+            at,
+        );
+        return Err(PoolError::NotAllowed(why));
+    }
+    Ok(())
 }
 
 /// A swap door's answer once it drove the payout as far as it goes in its call.

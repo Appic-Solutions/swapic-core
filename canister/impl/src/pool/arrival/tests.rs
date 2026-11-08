@@ -582,7 +582,9 @@ fn terms_the_pool_does_not_take_hold_the_transfer() {
             closed: Some("the books are off".to_string()),
             ..judge(Some(&mine))
         };
-        assert!(held(&found, &closed).contains("the pool is closed: the books are off"));
+        // a closed pool is not now (audit C13): nothing is recorded, never an orphan
+        assert!(record(&found, &closed, now).mine.is_empty());
+        assert!(read_state(|state| state.store().pool_orphan(&found[0].credit)).is_none());
         let mut other = same_chain(the_ref(1));
         log_at(&mut other, "0x3c8")["logIndex"] = Value::String("0x3cb".into());
         let found = find(&parse(&other), None, &base()).unwrap();
@@ -646,10 +648,10 @@ fn a_transfer_awaiting_its_terms_is_claimed_by_them() {
     });
 }
 
-/// Terms that came for a transfer awaiting them but that the pool does not take hold it for
-/// a controller, with why, still on the unattributed line.
+/// Terms that came for a transfer awaiting them while the pool is closed leave it awaiting,
+/// and the same terms credit it once the pool is open again (audit C13).
 #[test]
-fn terms_refused_for_an_awaiting_transfer_hold_it() {
+fn terms_for_an_awaiting_transfer_while_closed_wait_for_the_pool() {
     on_fresh_memory(|| {
         crate::storage::init();
         funded_pool(usdc(1_000));
@@ -662,14 +664,16 @@ fn terms_refused_for_an_awaiting_transfer_hold_it() {
             closed: Some("the books are off".to_string()),
             ..judge(Some(&given))
         };
-        assert!(matches!(
-            &record(&found, &closed, now).mine[..],
-            [PoolArrivalOutcome::Unattributed { why, .. }] if why.contains("the pool is closed")
-        ));
+        let count = event_count();
+        assert!(record(&found, &closed, now).mine.is_empty());
+        assert_eq!(event_count(), count);
         let orphan = read_state(|state| state.store().pool_orphan(&found[0].credit)).unwrap();
-        assert_eq!(orphan.status, OrphanStatus::Held);
-        assert_eq!(ledger().unattributed, TokenAmount::from(4_747_709_u32));
-        assert!(deposit(&the_ref(2)).is_none());
+        assert!(matches!(orphan.status, OrphanStatus::AwaitingTerms { .. }));
+        assert!(matches!(
+            &record(&found, &judge(Some(&given)), now).mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+        assert!(deposit(&the_ref(2)).is_some());
     });
 }
 
@@ -1612,4 +1616,144 @@ fn a_head_no_node_agrees_on_is_no_depth() {
         DEPTH
     )
     .is_err());
+}
+
+/// Audit C13, on the real guard: a controller's pause, lifted later, closes the pool while an
+/// honest same-chain EVM stake is reported with its terms. Nothing is recorded, and the same
+/// report after the lift credits it.
+#[test]
+fn audit_c13_a_stake_reported_while_paused_is_credited_after_the_pause_lifts() {
+    use types::books::{BalanceCheck, BookStep};
+    use types::pool::{IcpCheck, PoolAccount};
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        let config = types::Config {
+            pool_chain: Some(ChainId::BASE),
+            ..types::Config::default()
+        };
+        let stake_terms = |salt: u8| DepositTerms {
+            kind: DepositKind::Stake {
+                owner: PoolAccount::Evm(payer()),
+            },
+            min_usdc: TokenAmount::from(100_000_u32),
+            premium: TokenAmount::ZERO,
+            icp_fees: TokenAmount::ZERO,
+            move_fee: TokenAmount::ZERO,
+            salt: [salt; 32],
+        };
+        let stake = |salt: u8| Given {
+            terms: stake_terms(salt),
+            r#ref: stake_terms(salt).pool_ref().unwrap(),
+            src_chain: ChainId::BASE,
+        };
+        let raw = same_chain(stake(0x51).r#ref);
+        let now = Timestamp::from_secs(block_time(&raw) + 5).unwrap();
+        // fresh balance reads at `now`: only the pause can close the guard
+        crate::storage::timer_state::update(|state| {
+            state.books_reads.entry(ChainId::BASE).or_default().read = Some((
+                now,
+                BalanceCheck {
+                    block: BlockNumber::new(1),
+                    observed: TokenAmount::ZERO,
+                    expected: TokenAmount::ZERO,
+                },
+            ));
+            state.icp_read.read = Some((
+                now,
+                IcpCheck {
+                    observed: TokenAmount::ZERO,
+                    expected: TokenAmount::ZERO,
+                    shortfall: false,
+                },
+            ));
+            ((), true)
+        });
+        let guard = |at: Timestamp| -> Option<String> {
+            let reads = crate::storage::timer_state::get();
+            read_state(|state| {
+                let pool = state.pool();
+                crate::pool::closed_reason(
+                    crate::books::pool_status(state, &pool, &reads, &config, false, at),
+                    &pool,
+                )
+            })
+        };
+        assert_eq!(guard(now), None);
+        let pause = |paused: bool, at: Timestamp| {
+            crate::storage::events::append_event_at(
+                types::EventType::Books {
+                    chain_id: ChainId::BASE,
+                    step: BookStep::PoolPaused { paused },
+                },
+                at,
+            )
+            .unwrap();
+        };
+        pause(true, now);
+        let closed = guard(now);
+        assert!(closed.is_some());
+
+        let given_a = stake(0x51);
+        let found_a = find(&parse(&raw), None, &base()).unwrap();
+        assert_eq!(
+            found_a[0].proof,
+            Proof::Deposit {
+                r#ref: given_a.r#ref,
+                payer: Some(payer())
+            }
+        );
+        let paused = Judge {
+            givens: std::slice::from_ref(&given_a),
+            closed: closed.clone(),
+            sanctioned: &|_| false,
+        };
+        let count = event_count();
+        let first = record(&found_a, &paused, now);
+        assert!(first.mine.is_empty(), "{:?}", first.mine);
+        assert_eq!(event_count(), count, "a closed pool records nothing");
+        assert!(read_state(|state| state.store().pool_orphan(&found_a[0].credit)).is_none());
+        assert!(!crate::storage::pool::credited(&found_a[0].credit));
+        assert!(deposit(&given_a.r#ref).is_none());
+        assert!(crate::pool::orphans::held(now).is_empty());
+
+        // the controller lifts the pause a minute later
+        let later = now.checked_add(Duration::from_secs(60)).unwrap();
+        pause(false, later);
+        assert_eq!(guard(later), None);
+        let open_a = Judge {
+            givens: std::slice::from_ref(&given_a),
+            closed: None,
+            sanctioned: &|_| false,
+        };
+        // the same report after the lift credits it
+        assert!(matches!(
+            &record(&found_a, &open_a, later).mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+        assert_eq!(
+            deposit(&given_a.r#ref).unwrap().status,
+            DepositStatus::Arrived
+        );
+
+        // control: a twin stake whose report lands only after the lift is credited
+        let given_b = stake(0x52);
+        let mut raw_b = same_chain(given_b.r#ref);
+        log_at(&mut raw_b, "0x3c8")["logIndex"] = Value::String("0x3ca".into());
+        let found_b = find(&parse(&raw_b), None, &base()).unwrap();
+        let open_b = Judge {
+            givens: std::slice::from_ref(&given_b),
+            closed: None,
+            sanctioned: &|_| false,
+        };
+        let claim_b = record(&found_b, &open_b, later);
+        assert!(matches!(
+            &claim_b.mine[..],
+            [PoolArrivalOutcome::Credited { .. }]
+        ));
+        assert_eq!(
+            deposit(&given_b.r#ref).unwrap().status,
+            DepositStatus::Arrived
+        );
+    });
 }

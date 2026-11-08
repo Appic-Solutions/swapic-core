@@ -483,6 +483,12 @@ impl Move {
         at && self.route.is_none() && self.stuck.is_none()
     }
 
+    /// Whether its pinned order may be replaced: routed, and that order was never signed, so it
+    /// can never run.
+    pub fn reroutable(&self) -> bool {
+        self.status == MoveStatus::Routed && self.tx_hash.is_none() && self.stuck.is_none()
+    }
+
     /// What its arrival may be credited at the most: its amount, less what its route may
     /// keep. A donation to where it arrives is never the pool's.
     pub fn creditable(&self) -> TokenAmount {

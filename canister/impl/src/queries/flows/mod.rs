@@ -19,6 +19,14 @@ pub fn get_flow_settings() -> FlowSettings {
 /// backup.
 #[query]
 pub fn signed_txs(after_id: u64, limit: u64) -> Vec<SignedTx> {
+    // the watcher and the controllers read a signed transaction at once; anyone else only
+    // once it is long sent (audit C5: a swap readable before it is sent can be sandwiched)
+    let sees_all = crate::guards::require_watcher_or_controller().is_ok();
+    signed_page(after_id, limit, sees_all, ic_cdk::api::time())
+}
+
+/// [`signed_txs`]' page for a reader who sees all (`sees_all`) or not, at `now` (nanoseconds).
+pub fn signed_page(after_id: u64, limit: u64, sees_all: bool, now: u64) -> Vec<SignedTx> {
     let Some(from) = EventIndex::new(after_id).next() else {
         return Vec::new();
     };
@@ -26,6 +34,11 @@ pub fn signed_txs(after_id: u64, limit: u64) -> Vec<SignedTx> {
     read_state(|state| state.store().signed_in(from.., limit))
         .into_iter()
         .filter_map(|index| events::event_at(index.get()))
+        .filter(|event| {
+            sees_all
+                || now.saturating_sub(event.timestamp.as_nanos())
+                    >= crate::queries::events::HIDE_TX_BYTES_NS
+        })
         .filter_map(|event| {
             let (chain_id, tx_hash, raw) = event.payload.signed_tx()?;
             Some(SignedTx {

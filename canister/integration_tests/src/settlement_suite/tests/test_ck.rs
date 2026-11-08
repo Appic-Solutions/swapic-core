@@ -543,21 +543,22 @@ fn the_door_refuses_what_it_must() {
     };
     assert!(ck.door(user(0), short_floor).is_err());
     assert!(ck.door(Principal::anonymous(), terms.clone()).is_err());
-    // another's calls do not count against a caller
-    for _ in 0..5 {
-        assert!(ck
-            .door(
-                user(1),
-                CkSwapTerms {
-                    network_fee: Nat::from(1_u8),
-                    ..terms.clone()
-                }
-            )
-            .is_err());
-    }
+    // a refund naming the anonymous principal, which anyone can spend from (audit C4)
+    let refund_to_anon = CkSwapTerms {
+        refund_to: Some(settlement_api::types::pool::IcpAccount {
+            owner: Principal::anonymous(),
+            subaccount: None,
+        }),
+        ..terms.clone()
+    };
+    assert!(matches!(
+        ck.door(user(0), refund_to_anon),
+        Err(PoolError::NotAllowed(_))
+    ));
+    // a caller with no approval is refused by the ledger, with nothing written (audit C15)
     assert!(matches!(
         ck.door(user(1), terms.clone()),
-        Err(PoolError::Unavailable(_))
+        Err(PoolError::Ledger(_))
     ));
     assert_eq!(
         ck.door(user(0), terms).unwrap().status,

@@ -9,7 +9,7 @@ use crate::storage::events::{append_event, append_event_at, read_state};
 use crate::storage::{chain_data, config, outbox};
 use crate::tx;
 use candid::Nat;
-use serde_json::{json, Value};
+use serde_json::json;
 use settlement_api::types::sweep::{SweepError, SweepEvmArgs, SweepEvmOk};
 use types::config::GasAction;
 use types::events::TxPurpose;
@@ -73,10 +73,7 @@ async fn native_balance(chain: ChainId, canister: EvmAddress) -> Result<Wei, Str
     )
     .await
     .map_err(|error| format!("the balance read: {:?}", error.kind()))?;
-    answers
-        .first()
-        .and_then(Value::as_str)
-        .and_then(|text| Wei::from_str_hex(text.strip_prefix("0x")?).ok())
+    crate::rpc::wei_answer(answers.first())
         .ok_or_else(|| "the balance read answered no amount".to_string())
 }
 

@@ -909,6 +909,23 @@ impl<S: Store> State<S> {
             .map(|flow| (quote_hash, flow))
     }
 
+    /// How many arrivals other than `arrival` were finished from source transaction `tx`. The
+    /// index answers the common case, a source with no finish yet, with no scan.
+    pub fn other_arrivals_of_source(&self, tx: &TxHash, arrival: [u8; 32]) -> u32 {
+        if self.finish_of_source(tx).is_none() {
+            return 0;
+        }
+        let others: std::collections::BTreeSet<[u8; 32]> = self
+            .store
+            .flows()
+            .into_iter()
+            .filter(|(_, flow)| flow.source_tx.as_ref() == Some(tx))
+            .filter_map(|(_, flow)| flow.arrival)
+            .filter(|other| *other != arrival)
+            .collect();
+        u32::try_from(others.len()).unwrap_or(u32::MAX)
+    }
+
     /// The flow under `quote_hash`, if any.
     pub fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
         self.store.flow(quote_hash)

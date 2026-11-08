@@ -25,7 +25,7 @@ use ic_cdk::api::management_canister::http_request::{
 };
 use serde_json::{json, Value};
 use thiserror::Error;
-use types::{BlockNumber, ChainId, RpcUrl};
+use types::{BlockNumber, ChainId, RpcUrl, Wei};
 
 /// Pay-as-you-go pricing: charges what the call consumed rather than what it reserved, and
 /// it is the only version that prices an unreplicated call as one.
@@ -448,6 +448,11 @@ fn request_size(request: &HttpRequest) -> u64 {
 /// The most an `eth_blockNumber` reply may be: a hex height and the JSON-RPC envelope
 /// around it.
 pub(crate) const MAX_BLOCK_NUMBER_BYTES: u64 = 512;
+
+/// The wei a node's `eth_getBalance` answer names (`"0x..."`), if it names an amount.
+pub(crate) fn wei_answer(answer: Option<&Value>) -> Option<Wei> {
+    Wei::from_str_hex(answer?.as_str()?).ok()
+}
 
 /// `0x` and the hex of `bytes`, which is how a chain takes raw bytes, a topic or a word.
 pub(crate) fn hex0x(bytes: &[u8]) -> String {

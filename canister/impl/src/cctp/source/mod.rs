@@ -21,48 +21,84 @@ use types::swapic::{self, topics};
 use types::{ChainId, EvmAddress, TokenAmount, TxHash};
 
 /// Whether `receipt` is a source `message` may be finished from, pure: it succeeded, the
-/// source chain's transmitter sent `message` in it, and the source Runner paid `canister`
-/// fee steps worth at least `needed` in it.
+/// source chain's transmitter sent `message` in it, and the order that burned it paid. A
+/// transaction may run several orders (audit C10), so each is judged alone, by the logs from
+/// its `OrderStarted` to the next: its Runner fee steps to `canister` must be worth `needed`
+/// for each burn in it. An order that burned more than it paid proves nothing and hurts only
+/// itself; another's unpaid burn beside a paid order blocks nothing. Answers how many arrivals
+/// the transaction paid for: the burns in its paid orders.
 pub fn proves(
     receipt: &Receipt,
     message: &BurnMessage,
     source: &EvmChain,
     canister: EvmAddress,
     needed: TokenAmount,
-) -> Result<(), FinishError> {
+) -> Result<u32, FinishError> {
     if !receipt.success {
         return Err(FinishError::Source("reverted"));
     }
-    let sent = receipt
+    let starts: Vec<u64> = receipt
+        .logs
+        .iter()
+        .filter(|log| log.is(source.swapic, topics::order_started()))
+        .map(|log| log.index)
+        .collect();
+    let order_of = |index: u64| starts.iter().copied().filter(|at| *at < index).max();
+    let sent: Vec<(Option<u64>, BurnMessage)> = receipt
         .logs
         .iter()
         .filter(|log| {
             log.address == source.message_transmitter
                 && log.topics.first() == Some(&topics::message_sent())
         })
-        .filter_map(|log| swapic::read_message_sent(&log.topics, &log.data))
-        .filter_map(|bytes| BurnMessage::parse(&bytes).ok())
-        .any(|emitted| message.attests(&emitted));
-    if !sent {
+        .filter_map(|log| {
+            let bytes = swapic::read_message_sent(&log.topics, &log.data)?;
+            Some((order_of(log.index), BurnMessage::parse(&bytes).ok()?))
+        })
+        .collect();
+    let fees: Vec<(Option<u64>, TokenAmount)> =
+        runner_transfers(&receipt.logs, source.usdc, source.runner, canister)
+            .iter()
+            .filter_map(|transfer| match transfer {
+                RunnerTransfer::Fee { index, amount } => Some((order_of(*index), *amount)),
+                RunnerTransfer::Payout { .. } => None,
+            })
+            .collect();
+    let fees_of = |order: Option<u64>| {
+        fees.iter()
+            .filter(|(of, _)| *of == order)
+            .try_fold(TokenAmount::ZERO, |sum, (_, amount)| {
+                sum.checked_add(*amount)
+            })
+            .unwrap_or(TokenAmount::MAX)
+    };
+    let paid_up = |order: Option<u64>| {
+        let burns = sent.iter().filter(|(of, _)| *of == order).count();
+        (0..burns)
+            .try_fold(TokenAmount::ZERO, |sum, _| sum.checked_add(needed))
+            .is_some_and(|owed| fees_of(order) >= owed)
+    };
+    // any burn of this very message whose order paid: `attests` does not read the nonce, so an
+    // identical burn elsewhere in the transaction neither blocks this one nor is paid for by it
+    let mine: Vec<Option<u64>> = sent
+        .iter()
+        .filter(|(_, emitted)| message.attests(emitted))
+        .map(|(of, _)| *of)
+        .collect();
+    if mine.is_empty() {
         return Err(FinishError::Source("did not send this message"));
     }
-    let paid = runner_transfers(&receipt.logs, source.usdc, source.runner, canister)
-        .iter()
-        .filter_map(|transfer| match transfer {
-            RunnerTransfer::Fee { amount, .. } => Some(*amount),
-            RunnerTransfer::Payout { .. } => None,
-        })
-        .try_fold(TokenAmount::ZERO, |sum, amount| sum.checked_add(amount))
-        .unwrap_or(TokenAmount::MAX);
-    if paid == TokenAmount::ZERO {
-        return Err(FinishError::Source("paid the canister no fee step"));
-    }
-    if paid < needed {
+    if !mine.iter().copied().any(paid_up) {
         return Err(FinishError::Source(
-            "paid the canister less than the arrival's least network fee",
+            if mine.iter().all(|of| fees_of(*of) == TokenAmount::ZERO) {
+                "paid the canister no fee step"
+            } else {
+                "paid the canister less than the arrival's least network fee"
+            },
         ));
     }
-    Ok(())
+    let paid = sent.iter().filter(|(of, _)| paid_up(*of)).count();
+    Ok(u32::try_from(paid.max(1)).unwrap_or(u32::MAX))
 }
 
 /// The arrival the quoter charged a burn's fee for, by its envelope: a Swap's completion, a
