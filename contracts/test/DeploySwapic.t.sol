@@ -47,6 +47,16 @@ contract DeploySwapicTest is Test {
         _check(5042, 0x3600000000000000000000000000000000000000, address(0), 26);
     }
 
+    /// BNB Chain has no CCTP USDC: no USDC, WBNB, and every other chain keeps its CCTP
+    function test_bnb_chain_runs_without_cctp() public view {
+        _check(56, address(0), 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c, 0);
+        assertFalse(script.hasCctp(56));
+        uint256[12] memory cctp = [uint256(8453), 42161, 1, 137, 10, 130, 143, 999, 480, 9745, 43114, 5042];
+        for (uint256 i; i < cctp.length; ++i) {
+            assertTrue(script.hasCctp(cctp[i]));
+        }
+    }
+
     function test_a_chain_the_doc_leaves_open_is_refused() public {
         uint256[3] memory refused = [uint256(4663), 146, 57073];
         for (uint256 i; i < refused.length; ++i) {
