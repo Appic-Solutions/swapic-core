@@ -136,6 +136,42 @@ fn a_routed_move_signs_its_pinned_order_again_only_within_its_deadline_and_rever
     ));
 }
 
+/// Prod, 2026-11-08: a move that could not sign for an hour stopped on its order's deadline, and
+/// neither a retry (the same order) nor a write-off (out of the pool's books) could send it on.
+#[test]
+fn a_move_never_signed_takes_a_fresh_order_past_its_deadline() {
+    let mut routed = item(MoveDirection::BaseToIcp, MoveStatus::Routed);
+    routed.order = Some(PinnedOrder {
+        order_id: [1; 32],
+        order: vec![],
+        gas_limit: 300_000,
+        deadline_s: at(3_600).as_secs().get(),
+    });
+    assert_eq!(
+        next(&routed, at(3_479), false, FILL_WAIT),
+        Next::Sign { again: false }
+    );
+    assert_eq!(next(&routed, at(3_480), false, FILL_WAIT), Next::Route);
+    assert_eq!(
+        next(&routed, at(3_480), true, FILL_WAIT),
+        Next::Wait,
+        "a signature under way"
+    );
+    routed.stuck = Some("its order's deadline passed before it ran".to_string());
+    assert_eq!(
+        next(&routed, at(3_480), false, FILL_WAIT),
+        Next::Wait,
+        "stopped: a retry sends it on"
+    );
+    routed.stuck = None;
+    routed.tx_hash = Some(TxHash::new([2; 32]));
+    routed.reverted_block = Some(BlockNumber::new(500));
+    assert!(matches!(
+        next(&routed, at(3_480), false, FILL_WAIT),
+        Next::Stuck(why) if why.contains("deadline")
+    ));
+}
+
 #[test]
 fn a_burned_move_to_icp_sweeps_or_looks_for_its_eco_fill() {
     let mut own = item(MoveDirection::BaseToIcp, MoveStatus::Burned);

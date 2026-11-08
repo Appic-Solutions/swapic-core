@@ -246,10 +246,16 @@ pub fn next(item: &Move, now: Timestamp, in_flight: bool, fill_wait: Duration) -
                 return Next::Stuck(format!("its order reverted {MAX_REVERTS} times"));
             }
             let deadline = item.order.as_ref().map_or(0, |order| order.deadline_s);
-            if now.as_secs().get().saturating_add(SIGN_MARGIN_S) >= deadline {
-                return Next::Stuck("its order's deadline passed before it ran".to_string());
-            }
             let again = item.tx_hash.is_some();
+            if now.as_secs().get().saturating_add(SIGN_MARGIN_S) >= deadline {
+                // an order never signed can never run, so a fresh one takes its place; a signed
+                // one may have run, and a human decides
+                return if again {
+                    Next::Stuck("its order's deadline passed before it ran".to_string())
+                } else {
+                    Next::Route
+                };
+            }
             // whether a reverted order ran is read only at or after the block it reverted
             // in: a revert that carries none can never be read, so a human decides at once
             if again && item.reverted_block.is_none() {

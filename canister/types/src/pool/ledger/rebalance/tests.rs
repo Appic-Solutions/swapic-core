@@ -423,6 +423,47 @@ fn a_refused_minter_call_and_a_reverted_first_order_put_the_amount_back() {
     assert_eq!(world.ledger().pockets.base.in_flight, usdc(700));
 }
 
+/// A pinned order never signed can be replaced, with every line left where it is; once one was
+/// signed it may have run, and it never is.
+#[test]
+fn only_an_order_never_signed_is_replaced() {
+    let mut world = World::new();
+    let id = world.open(MoveDirection::BaseToIcp, usdc(700), false);
+    let routed = |number| PoolStep::MoveRouted {
+        id,
+        route: own(),
+        order: order(number),
+        scan_from: None,
+    };
+    world.step(routed(3)).unwrap();
+    let before = world.ledger().pockets.base;
+    world.step(routed(4)).unwrap();
+    assert_eq!(world.item(id).order, Some(order(4)));
+    assert_eq!(world.item(id).status, MoveStatus::Routed);
+    assert_eq!(world.ledger().pockets.base, before);
+    assert_eq!(world.ledger().total_assets(), usdc(10_000));
+
+    // stopped: a controller's retry first
+    world
+        .step(PoolStep::MoveStuck {
+            id,
+            why: "its order's deadline passed before it ran".to_string(),
+        })
+        .unwrap();
+    assert!(world.step(routed(5)).is_err());
+    world.step(PoolStep::MoveRetried { id }).unwrap();
+    world.step(routed(5)).unwrap();
+    assert_eq!(world.item(id).order, Some(order(5)));
+
+    world.step(signed(id, ChainId::BASE)).unwrap();
+    assert!(world.step(routed(6)).is_err(), "out");
+    world
+        .step(PoolStep::MoveReverted { id, block: None })
+        .unwrap();
+    assert_eq!(world.item(id).status, MoveStatus::Routed);
+    assert!(world.step(routed(6)).is_err(), "signed once, it may have run");
+}
+
 /// Review Focus 3 from the fold's side: a stuck move keeps its lines where they are, a retry
 /// sends it on from there, and a write-off takes it out of the assets.
 #[test]
