@@ -993,6 +993,29 @@ impl PoolStep {
         }
     }
 
+    /// Empties the signed bytes of a step that records a transaction ([`Self::signed_tx`]'s).
+    pub fn clear_raw_tx(&mut self) {
+        match self {
+            PoolStep::PayoutSigned { raw_tx, .. }
+            | PoolStep::ApproveSigned { raw_tx, .. }
+            | PoolStep::SweepSigned { raw_tx, .. }
+            | PoolStep::OrphanRefundSigned { raw_tx, .. }
+            | PoolStep::MoveSigned { raw_tx, .. }
+            | PoolStep::EcoRescueSigned { raw_tx, .. } => raw_tx.clear(),
+            // an order about to be signed as run(order) is the same calldata
+            PoolStep::PayoutOpened {
+                plan: Some(plan), ..
+            } => plan.order.clear(),
+            PoolStep::MoveProposed { order, .. } | PoolStep::MoveRouted { order, .. } => {
+                order.order.clear()
+            }
+            _ => {}
+        }
+        if let PoolStep::PayoutSigned { order, .. } = self {
+            order.order.clear();
+        }
+    }
+
     /// Whether the step gives a payout something to do now: the engine drives at once.
     /// The transaction a step records the exact bytes of, if it records one: its chain, its
     /// nonce, its hash and its bytes.

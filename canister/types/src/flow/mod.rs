@@ -93,10 +93,14 @@ pub enum FlowStep {
         #[cbor(n(5), with = "minicbor::bytes")]
         arrival: [u8; 32],
         /// The source transaction that burned the message, whose fee pays for this finish:
-        /// one message per source transaction is finished, a Complete and its Release
-        /// counting as one.
+        /// no more messages per source transaction are finished than it paid for (`paid`), a
+        /// Complete and its Release counting as one.
         #[n(6)]
         source_tx: Option<TxHash>,
+        /// How many arrivals the source transaction paid fee steps for (audit C10). None on a
+        /// line written before there was a count, and on the canister's own sources: one.
+        #[n(7)]
+        paid: Option<u32>,
     },
 }
 
@@ -216,8 +220,8 @@ pub enum FlowError {
         computed: QuoteHash,
     },
     #[error(
-        "source transaction {source_tx} already finished another message: its one fee pays \
-         for one arrival"
+        "source transaction {source_tx} already finished another message: it paid for no more \
+         arrivals"
     )]
     SourceFinished { source_tx: TxHash },
 }
@@ -240,14 +244,14 @@ impl Flow {
     }
 
     /// Every rule a step must meet: a signed record creates its flow once (a finish under
-    /// its own key, and never a second message under one source transaction); a close
-    /// ends an open transaction. `finished_from` answers the arrival a source transaction
-    /// was finished under, if any.
+    /// its own key, and no more messages under one source transaction than it paid for); a
+    /// close ends an open transaction. `others_finished` answers how many arrivals other than
+    /// the one named a source transaction was finished under.
     pub fn admits(
         quote_hash: QuoteHash,
         existing: Option<&Flow>,
         step: &FlowStep,
-        finished_from: impl Fn(&TxHash) -> Option<[u8; 32]>,
+        others_finished: impl Fn(&TxHash, [u8; 32]) -> u32,
     ) -> Result<(), FlowError> {
         match step {
             FlowStep::GaslessRelayed { .. } | FlowStep::CctpFinishSigned { .. } => {
@@ -258,6 +262,7 @@ impl Flow {
                     action,
                     arrival,
                     source_tx,
+                    paid,
                     ..
                 } = step
                 {
@@ -269,7 +274,7 @@ impl Flow {
                         });
                     }
                     if let Some(source_tx) = source_tx {
-                        if finished_from(source_tx).is_some_and(|other| other != *arrival) {
+                        if others_finished(source_tx, *arrival) >= paid.unwrap_or(1).max(1) {
                             return Err(FlowError::SourceFinished {
                                 source_tx: *source_tx,
                             });

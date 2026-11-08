@@ -149,7 +149,7 @@ fn a_source_proves_its_message_and_its_fee() {
     let message = attested();
     let chain = base();
     let proved = |receipt: &Receipt, message: &BurnMessage, canister: EvmAddress| {
-        proves(receipt, message, &chain, canister, NEEDED)
+        proves(receipt, message, &chain, canister, NEEDED).map(drop)
     };
     assert_eq!(
         proved(&with_fee(real(), 166_275), &message, CANISTER),
@@ -193,5 +193,90 @@ fn a_source_proves_its_message_and_its_fee() {
     assert_eq!(
         proved(&reverted, &message, CANISTER),
         Err(FinishError::Source("reverted"))
+    );
+}
+
+/// A receipt of `logs`, in order: an order's start (`Order`), a fee step to the canister
+/// (`Fee`) or the burn of the real message (`Burn`).
+#[derive(Clone, Copy)]
+enum Step {
+    Order,
+    Fee(u64),
+    Burn,
+}
+
+fn run_of(steps: &[Step]) -> Receipt {
+    let chain = base();
+    let burn = real()
+        .logs
+        .into_iter()
+        .find(|log| {
+            log.address == chain.message_transmitter
+                && log.topics.first() == Some(&topics::message_sent())
+        })
+        .unwrap();
+    let logs = steps
+        .iter()
+        .enumerate()
+        .map(|(at, step)| {
+            let index = at as u64 + 1;
+            match step {
+                Step::Order => log(index, chain.swapic, vec![topics::order_started()], vec![]),
+                Step::Fee(fee) => log(
+                    index,
+                    chain.usdc,
+                    vec![
+                        topics::transfer(),
+                        chain.runner.to_word(),
+                        CANISTER.to_word(),
+                    ],
+                    TokenAmount::from(*fee).to_be_bytes().to_vec(),
+                ),
+                Step::Burn => Log {
+                    index,
+                    ..burn.clone()
+                },
+            }
+        })
+        .collect();
+    Receipt { logs, ..real() }
+}
+
+/// Each order of one transaction is judged alone (audit C10): each paid order proves, however
+/// its neighbours' fees differ; an order that burned more than it paid proves nothing and takes
+/// no one's place; an unpaid burn beside a paid order blocks nothing and is not counted.
+#[test]
+fn each_order_of_a_transaction_is_judged_alone() {
+    use Step::{Burn, Fee, Order};
+    let needed = NEEDED.try_into_u128().unwrap() as u64;
+    let message = attested();
+    let chain = base();
+    let proved = |steps: &[Step]| proves(&run_of(steps), &message, &chain, CANISTER, NEEDED);
+    // two paid orders, one paying far more than the other: two arrivals
+    assert_eq!(
+        proved(&[Order, Fee(needed), Burn, Order, Fee(needed * 50), Burn]),
+        Ok(2)
+    );
+    // an unpaid order's burn before a paid order's: the paid one proves, one arrival is paid for
+    assert_eq!(proved(&[Order, Burn, Order, Fee(needed), Burn]), Ok(1));
+    assert_eq!(proved(&[Order, Fee(needed), Burn, Order, Burn]), Ok(1));
+    // one fee, two burns in one order: nothing is proven
+    assert_eq!(
+        proved(&[Order, Fee(needed), Burn, Burn]),
+        Err(FinishError::Source(
+            "paid the canister less than the arrival's least network fee"
+        ))
+    );
+    // that order takes no slot from a neighbour that paid
+    assert_eq!(
+        proved(&[Order, Fee(needed), Burn, Burn, Order, Fee(needed), Burn]),
+        Ok(1)
+    );
+    // an order paying for both of its burns
+    assert_eq!(proved(&[Order, Fee(needed * 2), Burn, Burn]), Ok(2));
+    // no order paid at all
+    assert_eq!(
+        proved(&[Order, Burn, Order, Burn]),
+        Err(FinishError::Source("paid the canister no fee step"))
     );
 }

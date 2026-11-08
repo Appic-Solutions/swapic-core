@@ -192,9 +192,12 @@ pub fn check_order(
             order.deadline
         )));
     }
-    if !(MIN_GAS_LIMIT..=settings.max_payout_gas).contains(&gas_limit) {
+    // the order's own bytes are less than its run(order) calldata, so this floor is never
+    // above what the signed transaction needs; signing holds the exact one (`tx::least_gas`)
+    let least = MIN_GAS_LIMIT.max(crate::tx::least_gas(order_bytes));
+    if !(least..=settings.max_payout_gas).contains(&gas_limit) {
         return Err(refused(format!(
-            "a gas limit of {gas_limit} is not between {MIN_GAS_LIMIT} and {}",
+            "a gas limit of {gas_limit} is not between {least} and {}",
             settings.max_payout_gas
         )));
     }

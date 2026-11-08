@@ -47,6 +47,10 @@ pub const STUCK_AFTER: Duration = Duration::from_secs(3 * 3_600);
 /// How many times a move's order may revert before it stops for a controller.
 pub const MAX_REVERTS: u32 = 3;
 
+/// The minter's standing approval on the ckUSDC ledger, with no expiry: the minter pulls only
+/// on a `withdraw_erc20` the canister itself makes. ckETH is approved per move (its gas).
+pub const STANDING_APPROVAL: u128 = u128::MAX;
+
 /// The least time the pinned order's deadline must still be ahead to sign it.
 pub const SIGN_MARGIN_S: u64 = 120;
 
@@ -58,6 +62,13 @@ pub const FILL_BLOCKS: u64 = 500;
 #[allow(async_fn_in_trait)]
 pub trait IcpCalls {
     async fn balance(&self, ledger: Principal, account: Account) -> Result<Nat, CallError>;
+    /// What `spender` may still pull from `owner`'s main account on `ledger`.
+    async fn allowance(
+        &self,
+        ledger: Principal,
+        owner: Principal,
+        spender: Principal,
+    ) -> Result<Nat, CallError>;
     async fn approve(
         &self,
         ledger: Principal,
@@ -95,6 +106,15 @@ pub struct Live;
 impl IcpCalls for Live {
     async fn balance(&self, ledger: Principal, account: Account) -> Result<Nat, CallError> {
         ic::icrc1_balance_of(ledger, account).await
+    }
+
+    async fn allowance(
+        &self,
+        ledger: Principal,
+        owner: Principal,
+        spender: Principal,
+    ) -> Result<Nat, CallError> {
+        ic::icrc2_allowance(ledger, owner, spender).await
     }
 
     async fn approve(
@@ -667,6 +687,33 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
         ));
         return Err("short of ckETH".to_string());
     }
+    // the minter's standing ckUSDC approval (audit C2, decided 2026-11-03): one large
+    // approval, asked again only when it reads below what this move pulls, so a move normally
+    // pays no ckUSDC approval fee and the minter's answer always books
+    let amount = item.amount.checked_add(fee).ok_or("the amount overflows")?;
+    let read = |what: &str, error: CallError| format!("the minter's {what} allowance: {error}");
+    let usdc_low = calls
+        .allowance(ckusdc, ctx.principal, minter)
+        .await
+        .map_err(|error| read("ckUSDC", error))?
+        < Nat::from(amount);
+    // the approval's ckUSDC fee, when one is paid, is booked with the answer from what the
+    // free line can carry then: a withdrawal may have emptied it during these awaits. Whatever
+    // it cannot carry stays off the books (0.01 ckUSDC at a renewal, within the check's
+    // tolerance): the answer that names a burn already made is never refused over it
+    let booked = |usdc_low: bool| -> TokenAmount {
+        if !usdc_low {
+            return TokenAmount::ZERO;
+        }
+        if fee > pool_store::ledger().pockets.icp.free {
+            pool::log(&format!(
+                "ALERT: rebalance move {}: the ICP pocket's free line cannot carry the minter approval's fee of {fee}: it stays off the books",
+                item.id
+            ));
+            return TokenAmount::ZERO;
+        }
+        fee
+    };
     record(
         PoolStep::MoveWithdrawing {
             id: item.id,
@@ -688,24 +735,30 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
             ctx.now,
         )
     };
-    let amount = item.amount.checked_add(fee).ok_or("the amount overflows")?;
-    match calls
-        .approve(ckusdc, minter, Nat::from(amount), dedup)
-        .await
-    {
-        Ok(()) => {}
-        Err(CallError::Refused(why)) => {
-            return refused(
-                format!("the ckUSDC approval was refused: {why}"),
-                TokenAmount::ZERO,
-            )
+    if usdc_low {
+        match calls
+            .approve(ckusdc, minter, Nat::from(STANDING_APPROVAL), dedup)
+            .await
+        {
+            Ok(()) => {}
+            Err(CallError::Refused(why)) => {
+                return refused(
+                    format!("the ckUSDC approval was refused: {why}"),
+                    TokenAmount::ZERO,
+                )
+            }
+            Err(error) => return Err(format!("the ckUSDC approval: {error}")),
         }
-        Err(error) => return Err(format!("the ckUSDC approval: {error}")),
     }
+    // ckETH at the withdrawal's exact gas, each move: the ck payouts' bounded allowance on
+    // the same account is their gas-price cap, which a standing one would lift
     match calls.approve(cketh, minter, gas, dedup).await {
         Ok(()) => {}
         Err(CallError::Refused(why)) => {
-            return refused(format!("the ckETH approval was refused: {why}"), fee)
+            return refused(
+                format!("the ckETH approval was refused: {why}"),
+                booked(usdc_low),
+            )
         }
         Err(error) => return Err(format!("the ckETH approval: {error}")),
     }
@@ -718,13 +771,13 @@ pub async fn withdraw(calls: &impl IcpCalls, item: &Move, ctx: &Ctx) -> Result<(
             PoolStep::MoveWithdrawn {
                 id: item.id,
                 withdrawal_id: u64::try_from(request.cketh_block_index.0).unwrap_or(u64::MAX),
-                fee,
+                fee: booked(usdc_low),
             },
             ctx.now,
         ),
         Err(ic::WithdrawFailure::Refused(refusal)) => {
             let why = refusal.to_string();
-            refused(why.clone(), fee)?;
+            refused(why.clone(), booked(usdc_low))?;
             if refusal.may_pass() {
                 if matches!(refusal, ic::WithdrawErc20Error::CkEthLedgerError { .. }) {
                     pool::log(&format!("ALERT: rebalance move {} waits: {why}", item.id));

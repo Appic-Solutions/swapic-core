@@ -296,6 +296,26 @@ impl EventError {
 }
 
 impl EventType {
+    /// This line with every transaction byte it records emptied: an unsent transaction's
+    /// calldata and every signed transaction's bytes (audit C5). What a public reader sees of
+    /// a young line, so a signed swap is never readable before it is sent.
+    pub fn without_tx_bytes(mut self) -> Self {
+        match &mut self {
+            EventType::TxCreated { data, .. } => data.clear(),
+            EventType::TxReplaced { raw_tx, .. } | EventType::TxCancelled { raw_tx, .. } => {
+                raw_tx.clear()
+            }
+            EventType::Flow {
+                step:
+                    FlowStep::GaslessRelayed { raw_tx, .. } | FlowStep::CctpFinishSigned { raw_tx, .. },
+                ..
+            } => raw_tx.clear(),
+            EventType::Pool { step } => step.clear_raw_tx(),
+            _ => {}
+        }
+        self
+    }
+
     /// The signed transaction this line records the exact bytes of, if it records one:
     /// its chain, its hash and its bytes. What the watcher broadcasts.
     pub fn signed_tx(&self) -> Option<(ChainId, TxHash, &[u8])> {

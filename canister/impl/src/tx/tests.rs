@@ -1394,6 +1394,7 @@ fn each_record_is_written_with_its_signed_bytes_and_its_detail() {
                 action,
                 arrival,
                 source_tx,
+                paid: 1,
             })
         ),
         EventType::Flow {
@@ -1406,6 +1407,7 @@ fn each_record_is_written_with_its_signed_bytes_and_its_detail() {
                 action,
                 arrival,
                 source_tx: Some(source_tx),
+                paid: Some(1),
             },
         }
     );
@@ -1618,4 +1620,14 @@ fn a_replacement_is_held_to_its_own_actions_budget() {
         None,
         "a chain that signs nothing"
     );
+}
+
+/// The least gas counts each byte at EIP-7623's floor where it is above EIP-2028's cost: no
+/// transaction under it is ever signed (audit C1).
+#[test]
+fn least_gas_is_the_intrinsic_floor_of_the_data() {
+    assert_eq!(least_gas(&[]), 21_000);
+    assert_eq!(least_gas(&[0]), 21_010);
+    assert_eq!(least_gas(&[1]), 21_040);
+    assert_eq!(least_gas(&[0, 1, 2]), 21_000 + 10 * (1 + 4 * 2));
 }

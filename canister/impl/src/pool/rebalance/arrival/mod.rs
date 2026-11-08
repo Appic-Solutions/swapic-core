@@ -90,7 +90,7 @@ pub async fn note(
     pool::require_running()?;
     let base_tx = TxHash::new(bytes32("base_tx", &base_tx).map_err(PoolError::from)?);
     // the cost guard: a caller other than the watcher, before any outcall
-    pool::report_guard::admit(base_tx, now())?;
+    pool::report_guard::admit(base_tx, now(), false)?;
     let source = if src_tx.is_empty() {
         None
     } else {

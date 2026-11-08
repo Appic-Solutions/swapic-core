@@ -624,3 +624,32 @@ impl From<RegisterRefusal> for PoolError {
         }
     }
 }
+
+/// A pull a door made before writing anything whose outcome nobody could tell (audit C15):
+/// nothing is written of it, so a human checks `ledger` for a transfer from `from` with this
+/// memo and gives back what moved. The watcher alerts each once.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PullToCheck {
+    pub at_ns: u64,
+    pub ledger: Principal,
+    pub from: IcpAccount,
+    pub amount: Nat,
+    pub memo: Vec<u8>,
+    /// The door, and whether its pull or its give-back ended unclear.
+    pub what: String,
+    pub why: String,
+}
+
+impl From<types::timer_state::PullToCheck> for PullToCheck {
+    fn from(pull: types::timer_state::PullToCheck) -> Self {
+        Self {
+            at_ns: pull.at.as_nanos(),
+            ledger: pull.ledger.0,
+            from: pull.from.into(),
+            amount: pull.amount.into(),
+            memo: pull.memo.to_vec(),
+            what: pull.what,
+            why: pull.why,
+        }
+    }
+}

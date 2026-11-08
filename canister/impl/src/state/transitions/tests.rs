@@ -452,6 +452,7 @@ fn a_finish_is_found_by_any_of_its_transactions() {
                 action: types::flow::FinishAction::Receive,
                 arrival: [0x54; 32],
                 source_tx: Some(source),
+                paid: None,
             },
         },
         replaced(finish, BASE, 0),

@@ -156,8 +156,10 @@ fn send(
     )
 }
 
+/// The log as a controller reads it: a public reader sees a young line's transaction bytes
+/// emptied (audit C5).
 fn events(pic: &PocketIc, canister: Principal) -> Vec<Event> {
-    events_page(pic, canister, Principal::anonymous(), 0, 500)
+    events_page(pic, canister, Principal::from_slice(&[1; 29]), 0, 500)
 }
 
 /// Moves the clock, keeps the chain reading young at the new time the way a live watcher

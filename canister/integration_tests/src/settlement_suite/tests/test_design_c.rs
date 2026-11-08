@@ -883,3 +883,223 @@ fn a_finish_is_signed_only_from_a_source_that_sent_it_and_paid_its_fee() {
     );
     assert!(paid.is_ok(), "{paid:?}");
 }
+
+/// The audit's C5 attack: callers with no role watch a relay being signed, every round. They
+/// never hold its calldata or its bytes before it is long sent; the watcher reads them at once.
+#[test]
+fn audit_c5_no_public_reader_holds_a_signed_transaction_before_it_is_sent() {
+    use settlement_api::types::events::{Event, EventType as Wire};
+    let (pic, canister, admin) = setup();
+    let mine = derive_evm_address(&pic, canister, admin).expect("the test key derives");
+    let canister_address = address(&mine);
+    let now = now_s(&pic);
+    let callers = [Principal::anonymous(), Principal::from_slice(&[7; 29])];
+    let (relay_args, _order, _auth, _envelope) = relay_for(canister_address, now);
+    push(&pic, canister, ARBITRUM);
+    let call = pic
+        .submit_call(canister, watcher(), "relay_gasless", relay_args)
+        .expect("submitted");
+    let public_view = |who: Principal| -> (Vec<Event>, Vec<SignedTx>) {
+        let count: u64 = query(&pic, canister, who, "event_count", encode_args(()).unwrap());
+        (
+            query(
+                &pic,
+                canister,
+                who,
+                "events_page",
+                encode_args((0_u64, count)).unwrap(),
+            ),
+            query(
+                &pic,
+                canister,
+                who,
+                "signed_txs",
+                encode_args((0_u64, 10_u64)).unwrap(),
+            ),
+        )
+    };
+    let hides = |who: Principal, raw: Option<&[u8]>| {
+        let (page, signed) = public_view(who);
+        assert!(signed.is_empty(), "{who} holds a signed transaction");
+        for event in &page {
+            if let Wire::TxCreated { data, .. } = &event.payload {
+                assert!(data.is_empty(), "{who} holds its calldata");
+            }
+        }
+        if let Some(raw) = raw {
+            let bytes = candid::encode_one(&page).unwrap();
+            assert!(
+                !bytes.windows(raw.len()).any(|window| window == raw),
+                "{who} holds its bytes"
+            );
+        }
+    };
+    for _ in 0..60 {
+        pic.tick();
+        for who in callers {
+            hides(who, None);
+        }
+    }
+    let relay_id = candid::decode_one::<Result<u64, String>>(&pic.await_call(call).unwrap())
+        .unwrap()
+        .expect("relayed");
+    // the watcher reads the signed bytes at once; a public reader does not
+    let signed: Vec<SignedTx> = query(
+        &pic,
+        canister,
+        watcher(),
+        "signed_txs",
+        encode_args((0_u64, 10_u64)).unwrap(),
+    );
+    assert_eq!(signed[0].id, relay_id);
+    let raw = signed[0].raw.clone();
+    for who in callers {
+        hides(who, Some(&raw));
+    }
+    // an hour on, what was signed is long sent, and anyone may read it
+    pic.advance_time(std::time::Duration::from_secs(3_601));
+    pic.tick();
+    let (_, later) = public_view(callers[0]);
+    assert_eq!(later[0].raw, raw);
+}
+
+/// The source transaction 0x5c..5c as the canister reads it: for each message, a Runner fee
+/// step of `fee` to the canister and the transmitter's MessageSent as the chain emits it.
+fn batched_receipt(messages: &[&[u8]], canister: EvmAddress, fees: &[u64], orders: bool) -> Value {
+    use alloy_sol_types::SolEvent;
+    let word = |address: EvmAddress| format!("0x{}", hex::encode(address.to_word()));
+    let mut logs = vec![];
+    for (i, message) in messages.iter().enumerate() {
+        let mut emitted = BurnMessage::parse(message).unwrap();
+        emitted.nonce = [0; 32];
+        emitted.finality_threshold_executed = 0;
+        emitted.body.fee_executed = types::TokenAmount::ZERO;
+        emitted.body.expiration_block = types::BlockNumber::new(0);
+        if orders {
+            logs.push(json!({
+                "address": SWAPIC,
+                "topics": [
+                    format!("0x{}", hex::encode(swapic::topics::order_started())),
+                    format!("0x{}", "ab".repeat(32)),
+                ],
+                "data": "0x",
+                "logIndex": format!("0x{:x}", 10 * i),
+                "removed": false,
+            }));
+        }
+        if let Some(fee) = fees.get(i).filter(|fee| **fee > 0) {
+            logs.push(json!({
+                "address": ARB_USDC,
+                "topics": [
+                    format!("0x{}", hex::encode(swapic::topics::transfer())),
+                    word(address(RUNNER)),
+                    word(canister),
+                ],
+                "data": format!("0x{fee:064x}"),
+                "logIndex": format!("0x{:x}", 10 * i + 1),
+                "removed": false,
+            }));
+        }
+        let sent = swapic::MessageSent {
+            message: emitted.encode().into(),
+        };
+        logs.push(json!({
+            "address": TRANSMITTER,
+            "topics": [format!("0x{}", hex::encode(swapic::topics::message_sent()))],
+            "data": format!("0x{}", hex::encode(sent.encode_data())),
+            "logIndex": format!("0x{:x}", 10 * i + 4),
+            "removed": false,
+        }));
+    }
+    json!({
+        "transactionHash": format!("0x{}", "5c".repeat(32)),
+        "blockNumber": "0x1000",
+        "status": "0x1",
+        "logs": logs,
+    })
+}
+
+/// Two orders of one source transaction, their own arrivals, as `finish_cctp` is asked them.
+fn batched_orders(
+    mine: EvmAddress,
+    now: u64,
+    reference: [u8; 32],
+    nonce: [u8; 32],
+) -> (Vec<u8>, Vec<u8>) {
+    let (_, _, _, first) = relay_for(mine, now);
+    let mut order = first.clone();
+    order.reference = reference;
+    let (_, message, attestation, stored) = finish_for(&order);
+    let mut parsed = BurnMessage::parse(&message).unwrap();
+    parsed.nonce = nonce;
+    let message = parsed.encode();
+    let args = encode_args((
+        BASE,
+        message.clone(),
+        attestation,
+        Some(Recipe {
+            target: swapic::evm(stored.target).to_string(),
+            data: stored.data.to_vec(),
+            scaler: Some(swapic::evm(stored.scaler).to_string()),
+        }),
+        vec![0x5c_u8; 32],
+        ARRIVAL_GAS,
+    ))
+    .unwrap();
+    (args, message)
+}
+
+/// The audit's C10 attack, flipped: a transaction that ran two paid orders has both finished,
+/// and a third order in it, which paid nothing, is refused for its own lack of a fee.
+#[test]
+fn audit_c10_each_paid_order_of_one_source_transaction_is_finished() {
+    let (pic, canister, admin) = setup();
+    let mine = address(&derive_evm_address(&pic, canister, admin).expect("the test key derives"));
+    let now = now_s(&pic);
+    let (args_a, message_a) = batched_orders(mine, now, [0x21; 32], [0x21; 32]);
+    let (args_b, message_b) = batched_orders(mine, now, [0x22; 32], [0x22; 32]);
+    let (args_c, message_c) = batched_orders(mine, now, [0x23; 32], [0x23; 32]);
+    let receipt = batched_receipt(
+        &[&message_a, &message_b, &message_c],
+        mine,
+        &[166_275, 166_275, 0],
+        true,
+    );
+    push(&pic, canister, BASE);
+    let a = finish(&pic, canister, args_a, &receipt);
+    assert!(a.is_ok(), "{a:?}");
+    push(&pic, canister, BASE);
+    let b = finish(&pic, canister, args_b, &receipt);
+    assert!(b.is_ok(), "the second paid order: {b:?}");
+    assert_ne!(a, b);
+    push(&pic, canister, BASE);
+    let c = finish(&pic, canister, args_c, &receipt);
+    assert!(
+        c.as_ref()
+            .is_err_and(|why| why.contains("paid the canister no fee step")),
+        "{c:?}"
+    );
+}
+
+/// A bundler's unpaid burn beside someone's paid order: the paid order's arrival is finished,
+/// whichever is asked first, and the unpaid one is refused for its own order's lack of a fee.
+#[test]
+fn audit_c10_an_unpaid_burn_beside_a_paid_order_blocks_nothing() {
+    let (pic, canister, admin) = setup();
+    let mine = address(&derive_evm_address(&pic, canister, admin).expect("the test key derives"));
+    let now = now_s(&pic);
+    let (args_paid, message_paid) = batched_orders(mine, now, [0x21; 32], [0x21; 32]);
+    let (args_unpaid, message_unpaid) = batched_orders(mine, now, [0x22; 32], [0x22; 32]);
+    let receipt = batched_receipt(&[&message_paid, &message_unpaid], mine, &[166_275, 0], true);
+    push(&pic, canister, BASE);
+    let unpaid = finish(&pic, canister, args_unpaid, &receipt);
+    assert!(
+        unpaid
+            .as_ref()
+            .is_err_and(|why| why.contains("paid the canister no fee step")),
+        "{unpaid:?}"
+    );
+    push(&pic, canister, BASE);
+    let paid = finish(&pic, canister, args_paid, &receipt);
+    assert!(paid.is_ok(), "{paid:?}");
+}

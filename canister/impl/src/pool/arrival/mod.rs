@@ -167,7 +167,7 @@ pub struct Log {
 }
 
 impl Log {
-    fn is(&self, emitter: EvmAddress, topic: [u8; 32]) -> bool {
+    pub(crate) fn is(&self, emitter: EvmAddress, topic: [u8; 32]) -> bool {
         self.address == emitter && self.topics.first() == Some(&topic)
     }
 
@@ -926,6 +926,13 @@ pub fn steps_for<S: Store>(
             awaiting_until: Some(until),
         }]);
     };
+    // a closed pool records nothing for a deposit whose terms are at hand: not now, never an
+    // orphan, so the same report credits it once the pool reopens (audit C13)
+    if let Some(reason) = &judge.closed {
+        return Err(format!(
+            "the pool is closed: {reason}; the deposit is credited once it reopens"
+        ));
+    }
     if credited {
         // a transfer awaiting its terms, which came: claimed while it may be
         let awaiting = state
@@ -1511,6 +1518,22 @@ pub async fn read_and_record(
     ))
 }
 
+/// Whether the canister holds a transfer of `base_tx` awaiting the terms under `r#ref`, its
+/// 24 hours not past.
+fn awaits_terms(base_tx: TxHash, r#ref: PoolRef, now: Timestamp) -> bool {
+    read_state(|state| {
+        state
+            .store()
+            .pool_orphans()
+            .into_iter()
+            .any(|(key, orphan)| {
+                key.tx == base_tx
+                    && matches!(orphan.status, OrphanStatus::AwaitingTerms { r#ref: awaited, until }
+                    if awaited == r#ref && now <= until)
+            })
+    })
+}
+
 /// Anyone's door (the watcher, or the user's app as a backup): the body of
 /// `note_pool_arrival`. The canister trusts only the chain and the fingerprint: the terms
 /// credit only the transfer whose proof carries the ref they commit to.
@@ -1520,8 +1543,6 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
         settlement_api::types::pool::bytes32("base_tx", &arrival.base_tx)
             .map_err(PoolError::from)?,
     );
-    // the cost guard: a caller other than the watcher, before any outcall
-    pool::report_guard::admit(base_tx, pool::now())?;
     let source = if arrival.src_tx.is_empty() {
         None
     } else {
@@ -1542,11 +1563,29 @@ pub async fn note(arrival: PoolArrival) -> Result<PoolArrivalOutcome, PoolError>
     }
     let src_chain = ChainId::new(arrival.src_chain);
     let handed = arrival.memo.is_some();
-    let recorded = match arrival.memo {
-        Some(memo) => {
-            let given = given_of(&memo, src_chain)?;
-            read_and_record(base_tx, source, &given).await?
+    // every check that needs no outcall comes first, the memo's decoding among them
+    let given = arrival
+        .memo
+        .as_ref()
+        .map(|memo| given_of(memo, src_chain))
+        .transpose()?;
+    // terms in hand and the pool closed: not now (audit C13), before any read is paid for;
+    // the reporter asks again, and the same report credits it once the pool reopens
+    if given.is_some() {
+        if let Some(reason) = pool::pool_closed() {
+            return Err(PoolError::Closed(reason));
         }
+    }
+    // the cost guard, before any outcall: a report bringing the terms of a transfer the
+    // canister already awaits in `base_tx` is one a stranger cannot make without a real
+    // transfer, so it never waits behind the shared minute (audit C16)
+    let now = pool::now();
+    let awaited = given
+        .as_ref()
+        .is_some_and(|given| awaits_terms(base_tx, given.r#ref, now));
+    pool::report_guard::admit(base_tx, now, awaited)?;
+    let recorded = match given {
+        Some(given) => read_and_record(base_tx, source, &given).await?,
         // no memo handed over: the chain's own, or the transfer awaits its terms
         None => read_memo_and_record(base_tx, source, src_chain).await?,
     };

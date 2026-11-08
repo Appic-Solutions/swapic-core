@@ -361,6 +361,7 @@ fn signed(nonce: u64, action: FinishAction, arrival: [u8; 32], source_tx: TxHash
             action,
             arrival,
             source_tx: Some(source_tx),
+            paid: None,
         },
     }
 }
@@ -434,12 +435,17 @@ fn completions_capped_per_source_tx() {
         append_event_at(created(finish_key(first, FinishAction::Complete), 0), at).unwrap();
         append_event_at(signed(0, FinishAction::Complete, first, source), at).unwrap();
 
-        assert!(read_state(|state| finished_another(state, source, second)));
-        assert!(!read_state(|state| finished_another(state, source, first)));
-        assert!(!read_state(|state| finished_another(
+        assert!(read_state(|state| finished_others(
+            state, source, second, 1
+        )));
+        assert!(!read_state(|state| finished_others(
+            state, source, first, 1
+        )));
+        assert!(!read_state(|state| finished_others(
             state,
             TxHash::new([0x5d; 32]),
-            second
+            second,
+            1
         )));
 
         // the fold, past the door: a second message under the same source is refused

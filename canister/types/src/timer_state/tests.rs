@@ -150,3 +150,92 @@ fn the_finalized_block_is_read_at_its_own_pace() {
     assert!(!seen.read_due(at(8)));
     assert_eq!(seen.number, Some(BlockNumber::new(50)));
 }
+
+/// Strangers filling the shared counts, and reporting the awaited transaction itself, never
+/// spend the awaited lane; it is still bounded per transaction, so a burst of reports cannot
+/// cost unbounded reads, and it gives back after the hour (audit C16).
+#[test]
+fn the_awaited_lane_is_apart_from_the_shared_counts_and_still_bounded() {
+    let mut limiter = Limiter::default();
+    for n in 0..PER_HOUR as u64 {
+        assert_eq!(
+            limiter.admit(tx(100 + n as u8), at(60 * (n / 2) + (n % 2))),
+            Ok(())
+        );
+    }
+    for n in 0..PER_TX_PER_HOUR as u64 {
+        let _ = limiter.admit(tx(7), at(600 + n));
+    }
+    assert!(
+        limiter.admit(tx(9), at(601)).is_err(),
+        "the shared counts are full"
+    );
+    for n in 0..PER_TX_PER_HOUR as u64 {
+        assert_eq!(limiter.admit_awaited(tx(7), at(601 + n)), Ok(()));
+    }
+    assert!(
+        limiter.admit_awaited(tx(7), at(610)).is_err(),
+        "bounded per transaction"
+    );
+    assert_eq!(
+        limiter.admit_awaited(tx(8), at(610)),
+        Ok(()),
+        "per transaction"
+    );
+    assert_eq!(
+        limiter.admit_awaited(tx(7), at(601 + 3_600)),
+        Ok(()),
+        "gives back after the hour"
+    );
+}
+
+/// A state written before the awaited lane and the pulls to check still reads: both absent
+/// from its bytes read as none, so an upgrade keeps every other line (audit C15, C16).
+#[test]
+fn a_state_written_before_the_new_fields_still_reads() {
+    #[derive(Encode)]
+    struct OldLimiter {
+        #[n(0)]
+        recent: Vec<Timestamp>,
+        #[n(1)]
+        by_tx: BTreeMap<TxHash, Vec<Timestamp>>,
+    }
+    let bytes = minicbor::to_vec(OldLimiter {
+        recent: vec![at(1)],
+        by_tx: BTreeMap::from([(tx(1), vec![at(1)])]),
+    })
+    .unwrap();
+    let read: Limiter = minicbor::decode(&bytes).unwrap();
+    assert_eq!(read.recent, vec![at(1)]);
+    assert_eq!(read.awaited, None);
+    assert_eq!(TimerState::default().pulls_to_check, None);
+    let bytes = minicbor::to_vec(TimerState::default()).unwrap();
+    let read: TimerState = minicbor::decode(&bytes).unwrap();
+    assert_eq!(read, TimerState::default());
+}
+
+/// The new fields, filled, come back whole from their stored bytes.
+#[test]
+fn the_awaited_lane_and_the_pulls_to_check_round_trip() {
+    let state = TimerState {
+        reports: Limiter {
+            awaited: Some(BTreeMap::from([(tx(2), vec![at(1)])])),
+            ..Limiter::default()
+        },
+        pulls_to_check: Some(vec![PullToCheck {
+            at: at(1),
+            ledger: crate::pool::PrincipalBytes(candid::Principal::anonymous()),
+            from: crate::pool::IcpAccount {
+                owner: candid::Principal::anonymous(),
+                subaccount: Some([7; 32]),
+            },
+            amount: crate::TokenAmount::from(5_u8),
+            memo: [9; 32],
+            what: "stake_icp pull".to_string(),
+            why: "unclear".to_string(),
+        }]),
+        ..TimerState::default()
+    };
+    let read: TimerState = minicbor::decode(&minicbor::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(read, state);
+}

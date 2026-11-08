@@ -1428,12 +1428,11 @@ fn a_stopped_payout_a_controller_refunds_pays_its_user_back_once() {
     assert_eq!(world.balance(staker()), refunded);
 }
 
-/// The per-caller limit (Jeff, 2026-10-23): a caller with no approval calls the free doors
-/// over and over. Each call let through writes its lines and is refused its pull; past five a
-/// minute, both doors together, it is refused with nothing written. Another caller is
-/// counted apart.
+/// Audit C15 (Jeff, 2026-11-08: never a line before the money): a call whose pull the ledger
+/// refuses writes nothing, however often it is made, through either door, and no caller is
+/// held to a count of calls.
 #[test]
-fn a_caller_past_five_calls_a_minute_is_refused_with_nothing_written() {
+fn a_refused_pull_writes_nothing_and_no_caller_is_counted() {
     use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk, SwapFromIcpOk};
     let (world, canister_address) = swap_world();
     let deadline_s = world.now().as_secs().get() + 600;
@@ -1447,10 +1446,10 @@ fn a_caller_past_five_calls_a_minute_is_refused_with_nothing_written() {
             encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
         )
     };
-    for _ in 0..4 {
+    let count = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    for _ in 0..8 {
         assert!(matches!(swap(staker()), Err(PoolError::Ledger(_))));
     }
-    // the stake door counts with it
     let staked: Result<StakeIcpOk, PoolError> = update(
         &world.pic,
         world.canister,
@@ -1467,23 +1466,12 @@ fn a_caller_past_five_calls_a_minute_is_refused_with_nothing_written() {
         })
         .unwrap(),
     );
-    assert!(staked.is_err());
-    let count = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
-    assert!(matches!(
-        swap(staker()),
-        Err(PoolError::Unavailable(why)) if why.contains("a minute")
-    ));
+    assert!(matches!(staked, Err(PoolError::Ledger(_))));
     assert_eq!(
         crate::client::settlement::event_count(&world.pic, world.canister, world.admin),
         count,
         "nothing written"
     );
-    // another caller is counted apart
-    assert!(matches!(swap(recipient()), Err(PoolError::Ledger(_))));
-    // a minute on, the first passes again
-    world.pic.advance_time(Duration::from_secs(61));
-    world.books_checked();
-    assert!(matches!(swap(staker()), Err(PoolError::Ledger(_))));
 }
 
 /// M-03: a pool arrival's receipt decides a credit alone, so every node reads it and they
@@ -2043,4 +2031,567 @@ fn a_held_token_payout_whose_transfer_landed_is_marked_paid_on_its_tokens_ledger
         encode_one(account(recipient())).unwrap(),
     );
     assert_eq!(paid, Nat::from(sent));
+}
+
+/// (nonce of every TxCreated after line `from`) in the log, read as a controller.
+fn nonces_created(world: &World, from: u64) -> Vec<u64> {
+    let count = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    crate::client::settlement::events_page(
+        &world.pic,
+        world.canister,
+        world.admin,
+        from,
+        count - from,
+    )
+    .into_iter()
+    .filter_map(|event| match event.payload {
+        EventType::TxCreated { nonce, .. } => Some(nonce),
+        _ => None,
+    })
+    .collect()
+}
+
+/// The least gas a transaction with `data` needs before a node takes it, as a node counts it.
+fn least_gas_of(data: &[u8]) -> u64 {
+    let zero = data.iter().filter(|byte| **byte == 0).count() as u64;
+    21_000 + 10 * (zero + 4 * (data.len() as u64 - zero))
+}
+
+/// Audit C1's attack: any ICP caller's swap at 21,000 gas is refused before anything moves:
+/// no pull, no line, no nonce handed out, so nothing can hold the canister's Base nonce.
+#[test]
+fn audit_c1_a_swap_at_21000_gas_is_refused_and_no_nonce_is_spent() {
+    use settlement_api::types::pool::SwapFromIcpOk;
+    let (world, canister_address) = swap_world();
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = kyber_plan(canister_address, deadline_s);
+    let lines = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    let before = world.balance(staker());
+    for gas in [21_000, least_gas_of(&plan) - 1] {
+        let answer: Result<SwapFromIcpOk, PoolError> = update(
+            &world.pic,
+            world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(swap_terms(&world, PAYS_501_65, plan.clone(), gas)).unwrap(),
+        );
+        assert!(
+            matches!(&answer, Err(PoolError::NotAllowed(why)) if why.contains("gas limit")),
+            "{gas}: {answer:?}"
+        );
+    }
+    assert_eq!(world.balance(staker()), before, "nothing was pulled");
+    assert_eq!(
+        crate::client::settlement::event_count(&world.pic, world.canister, world.admin),
+        lines,
+        "nothing was written"
+    );
+    // the canister's next Base transaction has the first nonce: nothing stands before it
+    world.push_reading();
+    crate::client::settlement::test_send(
+        &world.pic,
+        world.canister,
+        world.admin,
+        [0x7f; 32],
+        BASE,
+        "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406",
+        100_000,
+    )
+    .expect("a later transaction is signed");
+    assert_eq!(nonces_created(&world, lines), vec![0]);
+}
+
+/// The way around C1's first check: a limit the plan's own bytes pass, but the fitted
+/// calldata, which is larger, does not. The signing check holds: no nonce is handed out, the
+/// user's money is held by its payout, which waits for a proper order.
+#[test]
+fn audit_c1_a_limit_only_the_plans_own_bytes_pass_spends_no_nonce() {
+    use settlement_api::types::pool::{PayoutStatus, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = kyber_plan(canister_address, deadline_s);
+    let lines = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    let terms = swap_terms(&world, PAYS_501_65, plan.clone(), least_gas_of(&plan));
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(terms).unwrap(),
+        )
+        .expect("submitted");
+    let request = world.next_outcall(&["eth_call"]);
+    world.reply(
+        &request,
+        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+        false,
+    );
+    let raw = world.pic.await_call(call).expect("the swap answers");
+    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
+    let swapped = swapped.expect("the swap is opened");
+    assert!(
+        !matches!(swapped.status, PayoutStatus::Signed(_)),
+        "{:?}",
+        swapped.status
+    );
+    assert!(
+        nonces_created(&world, lines).is_empty(),
+        "no nonce was handed out"
+    );
+}
+
+/// Audit C15's attack: forty callers with no approval, five calls each with a real plan. Every
+/// call is refused its pull, not one line is written, and the page the watcher reads answers.
+#[test]
+fn audit_c15_free_swaps_write_nothing_and_the_page_answers() {
+    use candid::encode_args;
+    use settlement_api::types::pool::SwapFromIcpOk;
+    let (world, canister_address) = swap_world();
+    let start = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = kyber_plan(canister_address, deadline_s);
+    for i in 0..40_u8 {
+        let mut raw = [0_u8; 29];
+        raw[0] = 0x70;
+        raw[1] = i;
+        raw[28] = 0x02;
+        let caller = Principal::from_slice(&raw);
+        for _ in 0..5 {
+            let answer: Result<SwapFromIcpOk, PoolError> = update(
+                &world.pic,
+                world.canister,
+                caller,
+                "swap_from_icp",
+                encode_one(swap_terms(&world, PAYS_501_65, plan.clone(), 900_000)).unwrap(),
+            );
+            assert!(matches!(answer, Err(PoolError::Ledger(_))), "{answer:?}");
+        }
+    }
+    let end = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    assert_eq!(end, start, "not one line");
+    world
+        .pic
+        .query_call(
+            world.canister,
+            world.admin,
+            "events_page",
+            encode_args((0_u64, 500_u64)).unwrap(),
+        )
+        .expect("the page answers");
+}
+
+/// The audit's C4 attack, end to end: what a bad dapp would hand a cold signer is refused at
+/// the consent message and at the door, nothing moves, and an anonymous caller takes nothing.
+#[test]
+fn audit_c4_an_anonymous_owned_stake_or_payout_is_refused_everywhere() {
+    use crate::client::settlement::icrc21_canister_call_consent_message;
+    use settlement_api::types::icrc21::{
+        ConsentMessageMetadata, ConsentMessageRequest, ConsentMessageResponse, ConsentMessageSpec,
+    };
+    use settlement_api::types::pool::{
+        IcpAccount as WireAccount, IcpSwapTerms, StakeIcpArgs, StakeIcpOk, SwapFromIcpOk,
+        WithdrawIcpArgs, WithdrawIcpOk,
+    };
+    let (world, canister_address) = swap_world();
+    world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
+    let anon = Principal::anonymous();
+    let victim = staker();
+    let refused = |method: &str, arg: Vec<u8>| {
+        let answer = icrc21_canister_call_consent_message(
+            &world.pic,
+            world.canister,
+            anon,
+            &ConsentMessageRequest {
+                method: method.to_string(),
+                arg,
+                user_preferences: ConsentMessageSpec {
+                    metadata: ConsentMessageMetadata {
+                        language: "en".to_string(),
+                        utc_offset_minutes: None,
+                    },
+                    device_spec: None,
+                },
+            },
+        );
+        assert!(
+            !matches!(answer, ConsentMessageResponse::Ok(_)),
+            "{method}: {answer:?}"
+        );
+    };
+    let hostile_stake = encode_one(StakeIcpArgs {
+        from_subaccount: None,
+        amount: Nat::from(usdc(100)),
+        owner: PoolAccount::Icp(WireAccount {
+            owner: anon,
+            subaccount: None,
+        }),
+        move_fee: Nat::from(0_u8),
+    })
+    .unwrap();
+    refused("stake_icp", hostile_stake.clone());
+    let to_anon = encode_one(WithdrawIcpArgs {
+        from: None,
+        usdc: Nat::from(usdc(100)),
+        max_shares: Nat::from(100_000_000_000_000_000_000_u128),
+        token_out: world.ledger,
+        min_out: Nat::from(0_u8),
+        to: WireAccount {
+            owner: anon,
+            subaccount: None,
+        },
+        move_fee: Nat::from(0_u8),
+    })
+    .unwrap();
+    refused("withdraw_icp", to_anon.clone());
+    let deadline_s = world.now().as_secs().get() + 600;
+    let refund_to_anon = IcpSwapTerms {
+        refund_to: Some(WireAccount {
+            owner: anon,
+            subaccount: None,
+        }),
+        ..swap_terms(
+            &world,
+            PAYS_501_65,
+            kyber_plan(canister_address, deadline_s),
+            900_000,
+        )
+    };
+    refused("swap_from_icp", encode_one(refund_to_anon.clone()).unwrap());
+
+    // the victim signs them anyway: every door refuses, and nothing moves
+    world.approve(victim, usdc(200) + FEE);
+    let before = world.balance(victim);
+    let staked: Result<StakeIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        victim,
+        "stake_icp",
+        hostile_stake,
+    );
+    assert!(
+        matches!(staked, Err(PoolError::NotAllowed(_))),
+        "{staked:?}"
+    );
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        victim,
+        "swap_from_icp",
+        encode_one(refund_to_anon).unwrap(),
+    );
+    assert!(
+        matches!(swapped, Err(PoolError::NotAllowed(_))),
+        "{swapped:?}"
+    );
+    let withdrawn: Result<WithdrawIcpOk, PoolError> =
+        update(&world.pic, world.canister, victim, "withdraw_icp", to_anon);
+    assert!(
+        matches!(withdrawn, Err(PoolError::NotAllowed(_))),
+        "{withdrawn:?}"
+    );
+    assert_eq!(world.balance(victim), before);
+    assert_eq!(world.pool_account(anon).shares, Nat::from(0_u8));
+
+    // an anonymous caller is refused at the doors that pay or take
+    let anonymous_withdraw: Result<WithdrawIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        anon,
+        "withdraw_icp",
+        encode_one(WithdrawIcpArgs {
+            from: None,
+            usdc: Nat::from(usdc(1)),
+            max_shares: Nat::from(1_000_000_000_000_000_000_u128),
+            token_out: world.ledger,
+            min_out: Nat::from(0_u8),
+            to: WireAccount {
+                owner: victim,
+                subaccount: None,
+            },
+            move_fee: Nat::from(0_u8),
+        })
+        .unwrap(),
+    );
+    assert!(
+        matches!(anonymous_withdraw, Err(PoolError::NotAllowed(_))),
+        "{anonymous_withdraw:?}"
+    );
+}
+
+/// The audit's C16 attack: a stranger's oversized reports spend nothing, and when strangers do
+/// fill the shared minute, a controller's report still gets through to its read.
+#[test]
+fn audit_c16_strangers_do_not_block_a_controllers_report() {
+    use settlement_api::types::pool::{PoolArrival, PoolArrivalOutcome};
+    let (world, _) = swap_world();
+    let arrival = |base_tx: [u8; 32], memo: Option<Vec<u8>>| {
+        encode_one(PoolArrival {
+            base_tx: base_tx.to_vec(),
+            src_chain: BASE,
+            src_tx: vec![],
+            memo,
+        })
+        .unwrap()
+    };
+    let pending = || world.pic.get_canister_http().len();
+    let attacker = Principal::anonymous();
+    let user = Principal::from_slice(&[0x42; 29]);
+    // twenty oversized memos spend no slot of anyone's: they are refused before the guard
+    for n in 0..20_u8 {
+        let answer: Result<PoolArrivalOutcome, PoolError> = update(
+            &world.pic,
+            world.canister,
+            attacker,
+            "note_pool_arrival",
+            arrival([n + 1; 32], Some(vec![0_u8; 257])),
+        );
+        assert!(
+            matches!(&answer, Err(PoolError::BadArrival(why)) if why.contains("at most")),
+            "{answer:?}"
+        );
+    }
+    let before = pending();
+    let first = world
+        .pic
+        .submit_call(
+            world.canister,
+            user,
+            "note_pool_arrival",
+            arrival([0xaa; 32], None),
+        )
+        .unwrap();
+    for _ in 0..4 {
+        world.pic.tick();
+    }
+    assert!(pending() > before, "the user's report is read, not refused");
+    let _ = first;
+    // the shared minute filled with well-formed reports: a stranger's next one is refused
+    let second = world
+        .pic
+        .submit_call(
+            world.canister,
+            attacker,
+            "note_pool_arrival",
+            arrival([0xbb; 32], None),
+        )
+        .unwrap();
+    for _ in 0..4 {
+        world.pic.tick();
+    }
+    let _ = second;
+    let refused: Result<PoolArrivalOutcome, PoolError> = update(
+        &world.pic,
+        world.canister,
+        user,
+        "note_pool_arrival",
+        arrival([0xcc; 32], None),
+    );
+    assert!(
+        matches!(&refused, Err(PoolError::Unavailable(why)) if why.contains("a minute")),
+        "{refused:?}"
+    );
+    // a controller is never held by the strangers' minute
+    let before = pending();
+    let _call = world
+        .pic
+        .submit_call(
+            world.canister,
+            world.admin,
+            "note_pool_arrival",
+            arrival([0xdd; 32], None),
+        )
+        .unwrap();
+    for _ in 0..4 {
+        world.pic.tick();
+    }
+    assert!(pending() > before, "the controller's report is read");
+}
+
+/// Money first, when two stakes race for the last room under the TVL cap: both pass the first
+/// check and are pulled. Exactly one is minted; the other's money goes back at once, less the
+/// ledger's fee, and the canister ends up holding only what it minted against.
+#[test]
+fn a_stake_that_loses_the_race_for_the_last_room_gets_its_money_back() {
+    use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk};
+    let world = world(usdc(9_800));
+    world.plant_stake(world.admin, usdc(9_800), 9_800_000_000_000_000_000_000);
+    world.approve(staker(), usdc(500));
+    let stake = |amount: u64| {
+        encode_one(StakeIcpArgs {
+            from_subaccount: None,
+            amount: Nat::from(amount),
+            owner: PoolAccount::Icp(settlement_api::types::pool::IcpAccount {
+                owner: staker(),
+                subaccount: None,
+            }),
+            move_fee: Nat::from(0_u8),
+        })
+        .unwrap()
+    };
+    let before = world.balance(staker());
+    let held = world.balance(world.canister);
+    let (a, b) = (usdc(150), usdc(151));
+    let first = world
+        .pic
+        .submit_call(world.canister, staker(), "stake_icp", stake(a))
+        .unwrap();
+    let second = world
+        .pic
+        .submit_call(world.canister, staker(), "stake_icp", stake(b))
+        .unwrap();
+    let answer = |call| -> Result<StakeIcpOk, PoolError> {
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap()
+    };
+    let (first, second) = (answer(first), answer(second));
+    let (kept, lost) = match (&first, &second) {
+        (Ok(_), Err(_)) => (a, b),
+        (Err(_), Ok(_)) => (b, a),
+        other => panic!("not exactly one minted: {other:?}"),
+    };
+    assert_eq!(
+        world.balance(world.canister),
+        held.clone() + Nat::from(kept),
+        "the canister holds only what it minted against"
+    );
+    // both pulls' fees, the kept amount, and the give-back's fee out of the lost amount
+    assert_eq!(
+        world.balance(staker()),
+        before - Nat::from(kept) - Nat::from(2 * FEE) - Nat::from(FEE),
+        "{lost} came back less the fee"
+    );
+    assert_eq!(world.pool_account(staker()).shares > Nat::from(0_u8), true);
+}
+
+/// Two identical stakes in one instant share the pull's pair: the ledger takes one, the other
+/// is refused as a duplicate and never paid for. Nobody is charged twice or minted for free.
+#[test]
+fn two_identical_stakes_at_once_are_charged_and_minted_alike() {
+    use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk};
+    let world = world(usdc(1_000));
+    world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
+    world.approve(staker(), usdc(300));
+    let arg = encode_one(StakeIcpArgs {
+        from_subaccount: None,
+        amount: Nat::from(usdc(100)),
+        owner: PoolAccount::Icp(settlement_api::types::pool::IcpAccount {
+            owner: staker(),
+            subaccount: None,
+        }),
+        move_fee: Nat::from(0_u8),
+    })
+    .unwrap();
+    let held = world.balance(world.canister);
+    let first = world
+        .pic
+        .submit_call(world.canister, staker(), "stake_icp", arg.clone())
+        .unwrap();
+    let second = world
+        .pic
+        .submit_call(world.canister, staker(), "stake_icp", arg)
+        .unwrap();
+    let answer = |call| -> Result<StakeIcpOk, PoolError> {
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap()
+    };
+    let minted = [answer(first), answer(second)]
+        .iter()
+        .filter(|a| a.is_ok())
+        .count() as u64;
+    assert!(minted >= 1);
+    assert_eq!(
+        world.balance(world.canister),
+        held + Nat::from(minted * usdc(100))
+    );
+    assert_eq!(
+        world.pool_account(staker()).shares,
+        Nat::from(u128::from(minted) * 100_000_000_000_000_000_000_u128)
+    );
+}
+
+/// Audit C13 at the door: a report bringing its terms while the pool is closed answers `Closed`
+/// and pays for no read, so a closure gives nobody a way to run up outcalls.
+#[test]
+fn a_report_with_terms_while_the_pool_is_closed_reads_nothing() {
+    use settlement_api::types::pool::{PoolArrival, PoolArrivalOutcome};
+    let (world, _) = swap_world();
+    let paused: Result<(), String> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_pool_paused",
+        encode_one(true).unwrap(),
+    );
+    paused.unwrap();
+    let before = world.pic.get_canister_http().len();
+    let memo = types::pool::DepositTerms {
+        kind: types::pool::DepositKind::Stake {
+            owner: types::pool::PoolAccount::Evm(types::EvmAddress::new([0x11; 20])),
+        },
+        min_usdc: types::TokenAmount::from(100_000_u32),
+        premium: types::TokenAmount::ZERO,
+        icp_fees: types::TokenAmount::ZERO,
+        move_fee: types::TokenAmount::ZERO,
+        salt: [0x51; 32],
+    }
+    .memo()
+    .unwrap();
+    let answer: Result<PoolArrivalOutcome, PoolError> = update(
+        &world.pic,
+        world.canister,
+        Principal::from_slice(&[0x42; 29]),
+        "note_pool_arrival",
+        encode_one(PoolArrival {
+            base_tx: vec![0xaa; 32],
+            src_chain: BASE,
+            src_tx: vec![],
+            memo: Some(memo),
+        })
+        .unwrap(),
+    );
+    assert!(
+        matches!(&answer, Err(PoolError::Closed(why)) if !why.contains("no Swapic configured")),
+        "{answer:?}"
+    );
+    assert_eq!(
+        world.pic.get_canister_http().len(),
+        before,
+        "no read was paid for"
+    );
+}
+
+/// An amount no give-back could return is refused before the pull: nothing moves, and a pull
+/// to check can never be made for the price of a ledger fee.
+#[test]
+fn an_amount_at_or_under_the_ledgers_fee_is_never_pulled() {
+    use settlement_api::types::pool::{StakeIcpArgs, StakeIcpOk};
+    let world = world(usdc(1_000));
+    world.approve(staker(), usdc(1));
+    let before = world.balance(staker());
+    for amount in [1, FEE] {
+        let answer: Result<StakeIcpOk, PoolError> = update(
+            &world.pic,
+            world.canister,
+            staker(),
+            "stake_icp",
+            encode_one(StakeIcpArgs {
+                from_subaccount: None,
+                amount: Nat::from(amount),
+                owner: PoolAccount::Icp(settlement_api::types::pool::IcpAccount {
+                    owner: staker(),
+                    subaccount: None,
+                }),
+                move_fee: Nat::from(0_u8),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(answer, Err(PoolError::NotAllowed(_))),
+            "{amount}: {answer:?}"
+        );
+    }
+    assert_eq!(world.balance(staker()), before);
 }

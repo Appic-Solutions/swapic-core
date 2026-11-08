@@ -60,11 +60,15 @@ impl StakeRequest {
     /// The wire arguments as `stake_icp` reads them, `caller` paying: what the door checks
     /// and what a consent message states.
     pub fn of(caller: Principal, args: StakeIcpArgs) -> Result<Self, PoolError> {
+        let owner = PoolAccount::try_from(args.owner)?;
+        if let PoolAccount::Icp(account) = &owner {
+            crate::pool::not_anonymous("the stake's owner", account.owner)?;
+        }
         Ok(Self {
             caller,
             from_subaccount: subaccount("from_subaccount", args.from_subaccount)?,
             amount: settlement_api::types::pool::amount("amount", &args.amount)?,
-            owner: PoolAccount::try_from(args.owner)?,
+            owner,
             move_fee: settlement_api::types::pool::amount("move_fee", &args.move_fee)?,
         })
     }
@@ -88,6 +92,8 @@ impl WithdrawRequest {
     /// The wire arguments as `withdraw_icp` reads them, `caller` owning the shares: what the
     /// door checks and what a consent message states.
     pub fn of(caller: Principal, args: WithdrawIcpArgs) -> Result<Self, PoolError> {
+        let to: IcpAccount = args.to.try_into()?;
+        crate::pool::not_anonymous("the withdrawal's account", to.owner)?;
         Ok(Self {
             caller,
             from: subaccount("from", args.from)?,
@@ -98,7 +104,7 @@ impl WithdrawRequest {
             )?),
             token_out: args.token_out,
             min_out: settlement_api::types::pool::u128_of("min_out", &args.min_out)?,
-            to: args.to.try_into()?,
+            to,
             move_fee: settlement_api::types::pool::amount("move_fee", &args.move_fee)?,
         })
     }
@@ -308,49 +314,110 @@ pub async fn stake(
 ) -> Result<StakeIcpOk, PoolError> {
     pool::require_running()?;
     pool::require_pool_open()?;
-    // counted before anything is recorded: past the limit, nothing is written
-    pool::callers::admit(ic_cdk::api::caller(), now())?;
+    pool::caller_not_anonymous(ic_cdk::api::caller())?;
     let request = StakeRequest::of(ic_cdk::api::caller(), args)?;
+    read_state(|state| check_stake(state, &request, &sanctioned))?;
+    let from = IcpAccount {
+        owner: request.caller,
+        subaccount: request.from_subaccount,
+    };
+    let ckusdc = pool_store::ledger()
+        .settings
+        .ok_or_else(|| PoolError::Closed("the pool has no settings".to_string()))?
+        .ckusdc_ledger;
+    // every check first; nothing is written before the money is in (audit C15)
+    crate::pool::pull_first::worth_pulling(ckusdc, request.amount)?;
+    let at = now();
+    let pair = crate::pool::pull_first::dedup("stake_icp", &from, ckusdc, request.amount, at);
+    let block =
+        crate::pool::pull_first::pull("stake_icp", ckusdc, from, request.amount, pair, at).await?;
+    match staked(&request, from, now(), block, &sanctioned) {
+        Ok(shares) => Ok(StakeIcpOk {
+            shares: Nat::from(shares.get()),
+        }),
+        Err(why) => {
+            let fee = pool_store::ledger()
+                .settings
+                .and_then(|settings| settings.fee_of(ckusdc));
+            crate::pool::pull_first::give_back(
+                "stake_icp",
+                ckusdc,
+                from,
+                request.amount,
+                fee,
+                pair,
+                &format!("{why:?}"),
+            )
+            .await;
+            Err(why)
+        }
+    }
+}
+
+/// The stake's lines once its money is in, in this one message: the checks run again on the
+/// pool as it is now, then the stake started and minted at the pool's price. A mint the fold
+/// refuses ends the stake with nothing on its account, and the caller gives the money back.
+fn staked(
+    request: &StakeRequest,
+    from: IcpAccount,
+    at: Timestamp,
+    block: u64,
+    sanctioned: &impl Fn(&Address) -> bool,
+) -> Result<types::pool::Shares, PoolError> {
+    // the pool may have closed while the pull was out: then the money goes back
+    pool::require_running()?;
+    pool::require_pool_open()?;
     let id = read_state(|state| -> Result<_, PoolError> {
-        check_stake(state, &request, &sanctioned)?;
+        check_stake(state, request, sanctioned)?;
         Ok(op_id(
             false,
             &request.owner,
             state.meta().next_event_index.get(),
         ))
     })?;
-    let _busy = Busy::take(id.into_bytes())
-        .ok_or_else(|| PoolError::Unavailable("the stake is in progress".to_string()))?;
     pool_store::record_at(
         PoolStep::StakeStarted {
             id,
             owner: request.owner,
-            from: IcpAccount {
-                owner: request.caller,
-                subaccount: request.from_subaccount,
-            },
+            from,
             amount: request.amount,
-            created_at: now(),
+            created_at: at,
             move_fee: request.move_fee,
         },
-        now(),
+        at,
     )
     .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
-    match payout::pull_stake(&Live, id, now).await {
-        Ok(Some(shares)) => Ok(StakeIcpOk {
-            shares: Nat::from(shares.get()),
-        }),
-        Ok(None) => Err(PoolError::Unavailable(
-            "the stake is no longer in progress".to_string(),
-        )),
-        Err(Stop::Failed(why)) => Err(PoolError::Ledger(why)),
-        Err(Stop::Append(why)) | Err(Stop::Retry(why)) => Err(PoolError::Unavailable(format!(
-            "{why}; the canister asks again with the same pull"
-        ))),
-        Err(Stop::Later) | Err(Stop::Again) | Err(Stop::Queued) => Err(PoolError::Unavailable(
-            "the canister asks again with the same pull".to_string(),
-        )),
-    }
+    let minted = request
+        .amount
+        .checked_sub(request.move_fee)
+        .and_then(|staked| pool_store::ledger().mint_now(staked))
+        .ok_or_else(|| "the stake mints nothing".to_string())
+        .and_then(|shares| {
+            pool_store::record_at(
+                PoolStep::StakedIcp {
+                    id,
+                    owner: request.owner,
+                    amount: request.amount,
+                    move_fee: request.move_fee,
+                    shares,
+                    block,
+                },
+                at,
+            )
+            .map(|_| shares)
+            .map_err(|error| error.to_string())
+        });
+    minted.map_err(|why| {
+        // the room goes back; the money is given back by the caller
+        let _ = pool_store::record_at(
+            PoolStep::StakeFailed {
+                id,
+                why: why.clone(),
+            },
+            at,
+        );
+        PoolError::NotAllowed(why)
+    })
 }
 
 /// `withdraw_icp`'s body.
@@ -359,6 +426,7 @@ pub async fn withdraw(
     sanctioned: impl Fn(&Address) -> bool,
 ) -> Result<WithdrawIcpOk, PoolError> {
     pool::require_running()?;
+    pool::caller_not_anonymous(ic_cdk::api::caller())?;
     let request = WithdrawRequest::of(ic_cdk::api::caller(), args)?;
     let closed = pool::pool_closed();
     let owner = PoolAccount::Icp(request.owner());

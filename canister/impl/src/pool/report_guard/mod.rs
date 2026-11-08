@@ -10,14 +10,20 @@ use settlement_api::types::pool::PoolError;
 pub use types::timer_state::{Limiter, PER_HOUR, PER_MINUTE, PER_TX_PER_HOUR};
 use types::{Timestamp, TxHash};
 
-/// The guard for a report of `base_tx` by the caller at `now`: the watcher always passes.
-pub fn admit(base_tx: TxHash, now: Timestamp) -> Result<(), PoolError> {
-    if roles::get().watcher == Some(ic_cdk::api::caller()) {
+/// The guard for a report of `base_tx` by the caller at `now`: the watcher and the
+/// controllers always pass (ops hand terms in during an outage); a report of a transfer the
+/// canister already awaits terms for (`awaited`) is held to its own transaction's count only.
+pub fn admit(base_tx: TxHash, now: Timestamp, awaited: bool) -> Result<(), PoolError> {
+    let caller = ic_cdk::api::caller();
+    if roles::get().watcher == Some(caller) || ic_cdk::api::is_controller(&caller) {
         return Ok(());
     }
     // a refused report changed nothing worth writing: what it pruned is pruned again
     timer_state::update(|state| {
-        let admitted = state.reports.admit(base_tx, now);
+        let admitted = match awaited {
+            true => state.reports.admit_awaited(base_tx, now),
+            false => state.reports.admit(base_tx, now),
+        };
         let changed = admitted.is_ok();
         (admitted, changed)
     })

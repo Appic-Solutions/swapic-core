@@ -15,6 +15,7 @@ pub mod orphans;
 pub mod pay;
 pub mod payout;
 pub mod plan;
+pub mod pull_first;
 pub mod queue;
 pub mod rebalance;
 pub mod report_guard;
@@ -27,6 +28,7 @@ use crate::guards::require_not_halted;
 use crate::storage::config;
 use crate::storage::events::read_state;
 use crate::storage::halt::is_halted;
+use candid::Principal;
 use settlement_api::types::errors::GuardError;
 use settlement_api::types::pool::{PocketView, PoolError, PoolStateView};
 use types::books::PoolClosed;
@@ -139,6 +141,29 @@ pub fn state_view(ledger: &PoolLedger, closed: Option<String>) -> PoolStateView 
         per_swap_cap: candid::Nat::from(settings.per_swap_cap),
         premium_bps: settings.premium_bps,
     }
+}
+
+/// Refuses an account a request names for the anonymous principal: anyone can call as it, so
+/// whatever is paid or staked to it is anyone's to take (audit C4). Checked in the shared
+/// conversions, which consent runs too, so a cold signer is never told it is theirs.
+pub fn not_anonymous(what: &str, owner: Principal) -> Result<(), PoolError> {
+    if owner == Principal::anonymous() {
+        return Err(PoolError::NotAllowed(format!(
+            "{what} is owned by the anonymous principal, which anyone can spend from"
+        )));
+    }
+    Ok(())
+}
+
+/// The doors that pay an ICP caller refuse the anonymous one in their bodies (never in the
+/// conversions, which a cold signer's anonymous consent request runs too).
+pub fn caller_not_anonymous(caller: Principal) -> Result<(), PoolError> {
+    if caller == Principal::anonymous() {
+        return Err(PoolError::NotAllowed(
+            "the anonymous caller cannot use this door".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `principal` is sanctioned, as the sanctions set keys it (its text): the one screen

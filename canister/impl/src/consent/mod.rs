@@ -516,6 +516,24 @@ fn stake(door: Door, args: StakeIcpArgs, known: &Known) -> Result<Consent, Refus
                     subaccount: request.from_subaccount,
                 },
             ),
+            // the fee the request names, which may be up to all but one unit of the stake
+            Line::text(
+                "Kept",
+                format!(
+                    "{} Swapic fee; {} is staked",
+                    Amount {
+                        units: request.move_fee,
+                        token: CKUSDC
+                    },
+                    Amount {
+                        units: request
+                            .amount
+                            .checked_sub(request.move_fee)
+                            .unwrap_or(TokenAmount::ZERO),
+                        token: CKUSDC
+                    }
+                ),
+            ),
             Line::text("Stake owned by", owner),
         ],
     })
@@ -549,7 +567,11 @@ fn withdraw_icp(door: Door, args: WithdrawIcpArgs, known: &Known) -> Result<Cons
         Line::text(
             "Fees",
             format!(
-                "ledger fees come out of the {}",
+                "{} Swapic fee, and ledger fees, come out of the {}",
+                Amount {
+                    units: request.move_fee,
+                    token: USDC
+                },
                 text::decimal(request.usdc, USDC_DECIMALS)
             ),
         ),
