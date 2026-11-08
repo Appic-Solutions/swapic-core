@@ -156,7 +156,8 @@ fn a_user_paid_swap_burn_sends_all_it_produced_and_writes_the_right_message() {
         let event_rent = env.svm.minimum_balance_for_rent_exemption(748);
         assert_eq!(lamports - env.lamports(&pubkey_of(&user)), event_rent + 5000);
         let own = own_compute(&meta.logs, &env.a.program);
-        assert!(own <= 25_000, "own compute {own}");
+        println!("own compute {own}");
+        assert!(own <= 20_000, "own compute {own}");
     }
 }
 

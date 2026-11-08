@@ -113,3 +113,55 @@ fn compute_budget_instructions_have_their_tags() {
     assert_eq!(compute_unit_limit(5).data, vec![2, 5, 0, 0, 0]);
     assert_eq!(compute_unit_price(5).data, vec![3, 5, 0, 0, 0, 0, 0, 0, 0]);
 }
+
+#[test]
+fn the_swapic_table_holds_every_fixed_account_of_a_burn_and_an_arrival() {
+    let a = addresses();
+    let entries = swapic_table_entries(&a);
+    assert_eq!(entries.len(), 60);
+    let unique: alloc::collections::BTreeSet<_> = entries.iter().collect();
+    assert_eq!(unique.len(), entries.len());
+    let event = a.event(&[1; 32]);
+    let head = burn_head(&a, &[9; 32], 1, 6, false, &event, false);
+    for meta in &head {
+        // only the user and the event account are per-swap
+        if meta.pubkey != [9; 32] && meta.pubkey != event {
+            assert!(entries.contains(&meta.pubkey));
+        }
+    }
+    assert!(entries.len() <= 256);
+}
+
+#[test]
+fn a_lookup_table_address_comes_from_its_authority_and_slot() {
+    let (ix, table) = create_lookup_table(&[1; 32], &[2; 32], 5);
+    assert_eq!(ix.accounts[0].pubkey, table);
+    assert_eq!(&ix.data[..4], &[0, 0, 0, 0]);
+    assert_eq!(&ix.data[4..12], &5u64.to_le_bytes());
+    let extend = extend_lookup_table(&table, &[1; 32], &[2; 32], &[[3; 32], [4; 32]]);
+    assert_eq!(extend.data.len(), 4 + 8 + 64);
+    assert_eq!(freeze_lookup_table(&table, &[1; 32]).data, vec![1, 0, 0, 0]);
+}
+
+#[test]
+fn a_route_straight_to_the_user_has_no_taker_account_and_no_forward_step() {
+    let (taker_account, output) = ([7u8; 32], [8u8; 32]);
+    let mut route = vec![
+        AccountMeta::readonly([1; 32]),
+        AccountMeta::writable([2; 32]),
+        AccountMeta::writable(taker_account),
+        AccountMeta::readonly([3; 32]),
+        AccountMeta::readonly([4; 32]),
+        AccountMeta::readonly([5; 32]),
+        AccountMeta::readonly([5; 32]),
+        AccountMeta::writable(output),
+        AccountMeta::readonly([6; 32]),
+        AccountMeta::readonly(JUPITER),
+        AccountMeta::readonly(taker_account),
+    ];
+    assert_eq!(route_straight_to(&mut route, &taker_account, &output), 2);
+    assert!(route.iter().all(|m| m.pubkey != taker_account));
+    assert_eq!(route[2].pubkey, output);
+    assert!(route[10].writable, "the last swap writes it, whatever the answer said");
+    assert_eq!(route[7].pubkey, JUPITER, "the forward step reads as none");
+}

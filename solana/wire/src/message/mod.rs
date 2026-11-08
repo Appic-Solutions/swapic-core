@@ -334,8 +334,33 @@ impl KeySpace {
     }
 }
 
-/// Compiles a v0 message. An account that is neither a signer nor invoked comes from the first
-/// table that holds it; everything else stays a static key.
+/// The tables in the order that uses the fewest: each next one is the table that can provide the most
+/// keys no earlier table provides. A used table costs at least 34 bytes, more than the keys it saves when
+/// it holds only one or two, so this decides which long routes fit a transaction.
+fn fewest_tables<'a>(tables: &'a [LookupTable], keys: &[Pubkey]) -> Vec<&'a LookupTable> {
+    let holds = |table: &LookupTable, key: &Pubkey| table.entries.iter().take(256).any(|e| e == key);
+    let mut open: Vec<&Pubkey> = keys.iter().collect();
+    let mut left: Vec<&LookupTable> = tables.iter().collect();
+    let mut ordered = Vec::with_capacity(tables.len());
+    while !left.is_empty() {
+        let mut best = 0;
+        let mut best_count = 0;
+        for (i, table) in left.iter().enumerate() {
+            let count = open.iter().filter(|key| holds(table, key)).count();
+            if count > best_count {
+                best = i;
+                best_count = count;
+            }
+        }
+        let table = left.remove(best);
+        open.retain(|key| !holds(table, key));
+        ordered.push(table);
+    }
+    ordered
+}
+
+/// Compiles a v0 message. An account that is neither a signer nor invoked comes from a table when one
+/// holds it, by the fewest tables; everything else stays a static key.
 pub fn compile_v0(
     payer: &Pubkey,
     instructions: &[Instruction],
@@ -343,6 +368,8 @@ pub fn compile_v0(
     blockhash: &Pubkey,
 ) -> Result<V0Message, MessageError> {
     let space = KeySpace::of(payer, instructions);
+    let eligible: Vec<Pubkey> = space.entries.iter().filter(|e| !e.1 && !e.3).map(|e| e.0).collect();
+    let tables = fewest_tables(tables, &eligible);
     let table_of = |key: &Pubkey| -> Option<(usize, u8)> {
         tables.iter().enumerate().find_map(|(t, table)| {
             let index = table.entries.iter().position(|e| e == key)?;

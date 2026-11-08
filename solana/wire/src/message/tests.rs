@@ -209,3 +209,20 @@ fn short_vectors_are_canonical() {
     let mut r = Reader { bytes: &[0x80, 0x00] };
     assert_eq!(r.short(), Err(MessageError::Truncated));
 }
+
+#[test]
+fn compile_uses_the_fewest_tables() {
+    // the first table holds one of the keys, the second holds all three: one table is enough
+    let ix = Instruction {
+        program: [9; 32],
+        accounts: vec![AccountMeta::readonly([3; 32]), AccountMeta::readonly([4; 32]), AccountMeta::readonly([5; 32])],
+        data: vec![],
+    };
+    let small = LookupTable { address: [20; 32], entries: vec![[3; 32]] };
+    let big = LookupTable { address: [21; 32], entries: vec![[5; 32], [4; 32], [3; 32]] };
+    let message = compile_v0(&[1; 32], &[ix], &[small, big], &[7; 32]).unwrap();
+    assert_eq!(message.lookups.len(), 1);
+    assert_eq!(message.lookups[0].table, [21; 32]);
+    assert_eq!(message.static_keys.len(), 2);
+    assert_eq!(V0Message::parse(&message.encode()).unwrap(), message);
+}

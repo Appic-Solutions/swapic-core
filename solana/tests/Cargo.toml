@@ -27,3 +27,5 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.10"
 serde_json = "1"
 base64 = "0.22"
+ureq = { version = "2", features = ["json"] }
+rand = "0.8"

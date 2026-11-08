@@ -37,7 +37,8 @@ fn the_canister_completes_a_swap_and_the_recipient_gets_all_of_it() {
         assert_eq!(env.balance(&env.a.vault[shard]), vault_before, "the vault is back at its baseline");
         assert!(env.exists(&pda::used_nonce(&arrival.nonce)));
         let own = own_compute(&meta.logs, &env.a.program);
-        assert!(own <= 25_000, "own compute {own}");
+        println!("own compute {own}");
+        assert!(own <= 20_000, "own compute {own}");
     }
 }
 
@@ -372,7 +373,8 @@ fn release_pays_all_the_usdc_to_the_recipient_before_the_deadline_only_for_them_
     assert_eq!(env.balance(&env.recipient_usdc), MINTED);
     assert_eq!(env.balance(&env.a.vault[0]), 0);
     let own = own_compute(&meta.logs, &env.a.program);
-    assert!(own <= 25_000, "own compute {own}");
+    println!("own compute {own}");
+        assert!(own <= 20_000, "own compute {own}");
 
     let arrival = Arrival::new(&env, "rel-self", 1, |_| {});
     let ix = arrival.release(&env, &pubkey_of(&recipient), 1, 1, &env.recipient_usdc);

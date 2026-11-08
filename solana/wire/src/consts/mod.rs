@@ -93,6 +93,49 @@ pub const SEED_TOKEN_PAIR: &[u8] = b"token_pair";
 /// How many `auth` and `vault` pairs the program has.
 pub const SHARDS: usize = 4;
 
+pub const ADDRESS_LOOKUP_TABLE_PROGRAM: Pubkey = b58("AddressLookupTab1e1111111111111111111111111");
+
+const fn hex20(text: &str) -> [u8; 20] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => panic!("not hex"),
+        }
+    }
+    let input = text.as_bytes();
+    let mut out = [0u8; 20];
+    let mut i = 0;
+    while i < 20 {
+        out[i] = nibble(input[i * 2]) << 4 | nibble(input[i * 2 + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// One EVM chain Swapic reaches over CCTP: its domain and its USDC (the kit's chain table).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SwapicDomain {
+    pub domain: u32,
+    pub chain_id: u64,
+    pub usdc: [u8; 20],
+}
+
+/// The ten EVM chains live on 2026-11-08. A new chain is one more row and a new lookup table.
+pub const SWAPIC_DOMAINS: [SwapicDomain; 10] = [
+    SwapicDomain { domain: 0, chain_id: 1, usdc: hex20("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") },
+    SwapicDomain { domain: 2, chain_id: 10, usdc: hex20("0b2c639c533813f4aa9d7837caf62653d097ff85") },
+    SwapicDomain { domain: 3, chain_id: 42161, usdc: hex20("af88d065e77c8cc2239327c5edb3a432268e5831") },
+    SwapicDomain { domain: 6, chain_id: 8453, usdc: hex20("833589fcd6edb6e08f4c7c32d4f71b54bda02913") },
+    SwapicDomain { domain: 7, chain_id: 137, usdc: hex20("3c499c542cef5e3811e1192ce70d8cc03d5c3359") },
+    SwapicDomain { domain: 10, chain_id: 130, usdc: hex20("078d782b760474a361dda0af3839290b0ef57ad6") },
+    SwapicDomain { domain: 14, chain_id: 480, usdc: hex20("79a02482a880bce3f13e09da970dc34db4cd24d1") },
+    SwapicDomain { domain: 15, chain_id: 143, usdc: hex20("754704bc059f8c67012fed69bc8a327a5aafb603") },
+    SwapicDomain { domain: 19, chain_id: 999, usdc: hex20("b88339cb7199b77e23db6e890353e22632ba630f") },
+    SwapicDomain { domain: 33, chain_id: 9745, usdc: hex20("2d661c89d812261039af9764eceaaee884f5f67f") },
+];
+
 /// The shard of a ref. The quoter, the canister and the app all compute it this way.
 pub const fn shard_of(ref_bytes: &[u8; 32]) -> usize {
     (ref_bytes[31] & 3) as usize
