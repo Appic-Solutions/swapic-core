@@ -3377,6 +3377,60 @@ fn a_pool_that_fails_its_reads_never_touches_the_pull() {
     assert_eq!(sale.token_balance(staker()), taken, "taken once");
 }
 
+/// A flood at the door by callers with no approval: every pull is refused and nothing is written,
+/// and the reads beside them stay at the few the canister allows, whoever is calling.
+#[test]
+fn a_flood_of_refused_pulls_does_not_multiply_the_reads() {
+    let sale = SaleWorld::new();
+    let deadline_s = sale.world.now().as_secs().get() + 600;
+    let mut terms = swap_terms(
+        &sale.world,
+        SOLD,
+        kyber_plan(sale.canister_address, deadline_s),
+        900_000,
+    );
+    terms.token_in = sale.token;
+    let lines = crate::client::settlement::event_count(
+        &sale.world.pic,
+        sale.world.canister,
+        sale.world.admin,
+    );
+    let calls: Vec<_> = (1..=30_u8)
+        .map(|caller| {
+            sale.world
+                .pic
+                .submit_call(
+                    sale.world.canister,
+                    Principal::from_slice(&[caller; 29]),
+                    "swap_from_icp",
+                    encode_one(terms.clone()).unwrap(),
+                )
+                .expect("submitted")
+        })
+        .collect();
+    for call in calls {
+        let raw = sale.world.pic.await_call(call).expect("the door answers");
+        let answer: Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> =
+            candid::decode_one(&raw).unwrap();
+        assert!(matches!(answer, Err(PoolError::Ledger(_))), "{answer:?}");
+    }
+    assert_eq!(
+        crate::client::settlement::event_count(
+            &sale.world.pic,
+            sale.world.canister,
+            sale.world.admin,
+        ),
+        lines,
+        "not one line"
+    );
+    let quotes = sale.quotes_asked();
+    assert!(
+        quotes < 30,
+        "the reads were not multiplied: {quotes} quotes for 30 calls"
+    );
+    assert!(sale.world.pic.get_canister_http().is_empty(), "no outcall");
+}
+
 /// A pull the ledger refuses (no approval): nothing is written, and however far the reads beside
 /// it got, no outcall starts: an outcall is the canister's to pay for, and anyone can knock.
 #[test]

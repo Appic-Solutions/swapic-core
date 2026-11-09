@@ -161,8 +161,18 @@ pub struct ReadAhead {
     pub read_at: Timestamp,
 }
 
-/// How old a round read beside a pull may be.
-pub const READ_AHEAD_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+/// How old a round read beside a pull may be: a pull and a carried start take seconds.
+pub const READ_AHEAD_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How many rounds may be out beside pulls at once. The door is free to call and limits no
+/// caller, so a flood of pulls that will be refused must not multiply what each call costs the
+/// canister, or fill its queues to the pool and the ledger: past this a sale reads for itself.
+pub const READS_OUT_AT_MOST: u32 = 2;
+
+/// Whether one more round may go out beside a pull, with `out` of them out now.
+pub fn room_for_a_read(out: u32) -> bool {
+    out < READS_OUT_AT_MOST
+}
 
 impl ReadAhead {
     /// Whether this round is `spec`'s, for the leg holding the pool with `legs_taken` taken so
@@ -186,7 +196,7 @@ impl ReadAhead {
 /// Reads a sale's round beside its pull, in a task of its own: an answer from the pool cannot
 /// reach the pull however bad it is, and nothing waits on it for long. It writes nothing, moves
 /// nothing and spends no outcall: a pull refused leaves a reading no leg ever asks for. A pool a
-/// leg is at now is left alone.
+/// leg is at now is left alone, and so is any pull past [`READS_OUT_AT_MOST`].
 pub(crate) fn read_beside_pull(
     pool: Principal,
     token_in: Principal,
@@ -195,7 +205,7 @@ pub(crate) fn read_beside_pull(
 ) {
     #[cfg(target_arch = "wasm32")]
     {
-        if LEGS.with(|legs| legs.borrow().contains(&pool)) {
+        if LEGS.with(|legs| legs.borrow().contains(&pool)) || !room_for_a_read(READS_OUT.get()) {
             return;
         }
         let legs_then = LEGS_TAKEN.get();
@@ -286,9 +296,12 @@ pub const STANDING_MARGIN: std::time::Duration = std::time::Duration::from_secs(
 const CKETH_MAINNET: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
 
 /// Whether the canister's approval of a pool for `token` may outlast one swap. Only a token the
-/// canister holds nothing of but swaps on their way, all headed for that pool anyway: never
-/// ckUSDC, the stakers' pocket, never ckETH, the ck route's float, and nothing at all while the
-/// pool has no settings to say which ledger is which.
+/// canister holds nothing of but swaps on their way (Jeff, 2026-11-09): never ckUSDC, the
+/// stakers' pocket, never ckETH, the ck route's float, and nothing at all while the pool has no
+/// settings to say which ledger is which. What it trusts the pool with: a pool gone bad could
+/// take what the canister holds of that token at that moment, up to the allowance, for a day.
+/// That is every swap of the token on its way then, those headed for another pool too (ICP is
+/// on its way to more than one).
 pub fn may_stand(token: Principal, ckusdc: Option<Principal>, cketh: Option<Principal>) -> bool {
     let Some(ckusdc) = ckusdc else {
         return false;

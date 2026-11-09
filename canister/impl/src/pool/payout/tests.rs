@@ -2121,3 +2121,13 @@ fn a_round_read_ahead_serves_only_its_own_leg_at_an_untouched_pool() {
         at
     ));
 }
+
+/// A flood of pulls that will be refused costs the canister its one call each: only so many
+/// reads go out beside them, however many callers knock.
+#[test]
+fn only_so_many_reads_go_out_beside_pulls() {
+    assert!(room_for_a_read(0));
+    assert!(room_for_a_read(READS_OUT_AT_MOST - 1));
+    assert!(!room_for_a_read(READS_OUT_AT_MOST));
+    assert!(!room_for_a_read(u32::MAX));
+}
