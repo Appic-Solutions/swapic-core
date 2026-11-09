@@ -1078,13 +1078,7 @@ fn across_refund_step<S: Store>(
     found: &Found,
     now: Timestamp,
 ) -> Result<PoolStep, String> {
-    let payouts: Vec<types::pool::EvmPayout> = state
-        .pool()
-        .lines()
-        .across_owed
-        .iter()
-        .filter_map(|id| state.store().pool_payout(*id))
-        .collect();
+    let payouts = across_owed_payouts(state);
     if crate::pool::across::unread_refundable(&payouts, found.amount, now.as_secs().get()) {
         return Err(
             "an Across refund that may pay back a payout whose fill is not read yet: credited \
@@ -1120,6 +1114,30 @@ fn across_refund_step<S: Store>(
         refunded,
         surplus: found.amount.checked_sub(back).unwrap_or(TokenAmount::ZERO),
     })
+}
+
+/// The payouts whose USDC Across holds or owes back now.
+fn across_owed_payouts<S: Store>(state: &State<S>) -> Vec<types::pool::EvmPayout> {
+    state
+        .pool()
+        .lines()
+        .across_owed
+        .iter()
+        .filter_map(|id| state.store().pool_payout(*id))
+        .collect()
+}
+
+/// Whether `found`, an Across refund to the canister not credited yet, waits for the fill read
+/// of a payout it may pay back (as [`steps_for`] answers it: not now): what holds the
+/// canister's own read of Base before its transaction until that read is in.
+pub fn across_refund_waits<S: Store>(state: &State<S>, found: &Found, now: Timestamp) -> bool {
+    found.proof == Proof::AcrossRefund
+        && !state.store().is_pool_credited(&found.credit)
+        && crate::pool::across::unread_refundable(
+            &across_owed_payouts(state),
+            found.amount,
+            now.as_secs().get(),
+        )
 }
 
 /// What one report recorded: each transfer's outcome, and why the others were not recorded

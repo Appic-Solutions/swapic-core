@@ -492,7 +492,14 @@ pub async fn backup(
                  Base stops before it and asks again"
             ));
         }
-        if held {
+        // an Across refund that may pay back a payout whose fill is not read yet waits for
+        // that read, with no alert: the cursor stops before it, the rest of it is credited now
+        let refund_waits = read_state(|state| {
+            found
+                .iter()
+                .any(|one| arrival::across_refund_waits(state, one, clock()))
+        });
+        if held || refund_waits {
             failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
         }
         // the terms the chain shows (a same-chain order's own `OrderStarted`, a CCTP
