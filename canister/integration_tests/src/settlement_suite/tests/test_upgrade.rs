@@ -431,3 +431,89 @@ fn the_deployed_state_survives_the_bsc_upgrade_and_keeps_its_across_rows() {
     assert_eq!(get_config_full(&pic, canister, admin).unwrap(), written);
     assert_eq!(read::<u64>(&pic, canister, "event_count"), events + 1);
 }
+
+/// BNB Chain's wave 2 upgrade (U1b) in place from the deployed build (`PRIOR_WASM`, the
+/// integration build of the live commit): every line it wrote is read by this build, its
+/// payouts, routes and moves answer the same, the payouts' settings read with no Across cap;
+/// then the lines and rows only this build writes (the Across cap, the claim's gas row, an
+/// Across refund credited as the canister's own) are read back as written, and again after the
+/// next upgrade.
+#[test]
+#[ignore = "needs PRIOR_WASM: scripts/build-canister.sh --integration-test settlement at the deployed commit"]
+fn the_deployed_state_survives_the_bsc_wave2_upgrade_and_keeps_its_across_lines() {
+    use crate::client::settlement::{get_config_full, set_config};
+    use settlement_api::types::pool::{PayoutSettings, PoolError, PoolStateView};
+    let (pic, canister, admin) = setup_on(wasms::prior_settlement());
+    seed_with_a_stopped_withdrawal(&pic, canister, admin);
+    let events: u64 = read(&pic, canister, "event_count");
+    let routes: IcpRoutesView = read(&pic, canister, "icp_routes");
+    let moves: Vec<MoveView> = read(&pic, canister, "rebalance_moves");
+    let state: PoolStateView = read(&pic, canister, "pool_state");
+    let payout = |pic: &PocketIc| -> Option<settlement_api::types::pool::PayoutView> {
+        let raw = pic
+            .query_call(canister, admin, "payout", encode_one(0_u64).unwrap())
+            .unwrap();
+        decode_one(&raw).unwrap()
+    };
+    let stopped = payout(&pic);
+
+    upgrade(&pic, canister, admin).unwrap();
+
+    assert_eq!(read::<u64>(&pic, canister, "event_count"), events);
+    assert_eq!(read::<IcpRoutesView>(&pic, canister, "icp_routes"), routes);
+    assert_eq!(read::<Vec<MoveView>>(&pic, canister, "rebalance_moves"), moves);
+    assert_eq!(read::<PoolStateView>(&pic, canister, "pool_state"), state);
+    assert_eq!(payout(&pic), stopped);
+
+    // the payouts' settings with the Across cap, written by this build
+    let settings = PayoutSettings {
+        min_network_fee: candid::Nat::from(50_000_u32),
+        order_wait_s: 120,
+        max_payout_gas: 2_000_000,
+        cctp_payouts: false,
+        ck: None,
+        across_in_flight_max: Some(candid::Nat::from(2_000_000_000_u64)),
+    };
+    let raw = pic
+        .update_call(canister, admin, "set_payout_settings", encode_one(&settings).unwrap())
+        .unwrap();
+    assert_eq!(decode_one::<Result<(), PoolError>>(&raw).unwrap(), Ok(()));
+    // the claim's gas row on Base
+    let mut config = get_config_full(&pic, canister, admin).unwrap();
+    if let Some(base) = config.evm_chains.get_mut(&8453) {
+        base.gas_limit.across_claim = Some(150_000);
+        base.gas_budget_wei.across_claim = Some(candid::Nat::from(10_000_000_000_000_u64));
+        base.min_network_fee.across_claim = Some(candid::Nat::from(0_u8));
+    }
+    set_config(&pic, canister, admin, &config).unwrap();
+    let written = get_config_full(&pic, canister, admin).unwrap();
+    // an Across refund to the canister with no payout owed back: all of it its own surplus
+    append_step(
+        &pic,
+        canister,
+        admin,
+        PoolStep::AcrossRefunded {
+            credit: types::pool::CreditKey {
+                chain: types::ChainId::BASE,
+                tx: types::TxHash::new([0xa7; 32]),
+                log_index: 2,
+            },
+            amount: TokenAmount::from(7_u8),
+            block: types::BlockNumber::new(40),
+            refunded: Vec::new(),
+            surplus: TokenAmount::from(7_u8),
+        },
+    );
+    let after = read::<u64>(&pic, canister, "event_count");
+    assert!(after > events);
+
+    upgrade(&pic, canister, admin).unwrap();
+
+    assert_eq!(get_config_full(&pic, canister, admin).unwrap(), written);
+    assert_eq!(read::<u64>(&pic, canister, "event_count"), after);
+    let raw = pic
+        .query_call(canister, admin, "payout_settings", encode_one(()).unwrap())
+        .unwrap();
+    let read_back: PayoutSettings = decode_one(&raw).unwrap();
+    assert_eq!(read_back, settings);
+}
