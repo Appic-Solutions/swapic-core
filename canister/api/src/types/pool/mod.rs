@@ -57,6 +57,8 @@ pub enum PoolRail {
     Cctp,
     Eco,
     SameChain,
+    /// An Across deposit from another chain, filled to the canister on the pool chain.
+    Across,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -233,6 +235,9 @@ pub struct PoolSettings {
     /// Micro USDC, the least move fee of an ICP stake and of an EVM withdrawal (each pays
     /// for one ICP to Base move). Absent: 0.
     pub least_move_fee_icp_to_base: Option<Nat>,
+    /// Micro USDC, what every use of the pool leaves in it on top of its other fees: a swap
+    /// through it, a stake, a withdrawal. Absent: 0.
+    pub pool_fee: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -292,6 +297,23 @@ pub struct WithdrawEvmOk {
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PayPayoutOk {
     pub tx_id: u64,
+}
+
+/// `check_across_fill`'s answer: what the canister's own read of an Across payout's fill made
+/// of the watcher's nudge.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum AcrossFillCheck {
+    /// Read filled at an agreed block: the payout is paid.
+    Paid,
+    /// Read, and not filled at the agreed block (or no agreed block is past the read yet):
+    /// nothing changed but the time of this read. Read again no sooner than `again_at_s`
+    /// (unix seconds); the read at the fill deadline is the only one that finds it unfilled.
+    NotYet { again_at_s: u64 },
+    /// Not read: one fill wait has not passed since the last early read. Read again no sooner
+    /// than `again_at_s` (unix seconds).
+    TooSoon { again_at_s: u64 },
+    /// No longer delivering (paid, read unfilled, stopped, or undone): nothing to read.
+    NotDelivering,
 }
 
 /// An orphan held for a controller: its credit key (48 bytes: chain, transaction, log
@@ -467,6 +489,7 @@ impl From<PoolRail> for domain::PoolRail {
             PoolRail::Cctp => Self::Cctp,
             PoolRail::Eco => Self::Eco,
             PoolRail::SameChain => Self::SameChain,
+            PoolRail::Across => Self::Across,
         }
     }
 }
@@ -477,6 +500,7 @@ impl From<domain::PoolRail> for PoolRail {
             domain::PoolRail::Cctp => Self::Cctp,
             domain::PoolRail::Eco => Self::Eco,
             domain::PoolRail::SameChain => Self::SameChain,
+            domain::PoolRail::Across => Self::Across,
         }
     }
 }
@@ -572,6 +596,11 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
                     .transpose()?
                     .unwrap_or(TokenAmount::ZERO),
             },
+            pool_fee: settings
+                .pool_fee
+                .as_ref()
+                .map(|fee| amount("pool_fee", fee))
+                .transpose()?,
             // no registration: kept in the record at their defaults, read by nothing
             ..domain::PoolSettings::default()
         })
@@ -599,6 +628,7 @@ impl From<&domain::PoolSettings> for PoolSettings {
             large_deposit_confirmations: Some(settings.large_deposit().1.get()),
             least_move_fee_base_to_icp: Some(nat(settings.least_move_fee.base_to_icp)),
             least_move_fee_icp_to_base: Some(nat(settings.least_move_fee.icp_to_base)),
+            pool_fee: Some(nat(settings.pool_fee())),
         }
     }
 }

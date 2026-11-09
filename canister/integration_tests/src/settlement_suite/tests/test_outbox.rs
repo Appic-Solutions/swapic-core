@@ -54,6 +54,7 @@ fn outbox_config() -> Config {
         eco_rescue: None,
         sweep: None,
         relay_across: None,
+        across_claim: None,
     };
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),

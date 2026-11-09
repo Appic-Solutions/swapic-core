@@ -141,7 +141,8 @@ pub fn plan<S: Store>(
         .store()
         .pool_share(&owner.key())
         .map_or(Shares::ZERO, |line| line.shares);
-    let burned = Shares::burn_for(request.usdc, ledger.total_assets(), ledger.total_shares)
+    let burned = ledger
+        .burn_for_withdrawal(request.usdc, owned)
         .ok_or_else(|| PoolError::NotAllowed("the pool's assets cannot pay that".to_string()))?;
     if burned > request.max_shares || burned > owned {
         return Err(PoolError::ShortShares {

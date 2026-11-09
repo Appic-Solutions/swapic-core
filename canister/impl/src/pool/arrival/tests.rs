@@ -42,6 +42,7 @@ fn base() -> PoolChain {
             chain: ChainId::ETHEREUM,
             swapic: address("0xf0ba68cbc87c31ecaa9654eb14daf3632eaca406"),
         }],
+        across: None,
     }
 }
 
@@ -52,6 +53,7 @@ fn arbitrum() -> SourceChain {
         eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
         usdc: address("0xaf88d065e77c8cc2239327c5edb3a432268e5831"),
         runner: address("0x7e345acab79102ac9588c60b9358ec4d79438eee"),
+        across: None,
     }
 }
 
@@ -738,6 +740,7 @@ fn a_cctp_or_same_chain_arrival_ignores_its_source() {
         eco_portal: base().eco_portal,
         usdc: base().usdc,
         runner: base().runner,
+        across: None,
     };
     for raw in [cctp(the_ref(2)), same_chain(the_ref(1))] {
         let receipt = parse(&raw);
@@ -917,6 +920,7 @@ fn an_eco_refund_credits_a_delivering_payout_once() {
                 tx_hash: TxHash::new([7; 32]),
                 block: BlockNumber::new(30),
                 intent: Some(intent),
+                across: None,
             },
             at(4),
         )
@@ -1219,6 +1223,7 @@ fn a_refund_whose_route_does_not_parse_is_read_as_the_queue_reads_it() {
                 tx_hash: TxHash::new([7; 32]),
                 block: BlockNumber::new(30),
                 intent: Some(intent),
+                across: None,
             },
             at(4),
         )
@@ -1756,4 +1761,237 @@ fn audit_c13_a_stake_reported_while_paused_is_credited_after_the_pause_lifts() {
             DepositStatus::Arrived
         );
     });
+}
+
+/// BSC design 6.2.8 and 6.2.9 in `find` and the fold: an Across fill to the canister is proven
+/// on its source (none given: it needs one), and BNB Chain's real relayer refund leaves pay
+/// the canister (their refunded depositor stands in for it, their ETH for the pool chain's
+/// USDC) an Across refund.
+#[test]
+fn an_across_fill_needs_its_source_and_a_refund_leaf_is_an_across_refund() {
+    let fills: Value =
+        serde_json::from_str(include_str!("../across/samples/bsc_to_base_fill.json")).unwrap();
+    let fill = Receipt::parse(&fills["fill"]).unwrap();
+    let canister = address("0xf3b0042a0a3b6acb78122a6f6ead0f667a18059e");
+    let pool = PoolChain {
+        canister,
+        across: Some(crate::pool::across::AcrossPool {
+            chain: ChainId::BASE,
+            spoke_pool: address("0x09aea4b2242abc8bb4bb78d537a67a245a7bec64"),
+            usdc: address("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+            canister,
+            origins: vec![ChainId::BSC],
+        }),
+        ..base()
+    };
+    assert!(needs_source(&fill, &pool));
+    assert_eq!(find(&fill, None, &pool), Err(NoArrival::NeedsSource));
+    // with no Across pins on the pool chain, the same fill is no Across arrival
+    let no_pins = PoolChain {
+        across: None,
+        ..pool.clone()
+    };
+    assert!(!needs_source(&fill, &no_pins));
+
+    let leaves: Value =
+        serde_json::from_str(include_str!("../across/samples/bsc_refund_leaves.json")).unwrap();
+    let refunds = Receipt::parse(&leaves["receipt"]).unwrap();
+    let depositor = address("0x144c5fb302dbaa789fc59bbec301169eaa56c5fc");
+    let eth = address("0x2170ed0880ac9a755fd29b2688956bd959f933f8");
+    let bsc = PoolChain {
+        chain: ChainId::BSC,
+        usdc: eth,
+        canister: depositor,
+        eco_portal: None,
+        across: Some(crate::pool::across::AcrossPool {
+            chain: ChainId::BSC,
+            spoke_pool: address("0x4e8e101924ede233c13e2d8622dc8aed2872d505"),
+            usdc: eth,
+            canister: depositor,
+            origins: vec![],
+        }),
+        ..base()
+    };
+    assert!(!needs_source(&refunds, &bsc));
+    let found = find(&refunds, None, &bsc).unwrap();
+    let [one] = found.as_slice() else {
+        panic!("one transfer to the canister");
+    };
+    assert_eq!(one.rail, PoolRail::Across);
+    assert_eq!(one.proof, Proof::AcrossRefund);
+    assert_eq!(
+        one.amount,
+        TokenAmount::from(8_204_665_805_901_375_u64)
+    );
+}
+
+/// D9 in the fold: an Across refund credits the payout Across owes back, its whole deposit,
+/// and the rest is the canister's own surplus on the books; credited once.
+#[test]
+fn an_across_refund_credits_the_payout_owed_back_and_books_the_rest() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = crate::storage::pool::tests::waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+        );
+        let order = {
+            use alloy_primitives::{Address, U256};
+            let mut data = types::swapic::across::SWAP_AND_BRIDGE.to_vec();
+            data.extend_from_slice(&[0x5c; 32]);
+            types::swapic::encode_order(&types::swapic::Order {
+                r#ref: [0x5c; 32].into(),
+                payer: Address::repeat_byte(0x8f),
+                tokenIn: Address::repeat_byte(0x83),
+                amountIn: U256::from(1u8),
+                deadline: U256::from(900u64),
+                steps: vec![types::swapic::Step {
+                    target: Address::repeat_byte(0x97),
+                    data: data.into(),
+                    token: Address::repeat_byte(0x83),
+                    min: U256::from(1u8),
+                    writes: Vec::new(),
+                }],
+                payout: types::swapic::Payout {
+                    token: Address::ZERO,
+                    recipient: Address::ZERO,
+                    minOut: U256::ZERO,
+                },
+                memo: Vec::new().into(),
+            })
+        };
+        crate::storage::pool::tests::across_cap();
+        crate::storage::pool::tests::sign_payout_with(id, 0, 9, order);
+        let amount = crate::storage::pool::payout(id).unwrap().amount.unwrap();
+        let out = types::pool::AcrossOut {
+            destination: ChainId::BSC,
+            relay: types::swapic::across::RelayData {
+                depositor: [0x8f; 32],
+                recipient: [0x0f; 32],
+                exclusive_relayer: [0; 32],
+                input_token: [0x83; 32],
+                output_token: [0x8a; 32],
+                input_amount: amount,
+                output_amount: amount,
+                origin_chain_id: ChainId::BASE,
+                deposit_id: TokenAmount::from(7_u8),
+                fill_deadline: 1_500,
+                exclusivity_deadline: 0,
+                message: Vec::new(),
+            },
+            deposit_time: 300,
+        };
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([9; 32]),
+                block: BlockNumber::new(30),
+                intent: None,
+                across: Some(Box::new(out)),
+            },
+            at(10),
+        )
+        .unwrap();
+        // the payout's deposit and 5 units more: a stranger's refund in the same leaf
+        let found = Found {
+            credit: CreditKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([0xab; 32]),
+                log_index: 3,
+            },
+            amount: amount.checked_add(TokenAmount::from(5_u8)).unwrap(),
+            block: BlockNumber::new(40),
+            at: None,
+            rail: PoolRail::Across,
+            proof: Proof::AcrossRefund,
+        };
+        // past its fill deadline and not read yet: the refund may be its own, so not now
+        let past = at(2_000_000_000_000);
+        let early = read_state(|state| steps_for(state, &found, &Judge::without_terms(), past));
+        assert!(early.unwrap_err().contains("not read yet"));
+        // the canister's own read of Base stops before it, until the read is in
+        assert!(read_state(|state| across_refund_waits(state, &found, past)));
+        assert!(record(std::slice::from_ref(&found), &Judge::without_terms(), past)
+            .outcomes
+            .is_empty());
+        record_at(
+            PoolStep::PayoutUnfilled {
+                id,
+                block: BlockNumber::new(31),
+            },
+            at(11),
+        )
+        .unwrap();
+        assert!(!read_state(|state| across_refund_waits(state, &found, past)));
+        let before = ledger();
+        let steps = read_state(|state| steps_for(state, &found, &Judge::without_terms(), at(12)))
+            .unwrap();
+        assert_eq!(
+            steps,
+            vec![PoolStep::AcrossRefunded {
+                credit: found.credit,
+                amount: found.amount,
+                block: found.block,
+                refunded: vec![id],
+                surplus: TokenAmount::from(5_u8),
+            }]
+        );
+        let books_before = read_state(|state| state.book(&ChainId::BASE));
+        let recorded = record(std::slice::from_ref(&found), &Judge::without_terms(), at(12));
+        assert_eq!(recorded.outcomes.len(), 1);
+        let after = ledger();
+        assert_eq!(
+            after.pockets.base.free,
+            before.pockets.base.free.checked_add(amount).unwrap()
+        );
+        assert_eq!(
+            crate::storage::pool::payout(id).unwrap().reclaim,
+            Some(types::pool::Reclaim::Credited)
+        );
+        let books = read_state(|state| state.book(&ChainId::BASE));
+        assert_eq!(
+            books.unattributed,
+            books_before.unattributed.checked_add(TokenAmount::from(5_u8)).unwrap()
+        );
+        // credited once
+        assert_eq!(
+            read_state(|state| steps_for(state, &found, &Judge::without_terms(), at(13))),
+            Ok(Vec::new())
+        );
+    });
+}
+
+/// An Across deposit into the pool comes from BNB Chain alone, where the config pins Across:
+/// never from another chain with pins (the watcher reads fills from BNB Chain alone).
+#[test]
+fn an_across_deposit_into_the_pool_comes_from_bnb_chain_alone() {
+    let pins = types::config::AcrossPins {
+        periphery: EvmAddress::new([1; 20]),
+        swap_proxy: EvmAddress::new([2; 20]),
+        spoke_pool: EvmAddress::new([3; 20]),
+        multicall_handler: EvmAddress::new([4; 20]),
+    };
+    use types::numeric::{GasAmount, Wei};
+    let entry = || types::config::EvmChain {
+        swapic: EvmAddress::new([5; 20]),
+        runner: EvmAddress::new([6; 20]),
+        cctp_receiver: EvmAddress::new([7; 20]),
+        usdc: EvmAddress::new([8; 20]),
+        token_messenger: EvmAddress::new([9; 20]),
+        message_transmitter: EvmAddress::new([10; 20]),
+        gas_limit: types::config::PerAction::all(GasAmount::from(2_000_000_u64)),
+        gas_budget: types::config::PerAction::all(Wei::from(1_u64)),
+        min_network_fee: types::config::PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: Some(pins),
+    };
+    let mut config = types::Config::default();
+    for chain in [ChainId::BASE, ChainId::BSC, ChainId::ARBITRUM] {
+        config.evm_chains.0.insert(chain, entry());
+    }
+    assert_eq!(across_origins(&config, ChainId::BASE), vec![ChainId::BSC]);
+    config.evm_chains.0.get_mut(&ChainId::BSC).unwrap().across = None;
+    assert!(across_origins(&config, ChainId::BASE).is_empty());
 }

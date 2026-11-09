@@ -226,3 +226,93 @@ fn a_native_sweep_waits_for_a_nonce_still_being_signed() {
         );
     });
 }
+
+/// A fee sweep goes while the real balance holds every line to the unit, and waits while it does
+/// not, whatever the hourly check's tolerance: a wrong fee line never reaches the pool's money.
+#[test]
+fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let config = types::Config {
+            pool_chain: Some(ChainId::BASE),
+            books_tolerance: types::config::BooksTolerance(TokenAmount::from(1_000_000_u32)),
+            ..types::Config::default()
+        };
+        let line = EventType::Books {
+            chain_id: ChainId::BASE,
+            step: BookStep::FeeEarned {
+                tx_hash: TxHash::new([1; 32]),
+                amount: TokenAmount::from(5_000_000_u32),
+                block: Some(types::BlockNumber::new(1)),
+            },
+        };
+        append_event_at(line, at(1)).unwrap();
+        let refuses = |observed: u32| {
+            read_state(|state| {
+                balance_refuses(
+                    state,
+                    &config,
+                    ChainId::BASE,
+                    types::BlockNumber::new(10),
+                    TokenAmount::from(observed),
+                    false,
+                )
+            })
+        };
+        assert_eq!(refuses(5_000_000), None, "the books match");
+        assert_eq!(
+            refuses(9_000_000),
+            None,
+            "a surplus takes nothing from anyone"
+        );
+        // the hourly check's tolerance is not given to a sweep: a unit short is refused
+        let why = refuses(4_999_999).expect("a unit below the books");
+        // and never while a transaction of the canister on the chain is still open
+        let busy = read_state(|state| {
+            balance_refuses(
+                state,
+                &config,
+                ChainId::BASE,
+                types::BlockNumber::new(10),
+                TokenAmount::from(9_000_000_u32),
+                true,
+            )
+        });
+        assert!(busy.is_some_and(|why| why.contains("still open")));
+        // a bridged payout the pool still holds in flight has left the address: once the chain
+        // is quiet it takes nothing off the balance
+        let mut ledger = crate::storage::pool::ledger();
+        ledger.pockets.base.in_flight = TokenAmount::from(4_945_000_u32);
+        let mut store = crate::state::MemoryStore::default();
+        store.put_pool_ledger(ledger);
+        let line = EventType::Books {
+            chain_id: ChainId::BASE,
+            step: BookStep::FeeEarned {
+                tx_hash: TxHash::new([1; 32]),
+                amount: TokenAmount::from(5_000_000_u32),
+                block: Some(types::BlockNumber::new(1)),
+            },
+        };
+        let mut state = crate::state::State::new(store);
+        crate::state::transitions::apply_state_transition(
+            &mut state,
+            &types::events::Event {
+                index: types::EventIndex::new(0),
+                timestamp: at(1),
+                payload: line,
+            },
+        );
+        assert_eq!(
+            balance_refuses(
+                &state,
+                &config,
+                ChainId::BASE,
+                types::BlockNumber::new(10),
+                TokenAmount::from(5_000_000_u32),
+                false,
+            ),
+            None
+        );
+        assert!(why.contains("below the books"), "{why}");
+    });
+}

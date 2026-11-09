@@ -104,6 +104,7 @@ fn setup(world: &World, direction: MoveDirection) -> Setup<'_> {
             canister: canister(),
             eco_portal: Some(portal()),
             across_fee: None,
+            pool_chain: None,
         },
         swapic: address("0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406"),
         source_usdc: usdc_on(src),

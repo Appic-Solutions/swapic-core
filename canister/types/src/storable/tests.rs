@@ -312,6 +312,7 @@ fn samples() -> Vec<Sample> {
                     block: BlockNumber::new(23_600_001),
                     amount: TokenAmount::from(157_740_u32),
                 }]),
+                user_paid: None,
             },
         ),
         // the outbox entries above are open; this one pins the block its attempt closed at
@@ -419,7 +420,77 @@ fn samples() -> Vec<Sample> {
     ));
     all.push(hub_route_sample());
     all.extend(across_samples());
+    all.extend(across_payout_samples());
+    all.extend(across_waiting_samples());
+    all.extend(fee_books_samples());
     all
+}
+
+/// The fees users pay in transactions of their own, and the pool fee (2026-11-09): appended after
+/// every older line.
+fn fee_books_samples() -> Vec<Sample> {
+    use crate::books::{BookStep, Books, UserFeeKey};
+    use crate::pool::PoolSettings;
+    use crate::timer_state::{FeeCatchUp, TimerState};
+    vec![
+        // a chain's books, once users paid fees in transactions of their own
+        sample(
+            "books with fees users paid themselves",
+            Books {
+                fee_income: TokenAmount::from(900_001_u32),
+                user_paid: Some(TokenAmount::from(64_610_u32)),
+                ..Books::default()
+            },
+        ),
+        // the key of a transaction whose user-paid fees are booked
+        sample(
+            "user fee key",
+            UserFeeKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([0x5a; 32]),
+            },
+        ),
+        // a user-paid fee's line
+        sample(
+            "books line of a fee a user paid",
+            Event {
+                index: EventIndex::new(25_000),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_002_500),
+                payload: crate::events::EventType::Books {
+                    chain_id: ChainId::BASE,
+                    step: BookStep::UserFeeEarned {
+                        tx_hash: TxHash::new([0x5a; 32]),
+                        amount: TokenAmount::from(64_610_u32),
+                        block: Some(BlockNumber::new(54_930_356)),
+                    },
+                },
+            },
+        ),
+        // the timers, the fee catch-up on its way
+        sample(
+            "the timers' memory, the fee catch-up on its way",
+            TimerState {
+                fee_catch_up: Some(FeeCatchUp {
+                    next: 1_452,
+                    end: 1_531,
+                    tries: 2,
+                    passed_over: 1,
+                }),
+                ..TimerState::default()
+            },
+        ),
+        // pool settings with a pool fee
+        sample(
+            "pool ledger with a pool fee",
+            crate::pool::PoolLedger {
+                settings: Some(PoolSettings {
+                    pool_fee: Some(TokenAmount::from(10_000_u32)),
+                    ..PoolSettings::default()
+                }),
+                ..crate::pool::PoolLedger::default()
+            },
+        ),
+    ]
 }
 
 /// The routes with a token through a hub: the variant a route of the deployed build never
@@ -1074,6 +1145,22 @@ fn timer_state_samples() -> Vec<Sample> {
             // absent, so this sample's bytes stay the ones the golden pins
             ck_reads: None,
             pulls_to_check: None,
+            across_refunds_waiting: None,
+            fee_catch_up: None,
+        },
+    )]
+}
+
+/// The read of Base's Across refunds kept aside, each waiting for its payout's fill read (BSC
+/// wave 2): appended after every older line.
+fn across_waiting_samples() -> Vec<Sample> {
+    use crate::hash::TxHash;
+    use crate::timer_state::TimerState;
+    vec![sample(
+        "the read of Base's Across refunds kept aside",
+        TimerState {
+            across_refunds_waiting: Some(vec![TxHash::new([0xf4; 32]), TxHash::new([0xf5; 32])]),
+            ..TimerState::default()
         },
     )]
 }
@@ -1329,6 +1416,7 @@ fn rescue_samples() -> Vec<Sample> {
         eco_rescue: Some(base + 13),
         sweep: None,
         relay_across: None,
+        across_claim: None,
     };
     let chain = EvmChain {
         swapic: address(0xb1),
@@ -1356,6 +1444,7 @@ fn rescue_samples() -> Vec<Sample> {
                 eco_rescue: r.eco_rescue.map(GasAmount::from),
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         gas_budget: {
@@ -1377,6 +1466,7 @@ fn rescue_samples() -> Vec<Sample> {
                 eco_rescue: r.eco_rescue.map(Wei::from),
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         min_network_fee: {
@@ -1398,6 +1488,7 @@ fn rescue_samples() -> Vec<Sample> {
                 eco_rescue: r.eco_rescue.map(TokenAmount::from),
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         usdc_name: None,
@@ -1712,6 +1803,7 @@ fn rebalance_samples() -> Vec<Sample> {
         eco_rescue: None,
         sweep: None,
         relay_across: None,
+        across_claim: None,
     };
     let chain = EvmChain {
         swapic: address(0x9d),
@@ -1739,6 +1831,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         gas_budget: {
@@ -1760,6 +1853,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         min_network_fee: {
@@ -1781,6 +1875,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         usdc_name: None,
@@ -1939,6 +2034,7 @@ fn arrival_terms_samples() -> Vec<Sample> {
                     max_payout_gas: 914_000,
                     cctp_payouts: true,
                     ck: None,
+                    across_in_flight_max: None,
                 },
             },
         ),
@@ -2218,6 +2314,7 @@ fn pool_tx_samples() -> Vec<Sample> {
         eco_rescue: None,
         sweep: None,
         relay_across: None,
+        across_claim: None,
     };
     let chain = EvmChain {
         swapic: address(0x51),
@@ -2245,6 +2342,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         gas_budget: {
@@ -2266,6 +2364,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         min_network_fee: {
@@ -2287,6 +2386,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 eco_rescue: None,
                 sweep: None,
                 relay_across: None,
+                across_claim: None,
             }
         },
         usdc_name: None,
@@ -2631,6 +2731,7 @@ fn payout_samples() -> Vec<Sample> {
         reverted_block: None,
         reverted_at: None,
         ck: None,
+        across: None,
     };
     let withdrawal = EvmWithdrawal {
         staker: address(0xe6),
@@ -2660,6 +2761,7 @@ fn payout_samples() -> Vec<Sample> {
                 max_payout_gas: 241_000,
                 cctp_payouts: false,
                 ck: None,
+                across_in_flight_max: None,
             }),
             next_id: 242,
             fees_icp: TokenAmount::from(243_u8),
@@ -2669,6 +2771,7 @@ fn payout_samples() -> Vec<Sample> {
             next_seq: 247,
             open: BTreeSet::from([248, 249]),
             head_since: Some(Timestamp::from_nanos(1_800_000_000_000_000_250)),
+            across_owed: crate::pool::PayoutIds::default(),
         }),
         evm_changed: None,
         ..PoolLedger::default()
@@ -2730,6 +2833,7 @@ fn payout_samples() -> Vec<Sample> {
                 tx_hash: TxHash::new([0xfe; 32]),
                 block: BlockNumber::new(37_000_254),
                 intent: Some([0xfb; 32]),
+                across: None,
             },
         ),
         (
@@ -2841,6 +2945,7 @@ fn pool_samples() -> Vec<Sample> {
                 base_to_icp: TokenAmount::from(1_500_000_u64),
                 icp_to_base: TokenAmount::from(1_400_000_u64),
             },
+            pool_fee: None,
         }),
         pockets: Pockets {
             base: Pocket {
@@ -3207,10 +3312,18 @@ fn across_samples() -> Vec<Sample> {
         message_transmitter: address(0),
         gas_limit: PerAction {
             relay_across: Some(GasAmount::from(1_600_000_u64)),
+            // the claim's row came after this sample: absent, so its bytes stay the golden's
+            across_claim: None,
             ..PerAction::all(GasAmount::from(900_000_u64))
         },
-        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
-        min_network_fee: PerAction::all(TokenAmount::from(30_000_u64)),
+        gas_budget: PerAction {
+            across_claim: None,
+            ..PerAction::all(Wei::from(1_000_000_000_000_000_u64))
+        },
+        min_network_fee: PerAction {
+            across_claim: None,
+            ..PerAction::all(TokenAmount::from(30_000_u64))
+        },
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_millis(450),
@@ -3239,4 +3352,187 @@ fn across_samples() -> Vec<Sample> {
         ..Config::default()
     };
     vec![sample("config with BNB Chain's Across rows", config)]
+}
+
+/// BNB Chain's wave 2 (BSC plan P7): an ICP payout delivering through Across, its paid line
+/// with the deposit, the payouts' lines with the in-flight cap and the payouts owed back, an
+/// Across refund credited, the canister's claim signed, the claim's gas row, and a deposit
+/// that came by the Across rail.
+fn across_payout_samples() -> Vec<Sample> {
+    use crate::config::{EvmChain, PerAction};
+    use crate::events::{EventType, TxPurpose};
+    use crate::evm::EvmAddress;
+    use crate::pool::*;
+    use crate::swapic::across::RelayData;
+    use std::collections::BTreeSet;
+
+    let address = |byte: u8| EvmAddress::new([byte; 20]);
+    let relay = RelayData {
+        depositor: [0xa1; 32],
+        recipient: [0xa2; 32],
+        exclusive_relayer: [0; 32],
+        input_token: [0xa3; 32],
+        output_token: [0xa4; 32],
+        input_amount: TokenAmount::from(300_000_000_u64),
+        output_amount: TokenAmount::from(299_000_000_000_000_000_000_u128),
+        origin_chain_id: ChainId::BASE,
+        deposit_id: TokenAmount::from(6_434_219_u64),
+        fill_deadline: 1_800_000_301,
+        exclusivity_deadline: 0,
+        message: vec![0xa5; 7],
+    };
+    let out = AcrossOut {
+        destination: ChainId::BSC,
+        relay,
+        deposit_time: 1_800_000_302,
+    };
+    let terms = PayoutTerms {
+        dst_chain: ChainId::BSC,
+        recipient: address(0xa6),
+        token_out: address(0xa7),
+        min_out: TokenAmount::from(303_u16),
+        deadline: Timestamp::from_nanos(1_800_000_000_000_000_304),
+    };
+    let mut payout = EvmPayout::new(
+        305,
+        PayoutKind::Withdrawal(EvmWithdrawal {
+            staker: address(0xa8),
+            usdc: TokenAmount::from(306_000_000_u64),
+            max_shares: Shares::new(307),
+            move_fee: TokenAmount::from(308_u16),
+            network_fee: TokenAmount::from(309_u16),
+            nonce: 310,
+            burned: Shares::new(311),
+        }),
+        terms,
+        Undo::Remint {
+            owner: PoolAccount::Evm(address(0xa8)),
+            shares: Shares::new(311),
+        },
+        Timestamp::from_nanos(1_800_000_000_000_000_312),
+    );
+    payout.status = PayoutStatus::Delivering;
+    payout.amount = Some(TokenAmount::from(300_000_000_u64));
+    payout.reclaim = Some(Reclaim::Pending);
+    payout.across = Some(out.clone());
+    let lines = PoolLedger {
+        payouts: Some(PayoutLines {
+            settings: Some(PayoutSettings {
+                across_in_flight_max: Some(TokenAmount::from(2_000_000_000_u64)),
+                ..PayoutSettings::default()
+            }),
+            next_id: 313,
+            across_owed: PayoutIds(BTreeSet::from([305, 314])),
+            ..PayoutLines::default()
+        }),
+        ..PoolLedger::default()
+    };
+    let credit = CreditKey {
+        chain: ChainId::BASE,
+        tx: TxHash::new([0xa9; 32]),
+        log_index: 315,
+    };
+    let pool = |step: PoolStep| crate::events::Event {
+        index: crate::numeric::EventIndex::new(316),
+        timestamp: Timestamp::from_nanos(1_800_000_000_000_000_317),
+        payload: EventType::Pool { step },
+    };
+    let chain = EvmChain {
+        swapic: address(0xaa),
+        runner: address(0xab),
+        cctp_receiver: address(0xac),
+        usdc: address(0xad),
+        token_messenger: address(0xae),
+        message_transmitter: address(0xaf),
+        gas_limit: PerAction {
+            across_claim: Some(GasAmount::from(120_000_u64)),
+            ..PerAction::all(GasAmount::from(900_000_u64))
+        },
+        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::from(30_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
+    };
+    let config = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::BASE, chain)])),
+        ..Config::default()
+    };
+    let rail = Registration {
+        kind: DepositKind::Swap {
+            recipient: IcpAccount {
+                owner: candid::Principal::from_slice(&[0xb5; 10]),
+                subaccount: None,
+            },
+            token_out: candid::Principal::from_slice(&[0xb6; 10]),
+            min_out: 0xb7,
+        },
+        min_usdc: TokenAmount::from(323_000_000_u64),
+        premium: TokenAmount::from(324_000_u64),
+        move_fee: TokenAmount::ZERO,
+        src_chain: ChainId::BSC,
+        src_payer: address(0xb8),
+        rail: PoolRail::Across,
+        expires_at: Timestamp::from_nanos(1_800_000_000_000_000_325),
+        salt: [0xb9; 32],
+        icp_fees: Some(TokenAmount::from(20_000_u64)),
+        least_usdc: TokenAmount::from(323_000_000_u64),
+    };
+    vec![
+        sample("pool payout delivering through Across", payout),
+        sample("pool lines with Across payouts owed back", lines),
+        sample(
+            "pool payout paid with its Across deposit",
+            pool(PoolStep::PayoutPaid {
+                id: 305,
+                tx_hash: TxHash::new([0xb0; 32]),
+                block: BlockNumber::new(37_000_318),
+                intent: None,
+                across: Some(Box::new(out)),
+            }),
+        ),
+        sample(
+            "pool Across refund credited",
+            pool(PoolStep::AcrossRefunded {
+                credit,
+                amount: TokenAmount::from(300_000_001_u64),
+                block: BlockNumber::new(37_000_319),
+                refunded: vec![305],
+                surplus: TokenAmount::from(1_u8),
+            }),
+        ),
+        sample(
+            "pool Across claim signed",
+            pool(PoolStep::AcrossClaimSigned {
+                chain_id: ChainId::BASE,
+                nonce: Nonce::new(320),
+                tx_hash: TxHash::new([0xb1; 32]),
+                raw_tx: vec![0x02, 0xb2],
+            }),
+        ),
+        sample(
+            "Across claim created",
+            crate::events::Event {
+                index: crate::numeric::EventIndex::new(321),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_322),
+                payload: EventType::TxCreated {
+                    purpose: TxPurpose::AcrossClaim(ChainId::BASE),
+                    chain_id: ChainId::BASE,
+                    nonce: Nonce::new(320),
+                    to: address(0xb3),
+                    value: Wei::ZERO,
+                    data: vec![0xb4; 4],
+                    gas_limit: GasAmount::from(120_000_u64),
+                    max_fee: crate::numeric::WeiPerGas::from(1_000_u64),
+                    max_priority_fee: crate::numeric::WeiPerGas::from(1_u64),
+                    action: Some(crate::config::GasAction::AcrossClaim),
+                },
+            },
+        ),
+        sample("config with the Across claim's gas row", config),
+        sample("pool deposit by the Across rail", Registered::new(rail)),
+    ]
 }

@@ -1,11 +1,11 @@
 use crate::state::transitions::apply_state_transition;
 use crate::state::{State, Store};
 use crate::storage::memory::{
-    books_memory, eco_rescues_memory, events_data_memory, events_index_memory,
-    flow_by_source_memory, flow_by_tx_memory, flows_memory, ledger_meta_memory, nonces_memory,
-    pool_credited_memory, pool_deposits_memory, pool_ledger_memory, pool_moves_memory,
-    pool_orphans_memory, pool_own_sources_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    booked_user_fees_memory, books_memory, eco_rescues_memory, events_data_memory,
+    events_index_memory, flow_by_source_memory, flow_by_tx_memory, flows_memory,
+    ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
+    pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
+    pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
     pool_withdrawal_nonces_memory, signed_memory, sweeps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -13,7 +13,7 @@ use ic_stable_structures::{StableBTreeMap, StableBTreeSet, StableCell, StableLog
 use std::cell::RefCell;
 use std::ops::RangeFrom;
 use thiserror::Error;
-use types::books::Books;
+use types::books::{Books, UserFeeKey};
 use types::events::{Event, EventType};
 use types::hash::{OwnerKey, PoolRef};
 use types::pool::{CreditKey, EvmPayout, NonceUse, PoolLedger, Registered, ShareLine};
@@ -65,6 +65,11 @@ thread_local! {
     // Every chain's USDC books. Part of the fold: only `Books` lines write them.
     static BOOKS: RefCell<StableBTreeMap<ChainId, Books, Memory>> =
         RefCell::new(StableBTreeMap::init(books_memory()));
+
+    // The transactions whose user-paid fees are booked. Part of the fold: only `Books` lines
+    // write it.
+    static BOOKED_USER_FEES: RefCell<StableBTreeSet<UserFeeKey, Memory>> =
+        RefCell::new(StableBTreeSet::init(booked_user_fees_memory()));
 
     // The pool: its ledger, its deposits by ref, its shares by account key, and every
     // transfer it credited. Part of the fold: only `Pool` lines write them.
@@ -191,6 +196,18 @@ impl Store for StableStore {
 
     fn books(&self) -> Vec<(ChainId, Books)> {
         BOOKS.with(|books| books.borrow().iter().collect())
+    }
+
+    fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool {
+        BOOKED_USER_FEES.with(|booked| booked.borrow().contains(key))
+    }
+
+    fn put_user_fee_booked(&mut self, key: UserFeeKey) {
+        BOOKED_USER_FEES.with(|booked| booked.borrow_mut().insert(key));
+    }
+
+    fn booked_user_fees(&self) -> Vec<UserFeeKey> {
+        BOOKED_USER_FEES.with(|booked| booked.borrow().iter().collect())
     }
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {

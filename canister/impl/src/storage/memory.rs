@@ -57,6 +57,8 @@ const SWEEPS_MEMORY_ID: MemoryId = MemoryId::new(44);
 // 45 held flows by a landed transfer, retired before it was ever deployed
 const FLOW_BY_SOURCE_MEMORY_ID: MemoryId = MemoryId::new(46);
 const FLOW_BY_TX_MEMORY_ID: MemoryId = MemoryId::new(47);
+// the transactions whose user-paid fees are booked
+const BOOKED_USER_FEES_MEMORY_ID: MemoryId = MemoryId::new(48);
 
 fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
@@ -180,6 +182,10 @@ pub fn eco_rescues_memory() -> Memory {
 
 pub fn flow_by_tx_memory() -> Memory {
     memory(FLOW_BY_TX_MEMORY_ID)
+}
+
+pub fn booked_user_fees_memory() -> Memory {
+    memory(BOOKED_USER_FEES_MEMORY_ID)
 }
 
 pub fn flow_by_source_memory() -> Memory {

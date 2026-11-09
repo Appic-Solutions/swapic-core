@@ -22,6 +22,18 @@
 //! - Resolved (a controller, `resolve_payout`): a payout stopped for a human is
 //!   put back on its undo (`Refund`), or its signed order found paid (`MarkPaid`): the paid
 //!   line, from where a reverted payout's USDC sits (reserved again), once.
+//! - Across (BSC design 6.2.7, 6.2.9): an order with an Across step joins `across_owed` when
+//!   it is signed, and leaves it when it reverts, is found delivered or paid by a controller,
+//!   or Across's refund of it is credited. Paid with its deposit read off the receipt, it is
+//!   Delivering until the fill is read; Unfilled keeps its USDC in `in_flight`, owed back by
+//!   Across, and is NOT undone (Jeff, 2026-11-09: the pool never fronts it, the user waits):
+//!   no undo is admitted until Across's refund of it is credited. One Across refund to the
+//!   canister (AcrossRefunded) credits every payout it pays back, each its whole deposit, an
+//!   unfilled ICP swap's undo beginning in the same step, and books the rest as the
+//!   canister's own surplus. A payout
+//!   whose deposit is out may stop for a human (its fill read contradicts itself, or its
+//!   receipt shows no single deposit): Refund then owes it back as Unfilled does, MarkPaid
+//!   takes its paid line from `in_flight`.
 //! - A swap through the ck minter (`EvmPayout::ck`) never touches the Base pocket: no queue,
 //!   no order, no paid line. Withdrawing lowers `icp.reserved` and `owed` by its hold before
 //!   any of it leaves. Withdrawn moves nothing, and Landed closes it. Reimbursed, on proof
@@ -49,6 +61,44 @@ use crate::pool::payout::{
 };
 use crate::pool::plan;
 use crate::pool::{PoolAccount, PoolStep, ShareLine, Shares};
+
+/// Whether `order` (`abi.encode` of an Order) carries an Across step: its payout's deposit is
+/// out from its signature.
+fn deposits_on_across(order: &PinnedOrder) -> bool {
+    crate::swapic::decode_order(&order.order)
+        .is_some_and(|order| crate::swapic::across::across_step_at(&order.steps).is_some())
+}
+
+/// Whether payout `payout`'s USDC is out on Across, not yet owed back: its order was signed
+/// with an Across step, it never reverted, and nothing found it unfilled.
+fn on_across(lines: &PayoutLines, payout: &EvmPayout) -> bool {
+    lines.across_owed.contains(&payout.id) && payout.reclaim.is_none()
+}
+
+/// What the Across payouts in flight hold together (every payout in `across_owed`), the
+/// in-flight cap's other side (D16).
+fn across_out(lines: &PayoutLines, lookup: &impl PoolLookup) -> Result<TokenAmount, PoolStepError> {
+    lines
+        .across_owed
+        .iter()
+        .filter_map(|id| lookup.payout(*id))
+        .filter_map(|payout| payout.amount)
+        .try_fold(TokenAmount::ZERO, |sum, amount| sum.checked_add(amount))
+        .ok_or(PoolStepError::Overflow)
+}
+
+/// Whether `payout` read unfilled on Across waits for Across's refund before any undo: the pool
+/// never pays its ckUSDC back while its USDC is still at Across.
+fn waits_for_across_refund(payout: &EvmPayout) -> bool {
+    payout.status == PayoutStatus::Unfilled
+        && payout.across.is_some()
+        && payout.reclaim != Some(Reclaim::Credited)
+}
+
+/// The refusal of an undo before Across's refund of the payout is credited.
+const ACROSS_REFUND_FIRST: PoolStepError = PoolStepError::Terms(
+    "an unfilled Across payout is undone only once Across's refund of it is credited",
+);
 
 fn status_of(payout: &EvmPayout) -> String {
     format!("{:?}", payout.status)
@@ -122,6 +172,20 @@ fn unfilled(ledger: &mut PoolLedger, payout: &mut EvmPayout) {
     payout.base_reserved = false;
     payout.status = PayoutStatus::Unfilled;
     payout.reclaim = Some(Reclaim::Pending);
+}
+
+/// A payout's undo begins at `at`, with why: its refund is asked next. Old semantics (the
+/// module's note): an ICP swap paid once and released holds its ckUSDC back first.
+fn begin_undo(ledger: &mut PoolLedger, payout: &mut EvmPayout, why: String, at: Timestamp) {
+    if payout.icp_released.0 {
+        let held = payout.icp_hold();
+        let icp = &mut ledger.pockets.icp;
+        icp.free = sat_sub(icp.free, held);
+        icp.reserved = sat_add(icp.reserved, held);
+        payout.icp_released = crate::pool::payout::Flag(false);
+    }
+    payout.status = PayoutStatus::Undoing(why);
+    payout.undoing_at = Some(at);
 }
 
 /// Takes a payout off the queue at `at`, with its hold.
@@ -248,7 +312,8 @@ impl PoolLedger {
             PoolStep::PayoutFillEarly { .. }
             | PoolStep::PayoutDelivered { .. }
             | PoolStep::PayoutUnfilled { .. }
-            | PoolStep::PayoutRefunded { .. } => self.admits_payout_delivery(step, lookup),
+            | PoolStep::PayoutRefunded { .. }
+            | PoolStep::AcrossRefunded { .. } => self.admits_payout_delivery(step, lookup),
             PoolStep::PayoutResolved { .. }
             | PoolStep::PayoutStopped { .. }
             | PoolStep::PayoutUndoing { .. }
@@ -476,7 +541,7 @@ impl PoolLedger {
             }
             // a payout waiting is signed once: a revert undoes it, never signs it
             // again, its pinned order included
-            PoolStep::PayoutSigned { id, .. } => {
+            PoolStep::PayoutSigned { id, order, .. } => {
                 let payout = payout_of(lookup, *id)?;
                 if payout.status != PayoutStatus::Waiting
                     || !payout.base_reserved
@@ -488,6 +553,20 @@ impl PoolLedger {
                 let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
                 if amount > self.pockets.base.reserved {
                     return Err(PoolStepError::Overflow);
+                }
+                // an Across order within the cap on what the Across payouts in flight hold
+                // together (D16), held here, where nothing awaits: payouts signed at once
+                // never all pass on one old total. Refused, its signature is dropped and the
+                // payout waits on, its USDC and ckUSDC where they were
+                if deposits_on_across(order) {
+                    let settings = lines.settings.as_ref().ok_or(PoolStepError::NoSettings)?;
+                    settings
+                        .admits_across(amount, across_out(&lines, lookup)?)
+                        .map_err(|_| {
+                            PoolStepError::Terms(
+                                "the Across payouts in flight would pass their cap",
+                            )
+                        })?;
                 }
                 Ok(())
             }
@@ -508,6 +587,13 @@ impl PoolLedger {
                 let payout = payout_of(lookup, *id)?;
                 if !matches!(payout.status, PayoutStatus::Signed(_)) {
                     return Err(not_from(step.name(), &payout));
+                }
+                // an Across order's paid line carries its deposit, and nothing else does
+                if let PoolStep::PayoutPaid { intent, across, .. } = step {
+                    let across_order = lines.across_owed.contains(id);
+                    if across.is_some() != across_order || (across.is_some() && intent.is_some()) {
+                        return Err(PoolStepError::Mismatch);
+                    }
                 }
                 let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
                 if amount > self.pockets.base.in_flight {
@@ -557,6 +643,13 @@ impl PoolLedger {
             // Eco's refund of the intent the payout published, all of its reward: of a payout
             // delivering (the refund proves the intent unfilled), or one whose USDC Eco still
             // owes back; credited once, and never a payout paid again
+            PoolStep::AcrossRefunded {
+                credit,
+                amount,
+                refunded,
+                surplus,
+                ..
+            } => self.admits_across_refund(lookup, credit, *amount, refunded, *surplus),
             PoolStep::PayoutRefunded {
                 id, credit, amount, ..
             } => {
@@ -588,6 +681,65 @@ impl PoolLedger {
             }
             _ => Err(unrouted(step)),
         }
+    }
+
+    /// The rules of an Across refund to the canister (BSC design D9): credited once; each
+    /// payout it pays back owed back by Across now (unfilled, its deposit read), once, and
+    /// paid its whole deposit; together within the transfer, and `surplus` exactly the rest,
+    /// which is never the pool's.
+    fn admits_across_refund(
+        &self,
+        lookup: &impl PoolLookup,
+        credit: &crate::pool::CreditKey,
+        amount: TokenAmount,
+        refunded: &[u64],
+        surplus: TokenAmount,
+    ) -> Result<(), PoolStepError> {
+        if lookup.is_credited(credit) {
+            return Err(PoolStepError::AlreadyCredited(*credit));
+        }
+        let lines = self.lines();
+        let (mut deposits, mut back) = (TokenAmount::ZERO, TokenAmount::ZERO);
+        for (at, id) in refunded.iter().enumerate() {
+            if refunded[..at].contains(id) {
+                return Err(PoolStepError::Terms(
+                    "an Across refund pays a payout back once",
+                ));
+            }
+            let payout = payout_of(lookup, *id)?;
+            let deposit = payout
+                .across
+                .as_ref()
+                .map(|across| across.relay.input_amount)
+                .ok_or_else(|| not_from("AcrossRefunded", &payout))?;
+            if payout.reclaim != Some(Reclaim::Pending) || !lines.across_owed.contains(id) {
+                return Err(not_from("AcrossRefunded", &payout));
+            }
+            let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
+            if amount > deposit {
+                return Err(PoolStepError::Terms(
+                    "an Across deposit holds at least its payout's amount",
+                ));
+            }
+            deposits = deposits
+                .checked_add(deposit)
+                .ok_or(PoolStepError::Overflow)?;
+            back = back.checked_add(amount).ok_or(PoolStepError::Overflow)?;
+        }
+        if deposits > amount {
+            return Err(PoolStepError::Terms(
+                "the deposits paid back are more than the refund",
+            ));
+        }
+        if amount.checked_sub(back) != Some(surplus) {
+            return Err(PoolStepError::Terms(
+                "the surplus is the refund less the payouts it pays back",
+            ));
+        }
+        if back > self.pockets.base.in_flight {
+            return Err(PoolStepError::Overflow);
+        }
+        Ok(())
     }
 
     /// The rules of a payout stopped for a human or undone: stopped, a controller's
@@ -631,6 +783,18 @@ impl PoolLedger {
                             });
                         }
                     }
+                    // a stopped payout whose deposit is out on Across: its USDC left the pocket
+                    PayoutResolution::MarkPaid if on_across(&self.lines(), &payout) => {
+                        let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
+                        let fee = payout.base_fee.unwrap_or(TokenAmount::ZERO);
+                        if amount > self.pockets.base.in_flight
+                            || fee > self.pockets.base.reserved
+                            || (!payout.icp_released.0
+                                && payout.icp_hold() > self.pockets.icp.reserved)
+                        {
+                            return Err(PoolStepError::Overflow);
+                        }
+                    }
                     PayoutResolution::MarkPaid => {
                         if payout.order.is_none() || !payout.base_reserved {
                             return Err(PoolStepError::Terms(
@@ -660,20 +824,30 @@ impl PoolLedger {
             // reverted order Swapic says ran after all
             PoolStep::PayoutStopped { id, .. } => {
                 let payout = payout_of(lookup, *id)?;
-                if !matches!(
-                    payout.status,
-                    PayoutStatus::Opened
-                        | PayoutStatus::Swapping
-                        | PayoutStatus::Undoing(_)
-                        | PayoutStatus::Reverted
-                        | PayoutStatus::CkWithdrawing
-                ) {
+                let across_out = on_across(&self.lines(), &payout)
+                    && matches!(
+                        payout.status,
+                        PayoutStatus::Signed(_) | PayoutStatus::Delivering
+                    );
+                if !across_out
+                    && !matches!(
+                        payout.status,
+                        PayoutStatus::Opened
+                            | PayoutStatus::Swapping
+                            | PayoutStatus::Undoing(_)
+                            | PayoutStatus::Reverted
+                            | PayoutStatus::CkWithdrawing
+                    )
+                {
                     return Err(not_from("PayoutStopped", &payout));
                 }
                 Ok(())
             }
             PoolStep::PayoutUndoing { id, .. } => {
                 let payout = payout_of(lookup, *id)?;
+                if waits_for_across_refund(&payout) {
+                    return Err(ACROSS_REFUND_FIRST);
+                }
                 if !matches!(
                     payout.status,
                     PayoutStatus::Opened
@@ -699,6 +873,9 @@ impl PoolLedger {
             // a signed payout waits for its transaction's end: undone only once it reverted
             PoolStep::PayoutUndone { id, .. } => {
                 let payout = payout_of(lookup, *id)?;
+                if waits_for_across_refund(&payout) {
+                    return Err(ACROSS_REFUND_FIRST);
+                }
                 if !matches!(
                     payout.status,
                     PayoutStatus::Opened
@@ -890,7 +1067,8 @@ impl PoolLedger {
             PoolStep::PayoutDelivered { .. }
             | PoolStep::PayoutFillEarly { .. }
             | PoolStep::PayoutUnfilled { .. }
-            | PoolStep::PayoutRefunded { .. } => {
+            | PoolStep::PayoutRefunded { .. }
+            | PoolStep::AcrossRefunded { .. } => {
                 self.apply_payout_delivery(step, lookup, at, &mut lines, effects)
             }
             PoolStep::PayoutResolved { .. }
@@ -1045,6 +1223,25 @@ impl PoolLedger {
                 payout.status = PayoutStatus::Signed(index);
                 payout.order = Some(order.clone());
                 payout.tx_hash = Some(*tx_hash);
+                if deposits_on_across(order) {
+                    lines.across_owed.insert(*id);
+                }
+                effects.payout = Some(payout);
+            }
+            // an order that deposited on Across: delivering, every line as it was until its
+            // fill is read
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash,
+                block,
+                across: Some(across),
+                ..
+            } => {
+                let mut payout = lookup.payout(*id)?;
+                payout.status = PayoutStatus::Delivering;
+                payout.tx_hash = Some(*tx_hash);
+                payout.paid_block = Some(*block);
+                payout.across = Some((**across).clone());
                 effects.payout = Some(payout);
             }
             // an order that published an Eco intent: delivering, every line as it was until
@@ -1054,6 +1251,7 @@ impl PoolLedger {
                 tx_hash,
                 block,
                 intent: Some(intent),
+                across: None,
             } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.status = PayoutStatus::Delivering;
@@ -1068,6 +1266,7 @@ impl PoolLedger {
                 tx_hash,
                 block,
                 intent: None,
+                across: None,
             } => {
                 let mut payout = lookup.payout(*id)?;
                 payout.tx_hash = Some(*tx_hash);
@@ -1084,6 +1283,7 @@ impl PoolLedger {
             // back to reserved, for its undo: never signed again
             PoolStep::PayoutReverted { id, block } => {
                 let mut payout = lookup.payout(*id)?;
+                lines.across_owed.remove(id);
                 payout.reverted_block = *block;
                 payout.reverted_at = Some(at);
                 let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
@@ -1115,8 +1315,44 @@ impl PoolLedger {
         match step {
             PoolStep::PayoutDelivered { id, .. } => {
                 let mut payout = lookup.payout(*id)?;
+                lines.across_owed.remove(id);
                 paid(self, lines, &mut payout, id);
                 effects.payout = Some(payout);
+            }
+            // each payout Across paid back: its USDC to the Base pocket's free line, once, and an
+            // unfilled ICP swap's undo begins in the same step (its ckUSDC back to the user);
+            // the rest of the transfer is the canister's own (the state books it)
+            PoolStep::AcrossRefunded {
+                credit,
+                amount,
+                block,
+                refunded,
+                ..
+            } => {
+                for id in refunded {
+                    let mut payout = lookup.payout(*id)?;
+                    let back = payout.amount.unwrap_or(TokenAmount::ZERO);
+                    let base = &mut self.pockets.base;
+                    base.in_flight = sat_sub(base.in_flight, back);
+                    base.free = sat_add(base.free, back);
+                    payout.reclaim = Some(Reclaim::Credited);
+                    lines.across_owed.remove(id);
+                    if payout.status == PayoutStatus::Unfilled && payout.is_icp_swap() {
+                        let why = payout
+                            .across
+                            .as_ref()
+                            .map(crate::pool::payout::AcrossOut::unfilled_why)
+                            .unwrap_or_default();
+                        begin_undo(self, &mut payout, why, at);
+                    }
+                    effects.payouts.push(payout);
+                }
+                self.unseen.push(crate::pool::UnseenArrival {
+                    chain: credit.chain,
+                    block: *block,
+                    amount: *amount,
+                });
+                effects.credited = Some(*credit);
             }
             // noted, nothing moves
             PoolStep::PayoutFillEarly { id } => {
@@ -1190,6 +1426,10 @@ impl PoolLedger {
                         lines.open.insert(*id);
                     }
                     PayoutResolution::Refund => {
+                        // its deposit out on Across: owed back as an unfilled one is
+                        if on_across(lines, &payout) {
+                            unfilled(self, &mut payout);
+                        }
                         if payout.icp_released.0 {
                             let held = payout.icp_hold();
                             let icp = &mut self.pockets.icp;
@@ -1201,6 +1441,11 @@ impl PoolLedger {
                             PayoutStatus::Undoing(crate::pool::payout::REFUNDED.to_string());
                         payout.undoing_at = refund_at.or(payout.undoing_at).or(Some(at));
                         lines.open.insert(*id);
+                    }
+                    // its deposit out on Across and found filled: its USDC left already
+                    PayoutResolution::MarkPaid if on_across(lines, &payout) => {
+                        lines.across_owed.remove(id);
+                        paid(self, lines, &mut payout, id);
                     }
                     PayoutResolution::MarkPaid => {
                         let amount = payout.amount.unwrap_or(TokenAmount::ZERO);
@@ -1224,15 +1469,7 @@ impl PoolLedger {
             }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;
-                if payout.icp_released.0 {
-                    let held = payout.icp_hold();
-                    let icp = &mut self.pockets.icp;
-                    icp.free = sat_sub(icp.free, held);
-                    icp.reserved = sat_add(icp.reserved, held);
-                    payout.icp_released = crate::pool::payout::Flag(false);
-                }
-                payout.status = PayoutStatus::Undoing(why.clone());
-                payout.undoing_at = Some(at);
+                begin_undo(self, &mut payout, why.clone(), at);
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutUndone { id, why, block } => {

@@ -22,10 +22,8 @@ pub async fn drive_deposit(
             .ok_or_else(|| Stop::Retry("the pool has no settings".to_string()))?;
         match (&deposit.status, deposit.terms.kind) {
             (DepositStatus::Arrived, DepositKind::Stake { owner }) => {
-                let minted = deposit
-                    .owed()
-                    .checked_sub(deposit.terms.move_fee)
-                    .and_then(|amount| ledger.mint_now(amount))
+                let minted = ledger
+                    .mint_for_stake(deposit.owed(), deposit.terms.move_fee)
                     .ok_or_else(|| Stop::Failed("the stake mints nothing".to_string()))?;
                 return record(
                     PoolStep::Minted {
@@ -175,10 +173,9 @@ pub async fn pull_stake(
     {
         Ok(block) => {
             // priced after the await, on the pool as it is now, in this message, on what is
-            // left of the stake once Swapic's move fee is taken
-            let shares = amount
-                .checked_sub(move_fee)
-                .and_then(|staked| pool_store::ledger().mint_now(staked))
+            // left of the stake once Swapic's move fee and the pool fee are taken
+            let shares = pool_store::ledger()
+                .mint_for_stake(amount, move_fee)
                 .ok_or_else(|| Stop::Failed("the stake mints nothing".to_string()))?;
             record(
                 PoolStep::StakedIcp {

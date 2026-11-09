@@ -12,12 +12,54 @@ use crate::state::{State, Store};
 use types::books::BooksError;
 use types::pool::{OrphanStatus, PayoutKind, PayoutStatus, PendingOp};
 use types::sweep::{Sweep, SweepAsset};
-use types::TokenAmount;
+use types::{BlockNumber, ChainId, TokenAmount};
 
 fn sum(mut amounts: impl Iterator<Item = TokenAmount>) -> TokenAmount {
     amounts
         .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
         .unwrap_or(TokenAmount::MAX)
+}
+
+/// Why a USDC fee sweep on `chain` may not go now, given the `observed` balance (micro USD) every
+/// node read at `block`; None when it may. A fee line is read off a receipt one node gave, so it
+/// is never taken on its word: a sweep goes only while the real balance holds every line the
+/// books keep there, the pool's included, to the unit. The hourly check's tolerance is not
+/// given here: with it a wrong fee line could take up to that much of the pool's money. Every
+/// line is an exact sum the balance holds (each floored to micro USD, so their sum is never
+/// above the balance's own floor), so an honest book always passes.
+///
+/// A rebalancing move's USDC passes through the canister's address on Ethereum, so a balance
+/// there proves nothing while one is open.
+pub fn balance_refuses<S: Store>(
+    state: &State<S>,
+    config: &types::Config,
+    chain: ChainId,
+    block: BlockNumber,
+    observed: TokenAmount,
+    open_on_chain: bool,
+) -> Option<String> {
+    if chain == ChainId::ETHEREUM && !crate::pool::rebalance::open_moves(state).is_empty() {
+        return Some("a rebalancing move is open on Ethereum".to_string());
+    }
+    // USDC on its way out still reads in the balance while no line holds it, but only while
+    // its transaction is open: a payout or a move signed, an earlier sweep not final yet. So a
+    // sweep waits for the chain to be quiet. Once that transaction is final the USDC has left
+    // the address and the lines leave it out too, whatever the pool's `in_flight` still holds
+    // (a bridged payout stays there until its fill is read): it is never taken off again
+    if open_on_chain {
+        return Some(format!(
+            "a transaction of the canister on chain {chain} is still open"
+        ));
+    }
+    let (expected, short) = crate::books::expected_at(
+        state,
+        chain,
+        config.pool_chain,
+        block,
+        observed,
+        TokenAmount::ZERO,
+    );
+    short.then(|| format!("the balance {observed} at block {block} is below the books' {expected}"))
 }
 
 /// What the Base fee line can spare: `fees_base` less the fee an orphan's refund kept while

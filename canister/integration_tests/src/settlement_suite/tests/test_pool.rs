@@ -237,6 +237,7 @@ fn world_settled(world: World) -> World {
         large_deposit_confirmations: None,
         least_move_fee_base_to_icp: None,
         least_move_fee_icp_to_base: None,
+        pool_fee: None,
     };
     let set: Result<(), PoolError> = update(
         &world.pic,
@@ -705,6 +706,7 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
         eco_rescue: None,
         sweep: None,
         relay_across: None,
+        across_claim: None,
     };
     EvmChainConfig {
         swapic: "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406".to_string(),
@@ -730,6 +732,7 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
             eco_rescue: None,
             sweep: None,
             relay_across: None,
+            across_claim: None,
         },
         gas_budget_wei: amounts(100_000_000_000_000_000),
         min_network_fee: amounts(0),
@@ -855,6 +858,7 @@ fn swap_world() -> (World, types::EvmAddress) {
             max_payout_gas: 2_000_000,
             cctp_payouts: false,
             ck: None,
+            across_in_flight_max: None,
         })
         .unwrap(),
     );
@@ -2742,6 +2746,626 @@ fn an_amount_at_or_under_the_ledgers_fee_is_never_pulled() {
     assert_eq!(world.balance(staker()), before);
 }
 
+// BNB Chain's wave 2 (BSC design 6.2.7, 6.2.9): an ICP payout through Across, its fill read on
+// BNB Chain at its finalized block, every read answered by every node alike.
+
+const BSC: u64 = 56;
+/// BNB Chain's USDC (Binance's peg, 18 decimals).
+const PEG_USDC: &str = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d";
+const BASE_SPOKE: &str = "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64";
+const BSC_SPOKE: &str = "0x4e8E101924eDE233C13e2D8622DC8aED2872d505";
+
+fn across_pins(spoke: &str) -> settlement_api::types::config::AcrossPinsConfig {
+    settlement_api::types::config::AcrossPinsConfig {
+        periphery: "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4".to_string(),
+        swap_proxy: "0x1d1735bcf925d10b600279ce720da2673c2274c5".to_string(),
+        spoke_pool: spoke.to_string(),
+        multicall_handler: "0x0F7Ae28dE1C8532170AD4ee566B5801485c13a0E".to_string(),
+    }
+}
+
+/// [`swap_world`] with Across's pins on Base and BNB Chain (its USDC's 18 decimals, final at
+/// its finalized block), the fee bounds, and a cap of 2,000 USDC on Across payouts in flight.
+fn across_world() -> (World, types::EvmAddress) {
+    use settlement_api::types::config::{AcrossFeeConfig, EvmChainConfig};
+    use settlement_api::types::pool::PayoutSettings;
+    let (world, address) = swap_world();
+    let config = crate::client::settlement::get_config_full(&world.pic, world.canister, world.admin)
+        .expect("a controller reads the config");
+    let base = EvmChainConfig {
+        across: Some(across_pins(BASE_SPOKE)),
+        ..config.evm_chains[&BASE].clone()
+    };
+    let bsc = EvmChainConfig {
+        usdc: PEG_USDC.to_string(),
+        usdc_decimals: Some(18),
+        block_time_ms: 450,
+        across: Some(across_pins(BSC_SPOKE)),
+        ..base.clone()
+    };
+    let config = Config {
+        evm_chains: std::collections::BTreeMap::from([(BASE, base), (BSC, bsc)]),
+        rpc_urls: std::collections::BTreeMap::from([
+            (BASE, "https://base-mainnet.example/v2/key".to_string()),
+            (BSC, "https://bsc-mainnet.example/v2/key".to_string()),
+        ]),
+        finalized_chains: Some(vec![BSC]),
+        across_fee: Some(AcrossFeeConfig {
+            least_ppm: 50,
+            most_ppm: 3_000,
+            gas_allowance_usd6: std::collections::BTreeMap::from([(BSC, 100_000)]),
+        }),
+        ..config
+    };
+    crate::client::settlement::set_config(&world.pic, world.canister, world.admin, &config)
+        .expect("the Across config is taken");
+    let set: Result<(), PoolError> = update(
+        &world.pic,
+        world.canister,
+        world.admin,
+        "set_payout_settings",
+        encode_one(PayoutSettings {
+            min_network_fee: Nat::from(50_000_u32),
+            order_wait_s: 120,
+            max_payout_gas: 2_000_000,
+            cctp_payouts: false,
+            ck: None,
+            across_in_flight_max: Some(Nat::from(usdc(2_000))),
+        })
+        .unwrap(),
+    );
+    assert_eq!(set, Ok(()));
+    (world, address)
+}
+
+/// What an ICP payout of `payout` USDC to `0x2222...2222`'s BNB Chain USDC deposits on Across:
+/// its least the payout, its output 2 bps under it in 18 decimals, its fill window ten minutes
+/// past the order's deadline `deadline_s`.
+fn across_deposit(
+    canister: types::EvmAddress,
+    payout: u64,
+    deadline_s: u64,
+) -> types::swapic::across::AcrossDeposit {
+    use alloy_primitives::U256;
+    types::swapic::across::AcrossDeposit {
+        periphery: across_pins(BASE_SPOKE).periphery.parse().unwrap(),
+        spoke_pool: BASE_SPOKE.parse().unwrap(),
+        input_token: base_chain().usdc.parse().unwrap(),
+        output_token: PEG_USDC.parse().unwrap(),
+        output_amount: U256::from(payout) * U256::from(9_998u64) * U256::from(100_000_000u64),
+        min_expected: U256::from(payout),
+        depositor: canister,
+        recipient: "0x2222222222222222222222222222222222222222".parse().unwrap(),
+        destination_chain_id: BSC,
+        exclusive_relayer: types::EvmAddress::ZERO,
+        quote_timestamp: u32::try_from(deadline_s - 600).unwrap(),
+        fill_deadline: u32::try_from(deadline_s + 600).unwrap(),
+        exclusivity: 0,
+        message: Vec::new(),
+    }
+}
+
+fn across_plan(deposit: &types::swapic::across::AcrossDeposit, deadline_s: u64) -> Vec<u8> {
+    use alloy_primitives::{FixedBytes, U256};
+    use types::swapic::{addr, encode_order, Order, Payout};
+    encode_order(&Order {
+        r#ref: FixedBytes([0x67; 32]),
+        payer: addr(deposit.depositor),
+        tokenIn: addr(deposit.input_token),
+        amountIn: deposit.min_expected,
+        deadline: U256::from(deadline_s),
+        steps: vec![deposit.step()],
+        payout: Payout {
+            token: alloy_primitives::Address::ZERO,
+            recipient: alloy_primitives::Address::ZERO,
+            minOut: U256::ZERO,
+        },
+        memo: Default::default(),
+    })
+}
+
+/// The deposit as Base's SpokePool logged it.
+fn relay_of(deposit: &types::swapic::across::AcrossDeposit) -> types::swapic::across::RelayData {
+    let word = |address: types::EvmAddress| address.to_word();
+    types::swapic::across::RelayData {
+        depositor: word(deposit.depositor),
+        recipient: word(deposit.recipient),
+        exclusive_relayer: [0; 32],
+        input_token: word(deposit.input_token),
+        output_token: word(deposit.output_token),
+        input_amount: TokenAmount::from_u256(deposit.min_expected),
+        output_amount: TokenAmount::from_u256(deposit.output_amount),
+        origin_chain_id: ChainId::new(BASE),
+        deposit_id: TokenAmount::from(7_u8),
+        fill_deadline: deposit.fill_deadline,
+        exclusivity_deadline: 0,
+        message: Vec::new(),
+    }
+}
+
+impl World {
+    /// The next outcall to `host` whose calls are exactly `methods`.
+    fn next_outcall_to(
+        &self,
+        host: &str,
+        methods: &[&str],
+    ) -> pocket_ic::common::rest::CanisterHttpRequest {
+        for _ in 0..200 {
+            let found = self.pic.get_canister_http().into_iter().find(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let asked: Vec<&str> = body
+                    .as_array()
+                    .map(|calls| calls.iter().filter_map(|call| call["method"].as_str()).collect())
+                    .unwrap_or_default();
+                request.url.contains(host) && asked == methods
+            });
+            if let Some(found) = found {
+                return found;
+            }
+            self.pic.tick();
+        }
+        panic!("no outcall of {methods:?} to {host}");
+    }
+
+    /// Answers every call of `request` with `results`, in order, from every node alike.
+    fn reply_all(
+        &self,
+        request: &pocket_ic::common::rest::CanisterHttpRequest,
+        results: Vec<serde_json::Value>,
+    ) {
+        use pocket_ic::common::rest::{
+            CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
+        };
+        let body: Vec<serde_json::Value> = results
+            .into_iter()
+            .enumerate()
+            .map(|(id, result)| serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
+            .collect();
+        let body = serde_json::Value::Array(body).to_string().into_bytes();
+        let reply = || {
+            CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                status: 200,
+                headers: vec![],
+                body: body.clone(),
+            })
+        };
+        let subnet = self.pic.get_subnet(self.canister).expect("a subnet");
+        let nodes = self.pic.topology().subnet_configs[&subnet].node_ids.len();
+        self.pic
+            .mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: request.subnet_id,
+                request_id: request.request_id,
+                response: reply(),
+                additional_responses: (1..nodes).map(|_| reply()).collect(),
+            });
+        for _ in 0..12 {
+            self.pic.tick();
+        }
+    }
+
+    fn payout_status(&self, id: u64) -> settlement_api::types::pool::PayoutStatus {
+        let view: Option<settlement_api::types::pool::PayoutView> = query(
+            &self.pic,
+            self.canister,
+            self.admin,
+            "payout",
+            encode_one(id).unwrap(),
+        );
+        view.expect("the payout is there").status
+    }
+}
+
+/// An ICP user's 100 ckUSDC swap to USDC on BNB Chain through Across, opened, signed and paid
+/// on Base (its transaction's lines planted as the outbox writes them), delivering: the world,
+/// the payout's id, its deposit and the time its fill can be read.
+fn across_delivering() -> (World, u64, types::swapic::across::AcrossDeposit, u64) {
+    use settlement_api::types::pool::PayoutStatus;
+    let (world, canister) = across_world();
+    world.approve(staker(), usdc(100) + FEE);
+    let payout = usdc(100) - 100_000 - 50_000;
+    let deadline_s = world.now().as_secs().get() + 600;
+    let deposit = across_deposit(canister, payout, deadline_s);
+    let plan = across_plan(&deposit, deadline_s);
+    // the plan fits with no read; only the gas price is not read, so it waits
+    let swapped = world.swap_unpriced(swap_terms(&world, usdc(100), plan.clone(), 400_000));
+    let swapped = swapped.expect("an Across plan within the cap opens");
+    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    let id = swapped.id;
+    let created = types::EventType::TxCreated {
+        purpose: types::events::TxPurpose::PoolPayout(id),
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        to: base_chain().swapic.parse().unwrap(),
+        value: types::Wei::ZERO,
+        data: vec![0x01],
+        gas_limit: types::GasAmount::from(400_000_u64),
+        max_fee: types::WeiPerGas::new(2_000_000_000),
+        max_priority_fee: types::WeiPerGas::new(100_000_000),
+        action: Some(types::config::GasAction::PoolPayout),
+    };
+    append(&world.pic, world.canister, world.admin, &EventType::from(created))
+        .expect("the nonce is handed out");
+    world.plant(PoolStep::PayoutSigned {
+        id,
+        order: types::pool::PinnedOrder {
+            order_id: [0x68; 32],
+            order: plan,
+            gas_limit: 400_000,
+            deadline_s,
+        },
+        chain_id: ChainId::new(BASE),
+        nonce: types::Nonce::new(0),
+        tx_hash: TxHash::new([0x69; 32]),
+        raw_tx: vec![0x02, 0x01],
+    });
+    world.plant(PoolStep::PayoutPaid {
+        id,
+        tx_hash: TxHash::new([0x69; 32]),
+        block: BlockNumber::new(3),
+        intent: None,
+        across: Some(Box::new(types::pool::AcrossOut {
+            destination: ChainId::new(BSC),
+            relay: relay_of(&deposit),
+            deposit_time: world.now().as_secs().get(),
+        })),
+    });
+    assert_eq!(world.payout_status(id), PayoutStatus::Delivering);
+    let read_at = u64::from(deposit.fill_deadline);
+    (world, id, deposit, read_at)
+}
+
+/// What BNB Chain answers for the fill read: its finalized block, then that block's header
+/// (past the fill deadline), its SpokePool's relay hash and the fill's status.
+fn answer_fill_read(
+    world: &World,
+    deposit: &types::swapic::across::AcrossDeposit,
+    hash: [u8; 32],
+    status: u8,
+) {
+    let after = u64::from(deposit.fill_deadline);
+    // a fill read waits one agreed block's wait past the deadline: 16 of BNB Chain's blocks
+    // (counted at a second) and a minute
+    let wait = after.saturating_sub(world.now().as_secs().get()) + 16 + 60 + 5;
+    world.pic.advance_time(Duration::from_secs(wait));
+    answer_fill_read_at(world, hash, status, after + 30);
+}
+
+/// Answers the canister's next read of an Across fill on BNB Chain: the finalized head, then
+/// the agreed block (its time `timestamp`), the SpokePool's hash of the relay `hash` and its
+/// fill status `status`.
+fn answer_fill_read_at(world: &World, hash: [u8; 32], status: u8, timestamp: u64) {
+    let finalized = world.next_outcall_to("bsc-mainnet", &["eth_feeHistory"]);
+    world.reply_all(
+        &finalized,
+        vec![serde_json::json!({"oldestBlock": "0x3e1a2b31", "baseFeePerGas": ["0x0", "0x0"], "gasUsedRatio": [0.2]})],
+    );
+    let read = world.next_outcall_to(
+        "bsc-mainnet",
+        &["eth_getBlockByNumber", "eth_call", "eth_call"],
+    );
+    let body: serde_json::Value = serde_json::from_slice(&read.body).unwrap();
+    // at the finalized block rounded down, and one below it
+    assert_eq!(body[0]["params"][0], "0x3e1a2b2f");
+    assert_eq!(
+        body[1]["params"][0]["to"].as_str().unwrap().to_lowercase(),
+        BSC_SPOKE.to_lowercase()
+    );
+    let mut word = [0_u8; 32];
+    word[31] = status;
+    world.reply_all(
+        &read,
+        vec![
+            serde_json::json!({
+                "number": "0x3e1a2b2f",
+                "hash": format!("0x{}", "cd".repeat(32)),
+                "timestamp": format!("0x{timestamp:x}"),
+            }),
+            serde_json::json!(format!("0x{}", hex::encode(hash))),
+            serde_json::json!(format!("0x{}", hex::encode(word))),
+        ],
+    );
+}
+
+/// The fill's logs, every page answered empty or the first holding a fill.
+/// A `FilledRelay` log of BNB Chain's SpokePool pin filling `relay`, as eth_getLogs answers it.
+fn filled_relay_log(relay: &types::swapic::across::RelayData) -> serde_json::Value {
+    use alloy_sol_types::SolEvent;
+    use types::swapic::across::{FilledRelay, V3RelayExecutionEventInfo};
+    let key = relay.key();
+    let log = FilledRelay {
+        inputToken: key.input_token.into(),
+        outputToken: key.output_token.into(),
+        inputAmount: key.input_amount,
+        outputAmount: key.output_amount,
+        repaymentChainId: alloy_primitives::U256::from(BSC),
+        originChainId: alloy_primitives::U256::from(key.origin_chain_id),
+        depositId: key.deposit_id,
+        fillDeadline: key.fill_deadline,
+        exclusivityDeadline: key.exclusivity_deadline,
+        exclusiveRelayer: key.exclusive_relayer.into(),
+        relayer: [0x7e; 32].into(),
+        depositor: key.depositor.into(),
+        recipient: key.recipient.into(),
+        messageHash: key.message_hash.into(),
+        relayExecutionInfo: V3RelayExecutionEventInfo {
+            updatedRecipient: key.recipient.into(),
+            updatedMessageHash: key.message_hash.into(),
+            updatedOutputAmount: key.output_amount,
+            fillType: 0,
+        },
+    }
+    .encode_log_data();
+    let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+    serde_json::json!({
+        "address": BSC_SPOKE.to_lowercase(),
+        "topics": log.topics().iter().map(|topic| hex0x(topic.as_slice())).collect::<Vec<_>>(),
+        "data": hex0x(&log.data),
+        "logIndex": "0x0",
+        "removed": false,
+        "transactionHash": format!("0x{}", "ef".repeat(32)),
+    })
+}
+
+/// Answers the fill's log pages: a griefer's fill of a relay of their own that reuses the
+/// deposit's origin and id in every case (attack M5 counts only the deposit's own), and with
+/// `filled` the deposit's own fill too.
+fn answer_fill_logs(world: &World, deposit: &types::swapic::across::AcrossDeposit, filled: bool) {
+    let request = world
+        .pic
+        .get_canister_http()
+        .into_iter()
+        .find(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            request.url.contains("bsc-mainnet")
+                && body.as_array().is_some_and(|calls| {
+                    !calls.is_empty() && calls.iter().all(|call| call["method"] == "eth_getLogs")
+                })
+        });
+    let request = match request {
+        Some(request) => request,
+        None => {
+            for _ in 0..50 {
+                world.pic.tick();
+            }
+            world
+                .pic
+                .get_canister_http()
+                .into_iter()
+                .find(|request| request.url.contains("bsc-mainnet"))
+                .expect("the fill's logs are read")
+        }
+    };
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    let pages = body.as_array().unwrap().len();
+    assert!(pages > 1, "the deposit's whole window, in pages");
+    let relay = relay_of(deposit);
+    let griefer = types::swapic::across::RelayData {
+        input_amount: TokenAmount::from(1_u8),
+        output_amount: TokenAmount::from(1_u8),
+        ..relay.clone()
+    };
+    let results = (0..pages)
+        .map(|page| match (filled, page) {
+            (true, 0) => serde_json::json!([filled_relay_log(&griefer), filled_relay_log(&relay)]),
+            (false, 0) => serde_json::json!([filled_relay_log(&griefer)]),
+            _ => serde_json::json!([]),
+        })
+        .collect();
+    world.reply_all(&request, results);
+}
+
+/// BSC design 6.2.7: filled on BNB Chain, the payout is paid; its USDC is no longer in flight.
+#[test]
+fn an_across_payout_read_filled_is_paid() {
+    use settlement_api::types::pool::PayoutStatus;
+    let (world, id, deposit, _) = across_delivering();
+    let before = world.balance(staker());
+    answer_fill_read(&world, &deposit, relay_of(&deposit).hash(ChainId::new(BSC)), 2);
+    world.settle();
+    assert_eq!(world.payout_status(id), PayoutStatus::Paid);
+    assert_eq!(world.state().base.in_flight, Nat::from(0_u8));
+    assert_eq!(world.balance(staker()), before);
+}
+
+/// Read open past its deadline with no fill logged, the payout waits (Jeff, 2026-11-09: the
+/// pool never fronts it): no ckUSDC moves, its USDC owed back by Across in flight, its status
+/// "Refunding: the transfer to BNB Chain didn't go through". Only once Across's refund leaf is
+/// credited to the Base pocket is the user paid back on ICP, once.
+#[test]
+fn an_across_payout_read_unfilled_waits_and_the_user_is_paid_back_only_after_acrosss_refund() {
+    use settlement_api::types::pool::{PayoutStatus, PoolArrival, PoolArrivalOutcome};
+    let (world, id, deposit, _) = across_delivering();
+    let before = world.balance(staker());
+    let amount = u64::try_from(deposit.min_expected).unwrap();
+    answer_fill_read(&world, &deposit, relay_of(&deposit).hash(ChainId::new(BSC)), 0);
+    answer_fill_logs(&world, &deposit, false);
+    world.settle();
+    let waiting =
+        PayoutStatus::Refunding("the transfer to BNB Chain didn't go through".to_string());
+    assert_eq!(world.payout_status(id), waiting);
+    assert_eq!(world.state().base.in_flight, Nat::from(amount));
+    // a while later, the queue's passes past: still waiting, no ckUSDC moved
+    world.next_tick();
+    world.next_tick();
+    assert_eq!(world.payout_status(id), waiting);
+    assert_eq!(world.balance(staker()), before.clone(), "no ckUSDC moves before Across's refund");
+    // Across's relayer refund leaf pays the canister its deposit back on Base
+    use alloy_sol_types::SolEvent;
+    let canister = deposit.depositor;
+    let leaf = types::swapic::across::ExecutedRelayerRefundRoot {
+        amountToReturn: alloy_primitives::U256::ZERO,
+        chainId: alloy_primitives::U256::from(BASE),
+        refundAmounts: vec![alloy_primitives::U256::from(amount)],
+        rootBundleId: 9,
+        leafId: 1,
+        l2TokenAddress: types::swapic::addr(deposit.input_token),
+        refundAddresses: vec![types::swapic::addr(canister)],
+        deferredRefunds: false,
+        caller: alloy_primitives::Address::repeat_byte(0x33),
+    }
+    .encode_log_data();
+    let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+    let receipt = serde_json::json!({
+        "transactionHash": hex0x(&[0xac; 32]),
+        "blockNumber": "0xf0",
+        "status": "0x1",
+        "logs": [
+            {
+                "address": base_chain().usdc,
+                "topics": [
+                    hex0x(&types::swapic::topics::transfer()),
+                    hex0x(&BASE_SPOKE.parse::<types::EvmAddress>().unwrap().to_word()),
+                    hex0x(&canister.to_word()),
+                ],
+                "data": hex0x(&alloy_primitives::U256::from(amount).to_be_bytes::<32>()),
+                "logIndex": "0x4",
+            },
+            {
+                "address": BASE_SPOKE,
+                "topics": leaf.topics().iter().map(|topic| hex0x(topic.as_slice())).collect::<Vec<_>>(),
+                "data": hex0x(&leaf.data),
+                "logIndex": "0x5",
+            },
+        ],
+    });
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            world.admin,
+            "note_pool_arrival",
+            encode_one(PoolArrival {
+                base_tx: vec![0xac; 32],
+                src_chain: BASE,
+                src_tx: vec![],
+                memo: None,
+            })
+            .unwrap(),
+        )
+        .expect("the door takes the call");
+    // the head the report names its block by (the canister's own reads of Base answered
+    // alike), then the receipt every node reads
+    let read = loop {
+        if let Some(read) =
+            world.find_outcall(&["eth_getTransactionReceipt", "eth_getBlockByNumber"], 1)
+        {
+            break read;
+        }
+        if let Some(head) = world.find_outcall(&["eth_blockNumber"], 1) {
+            world.reply(&head, serde_json::json!("0x100"), false);
+        }
+        if let Some(logs) = world.find_outcall(&["eth_getLogs"], 1) {
+            world.reply(&logs, serde_json::json!([]), false);
+        }
+    };
+    world.reply_all(
+        &read,
+        vec![
+            receipt,
+            serde_json::json!({"number": "0xff", "hash": hex0x(&[0xcd; 32]), "timestamp": "0x6ad5e897"}),
+        ],
+    );
+    let outcome: Result<PoolArrivalOutcome, PoolError> =
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap();
+    assert!(
+        matches!(outcome, Ok(PoolArrivalOutcome::Credited { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(world.state().base.in_flight, Nat::from(0_u8));
+    let refunded = world
+        .pool_steps()
+        .into_iter()
+        .filter(|step| matches!(step, PoolStep::AcrossRefunded { refunded, .. } if refunded == &vec![id]))
+        .count();
+    assert_eq!(refunded, 1);
+    // the credit began the undo: the user's ckUSDC back on ICP, once
+    world.next_tick();
+    assert_eq!(
+        world.payout_status(id),
+        PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
+    );
+    let paid_back = before.clone() + Nat::from(usdc(100) - FEE);
+    assert_eq!(world.balance(staker()), paid_back);
+    world.next_tick();
+    assert_eq!(world.balance(staker()), paid_back);
+    let undone = world
+        .pool_steps()
+        .into_iter()
+        .filter(|step| matches!(step, PoolStep::PayoutUndone { id: undone, .. } if *undone == id))
+        .count();
+    assert_eq!(undone, 1, "one undo, never two");
+}
+
+/// Jeff's first live test: the fill landed on BNB Chain in seconds, and the payout showed in
+/// progress until its deadline. The watcher, seeing the fill, nudges the canister
+/// (`check_across_fill`); the canister reads the fill once itself, filled at an agreed block
+/// long before the deadline, and the payout is paid at once. Nobody but the watcher or a
+/// controller may nudge, and a second nudge reads nothing.
+#[test]
+fn an_across_payout_nudged_with_its_fill_before_its_deadline_is_paid() {
+    use settlement_api::types::pool::{AcrossFillCheck, PayoutStatus};
+    let (world, id, deposit, _) = across_delivering();
+    let stranger = Principal::from_slice(&[0x5a; 29]);
+    let refused: Result<AcrossFillCheck, PoolError> = update(
+        &world.pic,
+        world.canister,
+        stranger,
+        "check_across_fill",
+        encode_one(id).unwrap(),
+    );
+    assert!(matches!(refused, Err(PoolError::NotAllowed(_))), "{refused:?}");
+    assert_eq!(world.payout_status(id), PayoutStatus::Delivering);
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            crate::settlement_suite::init::watcher(),
+            "check_across_fill",
+            encode_one(id).unwrap(),
+        )
+        .expect("the door takes the call");
+    // filled, at an agreed block ten minutes before the fill deadline
+    let before_deadline = u64::from(deposit.fill_deadline) - 600;
+    answer_fill_read_at(&world, relay_of(&deposit).hash(ChainId::new(BSC)), 2, before_deadline);
+    let answer: Result<AcrossFillCheck, PoolError> =
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap();
+    assert_eq!(answer, Ok(AcrossFillCheck::Paid));
+    assert_eq!(world.payout_status(id), PayoutStatus::Paid);
+    assert_eq!(world.state().base.in_flight, Nat::from(0_u8));
+    let again: Result<AcrossFillCheck, PoolError> = update(
+        &world.pic,
+        world.canister,
+        crate::settlement_suite::init::watcher(),
+        "check_across_fill",
+        encode_one(id).unwrap(),
+    );
+    assert_eq!(again, Ok(AcrossFillCheck::NotDelivering));
+}
+
+/// D8 and attack M5: a relay hash that is not the canister's, or a fill logged for a deposit
+/// read open, stops the payout for a human: nothing is refunded.
+#[test]
+fn an_across_payout_whose_reads_disagree_stops_and_refunds_nothing() {
+    use settlement_api::types::pool::PayoutStatus;
+    for logged in [false, true] {
+        let (world, id, deposit, _) = across_delivering();
+        let before = world.balance(staker());
+        let local = relay_of(&deposit).hash(ChainId::new(BSC));
+        if logged {
+            answer_fill_read(&world, &deposit, local, 0);
+            answer_fill_logs(&world, &deposit, true);
+        } else {
+            answer_fill_read(&world, &deposit, [0x5d; 32], 0);
+        }
+        world.settle();
+        assert!(
+            matches!(world.payout_status(id), PayoutStatus::Failed(why) if why.starts_with("ALERT")),
+            "logged {logged}"
+        );
+        assert_eq!(world.balance(staker()), before);
+    }
+}
+
 // A token's whole way out of ICP on a stub of an ICPSwap pool that moves the suite's real
 // ledgers: the door's answer, the standing approval on the ledger, the reads beside the pull
 // and beside the sale, and the signature, in the canister itself.
@@ -2855,6 +3479,7 @@ impl SaleWorld {
                 large_deposit_confirmations: None,
                 least_move_fee_base_to_icp: None,
                 least_move_fee_icp_to_base: None,
+                pool_fee: None,
             })
             .unwrap(),
         );

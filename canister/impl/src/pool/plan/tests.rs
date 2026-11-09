@@ -154,9 +154,11 @@ fn a_rescaled_swap_that_moves_its_receiver_or_amount_is_refused() {
 #[test]
 fn a_plan_is_decided_before_any_read() {
     let planned = amount(500_000_000);
-    let (order, swap) = decide(&plan(0, 1_000), planned, amount(501_650_000), 100).unwrap();
-    assert_eq!(order.amountIn, U256::from(501_650_000_u64));
-    assert_eq!(swap, Some(0));
+    let decided = decide(&plan(0, 1_000), planned, amount(501_650_000), 100).unwrap();
+    assert_eq!(decided.order.amountIn, U256::from(501_650_000_u64));
+    assert_eq!((decided.swap, decided.across), (Some(0), None));
+    assert_eq!(decided.amount, amount(501_650_000));
+    assert_eq!(decided.gas_limit, plan(0, 1_000).gas_limit);
     // more than 5% from the plan, either way: waits
     for far in [474_999_999_u64, 525_000_001] {
         assert!(matches!(
@@ -205,5 +207,122 @@ fn a_first_minimum_above_the_payout_undoes_even_outside_the_window() {
     assert!(matches!(
         decide(&plan(490_000_001, 1_000), planned, amount(470_000_000), 100),
         Err(Fit::Undo(_))
+    ));
+}
+
+/// T0's real Across step (3 USDC from Base, the identity deposit, filled on Arbitrum).
+fn across_plan(deadline: u64) -> PinnedOrder {
+    let t0: Value = serde_json::from_str(include_str!(
+        "../../../../types/src/swapic/across/samples/t0.json"
+    ))
+    .unwrap();
+    let run = hex_of(&t0["run_data"]);
+    let mut order = swapic::decode_order(&run[4..]).unwrap();
+    order.deadline = U256::from(deadline);
+    PinnedOrder {
+        order_id: [0x63; 32],
+        order: swapic::encode_order(&order),
+        gas_limit: 900_000,
+        deadline_s: deadline,
+    }
+}
+
+/// What the fit hands the payout checks: the order it fitted.
+struct Fitter(std::cell::RefCell<Option<Order>>);
+
+impl PlanReads for Fitter {
+    async fn scaled(&self, _route: &[u8], _amount: TokenAmount) -> Result<Vec<u8>, String> {
+        Err("an Across plan reads no scaler".to_string())
+    }
+
+    fn checked(
+        &self,
+        _payout: &EvmPayout,
+        order: &Order,
+        order_bytes: &[u8],
+        gas_limit: u64,
+        _now: Timestamp,
+    ) -> Result<PinnedOrder, PoolError> {
+        *self.0.borrow_mut() = Some(order.clone());
+        Ok(PinnedOrder {
+            order_id: [0; 32],
+            order: order_bytes.to_vec(),
+            gas_limit,
+            deadline_s: 0,
+        })
+    }
+}
+
+/// BSC design 7.5: an Across plan asks nothing first (the fit writes the amount into its
+/// least), fits within the window either way, and is rewritten with no read: M and the step's
+/// minimum the payout's exact amount, F the same ratio of it, every other byte as it was.
+#[test]
+fn an_across_plan_is_fitted_with_no_read_to_the_exact_amount() {
+    let planned = amount(3_000_000);
+    let plan = across_plan(1_000);
+    let order = swapic::decode_order(&plan.order).unwrap();
+    assert_eq!(types::pool::plan::first_minimum(&order), TokenAmount::ZERO);
+    // 4% below the plan still fits, and is never undone for its least
+    let decided = decide(&plan, planned, amount(2_880_000), 100).unwrap();
+    // its Across step's place, and no swap: nothing is read ahead for it
+    assert_eq!((decided.swap, decided.across), (None, Some(0)));
+    let decided = decided.order;
+    let planned_order = order.clone();
+    crate::storage::on_fresh_memory(move || {
+        let order = planned_order;
+        let fitter = Fitter(Default::default());
+        crate::storage::init();
+        // the fit reads the payout as it stands: one waiting with this plan
+        let payout = crate::storage::pool::tests::waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+        );
+        let fitted = crate::test_util::block_on(fit(
+            &fitter,
+            payout,
+            Decided {
+                order: decided,
+                swap: None,
+                across: Some(0),
+                amount: amount(2_880_000),
+                gas_limit: 900_000,
+            },
+            Timestamp::from_secs(100).unwrap(),
+        ))
+        .unwrap();
+        let before = types::swapic::across::fit_step(&order.steps[0], U256::from(3_000_000u32)).unwrap();
+        assert_eq!(before, order.steps[0], "fitting the planned amount changes nothing");
+        let step = &fitted.order.steps[0];
+        assert_eq!(step.min, U256::from(2_880_000u32));
+        assert_eq!(fitted.order.amountIn, U256::from(2_880_000u32));
+        let pins = types::config::AcrossPins {
+            periphery: swapic::evm(order.steps[0].target),
+            swap_proxy: types::EvmAddress::ZERO,
+            spoke_pool: "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64".parse().unwrap(),
+            multicall_handler: types::EvmAddress::ZERO,
+        };
+        let read = types::swapic::across::read_across_step(step, &pins).unwrap();
+        let was = types::swapic::across::read_across_step(&order.steps[0], &pins).unwrap();
+        // floor(2,930,727 x 2.88 / 3)
+        assert_eq!(read.output_amount, U256::from(2_813_497u32));
+        assert_eq!(
+            types::swapic::across::AcrossDeposit {
+                output_amount: was.output_amount,
+                min_expected: was.min_expected,
+                ..read
+            },
+            was
+        );
+        assert_eq!(fitter.0.borrow().as_ref(), Some(&fitted.order));
+    });
+    // a plan that swaps before its deposit cannot be fitted: it waits for the watcher's order
+    let mut both = order.clone();
+    both.steps.insert(0, swap_step(route(), 0));
+    let both = PinnedOrder {
+        order: swapic::encode_order(&both),
+        ..across_plan(1_000)
+    };
+    assert!(matches!(
+        decide(&both, planned, amount(3_000_000), 100),
+        Err(Fit::Wait(_))
     ));
 }

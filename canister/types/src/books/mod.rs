@@ -17,8 +17,11 @@ use crate::chain::ChainId;
 use crate::hash::TxHash;
 use crate::ledger::LedgerMeta;
 use crate::numeric::{BlockNumber, Timestamp, TokenAmount};
+use ic_stable_structures::storable::Bound;
+use ic_stable_structures::Storable;
 use minicbor::data::Type;
 use minicbor::{Decode, Decoder, Encode, Encoder};
+use std::borrow::Cow;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -43,6 +46,52 @@ pub struct Books {
     /// Only the pool chain's fees are listed: no other chain is checked.
     #[n(6)]
     pub unseen_fees: UnseenFees,
+    /// Of every fee ever booked, what users paid in transactions of their own, micro USD:
+    /// the rest of what `fee_income` ever held was read off the canister's own relays.
+    /// Absent until the first such fee, and on books written before it existed.
+    #[n(7)]
+    pub user_paid: Option<TokenAmount>,
+}
+
+/// One transaction whose user-paid fees are booked, at most once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserFeeKey {
+    pub chain: ChainId,
+    pub tx: TxHash,
+}
+
+impl UserFeeKey {
+    const BYTES: usize = 8 + 32;
+}
+
+/// The chain id and the hash, big endian, so a stable set orders by them.
+impl Storable for UserFeeKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        out.extend_from_slice(&self.chain.get().to_be_bytes());
+        out.extend_from_slice(self.tx.as_ref());
+        Cow::Owned(out)
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert_eq!(
+            bytes.len(),
+            Self::BYTES,
+            "BUG: a stored user fee key is 40 bytes"
+        );
+        let chain = u64::from_be_bytes(bytes[..8].try_into().expect("BUG: eight bytes"));
+        let tx: [u8; 32] = bytes[8..].try_into().expect("BUG: thirty-two bytes");
+        Self {
+            chain: ChainId::new(chain),
+            tx: TxHash::new(tx),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: Self::BYTES as u32,
+        is_fixed_size: true,
+    };
 }
 
 /// A fee and the block of the receipt it was read off.
@@ -159,6 +208,19 @@ pub enum BookStep {
         #[n(0)]
         paused: bool,
     },
+    /// Swapic withheld `amount` to the canister in `tx_hash`, a transaction the user sent, read
+    /// off its receipt at the finish it paid for, or by the catch-up of the fees from before
+    /// this line existed. Once per transaction (`UserFeeKey`).
+    #[n(5)]
+    UserFeeEarned {
+        #[n(0)]
+        tx_hash: TxHash,
+        #[n(1)]
+        amount: TokenAmount,
+        /// As `FeeEarned`'s: the block of that receipt, on the pool chain only.
+        #[n(2)]
+        block: Option<BlockNumber>,
+    },
 }
 
 impl BookStep {
@@ -176,6 +238,7 @@ impl BookStep {
             BookStep::Checked { .. } => "Checked",
             BookStep::SurplusBooked { .. } => "SurplusBooked",
             BookStep::PoolPaused { .. } => "PoolPaused",
+            BookStep::UserFeeEarned { .. } => "UserFeeEarned",
         }
     }
 }
@@ -225,13 +288,15 @@ pub enum BooksError {
     },
     #[error("no sweep {0}, or it was taken back already")]
     NoSweep(u64),
+    #[error("the user-paid fees of {0} are booked")]
+    UserFeeBooked(TxHash),
 }
 
 impl Books {
     /// Every rule a step must meet.
     pub fn admits(&self, step: &BookStep) -> Result<(), BooksError> {
         match step {
-            BookStep::FeeEarned { amount, .. } => {
+            BookStep::FeeEarned { amount, .. } | BookStep::UserFeeEarned { amount, .. } => {
                 if *amount == TokenAmount::ZERO {
                     return Err(BooksError::Zero);
                 }
@@ -267,16 +332,15 @@ impl Books {
     pub fn apply(mut self, step: &BookStep) -> Self {
         match step {
             BookStep::FeeEarned { amount, block, .. } => {
-                self.fee_income = self
-                    .fee_income
-                    .checked_add(*amount)
-                    .unwrap_or(TokenAmount::MAX);
-                if let Some(block) = block {
-                    self.unseen_fees.0.push(BookedFee {
-                        block: *block,
-                        amount: *amount,
-                    });
-                }
+                self = self.earned(*amount, *block);
+            }
+            BookStep::UserFeeEarned { amount, block, .. } => {
+                self.user_paid = Some(
+                    self.user_paid()
+                        .checked_add(*amount)
+                        .unwrap_or(TokenAmount::MAX),
+                );
+                self = self.earned(*amount, *block);
             }
             BookStep::Checked { check, .. } => {
                 self.last_check = Some(*check);
@@ -298,6 +362,23 @@ impl Books {
             }
         }
         self
+    }
+
+    /// A fee on the income line, and in the unseen list while no check has read its block.
+    fn earned(mut self, amount: TokenAmount, block: Option<BlockNumber>) -> Self {
+        self.fee_income = self
+            .fee_income
+            .checked_add(amount)
+            .unwrap_or(TokenAmount::MAX);
+        if let Some(block) = block {
+            self.unseen_fees.0.push(BookedFee { block, amount });
+        }
+        self
+    }
+
+    /// Of every fee ever booked, what users paid in transactions of their own.
+    pub fn user_paid(&self) -> TokenAmount {
+        self.user_paid.unwrap_or(TokenAmount::ZERO)
     }
 
     /// The lines the books keep, summed.

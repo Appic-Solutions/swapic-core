@@ -14,6 +14,7 @@ fn wire() -> WireSettings {
         large_deposit_confirmations: None,
         least_move_fee_base_to_icp: None,
         least_move_fee_icp_to_base: None,
+        pool_fee: None,
     }
 }
 
@@ -52,6 +53,7 @@ fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
         ck: None,
+        across_in_flight_max: None,
     }
 }
 

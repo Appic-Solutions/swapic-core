@@ -216,6 +216,10 @@ pub enum TxPurpose {
     /// A controller's sweep from the canister's address, by the sweep's id.
     #[n(62)]
     Sweep(#[n(0)] u64),
+    /// The canister's claim of its own deferred Across refunds on a chain (a controller's
+    /// `claim_across_refund`): one out at a time per chain.
+    #[n(63)]
+    AcrossClaim(#[n(0)] ChainId),
 }
 
 impl TxPurpose {
@@ -230,6 +234,10 @@ impl TxPurpose {
             Self::PoolMove(id) => Some(pool_key(b"swapic.pool.v1.tx.move", &id.to_be_bytes())),
             Self::EcoRescue(order_id) => Some(pool_key(b"swapic.eco.v1.tx.rescue", order_id)),
             Self::Sweep(id) => Some(pool_key(b"swapic.sweep.v1.tx", &id.to_be_bytes())),
+            Self::AcrossClaim(chain) => Some(pool_key(
+                b"swapic.across.v1.tx.claim",
+                &chain.get().to_be_bytes(),
+            )),
             Self::Cancel(_) => None,
         }
     }

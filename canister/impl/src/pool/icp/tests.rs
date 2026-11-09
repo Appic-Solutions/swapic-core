@@ -791,3 +791,34 @@ fn the_icp_doors_hold_the_move_fee_to_its_least() {
         );
     });
 }
+
+/// The door prices an ICP stake as its mint is: a stake the move fee and the pool fee take whole
+/// is refused before it pulls anything.
+#[test]
+fn an_icp_stake_the_fees_take_whole_is_refused() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        crate::storage::pool::record_at(
+            PoolStep::SettingsSet {
+                settings: types::pool::PoolSettings {
+                    pool_fee: Some(TokenAmount::from(10_000_u32)),
+                    ..crate::storage::pool::tests::settings()
+                },
+            },
+            crate::storage::pool::tests::at(2),
+        )
+        .unwrap();
+        let request = |amount: u32| StakeRequest {
+            move_fee: TokenAmount::from(250_000_u32),
+            ..stake_request(TokenAmount::from(amount))
+        };
+        let check =
+            |request: &StakeRequest| read_state(|state| check_stake(state, request, nobody));
+        assert!(matches!(
+            check(&request(260_000)),
+            Err(PoolError::NotAllowed(why)) if why.contains("mints nothing")
+        ));
+        assert_eq!(check(&request(260_001)), Ok(()));
+    });
+}

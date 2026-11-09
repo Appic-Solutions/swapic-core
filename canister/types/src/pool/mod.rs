@@ -26,8 +26,8 @@ pub use step::PoolStep;
 
 pub use payout::{
     ck_back_memo, ck_burn, ck_least_usdc, ck_memo, ck_subaccount, evm_payout_id, evm_payout_ref,
-    orphan_key, CkBack, CkLeg, CkSettings, EvmPayout, EvmWithdrawal, Flag, IcpSwapTerms, NonceUse,
-    Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutResolution, PayoutSettings,
+    orphan_key, AcrossOut, CkBack, CkLeg, CkSettings, EvmPayout, EvmWithdrawal, Flag, IcpSwapTerms, NonceUse,
+    Orphan, OrphanStatus, PayoutKind, PayoutIds, PayoutLines, PayoutResolution, PayoutSettings,
     PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
 };
 
@@ -200,6 +200,10 @@ pub enum PoolRail {
     /// An order on Base whose payout is the canister.
     #[n(2)]
     SameChain,
+    /// An Across deposit from another chain whose recipient is the canister, filled on Base
+    /// (BSC design 6.2.8).
+    #[n(3)]
+    Across,
 }
 
 /// The interface's `owner`: `keccak256(0x02 ‖ u8(len) ‖ principal ‖ subaccount32)` for an
@@ -365,6 +369,9 @@ pub struct LedgerFee {
 /// The highest premium the settings take: 10%.
 pub const MAX_PREMIUM_BPS: u16 = 1_000;
 
+/// The most a pool fee may be, micro USDC: one dollar, so a slipped digit is refused.
+pub const MAX_POOL_FEE: TokenAmount = TokenAmount::new(1_000_000);
+
 /// The pool's knobs (interface section 3's `PoolSettings`), and the ledger fees read when
 /// they were set.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -422,6 +429,11 @@ pub struct PoolSettings {
     /// pays for; zero until a controller sets it.
     #[n(14)]
     pub least_move_fee: MoveFees,
+    /// What every use of the pool leaves in it on top of its other fees, micro USDC: a swap
+    /// through it, a stake, a withdrawal. The stakers bear the rebalancing's ledger fees, so
+    /// this is theirs, never Swapic's. None, as before a controller sets it: zero.
+    #[n(15)]
+    pub pool_fee: Option<TokenAmount>,
 }
 
 /// One amount per direction of a rebalancing move, micro USDC.
@@ -480,6 +492,7 @@ impl Default for PoolSettings {
             large_deposit_usdc: None,
             large_deposit_confirmations: None,
             least_move_fee: MoveFees::default(),
+            pool_fee: None,
         }
     }
 }
@@ -493,6 +506,8 @@ pub enum PoolSettingsError {
     SwapCapAboveTvlCap,
     #[error("a premium of {0} bps is above the ceiling of {MAX_PREMIUM_BPS}")]
     PremiumTooHigh(u16),
+    #[error("a pool fee of {0} is above the ceiling of {MAX_POOL_FEE}")]
+    PoolFeeTooHigh(TokenAmount),
     #[error("max_held_bps of {0} is above 10000")]
     HeldAboveAll(u16),
     #[error("the ckUSDC entry must name the ckUSDC ledger itself as its pool")]
@@ -508,6 +523,11 @@ pub enum PoolSettingsError {
 }
 
 impl PoolSettings {
+    /// What every use of the pool leaves in it, micro USDC.
+    pub fn pool_fee(&self) -> TokenAmount {
+        self.pool_fee.unwrap_or(TokenAmount::ZERO)
+    }
+
     /// The knobs hold together: caps above zero and the swap cap within the TVL cap, the
     /// premium at most 10%, the held share at most all of the pocket, the ckUSDC entry (if
     /// any) with its own ledger as its pool, every other token with a pool that is neither
@@ -524,6 +544,9 @@ impl PoolSettings {
         }
         if self.premium_bps > MAX_PREMIUM_BPS {
             return Err(PoolSettingsError::PremiumTooHigh(self.premium_bps));
+        }
+        if self.pool_fee() > MAX_POOL_FEE {
+            return Err(PoolSettingsError::PoolFeeTooHigh(self.pool_fee()));
         }
         if self.max_held_bps > 10_000 {
             return Err(PoolSettingsError::HeldAboveAll(self.max_held_bps));

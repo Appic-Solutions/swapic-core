@@ -149,6 +149,8 @@ pub enum TxPurpose {
     EcoRescue(Hash32),
     /// A controller's sweep, by its id.
     Sweep(u64),
+    /// The canister's claim of its own deferred Across refunds on that chain.
+    AcrossClaim(u64),
 }
 
 impl From<types::events::TxPurpose> for TxPurpose {
@@ -164,6 +166,7 @@ impl From<types::events::TxPurpose> for TxPurpose {
             Domain::PoolMove(id) => Self::PoolMove(id),
             Domain::EcoRescue(order_id) => Self::EcoRescue(order_id),
             Domain::Sweep(id) => Self::Sweep(id),
+            Domain::AcrossClaim(chain_id) => Self::AcrossClaim(chain_id.get()),
         }
     }
 }
@@ -180,6 +183,7 @@ impl From<TxPurpose> for types::events::TxPurpose {
             TxPurpose::PoolMove(id) => Self::PoolMove(id),
             TxPurpose::EcoRescue(order_id) => Self::EcoRescue(order_id),
             TxPurpose::Sweep(id) => Self::Sweep(id),
+            TxPurpose::AcrossClaim(chain_id) => Self::AcrossClaim(ChainId::new(chain_id)),
         }
     }
 }

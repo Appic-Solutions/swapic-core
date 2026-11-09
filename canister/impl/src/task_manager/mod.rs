@@ -10,6 +10,7 @@ use std::thread::LocalKey;
 use std::time::Duration;
 
 pub mod backstop;
+pub mod fee_catch_up;
 pub mod outbox;
 pub mod pool_arrivals;
 pub mod rebalance;

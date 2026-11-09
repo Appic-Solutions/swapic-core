@@ -528,3 +528,26 @@ fn a_balance_answer_reads_as_its_wei() {
     assert_eq!(read(json!(null)), None);
     assert_eq!(wei_answer(None), None);
 }
+
+/// BNB Chain's agreed reads (BSC design 6.2.3, 6.2.7): two nodes' finalized blocks a few
+/// blocks apart reduce to the same rounded number, which no node's finalized block is below.
+#[test]
+fn a_finalized_block_reduces_to_its_rounded_number() {
+    let keep = [Keep::FinalizedHead];
+    let answer = |oldest: &str, extra: bool| {
+        let mut result = json!({
+            "oldestBlock": oldest,
+            "baseFeePerGas": ["0x0", "0x0"],
+            "gasUsedRatio": [0.25],
+        });
+        if extra {
+            result["blobGasUsedRatio"] = json!([0.0]);
+        }
+        json!([{"jsonrpc": "2.0", "id": 0, "result": result}]).to_string()
+    };
+    let first = agreed_body(answer("0x3e1a2b31", false).as_bytes(), &keep);
+    let second = agreed_body(answer("0x3e1a2b3c", true).as_bytes(), &keep);
+    assert_eq!(first, second);
+    let read: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(read[0]["result"], json!("0x3e1a2b30"));
+}

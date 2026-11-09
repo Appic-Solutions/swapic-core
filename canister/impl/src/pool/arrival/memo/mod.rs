@@ -97,20 +97,29 @@ pub async fn memos_from_chain(
         };
         let memo = match one.rail {
             PoolRail::SameChain => memo_in(base, chain.swapic, r#ref),
-            PoolRail::Cctp => {
-                let Some(from) = cctp_source_of(base, chain, r#ref) else {
+            PoolRail::Cctp | PoolRail::Across => {
+                let from = match one.rail {
+                    PoolRail::Cctp => cctp_source_of(base, chain, r#ref).map(|from| (from.chain, from.swapic)),
+                    // proven on the report's own source: its chain's Swapic
+                    _ => source.and_then(|(src_chain, _)| {
+                        crate::storage::config::with(|config| {
+                            config.evm_chains.get(src_chain).map(|evm| (src_chain, evm.swapic))
+                        })
+                    }),
+                };
+                let Some((from_chain, from_swapic)) = from else {
                     continue;
                 };
                 let src_tx = source
-                    .filter(|(src_chain, _)| *src_chain == from.chain)
+                    .filter(|(src_chain, _)| *src_chain == from_chain)
                     .map(|(_, tx)| tx)
-                    .or_else(|| own_finish_source(base_tx));
+                    .or_else(|| (one.rail == PoolRail::Cctp).then(|| own_finish_source(base_tx)).flatten());
                 let Some(src_tx) = src_tx else {
                     continue;
                 };
-                let key = (from.chain, src_tx);
+                let key = (from_chain, src_tx);
                 if !read.iter().any(|(at, _)| *at == key) {
-                    let receipt = match reads.source(from.chain, src_tx).await {
+                    let receipt = match reads.source(from_chain, src_tx).await {
                         Ok(receipt) => Some(receipt),
                         Err(PoolError::BadArrival(_)) => None,
                         Err(error) => return Err(error),
@@ -120,7 +129,7 @@ pub async fn memos_from_chain(
                 read.iter()
                     .find(|(at, _)| *at == key)
                     .and_then(|(_, receipt)| receipt.as_ref())
-                    .and_then(|receipt| memo_in(receipt, from.swapic, r#ref))
+                    .and_then(|receipt| memo_in(receipt, from_swapic, r#ref))
             }
             // Eco is off; its report brings the memo
             PoolRail::Eco => None,
