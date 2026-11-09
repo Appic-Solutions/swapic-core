@@ -14,7 +14,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # a pull request's newer push replaces its run; every push to main is its own group, so
+  # none is ever cancelled, queued or not, and each is built and checked against the one
+  # before it
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
