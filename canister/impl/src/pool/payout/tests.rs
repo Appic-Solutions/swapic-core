@@ -2013,3 +2013,121 @@ fn a_route_through_icp_short_from_the_start_pays_ckusdc_and_calls_nothing() {
             .any(|call| call.starts_with("approve") || call.starts_with("swap")));
     });
 }
+
+/// ckUSDC is the stakers' pocket and ckETH the ck route's float: their approvals are for one swap
+/// each, whatever the settings say, and with no settings nothing may stand.
+#[test]
+fn only_a_token_held_for_nothing_but_swaps_may_stand() {
+    let ckusdc = Principal::from_slice(&[0x11; 10]);
+    let cketh = Principal::from_slice(&[0x22; 10]);
+    let icp = Principal::from_slice(&[0x33; 10]);
+    let mainnet_cketh = Principal::from_text("ss2fx-dyaaa-aaaar-qacoq-cai").unwrap();
+    assert!(may_stand(icp, Some(ckusdc), Some(cketh)));
+    assert!(may_stand(icp, Some(ckusdc), None));
+    assert!(!may_stand(ckusdc, Some(ckusdc), Some(cketh)));
+    assert!(!may_stand(cketh, Some(ckusdc), Some(cketh)));
+    assert!(!may_stand(mainnet_cketh, Some(ckusdc), None));
+    assert!(!may_stand(icp, None, Some(cketh)));
+}
+
+/// An allowance close to its end, or past it, reads as none; one with no end stands.
+#[test]
+fn an_allowance_about_to_end_reads_as_none() {
+    let now = Timestamp::from_nanos(1_000_000_000_000);
+    let held = TokenAmount::from(5_u32);
+    let margin = STANDING_MARGIN.as_nanos() as u64;
+    assert_eq!(lasting(held, None, now), held);
+    assert_eq!(lasting(held, Some(now.as_nanos() + margin + 1), now), held);
+    assert_eq!(
+        lasting(held, Some(now.as_nanos() + margin), now),
+        TokenAmount::ZERO
+    );
+    assert_eq!(lasting(held, Some(1), now), TokenAmount::ZERO);
+}
+
+/// A round read beside a pull serves only the leg it was read for, and only while no other leg
+/// has been at the pool: its `before` says what the pool holds of the canister's, and a leg
+/// there since would make that untrue.
+#[test]
+fn a_round_read_ahead_serves_only_its_own_leg_at_an_untouched_pool() {
+    let pool = Principal::from_slice(&[0x11; 10]);
+    let token = Principal::from_slice(&[0x22; 10]);
+    let at = Timestamp::from_nanos(1_000_000_000_000);
+    let amount = TokenAmount::from(5_000_u32);
+    let read = ReadAhead {
+        pool,
+        token_in: token,
+        amount_in: amount,
+        round: Round {
+            quoted: TokenAmount::from(1_u32),
+            before: PoolHeld {
+                ckusdc: TokenAmount::ZERO,
+                token: TokenAmount::ZERO,
+            },
+            allowed: None,
+        },
+        legs_then: 7,
+        read_at: at,
+    };
+    let spec = LegSpec {
+        id: PoolRef::new([0x33; 32]),
+        leg: None,
+        pool,
+        token_in: token,
+        token_out: Principal::from_slice(&[0x44; 10]),
+        amount_in: amount,
+        least: TokenAmount::ZERO,
+        fee_in: TokenAmount::ZERO,
+        fee_out: TokenAmount::ZERO,
+        pays_out: false,
+    };
+    // this leg's own take is the only one since the read began
+    assert!(read.serves(&spec, 8, at));
+    assert!(!read.serves(&spec, 7, at), "no leg holds the pool yet");
+    assert!(!read.serves(&spec, 9, at), "another leg was there");
+    let older = Timestamp::from_nanos(at.as_nanos() + READ_AHEAD_FOR.as_nanos() as u64 + 1);
+    assert!(!read.serves(&spec, 8, older), "too old");
+    let other_pool = Principal::from_slice(&[0x55; 10]);
+    assert!(!read.serves(
+        &LegSpec {
+            pool: other_pool,
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            token_in: other_pool,
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            amount_in: TokenAmount::from(4_999_u32),
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            leg: Some(LEG_SECOND),
+            ..spec
+        },
+        8,
+        at
+    ));
+}
+
+/// A flood of pulls that will be refused costs the canister its one call each: only so many
+/// reads go out beside them, however many callers knock.
+#[test]
+fn only_so_many_reads_go_out_beside_pulls() {
+    assert!(room_for_a_read(0));
+    assert!(room_for_a_read(READS_OUT_AT_MOST - 1));
+    assert!(!room_for_a_read(READS_OUT_AT_MOST));
+    assert!(!room_for_a_read(u32::MAX));
+}

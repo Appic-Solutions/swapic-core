@@ -297,8 +297,23 @@ impl CkWorld {
     fn swap(&self, owner: Principal) -> SwapFromIcpOk {
         let amount = usdc(100);
         self.approve(owner, amount + FEE);
-        self.door(owner, self.terms(amount))
-            .expect("the door opens")
+        let ok = self
+            .door(owner, self.terms(amount))
+            .expect("the door opens");
+        // the door answers once the money is in; its burn goes on in a message of its own
+        assert_eq!(ok.status, PayoutStatus::Swapping);
+        self.carried(ok)
+    }
+
+    /// `ok` once the message its door left behind has gone as far as it can.
+    fn carried(&self, ok: SwapFromIcpOk) -> SwapFromIcpOk {
+        for _ in 0..30 {
+            self.world.pic.tick();
+        }
+        SwapFromIcpOk {
+            id: ok.id,
+            status: self.payout(ok.id).status,
+        }
     }
 
     fn payout(&self, id: u64) -> PayoutView {
@@ -560,10 +575,8 @@ fn the_door_refuses_what_it_must() {
         ck.door(user(1), terms.clone()),
         Err(PoolError::Ledger(_))
     ));
-    assert_eq!(
-        ck.door(user(0), terms).unwrap().status,
-        PayoutStatus::CkWithdrawn
-    );
+    let ok = ck.door(user(0), terms).unwrap();
+    assert_eq!(ck.carried(ok).status, PayoutStatus::CkWithdrawn);
 }
 
 fn hourly_check_passes(ck: &CkWorld) {

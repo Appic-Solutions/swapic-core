@@ -4,6 +4,7 @@ members = [
     "canister/impl",
     "canister/integration_tests",
     "canister/stub_minter",
+    "canister/stub_pool",
     "canister/types",
 ]
 resolver = "2"
