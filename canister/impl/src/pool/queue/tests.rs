@@ -1669,3 +1669,12 @@ fn an_across_payouts_fill_is_read_past_its_deadline_and_decides_once() {
         });
     }
 }
+
+/// The Across stops read as one sentence each: no run of spaces left by a line break.
+#[test]
+fn the_across_stops_read_as_plain_sentences() {
+    for why in [ACROSS_HASH_DIFFERS, ACROSS_FILL_LOGGED, ACROSS_TOO_LATE] {
+        assert!(!why.contains("  "), "{why}");
+        assert!(why.starts_with("ALERT: ") && why.ends_with("for a human"), "{why}");
+    }
+}

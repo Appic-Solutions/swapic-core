@@ -263,15 +263,18 @@ pub const UNFILLED: &str = "its Eco intent was not filled";
 
 /// Why a delivering Across payout stops when the destination's relay hash is not the
 /// canister's (D8).
-pub const ACROSS_HASH_DIFFERS: &str = "ALERT: the destination SpokePool's relay hash of its Across      deposit is not the canister's: whether it was filled is not known, for a human";
+pub const ACROSS_HASH_DIFFERS: &str = "ALERT: the destination SpokePool's relay hash of its Across \
+     deposit is not the canister's: whether it was filled is not known, for a human";
 
 /// Why a delivering Across payout read open stops when the destination logged a fill of it
 /// (attack M5).
-pub const ACROSS_FILL_LOGGED: &str = "ALERT: its Across deposit reads open, and the destination      logged a fill of it: for a human";
+pub const ACROSS_FILL_LOGGED: &str =
+    "ALERT: its Across deposit reads open, and the destination logged a fill of it: for a human";
 
 /// Why a delivering Across payout stops when its fill is read too long after its deposit to
 /// look for every fill of it in one read.
-pub const ACROSS_TOO_LATE: &str = "ALERT: its Across deposit's fill is read too long after the      deposit to look for every fill of it: for a human";
+pub const ACROSS_TOO_LATE: &str = "ALERT: its Across deposit's fill is read too long after the \
+     deposit to look for every fill of it: for a human";
 
 /// The time a delivering payout's Eco intent can last be filled: the one rule for a pinned
 /// order's ([`crate::pool::eco::fill_read_after`]); with no order pinned, the latest any route
