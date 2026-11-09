@@ -205,6 +205,10 @@ struct Fake {
     standing: Cell<Option<Result<TokenAmount, ()>>>,
     /// The round read beside the pull, for the leg that asks.
     ahead: Cell<Option<crate::pool::payout::Round>>,
+    /// Whether reads beside a sale land before it answers, as the scaler answers them.
+    fit_read_ahead: Cell<bool>,
+    /// What they read: for which route and amount, and what the fit then finds.
+    scaled_ahead: RefCell<Option<(Vec<u8>, TokenAmount, Vec<u8>)>>,
 }
 
 /// The scaler as the fake answers it, and a payout order's checks on `config()`.
@@ -215,6 +219,21 @@ impl PlanReads for Fake {
             .borrow()
             .clone()
             .unwrap_or_else(|| Err("no scaler here".to_string()))
+    }
+
+    fn read_fit_ahead(&self, _id: u64, route: Option<Vec<u8>>, amount: TokenAmount) {
+        self.calls.borrow_mut().push(format!("read ahead {amount}"));
+        if self.fit_read_ahead.get() {
+            if let (Some(route), Some(Ok(scaled))) = (route, self.scaled.borrow().clone()) {
+                *self.scaled_ahead.borrow_mut() = Some((route, amount, scaled));
+            }
+        }
+    }
+
+    fn scaled_ahead(&self, _id: u64, route: &[u8], amount: TokenAmount) -> Option<Vec<u8>> {
+        let ahead = self.scaled_ahead.borrow();
+        let (read_route, read_amount, scaled) = ahead.as_ref()?;
+        (read_route == route && *read_amount == amount).then(|| scaled.clone())
     }
 
     fn checked(
@@ -1186,6 +1205,7 @@ fn a_planned_token_sale_has_half_the_slippage_as_its_floor() {
                 "pull token 5000000".to_string(),
                 "quote 4998000".to_string(),
                 "approve 4999000".to_string(),
+                "read ahead 2037910".to_string(),
                 "swap 4998000 at least 2051793".to_string(),
             ]
         );
@@ -1226,6 +1246,7 @@ fn a_standing_approval_that_covers_the_swap_asks_for_no_other() {
                 "pull token 5000000".to_string(),
                 "quote 4998000".to_string(),
                 "allowance".to_string(),
+                "read ahead 2037910".to_string(),
                 "swap 4998000 at least 2051793".to_string(),
             ]
         );
@@ -1255,6 +1276,7 @@ fn a_standing_approval_that_falls_short_is_given_for_ten_swaps() {
                     "quote 4998000".to_string(),
                     "allowance".to_string(),
                     "approve standing 49990000".to_string(),
+                    "read ahead 2037910".to_string(),
                     "swap 4998000 at least 2051793".to_string(),
                 ]
             );
@@ -1346,6 +1368,7 @@ fn a_round_read_beside_the_pull_goes_straight_to_the_sale() {
             *fake.calls.borrow(),
             vec![
                 "pull token 5000000".to_string(),
+                "read ahead 2037910".to_string(),
                 "swap 4998000 at least 2051793".to_string(),
             ]
         );
@@ -1557,6 +1580,95 @@ fn a_token_plan_reads_the_scaler_after_its_last_leg() {
         let calls = fake.calls.borrow();
         assert!(calls[calls.len() - 2].starts_with("swap "), "{calls:?}");
         assert_eq!(calls.last().unwrap(), "scale 501650000");
+    });
+}
+
+/// A token sale as `a_token_plan_reads_the_scaler_after_its_last_leg` has it, its quote and its
+/// output apart, with the reads beside it landing before it answers.
+fn sale_with_reads_ahead(quote: u64, out: u64, pays: u64) -> Fake {
+    pool_with(usdc(600));
+    let id = open_planned(&planned(
+        token(),
+        TokenAmount::from(900_000_000_u64),
+        &swap_plan(),
+    ));
+    let fake = Fake::default();
+    fake.fit_read_ahead.set(true);
+    fake.quote.set(Some(TokenAmount::from(quote)));
+    fake.out.set(Some(TokenAmount::from(out)));
+    *fake.scaled.borrow_mut() = Some(Ok(scaled_route(pays)));
+    let fitted = block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+    assert_eq!(
+        fitted.map(|fitted| fitted.order.steps[0].data.to_vec()),
+        Some(scaled_route(pays)),
+        "the order carries the rewrite for the payout"
+    );
+    fake
+}
+
+/// The sale gives what its quote said: the rewrite read beside it is the fit's, and after the
+/// sale nothing is left to read.
+#[test]
+fn a_sale_that_gives_its_quote_finds_its_rewrite_read_ahead() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let out = PAYS_501_65 + FEE;
+        let fake = sale_with_reads_ahead(out, out, 501_650_000);
+        let calls = fake.calls.borrow();
+        assert_eq!(calls[calls.len() - 2], "read ahead 501650000", "{calls:?}");
+        assert!(calls.last().unwrap().starts_with("swap "), "{calls:?}");
+        assert!(
+            !calls.iter().any(|call| call.starts_with("scale")),
+            "{calls:?}"
+        );
+    });
+}
+
+/// The sale gives other than its quote (someone traded in those seconds): what was read ahead is
+/// for another amount and is not used, and the fit reads for the amount the sale really made.
+#[test]
+fn a_sale_that_gives_other_than_its_quote_reads_its_rewrite_again() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let out = PAYS_501_65 + FEE;
+        let fake = sale_with_reads_ahead(out + 1_000_000, out, 501_650_000);
+        let calls = fake.calls.borrow();
+        assert!(
+            calls.iter().any(|call| call.starts_with("read ahead ")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.contains(&"read ahead 501650000".to_string()),
+            "{calls:?}"
+        );
+        assert_eq!(calls.last().unwrap(), "scale 501650000", "{calls:?}");
+    });
+}
+
+/// Nothing is read beside a pull or a sale that never goes out: a refused pull and a quote below
+/// the floor start no read, since an outcall is the canister's to pay for.
+#[test]
+fn no_read_ahead_starts_before_a_sale_goes_out() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(600));
+        let id = open_planned(&planned(
+            token(),
+            TokenAmount::from(900_000_000_u64),
+            &swap_plan(),
+        ));
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(1_u32)));
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        let calls = fake.calls.borrow();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("read ahead")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("swap")),
+            "{calls:?}"
+        );
     });
 }
 

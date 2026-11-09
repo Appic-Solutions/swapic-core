@@ -153,6 +153,19 @@ pub async fn run(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<LegEnd, Stop> {
+    run_beside(ledgers, spec, state, clock, guard, |_| {}).await
+}
+
+/// [`run`], and `beside` told the leg's quote just as its swap goes out. Only a swap that goes
+/// out now tells it: one that was begun before this run, or stops short, does not.
+pub async fn run_beside(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    beside: impl FnOnce(TokenAmount),
+) -> Result<LegEnd, Stop> {
     if let Some(out) = state.out {
         return Ok(LegEnd::Out(out));
     }
@@ -234,6 +247,7 @@ pub async fn run(
         },
         clock(),
     )?;
+    beside(quoted);
     // begun: whatever this answers, the swap is never called again
     match ledgers
         .swap(

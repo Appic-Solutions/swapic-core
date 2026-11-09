@@ -13,6 +13,13 @@
 //! least its old minimum scaled to it. The whole order then meets every check a payout order
 //! meets ([`crate::pool::pay::check_order`], the amount exact).
 //!
+//! The reads a fit needs (that rewrite, and the gas price its signature needs) cost the swap a
+//! round each after its sale, so a token's sale starts them beside itself, in a task of their
+//! own, for the amount its quote says ([`PlanReads::read_fit_ahead`]). A rewrite read ahead is
+//! taken only for exactly the amount the sale made and the very route the fit holds, and goes
+//! through every check a fresh one does: the scaler is a pure function of the two. Never beside
+//! the pull: anyone can make a door pull, and an outcall is the canister's to pay for.
+//!
 //! A plan that does not fit leaves the payout waiting for the watcher's order, the way every
 //! payout waited before the plan flow; one whose first step asks more than the payout could
 //! only revert, so the payout is undone at once.
@@ -39,6 +46,20 @@ pub trait PlanReads {
     /// chain; Err with why when it was not.
     async fn scaled(&self, route: &[u8], amount: TokenAmount) -> Result<Vec<u8>, String>;
 
+    /// Makes sure the pool chain has a gas reading young enough to sign with. It answers
+    /// nothing: a signature with no such reading reads for itself, and says why it could not.
+    async fn gas_ready(&self) {}
+
+    /// Starts the reads a fit for `amount` would make, for payout `id`, in a task of their own.
+    /// `route` is the plan's swap to rewrite, if it has one. Nothing waits on them.
+    fn read_fit_ahead(&self, _id: u64, _route: Option<Vec<u8>>, _amount: TokenAmount) {}
+
+    /// `route` rewritten for exactly `amount`, if [`Self::read_fit_ahead`] read just that for
+    /// payout `id`.
+    fn scaled_ahead(&self, _id: u64, _route: &[u8], _amount: TokenAmount) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Every check of a payout order, against the config, the canister's address and the
     /// sanctions as they are now.
     fn checked(
@@ -51,7 +72,67 @@ pub trait PlanReads {
     ) -> Result<PinnedOrder, PoolError>;
 }
 
+/// A rewrite read ahead: for which payout, of which route, for which amount, and what it gave.
+struct ScaledAhead {
+    id: u64,
+    route: Vec<u8>,
+    amount: TokenAmount,
+    scaled: Vec<u8>,
+}
+
+thread_local! {
+    // Heap by necessity, and nothing depends on it: the last rewrite read ahead, one at a time so
+    // it costs a route's bytes at most. Gone or overwritten, a fit reads for itself.
+    static SCALED_AHEAD: std::cell::RefCell<Option<ScaledAhead>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl PlanReads for crate::pool::payout::Live {
+    async fn gas_ready(&self) {
+        if let Some(chain) = crate::storage::config::get().pool_chain {
+            if let Err(failure) = crate::gas::ensure_fresh(chain).await {
+                crate::pool::log(&format!("the gas price read ahead: {failure:?}"));
+            }
+        }
+    }
+
+    fn read_fit_ahead(&self, id: u64, route: Option<Vec<u8>>, amount: TokenAmount) {
+        // a task of its own: a sale's answer waits on nothing here, whatever becomes of this
+        #[cfg(target_arch = "wasm32")]
+        ic_cdk::spawn(async move {
+            let live = crate::pool::payout::Live;
+            let scale = async {
+                match &route {
+                    Some(route) => live.scaled(route, amount).await.ok(),
+                    None => None,
+                }
+            };
+            let ((), scaled) = futures::future::join(live.gas_ready(), scale).await;
+            if let (Some(route), Some(scaled)) = (route, scaled) {
+                SCALED_AHEAD.with(|ahead| {
+                    *ahead.borrow_mut() = Some(ScaledAhead {
+                        id,
+                        route,
+                        amount,
+                        scaled,
+                    });
+                });
+            }
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (id, route, amount);
+    }
+
+    fn scaled_ahead(&self, id: u64, route: &[u8], amount: TokenAmount) -> Option<Vec<u8>> {
+        SCALED_AHEAD.with(|ahead| {
+            let mut ahead = ahead.borrow_mut();
+            let hit = ahead
+                .as_ref()
+                .is_some_and(|read| read.id == id && read.amount == amount && read.route == route);
+            hit.then(|| ahead.take().map(|read| read.scaled)).flatten()
+        })
+    }
+
     async fn scaled(&self, route: &[u8], amount: TokenAmount) -> Result<Vec<u8>, String> {
         let chain = crate::storage::config::get()
             .pool_chain
@@ -282,10 +363,13 @@ pub async fn fit(
         gas_limit,
     } = decided;
     if let Some(at) = swap {
-        let route = reads
-            .scaled(&order.steps[at].data, amount)
-            .await
-            .map_err(|why| format!("the plan's swap was not rewritten: {why}"))?;
+        let route = match reads.scaled_ahead(id, &order.steps[at].data, amount) {
+            Some(route) => route,
+            None => reads
+                .scaled(&order.steps[at].data, amount)
+                .await
+                .map_err(|why| format!("the plan's swap was not rewritten: {why}"))?,
+        };
         order.steps[at] = rescaled(&order.steps[at], route, amount)?;
     }
     // the payout as it stands after the read

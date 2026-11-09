@@ -674,17 +674,25 @@ async fn try_plan(
         return Ok(Tried::Closed);
     }
     let why = match decided {
-        Ok(decided) => match crate::pool::plan::fit(reads, id, decided, clock()).await {
-            Ok(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(Box::new(fitted))),
-            // closed during the read: tried again once it opens, not counted
-            Ok(_) => {
-                pool::log(&format!(
-                    "the pool payout {id}'s plan waits: the pool closed"
-                ));
-                return Ok(Tried::Closed);
+        Ok(decided) => {
+            // the gas its signature needs, read beside the fit's own read: one round for both
+            let (fitted, ()) = futures::future::join(
+                crate::pool::plan::fit(reads, id, decided, clock()),
+                reads.gas_ready(),
+            )
+            .await;
+            match fitted {
+                Ok(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(Box::new(fitted))),
+                // closed during the read: tried again once it opens, not counted
+                Ok(_) => {
+                    pool::log(&format!(
+                        "the pool payout {id}'s plan waits: the pool closed"
+                    ));
+                    return Ok(Tried::Closed);
+                }
+                Err(why) => why,
             }
-            Err(why) => why,
-        },
+        }
         Err(why) => why,
     };
     pool::log(&format!("the pool payout {id} waits for an order: {why}"));
@@ -823,8 +831,32 @@ fn landed(out: TokenAmount, fee: TokenAmount) -> TokenAmount {
     out.checked_sub(fee).unwrap_or(TokenAmount::ZERO)
 }
 
+/// Starts a planned swap's fit's reads beside the sale that ends in ckUSDC, for what its quote
+/// says the sale makes. A plan that would not fit that amount reads nothing.
+fn read_fit_beside_sale(
+    reads: &impl PlanReads,
+    payout: &EvmPayout,
+    terms: &IcpSwapTerms,
+    settings: &types::pool::PoolSettings,
+    received: TokenAmount,
+    now: Timestamp,
+) {
+    let (Some(pinned), Some(planned)) = (payout.plan.as_ref(), terms.planned) else {
+        return;
+    };
+    let Some(amount) = plan::payout_of(settings, received, terms.network_fee) else {
+        return;
+    };
+    if let Ok((order, swap)) =
+        crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get())
+    {
+        let route = swap.map(|at| order.steps[at].data.to_vec());
+        reads.read_fit_ahead(payout.id, route, amount);
+    }
+}
+
 async fn swap(
-    ledgers: &impl Ledgers,
+    ledgers: &(impl Ledgers + PlanReads),
     payout: &EvmPayout,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
@@ -898,7 +930,11 @@ async fn swap(
                 fee_out: fee_ck,
                 pays_out: false,
             };
-            match run_leg(ledgers, spec, progress.swap, clock, guard).await? {
+            let read_fit = |quoted: TokenAmount| {
+                let received = landed(quoted, fee_ck);
+                read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
+            };
+            match run_leg_beside(ledgers, spec, progress.swap, clock, guard, read_fit).await? {
                 LegEnd::Out(out) => known(landed(out, fee_ck)),
                 LegEnd::Short(quoted) => undo(
                     payout.id,
@@ -996,7 +1032,13 @@ async fn swap(
                     fee_out: fee_ck,
                     pays_out: false,
                 };
-                if let LegEnd::Out(out) = run_leg(ledgers, spec, second_leg, clock, guard).await? {
+                let read_fit = |quoted: TokenAmount| {
+                    let received = landed(quoted, fee_ck);
+                    read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
+                };
+                if let LegEnd::Out(out) =
+                    run_leg_beside(ledgers, spec, second_leg, clock, guard, read_fit).await?
+                {
                     return known(landed(out, fee_ck));
                 }
             }
@@ -1085,8 +1127,19 @@ async fn run_leg(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<LegEnd, Stop> {
+    run_leg_beside(ledgers, spec, state, clock, guard, |_| {}).await
+}
+
+async fn run_leg_beside(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: types::pool::SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    beside: impl FnOnce(TokenAmount),
+) -> Result<LegEnd, Stop> {
     if state.out.is_some() {
-        return legs::run(ledgers, spec, state, clock, guard).await;
+        return legs::run_beside(ledgers, spec, state, clock, guard, beside).await;
     }
     let Some(_held) = Leg::take(spec.pool) else {
         return Err(Stop::Retry(format!(
@@ -1102,7 +1155,7 @@ async fn run_leg(
             spec.pool
         )));
     }
-    legs::run(ledgers, spec, state, clock, guard).await
+    legs::run_beside(ledgers, spec, state, clock, guard, beside).await
 }
 
 /// How far below the token its first leg sold a way back from ICP may buy it: wide enough
