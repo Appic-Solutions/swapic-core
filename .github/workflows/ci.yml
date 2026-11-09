@@ -125,6 +125,7 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
         with:
           version: v1.3.5
-      - run: forge fmt --check
+      # no forge fmt check: the contracts are deployed and verified, and a reformatted source
+      # moves the metadata hash and breaks verifying the next deploy
       # the fork tests skip themselves without their rpc urls: no secret is given to CI
       - run: forge test -vv
