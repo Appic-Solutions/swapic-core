@@ -2350,7 +2350,10 @@ fn a_reverted_across_payout_is_no_longer_out() {
 }
 
 /// D9: an Across refund credits the payouts it pays back, each its whole deposit (a gift
-/// included), and the rest is the canister's surplus; the pool ends where it began.
+/// included), and the rest is the canister's surplus; the pool ends where it began. Read
+/// unfilled, a payout is NOT undone (Jeff, 2026-11-09: the user waits, the pool never fronts
+/// it): no undo is admitted and no ckUSDC moves until Across's refund of it is credited, and
+/// the credit begins its undo in the same step, once.
 #[test]
 fn an_across_refund_credits_its_payouts_and_books_the_rest_as_surplus() {
     let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x63, 1);
@@ -2363,17 +2366,28 @@ fn an_across_refund_credits_its_payouts_and_books_the_rest_as_surplus() {
         .unwrap();
     pool.step(across_paid(second, across_out(amount, 2_100)))
         .unwrap();
+    let why = || "the transfer to BNB Chain didn't go through".to_string();
     for id in [first, second] {
         pool.step(unfilled(id)).unwrap();
-        let why = || "the transfer to BNB Chain didn't go through".to_string();
-        pool.step(PoolStep::PayoutUndoing { id, why: why() })
-            .unwrap();
-        pool.step(PoolStep::PayoutUndone {
-            id,
-            why: why(),
-            block: Some(14),
-        })
-        .unwrap();
+        // no undo before Across's refund is credited: the user's ckUSDC stays held
+        let held = pool.ledger.clone();
+        let refund_first = Err(PoolStepError::Terms(
+            "an unfilled Across payout is undone only once Across's refund of it is credited",
+        ));
+        assert_eq!(
+            pool.step(PoolStep::PayoutUndoing { id, why: why() }),
+            refund_first
+        );
+        assert_eq!(
+            pool.step(PoolStep::PayoutUndone {
+                id,
+                why: why(),
+                block: Some(14),
+            }),
+            refund_first
+        );
+        assert_eq!(pool.ledger, held);
+        assert_eq!(status(&pool, id), PayoutStatus::Unfilled);
         never_paid_again(&mut pool, id);
     }
     assert_eq!(pool.ledger.lines().across_owed.0.len(), 2);
@@ -2411,7 +2425,17 @@ fn an_across_refund_credits_its_payouts_and_books_the_rest_as_surplus() {
             pool.payouts[&id].reclaim,
             Some(crate::pool::payout::Reclaim::Credited)
         );
+        // the credit began its undo, once: no second one
+        assert_eq!(status(&pool, id), PayoutStatus::Undoing(why()));
+        assert!(pool.step(PoolStep::PayoutUndoing { id, why: why() }).is_err());
         never_paid_again(&mut pool, id);
+        // its ckUSDC back to the user
+        pool.step(PoolStep::PayoutUndone {
+            id,
+            why: why(),
+            block: Some(14),
+        })
+        .unwrap();
     }
     assert_eq!(pool.ledger.lines().across_owed.0.len(), 0);
     // credited once

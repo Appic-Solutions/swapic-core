@@ -3159,10 +3159,12 @@ fn an_across_payout_read_filled_is_paid() {
     assert_eq!(world.balance(staker()), before);
 }
 
-/// Read open past its deadline with no fill logged: the user's ckUSDC back on ICP at once,
-/// its USDC owed back by Across; Across's refund leaf then credits the Base pocket, once.
+/// Read open past its deadline with no fill logged, the payout waits (Jeff, 2026-11-09: the
+/// pool never fronts it): no ckUSDC moves, its USDC owed back by Across in flight, its status
+/// "Refunding: the transfer to BNB Chain didn't go through". Only once Across's refund leaf is
+/// credited to the Base pocket is the user paid back on ICP, once.
 #[test]
-fn an_across_payout_read_unfilled_refunds_at_once_and_the_refund_is_credited_later() {
+fn an_across_payout_read_unfilled_waits_and_the_user_is_paid_back_only_after_acrosss_refund() {
     use settlement_api::types::pool::{PayoutStatus, PoolArrival, PoolArrivalOutcome};
     let (world, id, deposit, _) = across_delivering();
     let before = world.balance(staker());
@@ -3170,12 +3172,15 @@ fn an_across_payout_read_unfilled_refunds_at_once_and_the_refund_is_credited_lat
     answer_fill_read(&world, &deposit, relay_of(&deposit).hash(ChainId::new(BSC)), 0);
     answer_fill_logs(&world, &deposit, false);
     world.settle();
-    assert_eq!(
-        world.payout_status(id),
-        PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
-    );
-    assert_eq!(world.balance(staker()), before + Nat::from(usdc(100) - FEE));
+    let waiting =
+        PayoutStatus::Refunding("the transfer to BNB Chain didn't go through".to_string());
+    assert_eq!(world.payout_status(id), waiting);
     assert_eq!(world.state().base.in_flight, Nat::from(amount));
+    // a while later, the queue's passes past: still waiting, no ckUSDC moved
+    world.next_tick();
+    world.next_tick();
+    assert_eq!(world.payout_status(id), waiting);
+    assert_eq!(world.balance(staker()), before.clone(), "no ckUSDC moves before Across's refund");
     // Across's relayer refund leaf pays the canister its deposit back on Base
     use alloy_sol_types::SolEvent;
     let canister = deposit.depositor;
@@ -3265,6 +3270,22 @@ fn an_across_payout_read_unfilled_refunds_at_once_and_the_refund_is_credited_lat
         .filter(|step| matches!(step, PoolStep::AcrossRefunded { refunded, .. } if refunded == &vec![id]))
         .count();
     assert_eq!(refunded, 1);
+    // the credit began the undo: the user's ckUSDC back on ICP, once
+    world.next_tick();
+    assert_eq!(
+        world.payout_status(id),
+        PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
+    );
+    let paid_back = before.clone() + Nat::from(usdc(100) - FEE);
+    assert_eq!(world.balance(staker()), paid_back);
+    world.next_tick();
+    assert_eq!(world.balance(staker()), paid_back);
+    let undone = world
+        .pool_steps()
+        .into_iter()
+        .filter(|step| matches!(step, PoolStep::PayoutUndone { id: undone, .. } if *undone == id))
+        .count();
+    assert_eq!(undone, 1, "one undo, never two");
 }
 
 /// D8 and attack M5: a relay hash that is not the canister's, or a fill logged for a deposit

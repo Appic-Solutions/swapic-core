@@ -26,8 +26,11 @@
 //!   it is signed, and leaves it when it reverts, is found delivered or paid by a controller,
 //!   or Across's refund of it is credited. Paid with its deposit read off the receipt, it is
 //!   Delivering until the fill is read; Unfilled keeps its USDC in `in_flight`, owed back by
-//!   Across. One Across refund to the canister (AcrossRefunded) credits every payout it pays
-//!   back, each its whole deposit, and books the rest as the canister's own surplus. A payout
+//!   Across, and is NOT undone (Jeff, 2026-11-09: the pool never fronts it, the user waits):
+//!   no undo is admitted until Across's refund of it is credited. One Across refund to the
+//!   canister (AcrossRefunded) credits every payout it pays back, each its whole deposit, an
+//!   unfilled ICP swap's undo beginning in the same step, and books the rest as the
+//!   canister's own surplus. A payout
 //!   whose deposit is out may stop for a human (its fill read contradicts itself, or its
 //!   receipt shows no single deposit): Refund then owes it back as Unfilled does, MarkPaid
 //!   takes its paid line from `in_flight`.
@@ -83,6 +86,19 @@ fn across_out(lines: &PayoutLines, lookup: &impl PoolLookup) -> Result<TokenAmou
         .try_fold(TokenAmount::ZERO, |sum, amount| sum.checked_add(amount))
         .ok_or(PoolStepError::Overflow)
 }
+
+/// Whether `payout` read unfilled on Across waits for Across's refund before any undo: the pool
+/// never pays its ckUSDC back while its USDC is still at Across.
+fn waits_for_across_refund(payout: &EvmPayout) -> bool {
+    payout.status == PayoutStatus::Unfilled
+        && payout.across.is_some()
+        && payout.reclaim != Some(Reclaim::Credited)
+}
+
+/// The refusal of an undo before Across's refund of the payout is credited.
+const ACROSS_REFUND_FIRST: PoolStepError = PoolStepError::Terms(
+    "an unfilled Across payout is undone only once Across's refund of it is credited",
+);
 
 fn status_of(payout: &EvmPayout) -> String {
     format!("{:?}", payout.status)
@@ -156,6 +172,20 @@ fn unfilled(ledger: &mut PoolLedger, payout: &mut EvmPayout) {
     payout.base_reserved = false;
     payout.status = PayoutStatus::Unfilled;
     payout.reclaim = Some(Reclaim::Pending);
+}
+
+/// A payout's undo begins at `at`, with why: its refund is asked next. Old semantics (the
+/// module's note): an ICP swap paid once and released holds its ckUSDC back first.
+fn begin_undo(ledger: &mut PoolLedger, payout: &mut EvmPayout, why: String, at: Timestamp) {
+    if payout.icp_released.0 {
+        let held = payout.icp_hold();
+        let icp = &mut ledger.pockets.icp;
+        icp.free = sat_sub(icp.free, held);
+        icp.reserved = sat_add(icp.reserved, held);
+        payout.icp_released = crate::pool::payout::Flag(false);
+    }
+    payout.status = PayoutStatus::Undoing(why);
+    payout.undoing_at = Some(at);
 }
 
 /// Takes a payout off the queue at `at`, with its hold.
@@ -815,6 +845,9 @@ impl PoolLedger {
             }
             PoolStep::PayoutUndoing { id, .. } => {
                 let payout = payout_of(lookup, *id)?;
+                if waits_for_across_refund(&payout) {
+                    return Err(ACROSS_REFUND_FIRST);
+                }
                 if !matches!(
                     payout.status,
                     PayoutStatus::Opened
@@ -840,6 +873,9 @@ impl PoolLedger {
             // a signed payout waits for its transaction's end: undone only once it reverted
             PoolStep::PayoutUndone { id, .. } => {
                 let payout = payout_of(lookup, *id)?;
+                if waits_for_across_refund(&payout) {
+                    return Err(ACROSS_REFUND_FIRST);
+                }
                 if !matches!(
                     payout.status,
                     PayoutStatus::Opened
@@ -1283,8 +1319,9 @@ impl PoolLedger {
                 paid(self, lines, &mut payout, id);
                 effects.payout = Some(payout);
             }
-            // each payout Across paid back: its USDC to the Base pocket's free line, once; the
-            // rest of the transfer is the canister's own (the state books it)
+            // each payout Across paid back: its USDC to the Base pocket's free line, once, and an
+            // unfilled ICP swap's undo begins in the same step (its ckUSDC back to the user);
+            // the rest of the transfer is the canister's own (the state books it)
             PoolStep::AcrossRefunded {
                 credit,
                 amount,
@@ -1300,6 +1337,14 @@ impl PoolLedger {
                     base.free = sat_add(base.free, back);
                     payout.reclaim = Some(Reclaim::Credited);
                     lines.across_owed.remove(id);
+                    if payout.status == PayoutStatus::Unfilled && payout.is_icp_swap() {
+                        let why = payout
+                            .across
+                            .as_ref()
+                            .map(crate::pool::payout::AcrossOut::unfilled_why)
+                            .unwrap_or_default();
+                        begin_undo(self, &mut payout, why, at);
+                    }
                     effects.payouts.push(payout);
                 }
                 self.unseen.push(crate::pool::UnseenArrival {
@@ -1424,15 +1469,7 @@ impl PoolLedger {
             }
             PoolStep::PayoutUndoing { id, why } => {
                 let mut payout = lookup.payout(*id)?;
-                if payout.icp_released.0 {
-                    let held = payout.icp_hold();
-                    let icp = &mut self.pockets.icp;
-                    icp.free = sat_sub(icp.free, held);
-                    icp.reserved = sat_add(icp.reserved, held);
-                    payout.icp_released = crate::pool::payout::Flag(false);
-                }
-                payout.status = PayoutStatus::Undoing(why.clone());
-                payout.undoing_at = Some(at);
+                begin_undo(self, &mut payout, why.clone(), at);
                 effects.payout = Some(payout);
             }
             PoolStep::PayoutUndone { id, why, block } => {

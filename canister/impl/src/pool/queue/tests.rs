@@ -1620,19 +1620,42 @@ fn an_across_payouts_fill_is_read_past_its_deadline_and_decides_once() {
         let amount = payout(id).unwrap().amount.unwrap();
         let reads = Reads::across(Ok(AcrossFill::Open), Ok(Some(false)));
         block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
-        let undone = payout(id).unwrap();
-        // the rail is never named to the person (Jeff, 2026-11-09)
-        assert_eq!(
-            undone.status,
-            PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
-        );
-        assert_eq!(undone.reclaim, Some(types::pool::Reclaim::Pending));
-        assert!(shares_of(&owner) > before);
-        // owed back by Across: in flight still, and counted as out
+        // read unfilled, it is NOT undone (Jeff, 2026-11-09): the user waits for Across's
+        // refund, nothing is given back, and its USDC is in flight and out still
+        let waiting = payout(id).unwrap();
+        assert_eq!(waiting.status, PayoutStatus::Unfilled);
+        assert_eq!(waiting.reclaim, Some(types::pool::Reclaim::Pending));
+        assert_eq!(shares_of(&owner), before);
         assert_eq!(ledger().pockets.base.in_flight, amount);
         assert!(ledger().lines().across_owed.contains(&id));
+        // another pass reads nothing again and undoes nothing
         block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
         assert_eq!(reads.across_reads.borrow().len(), 1);
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Unfilled);
+        assert_eq!(shares_of(&owner), before);
+        // Across's refund of it credited: the next pass undoes it, once, in plain words
+        crate::storage::pool::record_at(
+            types::pool::PoolStep::AcrossRefunded {
+                credit: types::pool::CreditKey {
+                    chain: ChainId::BASE,
+                    tx: types::TxHash::new([0xa7; 32]),
+                    log_index: 2,
+                },
+                amount,
+                block: types::BlockNumber::new(40),
+                refunded: vec![id],
+                surplus: TokenAmount::ZERO,
+            },
+            across_read_at(),
+        )
+        .unwrap();
+        assert_eq!(ledger().pockets.base.in_flight, TokenAmount::ZERO);
+        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        assert_eq!(
+            payout(id).unwrap().status,
+            PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
+        );
+        assert!(shares_of(&owner) > before);
     });
     for (read, why) in [
         (

@@ -184,13 +184,20 @@ fn decide(
                 _ => Next::Wait,
             }
         }
-        // never filled: the user's refund at once
-        PayoutStatus::Unfilled => Next::Undo {
-            why: payout
-                .across
-                .as_ref()
-                .map_or_else(|| UNFILLED.to_string(), |across| across.unfilled_why()),
-            checked: false,
+        // an Across deposit never filled: the user waits for Across's refund of it, never
+        // fronted by the pool (Jeff, 2026-11-09); its credit begins the undo, and a payout that
+        // is no ICP swap is undone here once it is credited
+        PayoutStatus::Unfilled => match &payout.across {
+            Some(across) if payout.reclaim == Some(types::pool::Reclaim::Credited) => Next::Undo {
+                why: across.unfilled_why(),
+                checked: false,
+            },
+            Some(_) => Next::Wait,
+            // an Eco intent never filled: the user's refund at once
+            None => Next::Undo {
+                why: UNFILLED.to_string(),
+                checked: false,
+            },
         },
         // past its withdrawal the deadline undoes nothing: its drive decides on the minter's
         // word and its own reads
@@ -328,6 +335,9 @@ pub trait ChainReads {
         across: &AcrossOut,
         header: Header,
     ) -> Result<Option<bool>, String>;
+    /// The canister's own read of Base, soon: an Across refund it keeps aside for a payout
+    /// just read unfilled is credited then, the payout's undo with it. Nothing in a test.
+    fn read_base_soon(&self) {}
 }
 
 /// The chains themselves, read by every node at an agreed block.
@@ -383,8 +393,12 @@ impl ChainReads for LiveReads {
             return Ok(None);
         };
         crate::agreed::filled_relay_logged(chain, spoke_pool, &across.relay, &pages)
-        .await
-        .map(Some)
+            .await
+            .map(Some)
+    }
+
+    fn read_base_soon(&self) {
+        crate::task_manager::read_base_again();
     }
 }
 
@@ -588,12 +602,14 @@ pub async fn pass_with(
                                     continue;
                                 }
                                 acted += 1;
-                                // the user's refund at once; Across's refund credits the pool
-                                // later
-                                if undo(&payout, across.unfilled_why(), clock())
-                                    && payout.is_icp_swap()
+                                // no undo now: the user's ckUSDC goes back once Across's refund
+                                // is credited, which begins the undo in the same step; a refund
+                                // that came early, kept aside, is read again at once
+                                if crate::storage::timer_state::get()
+                                    .across_refunds_waiting
+                                    .is_some_and(|kept| !kept.is_empty())
                                 {
-                                    let _ = icp_swap::drive(ledgers, id, clock, guard).await;
+                                    reads.read_base_soon();
                                 }
                             }
                             Ok(Some(true)) => acted += usize::from(stop(ACROSS_FILL_LOGGED)),
