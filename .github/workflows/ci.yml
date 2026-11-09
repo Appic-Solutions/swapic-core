@@ -59,7 +59,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup show active-toolchain || rustup toolchain install
+      # rustup (installed when the image lacks it) and the toolchain rust-toolchain.toml pins:
+      # 1.98.1 with its wasm target, as the kit's Mac builds with
+      - name: Rust, as rust-toolchain.toml pins it
+        run: |
+          if ! command -v rustup > /dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install --no-self-update
+          rustc -vV
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: wasm
@@ -72,8 +82,11 @@ jobs:
             "https://github.com/dfinity/ic-wasm/releases/download/$IC_WASM_VERSION/ic-wasm-aarch64-apple-darwin.tar.xz"
           echo "$IC_WASM_SHA256  $RUNNER_TEMP/ic-wasm.tar.xz" | shasum -a 256 -c --quiet
           tar -xJf "$RUNNER_TEMP/ic-wasm.tar.xz" -C "$RUNNER_TEMP"
-          install -m 755 "$RUNNER_TEMP/ic-wasm-aarch64-apple-darwin/ic-wasm" "$HOME/.cargo/bin/ic-wasm"
-          ic-wasm --version
+          # a folder of its own on the PATH: the image's cargo keeps no ~/.cargo/bin
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 755 "$RUNNER_TEMP/ic-wasm-aarch64-apple-darwin/ic-wasm" "$RUNNER_TEMP/bin/ic-wasm"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/ic-wasm" --version
       - name: The reproducible build
         run: |
           scripts/build-canister.sh settlement
