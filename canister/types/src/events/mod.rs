@@ -150,14 +150,14 @@ pub enum EventType {
         #[n(0)]
         sweep: Sweep,
     },
-    /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
-    /// amount is back on the books it came from.
     /// A step of the Solana line.
     #[n(40)]
     Solana {
         #[n(0)]
         step: crate::solana::SolanaStep,
     },
+    /// A sweep that moved nothing (reverted, cancelled, or refused by the ledger): its
+    /// amount is back on the books it came from.
     #[n(29)]
     SweepReverted {
         #[n(0)]

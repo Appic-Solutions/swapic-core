@@ -4,7 +4,7 @@
 
 use super::*;
 use candid::types::subtype::{subtype, Gamma};
-use candid::types::{internal::TypeContainer, Type, TypeEnv, TypeInner};
+use candid::types::{internal::TypeContainer, Type, TypeEnv};
 use candid_parser::IDLProg;
 
 fn interface() -> (

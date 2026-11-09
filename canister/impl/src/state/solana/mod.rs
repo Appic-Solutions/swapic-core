@@ -82,6 +82,25 @@ impl<S: Store> State<S> {
         }
     }
 
+    /// Whether a co-signed transaction's landed failure was charged: once per signature.
+    pub fn solana_cosign_reported(&self, signature: &[u8; 64]) -> bool {
+        matches!(
+            self.store
+                .solana_entry(&SolanaKey::cosign_by_signature(signature)),
+            Some(SolanaEntry::Done)
+        )
+    }
+
+    /// How many arrivals other than this one a source transaction stood for: one fee pays one arrival.
+    pub fn solana_other_arrivals(&self, source_tx: &[u8; 32], arrival: &SolanaRef) -> u64 {
+        let all = self.solana_count(&SolanaKey::source_arrivals(source_tx));
+        let this = self
+            .store
+            .solana_entry(&SolanaKey::source_arrival(source_tx, arrival))
+            .is_some();
+        all.saturating_sub(u64::from(this))
+    }
+
     /// `(blocked, succeeded, co-signs this hour)` of a signer.
     pub fn solana_signer(&self, signer: &[u8; 32], hour: u64) -> (bool, bool, u32) {
         match self.store.solana_entry(&SolanaKey::signer(signer)) {
@@ -181,10 +200,16 @@ impl<S: Store> State<S> {
                 Some((hash, ..)) if hash == *message_hash => refuse("this message was co-signed"),
                 _ => Ok(()),
             },
+            SolanaStep::CosignFailed { signature, .. } => {
+                if self.solana_cosign_reported(signature) {
+                    return refuse("this signature's failure was charged");
+                }
+                Ok(())
+            }
             SolanaStep::KeysDerived { .. }
             | SolanaStep::Signed { .. }
-            | SolanaStep::CosignFailed { .. }
             | SolanaStep::ArrivalFinished { .. }
+            | SolanaStep::ArrivalOfSource { .. }
             | SolanaStep::Misrouted { .. } => Ok(()),
         }
     }
@@ -255,7 +280,9 @@ impl<S: Store> State<S> {
                     | SolanaPurpose::Proof => {}
                 }
             }
-            SolanaStep::CosignFailed { signer, .. } => {
+            SolanaStep::CosignFailed { signer, signature } => {
+                self.store
+                    .put_solana_entry(SolanaKey::cosign_by_signature(signature), SolanaEntry::Done);
                 let hour = hour_of(now_s);
                 let (_, succeeded, count) = self.solana_signer(signer, hour);
                 self.store.put_solana_entry(
@@ -318,6 +345,13 @@ impl<S: Store> State<S> {
             SolanaStep::ArrivalFinished { arrival } => {
                 self.store
                     .put_solana_entry(SolanaKey::arrival_done(arrival), SolanaEntry::Done);
+            }
+            SolanaStep::ArrivalOfSource { source_tx, arrival } => {
+                let key = SolanaKey::source_arrival(source_tx, arrival);
+                if self.store.solana_entry(&key).is_none() {
+                    self.store.put_solana_entry(key, SolanaEntry::Done);
+                    self.solana_add(SolanaKey::source_arrivals(source_tx));
+                }
             }
         }
     }

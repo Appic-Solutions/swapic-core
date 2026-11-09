@@ -132,6 +132,16 @@ impl SwapicAddresses {
         self.vault.iter().position(|a| a == address)
     }
 
+    /// The program's `is_program_address`: where `release` pays Swapic's fee account and not the
+    /// hook's recipient.
+    pub fn is_program_address(&self, address: &Pubkey) -> bool {
+        *address == self.program
+            || *address == self.config.0
+            || *address == self.rent.0
+            || self.auth_index(address).is_some()
+            || self.vault_index(address).is_some()
+    }
+
     /// True for every account a user's recipient may never be.
     pub fn is_swapic_account(&self, address: &Pubkey) -> bool {
         *address == self.program

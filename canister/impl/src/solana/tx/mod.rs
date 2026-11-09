@@ -120,11 +120,26 @@ pub async fn sign_and_record(
     compiled: Compiled,
     last_valid_block_height: u64,
 ) -> Result<u64, String> {
+    sign_then(d, purpose, compiled, last_valid_block_height, || {
+        require_not_halted().map_err(|e| format!("{e:?}"))
+    })
+    .await
+}
+
+/// `sign_and_record`, with what must still hold once the signatures are in: `admit` runs after the last
+/// await, so what it refuses is never recorded and what it writes goes in with the line.
+pub async fn sign_then(
+    d: &Deployment,
+    purpose: SolanaPurpose,
+    compiled: Compiled,
+    last_valid_block_height: u64,
+    admit: impl FnOnce() -> Result<(), String>,
+) -> Result<u64, String> {
     let mut signatures = Vec::with_capacity(compiled.signers.len());
     for role in &compiled.signers {
         signatures.push(ed25519::sign(*role, &d.config.key_name, compiled.bytes.clone()).await?);
     }
-    require_not_halted().map_err(|e| format!("{e:?}"))?;
+    admit()?;
     let raw = match compiled.version {
         SolanaTxVersion::V0 => wire_v0(&signatures, &compiled.bytes),
         SolanaTxVersion::V1 => wire_v1(&compiled.bytes, &signatures),

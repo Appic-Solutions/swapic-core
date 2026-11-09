@@ -7,6 +7,7 @@ use candid::{decode_one, encode_args, encode_one, CandidType, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde::de::DeserializeOwned;
 use settlement_api::types::config::{ActionAmounts, ActionGas, EvmChainConfig};
+use settlement_api::types::errors::GuardError;
 use settlement_api::types::solana::{
     ProposeSolanaUpgradeArgs, SolanaAddresses, SolanaConfig, SolanaFeesConfig, SolanaLifetime,
     SolanaProgramConfigArgs, SolanaUpgradeView,
@@ -63,6 +64,7 @@ fn config() -> SolanaConfig {
         enabled_arrivals: true,
         arrival_table: None,
         program_event_keypair_allowed: false,
+        program_paused: false,
     }
 }
 
@@ -525,4 +527,98 @@ fn nothing_is_signed_while_the_line_is_switched_off_or_the_canister_is_halted() 
         encode_args((vec![0u8; 10], 1u64)).unwrap(),
     );
     assert!(off.unwrap_err().contains("off"));
+}
+
+fn program_config(paused: bool, min_burn: u64) -> SolanaProgramConfigArgs {
+    SolanaProgramConfigArgs {
+        paused,
+        event_keypair_allowed: true,
+        swap_domains: 1 << 6,
+        ck_domains: 1,
+        min_burn,
+        min_deadline_s: 900,
+        max_deadline_s: 7_200,
+        lifetime: lifetime(),
+    }
+}
+
+#[test]
+fn the_programs_settings_move_the_canisters_reading_of_them() {
+    let (pic, canister, admin) = setup();
+    derive(&pic, canister, admin);
+    let signed: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "set_solana_program_config",
+        encode_one(program_config(true, 2_000_000)).unwrap(),
+    );
+    signed.unwrap();
+    let held = get_config_full(&pic, canister, admin)
+        .unwrap()
+        .solana
+        .unwrap();
+    assert!(held.program_paused);
+    assert!(held.program_event_keypair_allowed);
+    assert_eq!(held.program_min_burn, 2_000_000);
+    assert_eq!(held.program_min_deadline_s, 900);
+
+    // a paused program refuses what is co-signed: the canister signs none
+    let paused: Result<u64, String> = update(
+        &pic,
+        canister,
+        crate::settlement_suite::init::watcher(),
+        "cosign_solana",
+        encode_args((vec![0u8; 10], 1u64)).unwrap(),
+    );
+    assert!(paused.unwrap_err().contains("paused"));
+}
+
+#[test]
+fn a_pause_signs_under_a_halt_and_nothing_else_does() {
+    let (pic, canister, admin) = setup();
+    derive(&pic, canister, admin);
+    let halted: Result<(), GuardError> = update(
+        &pic,
+        canister,
+        admin,
+        "set_halted",
+        encode_one(true).unwrap(),
+    );
+    halted.unwrap();
+    let unpause: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "set_solana_program_config",
+        encode_one(program_config(false, 1_000_000)).unwrap(),
+    );
+    assert!(unpause.unwrap_err().contains("Halted"));
+    let pause: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "set_solana_program_config",
+        encode_one(program_config(true, 1_000_000)).unwrap(),
+    );
+    let id = pause.expect("a pause signs under a halt");
+    assert!(signed_txs(&pic, canister, admin)
+        .iter()
+        .any(|tx| tx.id == id));
+}
+
+#[test]
+fn the_key_name_and_the_section_stay_once_the_keys_are_derived() {
+    let (pic, canister, admin) = setup();
+    derive(&pic, canister, admin);
+    let mut full = get_config_full(&pic, canister, admin).unwrap();
+    let held = full.solana.clone();
+    full.solana = None;
+    assert!(set_config(&pic, canister, admin, &full).is_err());
+    let mut renamed = held.clone().unwrap();
+    renamed.key_name = "dfx_test_key".to_string();
+    full.solana = Some(renamed);
+    assert!(set_config(&pic, canister, admin, &full).is_err());
+    full.solana = held;
+    assert!(set_config(&pic, canister, admin, &full).is_ok());
 }

@@ -108,5 +108,6 @@ pub(crate) fn config_for_tests() -> SolanaConfig {
         enabled_arrivals: true,
         arrival_table: None,
         program_event_keypair_allowed: false,
+        program_paused: false,
     }
 }

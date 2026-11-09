@@ -57,6 +57,7 @@ pub struct SolanaConfig {
     pub enabled_arrivals: bool,
     pub arrival_table: Option<SolanaTableConfig>,
     pub program_event_keypair_allowed: bool,
+    pub program_paused: bool,
 }
 
 impl From<types::solana::SolanaConfig> for SolanaConfig {
@@ -98,6 +99,7 @@ impl From<types::solana::SolanaConfig> for SolanaConfig {
                 entries: t.entries.iter().map(|e| base58::encode(e)).collect(),
             }),
             program_event_keypair_allowed: c.program_event_keypair_allowed,
+            program_paused: c.program_paused,
         }
     }
 }
@@ -160,6 +162,7 @@ impl TryFrom<SolanaConfig> for types::solana::SolanaConfig {
             enabled_arrivals: c.enabled_arrivals,
             arrival_table: table,
             program_event_keypair_allowed: c.program_event_keypair_allowed,
+            program_paused: c.program_paused,
         })
     }
 }

@@ -974,6 +974,7 @@ type SolanaConfig = record {
   program_min_burn : nat64;
   enabled_arrivals : bool;
   program_event_keypair_allowed : bool;
+  program_paused : bool;
   max_fee_deci_bps : nat16;
   key_name : text;
   max_forward_fee : nat64;

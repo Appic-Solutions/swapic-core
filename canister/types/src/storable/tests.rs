@@ -515,6 +515,10 @@ fn solana_samples() -> Vec<Sample> {
             order_ref: [0x65; 32],
             payer: [0x66; 20],
         },
+        SolanaStep::ArrivalOfSource {
+            source_tx: [0x67; 32],
+            arrival: [0x68; 32],
+        },
     ];
     let mut out: Vec<Sample> = steps
         .into_iter()
@@ -607,6 +611,7 @@ fn solana_samples() -> Vec<Sample> {
                     entries: vec![[0x6c; 32]],
                 }),
                 program_event_keypair_allowed: true,
+                program_paused: false,
             }),
             ..Config::default()
         },

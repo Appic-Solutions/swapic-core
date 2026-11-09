@@ -61,6 +61,12 @@ fn addresses_are_recognised() {
     assert!(a.is_swapic_account(&a.wsol[1]));
     assert!(a.is_swapic_account(&[2; 32]));
     assert!(!a.is_swapic_account(&[9; 32]));
+    // the program's own rule is narrower: its keys and token accounts are recipients to `release`
+    assert!(a.is_program_address(&a.config.0));
+    assert!(a.is_program_address(&a.vault[1]));
+    assert!(!a.is_program_address(&[2; 32]));
+    assert!(!a.is_program_address(&a.wsol[1]));
+    assert!(!a.is_program_address(&[9; 32]));
     // the fee account belongs to the admin key, never the payer key (attack L8)
     assert_eq!(a.fee_account, ata(&[3; 32], &USDC_MINT, &TOKEN_PROGRAM));
     assert_ne!(a.fee_account, ata(&[2; 32], &USDC_MINT, &TOKEN_PROGRAM));

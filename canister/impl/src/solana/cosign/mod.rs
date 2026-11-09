@@ -21,10 +21,8 @@ pub struct Context<'a, F: Fn(u32) -> Option<EvmChain>> {
     pub config: &'a SolanaConfig,
     pub now_s: u64,
     pub destination: F,
-    /// The canister's address on the pool chain: where a memo burn's deposit goes.
-    pub pool_address: Option<EvmAddress>,
-    /// The most ahead an arrival's deadline may be.
-    pub max_ahead_s: u64,
+    /// The pool chain's CCTP domain and the canister's address there: where a memo burn's deposit goes.
+    pub pool: Option<(u32, EvmAddress)>,
 }
 
 /// A transaction that passed: what the door still has to do with it.
@@ -195,9 +193,9 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(
     let r#ref = match args.ref_source {
         RefSource::Direct(r) => *r,
         RefSource::Memo(memo) => {
-            if ctx.pool_address != Some(recipient) {
+            if ctx.pool != Some((args.domain as u32, recipient)) {
                 return Err(
-                    "a memo burn's recipient is not the canister's pool address".to_string()
+                    "a memo burn's destination is not the canister on the pool chain".to_string(),
                 );
             }
             let terms = types::pool::memo::decode(memo).map_err(|e| format!("the memo: {e}"))?;
@@ -227,7 +225,7 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(
     };
     // a deadline at the edge cannot pass the canister and then fail on chain (attack M1)
     let earliest = ctx.now_s + ctx.config.program_min_deadline_s + ctx.config.deadline_margin_s;
-    let latest = ctx.now_s + ctx.max_ahead_s.min(TWO_HOURS_S);
+    let latest = ctx.now_s + TWO_HOURS_S;
     if (args.deadline as u64) < earliest || (args.deadline as u64) > latest {
         return Err(format!(
             "the deadline {} is outside {earliest} to {latest}",

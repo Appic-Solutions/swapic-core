@@ -161,6 +161,10 @@ pub struct SolanaConfig {
     /// The program's `event_keypair_allowed`, as `set_solana_program_config` last set it.
     #[n(26)]
     pub program_event_keypair_allowed: bool,
+    /// The program's `paused`, as `set_solana_program_config` last set it: a paused program refuses
+    /// what is co-signed or completed, so neither is signed.
+    #[n(27)]
+    pub program_paused: bool,
 }
 
 impl SolanaConfig {
@@ -375,6 +379,14 @@ pub enum SolanaStep {
         #[cbor(n(2), with = "minicbor::bytes")]
         payer: [u8; 20],
     },
+    /// An arrival into Solana a source transaction stood for: one fee pays one arrival.
+    #[n(9)]
+    ArrivalOfSource {
+        #[cbor(n(0), with = "minicbor::bytes")]
+        source_tx: [u8; 32],
+        #[cbor(n(1), with = "minicbor::bytes")]
+        arrival: SolanaRef,
+    },
 }
 
 impl SolanaStep {
@@ -397,6 +409,7 @@ impl SolanaStep {
             Self::RefFinished { .. } => "RefFinished",
             Self::ArrivalFinished { .. } => "ArrivalFinished",
             Self::Misrouted { .. } => "Misrouted",
+            Self::ArrivalOfSource { .. } => "ArrivalOfSource",
         }
     }
 
@@ -466,6 +479,14 @@ impl SolanaKey {
     }
     pub fn last_top_up() -> Self {
         Self::of(13, &[])
+    }
+    /// That a source transaction stood for this arrival.
+    pub fn source_arrival(source_tx: &[u8; 32], arrival: &SolanaRef) -> Self {
+        Self::of(14, &[&source_tx[..], &arrival[..]].concat())
+    }
+    /// How many arrivals a source transaction stood for.
+    pub fn source_arrivals(source_tx: &[u8; 32]) -> Self {
+        Self::of(15, source_tx)
     }
 }
 

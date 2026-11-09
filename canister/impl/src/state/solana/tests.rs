@@ -239,3 +239,47 @@ fn one_proposal_is_live_at_a_time_and_only_the_live_one_can_end() {
         Some(SolanaProposalStatus::Executed)
     );
 }
+
+#[test]
+fn a_landed_failure_is_charged_once_per_signature() {
+    let mut s = state();
+    let signature = [7; 64];
+    let cosign = signed(SolanaPurpose::Cosign {
+        r#ref: [1; 32],
+        signer: [2; 32],
+        message_hash: [3; 32],
+    });
+    apply(&mut s, &cosign, 3_600);
+    assert_eq!(s.solana_cosign_signer(&signature), Some([2; 32]));
+    assert!(!s.solana_cosign_reported(&signature));
+
+    let failed = SolanaStep::CosignFailed {
+        signer: [2; 32],
+        signature,
+    };
+    apply(&mut s, &failed, 3_600);
+    assert!(s.solana_cosign_reported(&signature));
+    assert_eq!(s.solana_global(1).1, 1);
+    assert!(s.admits_solana(&failed).is_err());
+    assert_eq!(s.solana_global(1).1, 1, "the budget is charged once");
+}
+
+#[test]
+fn a_source_counts_each_arrival_it_stood_for_once() {
+    let mut s = state();
+    let source = [9; 32];
+    let of = |arrival| SolanaStep::ArrivalOfSource {
+        source_tx: source,
+        arrival,
+    };
+    assert_eq!(s.solana_other_arrivals(&source, &[1; 32]), 0);
+    apply(&mut s, &of([1; 32]), 10);
+    // a release after a complete is the same arrival, and stands for no other
+    apply(&mut s, &of([1; 32]), 20);
+    assert_eq!(s.solana_other_arrivals(&source, &[1; 32]), 0);
+    assert_eq!(s.solana_other_arrivals(&source, &[2; 32]), 1);
+    apply(&mut s, &of([2; 32]), 30);
+    assert_eq!(s.solana_other_arrivals(&source, &[1; 32]), 1);
+    assert_eq!(s.solana_other_arrivals(&source, &[3; 32]), 2);
+    assert_eq!(s.solana_other_arrivals(&[8; 32], &[3; 32]), 0, "per source");
+}

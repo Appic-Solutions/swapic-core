@@ -112,8 +112,7 @@ fn run(a: &SwapicAddresses, config: &SolanaConfig, wire: &[u8]) -> Result<Passed
             config,
             now_s: NOW,
             destination,
-            pool_address: Some(EvmAddress::new([0xcc; 20])),
-            max_ahead_s: 7_200,
+            pool: Some((6, EvmAddress::new([0xcc; 20]))),
         },
     )
 }
@@ -395,4 +394,73 @@ fn one_co_sign_per_ref() {
     assert_eq!(second_request((hash, 7, NOW), &hash, NOW + 5), Ok(Some(7)));
     assert!(second_request((hash, 7, NOW), &[2; 32], NOW + 89).is_err());
     assert_eq!(second_request((hash, 7, NOW), &[2; 32], NOW + 90), Ok(None));
+}
+
+/// A memo burn to `pool`: its terms, in a burn the canister would pay for.
+fn memo_wire(a: &SwapicAddresses, memo: &[u8], domain: u8, recipient: [u8; 20]) -> Vec<u8> {
+    let data = BurnArgs {
+        tag: TAG_BURN,
+        fast: true,
+        event_keypair: false,
+        float: true,
+        domain,
+        ref_source: RefSource::Memo(memo),
+        deadline: (NOW + 1800) as u32,
+        recipient: &recipient,
+        payload: Payload::Deliver,
+        min_gas: 0,
+        max_fee_deci_bps: 13,
+        amount: 50_000_000,
+        fee: 600_000,
+        jupiter: &[],
+    }
+    .encode();
+    let [limit, price] = budget();
+    wire_of(a, &a.canister, &[limit, price, burn_ix(a, data)])
+}
+
+fn swap_memo() -> Vec<u8> {
+    types::pool::memo::encode(&types::pool::DepositTerms {
+        kind: types::pool::DepositKind::Swap {
+            recipient: types::pool::IcpAccount {
+                owner: candid::Principal::from_slice(&[4; 29]),
+                subaccount: None,
+            },
+            token_out: candid::Principal::from_slice(&[5; 29]),
+            min_out: 1,
+        },
+        min_usdc: TokenAmount::from(1u64),
+        premium: TokenAmount::ZERO,
+        icp_fees: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
+        salt: [6; 32],
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_memo_burn_goes_to_the_canister_on_the_pool_chain_and_nowhere_else() {
+    let a = addresses();
+    let memo = swap_memo();
+    let pool = [0xcc; 20];
+    let passed = run(&a, &solana_config(), &memo_wire(&a, &memo, 6, pool)).unwrap();
+    assert_eq!(passed.r#ref, keccak256(&memo));
+
+    // the canister's address on another chain: nothing credits the deposit there
+    let chain = chain();
+    let two_chains = |domain: u32| (domain == 6 || domain == 3).then_some(chain);
+    let elsewhere = check(
+        &memo_wire(&a, &memo, 3, pool),
+        &Context {
+            a: &a,
+            config: &solana_config(),
+            now_s: NOW,
+            destination: two_chains,
+            pool: Some((6, EvmAddress::new(pool))),
+        },
+    );
+    assert!(elsewhere.unwrap_err().contains("the pool chain"));
+    // on the pool chain, to anyone else
+    let other = run(&a, &solana_config(), &memo_wire(&a, &memo, 6, RECIPIENT));
+    assert!(other.unwrap_err().contains("the pool chain"));
 }

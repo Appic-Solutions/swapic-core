@@ -2,6 +2,7 @@ use crate::storage::ecdsa_address;
 use crate::storage::events;
 use crate::storage::events::AppendError;
 use crate::storage::memory::{config_memory, Memory};
+use crate::storage::solana_keys;
 use ic_stable_structures::StableCell;
 use std::cell::RefCell;
 use thiserror::Error;
@@ -55,6 +56,7 @@ pub fn set(new: Config) -> Result<IntervalChanges, SetConfigError> {
     // before anything is written: a rejected config must leave no event and no cell write
     new.validate()?;
     ensure_key_name_is_not_moving(&new)?;
+    ensure_solana_line_is_not_moving(&new)?;
     let changed = get().interval_changes(&new);
     // the log first, because it is the step that can refuse. The log is world-readable,
     // and the redacted view prints every rpc url as `***`.
@@ -87,6 +89,36 @@ fn ensure_key_name_is_not_moving(new: &Config) -> Result<(), SetConfigError> {
             current,
             requested: new.ecdsa_key_name.clone(),
         }));
+    }
+    Ok(())
+}
+
+/// What the Solana keys fix, the rule above for the two keys beside the EVM address. The key name
+/// chooses the keys, so it never moves once they are derived, and the section stays: its switches turn
+/// the line off. The program id moves only while both switches are off, so a live line cannot be
+/// pointed elsewhere by a config write: between the keys and the deploy it may still change.
+fn ensure_solana_line_is_not_moving(new: &Config) -> Result<(), SetConfigError> {
+    if solana_keys::get().is_none() {
+        return Ok(());
+    }
+    let refuse = |why: &str| {
+        Err(SetConfigError::Invalid(ConfigError::Solana {
+            why: why.to_string(),
+        }))
+    };
+    let Some(current) = get().solana else {
+        return Ok(());
+    };
+    let Some(next) = &new.solana else {
+        return refuse("the keys are derived: the switches turn the line off, not removing it");
+    };
+    if next.key_name != current.key_name {
+        return refuse("key_name is fixed once the keys are derived");
+    }
+    if next.program_id != current.program_id
+        && (current.enabled_gasless || current.enabled_arrivals)
+    {
+        return refuse("program_id moves only while gasless and arrivals are off");
     }
     Ok(())
 }

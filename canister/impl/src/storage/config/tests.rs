@@ -72,6 +72,63 @@ fn the_key_name_is_fixed_once_the_address_is_derived() {
     });
 }
 
+#[test]
+fn the_solana_line_holds_still_once_its_keys_are_derived() {
+    crate::storage::on_fresh_memory(|| {
+        crate::storage::init();
+        let line = crate::solana::config_for_tests();
+        let with = |solana| Config {
+            solana,
+            ..Config::default()
+        };
+        let other_name = types::solana::SolanaConfig {
+            key_name: "dfx_test_key".to_string(),
+            ..line.clone()
+        };
+        let other_program = types::solana::SolanaConfig {
+            program_id: [8; 32],
+            ..line.clone()
+        };
+        test_set(with(Some(line.clone())));
+
+        // before the keys, all of it is a deploy-time choice
+        assert_eq!(
+            ensure_solana_line_is_not_moving(&with(Some(other_name.clone()))),
+            Ok(())
+        );
+        assert_eq!(ensure_solana_line_is_not_moving(&with(None)), Ok(()));
+
+        crate::storage::solana_keys::set([2; 32], [3; 32]);
+        for refused in [
+            with(Some(other_name)),
+            with(None),
+            with(Some(other_program.clone())),
+        ] {
+            assert!(matches!(
+                ensure_solana_line_is_not_moving(&refused),
+                Err(SetConfigError::Invalid(ConfigError::Solana { .. }))
+            ));
+        }
+        // a switch still moves, and everything else
+        let off = types::solana::SolanaConfig {
+            enabled_gasless: false,
+            enabled_arrivals: false,
+            ..line.clone()
+        };
+        assert_eq!(
+            ensure_solana_line_is_not_moving(&with(Some(off.clone()))),
+            Ok(())
+        );
+
+        // with both switches off, between the keys and the deploy, the program id may still change
+        test_set(with(Some(off)));
+        assert_eq!(
+            ensure_solana_line_is_not_moving(&with(Some(other_program))),
+            Ok(())
+        );
+    });
+}
+
 /// The pool's gas rows (P11b) leave a config's ConfigChanged JSON as it was while they are
 /// absent, and show in it once set.
 #[test]

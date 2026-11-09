@@ -10,7 +10,7 @@ use crate::solana::arrival::{build_complete, build_release, read_route, shards_o
 use crate::solana::cosign::{self, Context};
 use crate::solana::keeper;
 use crate::solana::tx::{
-    compile_v0_from_payer, compile_v1_from_payer, record, sign_and_record, Compiled,
+    compile_v0_from_payer, compile_v1_from_payer, record, sign_and_record, sign_then, Compiled,
 };
 use crate::solana::upgrade;
 use crate::solana::{deployment, now_s, rpc, screen, Deployment};
@@ -39,7 +39,7 @@ use types::events::EventType;
 use types::solana::{
     SolanaKeyRole, SolanaProposal, SolanaProposalStatus, SolanaPurpose, SolanaStep, SolanaTxVersion,
 };
-use types::{EvmAddress, QuoteHash, TokenAmount};
+use types::{EvmAddress, QuoteHash, TokenAmount, TxHash};
 
 fn watcher() -> Result<(), String> {
     require_watcher().map_err(|e| format!("{e:?}"))?;
@@ -112,12 +112,15 @@ pub async fn cosign_solana(tx: Vec<u8>, last_valid_block_height: u64) -> Result<
     if !d.config.enabled_gasless {
         return Err("gasless on Solana is off".to_string());
     }
+    if d.config.program_paused {
+        return Err("the program is paused".to_string());
+    }
     let settings = config::get();
     let now = now_s();
-    let pool_address = match settings.pool_chain {
-        Some(_) => crate::storage::ecdsa_address::get(),
-        None => None,
-    };
+    let pool = settings.pool_chain.and_then(|chain| {
+        let (_, domain) = settings.cctp_domains.0.iter().find(|(c, _)| **c == chain)?;
+        Some((domain.get(), crate::storage::ecdsa_address::get()?))
+    });
     let destination = |domain: u32| {
         let (chain, _) = settings
             .cctp_domains
@@ -134,8 +137,7 @@ pub async fn cosign_solana(tx: Vec<u8>, last_valid_block_height: u64) -> Result<
             config: &d.config,
             now_s: now,
             destination,
-            pool_address,
-            max_ahead_s: 7_200,
+            pool,
         },
     )?;
     screen(&passed.parties)?;
@@ -149,13 +151,16 @@ pub async fn cosign_solana(tx: Vec<u8>, last_valid_block_height: u64) -> Result<
         }
     }
     let hour = hour_of(now);
-    let (signer, global) = read_state(|state| {
-        (
-            state.solana_signer(&passed.user, hour),
-            state.solana_global(hour),
-        )
-    });
-    cosign::within_limits(&d.config, signer, global)?;
+    let within_limits = || {
+        let (signer, global) = read_state(|state| {
+            (
+                state.solana_signer(&passed.user, hour),
+                state.solana_global(hour),
+            )
+        });
+        cosign::within_limits(&d.config, signer, global)
+    };
+    within_limits()?;
 
     // 10. one co-sign per ref
     let _busy = Busy::take(QuoteHash::new(pda::keccak256(
@@ -178,6 +183,8 @@ pub async fn cosign_solana(tx: Vec<u8>, last_valid_block_height: u64) -> Result<
     )
     .await?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
+    // another signer's co-signs may have come in while this one was signed
+    within_limits()?;
     let mut signatures = passed.signatures.clone();
     signatures[0] = signature;
     record(
@@ -202,6 +209,9 @@ pub async fn report_solana_failure(signature: Vec<u8>) -> Result<bool, String> {
     let signature: [u8; 64] = signature
         .try_into()
         .map_err(|_| "a signature is 64 bytes")?;
+    if read_state(|state| state.solana_cosign_reported(&signature)) {
+        return Ok(true);
+    }
     let signer = read_state(|state| state.solana_cosign_signer(&signature))
         .ok_or("the canister did not co-sign this")?;
     let landed = rpc::transaction(d.config.sol_rpc, &signature)
@@ -232,12 +242,13 @@ fn evm_source(message: &BurnMessage) -> Result<(types::ChainId, types::config::E
 }
 
 /// The source rules of an arrival, and whether its fee was paid: a Runner burn on a chain the canister
-/// knows, proven from its receipt, or the canister's own pool payout (which pays no fee step).
+/// knows, proven from its receipt, or the canister's own pool payout (which pays no fee step). Answers
+/// how many arrivals the transaction paid for.
 async fn prove_arrival_source(
     parsed: &BurnMessage,
-    src_tx_hash: &[u8],
+    source_tx: TxHash,
     needed: TokenAmount,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let (chain, source) = evm_source(parsed)?;
     if parsed.sender != source.token_messenger.to_word() {
         return Err("the message is not a token messenger burn".to_string());
@@ -248,11 +259,6 @@ async fn prove_arrival_source(
     if parsed.body.message_sender != source.runner.to_word() {
         return Err("the burn was not made by the source chain's Runner".to_string());
     }
-    let source_tx = types::TxHash::new(
-        src_tx_hash
-            .try_into()
-            .map_err(|_| "src_tx_hash is 32 bytes")?,
-    );
     let own = read_state(|state| match state.store().pool_own_source(&source_tx) {
         Some(types::pool::OwnSource::Payout(id)) => Some(
             state
@@ -265,7 +271,7 @@ async fn prove_arrival_source(
         None => None,
     });
     match own {
-        Some(true) => return Ok(()),
+        Some(true) => return Ok(1),
         Some(false) => {
             return Err("the message is not the burn of the canister's own order".to_string())
         }
@@ -275,12 +281,42 @@ async fn prove_arrival_source(
         .await
         .map_err(|e| e.to_string())?;
     let receipt = cctp::source::read(chain, source_tx).await?;
-    cctp::source::proves(&receipt, parsed, &source, canister, needed).map_err(|e| e.to_string())?;
+    cctp::source::proves(&receipt, parsed, &source, canister, needed).map_err(|e| e.to_string())
+}
+
+/// One fee pays one arrival, as on EVM (`cctp::finished_others`): `attests` does not read the nonce, so
+/// an unpaid burn identical to a paid one must not be finished on the paid one's transaction.
+fn one_arrival_per_fee(source_tx: TxHash, arrival: &[u8; 32], paid: u32) -> Result<(), String> {
+    let others = read_state(|state| state.solana_other_arrivals(source_tx.as_ref(), arrival));
+    if others >= u64::from(paid.max(1)) {
+        return Err(cctp::FinishError::SourceFinished(source_tx).to_string());
+    }
     Ok(())
 }
 
-fn word_of_usdc(source: &types::config::EvmChain) -> [u8; 32] {
-    source.usdc.to_word()
+/// The attempts an arrival has left, read before the outcalls and again once the arrival is held.
+fn attempts_left(
+    action: &SolanaFinishAction,
+    arrival: &[u8; 32],
+    config: &types::solana::SolanaConfig,
+) -> Result<(), String> {
+    match action {
+        SolanaFinishAction::Complete => {
+            if read_state(|state| state.solana_complete_attempts(arrival))
+                >= u64::from(config.max_complete_attempts)
+            {
+                return Err("the completes are spent: only a release".to_string());
+            }
+        }
+        SolanaFinishAction::Release => {
+            if read_state(|state| state.solana_release_attempts(arrival))
+                >= u64::from(config.max_release_attempts)
+            {
+                return Err("the releases are spent".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compile(
@@ -333,22 +369,17 @@ pub async fn finish_solana(args: FinishSolanaArgs) -> Result<Option<u64>, String
     }
     let (caller, vault) =
         shards_of(&view, &d.a).ok_or("the message is not addressed to the program")?;
-    if caller != vault {
-        return Err(
-            "the caller and the vault are of different shards: release_solana_misrouted"
-                .to_string(),
-        );
-    }
     let hook = SolanaEnvelope::parse(view.hook()).map_err(|e| format!("the hook: {e:?}"))?;
     let now = now_s();
     let recipient = hook.recipient;
+    // the program pays such a recipient nothing: its release goes to the fee account, by hand
+    if d.a.is_program_address(&recipient) {
+        return Err(
+            "the recipient is one of the program's own: release_solana_misrouted".to_string(),
+        );
+    }
     // 6. the attempts, before any outcall
-    let (completes, releases) = read_state(|state| {
-        (
-            state.solana_complete_attempts(&arrival),
-            state.solana_release_attempts(&arrival),
-        )
-    });
+    attempts_left(&args.action, &arrival, &d.config)?;
     let wanted = match args.action {
         SolanaFinishAction::Complete => {
             if hook.action != SOLANA_ACTION_SWAP {
@@ -357,18 +388,25 @@ pub async fn finish_solana(args: FinishSolanaArgs) -> Result<Option<u64>, String
             if now + d.config.complete_margin_s >= hook.deadline as u64 {
                 return Err("past the completion margin: only a release".to_string());
             }
-            if completes >= u64::from(d.config.max_complete_attempts) {
-                return Err("the completes are spent: only a release".to_string());
+            if d.config.program_paused {
+                return Err("the program is paused: only a release".to_string());
+            }
+            // the program releases across shards, and completes only within one
+            if caller != vault {
+                return Err(
+                    "the caller and the vault are of different shards: only a release".to_string(),
+                );
             }
             SolanaPurpose::Complete { arrival }
         }
-        SolanaFinishAction::Release => {
-            if releases >= u64::from(d.config.max_release_attempts) {
-                return Err("the releases are spent".to_string());
-            }
-            SolanaPurpose::Release { arrival }
-        }
+        SolanaFinishAction::Release => SolanaPurpose::Release { arrival },
     };
+    let source_tx = TxHash::new(
+        args.src_tx_hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| "src_tx_hash is 32 bytes")?,
+    );
     screen(&[Party::Solana(recipient)])?;
 
     // 2. already received: nothing is ever signed again for it (attack M5)
@@ -384,17 +422,15 @@ pub async fn finish_solana(args: FinishSolanaArgs) -> Result<Option<u64>, String
         return Ok(None);
     }
     // 4. the fee, always the new-account rows (attack L1)
-    prove_arrival_source(
-        &parsed,
-        &args.src_tx_hash,
-        d.config.min_network_fee.arrival(),
-    )
-    .await?;
+    let paid = prove_arrival_source(&parsed, source_tx, d.config.min_network_fee.arrival()).await?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
 
     let _busy = Busy::take(QuoteHash::new(arrival)).ok_or("this arrival is being finished")?;
+    // the first read's answer may have been spent by a call that was in flight beside this one
+    attempts_left(&args.action, &arrival, &d.config)?;
+    one_arrival_per_fee(source_tx, &arrival, paid)?;
     let (_, source) = evm_source(&parsed)?;
-    let source_token = word_of_usdc(&source);
+    let source_token = source.usdc.to_word();
     // 7 and 8. the route and the build
     let (all, cu_limit) = match args.action {
         SolanaFinishAction::Complete => {
@@ -439,9 +475,40 @@ pub async fn finish_solana(args: FinishSolanaArgs) -> Result<Option<u64>, String
     };
     let compiled = compile(&d, &all, cu_limit, &args.lifetime)?;
     // 9. the record
-    sign_and_record(&d, wanted, compiled, args.lifetime.last_valid_block_height)
-        .await
-        .map(Some)
+    sign_arrival(
+        &d,
+        wanted,
+        compiled,
+        args.lifetime.last_valid_block_height,
+        source_tx,
+        arrival,
+        paid,
+    )
+    .await
+    .map(Some)
+}
+
+/// `sign_and_record` of an arrival, naming the source it stood for in the same message: two arrivals of
+/// one source signed side by side cannot both pass on one fee.
+async fn sign_arrival(
+    d: &Deployment,
+    purpose: SolanaPurpose,
+    compiled: Compiled,
+    last_valid_block_height: u64,
+    source_tx: TxHash,
+    arrival: [u8; 32],
+    paid: u32,
+) -> Result<u64, String> {
+    sign_then(d, purpose, compiled, last_valid_block_height, || {
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
+        one_arrival_per_fee(source_tx, &arrival, paid)?;
+        step(SolanaStep::ArrivalOfSource {
+            source_tx: *source_tx.as_ref(),
+            arrival,
+        })
+        .map(|_| ())
+    })
+    .await
 }
 
 /// Controller-only. A message whose hook is unreadable or whose recipient is a program address (design
@@ -455,8 +522,9 @@ pub async fn release_solana_misrouted(args: ReleaseMisroutedArgs) -> Result<Opti
     let view = Message::new(&args.message).map_err(|e| format!("{e:?}"))?;
     let (caller, vault) =
         shards_of(&view, &d.a).ok_or("the message is not addressed to the program")?;
+    // the program's own rule: any other recipient is paid by `finish_solana`, and refused here on chain
     if let Some(terms) = read_release_terms(view.hook()) {
-        if !d.a.is_swapic_account(&terms.recipient) {
+        if !d.a.is_program_address(&terms.recipient) {
             return Err("this hook names a recipient: finish_solana's release pays it".to_string());
         }
     }
@@ -480,7 +548,7 @@ pub async fn release_solana_misrouted(args: ReleaseMisroutedArgs) -> Result<Opti
         return Ok(None);
     }
     let (_, source) = evm_source(&parsed)?;
-    let source_token = word_of_usdc(&source);
+    let source_token = source.usdc.to_word();
     let all = build_release(
         &d.a,
         caller,
@@ -644,16 +712,22 @@ pub async fn relay_solana_forward(args: RelaySolanaForwardArgs) -> Result<Option
         step(SolanaStep::ArrivalFinished { arrival })?;
         return Ok(None);
     }
-    prove_arrival_source(
-        &parsed,
-        &args.src_tx_hash,
-        d.config.min_network_fee.forward_relay,
-    )
-    .await?;
+    let source_tx = TxHash::new(
+        args.src_tx_hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| "src_tx_hash is 32 bytes")?,
+    );
+    let paid =
+        prove_arrival_source(&parsed, source_tx, d.config.min_network_fee.forward_relay).await?;
     require_not_halted().map_err(|e| format!("{e:?}"))?;
     let _busy = Busy::take(QuoteHash::new(arrival)).ok_or("this arrival is being finished")?;
+    if read_state(|state| state.solana_forward_attempts(&arrival)) >= keeper::MAX_FORWARD_TRIES {
+        return Err("the relays are spent".to_string());
+    }
+    one_arrival_per_fee(source_tx, &arrival, paid)?;
     let (_, source) = evm_source(&parsed)?;
-    let source_token = word_of_usdc(&source);
+    let source_token = source.usdc.to_word();
     let tail = swapic_solana_wire::instructions::ArrivalSource {
         nonce: &parsed.nonce,
         source_domain: parsed.source_domain,
@@ -670,11 +744,14 @@ pub async fn relay_solana_forward(args: RelaySolanaForwardArgs) -> Result<Option
         ),
     ];
     let compiled = compile_v1_from_payer(&d, &all, 300_000, &args.lifetime)?;
-    sign_and_record(
+    sign_arrival(
         &d,
         SolanaPurpose::ForwardRelay { arrival },
         compiled,
         args.lifetime.last_valid_block_height,
+        source_tx,
+        arrival,
+        paid,
     )
     .await
     .map(Some)
@@ -699,10 +776,19 @@ pub async fn sweep_solana_fees(args: SweepSolanaFeesArgs) -> Result<u64, String>
     .await
 }
 
-/// Controller-only, immediate: the program's settings, signed by the admin key. They move no money.
+/// Controller-only, immediate: the program's settings, signed by the admin key. They move no money. A
+/// pause signs under a halt too: a halted canister's program still takes the burns users sign. What the
+/// canister reads of these settings moves with the signature.
 #[update]
 pub async fn set_solana_program_config(args: SolanaProgramConfigArgs) -> Result<u64, String> {
     controller()?;
+    let unless_a_pause = || -> Result<(), String> {
+        if args.paused {
+            return Ok(());
+        }
+        require_not_halted().map_err(|e| format!("{e:?}"))
+    };
+    unless_a_pause()?;
     let d = deployment()?;
     let program = ProgramConfig {
         paused: args.paused,
@@ -720,11 +806,24 @@ pub async fn set_solana_program_config(args: SolanaProgramConfigArgs) -> Result<
         30_000,
         &args.lifetime,
     )?;
-    sign_and_record(
+    sign_then(
         &d,
         SolanaPurpose::Config,
         compiled,
         args.lifetime.last_valid_block_height,
+        || {
+            unless_a_pause()?;
+            let mut settings = config::get();
+            let solana = settings
+                .solana
+                .as_mut()
+                .ok_or("the canister has no Solana config")?;
+            solana.program_paused = args.paused;
+            solana.program_event_keypair_allowed = args.event_keypair_allowed;
+            solana.program_min_burn = args.min_burn;
+            solana.program_min_deadline_s = u64::from(args.min_deadline_s);
+            config::set(settings).map(|_| ()).map_err(|e| e.to_string())
+        },
     )
     .await
 }
@@ -796,13 +895,17 @@ pub async fn execute_solana_upgrade(id: u64, lifetime: SolanaLifetime) -> Result
     let ix =
         instructions::loader_upgrade(&d.a.program, &proposal.buffer, &d.a.canister, &d.a.admin);
     let compiled = compile_v1_from_payer(&d, &[ix], 200_000, &lifetime)?;
-    let line = sign_and_record(
+    // a cancel that came in while the reads and the signatures were out stands: nothing is recorded,
+    // so the watcher has nothing to broadcast
+    sign_then(
         &d,
         SolanaPurpose::Upgrade { proposal: id },
         compiled,
         lifetime.last_valid_block_height,
+        || {
+            require_not_halted().map_err(|e| format!("{e:?}"))?;
+            step(SolanaStep::UpgradeExecuted { id }).map(|_| ())
+        },
     )
-    .await?;
-    step(SolanaStep::UpgradeExecuted { id })?;
-    Ok(line)
+    .await
 }
