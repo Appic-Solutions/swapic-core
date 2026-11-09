@@ -22,14 +22,14 @@ use swapic_solana_wire::pda::SwapicAddresses;
 
 const BLOCKHASH: [u8; 32] = [0x11; 32];
 
-fn lifetime() -> SolanaLifetime {
+pub(super) fn lifetime() -> SolanaLifetime {
     SolanaLifetime {
         blockhash: base58::encode(&BLOCKHASH),
         last_valid_block_height: 123,
     }
 }
 
-fn config() -> SolanaConfig {
+pub(super) fn config() -> SolanaConfig {
     SolanaConfig {
         program_id: base58::encode(&[1; 32]),
         sol_rpc: Principal::anonymous(),
@@ -68,7 +68,7 @@ fn config() -> SolanaConfig {
     }
 }
 
-fn update<T: DeserializeOwned + CandidType>(
+pub(super) fn update<T: DeserializeOwned + CandidType>(
     pic: &PocketIc,
     canister: Principal,
     sender: Principal,
@@ -81,7 +81,7 @@ fn update<T: DeserializeOwned + CandidType>(
     decode_one(&reply).unwrap_or_else(|e| panic!("{method}: {e:?}"))
 }
 
-fn query<T: DeserializeOwned + CandidType>(
+pub(super) fn query<T: DeserializeOwned + CandidType>(
     pic: &PocketIc,
     canister: Principal,
     method: &str,
@@ -94,7 +94,7 @@ fn query<T: DeserializeOwned + CandidType>(
 }
 
 /// (pic, canister, admin), on a network holding the test threshold keys, with the Solana line set.
-fn setup() -> (PocketIc, Principal, Principal) {
+pub(super) fn setup() -> (PocketIc, Principal, Principal) {
     let pic = PocketIcBuilder::new()
         .with_ii_subnet()
         .with_application_subnet()
@@ -110,7 +110,7 @@ fn setup() -> (PocketIc, Principal, Principal) {
     (pic, canister, admin)
 }
 
-fn derive(pic: &PocketIc, canister: Principal, admin: Principal) -> SolanaAddresses {
+pub(super) fn derive(pic: &PocketIc, canister: Principal, admin: Principal) -> SolanaAddresses {
     let derived: Result<SolanaAddresses, String> = update(
         pic,
         canister,
@@ -129,7 +129,7 @@ fn verify(key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
         .is_ok()
 }
 
-fn signed_txs(pic: &PocketIc, canister: Principal, admin: Principal) -> Vec<SignedTx> {
+pub(super) fn signed_txs(pic: &PocketIc, canister: Principal, admin: Principal) -> Vec<SignedTx> {
     let reply = pic
         .query_call(
             canister,
@@ -142,7 +142,7 @@ fn signed_txs(pic: &PocketIc, canister: Principal, admin: Principal) -> Vec<Sign
 }
 
 /// A chain the arrival can be read against: the design C suite's row, its addresses its own.
-fn evm_chain() -> EvmChainConfig {
+pub(super) fn evm_chain() -> EvmChainConfig {
     let usdc = "0x8335000000000000000000000000000000000000";
     let amounts = |value: u128| ActionAmounts {
         relay_cctp: Nat::from(value),
@@ -372,7 +372,7 @@ fn an_upgrade_waits_out_its_delay_and_only_a_controller_proposes() {
 }
 
 /// A gasless burn the user signed with a real key, on a chain the canister's config knows.
-fn gasless_tx(
+pub(super) fn gasless_tx(
     a: &SwapicAddresses,
     user: &ed25519_dalek::SigningKey,
     deadline: u32,

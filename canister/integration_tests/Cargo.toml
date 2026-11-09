@@ -17,6 +17,9 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
+base64 = "0.22"
+# the stand-in for the SOL RPC canister: a module that answers fixed bytes
+wat = "1"
 swapic-solana-wire = { workspace = true }
 
 settlement_api = { path = "../api" }

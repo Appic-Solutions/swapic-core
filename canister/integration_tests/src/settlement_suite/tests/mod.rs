@@ -10,6 +10,7 @@ mod test_rpc;
 mod test_sanctions;
 mod test_signing;
 mod test_solana;
+mod test_solana_doors;
 mod test_spine;
 mod test_timers;
 mod test_upgrade;
