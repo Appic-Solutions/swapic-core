@@ -1999,10 +1999,14 @@ mod across_orders {
         }
         /// Read with `pool_chain` as the pool's chain.
         fn read_into(&self, pool_chain: Option<ChainId>) -> Result<Plan, RelayError> {
+            self.read_from_into(BASE, pool_chain)
+        }
+        /// Read as an order of `source` (its entry the case's), `pool_chain` the pool's chain.
+        fn read_from_into(&self, source: ChainId, pool_chain: Option<ChainId>) -> Result<Plan, RelayError> {
             read_plan(
                 &self.order,
                 &Chains {
-                    chain_id: BASE,
+                    chain_id: source,
                     evm_chains: &self.evm_chains,
                     domains: &self.domains,
                     canister: address(CANISTER),
@@ -2032,25 +2036,30 @@ mod across_orders {
         Err(RelayError::Across(rule))
     }
 
-    /// AX7 c (BSC design 4.6): a deposit into the pool pays the canister on the pool's chain
-    /// in its USDC, with no message, the order's memo carrying the deposit's terms; anywhere
-    /// else, or with no memo, the canister is no recipient.
+    /// AX7 c (BSC design 4.6): a deposit into the pool from BNB Chain pays the canister on
+    /// the pool's chain in its USDC, with no message, the order's memo carrying the deposit's
+    /// terms; from any other chain, anywhere else, or with no memo, the canister is no
+    /// recipient. T0's order read as BNB Chain's (its entry Base's), Arbitrum the pool's chain.
     #[test]
     fn a_deposit_into_the_pool_pays_the_canister_on_the_pool_chain_alone() {
         let mut c = case();
+        let base = c.evm_chains.get(BASE).unwrap().clone();
+        c.evm_chains.0.insert(ChainId::BSC, base);
         c.deposit.recipient = address(CANISTER);
         c.deposit.message = Vec::new();
         c.resign();
         c.order.memo = vec![0x01, 0x02].into();
-        let plan = c.read_into(Some(ARBITRUM)).unwrap();
+        let plan = c.read_from_into(ChainId::BSC, Some(ARBITRUM)).unwrap();
         let delivery = plan.delivery.unwrap();
         assert_eq!(delivery.chain, ARBITRUM);
         assert_eq!(delivery.recipient, address(CANISTER));
         assert_eq!(delivery.token, c.evm_chains.get(ARBITRUM).unwrap().usdc);
-        assert_eq!(c.read_into(Some(BASE)), broken("AX7"));
-        assert_eq!(c.read_into(None), broken("AX7"));
-        c.order.memo = Default::default();
+        // from Base, or any chain but BNB Chain: refused
         assert_eq!(c.read_into(Some(ARBITRUM)), broken("AX7"));
+        assert_eq!(c.read_from_into(ChainId::BSC, Some(BASE)), broken("AX7"));
+        assert_eq!(c.read_from_into(ChainId::BSC, None), broken("AX7"));
+        c.order.memo = Default::default();
+        assert_eq!(c.read_from_into(ChainId::BSC, Some(ARBITRUM)), broken("AX7"));
     }
 
     #[test]

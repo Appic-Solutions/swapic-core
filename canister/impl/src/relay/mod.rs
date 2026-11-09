@@ -901,9 +901,11 @@ fn across_delivery(
     };
     let deadline = u64::try_from(order.deadline).unwrap_or(u64::MAX);
     let fill = u64::from(deposit.fill_deadline);
-    // AX7 c: into the pool, to the canister on the pool's chain in its USDC, with no message
-    // and the order's memo carrying the deposit's terms
-    let into_pool = deposit.recipient == chains.canister
+    // AX7 c: into the pool from BNB Chain (the one chain Across carries into it from), to the
+    // canister on the pool's chain in its USDC, with no message and the order's memo carrying
+    // the deposit's terms
+    let into_pool = chains.chain_id == crate::pool::across::POOL_ORIGIN
+        && deposit.recipient == chains.canister
         && deposit.message.is_empty()
         && chains.pool_chain == Some(destination_id)
         && !order.memo.is_empty();

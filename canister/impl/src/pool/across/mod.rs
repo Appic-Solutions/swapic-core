@@ -116,9 +116,14 @@ pub fn log_pages(
     )
 }
 
+/// The one chain Across carries a deposit into the pool from (BSC design 4.6): BNB Chain, which
+/// neither CCTP nor Eco reaches. The watcher reads fills from it alone, and the quoter offers
+/// Across only where BNB Chain is one end.
+pub const POOL_ORIGIN: ChainId = ChainId::BSC;
+
 /// What the pool chain's own configuration says of Across there: its SpokePool pin and USDC,
-/// the canister, and the chains a deposit into the pool may come from (each with Across's
-/// pins, never the pool chain).
+/// the canister, and the chains a deposit into the pool may come from ([`POOL_ORIGIN`] where
+/// the canister holds Across's pins for it, never the pool chain).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AcrossPool {
     pub chain: ChainId,

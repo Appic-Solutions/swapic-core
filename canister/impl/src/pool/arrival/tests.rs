@@ -1959,3 +1959,39 @@ fn an_across_refund_credits_the_payout_owed_back_and_books_the_rest() {
         );
     });
 }
+
+/// An Across deposit into the pool comes from BNB Chain alone, where the config pins Across:
+/// never from another chain with pins (the watcher reads fills from BNB Chain alone).
+#[test]
+fn an_across_deposit_into_the_pool_comes_from_bnb_chain_alone() {
+    let pins = types::config::AcrossPins {
+        periphery: EvmAddress::new([1; 20]),
+        swap_proxy: EvmAddress::new([2; 20]),
+        spoke_pool: EvmAddress::new([3; 20]),
+        multicall_handler: EvmAddress::new([4; 20]),
+    };
+    use types::numeric::{GasAmount, Wei};
+    let entry = || types::config::EvmChain {
+        swapic: EvmAddress::new([5; 20]),
+        runner: EvmAddress::new([6; 20]),
+        cctp_receiver: EvmAddress::new([7; 20]),
+        usdc: EvmAddress::new([8; 20]),
+        token_messenger: EvmAddress::new([9; 20]),
+        message_transmitter: EvmAddress::new([10; 20]),
+        gas_limit: types::config::PerAction::all(GasAmount::from(2_000_000_u64)),
+        gas_budget: types::config::PerAction::all(Wei::from(1_u64)),
+        min_network_fee: types::config::PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: Some(pins),
+    };
+    let mut config = types::Config::default();
+    for chain in [ChainId::BASE, ChainId::BSC, ChainId::ARBITRUM] {
+        config.evm_chains.0.insert(chain, entry());
+    }
+    assert_eq!(across_origins(&config, ChainId::BASE), vec![ChainId::BSC]);
+    config.evm_chains.0.get_mut(&ChainId::BSC).unwrap().across = None;
+    assert!(across_origins(&config, ChainId::BASE).is_empty());
+}

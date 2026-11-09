@@ -1251,6 +1251,22 @@ pub fn record(found: &[Found], judge: &Judge<'_>, now: Timestamp) -> Recorded {
     recorded
 }
 
+/// The chains an Across deposit into the pool on `chain` may come from: BNB Chain alone
+/// ([`crate::pool::across::POOL_ORIGIN`]), where the config holds Across's pins for it.
+pub fn across_origins(config: &types::Config, chain: ChainId) -> Vec<ChainId> {
+    config
+        .evm_chains
+        .0
+        .iter()
+        .filter(|(origin, entry)| {
+            **origin == crate::pool::across::POOL_ORIGIN
+                && **origin != chain
+                && entry.across.is_some()
+        })
+        .map(|(origin, _)| *origin)
+        .collect()
+}
+
 /// The pool chain's addresses, from the config and the canister's own address.
 pub async fn pool_chain() -> Result<PoolChain, PoolError> {
     let config = config::get();
@@ -1283,13 +1299,7 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
         spoke_pool: pins.spoke_pool,
         usdc: evm.usdc,
         canister,
-        origins: config
-            .evm_chains
-            .0
-            .iter()
-            .filter(|(origin, entry)| **origin != chain && entry.across.is_some())
-            .map(|(origin, _)| *origin)
-            .collect(),
+        origins: across_origins(&config, chain),
     });
     Ok(PoolChain {
         chain,
