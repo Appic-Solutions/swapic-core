@@ -1,8 +1,8 @@
 name: ci
 
-# Every pull request and every push to main: the canister's tests, its reproducible build
-# (the "settlement-wasm" artifact: the wasm, its sha256, its candid and the commit), the
-# pocket-ic integration tests, and the contracts' tests. Nothing deploys from here: the
+# Every pull request and every push to main: the canister's tests, its reproducible build on
+# the kit's host (the "settlement-wasm" artifact: the wasm, its sha256, its candid and the
+# commit), the pocket-ic integration tests, and the contracts' tests. Nothing deploys from here: the
 # canister is upgraded from Jeff's Mac (the backend's staging/upgrade-canister.sh fetches this
 # artifact and holds it to the Mac's own build of the same commit), the contracts by hand.
 on:
@@ -22,7 +22,8 @@ env:
   CARGO_INCREMENTAL: "0"
   # pinned like the compiler: another ic-wasm may shrink to other bytes
   IC_WASM_VERSION: "0.9.10"
-  IC_WASM_SHA256: 54f7a100273b2cfbb993b4de1358523c453936d6f80b0cb340ec35e6fd0b5703
+  # ic-wasm-aarch64-apple-darwin.tar.xz of that release
+  IC_WASM_SHA256: f594fc903518b92edbe528e0ffe3d0d910dae9567a35d14fa178b82e35ab93cc
 
 jobs:
   canister:
@@ -36,45 +37,57 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # DFINITY's release binary for x86_64 Linux, held to the sha256 GitHub records for it
-      # (building it from source compiles binaryen: minutes, for the same tool)
-      - name: ic-wasm ${{ env.IC_WASM_VERSION }}
-        run: |
-          curl -sSfL -o "$RUNNER_TEMP/ic-wasm.tar.xz" \
-            "https://github.com/dfinity/ic-wasm/releases/download/$IC_WASM_VERSION/ic-wasm-x86_64-unknown-linux-gnu.tar.xz"
-          echo "$IC_WASM_SHA256  $RUNNER_TEMP/ic-wasm.tar.xz" | sha256sum -c --quiet
-          tar -xJf "$RUNNER_TEMP/ic-wasm.tar.xz" -C "$RUNNER_TEMP"
-          install -m 755 "$RUNNER_TEMP/ic-wasm-x86_64-unknown-linux-gnu/ic-wasm" "$HOME/.cargo/bin/ic-wasm"
-          ic-wasm --version
       # rustfmt is not checked yet: the canister's code at c92bd0f is not rustfmt clean, and
       # formatting it moves the panic locations the wasm carries, so it waits for the next
       # canister change (then: cargo fmt --check here)
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked -p types -p settlement_api -p settlement
+      # the committed did must match the canister's exported interface, which also proves the
+      # inttest door never reaches the public interface
+      - run: scripts/generate-did.sh settlement && git diff --exit-code canister/api/can.did
+
+  # The production wasm, built where the kit builds it: an Apple Silicon Mac. The same commit
+  # gives other bytes on Linux (cargo's crate hashes take the build host's triple from the
+  # proc macros a canister crate uses, and the code is laid out by them), so the wasm the
+  # upgrade installs is built on the kit's host here too, and the Mac's own build of the
+  # commit must give the same sha256 (staging/upgrade-canister.sh holds them to it).
+  wasm:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # DFINITY's release binary for Apple Silicon, held to the sha256 GitHub records for it:
+      # it shrinks to the same bytes as one cargo installs (checked on the kit's c92bd0f)
+      - name: ic-wasm ${{ env.IC_WASM_VERSION }}
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/ic-wasm.tar.xz" \
+            "https://github.com/dfinity/ic-wasm/releases/download/$IC_WASM_VERSION/ic-wasm-aarch64-apple-darwin.tar.xz"
+          echo "$IC_WASM_SHA256  $RUNNER_TEMP/ic-wasm.tar.xz" | shasum -a 256 -c --quiet
+          tar -xJf "$RUNNER_TEMP/ic-wasm.tar.xz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/ic-wasm-aarch64-apple-darwin/ic-wasm" "$HOME/.cargo/bin/ic-wasm"
+          ic-wasm --version
       - name: The reproducible build
         run: |
           scripts/build-canister.sh settlement
           mkdir -p settlement-wasm
           cp canister/target/wasm32-unknown-unknown/release/settlement.wasm canister/api/can.did settlement-wasm/
-          (cd settlement-wasm && sha256sum settlement.wasm > settlement.wasm.sha256)
+          (cd settlement-wasm && shasum -a 256 settlement.wasm > settlement.wasm.sha256)
           {
             echo "COMMIT=$GITHUB_SHA"
             echo "RUN_ID=$GITHUB_RUN_ID"
             echo "RUSTC=$(rustc -V)"
+            echo "HOST=$(rustc -vV | sed -n 's/^host: //p')"
             echo "IC_WASM=$(ic-wasm --version)"
             echo "SHA256=$(cut -d' ' -f1 settlement-wasm/settlement.wasm.sha256)"
-            echo "BYTES=$(stat -c %s settlement-wasm/settlement.wasm)"
+            echo "BYTES=$(stat -f %z settlement-wasm/settlement.wasm)"
           } > settlement-wasm/BUILD
           cat settlement-wasm/BUILD
           echo "settlement.wasm: $(cut -d' ' -f1 settlement-wasm/settlement.wasm.sha256)" >> "$GITHUB_STEP_SUMMARY"
-      # the committed did must match the production wasm, which also proves the inttest door
-      # never reaches the public interface (extractor output is version dependent: pinned)
-      - name: The candid matches the wasm
-        run: |
-          if ! command -v candid-extractor > /dev/null; then
-            cargo install candid-extractor --locked --version 0.1.6
-          fi
-          scripts/generate-did.sh settlement && git diff --exit-code canister/api/can.did
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: settlement-wasm
