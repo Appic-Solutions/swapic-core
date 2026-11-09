@@ -327,6 +327,43 @@ fn a_relayer_refund_leaf_naming_the_canister_is_an_across_refund() {
     );
 }
 
+/// The SpokePool executes fills and refund leaves in one multicall: a fill of someone else's
+/// deposit just before the canister's refund transfer is not its explanation, and the refund
+/// still counts (review 5).
+#[test]
+fn an_unrelated_fill_before_a_refund_does_not_hold_it() {
+    let base = receipt(&leaves()["receipt"]);
+    let pool = leaf_pool();
+    let (index, _, _) = the_transfer(&base, &pool);
+    // ADAPTED: T0's real fill on Arbitrum (to its own recipient, not the canister), moved to
+    // this SpokePool and put just before the canister's transfer
+    let fill_topic = across_topics::filled_relay();
+    let mut fill = receipt(&t0()["fill"])
+        .logs
+        .into_iter()
+        .find(|log| log.topics.first() == Some(&fill_topic))
+        .expect("T0's fill");
+    fill.address = pool.spoke_pool;
+    let mut multicall = base.clone();
+    let at = multicall
+        .logs
+        .iter()
+        .position(|log| log.index == index)
+        .unwrap();
+    multicall.logs.insert(at, fill);
+    for (n, log) in multicall.logs.iter_mut().enumerate() {
+        log.index = u64::try_from(n).unwrap();
+    }
+    assert_eq!(explained(&multicall, &pool), Explained::Refund);
+    // a transfer of someone other than the SpokePool after that fill: its mismatch, held
+    let (index, _, value) = the_transfer(&multicall, &pool);
+    let stranger = address("0x7777777777777777777777777777777777777777");
+    assert_eq!(
+        explain(&multicall.logs, index, stranger, value, &pool, &mut Vec::new()),
+        Explained::Mismatch("the fill's relayer did not send it")
+    );
+}
+
 #[test]
 fn a_claim_counts_only_when_the_canister_made_it() {
     let pool = base_pool();

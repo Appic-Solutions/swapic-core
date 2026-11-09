@@ -160,7 +160,9 @@ fn transfers(logs: &[Log], token: EvmAddress, to: EvmAddress) -> Vec<(u64, EvmAd
 /// sender, or the SpokePool for a slow fill; the canister its first and its updated recipient;
 /// no message; the pool chain's USDC; exactly what arrived; from a chain a deposit may come
 /// from); else, for a transfer from the SpokePool, a refund leaf or the canister's own claim
-/// paying it; else nothing.
+/// paying it, whatever fill came before (the SpokePool executes fills and refund leaves in one
+/// multicall: an unrelated fill before a refund is not its); else the pair's mismatch, or
+/// nothing.
 pub fn explain(
     logs: &[Log],
     index: u64,
@@ -169,29 +171,43 @@ pub fn explain(
     pool: &AcrossPool,
     used_refunds: &mut Vec<(u64, usize)>,
 ) -> Explained {
-    let canister_transfers = transfers(logs, pool.usdc, pool.canister);
-    let fill = logs
-        .iter()
-        .filter(|log| log.index < index && log.is(pool.spoke_pool, across_topics::filled_relay()))
-        .max_by_key(|log| log.index);
-    if let Some(fill_log) = fill {
-        let between = canister_transfers
-            .iter()
-            .any(|(at, _, _)| *at > fill_log.index && *at < index);
-        if !between {
-            return match across::read_filled_relay(&fill_log.topics, &fill_log.data) {
-                Some(filled) => match fill_matches(&filled, from, value, pool) {
-                    Ok(()) => Explained::Fill(Box::new(filled)),
-                    Err(why) => Explained::Mismatch(why),
-                },
-                None => Explained::Mismatch("the fill before it does not read"),
-            };
-        }
+    let paired = paired_fill(logs, index, from, value, pool);
+    if let Some(Ok(filled)) = paired {
+        return Explained::Fill(filled);
     }
     if from == pool.spoke_pool && refunded(logs, value, pool, used_refunds) {
         return Explained::Refund;
     }
-    Explained::Nothing
+    match paired {
+        Some(Err(why)) => Explained::Mismatch(why),
+        _ => Explained::Nothing,
+    }
+}
+
+/// The fill the canister's transfer at `index` pairs with: the closest `FilledRelay` of the
+/// SpokePool pin before it, with no other transfer to the canister between them, read and held
+/// to [`fill_matches`]; None when no fill comes before it alone.
+fn paired_fill(
+    logs: &[Log],
+    index: u64,
+    from: EvmAddress,
+    value: TokenAmount,
+    pool: &AcrossPool,
+) -> Option<Result<Box<Filled>, &'static str>> {
+    let fill_log = logs
+        .iter()
+        .filter(|log| log.index < index && log.is(pool.spoke_pool, across_topics::filled_relay()))
+        .max_by_key(|log| log.index)?;
+    let between = transfers(logs, pool.usdc, pool.canister)
+        .iter()
+        .any(|(at, _, _)| *at > fill_log.index && *at < index);
+    if between {
+        return None;
+    }
+    Some(match across::read_filled_relay(&fill_log.topics, &fill_log.data) {
+        Some(filled) => fill_matches(&filled, from, value, pool).map(|()| Box::new(filled)),
+        None => Err("the fill before it does not read"),
+    })
 }
 
 /// Whether `filled` is the fill that sent `value` from `from` to the canister.
