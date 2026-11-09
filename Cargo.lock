@@ -1934,6 +1934,7 @@ dependencies = [
  "hex",
  "libsecp256k1",
  "pocket-ic",
+ "serde",
  "serde_json",
  "settlement_api",
  "sha2 0.10.9",
@@ -3557,6 +3558,15 @@ dependencies = [
 
 [[package]]
 name = "stub_minter"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk",
+ "serde",
+]
+
+[[package]]
+name = "stub_pool"
 version = "0.1.0"
 dependencies = [
  "candid",

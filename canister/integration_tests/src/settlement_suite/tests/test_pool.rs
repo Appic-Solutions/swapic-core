@@ -767,6 +767,51 @@ const RUNNER: &str = "0x7E345acaB79102ac9588C60B9358Ec4d79438eEe";
 
 /// A world whose Base pocket holds 1,000 USDC staked from Base and the payout settings, its
 /// canister's EVM address derived on the test key: what an ICP swap to EVM needs.
+/// The Base pocket: 500 USDC more, staked from Base, arrived and minted at the pool's price.
+/// `salt` tells one such stake from another.
+fn plant_base_stake(world: &World, salt: u8) {
+    let owner = types::pool::PoolAccount::Evm(
+        "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+    );
+    let stake = Registration {
+        kind: DepositKind::Stake { owner },
+        min_usdc: TokenAmount::from(usdc(1_000)),
+        premium: TokenAmount::ZERO,
+        move_fee: TokenAmount::ZERO,
+        src_chain: ChainId::new(BASE),
+        src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
+            .parse()
+            .unwrap(),
+        rail: PoolRail::SameChain,
+        expires_at: world.now().checked_add(Duration::from_secs(600)).unwrap(),
+        salt: [salt; 32],
+        icp_fees: None,
+        least_usdc: types::TokenAmount::ZERO,
+    };
+    let r#ref = stake.pool_ref().unwrap();
+    world.plant(PoolStep::Registered {
+        r#ref,
+        deposit: stake,
+    });
+    world.plant(PoolStep::Arrived {
+        r#ref,
+        credit: CreditKey {
+            chain: ChainId::new(BASE),
+            tx: TxHash::new([salt; 32]),
+            log_index: 1,
+        },
+        amount: TokenAmount::from(usdc(1_000)),
+        block: BlockNumber::new(2),
+    });
+    world.plant(PoolStep::Minted {
+        r#ref,
+        owner,
+        shares: Shares::new(1_000_000_000_000_000_000_000),
+    });
+}
+
 fn swap_world() -> (World, types::EvmAddress) {
     use settlement_api::types::pool::PayoutSettings;
     let world = signing_world(
@@ -794,47 +839,7 @@ fn swap_world() -> (World, types::EvmAddress) {
             .parse()
             .expect("an EVM address");
     world.plant_stake(world.admin, usdc(1_000), 1_000_000_000_000_000_000_000);
-    // the Base pocket: 500 USDC staked from Base, arrived and minted at the pool's price
-    let owner = types::pool::PoolAccount::Evm(
-        "0x1111111111111111111111111111111111111111"
-            .parse()
-            .unwrap(),
-    );
-    let stake = Registration {
-        kind: DepositKind::Stake { owner },
-        min_usdc: TokenAmount::from(usdc(1_000)),
-        premium: TokenAmount::ZERO,
-        move_fee: TokenAmount::ZERO,
-        src_chain: ChainId::new(BASE),
-        src_payer: "0xf00EBA8E5Fd231b526ADFAAa68B4d0ede72A89AC"
-            .parse()
-            .unwrap(),
-        rail: PoolRail::SameChain,
-        expires_at: world.now().checked_add(Duration::from_secs(600)).unwrap(),
-        salt: [0x71; 32],
-        icp_fees: None,
-        least_usdc: types::TokenAmount::ZERO,
-    };
-    let r#ref = stake.pool_ref().unwrap();
-    world.plant(PoolStep::Registered {
-        r#ref,
-        deposit: stake,
-    });
-    world.plant(PoolStep::Arrived {
-        r#ref,
-        credit: CreditKey {
-            chain: ChainId::new(BASE),
-            tx: TxHash::new([0x71; 32]),
-            log_index: 1,
-        },
-        amount: TokenAmount::from(usdc(1_000)),
-        block: BlockNumber::new(2),
-    });
-    world.plant(PoolStep::Minted {
-        r#ref,
-        owner,
-        shares: Shares::new(1_000_000_000_000_000_000_000),
-    });
+    plant_base_stake(&world, 0x71);
     let set: Result<(), PoolError> = update(
         &world.pic,
         world.canister,
@@ -1040,17 +1045,21 @@ impl World {
                 encode_one(terms).unwrap(),
             )
             .expect("submitted");
-        let request = self.next_outcall(&["eth_feeHistory"]);
-        self.pic
-            .mock_canister_http_response(MockCanisterHttpResponse {
-                subnet_id: request.subnet_id,
-                request_id: request.request_id,
-                response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
-                    reject_code: 2,
-                    message: "the provider is unreachable".to_string(),
-                }),
-                additional_responses: vec![],
-            });
+        // read beside the fit, then once more by the signature: the provider stays down
+        let mut request = Some(self.next_outcall(&["eth_feeHistory"]));
+        while let Some(read) = request {
+            self.pic
+                .mock_canister_http_response(MockCanisterHttpResponse {
+                    subnet_id: read.subnet_id,
+                    request_id: read.request_id,
+                    response: CanisterHttpResponse::CanisterHttpReject(CanisterHttpReject {
+                        reject_code: 2,
+                        message: "the provider is unreachable".to_string(),
+                    }),
+                    additional_responses: vec![],
+                });
+            request = self.find_outcall(&["eth_feeHistory"], 20);
+        }
         let answered: Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> =
             candid::decode_one(&self.pic.await_call(call).expect("the swap answers")).unwrap();
         answered.map(|ok| settlement_api::types::pool::SwapFromIcpOk {
@@ -2727,4 +2736,589 @@ fn an_amount_at_or_under_the_ledgers_fee_is_never_pulled() {
         );
     }
     assert_eq!(world.balance(staker()), before);
+}
+
+// A token's whole way out of ICP on a stub of an ICPSwap pool that moves the suite's real
+// ledgers: the door's answer, the standing approval on the ledger, the reads beside the pull
+// and beside the sale, and the signature, in the canister itself.
+
+#[derive(CandidType)]
+struct PoolInit {
+    token0: Principal,
+    token1: Principal,
+}
+
+#[derive(CandidType, Clone)]
+struct StubSale {
+    quote: Nat,
+    out: Nat,
+    refuse: bool,
+    hold: bool,
+    quote_fails: bool,
+}
+
+#[derive(CandidType)]
+struct IcrcTransfer {
+    from_subaccount: Option<Vec<u8>>,
+    to: Account,
+    amount: Nat,
+    fee: Option<Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType)]
+struct AllowanceAsk {
+    account: Account,
+    spender: Account,
+}
+
+#[derive(serde::Deserialize, CandidType)]
+struct AllowanceIs {
+    allowance: Nat,
+    expires_at: Option<u64>,
+}
+
+/// What the sale's output must be for the payout to come to exactly 501.65 USDC.
+const SALE_OUT: u64 = PAYS_501_65 + FEE;
+/// A token amount that sells for it, in the token's own units.
+const SOLD: u64 = 900_000_000;
+
+struct SaleWorld {
+    world: World,
+    canister_address: types::EvmAddress,
+    token: Principal,
+    pool: Principal,
+}
+
+impl SaleWorld {
+    fn new() -> Self {
+        use settlement_api::types::pool::{IcpRoute, IcpRouteVia, IcpTokenEntry};
+        // no reading pushed: the canister reads the gas itself, as it does on every sale
+        let (world, canister_address) = swap_world();
+        plant_base_stake(&world, 0x72);
+        let token = install_ledger(&world.pic, world.admin, "TOK", vec![(staker(), 10 * SOLD)]);
+        let pool = world
+            .pic
+            .create_canister_with_settings(Some(world.admin), None);
+        world.pic.add_cycles(pool, 100_000_000_000_000);
+        world.pic.install_canister(
+            pool,
+            wasms::stub_pool(),
+            encode_one(PoolInit {
+                token0: token,
+                token1: world.ledger,
+            })
+            .unwrap(),
+            Some(world.admin),
+        );
+        // the pool's ckUSDC, what it pays the sales with: minted, so the stakers' stay as they are
+        let raw = world
+            .pic
+            .update_call(
+                world.ledger,
+                Principal::from_slice(&[0x50; 29]),
+                "icrc1_transfer",
+                encode_one(IcrcTransfer {
+                    from_subaccount: None,
+                    to: account(pool),
+                    amount: Nat::from(usdc(5_000)),
+                    fee: None,
+                    memo: None,
+                    created_at_time: None,
+                })
+                .unwrap(),
+            )
+            .expect("the ledger answers");
+        assert!(!raw.is_empty());
+        let set: Result<(), PoolError> = update(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "set_pool_settings",
+            encode_one(PoolSettings {
+                tvl_cap: Nat::from(usdc(10_000)),
+                per_swap_cap: Nat::from(usdc(1_000)),
+                premium_bps: 10,
+                ckusdc_ledger: world.ledger,
+                icp_tokens: vec![IcpTokenEntry {
+                    ledger: token,
+                    icpswap_pool: pool,
+                }],
+                arrival_backup_s: 300,
+                pool_open_for_swaps: true,
+                large_deposit_usdc: None,
+                large_deposit_confirmations: None,
+                least_move_fee_base_to_icp: None,
+                least_move_fee_icp_to_base: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(set, Ok(()));
+        let routes: Result<(), PoolError> = update(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "set_icp_routes",
+            candid::encode_args((
+                None::<Principal>,
+                vec![IcpRoute {
+                    ledger: token,
+                    via: IcpRouteVia::Direct(pool),
+                }],
+            ))
+            .unwrap(),
+        );
+        assert_eq!(routes, Ok(()));
+        world.settle();
+        let sale = Self {
+            world,
+            canister_address,
+            token,
+            pool,
+        };
+        sale.hold(true);
+        sale
+    }
+
+    /// A sale that gives its quote: held once its deposit is in, or let go.
+    fn hold(&self, hold: bool) {
+        self.set(StubSale {
+            quote: Nat::from(SALE_OUT),
+            out: Nat::from(SALE_OUT),
+            refuse: false,
+            hold,
+            quote_fails: false,
+        });
+    }
+
+    fn set(&self, sale: StubSale) {
+        self.world
+            .pic
+            .update_call(
+                self.pool,
+                self.world.admin,
+                "set_sale",
+                encode_one(sale).unwrap(),
+            )
+            .expect("the stub answers");
+    }
+
+    fn token_balance(&self, owner: Principal) -> Nat {
+        query(
+            &self.world.pic,
+            self.token,
+            self.world.admin,
+            "icrc1_balance_of",
+            encode_one(account(owner)).unwrap(),
+        )
+    }
+
+    fn allowance(&self) -> AllowanceIs {
+        query(
+            &self.world.pic,
+            self.token,
+            self.world.admin,
+            "icrc2_allowance",
+            encode_one(AllowanceAsk {
+                account: account(self.world.canister),
+                spender: account(self.pool),
+            })
+            .unwrap(),
+        )
+    }
+
+    /// The staker's approval of the canister for one sale, and the sale's door.
+    fn swap(&self) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
+        let raw = self
+            .world
+            .pic
+            .update_call(
+                self.token,
+                staker(),
+                "icrc2_approve",
+                encode_one(ApproveArgs {
+                    from_subaccount: None,
+                    spender: account(self.world.canister),
+                    amount: Nat::from(SOLD + FEE),
+                    expected_allowance: None,
+                    expires_at: None,
+                    fee: None,
+                    memo: None,
+                    created_at_time: None,
+                })
+                .unwrap(),
+            )
+            .expect("the ledger answers");
+        assert!(!raw.is_empty());
+        self.door()
+    }
+
+    fn door(&self) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
+        let deadline_s = self.world.now().as_secs().get() + 600;
+        let mut terms = swap_terms(
+            &self.world,
+            SOLD,
+            kyber_plan(self.canister_address, deadline_s),
+            900_000,
+        );
+        terms.token_in = self.token;
+        update(
+            &self.world.pic,
+            self.world.canister,
+            staker(),
+            "swap_from_icp",
+            encode_one(terms).unwrap(),
+        )
+    }
+
+    /// Payout `id` once it has left where it was, within a bound.
+    fn until(
+        &self,
+        id: u64,
+        done: impl Fn(&settlement_api::types::pool::PayoutStatus) -> bool,
+    ) -> settlement_api::types::pool::PayoutStatus {
+        for _ in 0..400 {
+            self.world.pic.tick();
+            let view: Option<settlement_api::types::pool::PayoutView> = query(
+                &self.world.pic,
+                self.world.canister,
+                self.world.admin,
+                "payout",
+                encode_one(id).unwrap(),
+            );
+            let status = view.expect("the payout is there").status;
+            if done(&status) {
+                return status;
+            }
+        }
+        let view: Option<settlement_api::types::pool::PayoutView> = query(
+            &self.world.pic,
+            self.world.canister,
+            self.world.admin,
+            "payout",
+            encode_one(id).unwrap(),
+        );
+        let logs: Vec<String> = self
+            .world
+            .pic
+            .fetch_canister_logs(self.world.canister, self.world.admin)
+            .map(|logs| {
+                logs.iter()
+                    .rev()
+                    .take(8)
+                    .map(|log| {
+                        String::from_utf8_lossy(&log.content)
+                            .chars()
+                            .take(220)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        panic!(
+            "payout {id} did not get there: {:?}; pending outcalls {:?}; logs {logs:#?}",
+            view.map(|view| view.status),
+            self.world
+                .pic
+                .get_canister_http()
+                .iter()
+                .map(|request| String::from_utf8_lossy(&request.body)
+                    .chars()
+                    .take(120)
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn lines(&self, of: impl Fn(&PoolStep) -> bool) -> usize {
+        self.world
+            .pool_steps()
+            .iter()
+            .filter(|step| of(step))
+            .count()
+    }
+
+    /// Answers the scaler's read for exactly 501.65 USDC, the rewrite this sale's plan needs.
+    fn answer_the_scaler(&self) {
+        let request = self.world.next_outcall(&["eth_call"]);
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let data = hex::decode(
+            body[0]["params"][0]["data"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        assert_eq!(
+            data[36..68],
+            alloy_primitives::U256::from(501_650_000_u64).to_be_bytes::<32>(),
+            "read for what the quote says the sale makes"
+        );
+        self.world.reply(
+            &request,
+            serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+            false,
+        );
+        // the gas read out beside it, unless a reading young enough is held
+        if let Some(gas) = self.world.find_outcall(&["eth_feeHistory"], 5) {
+            self.world.reply(
+                &gas,
+                serde_json::json!({
+                    "oldestBlock": "0x121eac0",
+                    "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00"],
+                    "gasUsedRatio": [0.5, 0.5, 0.5, 0.5, 0.5],
+                    "reward": [["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"]],
+                }),
+                false,
+            );
+        }
+    }
+}
+
+fn is_signed(status: &settlement_api::types::pool::PayoutStatus) -> bool {
+    matches!(status, settlement_api::types::pool::PayoutStatus::Signed(_))
+}
+
+/// A token's first sale: the door answers once the token is in; a standing approval for ten
+/// sales is given on the ledger, ending in a day; the scaler and the gas are read beside the sale,
+/// for the amount its quote says, and nothing is read after it. The second sale asks for no
+/// approval at all, and all the canister keeps of the token is that second sale's unspent
+/// approval fee.
+#[test]
+fn a_token_sells_on_a_standing_approval_and_is_signed_with_nothing_read_after_the_sale() {
+    use settlement_api::types::pool::PayoutStatus;
+    let sale = SaleWorld::new();
+    let before = sale.token_balance(staker());
+    let first = sale.swap().expect("the swap is opened");
+    assert_eq!(first.status, PayoutStatus::Swapping);
+    // the sale, the pull's fee and the fee of the approval the staker gave
+    assert_eq!(
+        sale.token_balance(staker()),
+        before.clone() - Nat::from(SOLD + 2 * FEE),
+        "the door answers with the token in"
+    );
+    sale.answer_the_scaler();
+    sale.world.settle();
+    let scaled_once = sale.world.pic.get_canister_http();
+    assert!(scaled_once.is_empty(), "both reads were answered");
+    sale.hold(false);
+    assert!(is_signed(&sale.until(first.id, is_signed)));
+    assert!(
+        sale.world.pic.get_canister_http().is_empty(),
+        "nothing is left to read after the sale"
+    );
+    let approvals = |step: &PoolStep| matches!(step, PoolStep::SwapApproved { .. });
+    assert_eq!(sale.lines(approvals), 1);
+    let need = SOLD - 2 * FEE + FEE;
+    let allowance = sale.allowance();
+    assert_eq!(
+        allowance.allowance,
+        Nat::from(9 * need),
+        "ten sales, one spent"
+    );
+    let ends = allowance.expires_at.expect("it ends by itself");
+    let day = Duration::from_secs(24 * 3_600).as_nanos() as u64;
+    let now = sale.world.now().as_nanos();
+    assert!(
+        ends > now + day - 3_600_000_000_000 && ends <= now + day,
+        "a day"
+    );
+    assert_eq!(
+        sale.token_balance(sale.world.canister),
+        Nat::from(0_u8),
+        "the first sale spent all its budget"
+    );
+
+    sale.hold(true);
+    let second = sale.swap().expect("the swap is opened");
+    sale.answer_the_scaler();
+    sale.world.settle();
+    sale.hold(false);
+    assert!(is_signed(&sale.until(second.id, is_signed)));
+    assert_eq!(sale.lines(approvals), 1, "no other approval");
+    assert_eq!(sale.allowance().allowance, Nat::from(8 * need));
+    assert_eq!(
+        sale.token_balance(sale.world.canister),
+        Nat::from(FEE),
+        "the second sale's unspent approval fee"
+    );
+    let signed = sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. }));
+    assert_eq!(signed, 2);
+}
+
+/// A sale over before its reads come back: the fit reads for itself, as it always could, and
+/// signs once. What was read ahead is at most a read paid twice, never a second signature.
+#[test]
+fn a_sale_over_before_its_reads_came_back_reads_again_and_signs_once() {
+    let sale = SaleWorld::new();
+    sale.hold(false);
+    let first = sale.swap().expect("the swap is opened");
+    // the reads beside the sale, then the fit's own: answer them all as they come
+    for _ in 0..4 {
+        sale.world.settle();
+        for request in sale.world.pic.get_canister_http() {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            match body[0]["method"].as_str() {
+                Some("eth_call") => sale.world.reply(
+                    &request,
+                    serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+                    false,
+                ),
+                Some("eth_feeHistory") => sale.world.reply(
+                    &request,
+                    serde_json::json!({
+                        "oldestBlock": "0x121eac0",
+                        "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00"],
+                        "gasUsedRatio": [0.5, 0.5, 0.5, 0.5, 0.5],
+                        "reward": [["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"]],
+                    }),
+                    false,
+                ),
+                _ => {}
+            }
+        }
+    }
+    assert!(is_signed(&sale.until(first.id, is_signed)));
+    let signed = sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. }));
+    assert_eq!(signed, 1);
+}
+
+/// A token whose approval may not stand (here the flow settings name it as ckETH): its approval
+/// is for the sale alone, spent to nothing by it, with no end of its own to read.
+#[test]
+fn a_token_named_as_cketh_is_approved_for_its_sale_alone() {
+    use settlement_api::types::flow::FlowSettings;
+    let sale = SaleWorld::new();
+    let flow: Result<(), PoolError> = update(
+        &sale.world.pic,
+        sale.world.canister,
+        sale.world.admin,
+        "set_flow_settings",
+        encode_one(FlowSettings {
+            ck_minter: None,
+            cketh_ledger: Some(sale.token),
+            cketh_fee_allowance: Nat::from(0_u8),
+            relay_window_s: 3_600,
+            ck_helper: None,
+            eco_prover: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(flow, Ok(()));
+    let first = sale.swap().expect("the swap is opened");
+    sale.answer_the_scaler();
+    sale.world.settle();
+    sale.hold(false);
+    assert!(is_signed(&sale.until(first.id, is_signed)));
+    let allowance = sale.allowance();
+    assert_eq!(allowance.allowance, Nat::from(0_u8));
+    assert_eq!(allowance.expires_at, None);
+}
+
+/// A sale the pool refuses: the token comes back less what it spent, once, and the canister keeps
+/// nothing of it but the fee of an approval that stands for the next sale.
+#[test]
+fn a_sale_the_pool_refuses_refunds_the_token_once() {
+    use settlement_api::types::pool::PayoutStatus;
+    let sale = SaleWorld::new();
+    sale.set(StubSale {
+        quote: Nat::from(SALE_OUT),
+        out: Nat::from(SALE_OUT),
+        refuse: true,
+        hold: false,
+        quote_fails: false,
+    });
+    let before = sale.token_balance(staker());
+    let first = sale.swap().expect("the swap is opened");
+    let undone = |status: &PayoutStatus| matches!(status, PayoutStatus::Undone(_));
+    assert!(undone(&sale.until(first.id, undone)));
+    // the approve the door's caller gave, the pull's fee, the canister's approval, the refund's fee
+    assert_eq!(
+        sale.token_balance(staker()),
+        before - Nat::from(4 * FEE),
+        "all of it less the fees spent"
+    );
+    assert_eq!(sale.token_balance(sale.world.canister), Nat::from(0_u8));
+    let signed = sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. }));
+    assert_eq!(signed, 0);
+    // answering the scaler is no one's job here: what was read ahead is simply never used
+    for request in sale.world.pic.get_canister_http() {
+        sale.world.reply(
+            &request,
+            serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+            false,
+        );
+    }
+    sale.world.settle();
+    assert_eq!(
+        sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. })),
+        0
+    );
+}
+
+/// A pool that does not answer its reads, beside the pull and after it: the token is in, its
+/// lines are written and the door has answered; the payout timer carries the sale on once the
+/// pool answers, the token sold once.
+#[test]
+fn a_pool_that_fails_its_reads_never_touches_the_pull() {
+    use settlement_api::types::pool::PayoutStatus;
+    let sale = SaleWorld::new();
+    let working = StubSale {
+        quote: Nat::from(SALE_OUT),
+        out: Nat::from(SALE_OUT),
+        refuse: false,
+        hold: true,
+        quote_fails: false,
+    };
+    sale.set(StubSale {
+        quote_fails: true,
+        ..working.clone()
+    });
+    let before = sale.token_balance(staker());
+    let first = sale.swap().expect("the door answers with the token in");
+    assert_eq!(first.status, PayoutStatus::Swapping);
+    let taken = before - Nat::from(SOLD + 2 * FEE);
+    assert_eq!(sale.token_balance(staker()), taken);
+    assert_eq!(
+        sale.lines(|step| matches!(step, PoolStep::PayoutPulled { .. })),
+        1
+    );
+    sale.world.settle();
+    let begun = |step: &PoolStep| matches!(step, PoolStep::SwapBegun { .. });
+    assert_eq!(sale.lines(begun), 0, "no sale on no quote");
+    sale.set(working);
+    sale.world.pic.advance_time(Duration::from_secs(61));
+    sale.answer_the_scaler();
+    sale.world.settle();
+    sale.hold(false);
+    assert!(is_signed(&sale.until(first.id, is_signed)));
+    assert_eq!(sale.lines(begun), 1, "sold once");
+    assert_eq!(sale.token_balance(staker()), taken, "taken once");
+}
+
+/// A pull the ledger refuses (no approval): nothing is written, and however far the reads beside
+/// it got, no outcall starts: an outcall is the canister's to pay for, and anyone can knock.
+#[test]
+fn a_refused_pull_writes_nothing_and_starts_no_outcall() {
+    let sale = SaleWorld::new();
+    let lines = crate::client::settlement::event_count(
+        &sale.world.pic,
+        sale.world.canister,
+        sale.world.admin,
+    );
+    let answer = sale.door();
+    assert!(matches!(answer, Err(PoolError::Ledger(_))), "{answer:?}");
+    sale.world.settle();
+    assert_eq!(
+        crate::client::settlement::event_count(
+            &sale.world.pic,
+            sale.world.canister,
+            sale.world.admin,
+        ),
+        lines,
+        "not one line"
+    );
+    assert!(sale.world.pic.get_canister_http().is_empty(), "no outcall");
+    assert_eq!(sale.allowance().allowance, Nat::from(0_u8), "no approval");
 }
