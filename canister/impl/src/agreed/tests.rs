@@ -126,20 +126,32 @@ fn a_read_past_a_time_waits_the_grain_and_the_depth_in_the_chains_blocks() {
     );
 }
 
-/// BSC design 6.2.7 and D8: an Across fill is read only past its deadline; the SpokePool's own
-/// relay hash must be the canister's; then its status decides.
+/// BSC design 6.2.7 and D8: the SpokePool's own relay hash must be the canister's; a fill
+/// counts at any agreed block (Jeff saw a delivered payout shown in progress until its
+/// deadline), an open deposit only past its deadline.
 #[test]
-fn an_across_fill_reads_past_its_deadline_and_trusts_only_its_own_hash() {
+fn an_across_fill_counts_at_once_and_an_open_one_only_past_its_deadline() {
     let local = [0x5a; 32];
     let hash = json!(hex0x(&local));
     let deadline = 1_000;
     let read = |at: u64, hash: Value, status: Value| {
         across_fill_of(Ok(header(90, at)), Ok(hash), Ok(status), local, deadline)
     };
-    assert_eq!(
+    // before the deadline: filled is filled, open is too early to say, a foreign hash stops
+    assert!(matches!(
         read(deadline, hash.clone(), word_of(2)),
-        Err(FillRead::TooEarly)
-    );
+        Ok((AcrossFill::Filled, Header { number, .. })) if number == BlockNumber::new(90)
+    ));
+    for open in [0, 1] {
+        assert_eq!(
+            read(deadline, hash.clone(), word_of(open)),
+            Err(FillRead::TooEarly)
+        );
+    }
+    assert!(matches!(
+        read(deadline, json!(hex0x(&[0x5b; 32])), word_of(2)),
+        Ok((AcrossFill::HashDiffers, _))
+    ));
     let past = deadline + 1;
     assert!(matches!(
         read(past, hash.clone(), word_of(2)),

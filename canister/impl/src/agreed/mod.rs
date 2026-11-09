@@ -288,15 +288,18 @@ pub fn across_fill_of(
         header.map_err(|error| FillRead::Unread(format!("the block: {:?}", error.kind())))?;
     let header = Header::parse(&header)
         .ok_or_else(|| FillRead::Unread("the block is not one the nodes see".to_string()))?;
-    if header.timestamp <= after_s {
-        return Err(FillRead::TooEarly);
-    }
+    // the SpokePool's own hash of the relay is the canister's at any block, before the
+    // deadline as after it (D8)
     if word(hash).map_err(FillRead::Unread)? != local {
         return Ok((AcrossFill::HashDiffers, header));
     }
     let status = word(status).map_err(FillRead::Unread)?;
     match types::swapic::across::FillStatus::of(status) {
+        // filled at an agreed block (final on its chain) is filled for good: read at any
+        // time, so a payout shows delivered within one read of its fill
         Some(types::swapic::across::FillStatus::Filled) => Ok((AcrossFill::Filled, header)),
+        // open says nothing until no fill can land any more: past the deadline only
+        Some(_) if header.timestamp <= after_s => Err(FillRead::TooEarly),
         Some(_) => Ok((AcrossFill::Open, header)),
         None => Err(FillRead::Unread(
             "fillStatuses answered no status".to_string(),
@@ -305,8 +308,9 @@ pub fn across_fill_of(
 }
 
 /// An Across deposit's fill on `chain`'s SpokePool `spoke_pool`, read by every node at one
-/// agreed block whose time is past `after_s` (its fill deadline: no fill lands after it), with
-/// that block's header (BSC design 6.2.7). `TooEarly` while no agreed block is.
+/// agreed block, with that block's header (BSC design 6.2.7). Filled counts at any block; open
+/// counts only at a block past `after_s` (its fill deadline: no fill lands after it), and is
+/// `TooEarly` before it.
 pub async fn across_fill_after(
     chain: ChainId,
     spoke_pool: EvmAddress,

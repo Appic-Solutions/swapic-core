@@ -1592,21 +1592,21 @@ fn across_read_at() -> Timestamp {
         .unwrap()
 }
 
-/// BSC design 6.2.7: an Across payout's fill is read once past its fill deadline. Filled, it
-/// is paid; open with no fill logged, it is undone at once and owed back by Across; a relay
-/// hash that differs (D8) or a fill logged for a deposit read open (attack M5) stops it for a
-/// human, nothing refunded.
+/// BSC design 6.2.7: an Across payout's fill is read from the start (a fill read at an
+/// agreed block is final; the read itself answers too early for an open deposit before its
+/// deadline). Filled, it is paid; open past its deadline with no fill logged, it waits for
+/// Across's refund; a relay hash that differs (D8) or a fill logged for a deposit read open
+/// (attack M5) stops it for a human, nothing refunded.
 #[test]
-fn an_across_payouts_fill_is_read_past_its_deadline_and_decides_once() {
+fn an_across_payouts_fill_is_read_from_the_start_and_decides_once() {
     use crate::agreed::AcrossFill;
     on_fresh_memory(|| {
         crate::storage::init();
         let id = delivering_across_withdrawal();
-        // before its fill deadline and the wait: not even asked
+        // long before its fill deadline: asked at once, and a fill is paid at once
         let reads = Reads::across(Ok(AcrossFill::Filled), Ok(Some(false)));
-        block_on(pass_with(&Fake::default(), &reads, || secs(ACROSS_DEADLINE), &open_pool));
-        assert!(reads.across_reads.borrow().is_empty());
-        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        let early = || secs(ACROSS_DEADLINE - 600);
+        block_on(pass_with(&Fake::default(), &reads, early, &open_pool));
         assert_eq!(*reads.across_reads.borrow(), vec![(ChainId::BSC, ACROSS_DEADLINE)]);
         assert_eq!(payout(id).unwrap().status, PayoutStatus::Paid);
         assert_eq!(ledger().pockets.base.in_flight, TokenAmount::ZERO);

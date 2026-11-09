@@ -167,17 +167,21 @@ fn decide(
             let after_s = fill_read_after(payout);
             let now_s = now.as_secs().get();
             let wait = waits.fill.as_secs();
-            let ready = now_s >= after_s.saturating_add(wait)
-                && payout
-                    .fill_early_at
-                    .is_none_or(|early| now_s >= early.as_secs().get().saturating_add(wait));
+            let rested = payout
+                .fill_early_at
+                .is_none_or(|early| now_s >= early.as_secs().get().saturating_add(wait));
+            let ready = now_s >= after_s.saturating_add(wait) && rested;
             match (payout.intent, &payout.across) {
                 (Some(intent), _) if ready => Next::ReadFill {
                     chain: payout.terms.dst_chain,
                     intent,
                     after_s,
                 },
-                (None, Some(across)) if ready => Next::ReadAcrossFill {
+                // an Across fill is read from the start, and again one wait after a read too
+                // early: a fill read at an agreed block is final at any time, so the payout
+                // shows delivered within a read of it; only an open deposit waits for its
+                // deadline (the read answers TooEarly before it)
+                (None, Some(across)) if rested => Next::ReadAcrossFill {
                     chain: across.destination,
                     after_s,
                 },
