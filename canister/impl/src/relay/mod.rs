@@ -980,9 +980,13 @@ fn across_delivery(
     if deadline > u64::from(deposit.quote_timestamp).saturating_add(QUOTE_LIFE_S) {
         return Err(rule("AX12"));
     }
-    // AX13 and AX14: F between the least and the most a relayer keeps, in micro USD
+    // AX13 and AX14: F between the least and the most a relayer keeps, in micro USD; never
+    // nothing, which a small deposit's gas allowance alone would let through
     let million = U256::from(1_000_000u64);
     let paid = destination.usdc_to_usd6(TokenAmount::from_u256(deposit.output_amount)).to_u256() * million;
+    if paid.is_zero() {
+        return Err(rule("AX14"));
+    }
     let put = source.usdc_to_usd6(TokenAmount::from_u256(deposit.min_expected)).to_u256();
     if paid > put * (million - U256::from(fee_bounds.least_ppm)) {
         return Err(rule("AX13"));

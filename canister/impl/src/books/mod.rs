@@ -240,6 +240,11 @@ async fn check_balance(
         Ok(answer) => TokenAmount::from_be_bytes(answer.word().ok_or(ReadFailure::BadAnswer)?),
         Err(error) => return Err(error.kind()),
     };
+    // the books keep micro USD: a USDC of other decimals is read in them (a no-op on 6)
+    let observed = match config.evm_chains.get(chain_id) {
+        Some(chain) => chain.usdc_to_usd6(observed),
+        None => observed,
+    };
     keep_read(
         config,
         chain_id,

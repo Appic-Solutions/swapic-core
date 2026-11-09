@@ -2134,6 +2134,12 @@ mod across_orders {
             c.resign();
             assert_eq!(c.read(), broken("AX14"), "{dust}");
         }
+        // a deposit whose gas allowance is above its whole floor still promises something
+        let mut c = case();
+        c.fee.gas_allowance = ChainTable(BTreeMap::from([(ARBITRUM, TokenAmount::from(10_000_000_u64))]));
+        c.deposit.output_amount = U256::ZERO;
+        c.resign();
+        assert_eq!(c.read(), broken("AX14"));
     }
 
     #[test]
