@@ -42,8 +42,8 @@ if [[ $# -gt 0 && "$1" == "--" ]]; then shift; fi
 
 if [[ $BUILD == 1 ]]; then
   scripts/build-canister.sh --integration-test settlement
-  # the ck minter of the pool's tests; never deployed
-  cargo build --locked --target wasm32-unknown-unknown --release -p stub_minter \
+  # the ck minter and the ICPSwap pool of the pool's tests; never deployed
+  cargo build --locked --target wasm32-unknown-unknown --release -p stub_minter -p stub_pool \
     --target-dir canister/target/inttest
 fi
 

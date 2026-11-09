@@ -914,12 +914,31 @@ pub async fn icrc2_approve(
     spender: Principal,
     amount: Nat,
 ) -> Result<(), CallError> {
+    approve(ledger, spender, amount, None).await
+}
+
+/// [`icrc2_approve`] that ends by itself at `until_nanos`.
+pub async fn icrc2_approve_until(
+    ledger: Principal,
+    spender: Principal,
+    amount: Nat,
+    until_nanos: u64,
+) -> Result<(), CallError> {
+    approve(ledger, spender, amount, Some(until_nanos)).await
+}
+
+async fn approve(
+    ledger: Principal,
+    spender: Principal,
+    amount: Nat,
+    expires_at: Option<u64>,
+) -> Result<(), CallError> {
     let arg = ApproveArgs {
         from_subaccount: None,
         spender: Account::of(spender, None),
         amount,
         expected_allowance: None,
-        expires_at: None,
+        expires_at,
         fee: None,
         memo: None,
         created_at_time: None,
@@ -973,7 +992,6 @@ struct AllowanceArgs {
 #[derive(CandidType, Deserialize)]
 struct Allowance {
     allowance: Nat,
-    #[allow(dead_code)]
     expires_at: Option<u64>,
 }
 
@@ -983,12 +1001,23 @@ pub async fn icrc2_allowance(
     owner: Principal,
     spender: Principal,
 ) -> Result<Nat, CallError> {
+    icrc2_allowance_ending(ledger, owner, spender)
+        .await
+        .map(|(allowance, _)| allowance)
+}
+
+/// [`icrc2_allowance`] with when it ends, in nanoseconds, if it does.
+pub async fn icrc2_allowance_ending(
+    ledger: Principal,
+    owner: Principal,
+    spender: Principal,
+) -> Result<(Nat, Option<u64>), CallError> {
     let arg = AllowanceArgs {
         account: Account::of(owner, None),
         spender: Account::of(spender, None),
     };
     let (answer,): (Allowance,) = call(ledger, "icrc2_allowance", (arg,)).await?;
-    Ok(answer.allowance)
+    Ok((answer.allowance, answer.expires_at))
 }
 
 // ICPSwap's SwapPool, the calls made.

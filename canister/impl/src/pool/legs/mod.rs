@@ -3,11 +3,16 @@
 //! user's token to ckUSDC (`swap_from_icp`). Each leg is recorded before its call, under the
 //! payout it belongs to and its own leg number:
 //!
-//! - its pool's quote first, below the least it must give answers [`LegEnd::Short`] and
-//!   calls nothing (what to do is the caller's: decline once, then fall back);
-//! - what the pool holds of the canister's before the swap, read while this leg alone is at
-//!   the pool, then the approval (`SwapApproved`), `SwapBegun` with that reading and the
-//!   amount in, and `depositFromAndSwap`;
+//! - in one round, or beside the payout's pull when no leg has been at the pool since
+//!   ([`crate::pool::payout::ReadAhead`]): its pool's quote, what the pool holds of the
+//!   canister's before the swap (read while this leg alone is at the pool), and for a token
+//!   whose approval may stand what the pool may still pull. A quote below the least it must
+//!   give answers [`LegEnd::Short`] and moves nothing (what to do is the caller's: decline
+//!   once, then fall back);
+//! - the approval (`SwapApproved`), unless a standing one covers this swap: exactly the swap for
+//!   ckUSDC and ckETH, [`STANDING_SWAPS`] of them for a token that may stand
+//!   ([`crate::pool::payout::may_stand`]);
+//! - `SwapBegun` with that reading and the amount in, and `depositFromAndSwap`;
 //! - its output (`Swapped`), or, for a swap with no answer or the pool's own refusal, what the
 //!   pool holds of the canister's above that reading: its output there is withdrawn and the
 //!   leg paid; its deposit there is withdrawn back, never more than it put in (`SwapUndone`);
@@ -19,8 +24,9 @@
 mod tests;
 
 use crate::ic::CallError;
-use crate::pool::payout::{call_stop, open, record, Ledgers, Stop};
+use crate::pool::payout::{call_stop, open, record, Ledgers, Stop, STANDING_SWAPS};
 use candid::Principal;
+use futures::future::join3;
 use types::hash::PoolRef;
 use types::pool::{PoolHeld, PoolStep, SwapLeg};
 use types::{Timestamp, TokenAmount};
@@ -110,6 +116,35 @@ pub fn after_approvals(
         .filter(|left| *left > TokenAmount::ZERO)
 }
 
+/// A leg's reads, in one round. What the pool holds of the canister's before its deposit: only
+/// what is there above it is ever the leg's. An allowance that cannot be read is an approval
+/// asked again, never a swap that leans on it.
+pub(crate) async fn read_round(
+    ledgers: &impl Ledgers,
+    pool: Principal,
+    token_in: Principal,
+    amount_in: TokenAmount,
+    zero_for_one: bool,
+    stands: bool,
+) -> (
+    Result<TokenAmount, CallError>,
+    Result<PoolHeld, Stop>,
+    Option<TokenAmount>,
+) {
+    join3(
+        ledgers.quote(pool, amount_in, zero_for_one),
+        held_at(ledgers, pool, zero_for_one),
+        async {
+            if stands {
+                ledgers.allowance(token_in, pool).await.ok()
+            } else {
+                None
+            }
+        },
+    )
+    .await
+}
+
 /// Runs the leg from where `state` stands, as far as it goes now.
 pub async fn run(
     ledgers: &impl Ledgers,
@@ -117,6 +152,19 @@ pub async fn run(
     state: SwapLeg,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
+) -> Result<LegEnd, Stop> {
+    run_beside(ledgers, spec, state, clock, guard, |_| {}).await
+}
+
+/// [`run`], and `beside` told the leg's quote just as its swap goes out. Only a swap that goes
+/// out now tells it: one that was begun before this run, or stops short, does not.
+pub async fn run_beside(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    beside: impl FnOnce(TokenAmount),
 ) -> Result<LegEnd, Stop> {
     if let Some(out) = state.out {
         return Ok(LegEnd::Out(out));
@@ -146,33 +194,62 @@ pub async fn run(
     else {
         return Ok(LegEnd::NoPair);
     };
-    let quoted = ledgers
-        .quote(spec.pool, spec.amount_in, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
-    if quoted < spec.least {
-        return Ok(LegEnd::Short(quoted));
-    }
     let allowance = spec
         .amount_in
         .checked_add(spec.fee_in)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
-    // what the pool holds of the canister's before this leg's deposit, read while this leg
-    // alone is at the pool: only what is there above it is ever this leg's
-    let before = held_at(ledgers, spec.pool, zero_for_one).await?;
+    let stands = ledgers.may_stand(spec.token_in);
+    // a reading beside the pull can start a sale, never end one: a refund cannot be taken back, so
+    // a price below the least is asked again now, before it decides anything
+    let read_ahead = ledgers
+        .round_read_ahead(&spec)
+        .filter(|read| read.quoted >= spec.least);
+    let (quoted, before, allowed) = match read_ahead {
+        Some(read) => (Ok(read.quoted), Ok(read.before), read.allowed),
+        None => {
+            read_round(
+                ledgers,
+                spec.pool,
+                spec.token_in,
+                spec.amount_in,
+                zero_for_one,
+                stands,
+            )
+            .await
+        }
+    };
+    let quoted = quoted.map_err(|error| call_stop("the pool's quote", error))?;
+    if quoted < spec.least {
+        return Ok(LegEnd::Short(quoted));
+    }
+    let before = before?;
     open(guard)?;
-    ledgers
-        .approve(spec.token_in, spec.pool, allowance)
-        .await
-        .map_err(|error| call_stop("the approval", error))?;
-    record(
-        PoolStep::SwapApproved {
-            r#ref: spec.id,
-            leg: spec.leg,
-        },
-        clock(),
-    )?;
-    open(guard)?;
+    if allowed.is_none_or(|allowed| allowed < allowance) {
+        let approved = if stands {
+            let standing = allowance.checked_mul(STANDING_SWAPS).unwrap_or(allowance);
+            match ledgers
+                .approve_standing(spec.token_in, spec.pool, standing)
+                .await
+            {
+                // a ledger that will not take a standing approval still sells: this swap alone
+                Err(CallError::Refused(_)) => {
+                    ledgers.approve(spec.token_in, spec.pool, allowance).await
+                }
+                answer => answer,
+            }
+        } else {
+            ledgers.approve(spec.token_in, spec.pool, allowance).await
+        };
+        approved.map_err(|error| call_stop("the approval", error))?;
+        record(
+            PoolStep::SwapApproved {
+                r#ref: spec.id,
+                leg: spec.leg,
+            },
+            clock(),
+        )?;
+        open(guard)?;
+    }
     record(
         PoolStep::SwapBegun {
             r#ref: spec.id,
@@ -182,6 +259,7 @@ pub async fn run(
         },
         clock(),
     )?;
+    beside(quoted);
     // begun: whatever this answers, the swap is never called again
     match ledgers
         .swap(
@@ -300,7 +378,10 @@ async fn settle(
 }
 
 /// What a leg cost the account it sold from: every approval's fee, and once begun its
-/// deposit and the pull's fee, or what the deposit cost in the end once undone.
+/// deposit and the pull's fee, or what the deposit cost in the end once undone. A begun leg with
+/// no approval counted gave one before approvals were counted, or leaned on a standing one: that
+/// one is budgeted too, so the sum is at worst a fee above what was spent, and a refund never
+/// pays out more than the swap brought in.
 pub fn cost_in(state: &SwapLeg, fee_in: TokenAmount) -> Option<TokenAmount> {
     let approved = fee_in.checked_mul(state.approvals.unwrap_or(u32::from(state.begun)))?;
     if !state.begun {

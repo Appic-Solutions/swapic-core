@@ -8,9 +8,11 @@
 //! route's leg or legs, at least the sale floor (half the slippage below what the plan
 //! needs), and only then knows the exact ckUSDC `u`: the payout from the Base pocket is `u`
 //! less the settings' premium on it and the payouts' flat network fee. No per swap cap: a
-//! swap opens only while the Base pocket can pay it. A plan that fits that payout is signed by
-//! the canister in the same message chain ([`crate::pool::plan`]); one that does not waits for
-//! the watcher's order (`pay_payout`).
+//! swap opens only while the Base pocket can pay it. The door answers once the money is in: the
+//! sale, the fit and the signature go on in a message chain of their own
+//! ([`crate::pool::payout::carry_on`]), since a wallet holds its screen open until the answer. A
+//! plan that fits that payout is signed by the canister in that chain ([`crate::pool::plan`]);
+//! one that does not waits for the watcher's order (`pay_payout`).
 //!
 //! Each line before the call it guards:
 //! - The pull first, under the door's own pair, before any line (audit C15): refused, nothing
@@ -35,7 +37,7 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
-use crate::pool::payout::{open, record, Busy, Ledgers, Leg, Stop};
+use crate::pool::payout::{carry_on_after_read, open, record, Ledgers, Leg, ReadDone, Stop};
 use crate::pool::plan::{Decided, Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Chains, Delivery, Party, Plan};
@@ -355,9 +357,9 @@ pub fn check<S: Store>(
 }
 
 /// `swap_from_icp`'s body: the payout's id and where it stands. A pull the ledger refused
-/// answers its refusal (nothing moved, the payout undone); anything else answers the id, and
-/// `payout(id)` tells where it stands (a pull whose answer was lost, or a leg still running,
-/// continues on the canister's payout timer).
+/// answers its refusal (nothing moved, the payout undone); anything else answers the id once the
+/// money is in, and `payout(id)` tells where it stands (the sale and the signature go on in a
+/// message of their own, and whatever stops them continues on the canister's payout timer).
 pub async fn swap_from_icp(
     args: settlement_api::types::pool::IcpSwapTerms,
     sanctioned: impl Fn(&Address) -> bool,
@@ -385,8 +387,9 @@ pub async fn swap_from_icp(
     };
     // every check first; nothing is written before the money is in (audit C15)
     let at = now();
-    opening(at)?;
+    let (_, opened) = opening(at)?;
     crate::pool::pull_first::worth_pulling(request.token_in, request.amount_in)?;
+    let read = read_sale_beside_pull(&opened.terms);
     let pair = crate::pool::pull_first::dedup(
         "swap_from_icp",
         &request.from,
@@ -425,9 +428,9 @@ pub async fn swap_from_icp(
             return Err(why);
         }
     };
-    if let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
-        // whatever stops it, the payout timer carries it on; a plan that fits is signed in
-        // this same message chain, and one that is not waits for the watcher's order
+    carry_on_after_read(id, read, move |busy| async move {
+        // a plan that fits is signed in this same message chain, and one that is not waits for
+        // the watcher's order
         if let Ok(Some(fitted)) = drive(
             &crate::pool::payout::Live,
             id,
@@ -438,8 +441,27 @@ pub async fn swap_from_icp(
         {
             crate::pool::plan::sign_fitted(&busy, id, fitted, now).await;
         }
-    }
+    });
     answer(id)
+}
+
+/// What a swap's first leg sells: what was pulled less its approval's and its pull's fees.
+fn first_leg_in(amount_in: TokenAmount, fee_in: TokenAmount) -> Option<TokenAmount> {
+    amount_in
+        .checked_sub(fee_in.checked_mul(2_u8)?)
+        .filter(|left| *left > TokenAmount::ZERO)
+}
+
+/// A sale on one pool has nothing to wait for once its money is in, if what it reads comes back
+/// with the pull. A route through ICP reads on when its first leg is done, and ckUSDC sells
+/// nothing.
+fn read_sale_beside_pull(terms: &IcpSwapTerms) -> Option<ReadDone> {
+    let settings = pool_store::ledger().settings?;
+    let Some(PayoutPath::Icpswap { pool }) = inbound_path(&settings, terms.token_in) else {
+        return None;
+    };
+    let amount_in = first_leg_in(terms.amount_in, settings.fee_of(terms.token_in)?)?;
+    crate::pool::payout::read_beside_pull(pool, terms.token_in, settings.ckusdc_ledger, amount_in)
 }
 
 /// The swap's opening and its pull, both written once the money is in, with no await between:
@@ -509,7 +531,7 @@ pub(crate) fn pulled_line(
     Ok(())
 }
 
-/// A swap door's answer once it drove the payout as far as it goes in its call.
+/// A swap door's answer once the money is in: the payout's id and where it stands now.
 pub(crate) fn answer(id: u64) -> Result<SwapFromIcpOk, PoolError> {
     match pool_store::payout(id) {
         // the pull was refused: nothing moved
@@ -646,17 +668,25 @@ async fn try_plan(
         return Ok(Tried::Closed);
     }
     let why = match decided {
-        Ok(decided) => match crate::pool::plan::fit(reads, id, decided, clock()).await {
-            Ok(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(Box::new(fitted))),
-            // closed during the read: tried again once it opens, not counted
-            Ok(_) => {
-                pool::log(&format!(
-                    "the pool payout {id}'s plan waits: the pool closed"
-                ));
-                return Ok(Tried::Closed);
+        Ok(decided) => {
+            // the gas its signature needs, read beside the fit's own read: one round for both
+            let (fitted, ()) = futures::future::join(
+                crate::pool::plan::fit(reads, id, decided, clock()),
+                reads.gas_ready(),
+            )
+            .await;
+            match fitted {
+                Ok(fitted) if open(guard).is_ok() => return Ok(Tried::Sign(Box::new(fitted))),
+                // closed during the read: tried again once it opens, not counted
+                Ok(_) => {
+                    pool::log(&format!(
+                        "the pool payout {id}'s plan waits: the pool closed"
+                    ));
+                    return Ok(Tried::Closed);
+                }
+                Err(why) => why,
             }
-            Err(why) => why,
-        },
+        }
         Err(why) => why,
     };
     pool::log(&format!("the pool payout {id} waits for an order: {why}"));
@@ -795,8 +825,32 @@ fn landed(out: TokenAmount, fee: TokenAmount) -> TokenAmount {
     out.checked_sub(fee).unwrap_or(TokenAmount::ZERO)
 }
 
+/// Starts a planned swap's fit's reads beside the sale that ends in ckUSDC, for what its quote
+/// says the sale makes. A plan that would not fit that amount reads nothing.
+fn read_fit_beside_sale(
+    reads: &impl PlanReads,
+    payout: &EvmPayout,
+    terms: &IcpSwapTerms,
+    settings: &types::pool::PoolSettings,
+    received: TokenAmount,
+    now: Timestamp,
+) {
+    let (Some(pinned), Some(planned)) = (payout.plan.as_ref(), terms.planned) else {
+        return;
+    };
+    let Some(amount) = plan::payout_of(settings, received, terms.network_fee) else {
+        return;
+    };
+    if let Ok((order, swap)) =
+        crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get())
+    {
+        let route = swap.map(|at| order.steps[at].data.to_vec());
+        reads.read_fit_ahead(payout.id, route, amount);
+    }
+}
+
 async fn swap(
-    ledgers: &impl Ledgers,
+    ledgers: &(impl Ledgers + PlanReads),
     payout: &EvmPayout,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
@@ -852,12 +906,14 @@ async fn swap(
         .checked_add(fee_ck)
         .ok_or_else(|| Stop::Failed("min_usdc is too large".to_string()))?;
     // the first leg sells what was pulled less its approval's and its pull's fees
-    let in0 = terms
-        .amount_in
-        .checked_sub(fee_in.checked_mul(2_u8).unwrap_or(TokenAmount::MAX))
-        .filter(|left| *left > TokenAmount::ZERO)
+    let in0 = first_leg_in(terms.amount_in, fee_in)
         .ok_or_else(|| Stop::Failed("the amount does not cover the token's fees".to_string()))?;
     let id = evm_payout_ref(payout.id);
+    // what `known` will read off the sale that ends in ckUSDC, as its quote says it
+    let read_fit = |quoted: TokenAmount| {
+        let received = landed(quoted, fee_ck);
+        read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
+    };
     match attempt.path {
         PayoutPath::Ckusdc => known(terms.amount_in),
         PayoutPath::Icpswap { pool } => {
@@ -873,7 +929,7 @@ async fn swap(
                 fee_out: fee_ck,
                 pays_out: false,
             };
-            match run_leg(ledgers, spec, progress.swap, clock, guard).await? {
+            match run_leg_beside(ledgers, spec, progress.swap, clock, guard, read_fit).await? {
                 LegEnd::Out(out) => known(landed(out, fee_ck)),
                 LegEnd::Short(quoted) => undo(
                     payout.id,
@@ -971,7 +1027,9 @@ async fn swap(
                     fee_out: fee_ck,
                     pays_out: false,
                 };
-                if let LegEnd::Out(out) = run_leg(ledgers, spec, second_leg, clock, guard).await? {
+                if let LegEnd::Out(out) =
+                    run_leg_beside(ledgers, spec, second_leg, clock, guard, read_fit).await?
+                {
                     return known(landed(out, fee_ck));
                 }
             }
@@ -1060,8 +1118,19 @@ async fn run_leg(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> Result<LegEnd, Stop> {
+    run_leg_beside(ledgers, spec, state, clock, guard, |_| {}).await
+}
+
+async fn run_leg_beside(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: types::pool::SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    beside: impl FnOnce(TokenAmount),
+) -> Result<LegEnd, Stop> {
     if state.out.is_some() {
-        return legs::run(ledgers, spec, state, clock, guard).await;
+        return legs::run_beside(ledgers, spec, state, clock, guard, beside).await;
     }
     let Some(_held) = Leg::take(spec.pool) else {
         return Err(Stop::Retry(format!(
@@ -1077,7 +1146,7 @@ async fn run_leg(
             spec.pool
         )));
     }
-    legs::run(ledgers, spec, state, clock, guard).await
+    legs::run_beside(ledgers, spec, state, clock, guard, beside).await
 }
 
 /// How far below the token its first leg sold a way back from ICP may buy it: wide enough

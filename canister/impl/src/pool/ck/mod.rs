@@ -37,7 +37,7 @@ mod tests;
 
 use crate::ic::{self, Account, CallError, Dedup, WithdrawErc20Error, WithdrawFailure};
 use crate::pool::icp_swap::{self, check_payout_terms, MAX_DEADLINE, MIN_DEADLINE};
-use crate::pool::payout::{open, record, Busy, Ledgers, Live, Stop};
+use crate::pool::payout::{carry_on, open, record, Ledgers, Live, Stop};
 use crate::pool::plan::PlanReads;
 use crate::pool::rebalance::drive::{MinterSays, LATE_READ_EVERY, STUCK_AFTER};
 use crate::pool::{self, log, now};
@@ -53,7 +53,7 @@ use std::time::Duration;
 use types::hash::TxHash;
 use types::pool::payout::{CkLeg, EvmPayout, IcpSwapTerms, PayoutKind, PayoutStatus, PayoutTerms};
 use types::pool::{
-    ck_back_memo, ck_burn, ck_least_usdc, ck_memo, ck_subaccount, evm_payout_ref, Flag, IcpAccount,
+    ck_back_memo, ck_burn, ck_least_usdc, ck_memo, ck_subaccount, Flag, IcpAccount,
     PayoutResolution, PoolStep, Undo,
 };
 use types::{Address, ChainId, EvmAddress, Timestamp, TokenAmount};
@@ -511,10 +511,10 @@ pub async fn swap_from_icp_ck(
             return Err(why);
         }
     };
-    if let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
-        // whatever stops it, the payout timer carries it on
+    carry_on(id, move |busy| async move {
+        let _held = busy;
         let _ = drive(&Live, id, now, &crate::pool::payout::guard).await;
-    }
+    });
     icp_swap::answer(id)
 }
 
