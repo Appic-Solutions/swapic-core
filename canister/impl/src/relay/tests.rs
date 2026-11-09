@@ -2043,7 +2043,7 @@ mod across_orders {
     #[test]
     fn a_deposit_into_the_pool_pays_the_canister_on_the_pool_chain_alone() {
         let mut c = case();
-        let base = c.evm_chains.get(BASE).unwrap().clone();
+        let base = c.evm_chains.get(BASE).unwrap();
         c.evm_chains.0.insert(ChainId::BSC, base);
         c.deposit.recipient = address(CANISTER);
         c.deposit.message = Vec::new();
