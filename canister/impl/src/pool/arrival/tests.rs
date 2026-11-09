@@ -1891,15 +1891,6 @@ fn an_across_refund_credits_the_payout_owed_back_and_books_the_rest() {
             at(10),
         )
         .unwrap();
-        record_at(
-            PoolStep::PayoutUnfilled {
-                id,
-                block: BlockNumber::new(31),
-            },
-            at(11),
-        )
-        .unwrap();
-        let before = ledger();
         // the payout's deposit and 5 units more: a stranger's refund in the same leaf
         let found = Found {
             credit: CreditKey {
@@ -1913,6 +1904,22 @@ fn an_across_refund_credits_the_payout_owed_back_and_books_the_rest() {
             rail: PoolRail::Across,
             proof: Proof::AcrossRefund,
         };
+        // past its fill deadline and not read yet: the refund may be its own, so not now
+        let past = at(2_000_000_000_000);
+        let early = read_state(|state| steps_for(state, &found, &Judge::without_terms(), past));
+        assert!(early.unwrap_err().contains("not read yet"));
+        assert!(record(std::slice::from_ref(&found), &Judge::without_terms(), past)
+            .outcomes
+            .is_empty());
+        record_at(
+            PoolStep::PayoutUnfilled {
+                id,
+                block: BlockNumber::new(31),
+            },
+            at(11),
+        )
+        .unwrap();
+        let before = ledger();
         let steps = read_state(|state| steps_for(state, &found, &Judge::without_terms(), at(12)))
             .unwrap();
         assert_eq!(

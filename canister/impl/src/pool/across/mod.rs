@@ -404,6 +404,19 @@ pub fn credited(owed: &[(u64, TokenAmount, u64)], amount: TokenAmount) -> Option
     Some(prefix)
 }
 
+/// Whether a refund of `amount` at `now_s` may pay back one of `payouts` whose fill is not
+/// read yet: its deposit read off its receipt, neither read filled nor unfilled (delivering, or
+/// stopped for a human), its fill deadline past (Across refunds no deposit before it), and its
+/// deposit within the refund.
+pub fn unread_refundable(payouts: &[EvmPayout], amount: TokenAmount, now_s: u64) -> bool {
+    payouts.iter().any(|payout| {
+        payout.reclaim.is_none()
+            && payout.across.as_ref().is_some_and(|out| {
+                out.fill_deadline() <= now_s && out.relay.input_amount <= amount
+            })
+    })
+}
+
 /// The payouts owed back by Across now, as [`credited`] reads them.
 pub fn owed_back(payouts: &[EvmPayout]) -> Vec<(u64, TokenAmount, u64)> {
     payouts

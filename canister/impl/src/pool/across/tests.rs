@@ -571,3 +571,49 @@ fn an_across_refund_credits_the_oldest_prefix_that_fits() {
     // nothing owed back: all of it the canister's own
     assert_eq!(credited(&[], usdc(1)), Some(vec![]));
 }
+
+/// A refund is not booked while a payout it may pay back waits for its fill read: its deposit
+/// read, neither filled nor unfilled read, its fill deadline past, its deposit within it.
+#[test]
+fn a_refund_waits_for_a_payout_whose_fill_is_not_read() {
+    crate::storage::on_fresh_memory(|| {
+        crate::storage::init();
+        let id = crate::storage::pool::tests::waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111".parse().unwrap(),
+        );
+        refund_waits_for(crate::storage::pool::payout(id).unwrap());
+    });
+}
+
+fn refund_waits_for(mut payout: EvmPayout) {
+    use types::pool::Reclaim;
+    let usdc = |micro: u64| TokenAmount::from(micro);
+    let out = types::pool::AcrossOut {
+        destination: ChainId::BSC,
+        relay: types::swapic::across::RelayData {
+            depositor: [0x8f; 32],
+            recipient: [0x0f; 32],
+            exclusive_relayer: [0; 32],
+            input_token: [0x83; 32],
+            output_token: [0x8a; 32],
+            input_amount: usdc(10),
+            output_amount: usdc(10),
+            origin_chain_id: ChainId::BASE,
+            deposit_id: TokenAmount::from(7_u8),
+            fill_deadline: 1_500,
+            exclusivity_deadline: 0,
+            message: Vec::new(),
+        },
+        deposit_time: 300,
+    };
+    // no deposit read yet: signed, its receipt not closed
+    assert!(!unread_refundable(std::slice::from_ref(&payout), usdc(10), 2_000));
+    payout.across = Some(out);
+    assert!(unread_refundable(std::slice::from_ref(&payout), usdc(10), 2_000));
+    // before its fill deadline, or a refund smaller than its deposit: not its own
+    assert!(!unread_refundable(std::slice::from_ref(&payout), usdc(10), 1_499));
+    assert!(!unread_refundable(std::slice::from_ref(&payout), usdc(9), 2_000));
+    // read unfilled: owed back, credited at once
+    payout.reclaim = Some(Reclaim::Pending);
+    assert!(!unread_refundable(std::slice::from_ref(&payout), usdc(10), 2_000));
+}

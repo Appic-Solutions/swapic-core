@@ -981,7 +981,7 @@ pub fn steps_for<S: Store>(
         Proof::Move { .. } => return Ok(Vec::new()),
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
         Proof::Refund { .. } | Proof::AcrossRefund if credited => return Ok(Vec::new()),
-        Proof::AcrossRefund => return Ok(vec![across_refund_step(state, found)]),
+        Proof::AcrossRefund => return across_refund_step(state, found, now).map(|step| vec![step]),
         Proof::Refund { intents } => {
             // the payout whose intent was refunded, for exactly its amount: one delivering
             // (the refund proves its intent unfilled), or one whose USDC Eco still owes back.
@@ -1070,8 +1070,14 @@ pub fn steps_for<S: Store>(
 /// An Across refund to the canister credited (D9): the longest oldest-first prefix of the
 /// payouts Across owes back that fits in it, each its whole deposit, the rest the canister's
 /// own surplus; held for a controller only when payouts are owed back and not even the
-/// oldest fits.
-fn across_refund_step<S: Store>(state: &State<S>, found: &Found) -> PoolStep {
+/// oldest fits. Not now while a payout it may pay back still waits for its fill to be read:
+/// booked before that read, its deposit would be the canister's surplus and the payout owed
+/// back for good, so the reporter asks again and it is credited once the read is in.
+fn across_refund_step<S: Store>(
+    state: &State<S>,
+    found: &Found,
+    now: Timestamp,
+) -> Result<PoolStep, String> {
     let payouts: Vec<types::pool::EvmPayout> = state
         .pool()
         .lines()
@@ -1079,9 +1085,16 @@ fn across_refund_step<S: Store>(state: &State<S>, found: &Found) -> PoolStep {
         .iter()
         .filter_map(|id| state.store().pool_payout(*id))
         .collect();
+    if crate::pool::across::unread_refundable(&payouts, found.amount, now.as_secs().get()) {
+        return Err(
+            "an Across refund that may pay back a payout whose fill is not read yet: credited \
+             once it is read"
+                .to_string(),
+        );
+    }
     let owed = crate::pool::across::owed_back(&payouts);
     let Some(refunded) = crate::pool::across::credited(&owed, found.amount) else {
-        return PoolStep::Unattributed {
+        return Ok(PoolStep::Unattributed {
             credit: found.credit,
             amount: found.amount,
             src_payer: None,
@@ -1091,7 +1104,7 @@ fn across_refund_step<S: Store>(state: &State<S>, found: &Found) -> PoolStep {
             block: found.block,
             r#ref: None,
             awaiting_until: None,
-        };
+        });
     };
     let back = payouts
         .iter()
@@ -1100,13 +1113,13 @@ fn across_refund_step<S: Store>(state: &State<S>, found: &Found) -> PoolStep {
         .fold(TokenAmount::ZERO, |sum, amount| {
             sum.checked_add(amount).unwrap_or(TokenAmount::MAX)
         });
-    PoolStep::AcrossRefunded {
+    Ok(PoolStep::AcrossRefunded {
         credit: found.credit,
         amount: found.amount,
         block: found.block,
         refunded,
         surplus: found.amount.checked_sub(back).unwrap_or(TokenAmount::ZERO),
-    }
+    })
 }
 
 /// What one report recorded: each transfer's outcome, and why the others were not recorded
