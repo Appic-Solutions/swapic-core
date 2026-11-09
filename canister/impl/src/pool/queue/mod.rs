@@ -384,13 +384,7 @@ impl ChainReads for LiveReads {
         ) else {
             return Ok(None);
         };
-        crate::agreed::filled_relay_logged(
-            chain,
-            spoke_pool,
-            across.relay.origin_chain_id,
-            across.relay.deposit_id.to_u256(),
-            &pages,
-        )
+        crate::agreed::filled_relay_logged(chain, spoke_pool, &across.relay, &pages)
         .await
         .map(Some)
     }

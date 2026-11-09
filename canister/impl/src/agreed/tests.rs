@@ -161,22 +161,62 @@ fn an_across_fill_reads_past_its_deadline_and_trusts_only_its_own_hash() {
     ));
 }
 
-/// Attack M5: any fill a page holds, a removed one aside, counts; a page not answered is no
-/// answer.
+/// Attack M5, on T0's real fill on Arbitrum: a page's fill of the canister's own relay counts,
+/// a removed one does not; a fill of another relay reusing the deposit's origin and id (a
+/// griefer's own) stops nothing; a page not answered is no answer.
 #[test]
-fn any_log_in_any_page_is_a_fill() {
-    let page = |logs: Value| Ok(logs);
-    assert_eq!(any_log(vec![page(json!([])), page(json!([]))]), Ok(false));
-    assert_eq!(
-        any_log(vec![page(json!([])), page(json!([{"removed": false}]))]),
-        Ok(true)
+fn only_a_fill_of_the_canisters_own_relay_is_a_fill() {
+    let receipts: Value = serde_json::from_str(include_str!(
+        "../../../types/src/swapic/across/samples/t0_receipts.json"
+    ))
+    .unwrap();
+    let topic = format!(
+        "0x{}",
+        hex::encode(types::swapic::across::topics::filled_relay())
     );
-    assert_eq!(any_log(vec![page(json!([{"removed": true}]))]), Ok(false));
-    assert!(any_log(vec![
-        page(json!([])),
-        Err(RpcError::Unanswered {
-            method: "eth_getLogs".to_string()
-        })
-    ])
+    let fill = receipts["fill"]["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|log| log["topics"][0] == topic.as_str())
+        .unwrap()
+        .clone();
+    let spoke_pool: EvmAddress = fill["address"].as_str().unwrap().parse().unwrap();
+    let logs = crate::pool::arrival::logs_of(&json!({ "logs": [fill.clone()] }));
+    let key = types::swapic::across::read_filled_relay(&logs[0].topics, &logs[0].data)
+        .unwrap()
+        .key;
+    let page = |logs: Value| Ok(logs);
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], spoke_pool, &key), Ok(true));
+    assert_eq!(
+        relay_logged(vec![page(json!([])), page(json!([]))], spoke_pool, &key),
+        Ok(false)
+    );
+    let mut removed = fill.clone();
+    removed["removed"] = json!(true);
+    assert_eq!(relay_logged(vec![page(json!([removed]))], spoke_pool, &key), Ok(false));
+    // another relay with the deposit's origin and id: a different amount
+    let other = types::swapic::across::RelayKey {
+        input_amount: key.input_amount + alloy_primitives::U256::from(1u8),
+        ..key
+    };
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], spoke_pool, &other), Ok(false));
+    // a log of another contract, or one that is no FilledRelay
+    let elsewhere: EvmAddress = "0x7777777777777777777777777777777777777777".parse().unwrap();
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], elsewhere, &key), Ok(false));
+    assert_eq!(
+        relay_logged(vec![page(json!([{"removed": false}]))], spoke_pool, &key),
+        Ok(false)
+    );
+    assert!(relay_logged(
+        vec![
+            page(json!([])),
+            Err(RpcError::Unanswered {
+                method: "eth_getLogs".to_string()
+            })
+        ],
+        spoke_pool,
+        &key
+    )
     .is_err());
 }

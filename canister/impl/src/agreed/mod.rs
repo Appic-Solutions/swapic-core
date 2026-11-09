@@ -333,34 +333,45 @@ pub async fn across_fill_after(
 /// The most one agreed answer of a fill's log pages may be: empty pages, or the one fill.
 const MAX_LOGS_ANSWER_BYTES: u64 = 64 * 1024;
 
-/// Whether `answers` (one `eth_getLogs` answer per page) hold any log a reorg did not remove,
-/// pure; Err when a page was not answered.
-pub fn any_log(answers: Vec<Result<Value, RpcError>>) -> Result<bool, String> {
-    let mut any = false;
+/// Whether `answers` (one `eth_getLogs` answer per page) hold a `FilledRelay` of
+/// `spoke_pool` that fills the relay `key`, the canister's own deposit, in a log a reorg did not
+/// remove, pure; Err when a page was not answered. A fill of another relay that reuses the
+/// deposit's origin and id (anyone can fill a relay of their own making) is not the
+/// deposit's, and stops nothing.
+pub fn relay_logged(
+    answers: Vec<Result<Value, RpcError>>,
+    spoke_pool: EvmAddress,
+    key: &types::swapic::across::RelayKey,
+) -> Result<bool, String> {
+    let mut found = false;
     for answer in answers {
         let answer = answer.map_err(|error| format!("a page: {:?}", error.kind()))?;
-        let logs = answer.as_array().ok_or("a page answered no list")?;
-        any |= logs
+        if !answer.is_array() {
+            return Err("a page answered no list".to_string());
+        }
+        found |= crate::pool::arrival::logs_of(&json!({ "logs": answer }))
             .iter()
-            .any(|log| log.get("removed").and_then(Value::as_bool) != Some(true));
+            .filter(|log| log.address == spoke_pool)
+            .filter_map(|log| types::swapic::across::read_filled_relay(&log.topics, &log.data))
+            .any(|filled| filled.key == *key);
     }
-    Ok(any)
+    Ok(found)
 }
 
-/// Whether `chain`'s SpokePool `spoke_pool` logged a `FilledRelay` of the deposit `deposit_id`
-/// from `origin` in `pages` (each `[from, to]`), read by every node (attack M5: the second,
-/// independent check before an unfilled deposit's undo). Err when it was not read.
+/// Whether `chain`'s SpokePool `spoke_pool` logged a `FilledRelay` of the canister's deposit
+/// `relay` in `pages` (each `[from, to]`), read by every node (attack M5: the second,
+/// independent check before an unfilled deposit's undo): the logs of its origin and deposit
+/// id, each read whole and held to every field of the relay. Err when it was not read.
 pub async fn filled_relay_logged(
     chain: ChainId,
     spoke_pool: EvmAddress,
-    origin: ChainId,
-    deposit_id: alloy_primitives::U256,
+    relay: &types::swapic::across::RelayData,
     pages: &[(u64, u64)],
 ) -> Result<bool, String> {
     let topics = [
         hex0x(&types::swapic::across::topics::filled_relay()),
-        hex0x(&alloy_primitives::U256::from(origin.get()).to_be_bytes::<32>()),
-        hex0x(&deposit_id.to_be_bytes::<32>()),
+        hex0x(&alloy_primitives::U256::from(relay.origin_chain_id.get()).to_be_bytes::<32>()),
+        hex0x(&relay.deposit_id.to_u256().to_be_bytes::<32>()),
     ];
     let calls: Vec<(&str, Value, Keep)> = pages
         .iter()
@@ -377,5 +388,5 @@ pub async fn filled_relay_logged(
     let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_LOGS_ANSWER_BYTES)
         .await
         .map_err(|error| format!("the fill's logs: {:?}", error.kind()))?;
-    any_log(answers)
+    relay_logged(answers, spoke_pool, &relay.key())
 }

@@ -3059,7 +3059,49 @@ fn answer_fill_read(
 }
 
 /// The fill's logs, every page answered empty or the first holding a fill.
-fn answer_fill_logs(world: &World, filled: bool) {
+/// A `FilledRelay` log of BNB Chain's SpokePool pin filling `relay`, as eth_getLogs answers it.
+fn filled_relay_log(relay: &types::swapic::across::RelayData) -> serde_json::Value {
+    use alloy_sol_types::SolEvent;
+    use types::swapic::across::{FilledRelay, V3RelayExecutionEventInfo};
+    let key = relay.key();
+    let log = FilledRelay {
+        inputToken: key.input_token.into(),
+        outputToken: key.output_token.into(),
+        inputAmount: key.input_amount,
+        outputAmount: key.output_amount,
+        repaymentChainId: alloy_primitives::U256::from(BSC),
+        originChainId: alloy_primitives::U256::from(key.origin_chain_id),
+        depositId: key.deposit_id,
+        fillDeadline: key.fill_deadline,
+        exclusivityDeadline: key.exclusivity_deadline,
+        exclusiveRelayer: key.exclusive_relayer.into(),
+        relayer: [0x7e; 32].into(),
+        depositor: key.depositor.into(),
+        recipient: key.recipient.into(),
+        messageHash: key.message_hash.into(),
+        relayExecutionInfo: V3RelayExecutionEventInfo {
+            updatedRecipient: key.recipient.into(),
+            updatedMessageHash: key.message_hash.into(),
+            updatedOutputAmount: key.output_amount,
+            fillType: 0,
+        },
+    }
+    .encode_log_data();
+    let hex0x = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+    serde_json::json!({
+        "address": BSC_SPOKE.to_lowercase(),
+        "topics": log.topics().iter().map(|topic| hex0x(topic.as_slice())).collect::<Vec<_>>(),
+        "data": hex0x(&log.data),
+        "logIndex": "0x0",
+        "removed": false,
+        "transactionHash": format!("0x{}", "ef".repeat(32)),
+    })
+}
+
+/// Answers the fill's log pages: a griefer's fill of a relay of their own that reuses the
+/// deposit's origin and id in every case (attack M5 counts only the deposit's own), and with
+/// `filled` the deposit's own fill too.
+fn answer_fill_logs(world: &World, deposit: &types::swapic::across::AcrossDeposit, filled: bool) {
     let request = world
         .pic
         .get_canister_http()
@@ -3088,13 +3130,17 @@ fn answer_fill_logs(world: &World, filled: bool) {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     let pages = body.as_array().unwrap().len();
     assert!(pages > 1, "the deposit's whole window, in pages");
+    let relay = relay_of(deposit);
+    let griefer = types::swapic::across::RelayData {
+        input_amount: TokenAmount::from(1_u8),
+        output_amount: TokenAmount::from(1_u8),
+        ..relay.clone()
+    };
     let results = (0..pages)
-        .map(|page| {
-            if filled && page == 0 {
-                serde_json::json!([{"removed": false, "transactionHash": format!("0x{}", "ef".repeat(32))}])
-            } else {
-                serde_json::json!([])
-            }
+        .map(|page| match (filled, page) {
+            (true, 0) => serde_json::json!([filled_relay_log(&griefer), filled_relay_log(&relay)]),
+            (false, 0) => serde_json::json!([filled_relay_log(&griefer)]),
+            _ => serde_json::json!([]),
         })
         .collect();
     world.reply_all(&request, results);
@@ -3122,7 +3168,7 @@ fn an_across_payout_read_unfilled_refunds_at_once_and_the_refund_is_credited_lat
     let before = world.balance(staker());
     let amount = u64::try_from(deposit.min_expected).unwrap();
     answer_fill_read(&world, &deposit, relay_of(&deposit).hash(ChainId::new(BSC)), 0);
-    answer_fill_logs(&world, false);
+    answer_fill_logs(&world, &deposit, false);
     world.settle();
     assert_eq!(
         world.payout_status(id),
@@ -3232,7 +3278,7 @@ fn an_across_payout_whose_reads_disagree_stops_and_refunds_nothing() {
         let local = relay_of(&deposit).hash(ChainId::new(BSC));
         if logged {
             answer_fill_read(&world, &deposit, local, 0);
-            answer_fill_logs(&world, true);
+            answer_fill_logs(&world, &deposit, true);
         } else {
             answer_fill_read(&world, &deposit, [0x5d; 32], 0);
         }
