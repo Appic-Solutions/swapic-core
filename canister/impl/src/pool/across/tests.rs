@@ -290,6 +290,23 @@ fn a_relayer_refund_leaf_naming_the_canister_is_an_across_refund() {
         explain(&base.logs, index, from, value, &pool, &mut used),
         Explained::Nothing
     );
+    // ADAPTED: the same leaf with `deferredRefunds` set (some other entry could not be paid
+    // and waits for a claim): the canister's entry was paid, its transfer is in the receipt
+    let mut deferred = base.clone();
+    for log in deferred
+        .logs
+        .iter_mut()
+        .filter(|log| log.is(pool.spoke_pool, across_topics::executed_relayer_refund_root()))
+    {
+        let topics: Vec<alloy_primitives::B256> = log.topics.iter().map(|t| (*t).into()).collect();
+        let mut leaf =
+            types::swapic::across::ExecutedRelayerRefundRoot::decode_raw_log(topics, &log.data)
+                .expect("the real leaf decodes");
+        assert!(!leaf.deferredRefunds);
+        leaf.deferredRefunds = true;
+        log.data = leaf.encode_data();
+    }
+    assert_eq!(explained(&deferred, &pool), Explained::Refund);
     // another token's leaf, or another chain's, pays nothing of it
     let other = AcrossPool {
         chain: ChainId::BASE,

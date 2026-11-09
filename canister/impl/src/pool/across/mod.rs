@@ -230,8 +230,10 @@ fn fill_matches(
 }
 
 /// Whether a refund in `logs` pays the canister `value` from the SpokePool pin: an entry of a
-/// relayer refund leaf on the pool chain, in its USDC, paid now (not deferred), naming the
-/// canister for exactly `value`; or a claim of the canister's deferred refunds for exactly
+/// relayer refund leaf on the pool chain, in its USDC, naming the canister for exactly
+/// `value` (a leaf whose `deferredRefunds` is set still pays every entry it can: the transfer
+/// is the proof the canister's was paid, the flag never decides); or a claim of the
+/// canister's deferred refunds for exactly
 /// `value` that the canister itself made (anyone may claim their own balance to any address:
 /// attack M3). Each leaf entry pays one transfer: `used` holds the ones taken.
 fn refunded(
@@ -250,7 +252,7 @@ fn refunded(
         })
         .find_map(|log| {
             let leaf = across::read_refund_root(&log.topics, &log.data)?;
-            if leaf.chain_id != pool.chain.get() || leaf.token != pool.usdc || leaf.deferred {
+            if leaf.chain_id != pool.chain.get() || leaf.token != pool.usdc {
                 return None;
             }
             leaf.refunds
