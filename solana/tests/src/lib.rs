@@ -45,7 +45,12 @@ fn address(key: &Pubkey) -> Address {
 }
 
 /// The classic token account bytes, 165 of them.
-pub fn token_account_bytes(mint: &Pubkey, owner: &Pubkey, amount: u64, native_rent: Option<u64>) -> Vec<u8> {
+pub fn token_account_bytes(
+    mint: &Pubkey,
+    owner: &Pubkey,
+    amount: u64,
+    native_rent: Option<u64>,
+) -> Vec<u8> {
     let mut data = vec![0u8; 165];
     data[..32].copy_from_slice(mint);
     data[32..64].copy_from_slice(owner);
@@ -93,14 +98,17 @@ pub struct Env {
 pub const BASE_DOMAIN: u8 = 6;
 pub const ETHEREUM_DOMAIN: u8 = 0;
 pub const BASE_USDC: [u8; 20] = [
-    0x83, 0x35, 0x89, 0xfc, 0xd6, 0xed, 0xb6, 0xe0, 0x8f, 0x4c, 0x7c, 0x32, 0xd4, 0xf7, 0x1b, 0x54, 0xbd, 0xa0, 0x29, 0x13,
+    0x83, 0x35, 0x89, 0xfc, 0xd6, 0xed, 0xb6, 0xe0, 0x8f, 0x4c, 0x7c, 0x32, 0xd4, 0xf7, 0x1b, 0x54,
+    0xbd, 0xa0, 0x29, 0x13,
 ];
 /// The Base TokenMessengerV2, as Solana's `remote_token_messenger(6)` records it.
 pub const BASE_TOKEN_MESSENGER: [u8; 20] = [
-    0x28, 0xb5, 0xa0, 0xe9, 0xc6, 0x21, 0xa5, 0xba, 0xda, 0xa5, 0x36, 0x21, 0x9b, 0x3a, 0x22, 0x8c, 0x81, 0x68, 0xcf, 0x5d,
+    0x28, 0xb5, 0xa0, 0xe9, 0xc6, 0x21, 0xa5, 0xba, 0xda, 0xa5, 0x36, 0x21, 0x9b, 0x3a, 0x22, 0x8c,
+    0x81, 0x68, 0xcf, 0x5d,
 ];
 pub const CCTP_RECEIVER: [u8; 20] = [
-    0x40, 0x40, 0x56, 0xab, 0x78, 0x1d, 0x71, 0x3b, 0x8f, 0x5d, 0xc5, 0x5f, 0x5b, 0x95, 0x92, 0x96, 0x2b, 0x18, 0x70, 0x99,
+    0x40, 0x40, 0x56, 0xab, 0x78, 0x1d, 0x71, 0x3b, 0x8f, 0x5d, 0xc5, 0x5f, 0x5b, 0x95, 0x92, 0x96,
+    0x2b, 0x18, 0x70, 0x99,
 ];
 
 fn so_path(name: &str) -> String {
@@ -108,11 +116,18 @@ fn so_path(name: &str) -> String {
 }
 
 fn fixture_account(key: &Pubkey) -> Account {
-    let path = format!("{}/fixtures/{}.json", env!("CARGO_MANIFEST_DIR"), base58::encode(key));
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}; run the fetch_fixtures binary"));
+    let path = format!(
+        "{}/fixtures/{}.json",
+        env!("CARGO_MANIFEST_DIR"),
+        base58::encode(key)
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{path}: {e}; run the fetch_fixtures binary"));
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     let account = &v["account"];
-    let data = base64::engine::general_purpose::STANDARD.decode(account["data"][0].as_str().unwrap()).unwrap();
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(account["data"][0].as_str().unwrap())
+        .unwrap();
     Account {
         lamports: account["lamports"].as_u64().unwrap(),
         data,
@@ -155,13 +170,24 @@ impl Env {
         let canister = test_key("swapic-test-canister");
         let admin = test_key("swapic-test-admin");
         let program = test_key("swapic-test-program");
-        let a = SwapicAddresses::derive(pubkey_of(&program), pubkey_of(&canister), pubkey_of(&admin));
+        let a =
+            SwapicAddresses::derive(pubkey_of(&program), pubkey_of(&canister), pubkey_of(&admin));
 
-        svm.add_program_from_file(address(&a.program), so_path(so)).expect("the program is built by tests/run.sh");
-        svm.add_program_from_file(address(&JUPITER), so_path("swapic_test_router")).expect("the router");
+        svm.add_program_from_file(address(&a.program), so_path(so))
+            .expect("the program is built by tests/run.sh");
+        svm.add_program_from_file(address(&JUPITER), so_path("swapic_test_router"))
+            .expect("the router");
         let fixtures = format!("{}/fixtures", env!("CARGO_MANIFEST_DIR"));
-        svm.add_program_from_file(address(&MT), format!("{fixtures}/message_transmitter_v2.so")).unwrap();
-        svm.add_program_from_file(address(&TMM), format!("{fixtures}/token_messenger_minter_v2.so")).unwrap();
+        svm.add_program_from_file(
+            address(&MT),
+            format!("{fixtures}/message_transmitter_v2.so"),
+        )
+        .unwrap();
+        svm.add_program_from_file(
+            address(&TMM),
+            format!("{fixtures}/token_messenger_minter_v2.so"),
+        )
+        .unwrap();
 
         let base_token = word(&BASE_USDC);
         for key in [
@@ -175,7 +201,8 @@ impl Env {
             pda::remote_token_messenger(0),
             pda::token_pair(6, &base_token),
         ] {
-            svm.set_account(address(&key), fixture_account(&key)).unwrap();
+            svm.set_account(address(&key), fixture_account(&key))
+                .unwrap();
         }
 
         // two throwaway attesters, sorted by address as CCTP wants their signatures
@@ -189,7 +216,11 @@ impl Env {
         attesters.sort_by_key(evm_address);
         let mut transmitter = fixture_account(&MESSAGE_TRANSMITTER);
         let d = &mut transmitter.data;
-        assert_eq!(u32::from_le_bytes(d[145..149].try_into().unwrap()), 2, "the threshold on mainnet changed");
+        assert_eq!(
+            u32::from_le_bytes(d[145..149].try_into().unwrap()),
+            2,
+            "the threshold on mainnet changed"
+        );
         let count = u32::from_le_bytes(d[149..153].try_into().unwrap()) as usize;
         for i in 0..count {
             d[153 + 32 * i..185 + 32 * i].fill(0);
@@ -197,7 +228,8 @@ impl Env {
         for (i, key) in attesters.iter().enumerate() {
             d[153 + 32 * i + 12..185 + 32 * i].copy_from_slice(&evm_address(key));
         }
-        svm.set_account(address(&MESSAGE_TRANSMITTER), transmitter).unwrap();
+        svm.set_account(address(&MESSAGE_TRANSMITTER), transmitter)
+            .unwrap();
 
         let user = test_key("user");
         let recipient = test_key("recipient");
@@ -247,8 +279,19 @@ impl Env {
         // the float
         env.fund(&env.a.rent.0.clone(), 5_000_000_000);
         // user and pools
-        let (pool, pool_in, pool_usdc, pool_out, pool_wsol) = (env.pool, env.pool_in, env.pool_usdc, env.pool_out, env.pool_wsol);
-        let (user_in, user_usdc, recipient_out, recipient_usdc) = (env.user_in, env.user_usdc, env.recipient_out, env.recipient_usdc);
+        let (pool, pool_in, pool_usdc, pool_out, pool_wsol) = (
+            env.pool,
+            env.pool_in,
+            env.pool_usdc,
+            env.pool_out,
+            env.pool_wsol,
+        );
+        let (user_in, user_usdc, recipient_out, recipient_usdc) = (
+            env.user_in,
+            env.user_usdc,
+            env.recipient_out,
+            env.recipient_usdc,
+        );
         env.put_token(&user_in, &mint_in, &user_key, 1_000_000 * ONE_USDC);
         env.put_token(&user_usdc, &USDC_MINT, &user_key, 10_000 * ONE_USDC);
         env.put_token(&pool_in, &mint_in, &pool, 0);
@@ -258,7 +301,11 @@ impl Env {
         env.fund(&pool, 100_000_000_000);
         env.put_token(&recipient_out, &mint_out, &recipient_key, 0);
         env.put_token(&recipient_usdc, &USDC_MINT, &recipient_key, 0);
-        env.send_ok(&[instructions::set_config(&env.a.clone(), &default_config())], &env.admin.insecure_clone(), &[]);
+        env.send_ok(
+            &[instructions::set_config(&env.a.clone(), &default_config())],
+            &env.admin.insecure_clone(),
+            &[],
+        );
         env
     }
 
@@ -266,7 +313,16 @@ impl Env {
         let data = mint_bytes(decimals);
         let lamports = self.svm.minimum_balance_for_rent_exemption(data.len());
         self.svm
-            .set_account(address(key), Account { lamports, data, owner: address(&TOKEN_PROGRAM), executable: false, rent_epoch: u64::MAX })
+            .set_account(
+                address(key),
+                Account {
+                    lamports,
+                    data,
+                    owner: address(&TOKEN_PROGRAM),
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                },
+            )
             .unwrap();
     }
 
@@ -274,7 +330,16 @@ impl Env {
         let data = token_account_bytes(mint, owner, amount, None);
         let lamports = self.svm.minimum_balance_for_rent_exemption(165);
         self.svm
-            .set_account(address(key), Account { lamports, data, owner: address(&TOKEN_PROGRAM), executable: false, rent_epoch: u64::MAX })
+            .set_account(
+                address(key),
+                Account {
+                    lamports,
+                    data,
+                    owner: address(&TOKEN_PROGRAM),
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                },
+            )
             .unwrap();
     }
 
@@ -282,7 +347,16 @@ impl Env {
         let rent = self.svm.minimum_balance_for_rent_exemption(165);
         let data = token_account_bytes(&WSOL_MINT, owner, amount, Some(rent));
         self.svm
-            .set_account(address(key), Account { lamports: rent + amount, data, owner: address(&TOKEN_PROGRAM), executable: false, rent_epoch: u64::MAX })
+            .set_account(
+                address(key),
+                Account {
+                    lamports: rent + amount,
+                    data,
+                    owner: address(&TOKEN_PROGRAM),
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                },
+            )
             .unwrap();
     }
 
@@ -292,21 +366,32 @@ impl Env {
 
     /// Writes a field of an account by hand: a test's stand-in for a state nothing else can reach.
     pub fn poke(&mut self, key: &Pubkey, change: impl FnOnce(&mut Account)) {
-        let mut account = self.svm.get_account(&address(key)).expect("the account exists");
+        let mut account = self
+            .svm
+            .get_account(&address(key))
+            .expect("the account exists");
         change(&mut account);
         self.svm.set_account(address(key), account).unwrap();
     }
 
     pub fn lamports(&self, key: &Pubkey) -> u64 {
-        self.svm.get_account(&address(key)).map(|a| a.lamports).unwrap_or(0)
+        self.svm
+            .get_account(&address(key))
+            .map(|a| a.lamports)
+            .unwrap_or(0)
     }
 
     pub fn exists(&self, key: &Pubkey) -> bool {
-        self.svm.get_account(&address(key)).is_some_and(|a| a.lamports > 0)
+        self.svm
+            .get_account(&address(key))
+            .is_some_and(|a| a.lamports > 0)
     }
 
     pub fn data(&self, key: &Pubkey) -> Vec<u8> {
-        self.svm.get_account(&address(key)).map(|a| a.data).unwrap_or_default()
+        self.svm
+            .get_account(&address(key))
+            .map(|a| a.data)
+            .unwrap_or_default()
     }
 
     pub fn balance(&self, key: &Pubkey) -> u64 {
@@ -334,9 +419,15 @@ impl Env {
     }
 
     /// Sends one transaction signed by the payer and the other keys.
-    pub fn send(&mut self, instructions: &[Instruction], payer: &Keypair, others: &[&Keypair]) -> Result<TransactionMetadata, FailedTransactionMetadata> {
+    pub fn send(
+        &mut self,
+        instructions: &[Instruction],
+        payer: &Keypair,
+        others: &[&Keypair],
+    ) -> Result<TransactionMetadata, FailedTransactionMetadata> {
         // real arrivals take about 330k compute, over the default limit of 200k per instruction
-        let mut sdk: Vec<SdkInstruction> = vec![to_sdk(&wire::instructions::compute_unit_limit(1_400_000))];
+        let mut sdk: Vec<SdkInstruction> =
+            vec![to_sdk(&wire::instructions::compute_unit_limit(1_400_000))];
         sdk.extend(instructions.iter().map(to_sdk));
         self.svm.expire_blockhash();
         let message = LegacyMessage::new(&sdk, Some(&payer.pubkey()));
@@ -346,10 +437,19 @@ impl Env {
         self.svm.send_transaction(tx)
     }
 
-    pub fn send_ok(&mut self, instructions: &[Instruction], payer: &Keypair, others: &[&Keypair]) -> TransactionMetadata {
+    pub fn send_ok(
+        &mut self,
+        instructions: &[Instruction],
+        payer: &Keypair,
+        others: &[&Keypair],
+    ) -> TransactionMetadata {
         match self.send(instructions, payer, others) {
             Ok(meta) => meta,
-            Err(failed) => panic!("the transaction failed: {:?}\n{}", failed.err, failed.meta.logs.join("\n")),
+            Err(failed) => panic!(
+                "the transaction failed: {:?}\n{}",
+                failed.err,
+                failed.meta.logs.join("\n")
+            ),
         }
     }
 
@@ -431,7 +531,11 @@ pub fn to_sdk(ix: &Instruction) -> SdkInstruction {
         accounts: ix
             .accounts
             .iter()
-            .map(|m| SdkMeta { pubkey: address(&m.pubkey), is_signer: m.signer, is_writable: m.writable })
+            .map(|m| SdkMeta {
+                pubkey: address(&m.pubkey),
+                is_signer: m.signer,
+                is_writable: m.writable,
+            })
             .collect(),
         data: ix.data.clone(),
     }
@@ -440,10 +544,16 @@ pub fn to_sdk(ix: &Instruction) -> SdkInstruction {
 /// The custom code a transaction failed with, or a panic that shows the logs.
 pub fn custom_code(result: Result<TransactionMetadata, FailedTransactionMetadata>) -> u32 {
     match result {
-        Ok(meta) => panic!("the transaction landed, it should have failed:\n{}", meta.logs.join("\n")),
+        Ok(meta) => panic!(
+            "the transaction landed, it should have failed:\n{}",
+            meta.logs.join("\n")
+        ),
         Err(failed) => match failed.err {
             TransactionError::InstructionError(_, InstructionError::Custom(code)) => code,
-            other => panic!("not a custom error: {other:?}\n{}", failed.meta.logs.join("\n")),
+            other => panic!(
+                "not a custom error: {other:?}\n{}",
+                failed.meta.logs.join("\n")
+            ),
         },
     }
 }
@@ -469,7 +579,15 @@ pub fn own_compute(logs: &[String], program: &Pubkey) -> u64 {
             continue;
         }
         if line.contains(" consumed ") && line.contains(" of ") {
-            let used: u64 = line.split(" consumed ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+            let used: u64 = line
+                .split(" consumed ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
             if depth == in_swapic && line.contains(&id) {
                 own += used.saturating_sub(children);
                 children = 0;

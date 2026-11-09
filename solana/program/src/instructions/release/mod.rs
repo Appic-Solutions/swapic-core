@@ -4,7 +4,8 @@
 
 use super::complete::{check_header, check_receive_pins};
 use crate::accounts::{
-    is, is_program_address, key_of, now, require, require_top_level, shard_of, token_amount, ATA_ADDRESS, TOKEN_ADDRESS,
+    is, is_program_address, key_of, now, require, require_top_level, shard_of, token_amount,
+    ATA_ADDRESS, TOKEN_ADDRESS,
 };
 use crate::cctp::{receive_message, token_transfer};
 use crate::consts;
@@ -39,8 +40,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 
     let message = Message::new(args.message).map_err(fail)?;
     check_header(&message)?;
-    let caller = shard_of(message.destination_caller(), &consts::AUTH).ok_or(fail(SwapicError::NotForThisAuthOrVault))?;
-    let vault = shard_of(message.mint_recipient(), &consts::VAULT).ok_or(fail(SwapicError::NotForThisAuthOrVault))?;
+    let caller = shard_of(message.destination_caller(), &consts::AUTH)
+        .ok_or(fail(SwapicError::NotForThisAuthOrVault))?;
+    let vault = shard_of(message.mint_recipient(), &consts::VAULT)
+        .ok_or(fail(SwapicError::NotForThisAuthOrVault))?;
     require(&a[CALLER], &consts::AUTH[caller], SwapicError::WrongAuth)?;
     require(&a[VAULT], &consts::VAULT[vault], SwapicError::WrongVault)?;
     require(&a[VAULT_AUTH], &consts::AUTH[vault], SwapicError::WrongAuth)?;
@@ -63,7 +66,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
             if !a[OUTPUT].owned_by(&TOKEN_ADDRESS) {
                 return Err(fail(SwapicError::BadOutputAccount));
             }
-            if now()? <= terms.deadline as i64 && submitter != &consts::CANISTER && submitter != &terms.recipient {
+            if now()? <= terms.deadline as i64
+                && submitter != &consts::CANISTER
+                && submitter != &terms.recipient
+            {
                 return Err(fail(SwapicError::NotCanisterOrRecipient));
             }
             (terms.ref_bytes, false)
@@ -74,7 +80,11 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
             if submitter != &consts::CANISTER {
                 return Err(fail(SwapicError::NotCanisterOrRecipient));
             }
-            require(&a[OUTPUT], &consts::FEE_ACCOUNT, SwapicError::WrongFeeAccount)?;
+            require(
+                &a[OUTPUT],
+                &consts::FEE_ACCOUNT,
+                SwapicError::WrongFeeAccount,
+            )?;
             (terms.map(|t| t.ref_bytes).unwrap_or([0u8; 32]), true)
         }
     };
@@ -85,23 +95,51 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 
     let caller_index = [caller as u8];
     let caller_bump = [consts::AUTH_BUMP[caller]];
-    let caller_seeds = [Seed::from(wire::SEED_AUTH), Seed::from(&caller_index), Seed::from(&caller_bump)];
-    receive_message(a, &a[CALLER], &a[VAULT], args.message, args.attestation, &[Signer::from(&caller_seeds)])?;
+    let caller_seeds = [
+        Seed::from(wire::SEED_AUTH),
+        Seed::from(&caller_index),
+        Seed::from(&caller_bump),
+    ];
+    receive_message(
+        a,
+        &a[CALLER],
+        &a[VAULT],
+        args.message,
+        args.attestation,
+        &[Signer::from(&caller_seeds)],
+    )?;
 
-    let minted = token_amount(&a[VAULT])?.checked_sub(vault_before).ok_or(fail(SwapicError::NothingMinted))?;
+    let minted = token_amount(&a[VAULT])?
+        .checked_sub(vault_before)
+        .ok_or(fail(SwapicError::NothingMinted))?;
     if minted == 0 {
         return Err(fail(SwapicError::NothingMinted));
     }
 
     let vault_index = [vault as u8];
     let vault_bump = [consts::AUTH_BUMP[vault]];
-    let vault_seeds = [Seed::from(wire::SEED_AUTH), Seed::from(&vault_index), Seed::from(&vault_bump)];
-    token_transfer(&a[VAULT], &a[OUTPUT], &a[VAULT_AUTH], minted, &[Signer::from(&vault_seeds)])?;
+    let vault_seeds = [
+        Seed::from(wire::SEED_AUTH),
+        Seed::from(&vault_index),
+        Seed::from(&vault_bump),
+    ];
+    token_transfer(
+        &a[VAULT],
+        &a[OUTPUT],
+        &a[VAULT_AUTH],
+        minted,
+        &[Signer::from(&vault_seeds)],
+    )?;
 
     if token_amount(&a[VAULT])? != vault_before {
         return Err(fail(SwapicError::VaultNotAtBaseline));
     }
-    token_account_clean(&a[VAULT], &wire::USDC_MINT, &consts::AUTH[vault], SwapicError::VaultStateChanged)?;
+    token_account_clean(
+        &a[VAULT],
+        &wire::USDC_MINT,
+        &consts::AUTH[vault],
+        SwapicError::VaultStateChanged,
+    )?;
     auth_clean(&a[CALLER], caller_lamports)?;
     auth_clean(&a[VAULT_AUTH], vault_auth_lamports)?;
 

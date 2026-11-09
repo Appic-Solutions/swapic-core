@@ -8,8 +8,8 @@ use pocket_ic::{PocketIc, PocketIcBuilder};
 use serde::de::DeserializeOwned;
 use settlement_api::types::config::{ActionAmounts, ActionGas, EvmChainConfig};
 use settlement_api::types::solana::{
-    ProposeSolanaUpgradeArgs, SolanaAddresses, SolanaConfig, SolanaFeesConfig, SolanaLifetime, SolanaProgramConfigArgs,
-    SolanaUpgradeView,
+    ProposeSolanaUpgradeArgs, SolanaAddresses, SolanaConfig, SolanaFeesConfig, SolanaLifetime,
+    SolanaProgramConfigArgs, SolanaUpgradeView,
 };
 use settlement_api::types::tx::{ChainRef, SignedTx};
 use swapic_solana_wire::args::{BurnArgs, Payload, RefSource, TAG_BURN};
@@ -22,7 +22,10 @@ use swapic_solana_wire::pda::SwapicAddresses;
 const BLOCKHASH: [u8; 32] = [0x11; 32];
 
 fn lifetime() -> SolanaLifetime {
-    SolanaLifetime { blockhash: base58::encode(&BLOCKHASH), last_valid_block_height: 123 }
+    SolanaLifetime {
+        blockhash: base58::encode(&BLOCKHASH),
+        last_valid_block_height: 123,
+    }
 }
 
 fn config() -> SolanaConfig {
@@ -63,19 +66,37 @@ fn config() -> SolanaConfig {
     }
 }
 
-fn update<T: DeserializeOwned + CandidType>(pic: &PocketIc, canister: Principal, sender: Principal, method: &str, args: Vec<u8>) -> T {
-    let reply = pic.update_call(canister, sender, method, args).unwrap_or_else(|e| panic!("{method}: {e:?}"));
+fn update<T: DeserializeOwned + CandidType>(
+    pic: &PocketIc,
+    canister: Principal,
+    sender: Principal,
+    method: &str,
+    args: Vec<u8>,
+) -> T {
+    let reply = pic
+        .update_call(canister, sender, method, args)
+        .unwrap_or_else(|e| panic!("{method}: {e:?}"));
     decode_one(&reply).unwrap_or_else(|e| panic!("{method}: {e:?}"))
 }
 
-fn query<T: DeserializeOwned + CandidType>(pic: &PocketIc, canister: Principal, method: &str, args: Vec<u8>) -> T {
-    let reply = pic.query_call(canister, Principal::anonymous(), method, args).unwrap_or_else(|e| panic!("{method}: {e:?}"));
+fn query<T: DeserializeOwned + CandidType>(
+    pic: &PocketIc,
+    canister: Principal,
+    method: &str,
+    args: Vec<u8>,
+) -> T {
+    let reply = pic
+        .query_call(canister, Principal::anonymous(), method, args)
+        .unwrap_or_else(|e| panic!("{method}: {e:?}"));
     decode_one(&reply).unwrap_or_else(|e| panic!("{method}: {e:?}"))
 }
 
 /// (pic, canister, admin), on a network holding the test threshold keys, with the Solana line set.
 fn setup() -> (PocketIc, Principal, Principal) {
-    let pic = PocketIcBuilder::new().with_ii_subnet().with_application_subnet().build();
+    let pic = PocketIcBuilder::new()
+        .with_ii_subnet()
+        .with_application_subnet()
+        .build();
     let admin = Principal::from_slice(&[1; 29]);
     let subnet = pic.topology().get_app_subnets()[0];
     let canister = pic.create_canister_on_subnet(Some(admin), None, subnet);
@@ -88,17 +109,33 @@ fn setup() -> (PocketIc, Principal, Principal) {
 }
 
 fn derive(pic: &PocketIc, canister: Principal, admin: Principal) -> SolanaAddresses {
-    let derived: Result<SolanaAddresses, String> = update(pic, canister, admin, "derive_solana_keys", encode_args(()).unwrap());
+    let derived: Result<SolanaAddresses, String> = update(
+        pic,
+        canister,
+        admin,
+        "derive_solana_keys",
+        encode_args(()).unwrap(),
+    );
     derived.expect("the keys derive")
 }
 
 fn verify(key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
-    let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(key) else { return false };
-    key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature)).is_ok()
+    let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(key) else {
+        return false;
+    };
+    key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature))
+        .is_ok()
 }
 
 fn signed_txs(pic: &PocketIc, canister: Principal, admin: Principal) -> Vec<SignedTx> {
-    let reply = pic.query_call(canister, admin, "signed_txs", encode_args((0u64, 100u64)).unwrap()).unwrap();
+    let reply = pic
+        .query_call(
+            canister,
+            admin,
+            "signed_txs",
+            encode_args((0u64, 100u64)).unwrap(),
+        )
+        .unwrap();
     decode_one(&reply).unwrap()
 }
 
@@ -163,16 +200,27 @@ fn evm_chain() -> EvmChainConfig {
 #[test]
 fn the_two_keys_derive_once_and_differ() {
     let (pic, canister, admin) = setup();
-    let none: Option<SolanaAddresses> = query(&pic, canister, "solana_addresses", encode_args(()).unwrap());
+    let none: Option<SolanaAddresses> =
+        query(&pic, canister, "solana_addresses", encode_args(()).unwrap());
     assert_eq!(none, None);
     // a stranger cannot derive
-    let refused: Result<SolanaAddresses, String> = update(&pic, canister, Principal::from_slice(&[9; 29]), "derive_solana_keys", encode_args(()).unwrap());
+    let refused: Result<SolanaAddresses, String> = update(
+        &pic,
+        canister,
+        Principal::from_slice(&[9; 29]),
+        "derive_solana_keys",
+        encode_args(()).unwrap(),
+    );
     assert!(refused.is_err());
     let first = derive(&pic, canister, admin);
     assert_ne!(first.payer, first.admin);
-    assert_eq!(base58::decode_pubkey(&first.payer).map(|k| k.len()), Some(32));
+    assert_eq!(
+        base58::decode_pubkey(&first.payer).map(|k| k.len()),
+        Some(32)
+    );
     assert_eq!(derive(&pic, canister, admin), first);
-    let read: Option<SolanaAddresses> = query(&pic, canister, "solana_addresses", encode_args(()).unwrap());
+    let read: Option<SolanaAddresses> =
+        query(&pic, canister, "solana_addresses", encode_args(()).unwrap());
     assert_eq!(read, Some(first.clone()));
     // they survive an upgrade: nothing is derived again
     upgrade(&pic, canister, admin).expect("the upgrade goes through");
@@ -184,11 +232,24 @@ fn the_v1_proof_is_a_real_signature_over_what_the_canister_built() {
     let (pic, canister, admin) = setup();
     let keys = derive(&pic, canister, admin);
     let payer = base58::decode_pubkey(&keys.payer).unwrap();
-    let id: Result<u64, String> = update(&pic, canister, admin, "prove_solana_send", encode_one(lifetime()).unwrap());
+    let id: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "prove_solana_send",
+        encode_one(lifetime()).unwrap(),
+    );
     let id = id.unwrap();
-    let tx = signed_txs(&pic, canister, admin).into_iter().find(|tx| tx.id == id).expect("the watcher sees it");
+    let tx = signed_txs(&pic, canister, admin)
+        .into_iter()
+        .find(|tx| tx.id == id)
+        .expect("the watcher sees it");
     assert_eq!(tx.chain, ChainRef::Solana);
-    assert_eq!(tx.hash.len(), 64, "a Solana transaction's hash is its signature");
+    assert_eq!(
+        tx.hash.len(),
+        64,
+        "a Solana transaction's hash is its signature"
+    );
     let (message, signatures) = V1Message::parse_wire(&tx.raw).unwrap();
     assert_eq!(message.addresses[0], payer);
     assert_eq!(message.blockhash, BLOCKHASH);
@@ -201,7 +262,10 @@ fn the_v1_proof_is_a_real_signature_over_what_the_canister_built() {
 fn set_config_is_signed_by_the_admin_key_with_the_payer_key_paying() {
     let (pic, canister, admin) = setup();
     let keys = derive(&pic, canister, admin);
-    let (payer, admin_key) = (base58::decode_pubkey(&keys.payer).unwrap(), base58::decode_pubkey(&keys.admin).unwrap());
+    let (payer, admin_key) = (
+        base58::decode_pubkey(&keys.payer).unwrap(),
+        base58::decode_pubkey(&keys.admin).unwrap(),
+    );
     let args = SolanaProgramConfigArgs {
         paused: true,
         event_keypair_allowed: false,
@@ -212,8 +276,17 @@ fn set_config_is_signed_by_the_admin_key_with_the_payer_key_paying() {
         max_deadline_s: 7_200,
         lifetime: lifetime(),
     };
-    let id: Result<u64, String> = update(&pic, canister, admin, "set_solana_program_config", encode_one(args).unwrap());
-    let tx = signed_txs(&pic, canister, admin).into_iter().find(|tx| tx.id == id.clone().unwrap()).unwrap();
+    let id: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "set_solana_program_config",
+        encode_one(args).unwrap(),
+    );
+    let tx = signed_txs(&pic, canister, admin)
+        .into_iter()
+        .find(|tx| tx.id == id.clone().unwrap())
+        .unwrap();
     let (message, signatures) = V1Message::parse_wire(&tx.raw).unwrap();
     assert_eq!(signatures.len(), 2);
     let bytes = message.encode();
@@ -235,29 +308,75 @@ fn an_upgrade_waits_out_its_delay_and_only_a_controller_proposes() {
         source_commit: "abc".to_string(),
     };
     let stranger = Principal::from_slice(&[9; 29]);
-    let refused: Result<u64, String> = update(&pic, canister, stranger, "propose_solana_upgrade", encode_one(args.clone()).unwrap());
+    let refused: Result<u64, String> = update(
+        &pic,
+        canister,
+        stranger,
+        "propose_solana_upgrade",
+        encode_one(args.clone()).unwrap(),
+    );
     assert!(refused.is_err());
-    let id: Result<u64, String> = update(&pic, canister, admin, "propose_solana_upgrade", encode_one(args.clone()).unwrap());
+    let id: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "propose_solana_upgrade",
+        encode_one(args.clone()).unwrap(),
+    );
     let id = id.unwrap();
-    let live: Option<SolanaUpgradeView> = query(&pic, canister, "solana_live_upgrade", encode_args(()).unwrap());
+    let live: Option<SolanaUpgradeView> = query(
+        &pic,
+        canister,
+        "solana_live_upgrade",
+        encode_args(()).unwrap(),
+    );
     let live = live.unwrap();
     assert_eq!(live.id, id);
     assert_eq!(live.not_before_s - live.proposed_at_s, 172_800);
     // one at a time
-    let second: Result<u64, String> = update(&pic, canister, admin, "propose_solana_upgrade", encode_one(args).unwrap());
+    let second: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "propose_solana_upgrade",
+        encode_one(args).unwrap(),
+    );
     assert!(second.is_err());
     // before its delay, execution is refused before any read of Solana
-    let early: Result<u64, String> = update(&pic, canister, admin, "execute_solana_upgrade", encode_args((id, lifetime())).unwrap());
+    let early: Result<u64, String> = update(
+        &pic,
+        canister,
+        admin,
+        "execute_solana_upgrade",
+        encode_args((id, lifetime())).unwrap(),
+    );
     assert!(early.unwrap_err().contains("delay"));
     // a cancel clears it
-    let cancelled: Result<(), String> = update(&pic, canister, admin, "cancel_solana_upgrade", encode_one(id).unwrap());
+    let cancelled: Result<(), String> = update(
+        &pic,
+        canister,
+        admin,
+        "cancel_solana_upgrade",
+        encode_one(id).unwrap(),
+    );
     cancelled.unwrap();
-    let none: Option<SolanaUpgradeView> = query(&pic, canister, "solana_live_upgrade", encode_args(()).unwrap());
+    let none: Option<SolanaUpgradeView> = query(
+        &pic,
+        canister,
+        "solana_live_upgrade",
+        encode_args(()).unwrap(),
+    );
     assert_eq!(none, None);
 }
 
 /// A gasless burn the user signed with a real key, on a chain the canister's config knows.
-fn gasless_tx(a: &SwapicAddresses, user: &ed25519_dalek::SigningKey, deadline: u32, r: [u8; 32], fee: u32) -> Vec<u8> {
+fn gasless_tx(
+    a: &SwapicAddresses,
+    user: &ed25519_dalek::SigningKey,
+    deadline: u32,
+    r: [u8; 32],
+    fee: u32,
+) -> Vec<u8> {
     use ed25519_dalek::Signer;
     let user_key = *user.verifying_key().as_bytes();
     let data = BurnArgs {
@@ -269,7 +388,10 @@ fn gasless_tx(a: &SwapicAddresses, user: &ed25519_dalek::SigningKey, deadline: u
         ref_source: RefSource::Direct(&r),
         deadline,
         recipient: &[0x11; 20],
-        payload: Payload::Swap { token_out: &[0x22; 20], min_out: &[1, 2, 3] },
+        payload: Payload::Swap {
+            token_out: &[0x22; 20],
+            min_out: &[1, 2, 3],
+        },
         min_gas: 700_000,
         max_fee_deci_bps: 13,
         amount: 50_000_000,
@@ -280,8 +402,21 @@ fn gasless_tx(a: &SwapicAddresses, user: &ed25519_dalek::SigningKey, deadline: u
     let event = a.event(&r);
     let head = ixs::burn_head(a, &user_key, shard_of(&r), 6, true, &event, false);
     let burn = ixs::burn(a, head, &[10; 32], data);
-    let table = LookupTable { address: [77; 32], entries: ixs::swapic_table_entries(a) };
-    let message = compile_v0(&a.canister, &[ixs::compute_unit_limit(200_000), ixs::compute_unit_price(1000), burn], &[table], &BLOCKHASH).unwrap();
+    let table = LookupTable {
+        address: [77; 32],
+        entries: ixs::swapic_table_entries(a),
+    };
+    let message = compile_v0(
+        &a.canister,
+        &[
+            ixs::compute_unit_limit(200_000),
+            ixs::compute_unit_price(1000),
+            burn,
+        ],
+        &[table],
+        &BLOCKHASH,
+    )
+    .unwrap();
     let bytes = message.encode();
     let signature = user.sign(&bytes).to_bytes();
     wire_v0(&[[0; 64], signature], &bytes)
@@ -308,22 +443,41 @@ fn the_door_refuses_a_stranger_and_a_bad_signature_and_co_signs_a_real_burn_once
     let tx = gasless_tx(&a, &user, (now + 1800) as u32, r, 2_000_000);
 
     let args = encode_args((tx.clone(), 123u64)).unwrap();
-    let stranger: Result<u64, String> = update(&pic, canister, Principal::from_slice(&[9; 29]), "cosign_solana", args.clone());
+    let stranger: Result<u64, String> = update(
+        &pic,
+        canister,
+        Principal::from_slice(&[9; 29]),
+        "cosign_solana",
+        args.clone(),
+    );
     assert!(stranger.is_err());
 
     // another key's signature
     let mut forged = tx.clone();
     forged[66] ^= 1;
-    let bad: Result<u64, String> = update(&pic, canister, watcher, "cosign_solana", encode_args((forged, 123u64)).unwrap());
+    let bad: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher,
+        "cosign_solana",
+        encode_args((forged, 123u64)).unwrap(),
+    );
     assert!(bad.unwrap_err().contains("does not verify"));
 
     let id: Result<u64, String> = update(&pic, canister, watcher, "cosign_solana", args.clone());
     let id = id.expect("a good burn is co-signed");
-    let signed = signed_txs(&pic, canister, admin).into_iter().find(|tx| tx.id == id).unwrap();
+    let signed = signed_txs(&pic, canister, admin)
+        .into_iter()
+        .find(|tx| tx.id == id)
+        .unwrap();
     let parsed = SignedV0::parse(&signed.raw).unwrap();
     assert_eq!(parsed.signatures.len(), 2);
     assert!(verify(&payer, parsed.message, &parsed.signatures[0]));
-    assert!(verify(user.verifying_key().as_bytes(), parsed.message, &parsed.signatures[1]));
+    assert!(verify(
+        user.verifying_key().as_bytes(),
+        parsed.message,
+        &parsed.signatures[1]
+    ));
     assert_eq!(parsed.signatures[0].to_vec(), signed.hash);
 
     // asked again: the same line, no second signature
@@ -332,12 +486,24 @@ fn the_door_refuses_a_stranger_and_a_bad_signature_and_co_signs_a_real_burn_once
 
     // another message for the same ref is refused for 90 s
     let other = gasless_tx(&a, &user, (now + 1801) as u32, r, 2_000_000);
-    let refused: Result<u64, String> = update(&pic, canister, watcher, "cosign_solana", encode_args((other, 123u64)).unwrap());
+    let refused: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher,
+        "cosign_solana",
+        encode_args((other, 123u64)).unwrap(),
+    );
     assert!(refused.unwrap_err().contains("90 s"));
 
     // an under-priced burn is refused, and the door says why
     let cheap = gasless_tx(&a, &user, (now + 1800) as u32, [6; 32], 1);
-    let refused: Result<u64, String> = update(&pic, canister, watcher, "cosign_solana", encode_args((cheap, 123u64)).unwrap());
+    let refused: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher,
+        "cosign_solana",
+        encode_args((cheap, 123u64)).unwrap(),
+    );
     assert!(refused.unwrap_err().contains("below"));
 }
 
@@ -351,6 +517,12 @@ fn nothing_is_signed_while_the_line_is_switched_off_or_the_canister_is_halted() 
     solana.enabled_gasless = false;
     full.solana = Some(solana);
     set_config(&pic, canister, admin, &full).unwrap();
-    let off: Result<u64, String> = update(&pic, canister, watcher, "cosign_solana", encode_args((vec![0u8; 10], 1u64)).unwrap());
+    let off: Result<u64, String> = update(
+        &pic,
+        canister,
+        watcher,
+        "cosign_solana",
+        encode_args((vec![0u8; 10], 1u64)).unwrap(),
+    );
     assert!(off.unwrap_err().contains("off"));
 }

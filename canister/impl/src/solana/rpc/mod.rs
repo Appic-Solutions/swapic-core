@@ -169,7 +169,10 @@ const SOURCES: RpcSources = RpcSources::Default(SolanaCluster::Mainnet);
 fn agreed(size: u64) -> Option<RpcConfig> {
     Some(RpcConfig {
         responseSizeEstimate: Some(size),
-        responseConsensus: Some(ConsensusStrategy::Threshold { total: None, min: 2 }),
+        responseConsensus: Some(ConsensusStrategy::Threshold {
+            total: None,
+            min: 2,
+        }),
     })
 }
 
@@ -180,19 +183,30 @@ async fn paid_call<P: CandidType + Clone, T: for<'a> Deserialize<'a> + CandidTyp
     size: u64,
     params: P,
 ) -> Result<T, String> {
-    let (cost,): (Answer<Nat>,) = call(sol_rpc, &format!("{method}CyclesCost"), (SOURCES, agreed(size), params.clone()))
-        .await
-        .map_err(|(code, why)| format!("{method}'s cost: {code:?}: {why}"))?;
+    let (cost,): (Answer<Nat>,) = call(
+        sol_rpc,
+        &format!("{method}CyclesCost"),
+        (SOURCES, agreed(size), params.clone()),
+    )
+    .await
+    .map_err(|(code, why)| format!("{method}'s cost: {code:?}: {why}"))?;
     let Answer::Ok(cost) = cost else {
         return Err(format!("{method}'s cost was refused"));
     };
     let cost = u128::try_from(cost.0).map_err(|_| format!("{method}'s cost is above u128"))?;
-    let (answer,): (Multi<T>,) = call_with_payment128(sol_rpc, method, (SOURCES, agreed(size), params), cost + cost / 10)
-        .await
-        .map_err(|(code, why)| format!("{method}: {code:?}: {why}"))?;
+    let (answer,): (Multi<T>,) = call_with_payment128(
+        sol_rpc,
+        method,
+        (SOURCES, agreed(size), params),
+        cost + cost / 10,
+    )
+    .await
+    .map_err(|(code, why)| format!("{method}: {code:?}: {why}"))?;
     match answer {
         Multi::Consistent(Answer::Ok(value)) => Ok(value),
-        Multi::Consistent(Answer::Err(_)) => Err(format!("{method}: the providers answered an error")),
+        Multi::Consistent(Answer::Err(_)) => {
+            Err(format!("{method}: the providers answered an error"))
+        }
         Multi::Inconsistent(_) => Err(format!("{method}: the providers do not agree")),
     }
 }
@@ -218,7 +232,12 @@ pub struct Account {
 
 /// An account, or nothing when it does not exist. `first` limits the data read: a read of an account's
 /// head does not pay for the rest.
-pub async fn account(sol_rpc: Principal, key: &[u8; 32], first: Option<u32>, size: u64) -> Result<Option<Account>, String> {
+pub async fn account(
+    sol_rpc: Principal,
+    key: &[u8; 32],
+    first: Option<u32>,
+    size: u64,
+) -> Result<Option<Account>, String> {
     let params = AccountParams {
         pubkey: base58::encode(key),
         commitment: Some(Commitment::confirmed),
@@ -239,7 +258,11 @@ pub async fn account(sol_rpc: Principal, key: &[u8; 32], first: Option<u32>, siz
 }
 
 pub async fn balance(sol_rpc: Principal, key: &[u8; 32]) -> Result<u64, String> {
-    let params = BalanceParams { pubkey: base58::encode(key), commitment: Some(Commitment::confirmed), minContextSlot: None };
+    let params = BalanceParams {
+        pubkey: base58::encode(key),
+        commitment: Some(Commitment::confirmed),
+        minContextSlot: None,
+    };
     paid_call(sol_rpc, "getBalance", 512, params).await
 }
 
@@ -257,7 +280,10 @@ pub struct LandedTx {
 }
 
 /// The transaction with this signature, or nothing when no agreed provider has it.
-pub async fn transaction(sol_rpc: Principal, signature: &[u8; 64]) -> Result<Option<LandedTx>, String> {
+pub async fn transaction(
+    sol_rpc: Principal,
+    signature: &[u8; 64],
+) -> Result<Option<LandedTx>, String> {
     use base64::Engine;
     let params = TransactionParams {
         signature: base58::encode(signature),
@@ -269,15 +295,24 @@ pub async fn transaction(sol_rpc: Principal, signature: &[u8; 64]) -> Result<Opt
     let Some(confirmed) = answer else {
         return Ok(None);
     };
-    let meta = confirmed.transaction.meta.ok_or("a transaction with no meta")?;
+    let meta = confirmed
+        .transaction
+        .meta
+        .ok_or("a transaction with no meta")?;
     let wire = match confirmed.transaction.transaction {
-        EncodedTransaction::Binary(text, _) => {
-            base64::engine::general_purpose::STANDARD.decode(text).map_err(|_| "a transaction that is not base64")?
+        EncodedTransaction::Binary(text, _) => base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(|_| "a transaction that is not base64")?,
+        EncodedTransaction::LegacyBinary(_) => {
+            return Err("a transaction in the legacy encoding".to_string())
         }
-        EncodedTransaction::LegacyBinary(_) => return Err("a transaction in the legacy encoding".to_string()),
     };
     let keys = |list: Vec<String>| -> Result<Vec<[u8; 32]>, String> {
-        list.iter().map(|k| base58::decode_pubkey(k).ok_or_else(|| "a loaded address is not base58".to_string())).collect()
+        list.iter()
+            .map(|k| {
+                base58::decode_pubkey(k).ok_or_else(|| "a loaded address is not base58".to_string())
+            })
+            .collect()
     };
     let (loaded_writable, loaded_readonly) = match meta.loadedAddresses {
         Some(loaded) => (keys(loaded.writable)?, keys(loaded.readonly)?),
@@ -287,7 +322,8 @@ pub async fn transaction(sol_rpc: Principal, signature: &[u8; 64]) -> Result<Opt
     for group in meta.innerInstructions.unwrap_or_default() {
         let mut instructions = Vec::with_capacity(group.instructions.len());
         for Instruction::Compiled(ix) in group.instructions {
-            let data = base58::decode(&ix.data).ok_or("an inner instruction's data is not base58")?;
+            let data =
+                base58::decode(&ix.data).ok_or("an inner instruction's data is not base58")?;
             instructions.push((ix.programIdIndex, data));
         }
         inner.push((group.index, instructions));

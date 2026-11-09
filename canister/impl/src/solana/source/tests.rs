@@ -26,7 +26,10 @@ fn args(float: bool, fee: u32) -> Vec<u8> {
         ref_source: RefSource::Direct(&R),
         deadline: 1_800_001_800,
         recipient: &[0x11; 20],
-        payload: Payload::Swap { token_out: &[0x22; 20], min_out: &[1, 2, 3] },
+        payload: Payload::Swap {
+            token_out: &[0x22; 20],
+            min_out: &[1, 2, 3],
+        },
         min_gas: 700_000,
         max_fee_deci_bps: 13,
         amount: 1,
@@ -83,8 +86,15 @@ fn landed(a: &SwapicAddresses, data: Vec<u8>, inner_event: Vec<u8>) -> LandedTx 
     let event_key = a.event(&R);
     let head = ixs::burn_head(a, &[9; 32], shard_of(&R), 6, false, &event_key, false);
     let swap = ixs::swap_burn(a, head, &[], data);
-    let table = LookupTable { address: [77; 32], entries: ixs::swapic_table_entries(a) };
-    let instructions = [ixs::compute_unit_limit(200_000), ixs::compute_unit_price(1000), swap];
+    let table = LookupTable {
+        address: [77; 32],
+        entries: ixs::swapic_table_entries(a),
+    };
+    let instructions = [
+        ixs::compute_unit_limit(200_000),
+        ixs::compute_unit_price(1000),
+        swap,
+    ];
     let compiled = compile_v0(&[9; 32], &instructions, &[table], &[7; 32]).unwrap();
     LandedTx {
         failed: false,
@@ -110,8 +120,22 @@ fn a_real_shaped_burn_proves_its_message_and_its_fee() {
     let data = args(false, FEE);
     let envelope = envelope_of(&data);
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
-    let proved = proves(&tx, &message(&a, &envelope, AMOUNT), &a, needed(), gasless()).unwrap();
-    assert_eq!(proved, Proved { r#ref: R, fee: FEE as u64, float: false });
+    let proved = proves(
+        &tx,
+        &message(&a, &envelope, AMOUNT),
+        &a,
+        needed(),
+        gasless(),
+    )
+    .unwrap();
+    assert_eq!(
+        proved,
+        Proved {
+            r#ref: R,
+            fee: FEE as u64,
+            float: false
+        }
+    );
 }
 
 #[test]
@@ -121,7 +145,15 @@ fn a_failed_transaction_proves_nothing() {
     let envelope = envelope_of(&data);
     let mut tx = landed(&a, data, event(&a, &envelope, AMOUNT));
     tx.failed = true;
-    assert!(proves(&tx, &message(&a, &envelope, AMOUNT), &a, needed(), gasless()).unwrap_err().contains("failed"));
+    assert!(proves(
+        &tx,
+        &message(&a, &envelope, AMOUNT),
+        &a,
+        needed(),
+        gasless()
+    )
+    .unwrap_err()
+    .contains("failed"));
 }
 
 #[test]
@@ -130,7 +162,15 @@ fn an_unpaid_or_underpaid_burn_is_refused() {
     let data = args(false, 499_999);
     let envelope = envelope_of(&data);
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
-    assert!(proves(&tx, &message(&a, &envelope, AMOUNT), &a, needed(), gasless()).unwrap_err().contains("less"));
+    assert!(proves(
+        &tx,
+        &message(&a, &envelope, AMOUNT),
+        &a,
+        needed(),
+        gasless()
+    )
+    .unwrap_err()
+    .contains("less"));
 }
 
 #[test]
@@ -139,7 +179,15 @@ fn a_co_signed_burn_also_pays_the_gasless_row() {
     let data = args(true, FEE);
     let envelope = envelope_of(&data);
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
-    assert!(proves(&tx, &message(&a, &envelope, AMOUNT), &a, needed(), gasless()).unwrap_err().contains("less"));
+    assert!(proves(
+        &tx,
+        &message(&a, &envelope, AMOUNT),
+        &a,
+        needed(),
+        gasless()
+    )
+    .unwrap_err()
+    .contains("less"));
 }
 
 #[test]
@@ -150,7 +198,9 @@ fn a_message_that_differs_from_the_burn_event_is_refused() {
     let envelope = envelope_of(&data);
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
     let other = message(&a, &envelope, AMOUNT + 1);
-    assert!(proves(&tx, &other, &a, needed(), gasless()).unwrap_err().contains("does not match"));
+    assert!(proves(&tx, &other, &a, needed(), gasless())
+        .unwrap_err()
+        .contains("does not match"));
 }
 
 #[test]
@@ -163,7 +213,9 @@ fn a_burn_by_anyone_but_an_auth_is_refused() {
     let tx = landed(&a, data, forged);
     let mut attested = message(&a, &envelope, AMOUNT);
     attested[swapic_solana_wire::cctp::MESSAGE_SENDER].copy_from_slice(&[0x99; 32]);
-    assert!(proves(&tx, &attested, &a, needed(), gasless()).unwrap_err().contains("does not match"));
+    assert!(proves(&tx, &attested, &a, needed(), gasless())
+        .unwrap_err()
+        .contains("does not match"));
 }
 
 #[test]
@@ -174,7 +226,15 @@ fn a_message_the_program_did_not_burn_is_refused() {
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
     let mut other_envelope = envelope;
     other_envelope[140] ^= 1;
-    assert!(proves(&tx, &message(&a, &other_envelope, AMOUNT), &a, needed(), gasless()).unwrap_err().contains("did not burn"));
+    assert!(proves(
+        &tx,
+        &message(&a, &other_envelope, AMOUNT),
+        &a,
+        needed(),
+        gasless()
+    )
+    .unwrap_err()
+    .contains("did not burn"));
 }
 
 #[test]
@@ -201,7 +261,18 @@ fn a_memo_burn_is_matched_by_the_keccak_of_its_memo() {
     .encode();
     let envelope = BurnArgs::decode(&data).unwrap().envelope(&r).encode();
     let tx = landed(&a, data, event(&a, &envelope, AMOUNT));
-    assert_eq!(proves(&tx, &message(&a, &envelope, AMOUNT), &a, needed(), gasless()).unwrap().r#ref, r);
+    assert_eq!(
+        proves(
+            &tx,
+            &message(&a, &envelope, AMOUNT),
+            &a,
+            needed(),
+            gasless()
+        )
+        .unwrap()
+        .r#ref,
+        r
+    );
 }
 
 #[test]

@@ -780,7 +780,9 @@ impl Config {
     /// What a stored config must satisfy.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(solana) = &self.solana {
-            solana.validate().map_err(|why| ConfigError::Solana { why: why.to_string() })?;
+            solana.validate().map_err(|why| ConfigError::Solana {
+                why: why.to_string(),
+            })?;
         }
         if self.ecdsa_key_name.is_empty() {
             return Err(ConfigError::EmptyEcdsaKeyName);

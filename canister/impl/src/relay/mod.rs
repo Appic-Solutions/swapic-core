@@ -525,11 +525,20 @@ fn arrival_of(burn: &CctpBurn, source: &EvmChain, chains: &Chains) -> Result<Arr
 }
 
 /// The arrival of a burn into Solana, and what it delivers there.
-fn solana_arrival_of(burn: &CctpBurn, chains: &Chains) -> Result<(Arrival, SolanaDelivery), RelayError> {
+fn solana_arrival_of(
+    burn: &CctpBurn,
+    chains: &Chains,
+) -> Result<(Arrival, SolanaDelivery), RelayError> {
     use crate::solana::arrival::{read_burn, BurnFields, SolanaBurn};
     use types::solana::SolanaAction;
-    let solana = chains.solana.as_ref().ok_or(RelayError::UnknownDestination(burn.destination_domain))?;
-    let source_domain = chains.domains.get(chains.chain_id).map_or(0, |domain| domain.get());
+    let solana = chains
+        .solana
+        .as_ref()
+        .ok_or(RelayError::UnknownDestination(burn.destination_domain))?;
+    let source_domain = chains
+        .domains
+        .get(chains.chain_id)
+        .map_or(0, |domain| domain.get());
     let fields = BurnFields {
         source_domain,
         mint_recipient: &burn.mint_recipient,
@@ -537,17 +546,32 @@ fn solana_arrival_of(burn: &CctpBurn, chains: &Chains) -> Result<(Arrival, Solan
         hook: &burn.hook_data,
         max_fee: u128::try_from(burn.max_fee).unwrap_or(u128::MAX),
     };
-    let read = read_burn(&fields, &solana.a, &solana.config, solana.forward_owner, solana.now_s).map_err(RelayError::Arrival)?;
+    let read = read_burn(
+        &fields,
+        &solana.a,
+        &solana.config,
+        solana.forward_owner,
+        solana.now_s,
+    )
+    .map_err(RelayError::Arrival)?;
     let (recipient, action, delivery) = match read {
         SolanaBurn::Swap(hook) => (
             hook.recipient,
             SolanaAction::CompleteNewAccount,
-            SolanaDelivery { recipient: hook.recipient, mint_out: hook.mint_out, min_out: Some(hook.min_out) },
+            SolanaDelivery {
+                recipient: hook.recipient,
+                mint_out: hook.mint_out,
+                min_out: Some(hook.min_out),
+            },
         ),
         SolanaBurn::Forwarder { owner } => (
             owner,
             SolanaAction::ForwardRelay,
-            SolanaDelivery { recipient: owner, mint_out: swapic_solana_wire::consts::USDC_MINT, min_out: None },
+            SolanaDelivery {
+                recipient: owner,
+                mint_out: swapic_solana_wire::consts::USDC_MINT,
+                min_out: None,
+            },
         ),
     };
     Ok((
@@ -848,7 +872,9 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
             let delivery = if payout.is_some() { None } else { delivered };
             (GasAction::RelayEco, None, delivery)
         }
-        ([(burn, min)], []) if burn.destination_domain == swapic_solana_wire::consts::SOLANA_DOMAIN => {
+        ([(burn, min)], [])
+            if burn.destination_domain == swapic_solana_wire::consts::SOLANA_DOMAIN =>
+        {
             if burn.burn_token != source.usdc {
                 return Err(RelayError::Burn("is not of the chain's USDC"));
             }
@@ -865,7 +891,11 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
                 min_out,
                 solana: Some(solana),
             };
-            let delivery = if payout.is_some() { None } else { Some(delivered) };
+            let delivery = if payout.is_some() {
+                None
+            } else {
+                Some(delivered)
+            };
             (GasAction::RelayCctp, Some(arrival), delivery)
         }
         ([(burn, min)], []) => {
@@ -973,7 +1003,9 @@ pub fn check(
     if let Some(arrival) = &arrival {
         let row = match (arrival.solana, chains.solana.as_ref()) {
             // a swap arrival always pays the dearer of its two ends (attack L1)
-            (Some(types::solana::SolanaAction::CompleteNewAccount), Some(solana)) => solana.config.min_network_fee.arrival(),
+            (Some(types::solana::SolanaAction::CompleteNewAccount), Some(solana)) => {
+                solana.config.min_network_fee.arrival()
+            }
             (Some(action), Some(solana)) => solana.config.min_network_fee.get(action),
             (Some(_), None) => TokenAmount::MAX,
             (None, _) => chains

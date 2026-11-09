@@ -727,7 +727,10 @@ mod solana_source {
         BurnMessage::parse(&bytes).unwrap()
     }
 
-    fn decide_with(message: &BurnMessage, solana: Option<&SwapicAddresses>) -> Result<Plan, FinishError> {
+    fn decide_with(
+        message: &BurnMessage,
+        solana: Option<&SwapicAddresses>,
+    ) -> Result<Plan, FinishError> {
         let (evm_chains, domains) = (evm_chains(), domains());
         let setup = Setup {
             chain_id: BASE,
@@ -750,17 +753,29 @@ mod solana_source {
     #[test]
     fn domain_five_is_unknown_without_a_deployment() {
         let a = a();
-        assert_eq!(decide_with(&message(TMM, USDC_MINT, a.auth[0].0), None), Err(FinishError::UnknownSource(5)));
+        assert_eq!(
+            decide_with(&message(TMM, USDC_MINT, a.auth[0].0), None),
+            Err(FinishError::UnknownSource(5))
+        );
     }
 
     #[test]
     fn a_burn_anyone_else_made_on_solana_is_refused() {
         let a = a();
         // a user who burned directly
-        assert_eq!(decide_with(&message(TMM, USDC_MINT, [0x66; 32]), Some(&a)), Err(FinishError::NotTheRunner));
+        assert_eq!(
+            decide_with(&message(TMM, USDC_MINT, [0x66; 32]), Some(&a)),
+            Err(FinishError::NotTheRunner)
+        );
         // a message that is not from the token messenger
-        assert_eq!(decide_with(&message([0x77; 32], USDC_MINT, a.auth[0].0), Some(&a)), Err(FinishError::NotABurn));
+        assert_eq!(
+            decide_with(&message([0x77; 32], USDC_MINT, a.auth[0].0), Some(&a)),
+            Err(FinishError::NotABurn)
+        );
         // not USDC
-        assert_eq!(decide_with(&message(TMM, [0x88; 32], a.auth[0].0), Some(&a)), Err(FinishError::NotUsdc));
+        assert_eq!(
+            decide_with(&message(TMM, [0x88; 32], a.auth[0].0), Some(&a)),
+            Err(FinishError::NotUsdc)
+        );
     }
 }

@@ -54,10 +54,14 @@ fn le_u64(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Every rule that needs nothing but the bytes and the config: rules 2 to 7 and the parties of rule 8.
-pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) -> Result<Passed, String> {
+pub fn check<F: Fn(u32) -> Option<EvmChain>>(
+    wire: &[u8],
+    ctx: &Context<'_, F>,
+) -> Result<Passed, String> {
     // 2. the format: v0, and nothing else
     let signed = SignedV0::parse(wire).map_err(|e| format!("not a signed transaction: {e:?}"))?;
-    let message = V0Message::parse(signed.message).map_err(|e| format!("not a v0 message: {e:?}"))?;
+    let message =
+        V0Message::parse(signed.message).map_err(|e| format!("not a v0 message: {e:?}"))?;
 
     // 3. the signatures: the payer key first, then the user
     let signatures = message.header.required_signatures as usize;
@@ -85,15 +89,32 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
             }
             match ix.data.first().copied() {
                 Some(SET_COMPUTE_UNIT_LIMIT) if cu_limit.is_none() => {
-                    cu_limit = Some(ix.data.get(1..).and_then(le_u32).ok_or("a bad compute limit")?);
+                    cu_limit = Some(
+                        ix.data
+                            .get(1..)
+                            .and_then(le_u32)
+                            .ok_or("a bad compute limit")?,
+                    );
                 }
                 Some(SET_COMPUTE_UNIT_PRICE) if cu_price.is_none() => {
-                    cu_price = Some(ix.data.get(1..).and_then(le_u64).ok_or("a bad compute price")?);
+                    cu_price = Some(
+                        ix.data
+                            .get(1..)
+                            .and_then(le_u64)
+                            .ok_or("a bad compute price")?,
+                    );
                 }
                 Some(SET_LOADED_DATA_LIMIT) if loaded.is_none() => {
-                    loaded = Some(ix.data.get(1..).and_then(le_u32).ok_or("a bad data limit")?);
+                    loaded = Some(
+                        ix.data
+                            .get(1..)
+                            .and_then(le_u32)
+                            .ok_or("a bad data limit")?,
+                    );
                 }
-                _ => return Err("a compute budget instruction this door does not allow".to_string()),
+                _ => {
+                    return Err("a compute budget instruction this door does not allow".to_string())
+                }
             }
         } else if program == ctx.a.program {
             if burn.is_some() {
@@ -108,10 +129,16 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
     let cu_limit = cu_limit.ok_or("no compute limit")?;
     let cu_price = cu_price.ok_or("no compute price")?;
     if cu_limit > ctx.config.max_cu_limit {
-        return Err(format!("the compute limit {cu_limit} is above {}", ctx.config.max_cu_limit));
+        return Err(format!(
+            "the compute limit {cu_limit} is above {}",
+            ctx.config.max_cu_limit
+        ));
     }
     if cu_price > ctx.config.max_cu_price {
-        return Err(format!("the compute price {cu_price} is above {}", ctx.config.max_cu_price));
+        return Err(format!(
+            "the compute price {cu_price} is above {}",
+            ctx.config.max_cu_price
+        ));
     }
 
     // 5. the accounts: the payer key is in its one slot, and in no other slot of any instruction
@@ -135,7 +162,9 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
         return Err("a co-signed burn spends the float".to_string());
     }
     if args.event_keypair != (signatures == 3) {
-        return Err("the third signature is the event keypair's, and only under its flag".to_string());
+        return Err(
+            "the third signature is the event keypair's, and only under its flag".to_string(),
+        );
     }
     if args.event_keypair && !ctx.config.program_event_keypair_allowed {
         return Err("the event keypair fallback is off".to_string());
@@ -149,9 +178,17 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
         signers.push(message.static_keys[2]);
     }
 
-    let destination = (ctx.destination)(args.domain as u32).ok_or_else(|| format!("domain {} is not a chain Swapic has", args.domain))?;
+    let destination = (ctx.destination)(args.domain as u32)
+        .ok_or_else(|| format!("domain {} is not a chain Swapic has", args.domain))?;
     let recipient = EvmAddress::new(*args.recipient);
-    if recipient == EvmAddress::ZERO || [destination.swapic, destination.runner, destination.cctp_receiver].contains(&recipient) {
+    if recipient == EvmAddress::ZERO
+        || [
+            destination.swapic,
+            destination.runner,
+            destination.cctp_receiver,
+        ]
+        .contains(&recipient)
+    {
         return Err("the recipient is zero or one of Swapic's contracts".to_string());
     }
     let mut parties = vec![Party::Solana(user), Party::Evm(recipient)];
@@ -159,7 +196,9 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
         RefSource::Direct(r) => *r,
         RefSource::Memo(memo) => {
             if ctx.pool_address != Some(recipient) {
-                return Err("a memo burn's recipient is not the canister's pool address".to_string());
+                return Err(
+                    "a memo burn's recipient is not the canister's pool address".to_string()
+                );
             }
             let terms = types::pool::memo::decode(memo).map_err(|e| format!("the memo: {e}"))?;
             // staking from Solana is not offered: a memo burn is a swap into ICP
@@ -179,7 +218,10 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
             GasAction::CompleteSwap
         }
         Payload::CkDeposit { principal, .. } => {
-            parties.push(Party::Icp(types::swapic::ck_principal(*principal).ok_or("a CkDeposit's principal does not read")?));
+            parties.push(Party::Icp(
+                types::swapic::ck_principal(*principal)
+                    .ok_or("a CkDeposit's principal does not read")?,
+            ));
             GasAction::CompleteCk
         }
     };
@@ -187,15 +229,29 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
     let earliest = ctx.now_s + ctx.config.program_min_deadline_s + ctx.config.deadline_margin_s;
     let latest = ctx.now_s + ctx.max_ahead_s.min(TWO_HOURS_S);
     if (args.deadline as u64) < earliest || (args.deadline as u64) > latest {
-        return Err(format!("the deadline {} is outside {earliest} to {latest}", args.deadline));
+        return Err(format!(
+            "the deadline {} is outside {earliest} to {latest}",
+            args.deadline
+        ));
     }
     if args.amount < ctx.config.gasless_min_usdc {
-        return Err(format!("a gasless burn must produce at least {} micro USDC", ctx.config.gasless_min_usdc));
+        return Err(format!(
+            "a gasless burn must produce at least {} micro USDC",
+            ctx.config.gasless_min_usdc
+        ));
     }
 
     // 7. the fee
-    let row = destination.min_network_fee.get(gas_action).unwrap_or(TokenAmount::MAX);
-    let needed = ctx.config.min_network_fee.gasless_burn.checked_add(row).unwrap_or(TokenAmount::MAX);
+    let row = destination
+        .min_network_fee
+        .get(gas_action)
+        .unwrap_or(TokenAmount::MAX);
+    let needed = ctx
+        .config
+        .min_network_fee
+        .gasless_burn
+        .checked_add(row)
+        .unwrap_or(TokenAmount::MAX);
     if TokenAmount::from(args.fee as u64) < needed {
         return Err(format!("the fee {} is below {needed:?}", args.fee));
     }
@@ -204,11 +260,17 @@ pub fn check<F: Fn(u32) -> Option<EvmChain>>(wire: &[u8], ctx: &Context<'_, F>) 
         return Err("what is left after the fee is not above the program's least burn".to_string());
     }
     if args.max_fee_deci_bps > ctx.config.max_fee_deci_bps {
-        return Err(format!("the max fee {} is above {}", args.max_fee_deci_bps, ctx.config.max_fee_deci_bps));
+        return Err(format!(
+            "the max fee {} is above {}",
+            args.max_fee_deci_bps, ctx.config.max_fee_deci_bps
+        ));
     }
     let priority = (cu_limit as u128 * cu_price as u128).div_ceil(1_000_000);
     if priority > ctx.config.max_priority_lamports as u128 {
-        return Err(format!("the priority fee {priority} is above {}", ctx.config.max_priority_lamports));
+        return Err(format!(
+            "the priority fee {priority} is above {}",
+            ctx.config.max_priority_lamports
+        ));
     }
 
     Ok(Passed {
@@ -227,7 +289,8 @@ pub fn verify(signer: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(signer) else {
         return false;
     };
-    key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature)).is_ok()
+    key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature))
+        .is_ok()
 }
 
 /// Whether the limits let this signer through (rule 9), keyed on the verified signer.
@@ -255,7 +318,11 @@ pub fn within_limits(
 
 /// The first co-signature of a ref stands: the same message answers it, and another is refused until
 /// 90 s after it (rule 10, one actor per swap).
-pub fn second_request(existing: ([u8; 32], u64, u64), message_hash: &[u8; 32], now_s: u64) -> Result<Option<u64>, &'static str> {
+pub fn second_request(
+    existing: ([u8; 32], u64, u64),
+    message_hash: &[u8; 32],
+    now_s: u64,
+) -> Result<Option<u64>, &'static str> {
     let (hash, line, at_s) = existing;
     if hash == *message_hash {
         return Ok(Some(line));

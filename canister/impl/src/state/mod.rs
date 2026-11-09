@@ -107,7 +107,11 @@ pub trait Store {
     fn sweep_count(&self) -> u64;
     /// A value of the Solana fold.
     fn solana_entry(&self, key: &types::solana::SolanaKey) -> Option<types::solana::SolanaEntry>;
-    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry);
+    fn put_solana_entry(
+        &mut self,
+        key: types::solana::SolanaKey,
+        entry: types::solana::SolanaEntry,
+    );
     /// Every value of the Solana fold, in key order: what the audit compares.
     fn solana_entries(&self) -> Vec<(types::solana::SolanaKey, types::solana::SolanaEntry)>;
     /// Indexes a line that records a signed transaction's bytes.
@@ -252,12 +256,19 @@ impl Store for MemoryStore {
         self.solana.get(key).cloned()
     }
 
-    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry) {
+    fn put_solana_entry(
+        &mut self,
+        key: types::solana::SolanaKey,
+        entry: types::solana::SolanaEntry,
+    ) {
         self.solana.insert(key, entry);
     }
 
     fn solana_entries(&self) -> Vec<(types::solana::SolanaKey, types::solana::SolanaEntry)> {
-        self.solana.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        self.solana
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     fn flow(&self, quote_hash: &QuoteHash) -> Option<Flow> {
@@ -623,9 +634,11 @@ impl State<MemoryStore> {
             && sweeps
                 .iter()
                 .eq(other.store.sweeps().iter().map(|(id, entry)| (id, entry)))
-            && solana
+            && solana.iter().eq(other
+                .store
+                .solana_entries()
                 .iter()
-                .eq(other.store.solana_entries().iter().map(|(key, entry)| (key, entry)))
+                .map(|(key, entry)| (key, entry)))
     }
 }
 

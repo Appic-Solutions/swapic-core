@@ -29,12 +29,20 @@ pub fn reclaimable(burn: Option<(u64, u32)>, now_s: u64) -> Result<(), &'static 
 
 /// The lamports a top-up sends, if one is due: up to the target, and only when below the floor, at
 /// most once an hour.
-pub fn top_up(rent_lamports: u64, low: u64, target: u64, last_s: Option<u64>, now_s: u64) -> Option<u64> {
+pub fn top_up(
+    rent_lamports: u64,
+    low: u64,
+    target: u64,
+    last_s: Option<u64>,
+    now_s: u64,
+) -> Option<u64> {
     if rent_lamports >= low {
         return None;
     }
     if last_s.is_some_and(|last| now_s < last + TOP_UP_EVERY_S) {
         return None;
     }
-    target.checked_sub(rent_lamports).filter(|amount| *amount > 0)
+    target
+        .checked_sub(rent_lamports)
+        .filter(|amount| *amount > 0)
 }

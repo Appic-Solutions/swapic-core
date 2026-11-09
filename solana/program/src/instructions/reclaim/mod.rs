@@ -31,12 +31,19 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         return Err(fail(SwapicError::WrongKey));
     }
     require(&a[RENT], &consts::RENT, SwapicError::WrongRent)?;
-    require(&a[MESSAGE_TRANSMITTER], &wire::MESSAGE_TRANSMITTER, SwapicError::WrongProgram)?;
+    require(
+        &a[MESSAGE_TRANSMITTER],
+        &wire::MESSAGE_TRANSMITTER,
+        SwapicError::WrongProgram,
+    )?;
     require(&a[MT], &wire::MT, SwapicError::WrongProgram)?;
     require(&a[CANISTER], &consts::CANISTER, SwapicError::WrongKey)?;
     require(&a[SYSTEM], &wire::SYSTEM_PROGRAM, SwapicError::WrongProgram)?;
 
-    let seeds = [Seed::from(wire::SEED_RENT), Seed::from(core::slice::from_ref(&consts::RENT_BUMP))];
+    let seeds = [
+        Seed::from(wire::SEED_RENT),
+        Seed::from(core::slice::from_ref(&consts::RENT_BUMP)),
+    ];
     let before = a[RENT].lamports();
     reclaim_event_account(
         &a[RENT],
@@ -46,7 +53,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         args.destination_message,
         &[Signer::from(&seeds)],
     )?;
-    let delta = a[RENT].lamports().checked_sub(before).ok_or(fail(SwapicError::WrongRent))?;
+    let delta = a[RENT]
+        .lamports()
+        .checked_sub(before)
+        .ok_or(fail(SwapicError::WrongRent))?;
     system_transfer(&a[RENT], &a[CANISTER], delta, &[Signer::from(&seeds)])?;
     log::reclaimed(delta);
     Ok(())

@@ -68,16 +68,32 @@ pub struct AccountMeta {
 
 impl AccountMeta {
     pub const fn readonly(pubkey: Pubkey) -> Self {
-        Self { pubkey, signer: false, writable: false }
+        Self {
+            pubkey,
+            signer: false,
+            writable: false,
+        }
     }
     pub const fn writable(pubkey: Pubkey) -> Self {
-        Self { pubkey, signer: false, writable: true }
+        Self {
+            pubkey,
+            signer: false,
+            writable: true,
+        }
     }
     pub const fn signer(pubkey: Pubkey) -> Self {
-        Self { pubkey, signer: true, writable: false }
+        Self {
+            pubkey,
+            signer: true,
+            writable: false,
+        }
     }
     pub const fn writable_signer(pubkey: Pubkey) -> Self {
-        Self { pubkey, signer: true, writable: true }
+        Self {
+            pubkey,
+            signer: true,
+            writable: true,
+        }
     }
 }
 
@@ -154,8 +170,11 @@ impl V0Message {
         if r.u8()? != VERSION_V0_BYTE {
             return Err(MessageError::NotV0);
         }
-        let header =
-            Header { required_signatures: r.u8()?, readonly_signed: r.u8()?, readonly_unsigned: r.u8()? };
+        let header = Header {
+            required_signatures: r.u8()?,
+            readonly_signed: r.u8()?,
+            readonly_unsigned: r.u8()?,
+        };
         let key_count = r.short()?;
         let mut static_keys = Vec::with_capacity(key_count);
         for _ in 0..key_count {
@@ -177,7 +196,11 @@ impl V0Message {
             let accounts = r.take(account_count)?.to_vec();
             let data_len = r.short()?;
             let data = r.take(data_len)?.to_vec();
-            instructions.push(CompiledInstruction { program_index, accounts, data });
+            instructions.push(CompiledInstruction {
+                program_index,
+                accounts,
+                data,
+            });
         }
         let lookup_count = r.short()?;
         let mut lookups = Vec::with_capacity(lookup_count);
@@ -187,12 +210,22 @@ impl V0Message {
             let writable = r.take(writable_len)?.to_vec();
             let readonly_len = r.short()?;
             let readonly = r.take(readonly_len)?.to_vec();
-            lookups.push(TableLookup { table, writable, readonly });
+            lookups.push(TableLookup {
+                table,
+                writable,
+                readonly,
+            });
         }
         if !r.bytes.is_empty() {
             return Err(MessageError::TrailingBytes);
         }
-        let parsed = Self { header, static_keys, blockhash, instructions, lookups };
+        let parsed = Self {
+            header,
+            static_keys,
+            blockhash,
+            instructions,
+            lookups,
+        };
         let unique: BTreeSet<&Pubkey> = parsed.static_keys.iter().collect();
         if unique.len() != parsed.static_keys.len() {
             return Err(MessageError::DuplicateAccount);
@@ -244,7 +277,11 @@ impl V0Message {
 
     pub fn total_accounts(&self) -> usize {
         self.static_keys.len()
-            + self.lookups.iter().map(|l| l.writable.len() + l.readonly.len()).sum::<usize>()
+            + self
+                .lookups
+                .iter()
+                .map(|l| l.writable.len() + l.readonly.len())
+                .sum::<usize>()
     }
 
     /// True when the key at this index signs.
@@ -290,7 +327,10 @@ impl<'a> SignedV0<'a> {
         for _ in 0..count {
             signatures.push(r.take(64)?.try_into().expect("64 bytes"));
         }
-        Ok(Self { signatures, message: r.bytes })
+        Ok(Self {
+            signatures,
+            message: r.bytes,
+        })
     }
 }
 
@@ -338,7 +378,8 @@ impl KeySpace {
 /// keys no earlier table provides. A used table costs at least 34 bytes, more than the keys it saves when
 /// it holds only one or two, so this decides which long routes fit a transaction.
 fn fewest_tables<'a>(tables: &'a [LookupTable], keys: &[Pubkey]) -> Vec<&'a LookupTable> {
-    let holds = |table: &LookupTable, key: &Pubkey| table.entries.iter().take(256).any(|e| e == key);
+    let holds =
+        |table: &LookupTable, key: &Pubkey| table.entries.iter().take(256).any(|e| e == key);
     let mut open: Vec<&Pubkey> = keys.iter().collect();
     let mut left: Vec<&LookupTable> = tables.iter().collect();
     let mut ordered = Vec::with_capacity(tables.len());
@@ -368,7 +409,12 @@ pub fn compile_v0(
     blockhash: &Pubkey,
 ) -> Result<V0Message, MessageError> {
     let space = KeySpace::of(payer, instructions);
-    let eligible: Vec<Pubkey> = space.entries.iter().filter(|e| !e.1 && !e.3).map(|e| e.0).collect();
+    let eligible: Vec<Pubkey> = space
+        .entries
+        .iter()
+        .filter(|e| !e.1 && !e.3)
+        .map(|e| e.0)
+        .collect();
     let tables = fewest_tables(tables, &eligible);
     let table_of = |key: &Pubkey| -> Option<(usize, u8)> {
         tables.iter().enumerate().find_map(|(t, table)| {
@@ -383,7 +429,11 @@ pub fn compile_v0(
     let mut plain_r = Vec::new();
     let mut lookups: Vec<TableLookup> = tables
         .iter()
-        .map(|t| TableLookup { table: t.address, writable: Vec::new(), readonly: Vec::new() })
+        .map(|t| TableLookup {
+            table: t.address,
+            writable: Vec::new(),
+            readonly: Vec::new(),
+        })
         .collect();
     let mut loaded_w: Vec<Vec<Pubkey>> = tables.iter().map(|_| Vec::new()).collect();
     let mut loaded_r: Vec<Vec<Pubkey>> = tables.iter().map(|_| Vec::new()).collect();
@@ -432,13 +482,21 @@ pub fn compile_v0(
         return Err(MessageError::TooManyAccounts);
     }
     let index_of = |key: &Pubkey| -> Result<u8, MessageError> {
-        space_keys.iter().position(|k| k == key).map(|i| i as u8).ok_or(MessageError::BadIndex)
+        space_keys
+            .iter()
+            .position(|k| k == key)
+            .map(|i| i as u8)
+            .ok_or(MessageError::BadIndex)
     };
     let mut compiled = Vec::with_capacity(instructions.len());
     for ix in instructions {
         compiled.push(CompiledInstruction {
             program_index: index_of(&ix.program)?,
-            accounts: ix.accounts.iter().map(|m| index_of(&m.pubkey)).collect::<Result<_, _>>()?,
+            accounts: ix
+                .accounts
+                .iter()
+                .map(|m| index_of(&m.pubkey))
+                .collect::<Result<_, _>>()?,
             data: ix.data.clone(),
         });
     }
@@ -515,8 +573,11 @@ impl V1Message {
         if r.u8()? != VERSION_V1_BYTE {
             return Err(MessageError::NotV1);
         }
-        let header =
-            Header { required_signatures: r.u8()?, readonly_signed: r.u8()?, readonly_unsigned: r.u8()? };
+        let header = Header {
+            required_signatures: r.u8()?,
+            readonly_signed: r.u8()?,
+            readonly_unsigned: r.u8()?,
+        };
         let mask = u32::from_le_bytes(r.take(4)?.try_into().expect("4 bytes"));
         if mask != V1_CONFIG_MASK {
             return Err(MessageError::BadHeader);
@@ -553,8 +614,21 @@ impl V1Message {
         if !r.bytes.is_empty() {
             return Err(MessageError::TrailingBytes);
         }
-        let config = V1Config { priority_lamports, compute_unit_limit, loaded_data_limit };
-        Ok((Self { header, config, blockhash, addresses, instructions }, signatures))
+        let config = V1Config {
+            priority_lamports,
+            compute_unit_limit,
+            loaded_data_limit,
+        };
+        Ok((
+            Self {
+                header,
+                config,
+                blockhash,
+                addresses,
+                instructions,
+            },
+            signatures,
+        ))
     }
 }
 

@@ -204,7 +204,9 @@ impl ForwarderHook {
         let declared = u32::from_be_bytes(take::<4>(&hook[28..32]));
         match (hook.len(), declared) {
             (FORWARD_HOOK_SHORT_LEN, 0) => Some(Self::Existing),
-            (FORWARD_HOOK_LONG_LEN, 33) if hook[32] == 1 => Some(Self::CreateFor(take::<32>(&hook[33..65]))),
+            (FORWARD_HOOK_LONG_LEN, 33) if hook[32] == 1 => {
+                Some(Self::CreateFor(take::<32>(&hook[33..65])))
+            }
             _ => None,
         }
     }

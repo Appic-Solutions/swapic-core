@@ -557,7 +557,9 @@ pub async fn finish_cctp(
             return Err(FinishError::SourceFinished(source_tx).to_string());
         }
         if let Some((r#ref, _)) = &solana_burn {
-            if read_state(|state| state.solana_finished_ref(r#ref)).is_some_and(|done| done != arrival) {
+            if read_state(|state| state.solana_finished_ref(r#ref))
+                .is_some_and(|done| done != arrival)
+            {
                 return Err("this ref already finished another message".to_string());
             }
         }
@@ -596,7 +598,11 @@ pub async fn finish_cctp(
     }
     if let Some((r#ref, burned_at_s)) = solana_burn {
         crate::storage::events::append_event(types::EventType::Solana {
-            step: types::solana::SolanaStep::RefFinished { r#ref, arrival, burned_at_s },
+            step: types::solana::SolanaStep::RefFinished {
+                r#ref,
+                arrival,
+                burned_at_s,
+            },
         })
         .map_err(|e| e.to_string())?;
     }

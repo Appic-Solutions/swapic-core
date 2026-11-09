@@ -20,14 +20,26 @@ pub fn burn_head(
     event_signs: bool,
 ) -> Vec<AccountMeta> {
     vec![
-        AccountMeta { pubkey: *user, signer: true, writable: !float },
+        AccountMeta {
+            pubkey: *user,
+            signer: true,
+            writable: !float,
+        },
         AccountMeta::readonly(a.config.0),
-        AccountMeta { pubkey: a.canister, signer: float, writable: false },
+        AccountMeta {
+            pubkey: a.canister,
+            signer: float,
+            writable: false,
+        },
         AccountMeta::readonly(a.auth[shard].0),
         AccountMeta::writable(a.vault[shard]),
         AccountMeta::writable(a.fee_account),
         AccountMeta::writable(a.rent.0),
-        AccountMeta { pubkey: *event, signer: event_signs, writable: true },
+        AccountMeta {
+            pubkey: *event,
+            signer: event_signs,
+            writable: true,
+        },
         AccountMeta::readonly(SENDER_AUTHORITY),
         AccountMeta::readonly(a.denylist[shard]),
         AccountMeta::writable(MESSAGE_TRANSMITTER),
@@ -46,22 +58,44 @@ pub fn burn_head(
 
 /// `swap_burn`: the head, Jupiter, then the route's accounts with their own write flags. The
 /// outer signer flags of the route do not matter: the program sets the signer in its CPI.
-pub fn swap_burn(a: &SwapicAddresses, head: Vec<AccountMeta>, route: &[AccountMeta], data: Vec<u8>) -> Instruction {
+pub fn swap_burn(
+    a: &SwapicAddresses,
+    head: Vec<AccountMeta>,
+    route: &[AccountMeta],
+    data: Vec<u8>,
+) -> Instruction {
     let mut accounts = head;
     accounts.push(AccountMeta::readonly(JUPITER));
     accounts.extend_from_slice(route);
-    Instruction { program: a.program, accounts, data }
+    Instruction {
+        program: a.program,
+        accounts,
+        data,
+    }
 }
 
 /// `burn`: the head, then the user's USDC account.
-pub fn burn(a: &SwapicAddresses, head: Vec<AccountMeta>, user_usdc: &Pubkey, data: Vec<u8>) -> Instruction {
+pub fn burn(
+    a: &SwapicAddresses,
+    head: Vec<AccountMeta>,
+    user_usdc: &Pubkey,
+    data: Vec<u8>,
+) -> Instruction {
     let mut accounts = head;
     accounts.push(AccountMeta::writable(*user_usdc));
-    Instruction { program: a.program, accounts, data }
+    Instruction {
+        program: a.program,
+        accounts,
+        data,
+    }
 }
 
 /// The CCTP accounts of a receive from `source_domain`, whose USDC is `source_token`.
-fn receive_tail(nonce: &[u8; 32], source_domain: u32, source_token: &[u8; 32]) -> [AccountMeta; 16] {
+fn receive_tail(
+    nonce: &[u8; 32],
+    source_domain: u32,
+    source_token: &[u8; 32],
+) -> [AccountMeta; 16] {
     [
         AccountMeta::readonly(MT_AUTHORITY_TMM),
         AccountMeta::readonly(MESSAGE_TRANSMITTER),
@@ -108,10 +142,18 @@ pub fn complete(
         AccountMeta::writable(*output),
         AccountMeta::writable(a.wsol[shard]),
     ];
-    accounts.extend_from_slice(&receive_tail(source.nonce, source.source_domain, source.source_token));
+    accounts.extend_from_slice(&receive_tail(
+        source.nonce,
+        source.source_domain,
+        source.source_token,
+    ));
     accounts.push(AccountMeta::readonly(JUPITER));
     accounts.extend_from_slice(route);
-    Instruction { program: a.program, accounts, data }
+    Instruction {
+        program: a.program,
+        accounts,
+        data,
+    }
 }
 
 /// `release` (design 4.8): `caller` signs the receive, `vault` is where the message mints, and
@@ -133,13 +175,31 @@ pub fn release(
         AccountMeta::writable(*output),
         AccountMeta::readonly(a.auth[vault].0),
     ];
-    accounts.extend_from_slice(&receive_tail(source.nonce, source.source_domain, source.source_token));
-    Instruction { program: a.program, accounts, data }
+    accounts.extend_from_slice(&receive_tail(
+        source.nonce,
+        source.source_domain,
+        source.source_token,
+    ));
+    Instruction {
+        program: a.program,
+        accounts,
+        data,
+    }
 }
 
 /// `reclaim` (design 4.9). Anyone may pay; the lamports go to the canister's payer key.
-pub fn reclaim(a: &SwapicAddresses, payer: &Pubkey, event: &Pubkey, attestation: &[u8], message: &[u8]) -> Instruction {
-    let data = crate::args::ReclaimArgs { attestation, destination_message: message }.encode();
+pub fn reclaim(
+    a: &SwapicAddresses,
+    payer: &Pubkey,
+    event: &Pubkey,
+    attestation: &[u8],
+    message: &[u8],
+) -> Instruction {
+    let data = crate::args::ReclaimArgs {
+        attestation,
+        destination_message: message,
+    }
+    .encode();
     debug_assert_eq!(data[0], TAG_RECLAIM);
     Instruction {
         program: a.program,
@@ -170,7 +230,12 @@ pub fn set_config(a: &SwapicAddresses, config: &Config) -> Instruction {
 }
 
 /// The ATA program's `CreateIdempotent`.
-pub fn create_ata_idempotent(payer: &Pubkey, owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Instruction {
+pub fn create_ata_idempotent(
+    payer: &Pubkey,
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+) -> Instruction {
     Instruction {
         program: ATA_PROGRAM,
         accounts: vec![
@@ -197,14 +262,21 @@ pub fn receive_message(
     let mut data = vec![0u8; crate::cctp::receive_data_len(message.len(), attestation.len())];
     crate::cctp::write_receive_data(&mut data, message, attestation);
     let tail = receive_tail(source.nonce, source.source_domain, source.source_token);
-    let mut accounts = vec![AccountMeta::writable_signer(*payer), AccountMeta::signer(*payer)];
+    let mut accounts = vec![
+        AccountMeta::writable_signer(*payer),
+        AccountMeta::signer(*payer),
+    ];
     accounts.extend_from_slice(&tail[..14]);
     // the handler's remaining accounts, in Circle's order: the recipient's token account sits
     // after the fee recipient, then custody, the token program and the event authority
     accounts.insert(15, AccountMeta::writable(*mint_recipient));
     accounts.extend_from_slice(&tail[14..]);
     accounts.push(AccountMeta::readonly(TMM));
-    Instruction { program: MT, accounts, data }
+    Instruction {
+        program: MT,
+        accounts,
+        data,
+    }
 }
 
 /// System `transfer`.
@@ -214,7 +286,10 @@ pub fn system_transfer(from: &Pubkey, to: &Pubkey, lamports: u64) -> Instruction
     data.extend_from_slice(&lamports.to_le_bytes());
     Instruction {
         program: SYSTEM_PROGRAM,
-        accounts: vec![AccountMeta::writable_signer(*from), AccountMeta::writable(*to)],
+        accounts: vec![
+            AccountMeta::writable_signer(*from),
+            AccountMeta::writable(*to),
+        ],
         data,
     }
 }
@@ -226,7 +301,11 @@ pub fn token_transfer(from: &Pubkey, to: &Pubkey, owner: &Pubkey, amount: u64) -
     data.extend_from_slice(&amount.to_le_bytes());
     Instruction {
         program: TOKEN_PROGRAM,
-        accounts: vec![AccountMeta::writable(*from), AccountMeta::writable(*to), AccountMeta::signer(*owner)],
+        accounts: vec![
+            AccountMeta::writable(*from),
+            AccountMeta::writable(*to),
+            AccountMeta::signer(*owner),
+        ],
         data,
     }
 }
@@ -259,7 +338,11 @@ pub fn compute_unit_limit(units: u32) -> Instruction {
     let mut data = Vec::with_capacity(5);
     data.push(2);
     data.extend_from_slice(&units.to_le_bytes());
-    Instruction { program: COMPUTE_BUDGET_PROGRAM, accounts: Vec::new(), data }
+    Instruction {
+        program: COMPUTE_BUDGET_PROGRAM,
+        accounts: Vec::new(),
+        data,
+    }
 }
 
 /// ComputeBudget `SetComputeUnitPrice`.
@@ -267,7 +350,11 @@ pub fn compute_unit_price(micro_lamports: u64) -> Instruction {
     let mut data = Vec::with_capacity(9);
     data.push(3);
     data.extend_from_slice(&micro_lamports.to_le_bytes());
-    Instruction { program: COMPUTE_BUDGET_PROGRAM, accounts: Vec::new(), data }
+    Instruction {
+        program: COMPUTE_BUDGET_PROGRAM,
+        accounts: Vec::new(),
+        data,
+    }
 }
 
 /// Points a `route_v2` straight at where its output must end, in place of the taker's own account
@@ -276,7 +363,11 @@ pub fn compute_unit_price(micro_lamports: u64) -> Instruction {
 /// with this the last swap pays the final account and the forward step is gone. Not an option Jupiter
 /// offers: the builder simulates the result, and a route that refuses it is not used. Answers how many
 /// places it changed. `shared_accounts_route_v2` has no such account and needs nothing.
-pub fn route_straight_to(route: &mut [AccountMeta], taker_account: &Pubkey, output: &Pubkey) -> usize {
+pub fn route_straight_to(
+    route: &mut [AccountMeta],
+    taker_account: &Pubkey,
+    output: &Pubkey,
+) -> usize {
     let mut changed = 0;
     for meta in route.iter_mut() {
         if meta.pubkey == *taker_account {
@@ -337,8 +428,15 @@ pub fn swapic_table_entries(a: &SwapicAddresses) -> Vec<Pubkey> {
 }
 
 /// The lookup table program's `create`. Answers the instruction and the table's address.
-pub fn create_lookup_table(authority: &Pubkey, payer: &Pubkey, recent_slot: u64) -> (Instruction, Pubkey) {
-    let (table, bump) = pda::find_program_address(&[authority, &recent_slot.to_le_bytes()], &ADDRESS_LOOKUP_TABLE_PROGRAM);
+pub fn create_lookup_table(
+    authority: &Pubkey,
+    payer: &Pubkey,
+    recent_slot: u64,
+) -> (Instruction, Pubkey) {
+    let (table, bump) = pda::find_program_address(
+        &[authority, &recent_slot.to_le_bytes()],
+        &ADDRESS_LOOKUP_TABLE_PROGRAM,
+    );
     let mut data = Vec::with_capacity(13);
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&recent_slot.to_le_bytes());
@@ -357,7 +455,12 @@ pub fn create_lookup_table(authority: &Pubkey, payer: &Pubkey, recent_slot: u64)
 }
 
 /// The lookup table program's `extend`.
-pub fn extend_lookup_table(table: &Pubkey, authority: &Pubkey, payer: &Pubkey, entries: &[Pubkey]) -> Instruction {
+pub fn extend_lookup_table(
+    table: &Pubkey,
+    authority: &Pubkey,
+    payer: &Pubkey,
+    entries: &[Pubkey],
+) -> Instruction {
     let mut data = Vec::with_capacity(12 + entries.len() * 32);
     data.extend_from_slice(&2u32.to_le_bytes());
     data.extend_from_slice(&(entries.len() as u64).to_le_bytes());
@@ -380,7 +483,10 @@ pub fn extend_lookup_table(table: &Pubkey, authority: &Pubkey, payer: &Pubkey, e
 pub fn freeze_lookup_table(table: &Pubkey, authority: &Pubkey) -> Instruction {
     Instruction {
         program: ADDRESS_LOOKUP_TABLE_PROGRAM,
-        accounts: vec![AccountMeta::writable(*table), AccountMeta::signer(*authority)],
+        accounts: vec![
+            AccountMeta::writable(*table),
+            AccountMeta::signer(*authority),
+        ],
         data: 1u32.to_le_bytes().to_vec(),
     }
 }

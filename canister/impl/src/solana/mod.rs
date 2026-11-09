@@ -23,7 +23,9 @@ pub struct Deployment {
 
 /// The deployment, or why the canister signs nothing on Solana yet.
 pub fn deployment() -> Result<Deployment, String> {
-    let config = config::get().solana.ok_or("the canister has no Solana config")?;
+    let config = config::get()
+        .solana
+        .ok_or("the canister has no Solana config")?;
     let (payer, admin) = solana_keys::get().ok_or("the Solana keys are not derived")?;
     let a = SwapicAddresses::derive(config.program_id, payer, admin);
     Ok(Deployment { config, a })
@@ -40,11 +42,18 @@ pub fn chains_of(config: &types::Config) -> Option<crate::relay::SolanaChains> {
     let solana = config.solana.clone()?;
     let (payer, admin) = solana_keys::get()?;
     let a = SwapicAddresses::derive(solana.program_id, payer, admin);
-    Some(crate::relay::SolanaChains { a, config: solana, now_s: now_s(), forward_owner: None })
+    Some(crate::relay::SolanaChains {
+        a,
+        config: solana,
+        now_s: now_s(),
+        forward_owner: None,
+    })
 }
 
 pub fn now_s() -> u64 {
-    types::Timestamp::from_nanos(ic_cdk::api::time()).as_secs().get()
+    types::Timestamp::from_nanos(ic_cdk::api::time())
+        .as_secs()
+        .get()
 }
 
 /// Refuses a list of parties any of which is sanctioned.

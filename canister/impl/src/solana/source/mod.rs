@@ -32,13 +32,20 @@ pub fn source_key(signature: &[u8; 64]) -> types::TxHash {
 
 /// Whether `tx` is a source this attested message may be finished from, pure. `needed` is the least
 /// fee of the arrival; `gasless` what a co-signed burn adds to it.
-pub fn proves(tx: &LandedTx, message: &[u8], a: &SwapicAddresses, needed: TokenAmount, gasless: TokenAmount) -> Result<Proved, &'static str> {
+pub fn proves(
+    tx: &LandedTx,
+    message: &[u8],
+    a: &SwapicAddresses,
+    needed: TokenAmount,
+    gasless: TokenAmount,
+) -> Result<Proved, &'static str> {
     if tx.failed {
         return Err("the Solana transaction failed");
     }
     let attested = Message::new(message).map_err(|_| "the message is too short")?;
     let signed = SignedV0::parse(&tx.wire).map_err(|_| "the Solana transaction does not read")?;
-    let parsed = V0Message::parse(signed.message).map_err(|_| "the Solana transaction is not v0")?;
+    let parsed =
+        V0Message::parse(signed.message).map_err(|_| "the Solana transaction is not v0")?;
     let envelope = attested.hook();
 
     for (position, ix) in parsed.instructions.iter().enumerate() {
@@ -62,7 +69,8 @@ pub fn proves(tx: &LandedTx, message: &[u8], a: &SwapicAddresses, needed: TokenA
             .find(|(index, _)| *index as usize == position)
             .ok_or("the program's instruction has no inner instructions")?;
         let matched = inner.1.iter().any(|(_, data)| {
-            DepositForBurnEvent::parse(data).is_some_and(|event| event_matches(&event, &attested, a))
+            DepositForBurnEvent::parse(data)
+                .is_some_and(|event| event_matches(&event, &attested, a))
         });
         if !matched {
             return Err("CCTP's burn event does not match the attested message");
@@ -74,13 +82,21 @@ pub fn proves(tx: &LandedTx, message: &[u8], a: &SwapicAddresses, needed: TokenA
         if TokenAmount::from(args.fee as u64) < owed {
             return Err("the burn paid less than the arrival's least network fee");
         }
-        return Ok(Proved { r#ref, fee: args.fee as u64, float: args.float });
+        return Ok(Proved {
+            r#ref,
+            fee: args.fee as u64,
+            float: args.float,
+        });
     }
     Err("the program did not burn this message in the transaction")
 }
 
 /// Every field the burn determined is the same in CCTP's own event and in the attested message.
-fn event_matches(event: &DepositForBurnEvent<'_>, message: &Message<'_>, a: &SwapicAddresses) -> bool {
+fn event_matches(
+    event: &DepositForBurnEvent<'_>,
+    message: &Message<'_>,
+    a: &SwapicAddresses,
+) -> bool {
     event.burn_token == &USDC_MINT
         && event.burn_token == message.burn_token()
         && a.auth_index(event.depositor).is_some()

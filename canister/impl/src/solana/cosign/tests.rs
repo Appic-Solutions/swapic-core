@@ -1,12 +1,12 @@
 //! Every attack of design 8b becomes a refusal here.
 
 use super::*;
+use crate::solana::config_for_tests as solana_config;
 use swapic_solana_wire::args::{BurnArgs, Payload, RefSource, TAG_BURN, TAG_RELEASE};
 use swapic_solana_wire::consts::*;
 use swapic_solana_wire::instructions as ixs;
 use swapic_solana_wire::message::{compile_v0, wire_v0, AccountMeta, Instruction, LookupTable};
 use swapic_solana_wire::pda::SwapicAddresses;
-use crate::solana::config_for_tests as solana_config;
 use types::config::PerAction;
 
 const NOW: u64 = 1_800_000_000;
@@ -72,7 +72,10 @@ impl Good {
             ref_source: RefSource::Direct(&[5; 32]),
             deadline: self.deadline,
             recipient: &self.recipient,
-            payload: Payload::Swap { token_out: &self.token_out, min_out: &[1, 2, 3] },
+            payload: Payload::Swap {
+                token_out: &self.token_out,
+                min_out: &[1, 2, 3],
+            },
             min_gas: 700_000,
             max_fee_deci_bps: self.max_fee_deci_bps,
             amount: self.amount,
@@ -90,7 +93,10 @@ fn burn_ix(a: &SwapicAddresses, data: Vec<u8>) -> Instruction {
 }
 
 fn wire_of(a: &SwapicAddresses, payer: &[u8; 32], instructions: &[Instruction]) -> Vec<u8> {
-    let table = LookupTable { address: [77; 32], entries: ixs::swapic_table_entries(a) };
+    let table = LookupTable {
+        address: [77; 32],
+        entries: ixs::swapic_table_entries(a),
+    };
     let message = compile_v0(payer, instructions, &[table], &[7; 32]).unwrap();
     let signatures = vec![[1u8; 64]; message.header.required_signatures as usize];
     wire_v0(&signatures, &message.encode())
@@ -113,7 +119,10 @@ fn run(a: &SwapicAddresses, config: &SolanaConfig, wire: &[u8]) -> Result<Passed
 }
 
 fn budget() -> [Instruction; 2] {
-    [ixs::compute_unit_limit(200_000), ixs::compute_unit_price(1_000)]
+    [
+        ixs::compute_unit_limit(200_000),
+        ixs::compute_unit_price(1_000),
+    ]
 }
 
 fn refused_with(good: Good, want: &str) {
@@ -128,11 +137,18 @@ fn refused_with(good: Good, want: &str) {
 fn a_good_gasless_burn_passes_and_names_its_parties() {
     let a = addresses();
     let [limit, price] = budget();
-    let wire = wire_of(&a, &a.canister, &[limit, price, burn_ix(&a, Good::new().data())]);
+    let wire = wire_of(
+        &a,
+        &a.canister,
+        &[limit, price, burn_ix(&a, Good::new().data())],
+    );
     let passed = run(&a, &solana_config(), &wire).unwrap();
     assert_eq!(passed.user, USER);
     assert_eq!(passed.r#ref, [5; 32]);
-    assert_eq!(passed.parties, vec![Party::Solana(USER), Party::Evm(EvmAddress::new(RECIPIENT))]);
+    assert_eq!(
+        passed.parties,
+        vec![Party::Solana(USER), Party::Evm(EvmAddress::new(RECIPIENT))]
+    );
     assert_eq!(passed.signers, vec![USER]);
 }
 
@@ -141,8 +157,14 @@ fn a_system_transfer_from_the_canister_is_refused() {
     let a = addresses();
     let [limit, price] = budget();
     let drain = ixs::system_transfer(&a.canister, &[66; 32], 1_000_000);
-    let wire = wire_of(&a, &a.canister, &[limit, price, burn_ix(&a, Good::new().data()), drain]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("does not allow"));
+    let wire = wire_of(
+        &a,
+        &a.canister,
+        &[limit, price, burn_ix(&a, Good::new().data()), drain],
+    );
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("does not allow"));
 }
 
 #[test]
@@ -150,7 +172,11 @@ fn an_account_opened_at_the_canisters_cost_is_refused() {
     let a = addresses();
     let [limit, price] = budget();
     let farm = ixs::create_ata_idempotent(&a.canister, &USER, &USDC_MINT, &TOKEN_PROGRAM);
-    let wire = wire_of(&a, &a.canister, &[limit, price, farm, burn_ix(&a, Good::new().data())]);
+    let wire = wire_of(
+        &a,
+        &a.canister,
+        &[limit, price, farm, burn_ix(&a, Good::new().data())],
+    );
     assert!(run(&a, &solana_config(), &wire).is_err());
 }
 
@@ -158,8 +184,19 @@ fn an_account_opened_at_the_canisters_cost_is_refused() {
 fn two_swapic_instructions_are_refused() {
     let a = addresses();
     let [limit, price] = budget();
-    let wire = wire_of(&a, &a.canister, &[limit, price, burn_ix(&a, Good::new().data()), burn_ix(&a, Good::new().data())]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("two Swapic"));
+    let wire = wire_of(
+        &a,
+        &a.canister,
+        &[
+            limit,
+            price,
+            burn_ix(&a, Good::new().data()),
+            burn_ix(&a, Good::new().data()),
+        ],
+    );
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("two Swapic"));
 }
 
 #[test]
@@ -169,7 +206,9 @@ fn a_complete_release_or_set_config_is_never_co_signed() {
     let mut ix = burn_ix(&a, Good::new().data());
     ix.data[0] = TAG_RELEASE;
     let wire = wire_of(&a, &a.canister, &[limit, price, ix]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("arguments"));
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("arguments"));
 
     // set_config needs the admin key anyway, and this door refuses its shape first
     let [limit, price] = budget();
@@ -183,7 +222,11 @@ fn a_complete_release_or_set_config_is_never_co_signed() {
         min_deadline_s: 1,
         max_deadline_s: 2,
     };
-    let wire = wire_of(&a, &a.canister, &[limit, price, ixs::set_config(&a, &config)]);
+    let wire = wire_of(
+        &a,
+        &a.canister,
+        &[limit, price, ixs::set_config(&a, &config)],
+    );
     assert!(run(&a, &solana_config(), &wire).is_err());
 }
 
@@ -192,7 +235,9 @@ fn the_fee_payer_must_be_the_payer_key() {
     let a = addresses();
     let [limit, price] = budget();
     let wire = wire_of(&a, &USER, &[limit, price, burn_ix(&a, Good::new().data())]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("fee payer"));
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("fee payer"));
 }
 
 #[test]
@@ -202,7 +247,9 @@ fn the_payer_key_named_outside_its_slot_is_refused() {
     let mut ix = burn_ix(&a, Good::new().data());
     ix.accounts.push(AccountMeta::readonly(a.canister));
     let wire = wire_of(&a, &a.canister, &[limit, price, ix]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("outside its slot"));
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("outside its slot"));
 }
 
 #[test]
@@ -212,7 +259,9 @@ fn a_burn_that_does_not_spend_the_float_is_refused() {
     good.float = false;
     let [limit, price] = budget();
     let wire = wire_of(&a, &a.canister, &[limit, price, burn_ix(&a, good.data())]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("float"));
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("float"));
 }
 
 #[test]
@@ -273,7 +322,11 @@ fn a_dear_compute_budget_is_refused() {
         let wire = wire_of(
             &a,
             &a.canister,
-            &[ixs::compute_unit_limit(limit), ixs::compute_unit_price(price), burn_ix(&a, Good::new().data())],
+            &[
+                ixs::compute_unit_limit(limit),
+                ixs::compute_unit_price(price),
+                burn_ix(&a, Good::new().data()),
+            ],
         );
         let why = run(&a, &config, &wire).unwrap_err();
         assert!(why.contains(want), "{why}");
@@ -284,9 +337,15 @@ fn a_dear_compute_budget_is_refused() {
 fn a_missing_budget_or_trailing_bytes_are_refused() {
     let a = addresses();
     let wire = wire_of(&a, &a.canister, &[burn_ix(&a, Good::new().data())]);
-    assert!(run(&a, &solana_config(), &wire).unwrap_err().contains("compute"));
+    assert!(run(&a, &solana_config(), &wire)
+        .unwrap_err()
+        .contains("compute"));
     let [limit, price] = budget();
-    let mut wire = wire_of(&a, &a.canister, &[limit, price, burn_ix(&a, Good::new().data())]);
+    let mut wire = wire_of(
+        &a,
+        &a.canister,
+        &[limit, price, burn_ix(&a, Good::new().data())],
+    );
     wire.push(0);
     assert!(run(&a, &solana_config(), &wire).is_err());
 }
@@ -302,8 +361,16 @@ fn the_signature_is_checked_for_real() {
     use ed25519_dalek::{Signer, SigningKey};
     let key = SigningKey::from_bytes(&[8; 32]);
     let signature = key.sign(b"a message").to_bytes();
-    assert!(verify(key.verifying_key().as_bytes(), b"a message", &signature));
-    assert!(!verify(key.verifying_key().as_bytes(), b"another", &signature));
+    assert!(verify(
+        key.verifying_key().as_bytes(),
+        b"a message",
+        &signature
+    ));
+    assert!(!verify(
+        key.verifying_key().as_bytes(),
+        b"another",
+        &signature
+    ));
     assert!(!verify(&[0xff; 32], b"a message", &signature));
 }
 
@@ -311,10 +378,14 @@ fn the_signature_is_checked_for_real() {
 fn the_limits_key_on_the_signer_and_the_failure_budget_serves_only_known_signers() {
     let config = solana_config();
     assert!(within_limits(&config, (false, false, 0), (0, 0)).is_ok());
-    assert!(within_limits(&config, (true, true, 0), (0, 0)).unwrap_err().contains("landed and failed"));
+    assert!(within_limits(&config, (true, true, 0), (0, 0))
+        .unwrap_err()
+        .contains("landed and failed"));
     assert!(within_limits(&config, (false, false, 10), (0, 0)).is_err());
     assert!(within_limits(&config, (false, false, 0), (300, 0)).is_err());
-    assert!(within_limits(&config, (false, false, 0), (0, 30)).unwrap_err().contains("failure budget"));
+    assert!(within_limits(&config, (false, false, 0), (0, 30))
+        .unwrap_err()
+        .contains("failure budget"));
     assert!(within_limits(&config, (false, true, 0), (0, 30)).is_ok());
 }
 

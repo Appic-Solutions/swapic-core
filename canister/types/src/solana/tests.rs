@@ -32,5 +32,8 @@ fn a_swap_arrival_always_pays_the_dearer_end() {
 fn every_key_fits_its_bound_and_keys_of_two_kinds_differ() {
     let longest = SolanaKey::cosign_by_signature(&[0xff; 64]);
     assert_eq!(longest.0.len(), 65);
-    assert_ne!(SolanaKey::complete_attempts(&[1; 32]), SolanaKey::release_attempts(&[1; 32]));
+    assert_ne!(
+        SolanaKey::complete_attempts(&[1; 32]),
+        SolanaKey::release_attempts(&[1; 32])
+    );
 }

@@ -28,7 +28,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         require(&a[1], &consts::CONFIG, SwapicError::WrongConfig)?;
         require(&a[2], &wire::SYSTEM_PROGRAM, SwapicError::WrongProgram)?;
         if !a[1].owned_by(&PROGRAM_ADDRESS) {
-            let seeds = [Seed::from(wire::SEED_CONFIG), Seed::from(core::slice::from_ref(&consts::CONFIG_BUMP))];
+            let seeds = [
+                Seed::from(wire::SEED_CONFIG),
+                Seed::from(core::slice::from_ref(&consts::CONFIG_BUMP)),
+            ];
             let signer = [Signer::from(&seeds)];
             let needed = Rent::get()?.try_minimum_balance(CONFIG_LEN)?;
             let missing = needed.saturating_sub(a[1].lamports());
@@ -39,7 +42,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
             system_assign(&a[1], &consts::PROGRAM_ID, &signer)?;
         }
     }
-    let config = Config { bump: consts::CONFIG_BUMP, ..incoming };
+    let config = Config {
+        bump: consts::CONFIG_BUMP,
+        ..incoming
+    };
     let mut stored = accounts[1].try_borrow_mut()?;
     if stored.len() != CONFIG_LEN {
         return Err(fail(SwapicError::WrongConfig));

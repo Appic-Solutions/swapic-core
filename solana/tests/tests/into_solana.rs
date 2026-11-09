@@ -18,7 +18,15 @@ fn canister(env: &Env) -> [u8; 32] {
 
 /// Sends `complete` as the canister and answers its failure code.
 fn refused(env: &mut Env, arrival: &Arrival, mode: u8, extra: &[AccountMeta]) -> u32 {
-    let ix = arrival.complete(env, &canister(env), &env.recipient_out.clone(), mode, OUT, MINTED / 2, extra);
+    let ix = arrival.complete(
+        env,
+        &canister(env),
+        &env.recipient_out.clone(),
+        mode,
+        OUT,
+        MINTED / 2,
+        extra,
+    );
     let payer = env.canister.insecure_clone();
     custom_code(env.send(&[ix], &payer, &[]))
 }
@@ -31,10 +39,22 @@ fn the_canister_completes_a_swap_and_the_recipient_gets_all_of_it() {
         let before = env.balance(&env.recipient_out);
         let vault_before = env.balance(&env.a.vault[shard]);
         let payer = env.canister.insecure_clone();
-        let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+        let ix = arrival.complete(
+            &env,
+            &canister(&env),
+            &env.recipient_out,
+            HONEST,
+            OUT,
+            0,
+            &[],
+        );
         let meta = env.send_ok(&[ix], &payer, &[]);
         assert_eq!(env.balance(&env.recipient_out) - before, OUT);
-        assert_eq!(env.balance(&env.a.vault[shard]), vault_before, "the vault is back at its baseline");
+        assert_eq!(
+            env.balance(&env.a.vault[shard]),
+            vault_before,
+            "the vault is back at its baseline"
+        );
         assert!(env.exists(&pda::used_nonce(&arrival.nonce)));
         let own = own_compute(&meta.logs, &env.a.program);
         println!("own compute {own}");
@@ -47,7 +67,15 @@ fn the_recipient_may_submit_their_own_complete() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "self", 1, |_| {});
     let recipient = env.recipient.insecure_clone();
-    let ix = arrival.complete(&env, &pubkey_of(&recipient), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &pubkey_of(&recipient),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     env.send_ok(&[ix], &recipient, &[]);
     assert_eq!(env.balance(&env.recipient_out), OUT);
 }
@@ -78,7 +106,10 @@ fn a_native_arrival_may_close_wsol_and_its_rent_is_not_counted_as_output() {
     });
     let payer = env.canister.insecure_clone();
     let ix = arrival.complete_native(&env, &canister(&env), NATIVE_CLOSING, OUT);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BelowMinOut.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BelowMinOut.code()
+    );
 
     let arrival = Arrival::new(&env, "native-close-2", 2, |h| {
         h.mint_out = WSOL_MINT;
@@ -93,7 +124,15 @@ fn a_native_arrival_may_close_wsol_and_its_rent_is_not_counted_as_output() {
 
     // the shard keeps working while it is closed: the next token arrival does not need it open
     let arrival = Arrival::new(&env, "after-close", 2, |_| {});
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     env.send_ok(&[ix], &payer, &[]);
 
     // and the idempotent create before the next native arrival brings it back
@@ -101,7 +140,12 @@ fn a_native_arrival_may_close_wsol_and_its_rent_is_not_counted_as_output() {
         h.mint_out = WSOL_MINT;
         h.min_out = OUT;
     });
-    let create = instructions::create_ata_idempotent(&canister(&env), &env.a.auth[2].0, &WSOL_MINT, &TOKEN_PROGRAM);
+    let create = instructions::create_ata_idempotent(
+        &canister(&env),
+        &env.a.auth[2].0,
+        &WSOL_MINT,
+        &TOKEN_PROGRAM,
+    );
     let ix = arrival.complete_native(&env, &canister(&env), NATIVE_CLOSING, OUT);
     env.send_ok(&[create, ix], &payer, &[]);
 }
@@ -111,7 +155,12 @@ fn a_token_arrival_may_not_close_wsol() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "close-wsol", 0, |_| {});
     let wsol = env.a.wsol[0];
-    let code = refused(&mut env, &arrival, CLOSE_WSOL, &[AccountMeta::writable(wsol)]);
+    let code = refused(
+        &mut env,
+        &arrival,
+        CLOSE_WSOL,
+        &[AccountMeta::writable(wsol)],
+    );
     assert_eq!(code, E::WsolState.code());
 }
 
@@ -143,7 +192,15 @@ fn a_donation_to_auth_stops_nothing() {
     env.fund(&auth, 10_000_000);
     let payer = env.canister.insecure_clone();
     let arrival = Arrival::new(&env, "donated", 3, |_| {});
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     env.send_ok(&[ix], &payer, &[]);
     let arrival = Arrival::new(&env, "donated-release", 3, |_| {});
     let ix = arrival.release(&env, &canister(&env), 3, 3, &env.recipient_usdc);
@@ -159,7 +216,15 @@ fn a_donation_to_a_vault_is_never_spent_or_counted() {
     env.put_token(&vault, &USDC_MINT, &auth, 777);
     let payer = env.canister.insecure_clone();
     let arrival = Arrival::new(&env, "donated-vault", 1, |_| {});
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     env.send_ok(&[ix], &payer, &[]);
     assert_eq!(env.balance(&vault), 777);
 }
@@ -168,12 +233,29 @@ fn a_donation_to_a_vault_is_never_spent_or_counted() {
 fn all_or_nothing_holds_against_a_short_or_partial_route() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "nothing", 0, |_| {});
-    assert_eq!(refused(&mut env, &arrival, NOTHING, &[]), E::VaultNotAtBaseline.code());
-    assert_eq!(refused(&mut env, &arrival, SPEND_PART, &[]), E::VaultNotAtBaseline.code());
+    assert_eq!(
+        refused(&mut env, &arrival, NOTHING, &[]),
+        E::VaultNotAtBaseline.code()
+    );
+    assert_eq!(
+        refused(&mut env, &arrival, SPEND_PART, &[]),
+        E::VaultNotAtBaseline.code()
+    );
     // pays less than min_out
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, PAY_SHORT, OUT, MIN_OUT - 1, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        PAY_SHORT,
+        OUT,
+        MIN_OUT - 1,
+        &[],
+    );
     let payer = env.canister.insecure_clone();
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BelowMinOut.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BelowMinOut.code()
+    );
     // nothing moved
     assert_eq!(env.balance(&env.recipient_out), 0);
     assert!(!env.exists(&pda::used_nonce(&arrival.nonce)));
@@ -184,17 +266,53 @@ fn only_the_two_jupiter_routes_get_through() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "disc", 0, |_| {});
     let (_, token) = env.source();
-    let route = route_accounts(&env.a.auth[0].0, &env.a.vault[0], &env.recipient_out, &pubkey_of(&env.recipient), &env.pool_usdc, &env.pool_out, &env.pool, &[]);
-    let source = instructions::ArrivalSource { nonce: &arrival.nonce, source_domain: 6, source_token: &token };
+    let route = route_accounts(
+        &env.a.auth[0].0,
+        &env.a.vault[0],
+        &env.recipient_out,
+        &pubkey_of(&env.recipient),
+        &env.pool_usdc,
+        &env.pool_out,
+        &env.pool,
+        &[],
+    );
+    let source = instructions::ArrivalSource {
+        nonce: &arrival.nonce,
+        source_domain: 6,
+        source_token: &token,
+    };
     let payer = env.canister.insecure_clone();
-    for discriminator in [[229u8, 23, 203, 151, 122, 227, 173, 42], [193, 32, 155, 51, 65, 214, 156, 129], [0; 8]] {
+    for discriminator in [
+        [229u8, 23, 203, 151, 122, 227, 173, 42],
+        [193, 32, 155, 51, 65, 214, 156, 129],
+        [0; 8],
+    ] {
         let mut jupiter = route::data(MINTED, OUT, HONEST, 0);
         jupiter[..8].copy_from_slice(&discriminator);
-        let ix = instructions::complete(&env.a, &canister(&env), 0, &env.recipient_out, source, &route, arrival.complete_data(&jupiter));
-        assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::JupiterInstructionNotAllowed.code());
+        let ix = instructions::complete(
+            &env.a,
+            &canister(&env),
+            0,
+            &env.recipient_out,
+            source,
+            &route,
+            arrival.complete_data(&jupiter),
+        );
+        assert_eq!(
+            custom_code(env.send(&[ix], &payer, &[])),
+            E::JupiterInstructionNotAllowed.code()
+        );
     }
     // the shared form passes the check (the stand-in reads the same offsets)
-    let ix = instructions::complete(&env.a, &canister(&env), 0, &env.recipient_out, source, &route, arrival.complete_data(&route::shared(MINTED, OUT, HONEST)));
+    let ix = instructions::complete(
+        &env.a,
+        &canister(&env),
+        0,
+        &env.recipient_out,
+        source,
+        &route,
+        arrival.complete_data(&route::shared(MINTED, OUT, HONEST)),
+    );
     env.send_ok(&[ix], &payer, &[]);
 }
 
@@ -203,7 +321,19 @@ fn a_route_may_not_name_swapics_accounts() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "names", 0, |_| {});
     let a = env.a.clone();
-    let forbidden = [a.config.0, a.rent.0, a.canister, a.admin, a.program, MT, TMM, a.auth[1].0, a.vault[1], a.auth[3].0, a.vault[3]];
+    let forbidden = [
+        a.config.0,
+        a.rent.0,
+        a.canister,
+        a.admin,
+        a.program,
+        MT,
+        TMM,
+        a.auth[1].0,
+        a.vault[1],
+        a.auth[3].0,
+        a.vault[3],
+    ];
     for key in forbidden {
         let code = refused(&mut env, &arrival, HONEST, &[AccountMeta::readonly(key)]);
         assert_eq!(code, E::ForbiddenRouteAccount.code());
@@ -221,14 +351,23 @@ fn the_output_must_be_the_recipients_account_for_the_mint() {
     let stranger_key = pubkey_of(&env.stranger);
     env.put_token(&other, &env.mint_out.clone(), &stranger_key, 0);
     let ix = arrival.complete(&env, &can, &other, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadOutputAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadOutputAccount.code()
+    );
     // the recipient's account for another mint
     let ix = arrival.complete(&env, &can, &env.recipient_usdc, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadOutputAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadOutputAccount.code()
+    );
     // a native arrival names the wallet, and nothing else
     let native = Arrival::new(&env, "output-native", 0, |h| h.mint_out = WSOL_MINT);
     let ix = native.complete(&env, &can, &env.recipient_out, NATIVE_DIRECT, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadOutputAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadOutputAccount.code()
+    );
 }
 
 #[test]
@@ -236,8 +375,19 @@ fn only_the_canister_or_the_recipient_may_complete() {
     let mut env = Env::new();
     let arrival = Arrival::new(&env, "who", 0, |_| {});
     let stranger = env.stranger.insecure_clone();
-    let ix = arrival.complete(&env, &pubkey_of(&stranger), &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &stranger, &[])), E::NotCanisterOrRecipient.code());
+    let ix = arrival.complete(
+        &env,
+        &pubkey_of(&stranger),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
+    assert_eq!(
+        custom_code(env.send(&[ix], &stranger, &[])),
+        E::NotCanisterOrRecipient.code()
+    );
 }
 
 #[test]
@@ -249,9 +399,18 @@ fn complete_refuses_every_bad_hook_and_message() {
     let mut try_hook = |env: &mut Env, label: &str, change: fn(&mut SolanaEnvelope), want: E| {
         let arrival = Arrival::new(env, label, 0, change);
         let ix = arrival.complete(env, &can, &env.recipient_out.clone(), HONEST, OUT, 0, &[]);
-        assert_eq!(custom_code(env.send(&[ix], &payer, &[])), want.code(), "{label}");
+        assert_eq!(
+            custom_code(env.send(&[ix], &payer, &[])),
+            want.code(),
+            "{label}"
+        );
     };
-    try_hook(&mut env, "deliver", |h| h.action = SOLANA_ACTION_DELIVER, E::BadHook);
+    try_hook(
+        &mut env,
+        "deliver",
+        |h| h.action = SOLANA_ACTION_DELIVER,
+        E::BadHook,
+    );
     try_hook(&mut env, "usdc-out", |h| h.mint_out = USDC_MINT, E::BadHook);
     try_hook(&mut env, "zero-min", |h| h.min_out = 0, E::BadHook);
 
@@ -260,12 +419,18 @@ fn complete_refuses_every_bad_hook_and_message() {
     let hook = arrival.hook.encode();
     let short = Arrival::with_hook(&env, "short", 0, 0, &hook[..109], arrival.hook);
     let ix = short.complete(&env, &can, &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadMessageLength.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadMessageLength.code()
+    );
 
     // another shard's caller or vault
     let crossed = Arrival::with_hook(&env, "crossed", 1, 0, &arrival.hook.encode(), arrival.hook);
     let ix = crossed.complete(&env, &can, &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::NotForThisAuthOrVault.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::NotForThisAuthOrVault.code()
+    );
 
     // a message for another chain
     let nonce = hash("other-chain");
@@ -279,9 +444,18 @@ fn complete_refuses_every_bad_hook_and_message() {
         fee: FEE,
         hook: &arrival.hook.encode(),
     });
-    let wrong = Arrival { shard: 0, nonce, hook: arrival.hook, message, attestation };
+    let wrong = Arrival {
+        shard: 0,
+        nonce,
+        hook: arrival.hook,
+        message,
+        attestation,
+    };
     let ix = wrong.complete(&env, &can, &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadHeader.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadHeader.code()
+    );
 
     // a recipient that is one of the program's accounts
     let vault = env.a.vault[1];
@@ -291,7 +465,10 @@ fn complete_refuses_every_bad_hook_and_message() {
     hook.recipient = vault;
     let own = Arrival::with_hook(&env, "own-recipient", 0, 0, &hook.encode(), hook);
     let ix = own.complete(&env, &can, &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadRecipient.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadRecipient.code()
+    );
 }
 
 #[test]
@@ -300,12 +477,31 @@ fn complete_stops_at_the_deadline_and_under_a_pause() {
     let payer = env.canister.insecure_clone();
     let arrival = Arrival::new(&env, "deadline", 0, |_| {});
     env.warp(3601);
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::DeadlinePassed.code());
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::DeadlinePassed.code()
+    );
 
     let arrival = Arrival::new(&env, "paused", 0, |_| {});
     env.set_config(|c| c.paused = true);
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::Paused.code());
 }
 
@@ -314,10 +510,21 @@ fn a_message_lands_once_and_complete_then_release_cannot_both_pay() {
     let mut env = Env::new();
     let payer = env.canister.insecure_clone();
     let arrival = Arrival::new(&env, "once", 0, |_| {});
-    let ix = arrival.complete(&env, &canister(&env), &env.recipient_out, HONEST, OUT, 0, &[]);
+    let ix = arrival.complete(
+        &env,
+        &canister(&env),
+        &env.recipient_out,
+        HONEST,
+        OUT,
+        0,
+        &[],
+    );
     env.send_ok(&[ix], &payer, &[]);
     let ix = arrival.release(&env, &canister(&env), 0, 0, &env.recipient_usdc);
-    assert!(env.send(&[ix], &payer, &[]).is_err(), "CCTP's used_nonce stops a second receive");
+    assert!(
+        env.send(&[ix], &payer, &[]).is_err(),
+        "CCTP's used_nonce stops a second receive"
+    );
     assert_eq!(env.balance(&env.recipient_usdc), 0);
 }
 
@@ -328,11 +535,23 @@ fn a_token_2022_output_is_paid_and_measured() {
     let output = pubkey_of(&test_key("output-2022"));
     let pool_2022 = pubkey_of(&test_key("pool-2022"));
     let recipient = pubkey_of(&env.recipient);
-    let (lamports_mint, lamports_token) = (env.svm.minimum_balance_for_rent_exemption(82), env.svm.minimum_balance_for_rent_exemption(165));
+    let (lamports_mint, lamports_token) = (
+        env.svm.minimum_balance_for_rent_exemption(82),
+        env.svm.minimum_balance_for_rent_exemption(165),
+    );
     let owner = solana_address::Address::new_from_array(TOKEN_2022_PROGRAM);
     let put = |env: &mut Env, key: &[u8; 32], data: Vec<u8>, lamports: u64| {
         env.svm
-            .set_account(solana_address::Address::new_from_array(*key), solana_account::Account { lamports, data, owner, executable: false, rent_epoch: u64::MAX })
+            .set_account(
+                solana_address::Address::new_from_array(*key),
+                solana_account::Account {
+                    lamports,
+                    data,
+                    owner,
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                },
+            )
             .unwrap();
     };
     let mut mint_data = vec![0u8; 82];
@@ -340,16 +559,47 @@ fn a_token_2022_output_is_paid_and_measured() {
     mint_data[44] = 9;
     mint_data[45] = 1;
     put(&mut env, &mint, mint_data, lamports_mint);
-    put(&mut env, &output, token_account_bytes(&mint, &recipient, 0, None), lamports_token);
+    put(
+        &mut env,
+        &output,
+        token_account_bytes(&mint, &recipient, 0, None),
+        lamports_token,
+    );
     let pool = env.pool;
-    put(&mut env, &pool_2022, token_account_bytes(&mint, &pool, OUT * 2, None), lamports_token);
+    put(
+        &mut env,
+        &pool_2022,
+        token_account_bytes(&mint, &pool, OUT * 2, None),
+        lamports_token,
+    );
 
     let arrival = Arrival::new(&env, "t22", 0, |h| h.mint_out = mint);
     let (_, token) = env.source();
-    let mut route = route_accounts(&env.a.auth[0].0, &env.a.vault[0], &output, &recipient, &env.pool_usdc, &pool_2022, &env.pool, &[]);
+    let mut route = route_accounts(
+        &env.a.auth[0].0,
+        &env.a.vault[0],
+        &output,
+        &recipient,
+        &env.pool_usdc,
+        &pool_2022,
+        &env.pool,
+        &[],
+    );
     route.push(AccountMeta::readonly(TOKEN_2022_PROGRAM));
-    let source = instructions::ArrivalSource { nonce: &arrival.nonce, source_domain: 6, source_token: &token };
-    let ix = instructions::complete(&env.a, &canister(&env), 0, &output, source, &route, arrival.complete_data(&route::data(MINTED, OUT, PAY_2022, 0)));
+    let source = instructions::ArrivalSource {
+        nonce: &arrival.nonce,
+        source_domain: 6,
+        source_token: &token,
+    };
+    let ix = instructions::complete(
+        &env.a,
+        &canister(&env),
+        0,
+        &output,
+        source,
+        &route,
+        arrival.complete_data(&route::data(MINTED, OUT, PAY_2022, 0)),
+    );
     let payer = env.canister.insecure_clone();
     env.send_ok(&[ix], &payer, &[]);
     assert_eq!(env.balance(&output), OUT);
@@ -364,7 +614,10 @@ fn release_pays_all_the_usdc_to_the_recipient_before_the_deadline_only_for_them_
 
     let arrival = Arrival::new(&env, "rel-stranger", 0, |_| {});
     let ix = arrival.release(&env, &pubkey_of(&stranger), 0, 0, &env.recipient_usdc);
-    assert_eq!(custom_code(env.send(&[ix], &stranger, &[])), E::NotCanisterOrRecipient.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &stranger, &[])),
+        E::NotCanisterOrRecipient.code()
+    );
 
     let meta = {
         let ix = arrival.release(&env, &canister(&env), 0, 0, &env.recipient_usdc);
@@ -374,7 +627,7 @@ fn release_pays_all_the_usdc_to_the_recipient_before_the_deadline_only_for_them_
     assert_eq!(env.balance(&env.a.vault[0]), 0);
     let own = own_compute(&meta.logs, &env.a.program);
     println!("own compute {own}");
-        assert!(own <= 20_000, "own compute {own}");
+    assert!(own <= 20_000, "own compute {own}");
 
     let arrival = Arrival::new(&env, "rel-self", 1, |_| {});
     let ix = arrival.release(&env, &pubkey_of(&recipient), 1, 1, &env.recipient_usdc);
@@ -403,7 +656,10 @@ fn release_pays_only_the_recipients_own_usdc_account() {
     let stranger_key = pubkey_of(&env.stranger);
     env.put_token(&other, &USDC_MINT, &stranger_key, 0);
     let ix = arrival.release(&env, &canister(&env), 0, 0, &other);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadOutputAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadOutputAccount.code()
+    );
     // not created yet: a create may come first
     let fresh = pubkey_of(&test_key("fresh-recipient"));
     let mut hook = arrival.hook;
@@ -411,8 +667,12 @@ fn release_pays_only_the_recipients_own_usdc_account() {
     let arrival = Arrival::with_hook(&env, "rel-fresh", 0, 0, &hook.encode(), hook);
     let ata = pda::ata(&fresh, &USDC_MINT, &TOKEN_PROGRAM);
     let ix = arrival.release(&env, &canister(&env), 0, 0, &ata);
-    assert_eq!(custom_code(env.send(&[ix.clone()], &payer, &[])), E::BadOutputAccount.code());
-    let create = instructions::create_ata_idempotent(&canister(&env), &fresh, &USDC_MINT, &TOKEN_PROGRAM);
+    assert_eq!(
+        custom_code(env.send(&[ix.clone()], &payer, &[])),
+        E::BadOutputAccount.code()
+    );
+    let create =
+        instructions::create_ata_idempotent(&canister(&env), &fresh, &USDC_MINT, &TOKEN_PROGRAM);
     env.send_ok(&[create, ix], &payer, &[]);
     assert_eq!(env.balance(&ata), MINTED);
 }
@@ -447,9 +707,16 @@ fn a_message_complete_refuses_can_still_be_released() {
     let stranger = env.stranger.insecure_clone();
     let ix = unreadable.release(&env, &pubkey_of(&stranger), 0, 0, &fee);
     env.warp(10_000);
-    assert_eq!(custom_code(env.send(&[ix], &stranger, &[])), E::NotCanisterOrRecipient.code(), "even after any deadline");
+    assert_eq!(
+        custom_code(env.send(&[ix], &stranger, &[])),
+        E::NotCanisterOrRecipient.code(),
+        "even after any deadline"
+    );
     let ix = unreadable.release(&env, &can, 0, 0, &env.recipient_usdc);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::WrongFeeAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::WrongFeeAccount.code()
+    );
     let ix = unreadable.release(&env, &can, 0, 0, &fee);
     let meta = env.send_ok(&[ix], &payer, &[]);
     assert_eq!(env.balance(&fee), MINTED);
@@ -486,9 +753,18 @@ fn release_refuses_a_message_that_is_not_swapics() {
         fee: FEE,
         hook: &hook,
     });
-    let mut arrival = Arrival { shard: 0, nonce, hook: Arrival::new(&env, "x", 0, |_| {}).hook, message, attestation };
+    let mut arrival = Arrival {
+        shard: 0,
+        nonce,
+        hook: Arrival::new(&env, "x", 0, |_| {}).hook,
+        message,
+        attestation,
+    };
     let ix = arrival.release(&env, &canister(&env), 0, 0, &env.recipient_usdc);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::NotForThisAuthOrVault.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::NotForThisAuthOrVault.code()
+    );
     // a header version other than 1
     let (message, attestation) = env.craft(&MessageSpec {
         header_version: 2,
@@ -503,5 +779,8 @@ fn release_refuses_a_message_that_is_not_swapics() {
     arrival.message = message;
     arrival.attestation = attestation;
     let ix = arrival.release(&env, &canister(&env), 0, 0, &env.recipient_usdc);
-    assert_eq!(custom_code(env.send(&[ix], &payer, &[])), E::BadHeader.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &payer, &[])),
+        E::BadHeader.code()
+    );
 }

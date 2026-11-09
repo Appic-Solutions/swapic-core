@@ -12,7 +12,10 @@ use types::solana::SolanaProposal;
 /// The canister's two Solana addresses, or nothing before they are derived. World-readable.
 #[query]
 pub fn solana_addresses() -> Option<SolanaAddresses> {
-    solana_keys::get().map(|(payer, admin)| SolanaAddresses { payer: base58::encode(&payer), admin: base58::encode(&admin) })
+    solana_keys::get().map(|(payer, admin)| SolanaAddresses {
+        payer: base58::encode(&payer),
+        admin: base58::encode(&admin),
+    })
 }
 
 fn view(proposal: SolanaProposal) -> SolanaUpgradeView {
@@ -36,6 +39,10 @@ pub fn solana_live_upgrade() -> Option<SolanaUpgradeView> {
 /// What the co-sign limits have counted this hour.
 #[query]
 pub fn solana_budget() -> SolanaBudget {
-    let (cosigns_this_hour, failures_this_hour) = read_state(|state| state.solana_global(hour_of(now_s())));
-    SolanaBudget { cosigns_this_hour, failures_this_hour }
+    let (cosigns_this_hour, failures_this_hour) =
+        read_state(|state| state.solana_global(hour_of(now_s())));
+    SolanaBudget {
+        cosigns_this_hour,
+        failures_this_hour,
+    }
 }

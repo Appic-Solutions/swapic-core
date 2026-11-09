@@ -12,8 +12,8 @@ mod ops;
 mod pool;
 mod rebalance;
 mod rescue;
-mod solana;
 mod roles;
+mod solana;
 mod sweep;
 
 pub use books::*;
@@ -24,6 +24,6 @@ pub use ops::*;
 pub use pool::*;
 pub use rebalance::*;
 pub use rescue::*;
-pub use solana::*;
 pub use roles::*;
+pub use solana::*;
 pub use sweep::*;

@@ -7,11 +7,18 @@ use serde_json::Value;
 
 fn hex(s: &str) -> Vec<u8> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 fn samples() -> Vec<Value> {
-    serde_json::from_str::<Value>(include_str!("../../vectors/cctp_messages.json")).unwrap().as_array().unwrap().clone()
+    serde_json::from_str::<Value>(include_str!("../../vectors/cctp_messages.json"))
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 fn word_of(number: &str) -> [u8; 32] {
@@ -30,32 +37,58 @@ fn real_messages_read_as_iris_decoded_them() {
         let message = Message::new(&bytes).unwrap();
         let d = &v["decoded"];
         assert_eq!(message.header_version(), 1, "{}", v["name"]);
-        assert_eq!(message.source_domain().to_string(), d["sourceDomain"].as_str().unwrap());
-        assert_eq!(message.destination_domain().to_string(), d["destinationDomain"].as_str().unwrap());
-        assert_eq!(message.nonce().as_slice(), hex(d["nonce"].as_str().unwrap()));
+        assert_eq!(
+            message.source_domain().to_string(),
+            d["sourceDomain"].as_str().unwrap()
+        );
+        assert_eq!(
+            message.destination_domain().to_string(),
+            d["destinationDomain"].as_str().unwrap()
+        );
+        assert_eq!(
+            message.nonce().as_slice(),
+            hex(d["nonce"].as_str().unwrap())
+        );
         assert_eq!(message.body_version(), 1);
         let b = &v["body"];
-        assert_eq!(message.amount_word(), &word_of(b["amount"].as_str().unwrap()));
-        assert_eq!(message.fee_executed_word(), &word_of(b["feeExecuted"].as_str().unwrap()));
-        assert_eq!(message.max_fee_word(), &word_of(b["maxFee"].as_str().unwrap()));
+        assert_eq!(
+            message.amount_word(),
+            &word_of(b["amount"].as_str().unwrap())
+        );
+        assert_eq!(
+            message.fee_executed_word(),
+            &word_of(b["feeExecuted"].as_str().unwrap())
+        );
+        assert_eq!(
+            message.max_fee_word(),
+            &word_of(b["maxFee"].as_str().unwrap())
+        );
     }
 }
 
 #[test]
 fn a_real_forwarder_message_carries_the_long_hook_form() {
     use crate::envelope::ForwarderHook;
-    let v = samples().into_iter().find(|v| v["name"] == "evm_to_sol_forwarded_ata_flag_33").unwrap();
+    let v = samples()
+        .into_iter()
+        .find(|v| v["name"] == "evm_to_sol_forwarded_ata_flag_33")
+        .unwrap();
     let bytes = hex(v["message"].as_str().unwrap());
     let message = Message::new(&bytes).unwrap();
     assert_eq!(message.hook().len(), 65);
-    assert!(matches!(ForwarderHook::parse(message.hook()), Some(ForwarderHook::CreateFor(_))));
+    assert!(matches!(
+        ForwarderHook::parse(message.hook()),
+        Some(ForwarderHook::CreateFor(_))
+    ));
 }
 
 #[test]
 fn a_real_burn_event_matches_its_attested_message_field_by_field() {
     let mut seen = 0;
     for v in samples() {
-        let Some(event) = v["deposit_for_burn_event"].as_str() else { continue };
+        let Some(event) = v["deposit_for_burn_event"].as_str() else {
+            continue;
+        };
         let data = hex(event);
         let parsed = DepositForBurnEvent::parse(&data).expect("a real event parses");
         let bytes = hex(v["message"].as_str().unwrap());
@@ -76,7 +109,10 @@ fn a_real_burn_event_matches_its_attested_message_field_by_field() {
 
 #[test]
 fn a_burn_event_of_another_kind_or_length_is_refused() {
-    let v = samples().into_iter().find(|v| v["deposit_for_burn_event"].is_string()).unwrap();
+    let v = samples()
+        .into_iter()
+        .find(|v| v["deposit_for_burn_event"].is_string())
+        .unwrap();
     let mut data = hex(v["deposit_for_burn_event"].as_str().unwrap());
     assert!(DepositForBurnEvent::parse(&data).is_some());
     data.push(0);
@@ -115,7 +151,10 @@ fn burn_data_is_the_measured_420_bytes_in_circle_s_order() {
 fn discriminators_are_anchor_s_hashes() {
     use sha2::{Digest, Sha256};
     let of = |name: &str| -> [u8; 8] { Sha256::digest(name.as_bytes())[..8].try_into().unwrap() };
-    assert_eq!(of("global:deposit_for_burn_with_hook"), DEPOSIT_FOR_BURN_WITH_HOOK);
+    assert_eq!(
+        of("global:deposit_for_burn_with_hook"),
+        DEPOSIT_FOR_BURN_WITH_HOOK
+    );
     assert_eq!(of("global:receive_message"), RECEIVE_MESSAGE);
     assert_eq!(of("global:reclaim_event_account"), RECLAIM_EVENT_ACCOUNT);
 }

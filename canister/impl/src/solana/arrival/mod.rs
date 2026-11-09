@@ -49,7 +49,8 @@ pub fn read_burn(
         if burn.destination_caller != &a.auth[shard].0 {
             return Err("a burn into the program is called by its vault's own auth");
         }
-        let hook = SolanaEnvelope::parse(burn.hook).map_err(|_| "the hook is not a Solana envelope")?;
+        let hook =
+            SolanaEnvelope::parse(burn.hook).map_err(|_| "the hook is not a Solana envelope")?;
         if hook.action != SOLANA_ACTION_SWAP {
             return Err("the hook's action is not a swap");
         }
@@ -113,15 +114,29 @@ pub fn read_route(
     }
     let most = MAX_TX_ACCOUNTS.saturating_sub(23 + 3 * create_accounts);
     if route.accounts.len() > most {
-        return Err(format!("the route names {} accounts, above {most}", route.accounts.len()));
+        return Err(format!(
+            "the route names {} accounts, above {most}",
+            route.accounts.len()
+        ));
     }
     let mut metas = Vec::with_capacity(route.accounts.len());
     for account in &route.accounts {
         let key = base58::decode_pubkey(&account.address).ok_or("a route account is not base58")?;
-        if key == a.canister || key == a.admin || key == a.config.0 || key == a.rent.0 || key == a.program || key == MT || key == TMM {
+        if key == a.canister
+            || key == a.admin
+            || key == a.config.0
+            || key == a.rent.0
+            || key == a.program
+            || key == MT
+            || key == TMM
+        {
             return Err("the route names an account of Swapic's or CCTP's".to_string());
         }
-        metas.push(AccountMeta { pubkey: key, signer: false, writable: account.writable });
+        metas.push(AccountMeta {
+            pubkey: key,
+            signer: false,
+            writable: account.writable,
+        });
     }
     Ok(metas)
 }
@@ -143,18 +158,54 @@ pub fn build_complete(
     token_2022: bool,
 ) -> Vec<Instruction> {
     let native = hook.mint_out == WSOL_MINT;
-    let token_program = if token_2022 { TOKEN_2022_PROGRAM } else { TOKEN_PROGRAM };
-    let output = if native { hook.recipient } else { pda::ata(&hook.recipient, &hook.mint_out, &token_program) };
+    let token_program = if token_2022 {
+        TOKEN_2022_PROGRAM
+    } else {
+        TOKEN_PROGRAM
+    };
+    let output = if native {
+        hook.recipient
+    } else {
+        pda::ata(&hook.recipient, &hook.mint_out, &token_program)
+    };
     let mut all = Vec::with_capacity(3);
     // a route may have closed it, and creating it again costs nothing when it is there (attack M3)
     if native {
-        all.push(instructions::create_ata_idempotent(&a.canister, &a.auth[shard].0, &WSOL_MINT, &TOKEN_PROGRAM));
+        all.push(instructions::create_ata_idempotent(
+            &a.canister,
+            &a.auth[shard].0,
+            &WSOL_MINT,
+            &TOKEN_PROGRAM,
+        ));
     } else if create_account {
-        all.push(instructions::create_ata_idempotent(&a.canister, &hook.recipient, &hook.mint_out, &token_program));
+        all.push(instructions::create_ata_idempotent(
+            &a.canister,
+            &hook.recipient,
+            &hook.mint_out,
+            &token_program,
+        ));
     }
-    let data = ArrivalArgs { tag: TAG_COMPLETE, message, attestation, jupiter: &route.data }.encode();
-    let source = ArrivalSource { nonce, source_domain, source_token };
-    all.push(instructions::complete(a, &a.canister, shard, &output, source, route_metas, data));
+    let data = ArrivalArgs {
+        tag: TAG_COMPLETE,
+        message,
+        attestation,
+        jupiter: &route.data,
+    }
+    .encode();
+    let source = ArrivalSource {
+        nonce,
+        source_domain,
+        source_token,
+    };
+    all.push(instructions::complete(
+        a,
+        &a.canister,
+        shard,
+        &output,
+        source,
+        route_metas,
+        data,
+    ));
     all
 }
 
@@ -172,25 +223,51 @@ pub fn build_release(
     attestation: &[u8],
     create_account: bool,
 ) -> Vec<Instruction> {
-    let data = ArrivalArgs { tag: TAG_RELEASE, message, attestation, jupiter: &[] }.encode();
-    let source = ArrivalSource { nonce, source_domain, source_token };
+    let data = ArrivalArgs {
+        tag: TAG_RELEASE,
+        message,
+        attestation,
+        jupiter: &[],
+    }
+    .encode();
+    let source = ArrivalSource {
+        nonce,
+        source_domain,
+        source_token,
+    };
     let mut all = Vec::with_capacity(2);
     let output = match recipient {
         Some(recipient) => {
             if create_account {
-                all.push(instructions::create_ata_idempotent(&a.canister, recipient, &USDC_MINT, &TOKEN_PROGRAM));
+                all.push(instructions::create_ata_idempotent(
+                    &a.canister,
+                    recipient,
+                    &USDC_MINT,
+                    &TOKEN_PROGRAM,
+                ));
             }
             pda::ata(recipient, &USDC_MINT, &TOKEN_PROGRAM)
         }
         None => a.fee_account,
     };
-    all.push(instructions::release(a, &a.canister, caller, vault, &output, source, data));
+    all.push(instructions::release(
+        a,
+        &a.canister,
+        caller,
+        vault,
+        &output,
+        source,
+        data,
+    ));
     all
 }
 
 /// The two shards a message names, and whether it reads as the program's: the caller's and the vault's.
 pub fn shards_of(message: &Message<'_>, a: &SwapicAddresses) -> Option<(usize, usize)> {
-    Some((a.auth_index(message.destination_caller())?, a.vault_index(message.mint_recipient())?))
+    Some((
+        a.auth_index(message.destination_caller())?,
+        a.vault_index(message.mint_recipient())?,
+    ))
 }
 
 /// The owner a 32-byte Forwarder hook's token account holds, read from Solana, when the order has such
@@ -204,7 +281,9 @@ pub async fn forward_owner_of(
         let Some(Ok(burn)) = types::swapic::CctpBurn::of_step(step, source.token_messenger) else {
             continue;
         };
-        if burn.destination_domain != SOLANA_DOMAIN || ForwarderHook::parse(&burn.hook_data) != Some(ForwarderHook::Existing) {
+        if burn.destination_domain != SOLANA_DOMAIN
+            || ForwarderHook::parse(&burn.hook_data) != Some(ForwarderHook::Existing)
+        {
             continue;
         }
         let account = super::rpc::account(d.config.sol_rpc, &burn.mint_recipient, Some(64), 1024)
@@ -213,7 +292,10 @@ pub async fn forward_owner_of(
         if account.data.get(..32) != Some(&USDC_MINT[..]) {
             return Err("the Forwarder's token account is not USDC".to_string());
         }
-        return Ok(account.data.get(32..64).and_then(|owner| owner.try_into().ok()));
+        return Ok(account
+            .data
+            .get(32..64)
+            .and_then(|owner| owner.try_into().ok()));
     }
     Ok(None)
 }

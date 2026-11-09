@@ -13,7 +13,12 @@ const STATE_INITIALIZED: u8 = 1;
 
 /// The account is an initialized classic token account of this mint and owner, with no delegate
 /// and no close authority.
-pub fn token_account_clean(view: &AccountView, mint: &Pubkey, owner: &Pubkey, error: SwapicError) -> ProgramResult {
+pub fn token_account_clean(
+    view: &AccountView,
+    mint: &Pubkey,
+    owner: &Pubkey,
+    error: SwapicError,
+) -> ProgramResult {
     if !view.owned_by(&TOKEN_ADDRESS) {
         return Err(fail(error));
     }
@@ -35,7 +40,10 @@ pub fn token_account_clean(view: &AccountView, mint: &Pubkey, owner: &Pubkey, er
 /// Its lamports are not required to be zero: anyone may send SOL to any address, and a shard must
 /// not be stopped by a donation of a third of a dollar.
 pub fn auth_clean(view: &AccountView, lamports_at_start: u64) -> ProgramResult {
-    if !view.owned_by(&SYSTEM_ADDRESS) || view.data_len() != 0 || view.lamports() != lamports_at_start {
+    if !view.owned_by(&SYSTEM_ADDRESS)
+        || view.data_len() != 0
+        || view.lamports() != lamports_at_start
+    {
         return Err(fail(SwapicError::AuthStateChanged));
     }
     Ok(())

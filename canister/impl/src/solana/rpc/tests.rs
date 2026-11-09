@@ -7,10 +7,18 @@ use candid::types::subtype::{subtype, Gamma};
 use candid::types::{internal::TypeContainer, Type, TypeEnv, TypeInner};
 use candid_parser::IDLProg;
 
-fn interface() -> (TypeEnv, candid::types::Function, Vec<(String, candid::types::Function)>) {
-    let prog: IDLProg = include_str!("sol_rpc.did").parse().expect("the interface parses");
+fn interface() -> (
+    TypeEnv,
+    candid::types::Function,
+    Vec<(String, candid::types::Function)>,
+) {
+    let prog: IDLProg = include_str!("sol_rpc.did")
+        .parse()
+        .expect("the interface parses");
     let mut env = TypeEnv::new();
-    let actor = candid_parser::check_prog(&mut env, &prog).expect("the interface checks").expect("a service");
+    let actor = candid_parser::check_prog(&mut env, &prog)
+        .expect("the interface checks")
+        .expect("a service");
     let service = env.as_service(&actor).expect("a service type");
     let methods: Vec<(String, candid::types::Function)> = service
         .iter()
@@ -21,7 +29,12 @@ fn interface() -> (TypeEnv, candid::types::Function, Vec<(String, candid::types:
 }
 
 fn method(methods: &[(String, candid::types::Function)], name: &str) -> candid::types::Function {
-    methods.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no method {name}")).1.clone()
+    methods
+        .iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("no method {name}"))
+        .1
+        .clone()
 }
 
 /// `T` as a type in its own environment, merged into `env`.
@@ -40,7 +53,8 @@ fn answer_decodes<T: CandidType>(method_name: &str) {
     let real = method(&methods, method_name).rets[0].clone();
     let mine = ours::<T>(&mut env);
     let mut gamma = Gamma::new();
-    subtype(&mut gamma, &env, &real, &mine).unwrap_or_else(|e| panic!("{method_name}'s answer does not decode into ours: {e}"));
+    subtype(&mut gamma, &env, &real, &mine)
+        .unwrap_or_else(|e| panic!("{method_name}'s answer does not decode into ours: {e}"));
 }
 
 fn request_accepted<T: CandidType>(method_name: &str, position: usize) {
@@ -48,7 +62,8 @@ fn request_accepted<T: CandidType>(method_name: &str, position: usize) {
     let real = method(&methods, method_name).args[position].clone();
     let mine = ours::<T>(&mut env);
     let mut gamma = Gamma::new();
-    subtype(&mut gamma, &env, &mine, &real).unwrap_or_else(|e| panic!("{method_name} does not take our argument {position}: {e}"));
+    subtype(&mut gamma, &env, &mine, &real)
+        .unwrap_or_else(|e| panic!("{method_name} does not take our argument {position}: {e}"));
 }
 
 #[test]

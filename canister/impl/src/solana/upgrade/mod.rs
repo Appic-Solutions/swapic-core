@@ -24,7 +24,10 @@ pub fn buffer_authority(data: &[u8]) -> Option<[u8; 32]> {
 /// The hash `solana-verify get-executable-hash` prints: sha256 of the program's bytes with the padding
 /// of trailing zeroes taken off.
 pub fn executable_hash(program: &[u8]) -> [u8; 32] {
-    let end = program.iter().rposition(|byte| *byte != 0).map_or(0, |at| at + 1);
+    let end = program
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |at| at + 1);
     super::sha256(&program[..end])
 }
 

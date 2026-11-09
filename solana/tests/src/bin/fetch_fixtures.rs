@@ -15,13 +15,19 @@ fn word(evm: &str) -> [u8; 32] {
 }
 
 fn run(args: &[&str]) {
-    let status = Command::new("solana").args(args).status().expect("the Solana CLI");
+    let status = Command::new("solana")
+        .args(args)
+        .status()
+        .expect("the Solana CLI");
     assert!(status.success(), "solana {args:?}");
 }
 
 fn main() {
     std::fs::create_dir_all("fixtures").unwrap();
-    for (name, program) in [("message_transmitter_v2", MT), ("token_messenger_minter_v2", TMM)] {
+    for (name, program) in [
+        ("message_transmitter_v2", MT),
+        ("token_messenger_minter_v2", TMM),
+    ] {
         let path = format!("fixtures/{name}.so");
         if !std::path::Path::new(&path).exists() {
             run(&["-um", "program", "dump", &encode(&program), &path]);
@@ -47,7 +53,15 @@ fn main() {
         let text = encode(&account);
         let path = format!("fixtures/{text}.json");
         if !std::path::Path::new(&path).exists() {
-            run(&["-um", "account", &text, "--output", "json-compact", "-o", &path]);
+            run(&[
+                "-um",
+                "account",
+                &text,
+                "--output",
+                "json-compact",
+                "-o",
+                &path,
+            ]);
         }
     }
 }

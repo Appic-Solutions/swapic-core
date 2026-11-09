@@ -8,13 +8,17 @@ use rand::RngCore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use swapic_solana_wire::args::{ArrivalArgs, BurnArgs, Config, Payload, RefSource, TAG_BURN, TAG_COMPLETE, TAG_RELEASE, TAG_SWAP_BURN};
+use swapic_solana_wire::args::{
+    ArrivalArgs, BurnArgs, Config, Payload, RefSource, TAG_BURN, TAG_COMPLETE, TAG_RELEASE,
+    TAG_SWAP_BURN,
+};
 use swapic_solana_wire::base58::{self, encode};
 use swapic_solana_wire::consts::*;
 use swapic_solana_wire::envelope::{SolanaEnvelope, SOLANA_ACTION_SWAP};
 use swapic_solana_wire::instructions::{self as ixs, ArrivalSource};
 use swapic_solana_wire::message::{
-    compile_v0, compile_v1, wire_v0, wire_v1, AccountMeta, Instruction, LookupTable, V1Config, MAX_TX_ACCOUNTS, MAX_V0_TX_BYTES, MAX_V1_TX_BYTES,
+    compile_v0, compile_v1, wire_v0, wire_v1, AccountMeta, Instruction, LookupTable, V1Config,
+    MAX_TX_ACCOUNTS, MAX_V0_TX_BYTES, MAX_V1_TX_BYTES,
 };
 use swapic_solana_wire::pda::{self, keccak256, SwapicAddresses};
 use swapic_solana_wire::Pubkey;
@@ -61,7 +65,9 @@ fn sign_message_v0(message: &[u8], signers: usize) -> Vec<u8> {
 impl Fork {
     fn call(&self, method: &str, params: Value) -> Value {
         let body = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
-        let reply = ureq::post(LOCAL).timeout(Duration::from_secs(120)).send_json(body);
+        let reply = ureq::post(LOCAL)
+            .timeout(Duration::from_secs(120))
+            .send_json(body);
         match reply {
             Ok(r) => r.into_json().expect("json"),
             Err(e) => panic!("{method}: {e}"),
@@ -82,12 +88,21 @@ impl Fork {
     }
 
     fn account(&self, key: &Pubkey) -> Option<(u64, Vec<u8>, Pubkey)> {
-        let v = self.result("getAccountInfo", json!([encode(key), {"encoding":"base64"}]));
+        let v = self.result(
+            "getAccountInfo",
+            json!([encode(key), {"encoding":"base64"}]),
+        );
         if v["value"].is_null() {
             return None;
         }
-        let data = base64::engine::general_purpose::STANDARD.decode(v["value"]["data"][0].as_str().unwrap()).unwrap();
-        Some((v["value"]["lamports"].as_u64().unwrap(), data, base58::decode_pubkey(v["value"]["owner"].as_str().unwrap()).unwrap()))
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(v["value"]["data"][0].as_str().unwrap())
+            .unwrap();
+        Some((
+            v["value"]["lamports"].as_u64().unwrap(),
+            data,
+            base58::decode_pubkey(v["value"]["owner"].as_str().unwrap()).unwrap(),
+        ))
     }
 
     fn lamports(&self, key: &Pubkey) -> u64 {
@@ -100,7 +115,10 @@ impl Fork {
     }
 
     fn set_lamports(&self, key: &Pubkey, lamports: u64) {
-        self.result("surfnet_setAccount", json!([encode(key), {"lamports": lamports}]));
+        self.result(
+            "surfnet_setAccount",
+            json!([encode(key), {"lamports": lamports}]),
+        );
     }
 
     fn now(&self) -> i64 {
@@ -109,12 +127,17 @@ impl Fork {
     }
 
     fn slot(&self) -> u64 {
-        self.result("getSlot", json!([{"commitment":"confirmed"}])).as_u64().unwrap()
+        self.result("getSlot", json!([{"commitment":"confirmed"}]))
+            .as_u64()
+            .unwrap()
     }
 
     fn send(&self, wire: &[u8]) -> Result<Landed, String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(wire);
-        let v = self.call("sendTransaction", json!([b64, {"encoding":"base64","skipPreflight":true,"maxRetries":0}]));
+        let v = self.call(
+            "sendTransaction",
+            json!([b64, {"encoding":"base64","skipPreflight":true,"maxRetries":0}]),
+        );
         if !v["error"].is_null() {
             return Err(v["error"].to_string());
         }
@@ -124,17 +147,37 @@ impl Fork {
             let t = self.result("getTransaction", json!([signature, {"encoding":"json","maxSupportedTransactionVersion":1,"commitment":"confirmed"}]));
             if !t.is_null() {
                 let meta = &t["meta"];
-                let logs = meta["logMessages"].as_array().map(|a| a.iter().map(|l| l.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
-                let err = if meta["err"].is_null() { None } else { Some(meta["err"].clone()) };
-                return Ok(Landed { err, cu: meta["computeUnitsConsumed"].as_u64().unwrap_or(0), logs });
+                let logs = meta["logMessages"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|l| l.as_str().unwrap_or("").to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let err = if meta["err"].is_null() {
+                    None
+                } else {
+                    Some(meta["err"].clone())
+                };
+                return Ok(Landed {
+                    err,
+                    cu: meta["computeUnitsConsumed"].as_u64().unwrap_or(0),
+                    logs,
+                });
             }
         }
         Err("no status in time".to_string())
     }
 
     fn v1(&self, payer: &Pubkey, instructions: &[Instruction]) -> Vec<u8> {
-        let config = V1Config { priority_lamports: 1000, compute_unit_limit: 1_400_000, loaded_data_limit: 64 * 1024 * 1024 };
-        let message = compile_v1(payer, instructions, &self.blockhash(), config).expect("compiled v1");
+        let config = V1Config {
+            priority_lamports: 1000,
+            compute_unit_limit: 1_400_000,
+            loaded_data_limit: 64 * 1024 * 1024,
+        };
+        let message =
+            compile_v1(payer, instructions, &self.blockhash(), config).expect("compiled v1");
         let mut signatures = vec![[0u8; 64]; message.header.required_signatures as usize];
         for s in &mut signatures {
             rand::thread_rng().fill_bytes(s);
@@ -157,14 +200,19 @@ impl Fork {
         std::thread::sleep(wait);
         for attempt in 0..4 {
             self.last_jupiter = std::time::Instant::now();
-            let mut request = ureq::get(&format!("{JUPITER_API}/build")).timeout(Duration::from_secs(30));
+            let mut request =
+                ureq::get(&format!("{JUPITER_API}/build")).timeout(Duration::from_secs(30));
             for (k, v) in query {
                 request = request.query(k, v);
             }
             match request.call() {
                 Ok(r) => return r.into_json().map_err(|e| e.to_string()),
-                Err(ureq::Error::Status(429, _)) => std::thread::sleep(Duration::from_secs(5 * (attempt + 1))),
-                Err(ureq::Error::Status(code, r)) => return Err(format!("{code}: {}", r.into_string().unwrap_or_default())),
+                Err(ureq::Error::Status(429, _)) => {
+                    std::thread::sleep(Duration::from_secs(5 * (attempt + 1)))
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    return Err(format!("{code}: {}", r.into_string().unwrap_or_default()))
+                }
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -200,9 +248,15 @@ fn route_of(build: &Value) -> (Vec<AccountMeta>, Vec<u8>) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|a| AccountMeta { pubkey: pubkey_text(&a["pubkey"]), signer: false, writable: a["isWritable"].as_bool().unwrap() })
+        .map(|a| AccountMeta {
+            pubkey: pubkey_text(&a["pubkey"]),
+            signer: false,
+            writable: a["isWritable"].as_bool().unwrap(),
+        })
         .collect();
-    let data = base64::engine::general_purpose::STANDARD.decode(swap["data"].as_str().unwrap()).unwrap();
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(swap["data"].as_str().unwrap())
+        .unwrap();
     (accounts, data)
 }
 
@@ -213,9 +267,15 @@ fn plain(ix: &Value) -> Instruction {
             .as_array()
             .unwrap()
             .iter()
-            .map(|a| AccountMeta { pubkey: pubkey_text(&a["pubkey"]), signer: a["isSigner"].as_bool().unwrap(), writable: a["isWritable"].as_bool().unwrap() })
+            .map(|a| AccountMeta {
+                pubkey: pubkey_text(&a["pubkey"]),
+                signer: a["isSigner"].as_bool().unwrap(),
+                writable: a["isWritable"].as_bool().unwrap(),
+            })
             .collect(),
-        data: base64::engine::general_purpose::STANDARD.decode(ix["data"].as_str().unwrap()).unwrap(),
+        data: base64::engine::general_purpose::STANDARD
+            .decode(ix["data"].as_str().unwrap())
+            .unwrap(),
     }
 }
 
@@ -226,7 +286,12 @@ fn tables_of(build: &Value) -> Vec<LookupTable> {
             o.iter()
                 .map(|(address, entries)| LookupTable {
                     address: base58::decode_pubkey(address).unwrap(),
-                    entries: entries.as_array().unwrap().iter().map(pubkey_text).collect(),
+                    entries: entries
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(pubkey_text)
+                        .collect(),
                 })
                 .collect()
         })
@@ -236,20 +301,46 @@ fn tables_of(build: &Value) -> Vec<LookupTable> {
 fn labels_of(build: &Value) -> Vec<String> {
     build["routePlan"]
         .as_array()
-        .map(|p| p.iter().map(|s| s["swapInfo"]["label"].as_str().unwrap_or("?").to_string()).collect())
+        .map(|p| {
+            p.iter()
+                .map(|s| s["swapInfo"]["label"].as_str().unwrap_or("?").to_string())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn setup_of(build: &Value) -> Vec<Value> {
     let mut out = Vec::new();
-    for (name, list) in [("setup", build["setupInstructions"].clone()), ("cleanup", json!([build["cleanupInstruction"].clone()])), ("other", build["otherInstructions"].clone())] {
+    for (name, list) in [
+        ("setup", build["setupInstructions"].clone()),
+        ("cleanup", json!([build["cleanupInstruction"].clone()])),
+        ("other", build["otherInstructions"].clone()),
+    ] {
         for ix in list.as_array().cloned().unwrap_or_default() {
             if ix.is_null() {
                 continue;
             }
-            let accounts: Vec<String> = ix["accounts"].as_array().unwrap().iter().map(|m| {
-                format!("{}{}{}", m["pubkey"].as_str().unwrap(), if m["isSigner"].as_bool().unwrap() { " s" } else { "" }, if m["isWritable"].as_bool().unwrap() { " w" } else { "" })
-            }).collect();
+            let accounts: Vec<String> = ix["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}{}{}",
+                        m["pubkey"].as_str().unwrap(),
+                        if m["isSigner"].as_bool().unwrap() {
+                            " s"
+                        } else {
+                            ""
+                        },
+                        if m["isWritable"].as_bool().unwrap() {
+                            " w"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect();
             out.push(json!({"kind": name, "program": ix["programId"], "accounts": accounts}));
         }
     }
@@ -261,9 +352,37 @@ fn swapic_in_route(a: &SwapicAddresses, build: &Value) -> Vec<String> {
     let mut hits = Vec::new();
     for (i, m) in swap["accounts"].as_array().unwrap().iter().enumerate() {
         let key = pubkey_text(&m["pubkey"]);
-        let name = if key == a.canister { Some("canister") } else if key == a.admin { Some("admin") } else if key == a.config.0 { Some("config") } else if key == a.rent.0 { Some("rent") } else if a.auth_index(&key).is_some() { Some("auth") } else if a.vault_index(&key).is_some() { Some("vault") } else if a.wsol.contains(&key) { Some("wsol") } else { None };
+        let name = if key == a.canister {
+            Some("canister")
+        } else if key == a.admin {
+            Some("admin")
+        } else if key == a.config.0 {
+            Some("config")
+        } else if key == a.rent.0 {
+            Some("rent")
+        } else if a.auth_index(&key).is_some() {
+            Some("auth")
+        } else if a.vault_index(&key).is_some() {
+            Some("vault")
+        } else if a.wsol.contains(&key) {
+            Some("wsol")
+        } else {
+            None
+        };
         if let Some(name) = name {
-            hits.push(format!("{i}:{name}{}{}", if m["isSigner"].as_bool().unwrap() { " s" } else { "" }, if m["isWritable"].as_bool().unwrap() { " w" } else { "" }));
+            hits.push(format!(
+                "{i}:{name}{}{}",
+                if m["isSigner"].as_bool().unwrap() {
+                    " s"
+                } else {
+                    ""
+                },
+                if m["isWritable"].as_bool().unwrap() {
+                    " w"
+                } else {
+                    ""
+                }
+            ));
         }
     }
     hits
@@ -285,7 +404,13 @@ struct OutCase<'a> {
     ck_principal: Option<&'a [u8; 32]>,
 }
 
-fn run_out(f: &mut Fork, a: &SwapicAddresses, table: &LookupTable, user: &Pubkey, case: &OutCase<'_>) {
+fn run_out(
+    f: &mut Fork,
+    a: &SwapicAddresses,
+    table: &LookupTable,
+    user: &Pubkey,
+    case: &OutCase<'_>,
+) {
     let mut outcome = json!({"case": case.label, "fits": false});
     for cap in [48, 40, 32] {
         let mut r = random_ref();
@@ -313,18 +438,36 @@ fn run_out(f: &mut Fork, a: &SwapicAddresses, table: &LookupTable, user: &Pubkey
         };
         let (mut route, jupiter) = route_of(&build);
         if jupiter[..8] == swapic_solana_wire::jupiter::ROUTE_V2 {
-            ixs::route_straight_to(&mut route, &pda::ata(user, &USDC_MINT, &TOKEN_PROGRAM), &vault);
+            ixs::route_straight_to(
+                &mut route,
+                &pda::ata(user, &USDC_MINT, &TOKEN_PROGRAM),
+                &vault,
+            );
             outcome["straight"] = json!(true);
         }
-        let min_usdc: u64 = build["otherAmountThreshold"].as_str().unwrap().parse().unwrap();
-        let domain = if case.ck_principal.is_some() { 0u8 } else { 6u8 };
+        let min_usdc: u64 = build["otherAmountThreshold"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let domain = if case.ck_principal.is_some() {
+            0u8
+        } else {
+            6u8
+        };
         let now = f.now();
         let token_out = [0x42u8; 20];
         let min_out = 1_000_000u64.to_be_bytes();
         let payload = match (case.memo, case.ck_principal) {
             (Some(_), _) => Payload::Deliver,
-            (_, Some(principal)) => Payload::CkDeposit { principal, subaccount: None },
-            _ => Payload::Swap { token_out: &token_out, min_out: &min_out },
+            (_, Some(principal)) => Payload::CkDeposit {
+                principal,
+                subaccount: None,
+            },
+            _ => Payload::Swap {
+                token_out: &token_out,
+                min_out: &min_out,
+            },
         };
         let ref_source = match case.memo {
             Some(memo) => RefSource::Memo(memo),
@@ -351,13 +494,25 @@ fn run_out(f: &mut Fork, a: &SwapicAddresses, table: &LookupTable, user: &Pubkey
         let swap = ixs::swap_burn(a, head, &route, args.encode());
 
         // the user's own wSOL setup and cleanup stay on a user-paid SOL swap; a gasless one has none
-        let mut all = vec![ixs::compute_unit_limit(600_000), ixs::compute_unit_price(1000)];
-        let setups = build["setupInstructions"].as_array().cloned().unwrap_or_default();
+        let mut all = vec![
+            ixs::compute_unit_limit(600_000),
+            ixs::compute_unit_price(1000),
+        ];
+        let setups = build["setupInstructions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let kept: Vec<Instruction> = setups
             .iter()
             .map(plain)
             // nothing in USDC is opened: the route pays the vault itself
-            .filter(|ix| !(ix.program == ATA_PROGRAM && ix.accounts.iter().any(|m| m.pubkey == vault || m.pubkey == USDC_MINT)))
+            .filter(|ix| {
+                !(ix.program == ATA_PROGRAM
+                    && ix
+                        .accounts
+                        .iter()
+                        .any(|m| m.pubkey == vault || m.pubkey == USDC_MINT))
+            })
             .collect();
         if case.gasless && !kept.is_empty() {
             outcome["gasless_refused_setup"] = json!(setup_of(&build));
@@ -386,7 +541,10 @@ fn run_out(f: &mut Fork, a: &SwapicAddresses, table: &LookupTable, user: &Pubkey
             outcome[format!("cap{cap}")] = json!({"size": size, "accounts": accounts});
             continue;
         }
-        let wire = sign_message_v0(&message.encode(), message.header.required_signatures as usize);
+        let wire = sign_message_v0(
+            &message.encode(),
+            message.header.required_signatures as usize,
+        );
         let vault_before = f.amount(&vault);
         let fee_before = f.amount(&a.fee_account);
         let landed = f.send(&wire);
@@ -401,12 +559,23 @@ fn run_out(f: &mut Fork, a: &SwapicAddresses, table: &LookupTable, user: &Pubkey
                 outcome["own_cu"] = json!(swapic_solana_tests::own_compute(&l.logs, &a.program));
                 outcome["err"] = json!(l.err);
                 if l.err.is_none() {
-                    assert_eq!(f.amount(&vault), vault_before, "{}: the vault is not at its baseline", case.label);
+                    assert_eq!(
+                        f.amount(&vault),
+                        vault_before,
+                        "{}: the vault is not at its baseline",
+                        case.label
+                    );
                     assert_eq!(f.amount(&a.fee_account) - fee_before, 50_000);
                     let (_, event_data, _) = f.account(&event).expect("the event account");
-                    assert_eq!(event_data.len(), 748, "{}: CCTP's event account", case.label);
+                    assert_eq!(
+                        event_data.len(),
+                        748,
+                        "{}: CCTP's event account",
+                        case.label
+                    );
                 } else {
-                    outcome["tail"] = json!(l.logs.iter().rev().take(6).cloned().collect::<Vec<_>>());
+                    outcome["tail"] =
+                        json!(l.logs.iter().rev().take(6).cloned().collect::<Vec<_>>());
                 }
             }
             Err(e) => outcome["send_error"] = json!(e),
@@ -466,7 +635,11 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
     let minted = ARRIVAL_AMOUNT - ARRIVAL_FEE;
     let mut outcome = json!({"case": case.label, "fits": false});
     let mint = base58::decode_pubkey(case.mint).unwrap();
-    let output = if case.native { *wallet } else { pda::ata(wallet, &mint, &case.token_program) };
+    let output = if case.native {
+        *wallet
+    } else {
+        pda::ata(wallet, &mint, &case.token_program)
+    };
     let source_token = {
         let mut w = [0u8; 32];
         w[12..].copy_from_slice(&swapic_solana_tests::BASE_USDC);
@@ -498,12 +671,20 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
         };
         let (mut route, jupiter) = route_of(&build);
         if !case.native && jupiter[..8] == swapic_solana_wire::jupiter::ROUTE_V2 {
-            ixs::route_straight_to(&mut route, &pda::ata(&a.auth[shard].0, &mint, &case.token_program), &output);
+            ixs::route_straight_to(
+                &mut route,
+                &pda::ata(&a.auth[shard].0, &mint, &case.token_program),
+                &output,
+            );
             outcome["straight"] = json!(true);
         }
         outcome["swapic_in_route"] = json!(swapic_in_route(a, &build));
         outcome["extra"] = json!(setup_of(&build));
-        let min_out: u64 = build["otherAmountThreshold"].as_str().unwrap().parse().unwrap();
+        let min_out: u64 = build["otherAmountThreshold"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
         let hook = SolanaEnvelope {
             ref_bytes: r,
             action: SOLANA_ACTION_SWAP,
@@ -513,19 +694,43 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
             min_out,
         };
         let (nonce, message, attestation) = craft(f, shard, a, &hook.encode());
-        let data = ArrivalArgs { tag: TAG_COMPLETE, message: &message, attestation: &attestation, jupiter: &jupiter }.encode();
-        let source = ArrivalSource { nonce: &nonce, source_domain: 6, source_token: &source_token };
+        let data = ArrivalArgs {
+            tag: TAG_COMPLETE,
+            message: &message,
+            attestation: &attestation,
+            jupiter: &jupiter,
+        }
+        .encode();
+        let source = ArrivalSource {
+            nonce: &nonce,
+            source_domain: 6,
+            source_token: &source_token,
+        };
         let complete = ixs::complete(a, &a.canister, shard, &output, source, &route, data);
 
         let mut all = Vec::new();
         if case.native {
-            all.push(ixs::create_ata_idempotent(&a.canister, &a.auth[shard].0, &WSOL_MINT, &TOKEN_PROGRAM));
+            all.push(ixs::create_ata_idempotent(
+                &a.canister,
+                &a.auth[shard].0,
+                &WSOL_MINT,
+                &TOKEN_PROGRAM,
+            ));
         } else {
-            all.push(ixs::create_ata_idempotent(&a.canister, wallet, &mint, &case.token_program));
+            all.push(ixs::create_ata_idempotent(
+                &a.canister,
+                wallet,
+                &mint,
+                &case.token_program,
+            ));
         }
         all.push(complete);
 
-        let config = V1Config { priority_lamports: 1000, compute_unit_limit: 1_400_000, loaded_data_limit: 64 * 1024 * 1024 };
+        let config = V1Config {
+            priority_lamports: 1000,
+            compute_unit_limit: 1_400_000,
+            loaded_data_limit: 64 * 1024 * 1024,
+        };
         let compiled = match compile_v1(&a.canister, &all, &f.blockhash(), config) {
             Ok(m) => m,
             Err(e) => {
@@ -544,7 +749,11 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
         }
         let wsol = a.wsol[shard];
         let wsol_rent_before = f.lamports(&wsol);
-        let out_before = if case.native { f.lamports(wallet) } else { f.account(&output).map(|_| f.amount(&output)).unwrap_or(0) };
+        let out_before = if case.native {
+            f.lamports(wallet)
+        } else {
+            f.account(&output).map(|_| f.amount(&output)).unwrap_or(0)
+        };
         let vault_before = f.amount(&a.vault[shard]);
         let landed = f.send(&wire);
         outcome["fits"] = json!(true);
@@ -559,8 +768,17 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
                 outcome["own_cu"] = json!(swapic_solana_tests::own_compute(&l.logs, &a.program));
                 outcome["err"] = json!(l.err);
                 if l.err.is_none() {
-                    assert_eq!(f.amount(&a.vault[shard]), vault_before, "{}: the vault is not at its baseline", case.label);
-                    let got = if case.native { f.lamports(wallet) - out_before } else { f.amount(&output) - out_before };
+                    assert_eq!(
+                        f.amount(&a.vault[shard]),
+                        vault_before,
+                        "{}: the vault is not at its baseline",
+                        case.label
+                    );
+                    let got = if case.native {
+                        f.lamports(wallet) - out_before
+                    } else {
+                        f.amount(&output) - out_before
+                    };
                     outcome["got"] = json!(got);
                     assert!(got >= min_out, "{}: {got} below {min_out}", case.label);
                     if case.native {
@@ -569,7 +787,8 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
                         outcome["wsol_lamports"] = json!([wsol_rent_before, f.lamports(&wsol)]);
                     }
                 } else {
-                    outcome["tail"] = json!(l.logs.iter().rev().take(6).cloned().collect::<Vec<_>>());
+                    outcome["tail"] =
+                        json!(l.logs.iter().rev().take(6).cloned().collect::<Vec<_>>());
                 }
             }
             Err(e) => outcome["send_error"] = json!(e),
@@ -581,8 +800,18 @@ fn run_arrival(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, case: &Arriva
 
 /// Jeff's question: can a `route_v2` arrival skip the lane's own account for the token? Takes the
 /// route Jupiter answered and points its output straight at the user's account.
-fn run_direct(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, label: &str, mint_text: &str, token_program: Pubkey, dexes: &str) {
-    use swapic_solana_wire::jupiter::{ROUTE_V2, ROUTE_V2_DESTINATION, ROUTE_V2_DESTINATION_OPTIONAL};
+fn run_direct(
+    f: &mut Fork,
+    a: &SwapicAddresses,
+    wallet: &Pubkey,
+    label: &str,
+    mint_text: &str,
+    token_program: Pubkey,
+    dexes: &str,
+) {
+    use swapic_solana_wire::jupiter::{
+        ROUTE_V2, ROUTE_V2_DESTINATION, ROUTE_V2_DESTINATION_OPTIONAL,
+    };
     let minted = ARRIVAL_AMOUNT - ARRIVAL_FEE;
     let mint = base58::decode_pubkey(mint_text).unwrap();
     let output = pda::ata(wallet, &mint, &token_program);
@@ -618,7 +847,10 @@ fn run_direct(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, label: &str, m
             continue;
         }
         let lane_account = pda::ata(&a.auth[shard].0, &mint, &token_program);
-        let before_rewrite: Vec<String> = route[..10].iter().map(|m| encode(&m.pubkey)[..6].to_string()).collect();
+        let before_rewrite: Vec<String> = route[..10]
+            .iter()
+            .map(|m| encode(&m.pubkey)[..6].to_string())
+            .collect();
         let mut swapped = 0;
         for meta in route.iter_mut() {
             if meta.pubkey == lane_account {
@@ -631,11 +863,32 @@ fn run_direct(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, label: &str, m
         if route[ROUTE_V2_DESTINATION_OPTIONAL].pubkey == output {
             route[ROUTE_V2_DESTINATION_OPTIONAL] = AccountMeta::readonly(JUPITER);
         }
-        let min_out: u64 = build["otherAmountThreshold"].as_str().unwrap().parse().unwrap();
-        let hook = SolanaEnvelope { ref_bytes: r, action: SOLANA_ACTION_SWAP, deadline: (f.now() + 3600) as u32, recipient: *wallet, mint_out: mint, min_out };
+        let min_out: u64 = build["otherAmountThreshold"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let hook = SolanaEnvelope {
+            ref_bytes: r,
+            action: SOLANA_ACTION_SWAP,
+            deadline: (f.now() + 3600) as u32,
+            recipient: *wallet,
+            mint_out: mint,
+            min_out,
+        };
         let (nonce, message, attestation) = craft(f, shard, a, &hook.encode());
-        let data = ArrivalArgs { tag: TAG_COMPLETE, message: &message, attestation: &attestation, jupiter: &jupiter }.encode();
-        let source = ArrivalSource { nonce: &nonce, source_domain: 6, source_token: &source_token };
+        let data = ArrivalArgs {
+            tag: TAG_COMPLETE,
+            message: &message,
+            attestation: &attestation,
+            jupiter: &jupiter,
+        }
+        .encode();
+        let source = ArrivalSource {
+            nonce: &nonce,
+            source_domain: 6,
+            source_token: &source_token,
+        };
         let complete = ixs::complete(a, &a.canister, shard, &output, source, &route, data);
         let create = ixs::create_ata_idempotent(&a.canister, wallet, &mint, &token_program);
         let wire = f.v1(&a.canister, &[create, complete]);
@@ -644,8 +897,17 @@ fn run_direct(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, label: &str, m
         let lane_exists = f.account(&lane_account).is_some();
         match landed {
             Ok(l) => {
-                let got = if l.err.is_none() { f.amount(&output) - before } else { 0 };
-                let fail = l.logs.iter().rev().find(|x| x.contains("failed") || x.contains("Error")).cloned();
+                let got = if l.err.is_none() {
+                    f.amount(&output) - before
+                } else {
+                    0
+                };
+                let fail = l
+                    .logs
+                    .iter()
+                    .rev()
+                    .find(|x| x.contains("failed") || x.contains("Error"))
+                    .cloned();
                 f.record(json!({"direct": label, "route": labels_of(&build), "swapped": swapped, "first_accounts": before_rewrite, "destination_slot_was": destination_was, "err": l.err, "got": got, "min_out": min_out, "lane_account_exists": lane_exists, "cu": l.cu, "fail": fail}));
                 if l.err.is_none() {
                     assert!(got >= min_out);
@@ -661,19 +923,47 @@ fn run_direct(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, label: &str, m
 fn run_release(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, stranger: &Pubkey) {
     let r = random_ref();
     let shard = shard_of(&r);
-    let hook = SolanaEnvelope { ref_bytes: r, action: SOLANA_ACTION_SWAP, deadline: (f.now() + 30) as u32, recipient: *wallet, mint_out: base58::decode_pubkey(BONK).unwrap(), min_out: 1 };
+    let hook = SolanaEnvelope {
+        ref_bytes: r,
+        action: SOLANA_ACTION_SWAP,
+        deadline: (f.now() + 30) as u32,
+        recipient: *wallet,
+        mint_out: base58::decode_pubkey(BONK).unwrap(),
+        min_out: 1,
+    };
     let (nonce, message, attestation) = craft(f, shard, a, &hook.encode());
-    let data = ArrivalArgs { tag: TAG_RELEASE, message: &message, attestation: &attestation, jupiter: &[] }.encode();
+    let data = ArrivalArgs {
+        tag: TAG_RELEASE,
+        message: &message,
+        attestation: &attestation,
+        jupiter: &[],
+    }
+    .encode();
     let token = {
         let mut w = [0u8; 32];
         w[12..].copy_from_slice(&swapic_solana_tests::BASE_USDC);
         w
     };
-    let source = ArrivalSource { nonce: &nonce, source_domain: 6, source_token: &token };
+    let source = ArrivalSource {
+        nonce: &nonce,
+        source_domain: 6,
+        source_token: &token,
+    };
     let usdc_ata = pda::ata(wallet, &USDC_MINT, &TOKEN_PROGRAM);
-    let release = ixs::release(a, &a.canister, shard, shard, &usdc_ata, source, data.clone());
+    let release = ixs::release(
+        a,
+        &a.canister,
+        shard,
+        shard,
+        &usdc_ata,
+        source,
+        data.clone(),
+    );
     let create = ixs::create_ata_idempotent(&a.canister, wallet, &USDC_MINT, &TOKEN_PROGRAM);
-    let before = f.account(&usdc_ata).map(|_| f.amount(&usdc_ata)).unwrap_or(0);
+    let before = f
+        .account(&usdc_ata)
+        .map(|_| f.amount(&usdc_ata))
+        .unwrap_or(0);
     let wire = f.v1(&a.canister, &[create, release]);
     let landed = f.send(&wire).expect("the release sends");
     let got = f.amount(&usdc_ata) - before;
@@ -684,10 +974,27 @@ fn run_release(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, stranger: &Pu
     // a stranger before the deadline is refused, after it is allowed
     let r = random_ref();
     let shard = shard_of(&r);
-    let hook = SolanaEnvelope { ref_bytes: r, action: SOLANA_ACTION_SWAP, deadline: (f.now() + 2) as u32, recipient: *wallet, mint_out: base58::decode_pubkey(BONK).unwrap(), min_out: 1 };
+    let hook = SolanaEnvelope {
+        ref_bytes: r,
+        action: SOLANA_ACTION_SWAP,
+        deadline: (f.now() + 2) as u32,
+        recipient: *wallet,
+        mint_out: base58::decode_pubkey(BONK).unwrap(),
+        min_out: 1,
+    };
     let (nonce, message, attestation) = craft(f, shard, a, &hook.encode());
-    let data = ArrivalArgs { tag: TAG_RELEASE, message: &message, attestation: &attestation, jupiter: &[] }.encode();
-    let source = ArrivalSource { nonce: &nonce, source_domain: 6, source_token: &token };
+    let data = ArrivalArgs {
+        tag: TAG_RELEASE,
+        message: &message,
+        attestation: &attestation,
+        jupiter: &[],
+    }
+    .encode();
+    let source = ArrivalSource {
+        nonce: &nonce,
+        source_domain: 6,
+        source_token: &token,
+    };
     std::thread::sleep(Duration::from_secs(4));
     let release = ixs::release(a, stranger, shard, shard, &usdc_ata, source, data);
     let wire = f.v1(stranger, &[release]);
@@ -699,7 +1006,10 @@ fn run_release(f: &mut Fork, a: &SwapicAddresses, wallet: &Pubkey, stranger: &Pu
 fn main() {
     let report = std::env::args().nth(1).expect("a report path");
     let only = std::env::args().nth(2).unwrap_or_default();
-    let so = format!("{}/../target/deploy/swapic_solana_program.so", env!("CARGO_MANIFEST_DIR"));
+    let so = format!(
+        "{}/../target/deploy/swapic_solana_program.so",
+        env!("CARGO_MANIFEST_DIR")
+    );
 
     let canister = key_of("swapic-test-canister");
     let admin = key_of("swapic-test-admin");
@@ -721,7 +1031,11 @@ fn main() {
         keccak256(&point.as_bytes()[1..])[12..].try_into().unwrap()
     };
     attesters.sort_by_key(address_of);
-    let mut f = Fork { last_jupiter: std::time::Instant::now() - Duration::from_secs(10), attesters, log: Vec::new() };
+    let mut f = Fork {
+        last_jupiter: std::time::Instant::now() - Duration::from_secs(10),
+        attesters,
+        log: Vec::new(),
+    };
 
     // the program, as the research placed it
     let bytes = std::fs::read(&so).expect("the program is built by fork/run.sh");
@@ -751,7 +1065,10 @@ fn main() {
     for chain in &SWAPIC_DOMAINS {
         let mut token = [0u8; 32];
         token[12..].copy_from_slice(&chain.usdc);
-        if f.account(&pda::remote_token_messenger(chain.domain)).is_none() || f.account(&pda::token_pair(chain.domain, &token)).is_none() {
+        if f.account(&pda::remote_token_messenger(chain.domain))
+            .is_none()
+            || f.account(&pda::token_pair(chain.domain, &token)).is_none()
+        {
             missing.push(chain.domain);
         }
     }
@@ -760,13 +1077,39 @@ fn main() {
     // the deploy session: accounts, config, table
     let mut setup: Vec<Instruction> = Vec::new();
     for shard in 0..SHARDS {
-        setup.push(ixs::create_ata_idempotent(&canister, &a.auth[shard].0, &USDC_MINT, &TOKEN_PROGRAM));
-        setup.push(ixs::create_ata_idempotent(&canister, &a.auth[shard].0, &WSOL_MINT, &TOKEN_PROGRAM));
+        setup.push(ixs::create_ata_idempotent(
+            &canister,
+            &a.auth[shard].0,
+            &USDC_MINT,
+            &TOKEN_PROGRAM,
+        ));
+        setup.push(ixs::create_ata_idempotent(
+            &canister,
+            &a.auth[shard].0,
+            &WSOL_MINT,
+            &TOKEN_PROGRAM,
+        ));
     }
-    setup.push(ixs::create_ata_idempotent(&canister, &admin, &USDC_MINT, &TOKEN_PROGRAM));
+    setup.push(ixs::create_ata_idempotent(
+        &canister,
+        &admin,
+        &USDC_MINT,
+        &TOKEN_PROGRAM,
+    ));
     f.must_land("the vaults", &canister, &setup);
-    let swap_domains = SWAPIC_DOMAINS.iter().fold(0u64, |mask, c| mask | 1 << c.domain);
-    let config = Config { paused: false, event_keypair_allowed: false, bump: 0, swap_domains, ck_domains: 1, min_burn: 1_000_000, min_deadline_s: 600, max_deadline_s: 7200 };
+    let swap_domains = SWAPIC_DOMAINS
+        .iter()
+        .fold(0u64, |mask, c| mask | 1 << c.domain);
+    let config = Config {
+        paused: false,
+        event_keypair_allowed: false,
+        bump: 0,
+        swap_domains,
+        ck_domains: 1,
+        min_burn: 1_000_000,
+        min_deadline_s: 600,
+        max_deadline_s: 7200,
+    };
     f.must_land("set_config", &admin, &[ixs::set_config(&a, &config)]);
 
     let slot = f.slot();
@@ -774,17 +1117,29 @@ fn main() {
     let entries = ixs::swapic_table_entries(&a);
     // the table program refuses instruction data over 1,232 bytes: two extends in the one transaction
     let mut table_ixs = vec![create];
-    table_ixs.extend(entries.chunks(30).map(|chunk| ixs::extend_lookup_table(&table_address, &admin, &admin, chunk)));
+    table_ixs.extend(
+        entries
+            .chunks(30)
+            .map(|chunk| ixs::extend_lookup_table(&table_address, &admin, &admin, chunk)),
+    );
     table_ixs.push(ixs::freeze_lookup_table(&table_address, &admin));
     let wire = f.v1(&admin, &table_ixs);
     let landed = f.send(&wire).expect("the table");
     f.record(json!({"table": encode(&table_address), "entries": entries.len(), "size": wire.len(), "err": landed.err, "cu": landed.cu}));
     assert!(landed.err.is_none(), "{}", landed.logs.join("\n"));
     std::thread::sleep(Duration::from_secs(2));
-    let table = LookupTable { address: table_address, entries };
+    let table = LookupTable {
+        address: table_address,
+        entries,
+    };
 
     // tokens for the user: amounts the fork's cheat code writes
-    for (mint, amount) in [(BONK, 400_000_000_000_000u64), (JUP, 50_000_000_000), (WIF, 80_000_000_000), (USDC, 5_000_000_000)] {
+    for (mint, amount) in [
+        (BONK, 400_000_000_000_000u64),
+        (JUP, 50_000_000_000),
+        (WIF, 80_000_000_000),
+        (USDC, 5_000_000_000),
+    ] {
         f.result(
             "surfnet_setTokenAccount",
             json!([encode(&user), mint, {"amount": amount, "state": "initialized"}, encode(&TOKEN_PROGRAM)]),
@@ -799,7 +1154,14 @@ fn main() {
             let r = random_ref();
             let shard = shard_of(&r);
             let mint_key = base58::decode_pubkey(mint).unwrap();
-            let hook = SolanaEnvelope { ref_bytes: r, action: SOLANA_ACTION_SWAP, deadline: (f.now() + 3600) as u32, recipient: wallet, mint_out: mint_key, min_out: 1 };
+            let hook = SolanaEnvelope {
+                ref_bytes: r,
+                action: SOLANA_ACTION_SWAP,
+                deadline: (f.now() + 3600) as u32,
+                recipient: wallet,
+                mint_out: mint_key,
+                min_out: 1,
+            };
             let (nonce, message, attestation) = craft(&f, shard, &a, &hook.encode());
             let hex_of = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
             crafted.push(json!({"label": label, "shard": shard, "mint": mint, "nonce": hex_of(&nonce), "message": hex_of(&message), "attestation": hex_of(&attestation)}));
@@ -822,15 +1184,78 @@ fn main() {
     let memo = [0x5au8; 180];
     let principal = [0x77u8; 32];
     let outs = [
-        OutCase { label: "out user pays SOL", mint: SOL, amount: "11160000000", gasless: false, memo: None, ck_principal: None },
-        OutCase { label: "out user pays BONK", mint: BONK, amount: "35700000000000", gasless: false, memo: None, ck_principal: None },
-        OutCase { label: "out user pays JUP", mint: JUP, amount: "4125783593", gasless: false, memo: None, ck_principal: None },
-        OutCase { label: "out user pays WIF", mint: WIF, amount: "6222118407", gasless: false, memo: None, ck_principal: None },
-        OutCase { label: "out gasless BONK", mint: BONK, amount: "35700000000000", gasless: true, memo: None, ck_principal: None },
-        OutCase { label: "out gasless JUP", mint: JUP, amount: "4125783593", gasless: true, memo: None, ck_principal: None },
-        OutCase { label: "out to ICP with the memo, user pays BONK", mint: BONK, amount: "35700000000000", gasless: false, memo: Some(&memo), ck_principal: None },
-        OutCase { label: "out to ICP with the memo, gasless JUP", mint: JUP, amount: "4125783593", gasless: true, memo: Some(&[0x5b; 180]), ck_principal: None },
-        OutCase { label: "out ck deposit to Ethereum, user pays BONK", mint: BONK, amount: "35700000000000", gasless: false, memo: None, ck_principal: Some(&principal) },
+        OutCase {
+            label: "out user pays SOL",
+            mint: SOL,
+            amount: "11160000000",
+            gasless: false,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out user pays BONK",
+            mint: BONK,
+            amount: "35700000000000",
+            gasless: false,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out user pays JUP",
+            mint: JUP,
+            amount: "4125783593",
+            gasless: false,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out user pays WIF",
+            mint: WIF,
+            amount: "6222118407",
+            gasless: false,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out gasless BONK",
+            mint: BONK,
+            amount: "35700000000000",
+            gasless: true,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out gasless JUP",
+            mint: JUP,
+            amount: "4125783593",
+            gasless: true,
+            memo: None,
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out to ICP with the memo, user pays BONK",
+            mint: BONK,
+            amount: "35700000000000",
+            gasless: false,
+            memo: Some(&memo),
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out to ICP with the memo, gasless JUP",
+            mint: JUP,
+            amount: "4125783593",
+            gasless: true,
+            memo: Some(&[0x5b; 180]),
+            ck_principal: None,
+        },
+        OutCase {
+            label: "out ck deposit to Ethereum, user pays BONK",
+            mint: BONK,
+            amount: "35700000000000",
+            gasless: false,
+            memo: None,
+            ck_principal: Some(&principal),
+        },
     ];
     for case in &outs {
         if want(case.label) {
@@ -860,28 +1285,77 @@ fn main() {
             jupiter: &[],
         };
         let head = ixs::burn_head(&a, &user, shard, 6, false, &event, false);
-        let ix = ixs::burn(&a, head, &pda::ata(&user, &USDC_MINT, &TOKEN_PROGRAM), args.encode());
-        let all = [ixs::compute_unit_limit(300_000), ixs::compute_unit_price(1000), ix];
-        let message = compile_v0(&user, &all, std::slice::from_ref(&table), &f.blockhash()).unwrap();
+        let ix = ixs::burn(
+            &a,
+            head,
+            &pda::ata(&user, &USDC_MINT, &TOKEN_PROGRAM),
+            args.encode(),
+        );
+        let all = [
+            ixs::compute_unit_limit(300_000),
+            ixs::compute_unit_price(1000),
+            ix,
+        ];
+        let message =
+            compile_v0(&user, &all, std::slice::from_ref(&table), &f.blockhash()).unwrap();
         let wire = sign_message_v0(&message.encode(), 1);
         let landed = f.send(&wire).expect("burn sends");
         f.record(json!({"case": "burn usdc, deliver to Base", "size": wire.len(), "accounts": message.total_accounts(), "err": landed.err, "cu": landed.cu, "own_cu": swapic_solana_tests::own_compute(&landed.logs, &a.program)}));
     }
 
     if want("direct") {
-        for dexes in ["Raydium CLMM,Whirlpool", "Meteora DLMM,Whirlpool", "Raydium CLMM,Meteora DLMM", "Raydium,Whirlpool", DEXES] {
-            run_direct(&mut f, &a, &wallet, "PYUSD", PYUSD, TOKEN_2022_PROGRAM, dexes);
+        for dexes in [
+            "Raydium CLMM,Whirlpool",
+            "Meteora DLMM,Whirlpool",
+            "Raydium CLMM,Meteora DLMM",
+            "Raydium,Whirlpool",
+            DEXES,
+        ] {
+            run_direct(
+                &mut f,
+                &a,
+                &wallet,
+                "PYUSD",
+                PYUSD,
+                TOKEN_2022_PROGRAM,
+                dexes,
+            );
             run_direct(&mut f, &a, &wallet, "BONK", BONK, TOKEN_PROGRAM, dexes);
             run_direct(&mut f, &a, &wallet, "JUP", JUP, TOKEN_PROGRAM, dexes);
             run_direct(&mut f, &a, &wallet, "WIF", WIF, TOKEN_PROGRAM, dexes);
         }
     }
     let arrivals = [
-        ArrivalCase { label: "arrival USDC to BONK", mint: BONK, token_program: TOKEN_PROGRAM, native: false },
-        ArrivalCase { label: "arrival USDC to JUP", mint: JUP, token_program: TOKEN_PROGRAM, native: false },
-        ArrivalCase { label: "arrival USDC to PYUSD (Token-2022)", mint: PYUSD, token_program: TOKEN_2022_PROGRAM, native: false },
-        ArrivalCase { label: "arrival USDC to native SOL", mint: SOL, token_program: TOKEN_PROGRAM, native: true },
-        ArrivalCase { label: "arrival USDC to native SOL again", mint: SOL, token_program: TOKEN_PROGRAM, native: true },
+        ArrivalCase {
+            label: "arrival USDC to BONK",
+            mint: BONK,
+            token_program: TOKEN_PROGRAM,
+            native: false,
+        },
+        ArrivalCase {
+            label: "arrival USDC to JUP",
+            mint: JUP,
+            token_program: TOKEN_PROGRAM,
+            native: false,
+        },
+        ArrivalCase {
+            label: "arrival USDC to PYUSD (Token-2022)",
+            mint: PYUSD,
+            token_program: TOKEN_2022_PROGRAM,
+            native: false,
+        },
+        ArrivalCase {
+            label: "arrival USDC to native SOL",
+            mint: SOL,
+            token_program: TOKEN_PROGRAM,
+            native: true,
+        },
+        ArrivalCase {
+            label: "arrival USDC to native SOL again",
+            mint: SOL,
+            token_program: TOKEN_PROGRAM,
+            native: true,
+        },
     ];
     for case in &arrivals {
         if want(case.label) {

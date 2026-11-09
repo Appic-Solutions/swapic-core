@@ -126,8 +126,14 @@ impl TryFrom<SolanaConfig> for types::solana::SolanaConfig {
             key_name: c.key_name,
             min_network_fee: SolanaFees {
                 gasless_burn: amount("gasless_burn", c.min_network_fee.gasless_burn)?,
-                complete_new_account: amount("complete_new_account", c.min_network_fee.complete_new_account)?,
-                release_new_account: amount("release_new_account", c.min_network_fee.release_new_account)?,
+                complete_new_account: amount(
+                    "complete_new_account",
+                    c.min_network_fee.complete_new_account,
+                )?,
+                release_new_account: amount(
+                    "release_new_account",
+                    c.min_network_fee.release_new_account,
+                )?,
                 forward_relay: amount("forward_relay", c.min_network_fee.forward_relay)?,
                 reclaim: amount("reclaim", c.min_network_fee.reclaim)?,
             },

@@ -1,6 +1,8 @@
 //! `swap_burn` (tag 1) and `burn` (tag 2): out of Solana, design 4.6.
 
-use crate::accounts::{is, key_of, now, read_config, require, require_top_level, shard_of, token_amount};
+use crate::accounts::{
+    is, key_of, now, read_config, require, require_top_level, shard_of, token_amount,
+};
 use crate::cctp::{deposit_for_burn, system_transfer, token_transfer, BurnAccounts};
 use crate::consts;
 use crate::fail;
@@ -27,7 +29,11 @@ fn keccak(memo: &[u8]) -> [u8; 32] {
         let parts = [memo];
         // SAFETY: the syscall reads a slice of slices and writes 32 bytes
         unsafe {
-            pinocchio::syscalls::sol_keccak256(parts.as_ptr() as *const u8, parts.len() as u64, out.as_mut_ptr());
+            pinocchio::syscalls::sol_keccak256(
+                parts.as_ptr() as *const u8,
+                parts.len() as u64,
+                out.as_mut_ptr(),
+            );
         }
     }
     #[cfg(not(target_os = "solana"))]
@@ -94,12 +100,17 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     }
     let clock = now()?;
     let deadline = args.deadline as i64;
-    if deadline < clock.saturating_add(config.min_deadline_s as i64) || deadline > clock.saturating_add(config.max_deadline_s as i64) {
+    if deadline < clock.saturating_add(config.min_deadline_s as i64)
+        || deadline > clock.saturating_add(config.max_deadline_s as i64)
+    {
         return Err(fail(SwapicError::DeadlineOutOfWindow));
     }
     let mut receiver_shaped = [0u8; 32];
     receiver_shaped[12..].copy_from_slice(args.recipient);
-    if receiver_shaped == consts::CCTP_RECEIVER || *args.recipient == consts::SWAPIC_EVM || *args.recipient == consts::RUNNER_EVM {
+    if receiver_shaped == consts::CCTP_RECEIVER
+        || *args.recipient == consts::SWAPIC_EVM
+        || *args.recipient == consts::RUNNER_EVM
+    {
         return Err(fail(SwapicError::BadRecipient));
     }
 
@@ -132,7 +143,13 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     if args.tag == TAG_SWAP_BURN {
         require(&a[TAIL], &wire::JUPITER, SwapicError::WrongProgram)?;
         let route = &a[ROUTE..];
-        jupiter::check_route(route, Way::Out { shard, event: key_of(&a[EVENT]) })?;
+        jupiter::check_route(
+            route,
+            Way::Out {
+                shard,
+                event: key_of(&a[EVENT]),
+            },
+        )?;
         jupiter::call(route, args.jupiter, key_of(&a[USER]), &[])?;
     } else {
         if a.len() != ROUTE {
@@ -141,7 +158,9 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         token_transfer(&a[TAIL], &a[VAULT], &a[USER], args.amount, &[])?;
     }
 
-    let produced = token_amount(&a[VAULT])?.checked_sub(vault_before).ok_or(fail(SwapicError::NothingProduced))?;
+    let produced = token_amount(&a[VAULT])?
+        .checked_sub(vault_before)
+        .ok_or(fail(SwapicError::NothingProduced))?;
     if produced == 0 {
         return Err(fail(SwapicError::NothingProduced));
     }
@@ -159,10 +178,20 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 
     let index = [shard as u8];
     let auth_bump = [consts::AUTH_BUMP[shard]];
-    let auth_seeds = [Seed::from(wire::SEED_AUTH), Seed::from(&index), Seed::from(&auth_bump)];
+    let auth_seeds = [
+        Seed::from(wire::SEED_AUTH),
+        Seed::from(&index),
+        Seed::from(&auth_bump),
+    ];
     let auth_signer = Signer::from(&auth_seeds);
     if fee > 0 {
-        token_transfer(&a[VAULT], &a[FEE_ACCOUNT], &a[AUTH], fee, core::slice::from_ref(&auth_signer))?;
+        token_transfer(
+            &a[VAULT],
+            &a[FEE_ACCOUNT],
+            &a[AUTH],
+            fee,
+            core::slice::from_ref(&auth_signer),
+        )?;
     }
 
     let max_fee = max_fee_of(amount, args.max_fee_deci_bps);
@@ -184,14 +213,25 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         mint_recipient: &mint_recipient,
         destination_caller: &destination_caller,
         max_fee,
-        min_finality: if args.fast { FINALITY_FAST } else { FINALITY_STANDARD },
+        min_finality: if args.fast {
+            FINALITY_FAST
+        } else {
+            FINALITY_STANDARD
+        },
         hook: &envelope,
     }
     .encode();
 
-    let rent_seeds = [Seed::from(wire::SEED_RENT), Seed::from(core::slice::from_ref(&consts::RENT_BUMP))];
+    let rent_seeds = [
+        Seed::from(wire::SEED_RENT),
+        Seed::from(core::slice::from_ref(&consts::RENT_BUMP)),
+    ];
     let event_bump_seed = [event_bump.unwrap_or(0)];
-    let event_seeds = [Seed::from(wire::SEED_EVENT), Seed::from(&ref_bytes), Seed::from(&event_bump_seed)];
+    let event_seeds = [
+        Seed::from(wire::SEED_EVENT),
+        Seed::from(&ref_bytes),
+        Seed::from(&event_bump_seed),
+    ];
     let burn_accounts = BurnAccounts {
         owner: &a[AUTH],
         rent_payer: &a[RENT],
@@ -211,7 +251,11 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         system_program: &a[SYSTEM],
         event_authority: &a[EVENT_AUTHORITY],
     };
-    let signers = [auth_signer, Signer::from(&rent_seeds), Signer::from(&event_seeds)];
+    let signers = [
+        auth_signer,
+        Signer::from(&rent_seeds),
+        Signer::from(&event_seeds),
+    ];
     let signer_count = if event_bump.is_some() { 3 } else { 2 };
     deposit_for_burn(&burn_accounts, &burn, &signers[..signer_count])?;
 
@@ -219,14 +263,26 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     if token_amount(&a[VAULT])? != vault_before {
         return Err(fail(SwapicError::VaultNotAtBaseline));
     }
-    token_account_clean(&a[VAULT], &wire::USDC_MINT, &consts::AUTH[shard], SwapicError::VaultStateChanged)?;
+    token_account_clean(
+        &a[VAULT],
+        &wire::USDC_MINT,
+        &consts::AUTH[shard],
+        SwapicError::VaultStateChanged,
+    )?;
     auth_clean(&a[AUTH], auth_lamports)?;
     // a change in CCTP's event size can never draw on the float without the canister (attack L6)
     if !args.float && a[RENT].lamports() < rent_before {
         return Err(fail(SwapicError::FloatDrawn));
     }
 
-    log::burned(&ref_bytes, args.domain, args.payload.action() as u8, produced, args.fee, amount);
+    log::burned(
+        &ref_bytes,
+        args.domain,
+        args.payload.action() as u8,
+        produced,
+        args.fee,
+        amount,
+    );
     Ok(())
 }
 
@@ -234,20 +290,52 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 #[inline(never)]
 fn check_pins(a: &[AccountView], shard: usize) -> ProgramResult {
     require(&a[CANISTER], &consts::CANISTER, SwapicError::WrongKey)?;
-    require(&a[FEE_ACCOUNT], &consts::FEE_ACCOUNT, SwapicError::WrongFeeAccount)?;
+    require(
+        &a[FEE_ACCOUNT],
+        &consts::FEE_ACCOUNT,
+        SwapicError::WrongFeeAccount,
+    )?;
     require(&a[RENT], &consts::RENT, SwapicError::WrongRent)?;
-    require(&a[SENDER_AUTHORITY], &wire::SENDER_AUTHORITY, SwapicError::WrongProgram)?;
-    require(&a[DENYLIST], &consts::DENYLIST[shard], SwapicError::WrongProgram)?;
-    require(&a[MESSAGE_TRANSMITTER], &wire::MESSAGE_TRANSMITTER, SwapicError::WrongProgram)?;
-    require(&a[TOKEN_MESSENGER], &wire::TOKEN_MESSENGER, SwapicError::WrongProgram)?;
-    require(&a[TOKEN_MINTER], &wire::TOKEN_MINTER, SwapicError::WrongProgram)?;
-    require(&a[LOCAL_TOKEN], &wire::LOCAL_TOKEN, SwapicError::WrongProgram)?;
+    require(
+        &a[SENDER_AUTHORITY],
+        &wire::SENDER_AUTHORITY,
+        SwapicError::WrongProgram,
+    )?;
+    require(
+        &a[DENYLIST],
+        &consts::DENYLIST[shard],
+        SwapicError::WrongProgram,
+    )?;
+    require(
+        &a[MESSAGE_TRANSMITTER],
+        &wire::MESSAGE_TRANSMITTER,
+        SwapicError::WrongProgram,
+    )?;
+    require(
+        &a[TOKEN_MESSENGER],
+        &wire::TOKEN_MESSENGER,
+        SwapicError::WrongProgram,
+    )?;
+    require(
+        &a[TOKEN_MINTER],
+        &wire::TOKEN_MINTER,
+        SwapicError::WrongProgram,
+    )?;
+    require(
+        &a[LOCAL_TOKEN],
+        &wire::LOCAL_TOKEN,
+        SwapicError::WrongProgram,
+    )?;
     require(&a[USDC], &wire::USDC_MINT, SwapicError::WrongProgram)?;
     require(&a[MT], &wire::MT, SwapicError::WrongProgram)?;
     require(&a[TMM], &wire::TMM, SwapicError::WrongProgram)?;
     require(&a[TOKEN], &wire::TOKEN_PROGRAM, SwapicError::WrongProgram)?;
     require(&a[SYSTEM], &wire::SYSTEM_PROGRAM, SwapicError::WrongProgram)?;
-    require(&a[EVENT_AUTHORITY], &wire::TMM_EVENT_AUTHORITY, SwapicError::WrongProgram)
+    require(
+        &a[EVENT_AUTHORITY],
+        &wire::TMM_EVENT_AUTHORITY,
+        SwapicError::WrongProgram,
+    )
 }
 
 /// The event account is the canonical PDA of the ref (answers its bump), or under the fallback a
@@ -267,7 +355,10 @@ fn check_event(
         }
         return Ok(None);
     }
-    let (expected, bump) = Address::find_program_address(&[wire::SEED_EVENT, ref_bytes], &crate::accounts::PROGRAM_ADDRESS);
+    let (expected, bump) = Address::find_program_address(
+        &[wire::SEED_EVENT, ref_bytes],
+        &crate::accounts::PROGRAM_ADDRESS,
+    );
     if !is(&a[EVENT], expected.as_array()) {
         return Err(fail(SwapicError::WrongEvent));
     }

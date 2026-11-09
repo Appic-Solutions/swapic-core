@@ -478,7 +478,10 @@ impl Storable for SolanaKey {
         Self(bytes.into_owned())
     }
 
-    const BOUND: Bound = Bound::Bounded { max_size: 65, is_fixed_size: false };
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 65,
+        is_fixed_size: false,
+    };
 }
 
 /// A value of the Solana fold. Only `Solana` lines write them.

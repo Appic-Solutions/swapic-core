@@ -48,7 +48,10 @@ impl<'a> Burn<'a> {
             max_fee_deci_bps: 13,
             recipient: env.evm_recipient,
             r: ref_on(shard, label),
-            payload: Payload::Swap { token_out: &[0x22; 20], min_out: &[0x0f, 0x42, 0x40] },
+            payload: Payload::Swap {
+                token_out: &[0x22; 20],
+                min_out: &[0x0f, 0x42, 0x40],
+            },
             min_gas: 709_154,
             ref_source: None,
         }
@@ -75,19 +78,41 @@ impl<'a> Burn<'a> {
 
     fn head(&self, env: &Env, event: &[u8; 32]) -> Vec<AccountMeta> {
         let shard = shard_of(&self.r);
-        instructions::burn_head(&env.a, &pubkey_of(&env.user), shard, self.domain as u32, self.float, event, self.event_keypair)
+        instructions::burn_head(
+            &env.a,
+            &pubkey_of(&env.user),
+            shard,
+            self.domain as u32,
+            self.float,
+            event,
+            self.event_keypair,
+        )
     }
 
     fn route(&self, env: &Env, extra: &[AccountMeta]) -> Vec<AccountMeta> {
         let shard = shard_of(&self.r);
-        route_accounts(&pubkey_of(&env.user), &env.user_in, &env.a.vault[shard], &env.a.vault[shard], &env.pool_in, &env.pool_usdc, &env.pool, extra)
+        route_accounts(
+            &pubkey_of(&env.user),
+            &env.user_in,
+            &env.a.vault[shard],
+            &env.a.vault[shard],
+            &env.pool_in,
+            &env.pool_usdc,
+            &env.pool,
+            extra,
+        )
     }
 
     fn swap_burn(&self, env: &Env, mode: u8, produced: u64, extra: &[AccountMeta]) -> Instruction {
         let event = env.a.event(&self.real_ref());
         let jupiter = route::data(IN, produced, mode, produced);
         let data = self.args(TAG_SWAP_BURN, self.min_usdc, &jupiter).encode();
-        instructions::swap_burn(&env.a, self.head(env, &event), &self.route(env, extra), data)
+        instructions::swap_burn(
+            &env.a,
+            self.head(env, &event),
+            &self.route(env, extra),
+            data,
+        )
     }
 
     fn burn(&self, env: &Env, amount: u64) -> Instruction {
@@ -130,7 +155,11 @@ fn a_user_paid_swap_burn_sends_all_it_produced_and_writes_the_right_message() {
         let event = env.a.event(&burn.r);
         let bytes = env.data(&event);
         assert_eq!(bytes.len(), EVENT_ACCOUNT_LEN as usize);
-        assert_eq!(&bytes[8..40], &env.a.rent.0, "the event's rent payer is the rent PDA");
+        assert_eq!(
+            &bytes[8..40],
+            &env.a.rent.0,
+            "the event's rent payer is the rent PDA"
+        );
         let message = message_of(&env, &event);
         assert_eq!(message.len(), 696, "the length CctpReceiver requires");
         let m = Message::new(&message).unwrap();
@@ -140,7 +169,10 @@ fn a_user_paid_swap_burn_sends_all_it_produced_and_writes_the_right_message() {
         assert_eq!(m.destination_caller(), &word(&CCTP_RECEIVER));
         assert_eq!(m.message_sender(), &env.a.auth[shard].0);
         assert_eq!(m.burn_token(), &USDC_MINT);
-        assert_eq!(swapic_solana_tests::wire::cctp::word_to_u64(m.amount_word()), Some(PRODUCED - NET_FEE as u64));
+        assert_eq!(
+            swapic_solana_tests::wire::cctp::word_to_u64(m.amount_word()),
+            Some(PRODUCED - NET_FEE as u64)
+        );
         let envelope = Envelope::parse(m.hook()).unwrap();
         assert_eq!(envelope.ref_bytes, burn.r);
         assert_eq!(envelope.action, Action::Swap);
@@ -150,11 +182,18 @@ fn a_user_paid_swap_burn_sends_all_it_produced_and_writes_the_right_message() {
         assert_eq!(envelope.min_gas, 709_154);
 
         assert_eq!(env.balance(&env.a.fee_account) - fee_before, NET_FEE as u64);
-        assert_eq!(env.balance(&env.a.vault[shard]), 0, "nothing rests in the vault");
+        assert_eq!(
+            env.balance(&env.a.vault[shard]),
+            0,
+            "nothing rests in the vault"
+        );
         // the user paid the event account, and the float did not move
         assert_eq!(env.lamports(&env.a.rent.0), rent);
         let event_rent = env.svm.minimum_balance_for_rent_exemption(748);
-        assert_eq!(lamports - env.lamports(&pubkey_of(&user)), event_rent + 5000);
+        assert_eq!(
+            lamports - env.lamports(&pubkey_of(&user)),
+            event_rent + 5000
+        );
         let own = own_compute(&meta.logs, &env.a.program);
         println!("own compute {own}");
         assert!(own <= 20_000, "own compute {own}");
@@ -171,8 +210,15 @@ fn a_gasless_burn_spends_the_float_and_the_canister_pays_the_fee() {
     let rent_before = env.lamports(&env.a.rent.0);
     let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
     env.send_ok(&[ix], &canister, &[&user]);
-    assert_eq!(env.lamports(&pubkey_of(&user)), user_lamports, "the user pays no SOL");
-    assert_eq!(rent_before - env.lamports(&env.a.rent.0), env.svm.minimum_balance_for_rent_exemption(748));
+    assert_eq!(
+        env.lamports(&pubkey_of(&user)),
+        user_lamports,
+        "the user pays no SOL"
+    );
+    assert_eq!(
+        rent_before - env.lamports(&env.a.rent.0),
+        env.svm.minimum_balance_for_rent_exemption(748)
+    );
 }
 
 #[test]
@@ -191,7 +237,10 @@ fn the_float_is_spent_only_with_the_canisters_signature() {
     let mut ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
     ix.accounts[2].signer = true;
     let (user, canister) = (env.user.insecure_clone(), env.canister.insecure_clone());
-    assert_eq!(custom_code(env.send(&[ix], &user, &[&canister])), E::FloatWithoutCanister.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &user, &[&canister])),
+        E::FloatWithoutCanister.code()
+    );
 }
 
 #[test]
@@ -225,7 +274,12 @@ fn a_memo_burn_derives_its_ref_by_keccak_with_the_terms_in_the_instruction() {
     env.send_ok(&[ix], &user, &[]);
     let expected = keccak256(&memo);
     let message = message_of(&env, &env.a.event(&expected));
-    assert_eq!(Envelope::parse(Message::new(&message).unwrap().hook()).unwrap().ref_bytes, expected);
+    assert_eq!(
+        Envelope::parse(Message::new(&message).unwrap().hook())
+            .unwrap()
+            .ref_bytes,
+        expected
+    );
 }
 
 #[test]
@@ -233,20 +287,31 @@ fn a_ck_deposit_goes_only_to_ethereum_and_carries_its_principal() {
     let mut env = Env::new();
     let principal = [0x77u8; 32];
     let mut burn = Burn::new(&env, "ck-base", 0);
-    burn.payload = Payload::CkDeposit { principal: &principal, subaccount: None };
+    burn.payload = Payload::CkDeposit {
+        principal: &principal,
+        subaccount: None,
+    };
     burn.min_gas = 1;
     let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
     assert_eq!(user_sends(&mut env, ix), E::DomainNotAllowed.code());
 
     let mut burn = Burn::new(&env, "ck-eth", 0);
     burn.domain = ETHEREUM_DOMAIN;
-    burn.payload = Payload::CkDeposit { principal: &principal, subaccount: None };
+    burn.payload = Payload::CkDeposit {
+        principal: &principal,
+        subaccount: None,
+    };
     burn.min_gas = 1;
     let user = env.user.insecure_clone();
     let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
     env.send_ok(&[ix], &user, &[]);
     let message = message_of(&env, &env.a.event(&burn.r));
-    assert_eq!(Envelope::parse(Message::new(&message).unwrap().hook()).unwrap().principal, principal);
+    assert_eq!(
+        Envelope::parse(Message::new(&message).unwrap().hook())
+            .unwrap()
+            .principal,
+        principal
+    );
 }
 
 #[test]
@@ -257,7 +322,10 @@ fn one_live_burn_per_ref() {
     let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
     env.send_ok(&[ix], &user, &[]);
     let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[]);
-    assert!(is_foreign_failure(env.send(&[ix], &user, &[])), "the event PDA already exists");
+    assert!(
+        is_foreign_failure(env.send(&[ix], &user, &[])),
+        "the event PDA already exists"
+    );
 }
 
 #[test]
@@ -278,9 +346,17 @@ fn the_keypair_fallback_works_only_when_the_config_allows_it() {
     burn.event_keypair = true;
     let jupiter = route::data(IN, PRODUCED, HONEST, PRODUCED);
     let data = burn.args(TAG_SWAP_BURN, burn.min_usdc, &jupiter).encode();
-    let ix = instructions::swap_burn(&env.a, burn.head(&env, &event), &burn.route(&env, &[]), data);
+    let ix = instructions::swap_burn(
+        &env.a,
+        burn.head(&env, &event),
+        &burn.route(&env, &[]),
+        data,
+    );
     let user = env.user.insecure_clone();
-    assert_eq!(custom_code(env.send(&[ix.clone()], &user, &[&keypair])), E::EventKeypairNotAllowed.code());
+    assert_eq!(
+        custom_code(env.send(&[ix.clone()], &user, &[&keypair])),
+        E::EventKeypairNotAllowed.code()
+    );
     env.set_config(|c| c.event_keypair_allowed = true);
     env.send_ok(&[ix], &user, &[&keypair]);
     assert_eq!(env.data(&event).len(), EVENT_ACCOUNT_LEN as usize);
@@ -335,12 +411,38 @@ fn the_arguments_only_the_program_can_rule_on_are_refused() {
     go(&|b| b.deadline -= 1400, E::DeadlineOutOfWindow, &mut env);
     go(&|b| b.deadline += 7000, E::DeadlineOutOfWindow, &mut env);
     go(&|b| b.recipient = CCTP_RECEIVER, E::BadRecipient, &mut env);
-    go(&|b| b.recipient = [0xB3, 0xf6, 0x65, 0x17, 0xbE, 0xC4, 0xcC, 0x5A, 0x8E, 0x79, 0x9d, 0xB2, 0xdD, 0xA4, 0xC8, 0x10, 0xBe, 0xfC, 0xc9, 0x17], E::BadRecipient, &mut env);
-    go(&|b| b.recipient = [0x34, 0xD8, 0xA2, 0xde, 0xbE, 0x49, 0xDC, 0xCa, 0x0f, 0x7c, 0xC7, 0x7d, 0x74, 0x16, 0x3c, 0xFB, 0x94, 0xCc, 0x19, 0xF5], E::BadRecipient, &mut env);
+    go(
+        &|b| {
+            b.recipient = [
+                0xB3, 0xf6, 0x65, 0x17, 0xbE, 0xC4, 0xcC, 0x5A, 0x8E, 0x79, 0x9d, 0xB2, 0xdD, 0xA4,
+                0xC8, 0x10, 0xBe, 0xfC, 0xc9, 0x17,
+            ]
+        },
+        E::BadRecipient,
+        &mut env,
+    );
+    go(
+        &|b| {
+            b.recipient = [
+                0x34, 0xD8, 0xA2, 0xde, 0xbE, 0x49, 0xDC, 0xCa, 0x0f, 0x7c, 0xC7, 0x7d, 0x74, 0x16,
+                0x3c, 0xFB, 0x94, 0xCc, 0x19, 0xF5,
+            ]
+        },
+        E::BadRecipient,
+        &mut env,
+    );
     go(&|b| b.min_usdc = PRODUCED + 1, E::BelowMinUsdc, &mut env);
-    go(&|b| b.fee = PRODUCED as u32 + 1, E::FeeAboveProduced, &mut env);
+    go(
+        &|b| b.fee = PRODUCED as u32 + 1,
+        E::FeeAboveProduced,
+        &mut env,
+    );
     // what is left after the fee is under the least burn
-    go(&|b| b.fee = (PRODUCED - ONE_USDC + 1) as u32, E::BelowMinBurn, &mut env);
+    go(
+        &|b| b.fee = (PRODUCED - ONE_USDC + 1) as u32,
+        E::BelowMinBurn,
+        &mut env,
+    );
     // CCTP needs amount > maxFee: a one-unit burn rounds its max fee up to all of it
     env.set_config(|c| c.min_burn = 1);
     go(
@@ -370,7 +472,19 @@ fn a_route_may_not_name_swapics_accounts_on_the_way_out_and_never_an_auth() {
     let burn = Burn::new(&env, "names", 0);
     let event = env.a.event(&burn.r);
     let a = env.a.clone();
-    let forbidden = [a.config.0, a.rent.0, a.canister, a.admin, a.program, MT, TMM, event, a.auth[0].0, a.auth[1].0, a.vault[1]];
+    let forbidden = [
+        a.config.0,
+        a.rent.0,
+        a.canister,
+        a.admin,
+        a.program,
+        MT,
+        TMM,
+        event,
+        a.auth[0].0,
+        a.auth[1].0,
+        a.vault[1],
+    ];
     for key in forbidden {
         let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[AccountMeta::readonly(key)]);
         assert_eq!(user_sends(&mut env, ix), E::ForbiddenRouteAccount.code());
@@ -384,9 +498,17 @@ fn the_fee_payers_signature_never_reaches_a_route() {
     let mut env = Env::new();
     let mut burn = Burn::new(&env, "payer", 0);
     burn.float = true;
-    let ix = burn.swap_burn(&env, HONEST, PRODUCED, &[AccountMeta::readonly(pubkey_of(&env.canister))]);
+    let ix = burn.swap_burn(
+        &env,
+        HONEST,
+        PRODUCED,
+        &[AccountMeta::readonly(pubkey_of(&env.canister))],
+    );
     let (user, canister) = (env.user.insecure_clone(), env.canister.insecure_clone());
-    assert_eq!(custom_code(env.send(&[ix], &canister, &[&user])), E::ForbiddenRouteAccount.code());
+    assert_eq!(
+        custom_code(env.send(&[ix], &canister, &[&user])),
+        E::ForbiddenRouteAccount.code()
+    );
 }
 
 #[test]
@@ -397,8 +519,16 @@ fn only_jupiters_two_routes_reach_the_router_on_the_way_out() {
     let mut jupiter = route::data(IN, PRODUCED, HONEST, 0);
     jupiter[..8].copy_from_slice(&[229, 23, 203, 151, 122, 227, 173, 42]);
     let data = burn.args(TAG_SWAP_BURN, burn.min_usdc, &jupiter).encode();
-    let ix = instructions::swap_burn(&env.a, burn.head(&env, &event), &burn.route(&env, &[]), data);
-    assert_eq!(user_sends(&mut env, ix), E::JupiterInstructionNotAllowed.code());
+    let ix = instructions::swap_burn(
+        &env.a,
+        burn.head(&env, &event),
+        &burn.route(&env, &[]),
+        data,
+    );
+    assert_eq!(
+        user_sends(&mut env, ix),
+        E::JupiterInstructionNotAllowed.code()
+    );
 }
 
 #[test]
@@ -413,7 +543,11 @@ fn a_nested_call_into_the_program_is_refused() {
     accounts.push(AccountMeta::readonly(env.pool));
     accounts.push(AccountMeta::readonly(env.a.program));
     accounts.extend_from_slice(&inner.accounts);
-    let ix = Instruction { program: JUPITER, accounts, data };
+    let ix = Instruction {
+        program: JUPITER,
+        accounts,
+        data,
+    };
     assert_eq!(user_sends(&mut env, ix), E::NotTopLevel.code());
 }
 
@@ -437,7 +571,8 @@ fn a_donation_to_a_vault_is_never_burned() {
     env.send_ok(&[ix], &user, &[]);
     assert_eq!(env.balance(&vault), 12_345);
     let m = message_of(&env, &env.a.event(&burn.r));
-    let amount = swapic_solana_tests::wire::cctp::word_to_u64(Message::new(&m).unwrap().amount_word());
+    let amount =
+        swapic_solana_tests::wire::cctp::word_to_u64(Message::new(&m).unwrap().amount_word());
     assert_eq!(amount, Some(PRODUCED - NET_FEE as u64));
 }
 
@@ -465,15 +600,33 @@ fn reclaim_sends_the_rent_to_the_canister_after_five_days_only() {
     destination[12..44].copy_from_slice(&hash("assigned-nonce"));
     let attestation = env.attest(&destination);
     let stranger = env.stranger.insecure_clone();
-    let ix = instructions::reclaim(&env.a, &pubkey_of(&stranger), &event, &attestation, &destination);
+    let ix = instructions::reclaim(
+        &env.a,
+        &pubkey_of(&stranger),
+        &event,
+        &attestation,
+        &destination,
+    );
 
-    assert!(is_foreign_failure(env.send(&[ix.clone()], &stranger, &[])), "CCTP's five-day window");
+    assert!(
+        is_foreign_failure(env.send(&[ix.clone()], &stranger, &[])),
+        "CCTP's five-day window"
+    );
     env.warp(5 * 24 * 3600 + 1);
     let canister_key = pubkey_of(&env.canister);
-    let (canister_before, float_before) = (env.lamports(&canister_key), env.lamports(&env.a.rent.0));
+    let (canister_before, float_before) =
+        (env.lamports(&canister_key), env.lamports(&env.a.rent.0));
     env.send_ok(&[ix], &stranger, &[]);
-    assert_eq!(env.lamports(&canister_key) - canister_before, rent_value, "the reclaimed lamports reach the payer key");
-    assert_eq!(env.lamports(&env.a.rent.0), float_before, "the float is untouched");
+    assert_eq!(
+        env.lamports(&canister_key) - canister_before,
+        rent_value,
+        "the reclaimed lamports reach the payer key"
+    );
+    assert_eq!(
+        env.lamports(&env.a.rent.0),
+        float_before,
+        "the float is untouched"
+    );
     assert!(!env.exists(&event));
 }
 
@@ -481,13 +634,29 @@ fn reclaim_sends_the_rent_to_the_canister_after_five_days_only() {
 fn reclaim_cannot_be_pointed_elsewhere() {
     let mut env = Env::new();
     let stranger = env.stranger.insecure_clone();
-    let ix = instructions::reclaim(&env.a, &pubkey_of(&stranger), &[9; 32], &[1; 130], &[2; 376]);
-    for (slot, want) in [(1usize, E::WrongRent), (2, E::WrongProgram), (4, E::WrongProgram), (5, E::WrongKey), (6, E::WrongProgram)] {
+    let ix = instructions::reclaim(
+        &env.a,
+        &pubkey_of(&stranger),
+        &[9; 32],
+        &[1; 130],
+        &[2; 376],
+    );
+    for (slot, want) in [
+        (1usize, E::WrongRent),
+        (2, E::WrongProgram),
+        (4, E::WrongProgram),
+        (5, E::WrongKey),
+        (6, E::WrongProgram),
+    ] {
         let mut bad = ix.clone();
         bad.accounts[slot].pubkey = pubkey_of(&stranger);
         if slot == 1 || slot == 2 || slot == 5 {
             bad.accounts[slot].writable = true;
         }
-        assert_eq!(custom_code(env.send(&[bad], &stranger, &[])), want.code(), "slot {slot}");
+        assert_eq!(
+            custom_code(env.send(&[bad], &stranger, &[])),
+            want.code(),
+            "slot {slot}"
+        );
     }
 }

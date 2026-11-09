@@ -5,8 +5,8 @@
 use candid::Principal;
 use ic_cdk::api::call::call_with_payment128;
 use ic_cdk::api::management_canister::schnorr::{
-    schnorr_public_key, SchnorrAlgorithm, SchnorrKeyId, SchnorrPublicKeyArgument, SignWithSchnorrArgument,
-    SignWithSchnorrResponse,
+    schnorr_public_key, SchnorrAlgorithm, SchnorrKeyId, SchnorrPublicKeyArgument,
+    SignWithSchnorrArgument, SignWithSchnorrResponse,
 };
 use types::solana::SolanaKeyRole;
 
@@ -22,7 +22,10 @@ fn path(role: SolanaKeyRole) -> Vec<Vec<u8>> {
 }
 
 fn key_id(key_name: &str) -> SchnorrKeyId {
-    SchnorrKeyId { algorithm: SchnorrAlgorithm::Ed25519, name: key_name.to_string() }
+    SchnorrKeyId {
+        algorithm: SchnorrAlgorithm::Ed25519,
+        name: key_name.to_string(),
+    }
 }
 
 /// A role's public key.
@@ -44,17 +47,24 @@ pub async fn public_key(role: SolanaKeyRole, key_name: &str) -> Result<[u8; 32],
 ///
 /// A rejected call is an error and not a trap: the signature may exist in the system anyway, so a
 /// caller that retries must know it is retrying.
-pub async fn sign(role: SolanaKeyRole, key_name: &str, message: Vec<u8>) -> Result<[u8; 64], String> {
+pub async fn sign(
+    role: SolanaKeyRole,
+    key_name: &str,
+    message: Vec<u8>,
+) -> Result<[u8; 64], String> {
     let (answer,): (SignWithSchnorrResponse,) = call_with_payment128(
         Principal::management_canister(),
         "sign_with_schnorr",
-        (SignWithSchnorrArgument { message, derivation_path: path(role), key_id: key_id(key_name) },),
+        (SignWithSchnorrArgument {
+            message,
+            derivation_path: path(role),
+            key_id: key_id(key_name),
+        },),
         CYCLES_PER_SIGNATURE,
     )
     .await
     .map_err(|(code, message)| format!("the signature: {code:?}: {message}"))?;
-    answer
-        .signature
-        .try_into()
-        .map_err(|_| "the management canister answered a signature that is not 64 bytes".to_string())
+    answer.signature.try_into().map_err(|_| {
+        "the management canister answered a signature that is not 64 bytes".to_string()
+    })
 }

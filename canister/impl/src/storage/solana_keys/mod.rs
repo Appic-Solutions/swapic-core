@@ -36,7 +36,10 @@ impl Storable for CachedKeys {
         Self(Some((payer, admin)))
     }
 
-    const BOUND: Bound = Bound::Bounded { max_size: 64, is_fixed_size: false };
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 64,
+        is_fixed_size: false,
+    };
 }
 
 thread_local! {

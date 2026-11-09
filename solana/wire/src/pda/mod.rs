@@ -108,7 +108,9 @@ impl SwapicAddresses {
             config: find_program_address(&[SEED_CONFIG], &program),
             vault: core::array::from_fn(|i| ata(&auth[i].0, &USDC_MINT, &TOKEN_PROGRAM)),
             wsol: core::array::from_fn(|i| ata(&auth[i].0, &WSOL_MINT, &TOKEN_PROGRAM)),
-            denylist: core::array::from_fn(|i| find_program_address(&[SEED_DENYLIST, &auth[i].0], &TMM).0),
+            denylist: core::array::from_fn(|i| {
+                find_program_address(&[SEED_DENYLIST, &auth[i].0], &TMM).0
+            }),
             auth,
             rent: find_program_address(&[SEED_RENT], &program),
             fee_account: ata(&admin, &USDC_MINT, &TOKEN_PROGRAM),

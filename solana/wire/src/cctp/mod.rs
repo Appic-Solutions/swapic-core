@@ -171,7 +171,12 @@ pub const fn reclaim_data_len(attestation_len: usize, message_len: usize) -> usi
 
 /// Writes `reclaim_event_account`'s data into `out`: its parameters are attestation, then message.
 pub fn write_reclaim_data(out: &mut [u8], attestation: &[u8], destination_message: &[u8]) {
-    write_two_vecs(out, &RECLAIM_EVENT_ACCOUNT, attestation, destination_message);
+    write_two_vecs(
+        out,
+        &RECLAIM_EVENT_ACCOUNT,
+        attestation,
+        destination_message,
+    );
 }
 
 fn write_two_vecs(out: &mut [u8], discriminator: &[u8; 8], first: &[u8], second: &[u8]) {
@@ -204,7 +209,8 @@ impl<'a> DepositForBurnEvent<'a> {
     /// `data` is the whole inner instruction data, the event-CPI tag first.
     pub fn parse(data: &'a [u8]) -> Option<Self> {
         const FIXED: usize = 16 + 32 + 8 + 32 + 32 + 4 + 32 + 32 + 8 + 4 + 4;
-        if data.len() < FIXED || data[..8] != EVENT_CPI_TAG || data[8..16] != DEPOSIT_FOR_BURN_EVENT {
+        if data.len() < FIXED || data[..8] != EVENT_CPI_TAG || data[8..16] != DEPOSIT_FOR_BURN_EVENT
+        {
             return None;
         }
         let key = |i: usize| -> &'a Pubkey { data[i..i + 32].try_into().expect("32 bytes") };

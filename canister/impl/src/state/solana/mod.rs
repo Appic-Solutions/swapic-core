@@ -5,7 +5,9 @@
 mod tests;
 
 use super::{State, Store};
-use types::solana::{SolanaEntry, SolanaKey, SolanaPurpose, SolanaProposalStatus, SolanaRef, SolanaStep};
+use types::solana::{
+    SolanaEntry, SolanaKey, SolanaProposalStatus, SolanaPurpose, SolanaRef, SolanaStep,
+};
 use types::{EventIndex, Timestamp, TransitionError};
 
 /// The hour a time falls in: the buckets of the co-sign limits.
@@ -23,7 +25,8 @@ impl<S: Store> State<S> {
 
     fn solana_add(&mut self, key: SolanaKey) {
         let n = self.solana_count(&key);
-        self.store.put_solana_entry(key, SolanaEntry::Count(n.saturating_add(1)));
+        self.store
+            .put_solana_entry(key, SolanaEntry::Count(n.saturating_add(1)));
     }
 
     pub fn solana_complete_attempts(&self, arrival: &SolanaRef) -> u64 {
@@ -39,7 +42,9 @@ impl<S: Store> State<S> {
     }
 
     pub fn solana_arrival_done(&self, arrival: &SolanaRef) -> bool {
-        self.store.solana_entry(&SolanaKey::arrival_done(arrival)).is_some()
+        self.store
+            .solana_entry(&SolanaKey::arrival_done(arrival))
+            .is_some()
     }
 
     /// The arrival a ref finished as: one finish per `(domain 5, ref)`.
@@ -51,16 +56,27 @@ impl<S: Store> State<S> {
     }
 
     /// `(message hash, line, when, signer)` of a ref's co-signature.
-    pub fn solana_cosign_of_ref(&self, r#ref: &SolanaRef) -> Option<([u8; 32], u64, u64, [u8; 32])> {
+    pub fn solana_cosign_of_ref(
+        &self,
+        r#ref: &SolanaRef,
+    ) -> Option<([u8; 32], u64, u64, [u8; 32])> {
         match self.store.solana_entry(&SolanaKey::cosign_by_ref(r#ref)) {
-            Some(SolanaEntry::Cosigned { message_hash, line, at_s, signer }) => Some((message_hash, line, at_s, signer)),
+            Some(SolanaEntry::Cosigned {
+                message_hash,
+                line,
+                at_s,
+                signer,
+            }) => Some((message_hash, line, at_s, signer)),
             _ => None,
         }
     }
 
     /// The signer of a transaction the canister co-signed, by its signature.
     pub fn solana_cosign_signer(&self, signature: &[u8; 64]) -> Option<[u8; 32]> {
-        match self.store.solana_entry(&SolanaKey::cosign_by_signature(signature)) {
+        match self
+            .store
+            .solana_entry(&SolanaKey::cosign_by_signature(signature))
+        {
             Some(SolanaEntry::Cosigned { signer, .. }) => Some(signer),
             _ => None,
         }
@@ -69,9 +85,12 @@ impl<S: Store> State<S> {
     /// `(blocked, succeeded, co-signs this hour)` of a signer.
     pub fn solana_signer(&self, signer: &[u8; 32], hour: u64) -> (bool, bool, u32) {
         match self.store.solana_entry(&SolanaKey::signer(signer)) {
-            Some(SolanaEntry::Signer { blocked, succeeded, hour: at, count }) => {
-                (blocked, succeeded, if at == hour { count } else { 0 })
-            }
+            Some(SolanaEntry::Signer {
+                blocked,
+                succeeded,
+                hour: at,
+                count,
+            }) => (blocked, succeeded, if at == hour { count } else { 0 }),
             _ => (false, false, 0),
         }
     }
@@ -79,7 +98,11 @@ impl<S: Store> State<S> {
     /// `(co-signs, landed failures)` of all signers this hour.
     pub fn solana_global(&self, hour: u64) -> (u32, u32) {
         match self.store.solana_entry(&SolanaKey::global()) {
-            Some(SolanaEntry::Global { hour: at, count, failures }) if at == hour => (count, failures),
+            Some(SolanaEntry::Global {
+                hour: at,
+                count,
+                failures,
+            }) if at == hour => (count, failures),
             _ => (0, 0),
         }
     }
@@ -87,7 +110,10 @@ impl<S: Store> State<S> {
     /// `(when, reclaims signed)` of a burn the keeper may reclaim.
     pub fn solana_burn(&self, r#ref: &SolanaRef) -> Option<(u64, u32)> {
         match self.store.solana_entry(&SolanaKey::burn(r#ref)) {
-            Some(SolanaEntry::Burn { at_s, reclaim_tries }) => Some((at_s, reclaim_tries)),
+            Some(SolanaEntry::Burn {
+                at_s,
+                reclaim_tries,
+            }) => Some((at_s, reclaim_tries)),
             _ => None,
         }
     }
@@ -121,8 +147,11 @@ impl<S: Store> State<S> {
     pub(crate) fn admits_solana(&self, step: &SolanaStep) -> Result<(), TransitionError> {
         let refuse = |why: &'static str| Err(TransitionError::Solana { why });
         match step {
-            SolanaStep::RefFinished { r#ref, arrival, .. } => match self.solana_finished_ref(r#ref) {
-                Some(finished) if finished != *arrival => refuse("the ref finished as another arrival"),
+            SolanaStep::RefFinished { r#ref, arrival, .. } => match self.solana_finished_ref(r#ref)
+            {
+                Some(finished) if finished != *arrival => {
+                    refuse("the ref finished as another arrival")
+                }
                 _ => Ok(()),
             },
             SolanaStep::UpgradeProposed { proposal } => {
@@ -140,12 +169,18 @@ impl<S: Store> State<S> {
                     _ => refuse("the proposal is not the live one"),
                 }
             }
-            SolanaStep::Signed { purpose: SolanaPurpose::Cosign { r#ref, message_hash, .. }, .. } => {
-                match self.solana_cosign_of_ref(r#ref) {
-                    Some((hash, ..)) if hash == *message_hash => refuse("this message was co-signed"),
-                    _ => Ok(()),
-                }
-            }
+            SolanaStep::Signed {
+                purpose:
+                    SolanaPurpose::Cosign {
+                        r#ref,
+                        message_hash,
+                        ..
+                    },
+                ..
+            } => match self.solana_cosign_of_ref(r#ref) {
+                Some((hash, ..)) if hash == *message_hash => refuse("this message was co-signed"),
+                _ => Ok(()),
+            },
             SolanaStep::KeysDerived { .. }
             | SolanaStep::Signed { .. }
             | SolanaStep::CosignFailed { .. }
@@ -155,44 +190,69 @@ impl<S: Store> State<S> {
     }
 
     /// Applies a line. Refuses nothing: `admits_solana` already did.
-    pub(crate) fn record_solana(&mut self, step: &SolanaStep, index: EventIndex, timestamp: Timestamp) {
+    pub(crate) fn record_solana(
+        &mut self,
+        step: &SolanaStep,
+        index: EventIndex,
+        timestamp: Timestamp,
+    ) {
         let now_s = timestamp.as_secs().get();
         match step {
             SolanaStep::KeysDerived { .. } | SolanaStep::Misrouted { .. } => {}
-            SolanaStep::Signed { purpose, signature, .. } => {
+            SolanaStep::Signed {
+                purpose, signature, ..
+            } => {
                 self.record_signed(index);
                 match purpose {
-                    SolanaPurpose::Cosign { r#ref, signer, message_hash } => {
+                    SolanaPurpose::Cosign {
+                        r#ref,
+                        signer,
+                        message_hash,
+                    } => {
                         let entry = SolanaEntry::Cosigned {
                             message_hash: *message_hash,
                             line: index.get(),
                             at_s: now_s,
                             signer: *signer,
                         };
-                        self.store.put_solana_entry(SolanaKey::cosign_by_ref(r#ref), entry.clone());
-                        self.store.put_solana_entry(SolanaKey::cosign_by_signature(signature), entry);
+                        self.store
+                            .put_solana_entry(SolanaKey::cosign_by_ref(r#ref), entry.clone());
+                        self.store
+                            .put_solana_entry(SolanaKey::cosign_by_signature(signature), entry);
                         self.note_burn(r#ref, now_s);
                         self.note_cosign(signer, hour_of(now_s));
                     }
-                    SolanaPurpose::Complete { arrival } => self.solana_add(SolanaKey::complete_attempts(arrival)),
-                    SolanaPurpose::Release { arrival } | SolanaPurpose::MisroutedRelease { arrival } => {
+                    SolanaPurpose::Complete { arrival } => {
+                        self.solana_add(SolanaKey::complete_attempts(arrival))
+                    }
+                    SolanaPurpose::Release { arrival }
+                    | SolanaPurpose::MisroutedRelease { arrival } => {
                         self.solana_add(SolanaKey::release_attempts(arrival))
                     }
-                    SolanaPurpose::ForwardRelay { arrival } => self.solana_add(SolanaKey::forward_attempts(arrival)),
+                    SolanaPurpose::ForwardRelay { arrival } => {
+                        self.solana_add(SolanaKey::forward_attempts(arrival))
+                    }
                     SolanaPurpose::Reclaim { refs } => {
                         for r#ref in refs {
                             if let Some((at_s, tries)) = self.solana_burn(r#ref) {
                                 self.store.put_solana_entry(
                                     SolanaKey::burn(r#ref),
-                                    SolanaEntry::Burn { at_s, reclaim_tries: tries.saturating_add(1) },
+                                    SolanaEntry::Burn {
+                                        at_s,
+                                        reclaim_tries: tries.saturating_add(1),
+                                    },
                                 );
                             }
                         }
                     }
                     SolanaPurpose::TopUp => {
-                        self.store.put_solana_entry(SolanaKey::last_top_up(), SolanaEntry::Time(now_s));
+                        self.store
+                            .put_solana_entry(SolanaKey::last_top_up(), SolanaEntry::Time(now_s));
                     }
-                    SolanaPurpose::Config | SolanaPurpose::Upgrade { .. } | SolanaPurpose::Sweep | SolanaPurpose::Proof => {}
+                    SolanaPurpose::Config
+                    | SolanaPurpose::Upgrade { .. }
+                    | SolanaPurpose::Sweep
+                    | SolanaPurpose::Proof => {}
                 }
             }
             SolanaStep::CosignFailed { signer, .. } => {
@@ -200,22 +260,45 @@ impl<S: Store> State<S> {
                 let (_, succeeded, count) = self.solana_signer(signer, hour);
                 self.store.put_solana_entry(
                     SolanaKey::signer(signer),
-                    SolanaEntry::Signer { blocked: true, succeeded, hour, count },
+                    SolanaEntry::Signer {
+                        blocked: true,
+                        succeeded,
+                        hour,
+                        count,
+                    },
                 );
                 let (count, failures) = self.solana_global(hour);
                 self.store.put_solana_entry(
                     SolanaKey::global(),
-                    SolanaEntry::Global { hour, count, failures: failures.saturating_add(1) },
+                    SolanaEntry::Global {
+                        hour,
+                        count,
+                        failures: failures.saturating_add(1),
+                    },
                 );
             }
             SolanaStep::UpgradeProposed { proposal } => {
-                self.store.put_solana_entry(SolanaKey::proposal(proposal.id), SolanaEntry::Proposal(proposal.clone()));
+                self.store.put_solana_entry(
+                    SolanaKey::proposal(proposal.id),
+                    SolanaEntry::Proposal(proposal.clone()),
+                );
                 self.solana_add(SolanaKey::proposal_count());
             }
-            SolanaStep::UpgradeCancelled { id } => self.close_proposal(*id, SolanaProposalStatus::Cancelled),
-            SolanaStep::UpgradeExecuted { id } => self.close_proposal(*id, SolanaProposalStatus::Executed),
-            SolanaStep::RefFinished { r#ref, arrival, burned_at_s } => {
-                self.store.put_solana_entry(SolanaKey::finished_ref(r#ref), SolanaEntry::Finished { arrival: *arrival });
+            SolanaStep::UpgradeCancelled { id } => {
+                self.close_proposal(*id, SolanaProposalStatus::Cancelled)
+            }
+            SolanaStep::UpgradeExecuted { id } => {
+                self.close_proposal(*id, SolanaProposalStatus::Executed)
+            }
+            SolanaStep::RefFinished {
+                r#ref,
+                arrival,
+                burned_at_s,
+            } => {
+                self.store.put_solana_entry(
+                    SolanaKey::finished_ref(r#ref),
+                    SolanaEntry::Finished { arrival: *arrival },
+                );
                 self.note_burn(r#ref, *burned_at_s);
                 // a co-signed burn that reached its finish landed: its signer has an earlier success
                 if let Some((.., signer)) = self.solana_cosign_of_ref(r#ref) {
@@ -223,19 +306,31 @@ impl<S: Store> State<S> {
                     let (blocked, _, count) = self.solana_signer(&signer, hour);
                     self.store.put_solana_entry(
                         SolanaKey::signer(&signer),
-                        SolanaEntry::Signer { blocked, succeeded: true, hour, count },
+                        SolanaEntry::Signer {
+                            blocked,
+                            succeeded: true,
+                            hour,
+                            count,
+                        },
                     );
                 }
             }
             SolanaStep::ArrivalFinished { arrival } => {
-                self.store.put_solana_entry(SolanaKey::arrival_done(arrival), SolanaEntry::Done);
+                self.store
+                    .put_solana_entry(SolanaKey::arrival_done(arrival), SolanaEntry::Done);
             }
         }
     }
 
     fn note_burn(&mut self, r#ref: &SolanaRef, at_s: u64) {
         if self.solana_burn(r#ref).is_none() {
-            self.store.put_solana_entry(SolanaKey::burn(r#ref), SolanaEntry::Burn { at_s, reclaim_tries: 0 });
+            self.store.put_solana_entry(
+                SolanaKey::burn(r#ref),
+                SolanaEntry::Burn {
+                    at_s,
+                    reclaim_tries: 0,
+                },
+            );
         }
     }
 
@@ -243,19 +338,29 @@ impl<S: Store> State<S> {
         let (blocked, succeeded, count) = self.solana_signer(signer, hour);
         self.store.put_solana_entry(
             SolanaKey::signer(signer),
-            SolanaEntry::Signer { blocked, succeeded, hour, count: count.saturating_add(1) },
+            SolanaEntry::Signer {
+                blocked,
+                succeeded,
+                hour,
+                count: count.saturating_add(1),
+            },
         );
         let (count, failures) = self.solana_global(hour);
         self.store.put_solana_entry(
             SolanaKey::global(),
-            SolanaEntry::Global { hour, count: count.saturating_add(1), failures },
+            SolanaEntry::Global {
+                hour,
+                count: count.saturating_add(1),
+                failures,
+            },
         );
     }
 
     fn close_proposal(&mut self, id: u64, status: SolanaProposalStatus) {
         if let Some(mut proposal) = self.solana_proposal(id) {
             proposal.status = status;
-            self.store.put_solana_entry(SolanaKey::proposal(id), SolanaEntry::Proposal(proposal));
+            self.store
+                .put_solana_entry(SolanaKey::proposal(id), SolanaEntry::Proposal(proposal));
         }
     }
 }

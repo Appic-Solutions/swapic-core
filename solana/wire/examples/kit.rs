@@ -17,7 +17,13 @@ fn key(text: &str) -> [u8; 32] {
 
 fn addresses(args: &[String]) {
     let a = SwapicAddresses::derive(key(&args[0]), key(&args[1]), key(&args[2]));
-    let list = |items: Vec<[u8; 32]>| items.iter().map(|k| format!("\"{}\"", encode(k))).collect::<Vec<_>>().join(",");
+    let list = |items: Vec<[u8; 32]>| {
+        items
+            .iter()
+            .map(|k| format!("\"{}\"", encode(k)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     println!(
         "{{\"program\":\"{}\",\"payer\":\"{}\",\"admin\":\"{}\",\"config\":\"{}\",\"rent\":\"{}\",\"fee_account\":\"{}\",\"auth\":[{}],\"vault\":[{}],\"wsol\":[{}],\"table_entries\":[{}]}}",
         encode(&a.program),
@@ -69,11 +75,21 @@ fn from_base64(text: &str) -> Vec<u8> {
 fn to_base64(bytes: &[u8]) -> String {
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -82,12 +98,17 @@ fn to_base64(bytes: &[u8]) -> String {
 fn sign(args: &[String]) {
     use ed25519_dalek::{Signer, SigningKey};
     let text = std::fs::read_to_string(&args[0]).expect("the key file reads");
-    let bytes: Vec<u8> = serde_json::from_str(&text).expect("a Solana key file: a list of 64 numbers");
-    let secret: [u8; 32] = bytes[..32].try_into().expect("a Solana key file: a list of 64 numbers");
+    let bytes: Vec<u8> =
+        serde_json::from_str(&text).expect("a Solana key file: a list of 64 numbers");
+    let secret: [u8; 32] = bytes[..32]
+        .try_into()
+        .expect("a Solana key file: a list of 64 numbers");
     let signer = SigningKey::from_bytes(&secret);
     let public = signer.verifying_key().to_bytes();
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).expect("stdin reads");
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .expect("stdin reads");
     let mut wire = from_base64(&input);
     let slots = wire[0] as usize;
     assert!(slots < 128, "a compact count this tool reads");
@@ -96,7 +117,10 @@ fn sign(args: &[String]) {
     // a v0 message: its marker, then the three counts, then the keys
     let keys_at = if message[0] & 0x80 != 0 { 4 } else { 3 };
     let signers = usize::from(message[if message[0] & 0x80 != 0 { 1 } else { 0 }]);
-    assert!(usize::from(message[keys_at]) < 128, "a compact count this tool reads");
+    assert!(
+        usize::from(message[keys_at]) < 128,
+        "a compact count this tool reads"
+    );
     let first = keys_at + 1;
     let at = (0..signers)
         .find(|i| message[first + i * 32..first + (i + 1) * 32] == public)

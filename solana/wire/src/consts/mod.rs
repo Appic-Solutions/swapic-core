@@ -124,16 +124,56 @@ pub struct SwapicDomain {
 
 /// The ten EVM chains live on 2026-11-08. A new chain is one more row and a new lookup table.
 pub const SWAPIC_DOMAINS: [SwapicDomain; 10] = [
-    SwapicDomain { domain: 0, chain_id: 1, usdc: hex20("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") },
-    SwapicDomain { domain: 2, chain_id: 10, usdc: hex20("0b2c639c533813f4aa9d7837caf62653d097ff85") },
-    SwapicDomain { domain: 3, chain_id: 42161, usdc: hex20("af88d065e77c8cc2239327c5edb3a432268e5831") },
-    SwapicDomain { domain: 6, chain_id: 8453, usdc: hex20("833589fcd6edb6e08f4c7c32d4f71b54bda02913") },
-    SwapicDomain { domain: 7, chain_id: 137, usdc: hex20("3c499c542cef5e3811e1192ce70d8cc03d5c3359") },
-    SwapicDomain { domain: 10, chain_id: 130, usdc: hex20("078d782b760474a361dda0af3839290b0ef57ad6") },
-    SwapicDomain { domain: 14, chain_id: 480, usdc: hex20("79a02482a880bce3f13e09da970dc34db4cd24d1") },
-    SwapicDomain { domain: 15, chain_id: 143, usdc: hex20("754704bc059f8c67012fed69bc8a327a5aafb603") },
-    SwapicDomain { domain: 19, chain_id: 999, usdc: hex20("b88339cb7199b77e23db6e890353e22632ba630f") },
-    SwapicDomain { domain: 33, chain_id: 9745, usdc: hex20("2d661c89d812261039af9764eceaaee884f5f67f") },
+    SwapicDomain {
+        domain: 0,
+        chain_id: 1,
+        usdc: hex20("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+    },
+    SwapicDomain {
+        domain: 2,
+        chain_id: 10,
+        usdc: hex20("0b2c639c533813f4aa9d7837caf62653d097ff85"),
+    },
+    SwapicDomain {
+        domain: 3,
+        chain_id: 42161,
+        usdc: hex20("af88d065e77c8cc2239327c5edb3a432268e5831"),
+    },
+    SwapicDomain {
+        domain: 6,
+        chain_id: 8453,
+        usdc: hex20("833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+    },
+    SwapicDomain {
+        domain: 7,
+        chain_id: 137,
+        usdc: hex20("3c499c542cef5e3811e1192ce70d8cc03d5c3359"),
+    },
+    SwapicDomain {
+        domain: 10,
+        chain_id: 130,
+        usdc: hex20("078d782b760474a361dda0af3839290b0ef57ad6"),
+    },
+    SwapicDomain {
+        domain: 14,
+        chain_id: 480,
+        usdc: hex20("79a02482a880bce3f13e09da970dc34db4cd24d1"),
+    },
+    SwapicDomain {
+        domain: 15,
+        chain_id: 143,
+        usdc: hex20("754704bc059f8c67012fed69bc8a327a5aafb603"),
+    },
+    SwapicDomain {
+        domain: 19,
+        chain_id: 999,
+        usdc: hex20("b88339cb7199b77e23db6e890353e22632ba630f"),
+    },
+    SwapicDomain {
+        domain: 33,
+        chain_id: 9745,
+        usdc: hex20("2d661c89d812261039af9764eceaaee884f5f67f"),
+    },
 ];
 
 /// The shard of a ref. The quoter, the canister and the app all compute it this way.

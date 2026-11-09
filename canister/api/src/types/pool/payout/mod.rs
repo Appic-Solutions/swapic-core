@@ -233,9 +233,13 @@ impl TryFrom<PayoutTerms> for domain::PayoutTerms {
                 .solana
                 .map(|s| -> Result<domain::SolanaPayout, PoolWireError> {
                     let key = |field: &'static str, text: &str| {
-                        swapic_solana_wire::base58::decode_pubkey(text).ok_or(PoolWireError::NotASolanaAddress { field })
+                        swapic_solana_wire::base58::decode_pubkey(text)
+                            .ok_or(PoolWireError::NotASolanaAddress { field })
                     };
-                    Ok(domain::SolanaPayout { recipient: key("solana.recipient", &s.recipient)?, mint_out: key("solana.mint_out", &s.mint_out)? })
+                    Ok(domain::SolanaPayout {
+                        recipient: key("solana.recipient", &s.recipient)?,
+                        mint_out: key("solana.mint_out", &s.mint_out)?,
+                    })
                 })
                 .transpose()?,
         })

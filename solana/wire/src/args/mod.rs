@@ -34,8 +34,14 @@ pub enum RefSource<'a> {
 pub enum Payload<'a> {
     Deliver,
     /// `min_out` is big-endian, 1 to 32 bytes, not zero.
-    Swap { token_out: &'a [u8; 20], min_out: &'a [u8] },
-    CkDeposit { principal: &'a [u8; 32], subaccount: Option<&'a [u8; 32]> },
+    Swap {
+        token_out: &'a [u8; 20],
+        min_out: &'a [u8],
+    },
+    CkDeposit {
+        principal: &'a [u8; 32],
+        subaccount: Option<&'a [u8; 32]>,
+    },
 }
 
 impl Payload<'_> {
@@ -157,8 +163,15 @@ impl<'a> BurnArgs<'a> {
                 if principal == &[0u8; 32] {
                     return Err(SwapicError::BadPrincipal);
                 }
-                let subaccount = if flags & FLAG_SUBACCOUNT != 0 { Some(r.array::<32>()?) } else { None };
-                Payload::CkDeposit { principal, subaccount }
+                let subaccount = if flags & FLAG_SUBACCOUNT != 0 {
+                    Some(r.array::<32>()?)
+                } else {
+                    None
+                };
+                Payload::CkDeposit {
+                    principal,
+                    subaccount,
+                }
             }
         };
 
@@ -211,7 +224,10 @@ impl<'a> BurnArgs<'a> {
                 envelope.token_out = *token_out;
                 envelope.min_out[32 - min_out.len()..].copy_from_slice(min_out);
             }
-            Payload::CkDeposit { principal, subaccount } => {
+            Payload::CkDeposit {
+                principal,
+                subaccount,
+            } => {
                 envelope.principal = *principal;
                 if let Some(subaccount) = subaccount {
                     envelope.subaccount = *subaccount;
@@ -238,7 +254,13 @@ impl BurnArgs<'_> {
         if matches!(self.ref_source, RefSource::Memo(_)) {
             flags |= FLAG_MEMO;
         }
-        if matches!(self.payload, Payload::CkDeposit { subaccount: Some(_), .. }) {
+        if matches!(
+            self.payload,
+            Payload::CkDeposit {
+                subaccount: Some(_),
+                ..
+            }
+        ) {
             flags |= FLAG_SUBACCOUNT;
         }
         let mut out = alloc::vec::Vec::with_capacity(128 + self.jupiter.len());
@@ -261,7 +283,10 @@ impl BurnArgs<'_> {
                 out.push(min_out.len() as u8);
                 out.extend_from_slice(min_out);
             }
-            Payload::CkDeposit { principal, subaccount } => {
+            Payload::CkDeposit {
+                principal,
+                subaccount,
+            } => {
                 out.extend_from_slice(principal);
                 if let Some(subaccount) = subaccount {
                     out.extend_from_slice(subaccount);
@@ -305,14 +330,21 @@ impl<'a> ArrivalArgs<'a> {
         if tag == TAG_RELEASE && !jupiter.is_empty() {
             return Err(SwapicError::ShortData);
         }
-        Ok(Self { tag, message, attestation, jupiter })
+        Ok(Self {
+            tag,
+            message,
+            attestation,
+            jupiter,
+        })
     }
 }
 
 #[cfg(feature = "alloc")]
 impl ArrivalArgs<'_> {
     pub fn encode(&self) -> alloc::vec::Vec<u8> {
-        let mut out = alloc::vec::Vec::with_capacity(4 + self.message.len() + self.attestation.len() + self.jupiter.len());
+        let mut out = alloc::vec::Vec::with_capacity(
+            4 + self.message.len() + self.attestation.len() + self.jupiter.len(),
+        );
         out.push(self.tag);
         out.extend_from_slice(&(self.message.len() as u16).to_le_bytes());
         out.extend_from_slice(self.message);
@@ -343,14 +375,19 @@ impl<'a> ReclaimArgs<'a> {
         if !r.bytes.is_empty() {
             return Err(SwapicError::ShortData);
         }
-        Ok(Self { attestation, destination_message })
+        Ok(Self {
+            attestation,
+            destination_message,
+        })
     }
 }
 
 #[cfg(feature = "alloc")]
 impl ReclaimArgs<'_> {
     pub fn encode(&self) -> alloc::vec::Vec<u8> {
-        let mut out = alloc::vec::Vec::with_capacity(5 + self.attestation.len() + self.destination_message.len());
+        let mut out = alloc::vec::Vec::with_capacity(
+            5 + self.attestation.len() + self.destination_message.len(),
+        );
         out.push(TAG_RECLAIM);
         out.extend_from_slice(&(self.attestation.len() as u16).to_le_bytes());
         out.extend_from_slice(self.attestation);

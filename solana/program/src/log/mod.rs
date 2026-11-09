@@ -8,7 +8,9 @@ pub fn data(bytes: &[u8]) {
     {
         let parts = [bytes];
         // SAFETY: the syscall reads a slice of slices, valid for the call
-        unsafe { pinocchio::syscalls::sol_log_data(parts.as_ptr() as *const u8, parts.len() as u64) };
+        unsafe {
+            pinocchio::syscalls::sol_log_data(parts.as_ptr() as *const u8, parts.len() as u64)
+        };
     }
     #[cfg(not(target_os = "solana"))]
     let _ = bytes;

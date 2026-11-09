@@ -69,7 +69,12 @@ pub struct Arrival {
 }
 
 impl Arrival {
-    pub fn new(env: &Env, label: &str, shard: usize, change: impl FnOnce(&mut SolanaEnvelope)) -> Self {
+    pub fn new(
+        env: &Env,
+        label: &str,
+        shard: usize,
+        change: impl FnOnce(&mut SolanaEnvelope),
+    ) -> Self {
         let mut hook = SolanaEnvelope {
             ref_bytes: ref_on(shard, label),
             action: SOLANA_ACTION_SWAP,
@@ -83,7 +88,14 @@ impl Arrival {
     }
 
     /// A message whose caller and mint recipient may name different shards and whose hook may be anything.
-    pub fn with_hook(env: &Env, label: &str, caller: usize, vault: usize, hook_bytes: &[u8], hook: SolanaEnvelope) -> Self {
+    pub fn with_hook(
+        env: &Env,
+        label: &str,
+        caller: usize,
+        vault: usize,
+        hook_bytes: &[u8],
+        hook: SolanaEnvelope,
+    ) -> Self {
         let nonce = hash(&format!("nonce-{label}"));
         let (message, attestation) = env.craft(&MessageSpec {
             header_version: 1,
@@ -95,41 +107,130 @@ impl Arrival {
             fee: FEE,
             hook: hook_bytes,
         });
-        Self { shard: caller, nonce, hook, message, attestation }
+        Self {
+            shard: caller,
+            nonce,
+            hook,
+            message,
+            attestation,
+        }
     }
 
     fn source<'a>(&'a self, env: &'a Env, token: &'a [u8; 32]) -> ArrivalSource<'a> {
         let _ = env;
-        ArrivalSource { nonce: &self.nonce, source_domain: 6, source_token: token }
+        ArrivalSource {
+            nonce: &self.nonce,
+            source_domain: 6,
+            source_token: token,
+        }
     }
 
     pub fn complete_data(&self, jupiter: &[u8]) -> Vec<u8> {
-        ArrivalArgs { tag: TAG_COMPLETE, message: &self.message, attestation: &self.attestation, jupiter }.encode()
+        ArrivalArgs {
+            tag: TAG_COMPLETE,
+            message: &self.message,
+            attestation: &self.attestation,
+            jupiter,
+        }
+        .encode()
     }
 
     pub fn release_data(&self) -> Vec<u8> {
-        ArrivalArgs { tag: TAG_RELEASE, message: &self.message, attestation: &self.attestation, jupiter: &[] }.encode()
+        ArrivalArgs {
+            tag: TAG_RELEASE,
+            message: &self.message,
+            attestation: &self.attestation,
+            jupiter: &[],
+        }
+        .encode()
     }
 
     /// `complete` with the stand-in's honest route into `output`, whatever the mode.
-    pub fn complete(&self, env: &Env, submitter: &Pubkey, output: &Pubkey, mode: u8, quoted: u64, arg: u64, extra: &[AccountMeta]) -> Instruction {
+    pub fn complete(
+        &self,
+        env: &Env,
+        submitter: &Pubkey,
+        output: &Pubkey,
+        mode: u8,
+        quoted: u64,
+        arg: u64,
+        extra: &[AccountMeta],
+    ) -> Instruction {
         let (_, token) = env.source();
-        let mut route = route_accounts(&env.a.auth[self.shard].0, &env.a.vault[self.shard], output, &pubkey_of(&env.recipient), &env.pool_usdc, &env.pool_out, &env.pool, extra);
+        let mut route = route_accounts(
+            &env.a.auth[self.shard].0,
+            &env.a.vault[self.shard],
+            output,
+            &pubkey_of(&env.recipient),
+            &env.pool_usdc,
+            &env.pool_out,
+            &env.pool,
+            extra,
+        );
         // a hostile route is free to ask for `auth` to be writable
-        route[0].writable = matches!(mode, route::ASSIGN_AUTH | route::ALLOCATE_AUTH | route::FUND_AUTH);
-        instructions::complete(&env.a, submitter, self.shard, output, self.source(env, &token), &route, self.complete_data(&route::data(MINTED, quoted, mode, arg)))
+        route[0].writable = matches!(
+            mode,
+            route::ASSIGN_AUTH | route::ALLOCATE_AUTH | route::FUND_AUTH
+        );
+        instructions::complete(
+            &env.a,
+            submitter,
+            self.shard,
+            output,
+            self.source(env, &token),
+            &route,
+            self.complete_data(&route::data(MINTED, quoted, mode, arg)),
+        )
     }
 
     /// `complete` for a native arrival: `wsol[i]` as the route's destination, the wallet as the output.
-    pub fn complete_native(&self, env: &Env, submitter: &Pubkey, mode: u8, quoted: u64) -> Instruction {
+    pub fn complete_native(
+        &self,
+        env: &Env,
+        submitter: &Pubkey,
+        mode: u8,
+        quoted: u64,
+    ) -> Instruction {
         let (_, token) = env.source();
         let wallet = pubkey_of(&env.recipient);
-        let route = route_accounts(&env.a.auth[self.shard].0, &env.a.vault[self.shard], &env.a.wsol[self.shard], &wallet, &env.pool_usdc, &env.pool_wsol, &env.pool, &[]);
-        instructions::complete(&env.a, submitter, self.shard, &wallet, self.source(env, &token), &route, self.complete_data(&route::data(MINTED, quoted, mode, 0)))
+        let route = route_accounts(
+            &env.a.auth[self.shard].0,
+            &env.a.vault[self.shard],
+            &env.a.wsol[self.shard],
+            &wallet,
+            &env.pool_usdc,
+            &env.pool_wsol,
+            &env.pool,
+            &[],
+        );
+        instructions::complete(
+            &env.a,
+            submitter,
+            self.shard,
+            &wallet,
+            self.source(env, &token),
+            &route,
+            self.complete_data(&route::data(MINTED, quoted, mode, 0)),
+        )
     }
 
-    pub fn release(&self, env: &Env, submitter: &Pubkey, caller: usize, vault: usize, output: &Pubkey) -> Instruction {
+    pub fn release(
+        &self,
+        env: &Env,
+        submitter: &Pubkey,
+        caller: usize,
+        vault: usize,
+        output: &Pubkey,
+    ) -> Instruction {
         let (_, token) = env.source();
-        instructions::release(&env.a, submitter, caller, vault, output, self.source(env, &token), self.release_data())
+        instructions::release(
+            &env.a,
+            submitter,
+            caller,
+            vault,
+            output,
+            self.source(env, &token),
+            self.release_data(),
+        )
     }
 }

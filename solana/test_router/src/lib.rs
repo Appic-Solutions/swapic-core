@@ -40,12 +40,27 @@ pub const FUND_AUTH: u8 = 12;
 pub const CLOSE_WSOL: u8 = 13;
 pub const PAY_2022: u8 = 14;
 
-fn token_call(tag_and_data: &[u8], metas: &[InstructionAccount<'_>], views: &[&AccountView], signers: &[Signer<'_, '_>]) -> ProgramResult {
-    let ix = InstructionView { program_id: &TOKEN, data: tag_and_data, accounts: metas };
+fn token_call(
+    tag_and_data: &[u8],
+    metas: &[InstructionAccount<'_>],
+    views: &[&AccountView],
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
+    let ix = InstructionView {
+        program_id: &TOKEN,
+        data: tag_and_data,
+        accounts: metas,
+    };
     invoke_signed_with_slice(&ix, views, signers)
 }
 
-fn transfer(from: &AccountView, to: &AccountView, authority: &AccountView, amount: u64, signers: &[Signer<'_, '_>]) -> ProgramResult {
+fn transfer(
+    from: &AccountView,
+    to: &AccountView,
+    authority: &AccountView,
+    amount: u64,
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     let mut data = [0u8; 9];
     data[0] = 3;
     data[1..].copy_from_slice(&amount.to_le_bytes());
@@ -91,8 +106,15 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
                     let mut d = [0u8; 12];
                     d[0] = 2;
                     d[4..12].copy_from_slice(&pay.to_le_bytes());
-                    let metas = [InstructionAccount::writable_signer(a[12].address()), InstructionAccount::writable(a[7].address())];
-                    let ix = InstructionView { program_id: &SYSTEM, data: &d, accounts: &metas };
+                    let metas = [
+                        InstructionAccount::writable_signer(a[12].address()),
+                        InstructionAccount::writable(a[7].address()),
+                    ];
+                    let ix = InstructionView {
+                        program_id: &SYSTEM,
+                        data: &d,
+                        accounts: &metas,
+                    };
                     invoke_signed(&ix, &[&a[12], &a[7]], &pool_signer)?;
                 }
                 CLOSE_WSOL => {
@@ -116,7 +138,11 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
                 InstructionAccount::writable(a[2].address()),
                 InstructionAccount::readonly_signer(a[12].address()),
             ];
-            let ix = InstructionView { program_id: &TOKEN_2022, data: &d, accounts: &metas };
+            let ix = InstructionView {
+                program_id: &TOKEN_2022,
+                data: &d,
+                accounts: &metas,
+            };
             invoke_signed_with_slice(&ix, &[&a[11], &a[2], &a[12]], &pool_signer)
         }
         APPROVE_DELEGATE => {
@@ -140,7 +166,10 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
             d[1] = if mode == SET_OWNER { 2 } else { 3 };
             d[2] = 1;
             d[3..35].copy_from_slice(a[13].address().as_ref());
-            let metas = [InstructionAccount::writable(a[1].address()), InstructionAccount::readonly_signer(a[0].address())];
+            let metas = [
+                InstructionAccount::writable(a[1].address()),
+                InstructionAccount::readonly_signer(a[0].address()),
+            ];
             token_call(&d, &metas, &[&a[1], &a[0]], &[])
         }
         ASSIGN_AUTH | ALLOCATE_AUTH => {
@@ -157,7 +186,11 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
                 12
             };
             let metas = [InstructionAccount::writable_signer(a[0].address())];
-            let ix = InstructionView { program_id: &SYSTEM, data: &d[..n], accounts: &metas };
+            let ix = InstructionView {
+                program_id: &SYSTEM,
+                data: &d[..n],
+                accounts: &metas,
+            };
             invoke_signed(&ix, &[&a[0]], &[])
         }
         FUND_AUTH => {
@@ -166,8 +199,15 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
             let mut d = [0u8; 12];
             d[0] = 2;
             d[4..12].copy_from_slice(&arg.to_le_bytes());
-            let metas = [InstructionAccount::writable_signer(a[12].address()), InstructionAccount::writable(a[0].address())];
-            let ix = InstructionView { program_id: &SYSTEM, data: &d, accounts: &metas };
+            let metas = [
+                InstructionAccount::writable_signer(a[12].address()),
+                InstructionAccount::writable(a[0].address()),
+            ];
+            let ix = InstructionView {
+                program_id: &SYSTEM,
+                data: &d,
+                accounts: &metas,
+            };
             invoke_signed(&ix, &[&a[12], &a[0]], &pool_signer)
         }
         REENTER => {
@@ -175,9 +215,15 @@ pub fn process(program: &Address, accounts: &mut [AccountView], data: &[u8]) -> 
             let target = a[13].address();
             let inner = &data[43..];
             let rest = &a[14..];
-            let metas: Vec<InstructionAccount<'_>> =
-                rest.iter().map(|v| InstructionAccount::new(v.address(), v.is_writable(), v.is_signer())).collect();
-            let ix = InstructionView { program_id: target, data: inner, accounts: &metas };
+            let metas: Vec<InstructionAccount<'_>> = rest
+                .iter()
+                .map(|v| InstructionAccount::new(v.address(), v.is_writable(), v.is_signer()))
+                .collect();
+            let ix = InstructionView {
+                program_id: target,
+                data: inner,
+                accounts: &metas,
+            };
             invoke_signed_with_slice(&ix, rest, &[])
         }
         _ => Err(ProgramError::InvalidInstructionData),

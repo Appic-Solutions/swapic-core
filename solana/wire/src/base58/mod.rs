@@ -59,10 +59,19 @@ mod tests {
 
     #[test]
     fn round_trips_addresses_and_leading_zeros() {
-        assert_eq!(encode(&USDC_MINT), "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-        assert_eq!(decode_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), Some(TOKEN_PROGRAM));
+        assert_eq!(
+            encode(&USDC_MINT),
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
+        assert_eq!(
+            decode_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+            Some(TOKEN_PROGRAM)
+        );
         assert_eq!(encode(&[0u8; 32]), "11111111111111111111111111111111");
-        assert_eq!(decode_pubkey("11111111111111111111111111111111"), Some([0u8; 32]));
+        assert_eq!(
+            decode_pubkey("11111111111111111111111111111111"),
+            Some([0u8; 32])
+        );
         let mut signature = [7u8; 64];
         signature[0] = 0;
         assert_eq!(decode(&encode(&signature)).unwrap(), signature.to_vec());

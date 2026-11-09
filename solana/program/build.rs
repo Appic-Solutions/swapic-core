@@ -18,7 +18,10 @@ fn value<'a>(text: &'a str, key: &str) -> &'a str {
 
 fn pubkey(text: &str, key: &str) -> [u8; 32] {
     let raw = value(text, key);
-    assert_ne!(raw, "UNSET", "`{key}` is UNSET: name a constants file through SWAPIC_SOLANA_CONSTS");
+    assert_ne!(
+        raw, "UNSET",
+        "`{key}` is UNSET: name a constants file through SWAPIC_SOLANA_CONSTS"
+    );
     base58::decode_pubkey(raw).unwrap_or_else(|| panic!("`{key}` is not a Solana address: {raw}"))
 }
 
@@ -27,7 +30,8 @@ fn evm(text: &str, key: &str) -> [u8; 20] {
     assert_eq!(raw.len(), 40, "`{key}` is not an EVM address");
     let mut out = [0u8; 20];
     for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).unwrap_or_else(|_| panic!("`{key}` is not hex"));
+        *byte = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+            .unwrap_or_else(|_| panic!("`{key}` is not hex"));
     }
     out
 }
@@ -39,12 +43,17 @@ fn bytes(array: &[u8]) -> String {
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rerun-if-env-changed=SWAPIC_SOLANA_CONSTS");
-    let path = std::env::var("SWAPIC_SOLANA_CONSTS").unwrap_or_else(|_| format!("{dir}/../consts.toml"));
+    let path =
+        std::env::var("SWAPIC_SOLANA_CONSTS").unwrap_or_else(|_| format!("{dir}/../consts.toml"));
     println!("cargo:rerun-if-changed={path}");
     println!("cargo:rerun-if-changed=build.rs");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
 
-    let a = SwapicAddresses::derive(pubkey(&text, "program_id"), pubkey(&text, "canister"), pubkey(&text, "admin"));
+    let a = SwapicAddresses::derive(
+        pubkey(&text, "program_id"),
+        pubkey(&text, "canister"),
+        pubkey(&text, "admin"),
+    );
     let receiver = evm(&text, "cctp_receiver");
     let mut receiver_word = [0u8; 32];
     receiver_word[12..].copy_from_slice(&receiver);
@@ -53,7 +62,12 @@ fn main() {
     let mut row = |name: &str, ty: &str, val: String| {
         writeln!(out, "pub const {name}: {ty} = {val};").unwrap();
     };
-    let keys = |list: &[[u8; 32]]| format!("[{}]", list.iter().map(|k| bytes(k)).collect::<Vec<_>>().join(","));
+    let keys = |list: &[[u8; 32]]| {
+        format!(
+            "[{}]",
+            list.iter().map(|k| bytes(k)).collect::<Vec<_>>().join(",")
+        )
+    };
     let auth: Vec<[u8; 32]> = a.auth.iter().map(|x| x.0).collect();
     let auth_bumps: Vec<u8> = a.auth.iter().map(|x| x.1).collect();
     row("PROGRAM_ID", "[u8; 32]", bytes(&a.program));

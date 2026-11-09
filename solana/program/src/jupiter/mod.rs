@@ -22,8 +22,15 @@ pub enum Way<'a> {
     Arrival { shard: usize },
 }
 
-const COMMON: [&Pubkey; 7] =
-    [&consts::CONFIG, &consts::RENT, &consts::CANISTER, &consts::ADMIN, &consts::PROGRAM_ID, &MT, &TMM];
+const COMMON: [&Pubkey; 7] = [
+    &consts::CONFIG,
+    &consts::RENT,
+    &consts::CANISTER,
+    &consts::ADMIN,
+    &consts::PROGRAM_ID,
+    &MT,
+    &TMM,
+];
 
 #[inline(always)]
 fn first_word(key: &Pubkey) -> u64 {
@@ -45,7 +52,10 @@ pub fn check_route(route: &[AccountView], way: Way<'_>) -> ProgramResult {
         let hit = |other: &Pubkey| word == first_word(other) && key == other;
         let forbidden = COMMON.iter().any(|other| hit(other))
             || event.is_some_and(|e| hit(e))
-            || (0..4).any(|j| (hit(&consts::AUTH[j]) && !(auth_allowed && j == shard)) || (hit(&consts::VAULT[j]) && j != shard));
+            || (0..4).any(|j| {
+                (hit(&consts::AUTH[j]) && !(auth_allowed && j == shard))
+                    || (hit(&consts::VAULT[j]) && j != shard)
+            });
         if forbidden {
             return Err(fail(SwapicError::ForbiddenRouteAccount));
         }
@@ -55,14 +65,29 @@ pub fn check_route(route: &[AccountView], way: Way<'_>) -> ProgramResult {
 
 /// Calls the router with the route's accounts. The signer flag is set for the authority alone: the
 /// outer flags are never copied.
-pub fn call(route: &[AccountView], data: &[u8], authority: &Pubkey, signers: &[Signer<'_, '_>]) -> ProgramResult {
+pub fn call(
+    route: &[AccountView],
+    data: &[u8],
+    authority: &Pubkey,
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     if !is_allowed_route(data) {
         return Err(fail(SwapicError::JupiterInstructionNotAllowed));
     }
     let metas: alloc::vec::Vec<InstructionAccount<'_>> = route
         .iter()
-        .map(|view| InstructionAccount::new(view.address(), view.is_writable(), key_of(view) == authority))
+        .map(|view| {
+            InstructionAccount::new(
+                view.address(),
+                view.is_writable(),
+                key_of(view) == authority,
+            )
+        })
         .collect();
-    let instruction = InstructionView { program_id: &JUPITER_ADDRESS, data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &JUPITER_ADDRESS,
+        data,
+        accounts: &metas,
+    };
     invoke_signed_with_slice(&instruction, route, signers)
 }

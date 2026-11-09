@@ -17,7 +17,9 @@ pub mod consts {
 
 use pinocchio::error::ProgramError;
 use pinocchio::{AccountView, Address, ProgramResult};
-use swapic_solana_wire::args::{TAG_BURN, TAG_COMPLETE, TAG_RECLAIM, TAG_RELEASE, TAG_SET_CONFIG, TAG_SWAP_BURN};
+use swapic_solana_wire::args::{
+    TAG_BURN, TAG_COMPLETE, TAG_RECLAIM, TAG_RELEASE, TAG_SET_CONFIG, TAG_SWAP_BURN,
+};
 use swapic_solana_wire::errors::SwapicError;
 
 #[cfg(all(target_os = "solana", not(feature = "no-entrypoint")))]

@@ -366,7 +366,11 @@ impl Store for StableStore {
         SOLANA_FOLD.with(|fold| fold.borrow().get(key))
     }
 
-    fn put_solana_entry(&mut self, key: types::solana::SolanaKey, entry: types::solana::SolanaEntry) {
+    fn put_solana_entry(
+        &mut self,
+        key: types::solana::SolanaKey,
+        entry: types::solana::SolanaEntry,
+    ) {
         SOLANA_FOLD.with(|fold| fold.borrow_mut().insert(key, entry));
     }
 

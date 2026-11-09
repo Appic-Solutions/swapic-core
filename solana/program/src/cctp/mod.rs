@@ -5,36 +5,66 @@ use alloc::vec;
 use pinocchio::cpi::{invoke_signed, invoke_signed_with_bounds, Signer};
 use pinocchio::instruction::{InstructionAccount, InstructionView};
 use pinocchio::{AccountView, ProgramResult};
-use swapic_solana_wire::cctp::{reclaim_data_len, receive_data_len, write_reclaim_data, write_receive_data};
+use swapic_solana_wire::cctp::{
+    receive_data_len, reclaim_data_len, write_receive_data, write_reclaim_data,
+};
 
 /// System `transfer`.
 #[inline(never)]
-pub fn system_transfer(from: &AccountView, to: &AccountView, lamports: u64, signers: &[Signer<'_, '_>]) -> ProgramResult {
+pub fn system_transfer(
+    from: &AccountView,
+    to: &AccountView,
+    lamports: u64,
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     let mut data = [0u8; 12];
     data[0] = 2;
     data[4..12].copy_from_slice(&lamports.to_le_bytes());
-    let metas = [InstructionAccount::writable_signer(from.address()), InstructionAccount::writable(to.address())];
-    let instruction = InstructionView { program_id: &SYSTEM_ADDRESS, data: &data, accounts: &metas };
+    let metas = [
+        InstructionAccount::writable_signer(from.address()),
+        InstructionAccount::writable(to.address()),
+    ];
+    let instruction = InstructionView {
+        program_id: &SYSTEM_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed(&instruction, &[from, to], signers)
 }
 
 /// System `allocate`.
-pub fn system_allocate(account: &AccountView, space: u64, signers: &[Signer<'_, '_>]) -> ProgramResult {
+pub fn system_allocate(
+    account: &AccountView,
+    space: u64,
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     let mut data = [0u8; 12];
     data[0] = 8;
     data[4..12].copy_from_slice(&space.to_le_bytes());
     let metas = [InstructionAccount::writable_signer(account.address())];
-    let instruction = InstructionView { program_id: &SYSTEM_ADDRESS, data: &data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &SYSTEM_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed(&instruction, &[account], signers)
 }
 
 /// System `assign`.
-pub fn system_assign(account: &AccountView, owner: &[u8; 32], signers: &[Signer<'_, '_>]) -> ProgramResult {
+pub fn system_assign(
+    account: &AccountView,
+    owner: &[u8; 32],
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     let mut data = [0u8; 36];
     data[0] = 1;
     data[4..36].copy_from_slice(owner);
     let metas = [InstructionAccount::writable_signer(account.address())];
-    let instruction = InstructionView { program_id: &SYSTEM_ADDRESS, data: &data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &SYSTEM_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed(&instruction, &[account], signers)
 }
 
@@ -55,7 +85,11 @@ pub fn token_transfer(
         InstructionAccount::writable(to.address()),
         InstructionAccount::readonly_signer(authority.address()),
     ];
-    let instruction = InstructionView { program_id: &TOKEN_ADDRESS, data: &data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &TOKEN_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed(&instruction, &[from, to, authority], signers)
 }
 
@@ -82,7 +116,11 @@ pub struct BurnAccounts<'a> {
 
 /// CCTP's burn. `data` is the 420 bytes of `wire::cctp::BurnData`.
 #[inline(never)]
-pub fn deposit_for_burn(a: &BurnAccounts<'_>, data: &[u8], signers: &[Signer<'_, '_>]) -> ProgramResult {
+pub fn deposit_for_burn(
+    a: &BurnAccounts<'_>,
+    data: &[u8],
+    signers: &[Signer<'_, '_>],
+) -> ProgramResult {
     let metas = [
         InstructionAccount::readonly_signer(a.owner.address()),
         InstructionAccount::writable_signer(a.rent_payer.address()),
@@ -123,7 +161,11 @@ pub fn deposit_for_burn(a: &BurnAccounts<'_>, data: &[u8], signers: &[Signer<'_,
         a.event_authority,
         a.tmm_program,
     ];
-    let instruction = InstructionView { program_id: &TMM_ADDRESS, data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &TMM_ADDRESS,
+        data,
+        accounts: &metas,
+    };
     invoke_signed_with_bounds::<18, _>(&instruction, &views, signers)
 }
 
@@ -164,10 +206,14 @@ pub fn receive_message(
         InstructionAccount::readonly(a[9].address()),
     ];
     let views = [
-        &a[0], caller, &a[6], &a[7], &a[8], &a[9], &a[10], &a[11], &a[12], &a[13], &a[14], &a[15], &a[16], &a[17],
-        &a[18], vault, &a[19], &a[20], &a[21], &a[9],
+        &a[0], caller, &a[6], &a[7], &a[8], &a[9], &a[10], &a[11], &a[12], &a[13], &a[14], &a[15],
+        &a[16], &a[17], &a[18], vault, &a[19], &a[20], &a[21], &a[9],
     ];
-    let instruction = InstructionView { program_id: &MT_ADDRESS, data: &data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &MT_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed_with_bounds::<20, _>(&instruction, &views, signers)
 }
 
@@ -188,6 +234,10 @@ pub fn reclaim_event_account(
         InstructionAccount::writable(message_transmitter.address()),
         InstructionAccount::writable(event.address()),
     ];
-    let instruction = InstructionView { program_id: &MT_ADDRESS, data: &data, accounts: &metas };
+    let instruction = InstructionView {
+        program_id: &MT_ADDRESS,
+        data: &data,
+        accounts: &metas,
+    };
     invoke_signed(&instruction, &[payee, message_transmitter, event], signers)
 }
