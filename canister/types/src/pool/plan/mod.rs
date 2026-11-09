@@ -78,10 +78,15 @@ pub fn open_cover(planned: TokenAmount) -> Option<TokenAmount> {
 
 /// The least the plan's first spending asks of the Runner: the `min` of its first step that
 /// spends the order's token in (the Runner gives that step all of it), or, with no step, the
-/// payout's own `minOut` when it pays that token. A payout below it can only revert.
+/// payout's own `minOut` when it pays that token. A payout below it can only revert. An
+/// Across step asks nothing here: the fit writes the payout's exact amount into its least
+/// (BSC design 7.5).
 pub fn first_minimum(order: &crate::swapic::Order) -> TokenAmount {
     let token_in = order.tokenIn;
     let least = match order.steps.iter().find(|step| step.token == token_in) {
+        Some(step) if step.data.get(..4) == Some(crate::swapic::across::SWAP_AND_BRIDGE.as_slice()) => {
+            alloy_primitives::U256::ZERO
+        }
         Some(step) => step.min,
         None if order.steps.is_empty() && order.payout.token == token_in => order.payout.minOut,
         None => alloy_primitives::U256::ZERO,

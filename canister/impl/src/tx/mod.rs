@@ -459,6 +459,8 @@ enum Record {
     PoolMove(u64),
     /// A controller's EVM sweep's.
     Sweep(u64),
+    /// A controller's claim of the canister's own deferred Across refunds.
+    AcrossClaim,
 }
 
 /// The record a signed transaction of `purpose` is written in, decided before its nonce is
@@ -496,6 +498,7 @@ fn record_of(purpose: TxPurpose, detail: Option<Detail>) -> Result<Record, TxErr
         (TxPurpose::PoolMove(id), _) => Ok(Record::PoolMove(id)),
         (TxPurpose::Cancel(_), _) => Err(TxError::NoRecord("a cancel")),
         (TxPurpose::Sweep(id), _) => Ok(Record::Sweep(id)),
+        (TxPurpose::AcrossClaim(_), _) => Ok(Record::AcrossClaim),
     }
 }
 
@@ -573,6 +576,12 @@ impl Record {
             }),
             Record::Sweep(id) => pool(PoolStep::SweepSigned {
                 id,
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
+            }),
+            Record::AcrossClaim => pool(PoolStep::AcrossClaimSigned {
                 chain_id,
                 nonce,
                 tx_hash,
@@ -1225,7 +1234,20 @@ async fn read_receipts(
                 eco_portal: config.eco_portal,
             })
     });
-    landed(entries, &answers, fee_path).ok_or(Unread::NoHead)
+    // the chain's SpokePool pin, where a payout's own Across deposit is read
+    let across_pin = config::with(|config| {
+        config
+            .evm_chains
+            .get(chain_id)
+            .and_then(|chain| chain.across)
+            .zip(crate::storage::ecdsa_address::get())
+            .map(|(pins, canister)| AcrossPin {
+                chain: chain_id,
+                spoke_pool: pins.spoke_pool,
+                canister,
+            })
+    });
+    landed(entries, &answers, fee_path, across_pin).ok_or(Unread::NoHead)
 }
 
 /// The head and the receipt that landed for each entry, sliced out of one chunk's answers
@@ -1236,6 +1258,7 @@ fn landed(
     entries: &[OutboxEntry],
     answers: &[Result<Value, RpcError>],
     fee_path: Option<crate::books::FeePath>,
+    across_pin: Option<AcrossPin>,
 ) -> Option<(BlockNumber, Vec<Option<Receipt>>)> {
     let latest = answers
         .first()?
@@ -1259,6 +1282,14 @@ fn landed(
                             crate::books::network_fee_in(value, path)
                         }),
                         eco_intent: fee_path.and_then(|path| eco_intent_in(value, &path)),
+                        across: across_pin.map(|pin| {
+                            crate::pool::across::deposit_in(
+                                &crate::pool::arrival::logs_of(value),
+                                pin.spoke_pool,
+                                pin.canister,
+                                pin.chain,
+                            )
+                        }),
                         ..receipt
                     })
                 }),
@@ -1322,6 +1353,7 @@ async fn decide(
                 success,
                 network_fee,
                 eco_intent,
+                across,
             } = receipt;
             // an orphan's refund closes with its own line: refunded, or held again
             if let TxPurpose::PoolTransfer(hash) = entry.purpose {
@@ -1384,12 +1416,7 @@ async fn decide(
                 )),
                 TxPurpose::PoolPayout(id) if success => Some((
                     format!("the pool payout {id}"),
-                    types::pool::PoolStep::PayoutPaid {
-                        id,
-                        tx_hash,
-                        block,
-                        intent: eco_intent,
-                    },
+                    paid_line(id, tx_hash, block, eco_intent, across),
                 )),
                 TxPurpose::PoolPayout(id) => Some((
                     format!("the pool payout {id}"),
@@ -1401,8 +1428,10 @@ async fn decide(
                 _ => None,
             };
             // a sweep closes as any transaction does; a revert is taken back only at the
-            // crediting depth, where no reorg turns it into a run (`sweep_settled`)
-            if let TxPurpose::Sweep(_) = entry.purpose {
+            // crediting depth, where no reorg turns it into a run (`sweep_settled`). An Across
+            // claim too: what it paid is credited when the canister's read of the pool chain
+            // finds its transfer
+            if let TxPurpose::Sweep(_) | TxPurpose::AcrossClaim(_) = entry.purpose {
                 settle(entry, tx_hash, block, success, finals.credit, now);
                 return 1;
             }
@@ -1452,6 +1481,50 @@ async fn decide(
             push_again(entry, chain_id, now).await;
             0
         }
+    }
+}
+
+/// The line a pool payout's successful transaction closes with: paid, with the Eco intent its
+/// order published; or, for an order with an Across step (BSC design 6.2.7), paid with the one
+/// deposit of the canister's its receipt shows, delivering until its fill is read. A receipt
+/// that shows none of the canister's deposits, or two, names no deposit to follow: the payout
+/// stops for a human, its USDC out on Across.
+fn paid_line(
+    id: u64,
+    tx_hash: TxHash,
+    block: BlockNumber,
+    eco_intent: Option<[u8; 32]>,
+    across: Option<crate::pool::across::DepositRead>,
+) -> types::pool::PoolStep {
+    use crate::pool::across::DepositRead;
+    use types::pool::PoolStep;
+    let across_order = read_state(|state| state.pool().lines().across_owed.contains(&id));
+    match (across_order, across) {
+        (false, _) => PoolStep::PayoutPaid {
+            id,
+            tx_hash,
+            block,
+            intent: eco_intent,
+            across: None,
+        },
+        (true, Some(DepositRead::One(out))) => PoolStep::PayoutPaid {
+            id,
+            tx_hash,
+            block,
+            intent: None,
+            across: Some(out),
+        },
+        (true, read) => PoolStep::PayoutStopped {
+            id,
+            why: format!(
+                "ALERT: its Across order ran in {tx_hash}, and the receipt shows {} deposit of \
+                 the canister's: its fill cannot be followed, for a human",
+                match read {
+                    Some(DepositRead::Many) => "more than one",
+                    _ => "no",
+                }
+            ),
+        },
     }
 }
 
@@ -1627,8 +1700,16 @@ fn log(line: &str) {
     let _ = line;
 }
 
-/// What a receipt says.
+/// Where the canister's own Across deposits on a chain are read: the chain's SpokePool pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AcrossPin {
+    chain: ChainId,
+    spoke_pool: EvmAddress,
+    canister: EvmAddress,
+}
+
+/// What a receipt says.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Receipt {
     tx_hash: TxHash,
     block: BlockNumber,
@@ -1638,6 +1719,9 @@ struct Receipt {
     /// The Eco intent it published with the canister as the reward's creator: a pool payout's
     /// onward intent, whose refund comes back to the canister if no one fills it.
     eco_intent: Option<[u8; 32]>,
+    /// The canister's own Across deposit in it, on a chain with Across's pins: a pool
+    /// payout's, whose fill is read on its destination.
+    across: Option<crate::pool::across::DepositRead>,
 }
 
 /// The hash of the one Eco intent Eco's Portal published in `receipt` whose reward's creator
@@ -1683,6 +1767,7 @@ fn parse_receipt(value: &Value, ours: &[TxHash]) -> Result<Receipt, NotOurReceip
             success: status == "0x1",
             network_fee: types::TokenAmount::ZERO,
             eco_intent: None,
+            across: None,
         })
     };
     let receipt = read().ok_or(NotOurReceipt::Unmined)?;

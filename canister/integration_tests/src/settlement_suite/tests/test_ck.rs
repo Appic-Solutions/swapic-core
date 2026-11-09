@@ -179,6 +179,7 @@ impl CkWorld {
                     min_network_fee: Nat::from(NETWORK_FEE),
                     ck_swap_fee_allowance: Nat::from(ALLOWANCE),
                 }),
+                across_in_flight_max: None,
             })
             .unwrap(),
         );
@@ -683,6 +684,7 @@ fn settings_that_name_no_ck_route_strand_no_swap_on_its_way() {
             max_payout_gas: 2_000_000,
             cctp_payouts: false,
             ck: None,
+            across_in_flight_max: None,
         })
         .unwrap(),
     );

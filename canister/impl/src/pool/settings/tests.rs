@@ -53,6 +53,7 @@ fn payout_wire() -> settlement_api::types::pool::PayoutSettings {
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
         ck: None,
+        across_in_flight_max: None,
     }
 }
 

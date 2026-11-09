@@ -271,6 +271,7 @@ fn a_withdrawal_moves_the_base_pocket_at_each_step() {
         tx_hash: TxHash::new([0x77; 32]),
         block: BlockNumber::new(20),
         intent: None,
+        across: None,
     })
     .unwrap();
     assert_eq!(status(&pool, id), PayoutStatus::Paid);
@@ -458,6 +459,7 @@ fn an_icp_swap_holds_its_ckusdc_until_paid_and_its_premium_is_the_pools() {
         tx_hash: TxHash::new([0x77; 32]),
         block: BlockNumber::new(30),
         intent: Some([0x99; 32]),
+        across: None,
     })
     .unwrap();
     pool.step(PoolStep::PayoutDelivered {
@@ -604,6 +606,7 @@ fn a_step_out_of_order_is_refused() {
             tx_hash: TxHash::new([0; 32]),
             block: BlockNumber::new(1),
             intent: None,
+            across: None,
         })
         .is_err());
     // a withdrawal's amount is never an ICP swap's
@@ -689,6 +692,7 @@ fn a_paid_payout_releases_its_ckusdc_once() {
         tx_hash: TxHash::new([0x77; 32]),
         block: BlockNumber::new(31),
         intent: None,
+        across: None,
     })
     .unwrap();
     assert_eq!(pool.ledger.pockets.icp, icp);
@@ -712,6 +716,7 @@ fn paid(id: u64, intent: Option<[u8; 32]>) -> PoolStep {
         tx_hash: TxHash::new([0x77; 32]),
         block: BlockNumber::new(30),
         intent,
+        across: None,
     }
 }
 
@@ -2119,4 +2124,383 @@ fn a_ck_swap_opens_only_with_a_floor_that_pays_its_minimum() {
     assert!(opened(&mut pool, swap(CK_RECEIVED - 1, 0)).is_err());
     assert!(opened(&mut pool, swap(CK_RECEIVED, 1)).is_err());
     assert!(opened(&mut pool, swap(CK_RECEIVED, 0)).is_ok());
+}
+
+/// An order whose one step deposits on Across: what makes a signed payout's USDC out on
+/// Across.
+fn across_order(id: u8) -> PinnedOrder {
+    use crate::swapic::across::SWAP_AND_BRIDGE;
+    use alloy_primitives::{Address, U256};
+    let mut data = SWAP_AND_BRIDGE.to_vec();
+    data.extend_from_slice(&[id; 32]);
+    let order = crate::swapic::Order {
+        r#ref: [id; 32].into(),
+        payer: Address::repeat_byte(0x8f),
+        tokenIn: Address::repeat_byte(0x83),
+        amountIn: U256::from(1u8),
+        deadline: U256::from(1_800_000_000u64),
+        steps: vec![crate::swapic::Step {
+            target: Address::repeat_byte(0x97),
+            data: data.into(),
+            token: Address::repeat_byte(0x83),
+            min: U256::from(1u8),
+            writes: Vec::new(),
+        }],
+        payout: crate::swapic::Payout {
+            token: Address::ZERO,
+            recipient: Address::ZERO,
+            minOut: U256::ZERO,
+        },
+        memo: Vec::new().into(),
+    };
+    PinnedOrder {
+        order_id: [id; 32],
+        order: crate::swapic::encode_order(&order),
+        gas_limit: 400_000,
+        deadline_s: 1_800_000_000,
+    }
+}
+
+/// An Across deposit of `input` (the payout's amount and any gift with it), its fill deadline
+/// `deadline`.
+fn across_out(input: TokenAmount, deadline: u32) -> crate::pool::AcrossOut {
+    crate::pool::AcrossOut {
+        destination: ChainId::BSC,
+        relay: crate::swapic::across::RelayData {
+            depositor: [0x8f; 32],
+            recipient: [0x0f; 32],
+            exclusive_relayer: [0; 32],
+            input_token: [0x83; 32],
+            output_token: [0x8a; 32],
+            input_amount: input,
+            output_amount: input,
+            origin_chain_id: ChainId::BASE,
+            deposit_id: TokenAmount::from(u64::from(deadline)),
+            fill_deadline: deadline,
+            exclusivity_deadline: 0,
+            message: Vec::new(),
+        },
+        deposit_time: u64::from(deadline) - 1_200,
+    }
+}
+
+fn across_paid(id: u64, out: crate::pool::AcrossOut) -> PoolStep {
+    PoolStep::PayoutPaid {
+        id,
+        tx_hash: TxHash::new([0x77; 32]),
+        block: BlockNumber::new(30),
+        intent: None,
+        across: Some(Box::new(out)),
+    }
+}
+
+/// `pool` with an ICP swap of 100 ckUSDC signed with an Across order (`tag` its order's
+/// bytes): its id and amount.
+fn across_signed(pool: &mut Pool, tag: u8) -> (u64, TokenAmount) {
+    across_cap(pool, usdc(1_000_000));
+    let (kind, undo) = icp_swap(usdc(100));
+    let amount = TokenAmount::from(100_000_000_u64 - 60_000);
+    let id = open(pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    pool.step(signed(id, across_order(tag))).unwrap();
+    (id, amount)
+}
+
+/// `pool`'s payout settings with the Across in-flight cap `cap`, where it holds none yet.
+fn across_cap(pool: &mut Pool, cap: TokenAmount) {
+    let settings = pool.ledger.lines().settings.unwrap_or_default();
+    if settings.across_in_flight_max.is_none() {
+        pool.step(PoolStep::PayoutSettingsSet {
+            settings: PayoutSettings {
+                across_in_flight_max: Some(cap),
+                ..settings
+            },
+        })
+        .unwrap();
+    }
+}
+
+/// An ICP swap of 100 ckUSDC in `pool`, waiting for its order: its id and amount.
+fn across_waiting(pool: &mut Pool) -> (u64, TokenAmount) {
+    let (kind, undo) = icp_swap(usdc(100));
+    let amount = TokenAmount::from(100_000_000_u64 - 60_000);
+    let id = open(pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id }).unwrap();
+    (id, amount)
+}
+
+/// D16, held in the fold: two Across payouts signed at once never both pass the cap on one
+/// old total; the one refused waits on, its USDC still reserved, and signs once the first is
+/// no longer out.
+#[test]
+fn the_across_cap_is_held_where_a_payout_is_signed() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x64, 1);
+    // a cap for one payout and a half
+    across_cap(&mut pool, usdc(150));
+    let (first, _) = across_waiting(&mut pool);
+    let (second, amount) = across_waiting(&mut pool);
+    pool.step(signed(first, across_order(0x45))).unwrap();
+    let before = pool.ledger.clone();
+    assert_eq!(
+        pool.step(signed(second, across_order(0x46))),
+        Err(PoolStepError::Terms(
+            "the Across payouts in flight would pass their cap"
+        ))
+    );
+    assert_eq!(pool.ledger, before);
+    assert_eq!(status(&pool, second), PayoutStatus::Waiting);
+    // an order with no Across step is not held to it
+    pool.step(signed(second, order(47))).unwrap();
+    // no cap set: no Across payout is signed
+    let mut uncapped = with_base(funded(usdc(1_000)), usdc(5_000), 0x65, 1);
+    let (id, _) = across_waiting(&mut uncapped);
+    assert!(uncapped.step(signed(id, across_order(0x48))).is_err());
+    // once the first is no longer out, the next one fits
+    pool.step(PoolStep::PayoutReverted {
+        id: first,
+        block: None,
+    })
+    .unwrap();
+    let (third, _) = across_waiting(&mut pool);
+    assert!(amount <= usdc(150));
+    pool.step(signed(third, across_order(0x49))).unwrap();
+}
+
+fn across_refunded(
+    refunded: Vec<u64>,
+    amount: TokenAmount,
+    surplus: TokenAmount,
+    log: u64,
+) -> PoolStep {
+    PoolStep::AcrossRefunded {
+        credit: crate::pool::CreditKey {
+            chain: ChainId::BASE,
+            tx: TxHash::new([0xa2; 32]),
+            log_index: log,
+        },
+        amount,
+        block: BlockNumber::new(41),
+        refunded,
+        surplus,
+    }
+}
+
+/// BSC design 6.2.7: a payout signed with an Across order is out on Across from its signature;
+/// paid, it delivers with its deposit, every line as it was; found filled, it is paid and no
+/// longer out.
+#[test]
+fn an_across_payout_is_out_from_its_signature_and_delivering_until_its_fill_is_read() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x61, 1);
+    let (id, amount) = across_signed(&mut pool, 0x40);
+    assert!(pool.ledger.lines().across_owed.contains(&id));
+    let signed_ledger = pool.ledger.clone();
+    // an Across order is paid with its deposit, and nothing else is
+    assert_eq!(pool.step(paid(id, None)), Err(PoolStepError::Mismatch));
+    let out = across_out(amount, 2_000);
+    pool.step(across_paid(id, out.clone())).unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Delivering);
+    assert_eq!(pool.payouts[&id].across, Some(out.clone()));
+    assert_eq!(pool.ledger.pockets, signed_ledger.pockets);
+    pool.step(PoolStep::PayoutDelivered {
+        id,
+        block: BlockNumber::new(33),
+    })
+    .unwrap();
+    assert_eq!(status(&pool, id), PayoutStatus::Paid);
+    assert!(!pool.ledger.lines().across_owed.contains(&id));
+    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
+    // a payout with no Across order is never paid with a deposit
+    let (kind, undo) = icp_swap(usdc(100));
+    let other = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id: other,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id: other }).unwrap();
+    pool.step(signed(other, order(41))).unwrap();
+    assert!(!pool.ledger.lines().across_owed.contains(&other));
+    assert_eq!(
+        pool.step(across_paid(other, out)),
+        Err(PoolStepError::Mismatch)
+    );
+}
+
+/// A reverted Across payout is no longer out: its USDC is reserved again for its undo.
+#[test]
+fn a_reverted_across_payout_is_no_longer_out() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x62, 1);
+    let (id, _) = across_signed(&mut pool, 0x42);
+    pool.step(PoolStep::PayoutReverted { id, block: None })
+        .unwrap();
+    assert!(!pool.ledger.lines().across_owed.contains(&id));
+}
+
+/// D9: an Across refund credits the payouts it pays back, each its whole deposit (a gift
+/// included), and the rest is the canister's surplus; the pool ends where it began. Read
+/// unfilled, a payout is NOT undone (Jeff, 2026-11-09: the user waits, the pool never fronts
+/// it): no undo is admitted and no ckUSDC moves until Across's refund of it is credited, and
+/// the credit begins its undo in the same step, once.
+#[test]
+fn an_across_refund_credits_its_payouts_and_books_the_rest_as_surplus() {
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x63, 1);
+    let before = pool.ledger.clone();
+    let (first, amount) = across_signed(&mut pool, 0x43);
+    let (second, _) = across_signed(&mut pool, 0x44);
+    // the first deposit carried a 1 unit gift a stranger left in the SwapProxy
+    let gifted = amount.checked_add(TokenAmount::from(1_u8)).unwrap();
+    pool.step(across_paid(first, across_out(gifted, 2_000)))
+        .unwrap();
+    pool.step(across_paid(second, across_out(amount, 2_100)))
+        .unwrap();
+    let why = || "the transfer to BNB Chain didn't go through".to_string();
+    for id in [first, second] {
+        pool.step(unfilled(id)).unwrap();
+        // no undo before Across's refund is credited: the user's ckUSDC stays held
+        let held = pool.ledger.clone();
+        let refund_first = Err(PoolStepError::Terms(
+            "an unfilled Across payout is undone only once Across's refund of it is credited",
+        ));
+        assert_eq!(
+            pool.step(PoolStep::PayoutUndoing { id, why: why() }),
+            refund_first
+        );
+        assert_eq!(
+            pool.step(PoolStep::PayoutUndone {
+                id,
+                why: why(),
+                block: Some(14),
+            }),
+            refund_first
+        );
+        assert_eq!(pool.ledger, held);
+        assert_eq!(status(&pool, id), PayoutStatus::Unfilled);
+        never_paid_again(&mut pool, id);
+    }
+    assert_eq!(pool.ledger.lines().across_owed.0.len(), 2);
+    // a refund of both deposits and a stranger's 5 units: the surplus is what is not the pool's
+    let total = gifted
+        .checked_add(amount)
+        .unwrap()
+        .checked_add(TokenAmount::from(5_u8))
+        .unwrap();
+    let surplus = TokenAmount::from(6_u8);
+    // the surplus must be exactly the rest, the deposits within the refund, each once
+    assert!(pool
+        .step(across_refunded(
+            vec![first, second],
+            total,
+            TokenAmount::from(5_u8),
+            1
+        ))
+        .is_err());
+    assert!(pool
+        .step(across_refunded(vec![first, first], total, surplus, 1))
+        .is_err());
+    assert!(pool
+        .step(across_refunded(
+            vec![first, second],
+            amount,
+            TokenAmount::ZERO,
+            1
+        ))
+        .is_err());
+    pool.step(across_refunded(vec![first, second], total, surplus, 1))
+        .unwrap();
+    for id in [first, second] {
+        assert_eq!(
+            pool.payouts[&id].reclaim,
+            Some(crate::pool::payout::Reclaim::Credited)
+        );
+        // the credit began its undo, once: no second one
+        assert_eq!(status(&pool, id), PayoutStatus::Undoing(why()));
+        assert!(pool.step(PoolStep::PayoutUndoing { id, why: why() }).is_err());
+        never_paid_again(&mut pool, id);
+        // its ckUSDC back to the user
+        pool.step(PoolStep::PayoutUndone {
+            id,
+            why: why(),
+            block: Some(14),
+        })
+        .unwrap();
+    }
+    assert_eq!(pool.ledger.lines().across_owed.0.len(), 0);
+    // credited once
+    assert!(pool.step(across_refunded(vec![], total, total, 1)).is_err());
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    assert_eq!(pool.ledger.owed, before.owed);
+    // and a refund of nobody's: all of it surplus
+    pool.step(across_refunded(
+        vec![],
+        TokenAmount::from(1_u8),
+        TokenAmount::from(1_u8),
+        2,
+    ))
+    .unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+}
+
+/// D8: a delivering Across payout whose fill read contradicts itself stops for a human. A
+/// controller who finds it unfilled refunds the user and it is owed back as an unfilled one
+/// is; one who finds it filled marks it paid from where its USDC went.
+#[test]
+fn a_stopped_across_payout_resolves_from_where_its_usdc_is() {
+    use crate::pool::payout::PayoutResolution::{MarkPaid, Refund};
+    let mut pool = with_base(funded(usdc(1_000)), usdc(5_000), 0x64, 1);
+    let before = pool.ledger.clone();
+    let (refund, amount) = across_signed(&mut pool, 0x45);
+    pool.step(across_paid(refund, across_out(amount, 2_000)))
+        .unwrap();
+    pool.step(stopped(refund)).unwrap();
+    pool.step(resolved(refund, Refund)).unwrap();
+    assert_eq!(
+        pool.payouts[&refund].reclaim,
+        Some(crate::pool::payout::Reclaim::Pending)
+    );
+    assert_eq!(pool.ledger.pockets.base.in_flight, amount);
+    let why = crate::pool::payout::REFUNDED.to_string();
+    pool.step(PoolStep::PayoutUndone {
+        id: refund,
+        why,
+        block: Some(15),
+    })
+    .unwrap();
+    pool.step(across_refunded(vec![refund], amount, TokenAmount::ZERO, 3))
+        .unwrap();
+    assert_eq!(pool.ledger.pockets, before.pockets);
+    // filled after all: paid from in flight, once
+    let (paid_id, amount) = across_signed(&mut pool, 0x46);
+    pool.step(across_paid(paid_id, across_out(amount, 2_200)))
+        .unwrap();
+    pool.step(stopped(paid_id)).unwrap();
+    pool.step(resolved(paid_id, MarkPaid)).unwrap();
+    assert_eq!(status(&pool, paid_id), PayoutStatus::Paid);
+    assert_eq!(pool.ledger.pockets.base.in_flight, TokenAmount::ZERO);
+    assert!(!pool.ledger.lines().across_owed.contains(&paid_id));
+    assert!(pool.step(resolved(paid_id, MarkPaid)).is_err());
+    // a payout signed with no Across order never stops from its signature
+    let (kind, undo) = icp_swap(usdc(100));
+    let other = open(&mut pool, kind, undo);
+    pool.step(PoolStep::PayoutAmountKnown {
+        id: other,
+        amount,
+        received: Some(usdc(100)),
+    })
+    .unwrap();
+    pool.step(PoolStep::PayoutWaiting { id: other }).unwrap();
+    pool.step(signed(other, order(47))).unwrap();
+    assert!(pool.step(stopped(other)).is_err());
 }

@@ -57,6 +57,8 @@ pub enum PoolRail {
     Cctp,
     Eco,
     SameChain,
+    /// An Across deposit from another chain, filled to the canister on the pool chain.
+    Across,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -470,6 +472,7 @@ impl From<PoolRail> for domain::PoolRail {
             PoolRail::Cctp => Self::Cctp,
             PoolRail::Eco => Self::Eco,
             PoolRail::SameChain => Self::SameChain,
+            PoolRail::Across => Self::Across,
         }
     }
 }
@@ -480,6 +483,7 @@ impl From<domain::PoolRail> for PoolRail {
             domain::PoolRail::Cctp => Self::Cctp,
             domain::PoolRail::Eco => Self::Eco,
             domain::PoolRail::SameChain => Self::SameChain,
+            domain::PoolRail::Across => Self::Across,
         }
     }
 }

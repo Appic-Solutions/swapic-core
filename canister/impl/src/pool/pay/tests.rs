@@ -89,10 +89,13 @@ impl World {
                 canister: canister(),
                 eco_portal: Some(address("0xEC000769A73b70e16f361a442292500b3BCf4A85")),
                 across_fee: None,
+                pool_chain: None,
             },
             swapic: swapic_address(),
             usdc: base_usdc(),
             eco_prover: Some(address("0xEC08fb4647f3f50d1162a578d481266687C60fc5")),
+            across_integrator: None,
+            across_out: TokenAmount::ZERO,
         }
     }
 }
@@ -697,4 +700,275 @@ fn payouts_waiting_leaves_out_a_payout_being_fitted() {
         drop(held);
         assert_eq!(super::waiting().len(), 1);
     });
+}
+
+/// BSC design 6.2.7 on T0's real order (Base USDC deposited on Across, filled on Arbitrum into
+/// the Runner, delivered as ARB: the shape of an ICP payout to another chain's token, no swap
+/// on Base), rewritten to be the canister's: its payer and the deposit's depositor.
+mod across_payouts {
+    use super::*;
+    use types::config::{AcrossFee, AcrossPins};
+    use types::swapic::across::{read_across_step, AcrossDeposit};
+
+    fn t0() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../../types/src/swapic/across/samples/t0.json"))
+            .unwrap()
+    }
+
+    fn bytes(v: &serde_json::Value) -> Vec<u8> {
+        hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap()
+    }
+
+    const HANDLER: &str = "0x0F7Ae28dE1C8532170AD4ee566B5801485c13a0E";
+    const PERIPHERY: &str = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4";
+
+    fn pins(spoke: &str) -> AcrossPins {
+        AcrossPins {
+            periphery: address(PERIPHERY),
+            swap_proxy: address("0x1d1735bcf925d10b600279ce720da2673c2274c5"),
+            spoke_pool: address(spoke),
+            multicall_handler: address(HANDLER),
+        }
+    }
+
+    struct Case {
+        evm_chains: ChainTable<EvmChain>,
+        domains: ChainTable<CctpDomain>,
+        fee: AcrossFee,
+        order: Order,
+        deposit: AcrossDeposit,
+    }
+
+    fn prod_chain(usdc: EvmAddress, spoke: &str) -> EvmChain {
+        EvmChain {
+            swapic: address("0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"),
+            runner: address("0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5"),
+            cctp_receiver: address("0x404056Ab781D713B8f5Dc55F5B9592962B187099"),
+            across: Some(pins(spoke)),
+            ..chain(usdc)
+        }
+    }
+
+    fn case() -> Case {
+        let t = t0();
+        let mut order = swapic::decode_order(&bytes(&t["run_data"])[4..]).unwrap();
+        let base = prod_chain(base_usdc(), "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64");
+        let mut deposit = read_across_step(&order.steps[0], &base.across.unwrap()).unwrap();
+        order.payer = swapic::addr(canister());
+        deposit.depositor = canister();
+        order.steps[0] = deposit.step();
+        Case {
+            evm_chains: ChainTable(BTreeMap::from([
+                (ChainId::BASE, base),
+                (
+                    ChainId::ARBITRUM,
+                    prod_chain(arbitrum_usdc(), "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A"),
+                ),
+            ])),
+            domains: ChainTable::default(),
+            fee: AcrossFee {
+                least_ppm: 50,
+                most_ppm: 3_000,
+                gas_allowance: ChainTable(BTreeMap::from([(
+                    ChainId::ARBITRUM,
+                    TokenAmount::from(100_000_u64),
+                )])),
+            },
+            order,
+            deposit,
+        }
+    }
+
+    impl Case {
+        fn payer(&self, integrator: Option<u16>, out: TokenAmount) -> Payer<'_> {
+            Payer {
+                chains: Chains {
+                    chain_id: ChainId::BASE,
+                    evm_chains: &self.evm_chains,
+                    domains: &self.domains,
+                    canister: canister(),
+                    eco_portal: None,
+                    across_fee: Some(&self.fee),
+                    pool_chain: None,
+                },
+                swapic: address("0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"),
+                usdc: base_usdc(),
+                eco_prover: None,
+                across_integrator: integrator,
+                across_out: out,
+            }
+        }
+
+        fn resign(&mut self) {
+            self.order.steps[0] = self.deposit.step();
+        }
+
+        fn payout(&self) -> EvmPayout {
+            let delivery = read_plan(&self.order, &self.payer(None, TokenAmount::ZERO).chains)
+                .unwrap()
+                .delivery
+                .unwrap();
+            swap_waiting(
+                &self.order,
+                PayoutTerms {
+                    dst_chain: delivery.chain,
+                    recipient: delivery.recipient,
+                    token_out: delivery.token,
+                    min_out: delivery.min_out,
+                    deadline: Timestamp::from_secs(deadline_of(&self.order)).unwrap(),
+                },
+            )
+        }
+
+        fn check(
+            &self,
+            payout: &EvmPayout,
+            settings: &PayoutSettings,
+            integrator: Option<u16>,
+            out: TokenAmount,
+            gas_limit: u64,
+        ) -> Result<PinnedOrder, PoolError> {
+            check_order(
+                payout,
+                &self.order,
+                &swapic::encode_order(&self.order),
+                gas_limit,
+                &self.payer(integrator, out),
+                settings,
+                deadline_of(&self.order) - 600,
+                nobody,
+                AmountIn::Exact,
+            )
+        }
+    }
+
+    /// [`waiting`] as an ICP swap's payout: the only payout an Across order pays (N5).
+    fn swap_waiting(order: &Order, terms: PayoutTerms) -> EvmPayout {
+        let mut payout = waiting(order, terms);
+        let refund_to = types::pool::IcpAccount {
+            owner: candid::Principal::from_slice(&[0x31; 10]),
+            subaccount: None,
+        };
+        payout.kind = PayoutKind::IcpSwap(types::pool::IcpSwapTerms {
+            token_in: candid::Principal::from_slice(&[0x32; 10]),
+            amount_in: TokenAmount::from(10_000_000_u64),
+            from: refund_to,
+            min_usdc: TokenAmount::from(10_000_000_u64),
+            premium: TokenAmount::ZERO,
+            network_fee: TokenAmount::from(50_000_u64),
+            refund_to,
+            slippage_bps: Some(100),
+            planned: Some(amount_of(order)),
+        });
+        payout.undo = Undo::Refund { to: refund_to };
+        payout
+    }
+
+    /// N5: a pool withdrawal is never paid through Across, whatever its order.
+    #[test]
+    fn a_withdrawal_is_never_paid_through_across() {
+        let c = case();
+        let swap = c.payout();
+        let withdrawal = waiting(&c.order, swap.terms);
+        assert!(c
+            .check(&swap, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000)
+            .is_ok());
+        assert!(matches!(
+            c.check(&withdrawal, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
+            Err(PoolError::NotAllowed(why)) if why.contains("withdrawal")
+        ));
+    }
+
+    fn capped(max: u64) -> PayoutSettings {
+        PayoutSettings {
+            across_in_flight_max: Some(TokenAmount::from(max)),
+            ..PayoutSettings::default()
+        }
+    }
+
+    #[test]
+    fn an_across_payout_within_its_cap_is_pinned() {
+        let c = case();
+        let payout = c.payout();
+        // ARB on Arbitrum, its minimum the envelope's
+        assert_eq!(payout.terms.dst_chain, ChainId::ARBITRUM);
+        let pinned = c
+            .check(&payout, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000)
+            .unwrap();
+        assert_eq!(swapic::decode_order(&pinned.order), Some(c.order.clone()));
+    }
+
+    #[test]
+    fn an_across_payout_past_the_in_flight_cap_or_with_none_is_refused() {
+        let c = case();
+        let payout = c.payout();
+        // 3 USDC with 1,999 out under a 2,000 cap
+        let out = TokenAmount::from(1_999_000_000_u64);
+        assert!(c.check(&payout, &capped(2_002_000_000), None, out, 900_000).is_ok());
+        assert!(matches!(
+            c.check(&payout, &capped(2_000_000_000), None, out, 900_000),
+            Err(PoolError::NotAllowed(why)) if why.contains("cap")
+        ));
+        assert!(matches!(
+            c.check(&payout, &PayoutSettings::default(), None, TokenAmount::ZERO, 900_000),
+            Err(PoolError::NotAllowed(why)) if why.contains("no in-flight cap")
+        ));
+    }
+
+    /// AX14 on a payout (attack C1): the caller's own plan cannot hand the relayer the payout.
+    #[test]
+    fn an_across_payout_promising_dust_or_naming_another_depositor_is_refused() {
+        for (output, rule) in [
+            (U256::from(1u8), "AX14"),
+            (U256::from(1_465_363u32), "AX14"),
+            (U256::from(3_000_000u32), "AX13"),
+        ] {
+            let mut c = case();
+            c.deposit.output_amount = output;
+            c.resign();
+            let payout = swap_waiting(&c.order, case().payout().terms);
+            assert!(
+                matches!(
+                    c.check(&payout, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
+                    Err(PoolError::NotAllowed(why)) if why.contains(rule)
+                ),
+                "{output}"
+            );
+        }
+        let mut c = case();
+        c.deposit.depositor = address("0x1111111111111111111111111111111111111111");
+        c.resign();
+        let payout = swap_waiting(&c.order, case().payout().terms);
+        assert!(matches!(
+            c.check(&payout, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
+            Err(PoolError::NotAllowed(why)) if why.contains("AX5")
+        ));
+    }
+
+    /// 6.2.11: the canister's own Across payout carries the integrator suffix, and its gas
+    /// floor counts it.
+    #[test]
+    fn an_across_payouts_data_ends_with_the_integrator_and_its_floor_counts_it() {
+        let c = case();
+        let plain = swapic::run_calldata(&c.order);
+        let data = payout_calldata(&c.order, Some(0x00ab));
+        assert_eq!(data[..plain.len()], plain[..]);
+        assert_eq!(data[plain.len()..], [0x1d, 0xc0, 0xde, 0x00, 0xab]);
+        assert_eq!(payout_calldata(&c.order, None), plain);
+        // a payout with no Across step carries none
+        assert_eq!(
+            payout_calldata(&same_chain(), Some(0x00ab)),
+            swapic::run_calldata(&same_chain())
+        );
+        let least = crate::tx::least_gas(&plain);
+        let with_suffix = crate::tx::least_gas(&data);
+        assert!(with_suffix > least);
+        let payout = c.payout();
+        let settings = capped(2_000_000_000);
+        assert!(c.check(&payout, &settings, None, TokenAmount::ZERO, least).is_ok());
+        assert!(matches!(
+            c.check(&payout, &settings, Some(0x00ab), TokenAmount::ZERO, least),
+            Err(PoolError::NotAllowed(why)) if why.contains("gas limit")
+        ));
+    }
 }

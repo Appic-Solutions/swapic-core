@@ -144,6 +144,8 @@ pub struct PoolEffects {
     pub credited: Option<CreditKey>,
     /// A Base payout as the step leaves it.
     pub payout: Option<EvmPayout>,
+    /// More Base payouts the step leaves changed: each payout an Across refund pays back.
+    pub payouts: Vec<EvmPayout>,
     /// A place in the Base queue taken: the place and the payout.
     pub queued: Option<(u64, u64)>,
     /// A place in the Base queue given up.
@@ -167,6 +169,7 @@ impl PoolEffects {
             shares: None,
             credited: None,
             payout: None,
+            payouts: Vec::new(),
             queued: None,
             dequeued: None,
             nonce: None,
@@ -661,9 +664,12 @@ impl PoolLedger {
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }
-            | PoolStep::TermsClaimed { .. } => self.admits_payout(step, lookup),
+            | PoolStep::TermsClaimed { .. }
+            | PoolStep::AcrossRefunded { .. } => self.admits_payout(step, lookup),
             // the nonce it spends is the state's to check: nothing of the pool moves
-            PoolStep::ApproveSigned { .. } | PoolStep::SweepSigned { .. } => Ok(()),
+            PoolStep::ApproveSigned { .. }
+            | PoolStep::SweepSigned { .. }
+            | PoolStep::AcrossClaimSigned { .. } => Ok(()),
             PoolStep::MoveSettingsSet { .. }
             | PoolStep::MoveOpened { .. }
             | PoolStep::MoveProposed { .. }
@@ -993,7 +999,9 @@ impl PoolLedger {
             | PoolStep::StakeStarted { .. }
             | PoolStep::StakeFailed { .. }
             | PoolStep::WithdrawStarted { .. } => ledger.apply_icp_op(step, lookup, &mut effects),
-            PoolStep::ApproveSigned { .. } | PoolStep::SweepSigned { .. } => {}
+            PoolStep::ApproveSigned { .. }
+            | PoolStep::SweepSigned { .. }
+            | PoolStep::AcrossClaimSigned { .. } => {}
             PoolStep::PayoutSettingsSet { .. }
             | PoolStep::PayoutOpened { .. }
             | PoolStep::PayoutAmountKnown { .. }
@@ -1020,7 +1028,8 @@ impl PoolLedger {
             | PoolStep::OrphanBooked { .. }
             | PoolStep::OrphanRefundSigned { .. }
             | PoolStep::OrphanRefundClosed { .. }
-            | PoolStep::TermsClaimed { .. } => {
+            | PoolStep::TermsClaimed { .. }
+            | PoolStep::AcrossRefunded { .. } => {
                 ledger.apply_payout(step, lookup, at, index, &mut effects)
             }
             PoolStep::MoveSettingsSet { .. }

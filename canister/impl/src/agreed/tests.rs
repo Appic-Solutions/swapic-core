@@ -125,3 +125,98 @@ fn a_read_past_a_time_waits_the_grain_and_the_depth_in_the_chains_blocks() {
         Duration::from_secs((16 + 12) * 12 + 60)
     );
 }
+
+/// BSC design 6.2.7 and D8: an Across fill is read only past its deadline; the SpokePool's own
+/// relay hash must be the canister's; then its status decides.
+#[test]
+fn an_across_fill_reads_past_its_deadline_and_trusts_only_its_own_hash() {
+    let local = [0x5a; 32];
+    let hash = json!(hex0x(&local));
+    let deadline = 1_000;
+    let read = |at: u64, hash: Value, status: Value| {
+        across_fill_of(Ok(header(90, at)), Ok(hash), Ok(status), local, deadline)
+    };
+    assert_eq!(
+        read(deadline, hash.clone(), word_of(2)),
+        Err(FillRead::TooEarly)
+    );
+    let past = deadline + 1;
+    assert!(matches!(
+        read(past, hash.clone(), word_of(2)),
+        Ok((AcrossFill::Filled, Header { number, .. })) if number == BlockNumber::new(90)
+    ));
+    for open in [0, 1] {
+        assert!(matches!(
+            read(past, hash.clone(), word_of(open)),
+            Ok((AcrossFill::Open, _))
+        ));
+    }
+    assert!(matches!(
+        read(past, json!(hex0x(&[0x5b; 32])), word_of(0)),
+        Ok((AcrossFill::HashDiffers, _))
+    ));
+    assert!(matches!(
+        read(past, hash, word_of(3)),
+        Err(FillRead::Unread(_))
+    ));
+}
+
+/// Attack M5, on T0's real fill on Arbitrum: a page's fill of the canister's own relay counts,
+/// a removed one does not; a fill of another relay reusing the deposit's origin and id (a
+/// griefer's own) stops nothing; a page not answered is no answer.
+#[test]
+fn only_a_fill_of_the_canisters_own_relay_is_a_fill() {
+    let receipts: Value = serde_json::from_str(include_str!(
+        "../../../types/src/swapic/across/samples/t0_receipts.json"
+    ))
+    .unwrap();
+    let topic = format!(
+        "0x{}",
+        hex::encode(types::swapic::across::topics::filled_relay())
+    );
+    let fill = receipts["fill"]["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|log| log["topics"][0] == topic.as_str())
+        .unwrap()
+        .clone();
+    let spoke_pool: EvmAddress = fill["address"].as_str().unwrap().parse().unwrap();
+    let logs = crate::pool::arrival::logs_of(&json!({ "logs": [fill.clone()] }));
+    let key = types::swapic::across::read_filled_relay(&logs[0].topics, &logs[0].data)
+        .unwrap()
+        .key;
+    let page = |logs: Value| Ok(logs);
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], spoke_pool, &key), Ok(true));
+    assert_eq!(
+        relay_logged(vec![page(json!([])), page(json!([]))], spoke_pool, &key),
+        Ok(false)
+    );
+    let mut removed = fill.clone();
+    removed["removed"] = json!(true);
+    assert_eq!(relay_logged(vec![page(json!([removed]))], spoke_pool, &key), Ok(false));
+    // another relay with the deposit's origin and id: a different amount
+    let other = types::swapic::across::RelayKey {
+        input_amount: key.input_amount + alloy_primitives::U256::from(1u8),
+        ..key
+    };
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], spoke_pool, &other), Ok(false));
+    // a log of another contract, or one that is no FilledRelay
+    let elsewhere: EvmAddress = "0x7777777777777777777777777777777777777777".parse().unwrap();
+    assert_eq!(relay_logged(vec![page(json!([fill.clone()]))], elsewhere, &key), Ok(false));
+    assert_eq!(
+        relay_logged(vec![page(json!([{"removed": false}]))], spoke_pool, &key),
+        Ok(false)
+    );
+    assert!(relay_logged(
+        vec![
+            page(json!([])),
+            Err(RpcError::Unanswered {
+                method: "eth_getLogs".to_string()
+            })
+        ],
+        spoke_pool,
+        &key
+    )
+    .is_err());
+}

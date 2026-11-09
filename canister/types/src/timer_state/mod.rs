@@ -170,11 +170,21 @@ pub struct TimerState {
     /// alerts each once. None for a state written before there were any.
     #[n(11)]
     pub pulls_to_check: Option<Vec<PullToCheck>>,
+    /// The transactions of Across refunds to the canister its read of Base found while a
+    /// payout they may pay back waited for its fill read: kept aside and read again each pass,
+    /// so the read moves on past them (BSC wave 2). None for a state written before there were
+    /// any.
+    #[n(12)]
+    pub across_refunds_waiting: Option<Vec<crate::hash::TxHash>>,
     /// The one time walk of the log for the user-paid fees of finishes from before they were
     /// booked. None until the upgrade that starts it, and it stays when it is done.
-    #[n(12)]
+    #[n(13)]
     pub fee_catch_up: Option<FeeCatchUp>,
 }
+
+/// The most Across refunds the read of Base keeps aside: past it, the read stops before the
+/// next one, with an alert.
+pub const MAX_WAITING_REFUNDS: usize = 32;
 
 /// The most pulls to check kept: the oldest goes first.
 pub const MAX_PULLS_TO_CHECK: usize = 100;

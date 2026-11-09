@@ -730,6 +730,10 @@ struct Reads {
     asked: RefCell<Vec<([u8; 32], BlockNumber)>>,
     fill: Result<(Fill, BlockNumber), crate::agreed::FillRead>,
     fills: RefCell<Vec<(ChainId, [u8; 32], u64)>>,
+    /// An Across deposit's fill, and whether the destination logged one.
+    across: Result<crate::agreed::AcrossFill, crate::agreed::FillRead>,
+    logged: Result<Option<bool>, String>,
+    across_reads: RefCell<Vec<(ChainId, u64)>>,
 }
 
 impl Reads {
@@ -746,6 +750,20 @@ impl Reads {
             asked: RefCell::default(),
             fill: Err(crate::agreed::FillRead::Unread("not read".to_string())),
             fills: RefCell::default(),
+            across: Err(crate::agreed::FillRead::Unread("not read".to_string())),
+            logged: Err("not read".to_string()),
+            across_reads: RefCell::default(),
+        }
+    }
+
+    fn across(
+        across: Result<crate::agreed::AcrossFill, crate::agreed::FillRead>,
+        logged: Result<Option<bool>, String>,
+    ) -> Self {
+        Self {
+            across,
+            logged,
+            ..Self::unread()
         }
     }
 
@@ -771,6 +789,33 @@ impl ChainReads for Reads {
     ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead> {
         self.fills.borrow_mut().push((chain, intent, after_s));
         self.fill.clone()
+    }
+
+    async fn across_fill_after(
+        &self,
+        chain: ChainId,
+        _across: &types::pool::AcrossOut,
+        after_s: u64,
+    ) -> Result<(crate::agreed::AcrossFill, crate::agreed::Header), crate::agreed::FillRead> {
+        self.across_reads.borrow_mut().push((chain, after_s));
+        self.across.clone().map(|fill| {
+            (
+                fill,
+                crate::agreed::Header {
+                    number: BlockNumber::new(88),
+                    timestamp: after_s + 30,
+                },
+            )
+        })
+    }
+
+    async fn fill_logged(
+        &self,
+        _chain: ChainId,
+        _across: &types::pool::AcrossOut,
+        _header: crate::agreed::Header,
+    ) -> Result<Option<bool>, String> {
+        self.logged.clone()
     }
 }
 
@@ -860,6 +905,7 @@ fn delivering_withdrawal() -> u64 {
             tx_hash: types::TxHash::new([9; 32]),
             block: BlockNumber::new(30),
             intent: Some([0x1e; 32]),
+            across: None,
         },
         at(10),
     )
@@ -1011,6 +1057,7 @@ fn an_unfilled_icp_swap_refunds_its_ckusdc_at_once() {
                 tx_hash: types::TxHash::new([9; 32]),
                 block: BlockNumber::new(30),
                 intent: Some([0x1f; 32]),
+                across: None,
             },
             at(10),
         )
@@ -1072,6 +1119,7 @@ fn the_split_and_the_books_leave_an_eco_payouts_usdc_in_flight_out() {
                 tx_hash: types::TxHash::new([9; 32]),
                 block: BlockNumber::new(30),
                 intent: Some([0x1e; 32]),
+                across: None,
             },
             at(10),
         )
@@ -1463,5 +1511,193 @@ fn a_ck_payout_is_driven_and_past_its_withdrawal_no_deadline_undoes_it() {
         payout.status = status;
         assert_eq!(at(&payout, 50), Next::Ck);
         assert_eq!(at(&payout, 1_000), Next::Ck);
+    }
+}
+
+/// An order whose one step deposits on Across: a signed payout's USDC is out on Across.
+fn across_order() -> Vec<u8> {
+    use alloy_primitives::{Address, U256};
+    use types::swapic::{Order, Payout, Step};
+    let mut data = types::swapic::across::SWAP_AND_BRIDGE.to_vec();
+    data.extend_from_slice(&[0x5b; 32]);
+    types::swapic::encode_order(&Order {
+        r#ref: [0x5b; 32].into(),
+        payer: Address::repeat_byte(0x8f),
+        tokenIn: Address::repeat_byte(0x83),
+        amountIn: U256::from(1u8),
+        deadline: U256::from(900u64),
+        steps: vec![Step {
+            target: Address::repeat_byte(0x97),
+            data: data.into(),
+            token: Address::repeat_byte(0x83),
+            min: U256::from(1u8),
+            writes: Vec::new(),
+        }],
+        payout: Payout {
+            token: Address::ZERO,
+            recipient: Address::ZERO,
+            minOut: U256::ZERO,
+        },
+        memo: Vec::new().into(),
+    })
+}
+
+/// The fill deadline of the Across deposits below.
+const ACROSS_DEADLINE: u64 = 1_500;
+
+/// A withdrawal of 100 USDC paid on Base into an Across deposit to BNB Chain, its fill
+/// deadline [`ACROSS_DEADLINE`].
+fn delivering_across_withdrawal() -> u64 {
+    let id = waiting_withdrawal(staker());
+    crate::storage::pool::tests::across_cap();
+    crate::storage::pool::tests::sign_payout_with(id, 0, 9, across_order());
+    let amount = payout(id).unwrap().amount.unwrap();
+    let out = types::pool::AcrossOut {
+        destination: ChainId::BSC,
+        relay: types::swapic::across::RelayData {
+            depositor: [0x8f; 32],
+            recipient: [0x0f; 32],
+            exclusive_relayer: [0; 32],
+            input_token: [0x83; 32],
+            output_token: [0x8a; 32],
+            input_amount: amount,
+            output_amount: amount,
+            origin_chain_id: ChainId::BASE,
+            deposit_id: TokenAmount::from(7_u8),
+            fill_deadline: ACROSS_DEADLINE as u32,
+            exclusivity_deadline: 0,
+            message: vec![0x01],
+        },
+        deposit_time: 300,
+    };
+    record_at(
+        PoolStep::PayoutPaid {
+            id,
+            tx_hash: types::TxHash::new([9; 32]),
+            block: BlockNumber::new(30),
+            intent: None,
+            across: Some(Box::new(out)),
+        },
+        at(10),
+    )
+    .unwrap();
+    assert_eq!(payout(id).unwrap().status, PayoutStatus::Delivering);
+    id
+}
+
+/// When an Across deposit's fill is read: one agreed block's wait on BNB Chain past its fill
+/// deadline.
+fn across_read_at() -> Timestamp {
+    Timestamp::from_secs(ACROSS_DEADLINE + crate::agreed::fill_wait_on(ChainId::BSC).as_secs())
+        .unwrap()
+}
+
+/// BSC design 6.2.7: an Across payout's fill is read once past its fill deadline. Filled, it
+/// is paid; open with no fill logged, it is undone at once and owed back by Across; a relay
+/// hash that differs (D8) or a fill logged for a deposit read open (attack M5) stops it for a
+/// human, nothing refunded.
+#[test]
+fn an_across_payouts_fill_is_read_past_its_deadline_and_decides_once() {
+    use crate::agreed::AcrossFill;
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = delivering_across_withdrawal();
+        // before its fill deadline and the wait: not even asked
+        let reads = Reads::across(Ok(AcrossFill::Filled), Ok(Some(false)));
+        block_on(pass_with(&Fake::default(), &reads, || secs(ACROSS_DEADLINE), &open_pool));
+        assert!(reads.across_reads.borrow().is_empty());
+        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        assert_eq!(*reads.across_reads.borrow(), vec![(ChainId::BSC, ACROSS_DEADLINE)]);
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Paid);
+        assert_eq!(ledger().pockets.base.in_flight, TokenAmount::ZERO);
+        assert!(!ledger().lines().across_owed.contains(&id));
+    });
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = delivering_across_withdrawal();
+        let owner = PoolAccount::Evm(staker());
+        let before = shares_of(&owner);
+        let amount = payout(id).unwrap().amount.unwrap();
+        let reads = Reads::across(Ok(AcrossFill::Open), Ok(Some(false)));
+        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        // read unfilled, it is NOT undone (Jeff, 2026-11-09): the user waits for Across's
+        // refund, nothing is given back, and its USDC is in flight and out still
+        let waiting = payout(id).unwrap();
+        assert_eq!(waiting.status, PayoutStatus::Unfilled);
+        assert_eq!(waiting.reclaim, Some(types::pool::Reclaim::Pending));
+        assert_eq!(shares_of(&owner), before);
+        assert_eq!(ledger().pockets.base.in_flight, amount);
+        assert!(ledger().lines().across_owed.contains(&id));
+        // another pass reads nothing again and undoes nothing
+        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        assert_eq!(reads.across_reads.borrow().len(), 1);
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Unfilled);
+        assert_eq!(shares_of(&owner), before);
+        // Across's refund of it credited: the next pass undoes it, once, in plain words
+        crate::storage::pool::record_at(
+            types::pool::PoolStep::AcrossRefunded {
+                credit: types::pool::CreditKey {
+                    chain: ChainId::BASE,
+                    tx: types::TxHash::new([0xa7; 32]),
+                    log_index: 2,
+                },
+                amount,
+                block: types::BlockNumber::new(40),
+                refunded: vec![id],
+                surplus: TokenAmount::ZERO,
+            },
+            across_read_at(),
+        )
+        .unwrap();
+        assert_eq!(ledger().pockets.base.in_flight, TokenAmount::ZERO);
+        block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
+        assert_eq!(
+            payout(id).unwrap().status,
+            PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
+        );
+        assert!(shares_of(&owner) > before);
+    });
+    for (read, why) in [
+        (
+            Reads::across(Ok(AcrossFill::HashDiffers), Ok(Some(false))),
+            ACROSS_HASH_DIFFERS,
+        ),
+        (
+            Reads::across(Ok(AcrossFill::Open), Ok(Some(true))),
+            ACROSS_FILL_LOGGED,
+        ),
+        (Reads::across(Ok(AcrossFill::Open), Ok(None)), ACROSS_TOO_LATE),
+    ] {
+        on_fresh_memory(move || {
+            crate::storage::init();
+            let id = delivering_across_withdrawal();
+            let owner = PoolAccount::Evm(staker());
+            let before = shares_of(&owner);
+            block_on(pass_with(&Fake::default(), &read, across_read_at, &open_pool));
+            assert_eq!(payout(id).unwrap().status, PayoutStatus::Failed(why.to_string()));
+            assert_eq!(shares_of(&owner), before, "nothing refunded");
+            assert!(ledger().lines().across_owed.contains(&id));
+        });
+    }
+    // unread logs, an unread fill or one read too early: it waits
+    for read in [
+        Reads::across(Ok(AcrossFill::Open), Err("no agreement".to_string())),
+        Reads::across(Err(crate::agreed::FillRead::TooEarly), Ok(Some(false))),
+    ] {
+        on_fresh_memory(move || {
+            crate::storage::init();
+            let id = delivering_across_withdrawal();
+            block_on(pass_with(&Fake::default(), &read, across_read_at, &open_pool));
+            assert_eq!(payout(id).unwrap().status, PayoutStatus::Delivering);
+        });
+    }
+}
+
+/// The Across stops read as one sentence each: no run of spaces left by a line break.
+#[test]
+fn the_across_stops_read_as_plain_sentences() {
+    for why in [ACROSS_HASH_DIFFERS, ACROSS_FILL_LOGGED, ACROSS_TOO_LATE] {
+        assert!(!why.contains("  "), "{why}");
+        assert!(why.starts_with("ALERT: ") && why.ends_with("for a human"), "{why}");
     }
 }

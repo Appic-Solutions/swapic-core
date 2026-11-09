@@ -44,6 +44,7 @@ fn payout_settings_cross_the_wire_and_back() {
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
         ck: None,
+        across_in_flight_max: None,
     };
     let bytes = Encode!(&wire).unwrap();
     assert_eq!(Decode!(&bytes, PayoutSettings).unwrap(), wire);
@@ -53,7 +54,7 @@ fn payout_settings_cross_the_wire_and_back() {
     // CCTP payouts on: a payout below the destination's floor is refused, at it signed
     let cctp = PayoutSettings {
         cctp_payouts: true,
-        ..wire
+        ..wire.clone()
     };
     let domain = domain::PayoutSettings::try_from(cctp.clone()).unwrap();
     assert_eq!(PayoutSettings::from(&domain), cctp);
@@ -64,6 +65,21 @@ fn payout_settings_cross_the_wire_and_back() {
     assert_eq!(domain.admits_cctp(floor, floor), Ok(()));
     assert!(domain::PayoutSettings::default()
         .admits_cctp(TokenAmount::MAX, floor)
+        .is_err());
+    // the Across in-flight cap crosses too, and with none no Across payout is signed
+    let capped = PayoutSettings {
+        across_in_flight_max: Some(Nat::from(2_000_000_000_u64)),
+        ..wire
+    };
+    let domain = domain::PayoutSettings::try_from(capped.clone()).unwrap();
+    assert_eq!(PayoutSettings::from(&domain), capped);
+    let out = TokenAmount::from(1_999_000_000_u64);
+    assert_eq!(domain.admits_across(TokenAmount::from(1_000_000_u64), out), Ok(()));
+    assert!(domain
+        .admits_across(TokenAmount::from(1_000_001_u64), out)
+        .is_err());
+    assert!(domain::PayoutSettings::default()
+        .admits_across(TokenAmount::ONE, TokenAmount::ZERO)
         .is_err());
 }
 
@@ -123,6 +139,30 @@ fn a_payout_view_says_what_the_payout_spends_and_where_it_stands() {
         PayoutStatus::from(&payout.status),
         PayoutStatus::Refunding("its Eco intent was not filled".to_string())
     );
+    // an unfilled Across deposit reads in plain words, the rail never named (Jeff, 2026-11-09)
+    payout.across = Some(domain::AcrossOut {
+        destination: types::ChainId::BSC,
+        relay: types::swapic::across::RelayData {
+            depositor: [1; 32],
+            recipient: [2; 32],
+            exclusive_relayer: [0; 32],
+            input_token: [3; 32],
+            output_token: [4; 32],
+            input_amount: TokenAmount::from(4_949_000_u64),
+            output_amount: TokenAmount::from(4_940_000_u64),
+            origin_chain_id: types::ChainId::BASE,
+            deposit_id: TokenAmount::from(7_u8),
+            fill_deadline: 1_800_000_900,
+            exclusivity_deadline: 0,
+            message: Vec::new(),
+        },
+        deposit_time: 1_800_000_000,
+    });
+    assert_eq!(
+        PayoutView::from(&payout).status,
+        PayoutStatus::Refunding("the transfer to BNB Chain didn't go through".to_string())
+    );
+    payout.across = None;
     payout.status = domain::PayoutStatus::Delivering;
     assert_eq!(PayoutStatus::from(&payout.status), PayoutStatus::Delivering);
     payout.status = domain::PayoutStatus::Undone("past its deadline".to_string());

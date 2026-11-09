@@ -277,4 +277,9 @@ fn the_interface_golden_events_hold() {
     assert_eq!(candid::encode_one(&page).unwrap(), hex_of("page_candid"));
     let decoded: Vec<Event> = candid::decode_one(&hex_of("page_candid")).unwrap();
     assert_eq!(decoded, page);
+    // the page as it was written before the Across claim's purpose (BSC design 6.2.9) still
+    // reads the same: a variant added changes the type table, never a line
+    let before: Vec<Event> =
+        candid::decode_one(&hex_of("page_candid_before_across_claim")).unwrap();
+    assert_eq!(before, page);
 }

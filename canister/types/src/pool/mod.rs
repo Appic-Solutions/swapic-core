@@ -26,8 +26,8 @@ pub use step::PoolStep;
 
 pub use payout::{
     ck_back_memo, ck_burn, ck_least_usdc, ck_memo, ck_subaccount, evm_payout_id, evm_payout_ref,
-    orphan_key, CkBack, CkLeg, CkSettings, EvmPayout, EvmWithdrawal, Flag, IcpSwapTerms, NonceUse,
-    Orphan, OrphanStatus, PayoutKind, PayoutLines, PayoutResolution, PayoutSettings,
+    orphan_key, AcrossOut, CkBack, CkLeg, CkSettings, EvmPayout, EvmWithdrawal, Flag, IcpSwapTerms, NonceUse,
+    Orphan, OrphanStatus, PayoutKind, PayoutIds, PayoutLines, PayoutResolution, PayoutSettings,
     PayoutSettingsError, PayoutStatus, PayoutTerms, PinnedOrder, Reclaim, Undo,
 };
 
@@ -200,6 +200,10 @@ pub enum PoolRail {
     /// An order on Base whose payout is the canister.
     #[n(2)]
     SameChain,
+    /// An Across deposit from another chain whose recipient is the canister, filled on Base
+    /// (BSC design 6.2.8).
+    #[n(3)]
+    Across,
 }
 
 /// The interface's `owner`: `keccak256(0x02 ‖ u8(len) ‖ principal ‖ subaccount32)` for an

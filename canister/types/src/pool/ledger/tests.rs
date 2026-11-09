@@ -71,6 +71,9 @@ impl Pool {
         if let Some(payout) = effects.payout {
             self.payouts.insert(payout.id, payout);
         }
+        for payout in effects.payouts {
+            self.payouts.insert(payout.id, payout);
+        }
         if let Some(seq) = effects.dequeued {
             self.queue.remove(&seq);
         }
@@ -2188,7 +2191,7 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
 }
 
 /// How many variants `PoolStep` has: [`place`] gives each its own place below it.
-const STEP_COUNT: usize = 76;
+const STEP_COUNT: usize = 78;
 
 /// Each step's place in `PoolStep`'s order. The match has no catch-all, so a step added to
 /// `PoolStep` does not compile here until it has a place, and a sample in [`every_step`].
@@ -2270,6 +2273,8 @@ fn place(step: &PoolStep) -> usize {
         PoolStep::PayoutCkWithdrawn { .. } => 73,
         PoolStep::PayoutCkLanded { .. } => 74,
         PoolStep::PayoutCkReimbursed { .. } => 75,
+        PoolStep::AcrossRefunded { .. } => 76,
+        PoolStep::AcrossClaimSigned { .. } => 77,
     }
 }
 
@@ -2480,6 +2485,7 @@ fn every_step() -> Vec<PoolStep> {
             tx_hash,
             block,
             intent: None,
+            across: None,
         },
         PoolStep::PayoutReverted { id: 0, block: None },
         PoolStep::PayoutUndoing {
@@ -2689,6 +2695,19 @@ fn every_step() -> Vec<PoolStep> {
             left: amount,
             block: None,
             burned: true,
+        },
+        PoolStep::AcrossRefunded {
+            credit,
+            amount,
+            block,
+            refunded: vec![0],
+            surplus: TokenAmount::ZERO,
+        },
+        PoolStep::AcrossClaimSigned {
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
         },
     ]
 }

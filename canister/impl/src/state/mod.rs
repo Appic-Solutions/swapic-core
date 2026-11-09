@@ -798,6 +798,9 @@ impl<S: Store> State<S> {
         if let Some(payout) = effects.payout {
             self.store.put_pool_payout(payout.id, payout);
         }
+        for payout in effects.payouts {
+            self.store.put_pool_payout(payout.id, payout);
+        }
         if let Some(seq) = effects.dequeued {
             self.store.remove_payout_queued(seq);
         }
@@ -821,6 +824,19 @@ impl<S: Store> State<S> {
                 self.store.put_book(key.chain, books);
             }
             self.store.put_pool_orphan(key, orphan);
+        }
+        // an Across refund's surplus is the canister's own: the books' unattributed line of
+        // its chain
+        if let PoolStep::AcrossRefunded {
+            credit, surplus, ..
+        } = step
+        {
+            let mut books = self.book(&credit.chain);
+            books.unattributed = books
+                .unattributed
+                .checked_add(*surplus)
+                .unwrap_or(TokenAmount::MAX);
+            self.store.put_book(credit.chain, books);
         }
         if let Some(item) = effects.moved {
             self.store.put_pool_move(item.id, item);

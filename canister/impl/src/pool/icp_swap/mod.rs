@@ -263,7 +263,8 @@ pub fn check<S: Store>(
     let canister = canister.ok_or_else(|| {
         PoolError::Unavailable("the canister's address is not derived yet".to_string())
     })?;
-    let payer = pay::payer_of(config, canister, eco_prover)?;
+    let mut payer = pay::payer_of(config, canister, eco_prover)?;
+    payer.across_out = pay::across_out(state);
     let (read, delivery) = plan_delivery(&order, &payer.chains)?;
     let payout = PayoutTerms {
         dst_chain: delivery.chain,
@@ -840,10 +841,11 @@ fn read_fit_beside_sale(
     let Some(amount) = plan::payout_of(settings, received, terms.network_fee) else {
         return;
     };
-    if let Ok((order, swap)) =
-        crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get())
-    {
-        let route = swap.map(|at| order.steps[at].data.to_vec());
+    if let Ok(decided) = crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get()) {
+        // a KyberSwap step's route alone is read ahead: an Across step is fitted with no read
+        let route = decided
+            .swap
+            .map(|at| decided.order.steps[at].data.to_vec());
         reads.read_fit_ahead(payout.id, route, amount);
     }
 }
