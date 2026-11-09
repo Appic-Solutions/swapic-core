@@ -181,6 +181,13 @@ pub fn check_order(
             "a payout order carries no fee step: the canister pays itself nothing",
         ));
     }
+    // N5: a pool withdrawal is never paid through Across (BNB Chain stays out of the pool's
+    // stakes and withdrawals): only an ICP swap's payout deposits on Across
+    if plan.action == GasAction::RelayAcross && !payout.is_icp_swap() {
+        return Err(refused(
+            "a withdrawal is never paid through Across: BNB Chain takes no pool withdrawal",
+        ));
+    }
     // an Across payout: within the cap on what Across payouts hold in flight together (D16)
     if plan.action == GasAction::RelayAcross {
         let this = amount.unwrap_or(TokenAmount::from_u256(order.amountIn));

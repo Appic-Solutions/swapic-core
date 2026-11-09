@@ -808,7 +808,7 @@ mod across_payouts {
                 .unwrap()
                 .delivery
                 .unwrap();
-            waiting(
+            swap_waiting(
                 &self.order,
                 PayoutTerms {
                     dst_chain: delivery.chain,
@@ -840,6 +840,43 @@ mod across_payouts {
                 AmountIn::Exact,
             )
         }
+    }
+
+    /// [`waiting`] as an ICP swap's payout: the only payout an Across order pays (N5).
+    fn swap_waiting(order: &Order, terms: PayoutTerms) -> EvmPayout {
+        let mut payout = waiting(order, terms);
+        let refund_to = types::pool::IcpAccount {
+            owner: candid::Principal::from_slice(&[0x31; 10]),
+            subaccount: None,
+        };
+        payout.kind = PayoutKind::IcpSwap(types::pool::IcpSwapTerms {
+            token_in: candid::Principal::from_slice(&[0x32; 10]),
+            amount_in: TokenAmount::from(10_000_000_u64),
+            from: refund_to,
+            min_usdc: TokenAmount::from(10_000_000_u64),
+            premium: TokenAmount::ZERO,
+            network_fee: TokenAmount::from(50_000_u64),
+            refund_to,
+            slippage_bps: Some(100),
+            planned: Some(amount_of(order)),
+        });
+        payout.undo = Undo::Refund { to: refund_to };
+        payout
+    }
+
+    /// N5: a pool withdrawal is never paid through Across, whatever its order.
+    #[test]
+    fn a_withdrawal_is_never_paid_through_across() {
+        let c = case();
+        let swap = c.payout();
+        let withdrawal = waiting(&c.order, swap.terms);
+        assert!(c
+            .check(&swap, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000)
+            .is_ok());
+        assert!(matches!(
+            c.check(&withdrawal, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
+            Err(PoolError::NotAllowed(why)) if why.contains("withdrawal")
+        ));
     }
 
     fn capped(max: u64) -> PayoutSettings {
@@ -889,7 +926,7 @@ mod across_payouts {
             let mut c = case();
             c.deposit.output_amount = output;
             c.resign();
-            let payout = waiting(&c.order, case().payout().terms);
+            let payout = swap_waiting(&c.order, case().payout().terms);
             assert!(
                 matches!(
                     c.check(&payout, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
@@ -901,7 +938,7 @@ mod across_payouts {
         let mut c = case();
         c.deposit.depositor = address("0x1111111111111111111111111111111111111111");
         c.resign();
-        let payout = waiting(&c.order, case().payout().terms);
+        let payout = swap_waiting(&c.order, case().payout().terms);
         assert!(matches!(
             c.check(&payout, &capped(2_000_000_000), None, TokenAmount::ZERO, 900_000),
             Err(PoolError::NotAllowed(why)) if why.contains("AX5")
