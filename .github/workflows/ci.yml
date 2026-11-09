@@ -22,6 +22,7 @@ env:
   CARGO_INCREMENTAL: "0"
   # pinned like the compiler: another ic-wasm may shrink to other bytes
   IC_WASM_VERSION: "0.9.10"
+  IC_WASM_SHA256: 54f7a100273b2cfbb993b4de1358523c453936d6f80b0cb340ec35e6fd0b5703
 
 jobs:
   canister:
@@ -35,11 +36,16 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # DFINITY's release binary for x86_64 Linux, held to the sha256 GitHub records for it
+      # (building it from source compiles binaryen: minutes, for the same tool)
       - name: ic-wasm ${{ env.IC_WASM_VERSION }}
         run: |
-          if [[ "$(ic-wasm --version 2> /dev/null)" != "ic-wasm $IC_WASM_VERSION" ]]; then
-            cargo install ic-wasm --version "$IC_WASM_VERSION" --locked
-          fi
+          curl -sSfL -o "$RUNNER_TEMP/ic-wasm.tar.xz" \
+            "https://github.com/dfinity/ic-wasm/releases/download/$IC_WASM_VERSION/ic-wasm-x86_64-unknown-linux-gnu.tar.xz"
+          echo "$IC_WASM_SHA256  $RUNNER_TEMP/ic-wasm.tar.xz" | sha256sum -c --quiet
+          tar -xJf "$RUNNER_TEMP/ic-wasm.tar.xz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/ic-wasm-x86_64-unknown-linux-gnu/ic-wasm" "$HOME/.cargo/bin/ic-wasm"
+          ic-wasm --version
       # rustfmt is not checked yet: the canister's code at c92bd0f is not rustfmt clean, and
       # formatting it moves the panic locations the wasm carries, so it waits for the next
       # canister change (then: cargo fmt --check here)
@@ -87,11 +93,7 @@ jobs:
         with:
           key: integration
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: ic-wasm ${{ env.IC_WASM_VERSION }}
-        run: |
-          if [[ "$(ic-wasm --version 2> /dev/null)" != "ic-wasm $IC_WASM_VERSION" ]]; then
-            cargo install ic-wasm --version "$IC_WASM_VERSION" --locked
-          fi
+      # the integration-test wasm is not shrunk: no ic-wasm here
       - uses: dfinity/setup-dfx@e50c04f104ee4285ec010f10609483cf41e4d365 # main @ 2024-04-01; repo publishes no tags or releases
         with:
           # paired pin: dfx 0.29.2 bundles pocket-ic-server 9.0.3, which must stay on the same
