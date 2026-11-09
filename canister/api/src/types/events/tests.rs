@@ -194,7 +194,7 @@ fn an_event_reads_back_with_its_index_and_time() {
     let sealed = types::Event {
         index: EventIndex::new(4),
         timestamp: Timestamp::from_nanos(1_700_000_000),
-        payload: payload,
+        payload,
     };
     let wire = Event::from(sealed);
     assert_eq!(wire.index, 4);

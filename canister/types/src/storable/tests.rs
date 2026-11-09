@@ -76,7 +76,7 @@ fn samples() -> Vec<Sample> {
             let event = Event {
                 index: EventIndex::new(i.into()),
                 timestamp: Timestamp::from_nanos(1_700_000_000_000_000_000 + u64::from(i)),
-                payload: payload,
+                payload,
             };
             sample(name, event)
         })

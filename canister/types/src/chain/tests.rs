@@ -69,8 +69,7 @@ fn the_chains_the_canister_signs_on_have_names_and_native_coins() {
         assert_eq!(ChainId::new(id).native_symbol(), Some(symbol), "{id}");
     }
     // Robinhood Chain is not deployed: unnamed, so a message writes its id
-    for id in [4663] {
-        assert_eq!(ChainId::new(id).name(), None);
-        assert_eq!(ChainId::new(id).native_symbol(), None);
-    }
+    let id = 4663;
+    assert_eq!(ChainId::new(id).name(), None);
+    assert_eq!(ChainId::new(id).native_symbol(), None);
 }

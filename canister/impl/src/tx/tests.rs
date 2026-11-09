@@ -686,7 +686,7 @@ fn a_late_signature_is_refused_unless_the_swap_still_holds_its_own_nonce() {
         let event = Event {
             index: meta.next_event_index,
             timestamp: Timestamp::from_nanos(1),
-            payload: payload,
+            payload,
         };
         apply_state_transition(state, &event);
     };
@@ -1079,8 +1079,8 @@ fn a_closed_entry_keeps_its_bytes_until_the_crediting_depth() {
                 landed,
                 Finals::of(
                     Finality::Blocks {
-                        swap: swap,
-                        credit: credit,
+                        swap,
+                        credit,
                     },
                     BlockNumber::new(latest),
                     None,
@@ -1159,8 +1159,8 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
                 landed,
                 Finals::of(
                     Finality::Blocks {
-                        swap: swap,
-                        credit: credit,
+                        swap,
+                        credit,
                     },
                     BlockNumber::new(latest),
                     None,

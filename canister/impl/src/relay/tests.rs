@@ -1735,7 +1735,7 @@ fn a_3009_signature_is_checked_under_its_chains_own_usdc_name() {
         (
             ChainId::new(130),
             "0x078D782b760474a361dDA0AF3839290b0EF57AD6",
-            Some(usdc_named.clone()),
+            Some(usdc_named),
             None,
         ),
         (
@@ -1762,7 +1762,7 @@ fn a_3009_signature_is_checked_under_its_chains_own_usdc_name() {
             nonce: id.as_nonce(),
             ..Default::default()
         };
-        let signer = entry(signed_under.clone());
+        let signer = entry(signed_under);
         let digest = swapic::receive_with_authorization_digest(
             &order,
             &auth,

@@ -94,7 +94,7 @@ fn next_event(state: &HeapState, nanos: u64, payload: EventType) -> Event {
     Event {
         index: meta.next_event_index,
         timestamp: Timestamp::from_nanos(nanos),
-        payload: payload,
+        payload,
     }
 }
 

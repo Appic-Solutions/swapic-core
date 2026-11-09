@@ -1031,7 +1031,7 @@ fn batched_orders(
     nonce: [u8; 32],
 ) -> (Vec<u8>, Vec<u8>) {
     let (_, _, _, first) = relay_for(mine, now);
-    let mut order = first.clone();
+    let mut order = first;
     order.reference = reference;
     let (_, message, attestation, stored) = finish_for(&order);
     let mut parsed = BurnMessage::parse(&message).unwrap();

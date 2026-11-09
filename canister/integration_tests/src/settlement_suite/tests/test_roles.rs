@@ -31,10 +31,10 @@ fn is_watcher(pic: &PocketIc, canister: Principal, caller: Principal, block: u64
     let answer = pic
         .update_call(canister, caller, "relay_gasless", args)
         .expect("the relay door answers");
-    match decode_one::<Result<u64, String>>(&answer).expect("a relay answer") {
-        Err(why) if why.contains("CallerNotRole") => false,
-        _ => true,
-    }
+    !matches!(
+        decode_one::<Result<u64, String>>(&answer).expect("a relay answer"),
+        Err(why) if why.contains("CallerNotRole")
+    )
 }
 
 #[test]

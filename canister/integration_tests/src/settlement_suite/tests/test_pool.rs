@@ -2468,7 +2468,7 @@ fn a_stake_that_loses_the_race_for_the_last_room_gets_its_money_back() {
         before - Nat::from(kept) - Nat::from(2 * FEE) - Nat::from(FEE),
         "{lost} came back less the fee"
     );
-    assert_eq!(world.pool_account(staker()).shares > Nat::from(0_u8), true);
+    assert!(world.pool_account(staker()).shares > 0_u8);
 }
 
 /// Two identical stakes in one instant share the pull's pair: the ledger takes one, the other
