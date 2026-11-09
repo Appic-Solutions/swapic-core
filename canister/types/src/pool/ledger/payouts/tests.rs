@@ -2365,7 +2365,7 @@ fn an_across_refund_credits_its_payouts_and_books_the_rest_as_surplus() {
         .unwrap();
     for id in [first, second] {
         pool.step(unfilled(id)).unwrap();
-        let why = || "its Across deposit was not filled".to_string();
+        let why = || "the transfer to BNB Chain didn't go through".to_string();
         pool.step(PoolStep::PayoutUndoing { id, why: why() })
             .unwrap();
         pool.step(PoolStep::PayoutUndone {

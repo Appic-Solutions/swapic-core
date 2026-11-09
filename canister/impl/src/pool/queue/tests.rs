@@ -1621,7 +1621,11 @@ fn an_across_payouts_fill_is_read_past_its_deadline_and_decides_once() {
         let reads = Reads::across(Ok(AcrossFill::Open), Ok(Some(false)));
         block_on(pass_with(&Fake::default(), &reads, across_read_at, &open_pool));
         let undone = payout(id).unwrap();
-        assert_eq!(undone.status, PayoutStatus::Undone(ACROSS_UNFILLED.to_string()));
+        // the rail is never named to the person (Jeff, 2026-11-09)
+        assert_eq!(
+            undone.status,
+            PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
+        );
         assert_eq!(undone.reclaim, Some(types::pool::Reclaim::Pending));
         assert!(shares_of(&owner) > before);
         // owed back by Across: in flight still, and counted as out

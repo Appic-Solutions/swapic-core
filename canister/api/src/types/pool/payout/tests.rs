@@ -139,6 +139,30 @@ fn a_payout_view_says_what_the_payout_spends_and_where_it_stands() {
         PayoutStatus::from(&payout.status),
         PayoutStatus::Refunding("its Eco intent was not filled".to_string())
     );
+    // an unfilled Across deposit reads in plain words, the rail never named (Jeff, 2026-11-09)
+    payout.across = Some(domain::AcrossOut {
+        destination: types::ChainId::BSC,
+        relay: types::swapic::across::RelayData {
+            depositor: [1; 32],
+            recipient: [2; 32],
+            exclusive_relayer: [0; 32],
+            input_token: [3; 32],
+            output_token: [4; 32],
+            input_amount: TokenAmount::from(4_949_000_u64),
+            output_amount: TokenAmount::from(4_940_000_u64),
+            origin_chain_id: types::ChainId::BASE,
+            deposit_id: TokenAmount::from(7_u8),
+            fill_deadline: 1_800_000_900,
+            exclusivity_deadline: 0,
+            message: Vec::new(),
+        },
+        deposit_time: 1_800_000_000,
+    });
+    assert_eq!(
+        PayoutView::from(&payout).status,
+        PayoutStatus::Refunding("the transfer to BNB Chain didn't go through".to_string())
+    );
+    payout.across = None;
     payout.status = domain::PayoutStatus::Delivering;
     assert_eq!(PayoutStatus::from(&payout.status), PayoutStatus::Delivering);
     payout.status = domain::PayoutStatus::Undone("past its deadline".to_string());

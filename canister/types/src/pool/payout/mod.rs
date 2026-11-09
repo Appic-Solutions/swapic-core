@@ -503,6 +503,16 @@ impl AcrossOut {
     pub fn fill_deadline(&self) -> u64 {
         u64::from(self.relay.fill_deadline)
     }
+
+    /// Why the payout is refunded when no relayer filled its deposit, in the words a person
+    /// reads (Jeff, 2026-11-09: the rail is never named): "the transfer to BNB Chain didn't go
+    /// through".
+    pub fn unfilled_why(&self) -> String {
+        format!(
+            "the transfer to {} didn't go through",
+            self.destination.name().unwrap_or("its chain")
+        )
+    }
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads

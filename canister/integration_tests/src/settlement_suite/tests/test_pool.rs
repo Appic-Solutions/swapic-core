@@ -3172,7 +3172,7 @@ fn an_across_payout_read_unfilled_refunds_at_once_and_the_refund_is_credited_lat
     world.settle();
     assert_eq!(
         world.payout_status(id),
-        PayoutStatus::Undone("its Across deposit was not filled".to_string())
+        PayoutStatus::Undone("the transfer to BNB Chain didn't go through".to_string())
     );
     assert_eq!(world.balance(staker()), before + Nat::from(usdc(100) - FEE));
     assert_eq!(world.state().base.in_flight, Nat::from(amount));

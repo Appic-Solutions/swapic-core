@@ -286,8 +286,8 @@ impl From<&domain::EvmPayout> for PayoutView {
             terms: payout.terms.into(),
             amount: payout.amount.map(nat),
             status: match (&payout.status, &payout.across) {
-                (domain::PayoutStatus::Unfilled, Some(_)) => {
-                    PayoutStatus::Refunding("its Across deposit was not filled".to_string())
+                (domain::PayoutStatus::Unfilled, Some(across)) => {
+                    PayoutStatus::Refunding(across.unfilled_why())
                 }
                 (status, _) => status.into(),
             },

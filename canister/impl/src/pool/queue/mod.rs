@@ -186,12 +186,10 @@ fn decide(
         }
         // never filled: the user's refund at once
         PayoutStatus::Unfilled => Next::Undo {
-            why: if payout.across.is_some() {
-                ACROSS_UNFILLED
-            } else {
-                UNFILLED
-            }
-            .to_string(),
+            why: payout
+                .across
+                .as_ref()
+                .map_or_else(|| UNFILLED.to_string(), |across| across.unfilled_why()),
             checked: false,
         },
         // past its withdrawal the deadline undoes nothing: its drive decides on the minter's
@@ -262,9 +260,6 @@ pub fn refittable(payout: &EvmPayout, now: Timestamp) -> Option<Result<Decided, 
 
 /// Why a payout whose Eco intent never filled is undone.
 pub const UNFILLED: &str = "its Eco intent was not filled";
-
-/// Why a payout whose Across deposit was never filled is undone.
-pub const ACROSS_UNFILLED: &str = "its Across deposit was not filled";
 
 /// Why a delivering Across payout stops when the destination's relay hash is not the
 /// canister's (D8).
@@ -592,7 +587,7 @@ pub async fn pass_with(
                                 acted += 1;
                                 // the user's refund at once; Across's refund credits the pool
                                 // later
-                                if undo(&payout, ACROSS_UNFILLED.to_string(), clock())
+                                if undo(&payout, across.unfilled_why(), clock())
                                     && payout.is_icp_swap()
                                 {
                                     let _ = icp_swap::drive(ledgers, id, clock, guard).await;
