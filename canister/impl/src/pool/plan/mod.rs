@@ -259,14 +259,14 @@ pub async fn sign_fitted(
 }
 
 /// What a plan says of a payout of `amount` at `now_s`, before any read, pure: the order with
-/// that amount in and the place of its KyberSwap step, if it has one; or why it waits, or is
-/// undone.
+/// that amount in, the places of its KyberSwap step and of its Across step, each if it has
+/// one, and its gas limit; or why it waits, or is undone.
 pub fn decide(
     plan: &PinnedOrder,
     planned: TokenAmount,
     amount: TokenAmount,
     now_s: u64,
-) -> Result<(Order, Option<usize>), Fit> {
+) -> Result<Decided, Fit> {
     let mut order = swapic::decode_order(&plan.order)
         .ok_or_else(|| Fit::Wait("the plan is not abi.encode of an Order".to_string()))?;
     // a plan that could only revert undoes the payout, whatever else it says
@@ -299,7 +299,13 @@ pub fn decide(
         ));
     }
     order.amountIn = amount.to_u256();
-    Ok((order, swaps.first().copied().or(across)))
+    Ok(Decided {
+        order,
+        swap: swaps.first().copied(),
+        across,
+        amount,
+        gas_limit: plan.gas_limit,
+    })
 }
 
 /// [`decide`] for `payout`, its plan, planned amount and amount read off it: none for a
@@ -310,22 +316,7 @@ pub fn decide_payout(payout: &EvmPayout, now_s: u64) -> Option<Result<Decided, F
     else {
         return None;
     };
-    Some(
-        decide(plan, terms.planned?, amount, now_s).map(|(order, at)| {
-            let across = at.filter(|at| selector_is_across(&order.steps[*at]));
-            Decided {
-                swap: at.filter(|_| across.is_none()),
-                across,
-                order,
-                amount,
-                gas_limit: plan.gas_limit,
-            }
-        }),
-    )
-}
-
-fn selector_is_across(step: &Step) -> bool {
-    step.data.get(..4) == Some(types::swapic::across::SWAP_AND_BRIDGE.as_slice())
+    Some(decide(plan, terms.planned?, amount, now_s))
 }
 
 /// The plan's KyberSwap `step` rewritten to `route` for `amount`, pure: the same swap but for

@@ -154,9 +154,11 @@ fn a_rescaled_swap_that_moves_its_receiver_or_amount_is_refused() {
 #[test]
 fn a_plan_is_decided_before_any_read() {
     let planned = amount(500_000_000);
-    let (order, swap) = decide(&plan(0, 1_000), planned, amount(501_650_000), 100).unwrap();
-    assert_eq!(order.amountIn, U256::from(501_650_000_u64));
-    assert_eq!(swap, Some(0));
+    let decided = decide(&plan(0, 1_000), planned, amount(501_650_000), 100).unwrap();
+    assert_eq!(decided.order.amountIn, U256::from(501_650_000_u64));
+    assert_eq!((decided.swap, decided.across), (Some(0), None));
+    assert_eq!(decided.amount, amount(501_650_000));
+    assert_eq!(decided.gas_limit, plan(0, 1_000).gas_limit);
     // more than 5% from the plan, either way: waits
     for far in [474_999_999_u64, 525_000_001] {
         assert!(matches!(
@@ -261,8 +263,10 @@ fn an_across_plan_is_fitted_with_no_read_to_the_exact_amount() {
     let order = swapic::decode_order(&plan.order).unwrap();
     assert_eq!(types::pool::plan::first_minimum(&order), TokenAmount::ZERO);
     // 4% below the plan still fits, and is never undone for its least
-    let (decided, at) = decide(&plan, planned, amount(2_880_000), 100).unwrap();
-    assert_eq!(at, Some(0));
+    let decided = decide(&plan, planned, amount(2_880_000), 100).unwrap();
+    // its Across step's place, and no swap: nothing is read ahead for it
+    assert_eq!((decided.swap, decided.across), (None, Some(0)));
+    let decided = decided.order;
     let planned_order = order.clone();
     crate::storage::on_fresh_memory(move || {
         let order = planned_order;

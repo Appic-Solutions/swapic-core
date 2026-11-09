@@ -841,10 +841,11 @@ fn read_fit_beside_sale(
     let Some(amount) = plan::payout_of(settings, received, terms.network_fee) else {
         return;
     };
-    if let Ok((order, swap)) =
-        crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get())
-    {
-        let route = swap.map(|at| order.steps[at].data.to_vec());
+    if let Ok(decided) = crate::pool::plan::decide(pinned, planned, amount, now.as_secs().get()) {
+        // a KyberSwap step's route alone is read ahead: an Across step is fitted with no read
+        let route = decided
+            .swap
+            .map(|at| decided.order.steps[at].data.to_vec());
         reads.read_fit_ahead(payout.id, route, amount);
     }
 }
