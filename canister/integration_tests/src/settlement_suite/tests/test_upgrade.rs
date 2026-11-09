@@ -386,6 +386,7 @@ fn the_deployed_state_survives_the_bsc_upgrade_and_keeps_its_across_rows() {
     let swapic = "0xb3f66517bec4cc5a8e799db2dda4c810befcc917".to_string();
     let amounts = settlement_api::types::config::ActionAmounts {
         relay_across: Some(candid::Nat::from(100_000_000_000_000_u64)),
+        across_claim: None,
         ..Default::default()
     };
     config.evm_chains.insert(
@@ -399,6 +400,7 @@ fn the_deployed_state_survives_the_bsc_upgrade_and_keeps_its_across_rows() {
             message_transmitter: zero,
             gas_limit: settlement_api::types::config::ActionGas {
                 relay_across: Some(1_200_000),
+                across_claim: None,
                 ..Default::default()
             },
             gas_budget_wei: amounts.clone(),
