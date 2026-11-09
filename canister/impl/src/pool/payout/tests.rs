@@ -2044,3 +2044,80 @@ fn an_allowance_about_to_end_reads_as_none() {
     );
     assert_eq!(lasting(held, Some(1), now), TokenAmount::ZERO);
 }
+
+/// A round read beside a pull serves only the leg it was read for, and only while no other leg
+/// has been at the pool: its `before` says what the pool holds of the canister's, and a leg
+/// there since would make that untrue.
+#[test]
+fn a_round_read_ahead_serves_only_its_own_leg_at_an_untouched_pool() {
+    let pool = Principal::from_slice(&[0x11; 10]);
+    let token = Principal::from_slice(&[0x22; 10]);
+    let at = Timestamp::from_nanos(1_000_000_000_000);
+    let amount = TokenAmount::from(5_000_u32);
+    let read = ReadAhead {
+        pool,
+        token_in: token,
+        amount_in: amount,
+        round: Round {
+            quoted: TokenAmount::from(1_u32),
+            before: PoolHeld {
+                ckusdc: TokenAmount::ZERO,
+                token: TokenAmount::ZERO,
+            },
+            allowed: None,
+        },
+        legs_then: 7,
+        read_at: at,
+    };
+    let spec = LegSpec {
+        id: PoolRef::new([0x33; 32]),
+        leg: None,
+        pool,
+        token_in: token,
+        token_out: Principal::from_slice(&[0x44; 10]),
+        amount_in: amount,
+        least: TokenAmount::ZERO,
+        fee_in: TokenAmount::ZERO,
+        fee_out: TokenAmount::ZERO,
+        pays_out: false,
+    };
+    // this leg's own take is the only one since the read began
+    assert!(read.serves(&spec, 8, at));
+    assert!(!read.serves(&spec, 7, at), "no leg holds the pool yet");
+    assert!(!read.serves(&spec, 9, at), "another leg was there");
+    let older = Timestamp::from_nanos(at.as_nanos() + READ_AHEAD_FOR.as_nanos() as u64 + 1);
+    assert!(!read.serves(&spec, 8, older), "too old");
+    let other_pool = Principal::from_slice(&[0x55; 10]);
+    assert!(!read.serves(
+        &LegSpec {
+            pool: other_pool,
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            token_in: other_pool,
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            amount_in: TokenAmount::from(4_999_u32),
+            ..spec
+        },
+        8,
+        at
+    ));
+    assert!(!read.serves(
+        &LegSpec {
+            leg: Some(LEG_SECOND),
+            ..spec
+        },
+        8,
+        at
+    ));
+}

@@ -386,8 +386,9 @@ pub async fn swap_from_icp(
     };
     // every check first; nothing is written before the money is in (audit C15)
     let at = now();
-    opening(at)?;
+    let (_, opened) = opening(at)?;
     crate::pool::pull_first::worth_pulling(request.token_in, request.amount_in)?;
+    read_sale_beside_pull(&opened.terms);
     let pair = crate::pool::pull_first::dedup(
         "swap_from_icp",
         &request.from,
@@ -441,6 +442,32 @@ pub async fn swap_from_icp(
         }
     });
     answer(id)
+}
+
+/// What a swap's first leg sells: what was pulled less its approval's and its pull's fees.
+fn first_leg_in(amount_in: TokenAmount, fee_in: TokenAmount) -> Option<TokenAmount> {
+    amount_in
+        .checked_sub(fee_in.checked_mul(2_u8)?)
+        .filter(|left| *left > TokenAmount::ZERO)
+}
+
+/// A sale on one pool has nothing to wait for once its money is in, if what it reads comes back
+/// with the pull. A route through ICP reads on when its first leg is done, and ckUSDC sells
+/// nothing.
+fn read_sale_beside_pull(terms: &IcpSwapTerms) {
+    let Some(settings) = pool_store::ledger().settings else {
+        return;
+    };
+    let Some(PayoutPath::Icpswap { pool }) = inbound_path(&settings, terms.token_in) else {
+        return;
+    };
+    let Some(amount_in) = settings
+        .fee_of(terms.token_in)
+        .and_then(|fee| first_leg_in(terms.amount_in, fee))
+    else {
+        return;
+    };
+    crate::pool::payout::read_beside_pull(pool, terms.token_in, settings.ckusdc_ledger, amount_in);
 }
 
 /// The swap's opening and its pull, both written once the money is in, with no await between:
@@ -853,10 +880,7 @@ async fn swap(
         .checked_add(fee_ck)
         .ok_or_else(|| Stop::Failed("min_usdc is too large".to_string()))?;
     // the first leg sells what was pulled less its approval's and its pull's fees
-    let in0 = terms
-        .amount_in
-        .checked_sub(fee_in.checked_mul(2_u8).unwrap_or(TokenAmount::MAX))
-        .filter(|left| *left > TokenAmount::ZERO)
+    let in0 = first_leg_in(terms.amount_in, fee_in)
         .ok_or_else(|| Stop::Failed("the amount does not cover the token's fees".to_string()))?;
     let id = evm_payout_ref(payout.id);
     match attempt.path {

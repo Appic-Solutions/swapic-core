@@ -3,10 +3,12 @@
 //! user's token to ckUSDC (`swap_from_icp`). Each leg is recorded before its call, under the
 //! payout it belongs to and its own leg number:
 //!
-//! - in one round: its pool's quote, what the pool holds of the canister's before the swap
-//!   (read while this leg alone is at the pool), and for a token whose approval may stand what
-//!   the pool may still pull. A quote below the least it must give answers [`LegEnd::Short`]
-//!   and moves nothing (what to do is the caller's: decline once, then fall back);
+//! - in one round, or beside the payout's pull when no leg has been at the pool since
+//!   ([`crate::pool::payout::ReadAhead`]): its pool's quote, what the pool holds of the
+//!   canister's before the swap (read while this leg alone is at the pool), and for a token
+//!   whose approval may stand what the pool may still pull. A quote below the least it must
+//!   give answers [`LegEnd::Short`] and moves nothing (what to do is the caller's: decline
+//!   once, then fall back);
 //! - the approval (`SwapApproved`), unless a standing one covers this swap: exactly the swap for
 //!   ckUSDC and ckETH, [`STANDING_SWAPS`] of them for a token that may stand
 //!   ([`crate::pool::payout::may_stand`]);
@@ -114,6 +116,35 @@ pub fn after_approvals(
         .filter(|left| *left > TokenAmount::ZERO)
 }
 
+/// A leg's reads, in one round. What the pool holds of the canister's before its deposit: only
+/// what is there above it is ever the leg's. An allowance that cannot be read is an approval
+/// asked again, never a swap that leans on it.
+pub(crate) async fn read_round(
+    ledgers: &impl Ledgers,
+    pool: Principal,
+    token_in: Principal,
+    amount_in: TokenAmount,
+    zero_for_one: bool,
+    stands: bool,
+) -> (
+    Result<TokenAmount, CallError>,
+    Result<PoolHeld, Stop>,
+    Option<TokenAmount>,
+) {
+    join3(
+        ledgers.quote(pool, amount_in, zero_for_one),
+        held_at(ledgers, pool, zero_for_one),
+        async {
+            if stands {
+                ledgers.allowance(token_in, pool).await.ok()
+            } else {
+                None
+            }
+        },
+    )
+    .await
+}
+
 /// Runs the leg from where `state` stands, as far as it goes now.
 pub async fn run(
     ledgers: &impl Ledgers,
@@ -155,21 +186,20 @@ pub async fn run(
         .checked_add(spec.fee_in)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
     let stands = ledgers.may_stand(spec.token_in);
-    // one round. What the pool holds of the canister's before this leg's deposit is read while
-    // this leg alone is at the pool: only what is there above it is ever this leg's. An
-    // allowance that cannot be read is an approval asked again, never a swap that leans on it
-    let (quoted, before, allowed) = join3(
-        ledgers.quote(spec.pool, spec.amount_in, zero_for_one),
-        held_at(ledgers, spec.pool, zero_for_one),
-        async {
-            if stands {
-                ledgers.allowance(spec.token_in, spec.pool).await.ok()
-            } else {
-                None
-            }
-        },
-    )
-    .await;
+    let (quoted, before, allowed) = match ledgers.round_read_ahead(&spec) {
+        Some(read) => (Ok(read.quoted), Ok(read.before), read.allowed),
+        None => {
+            read_round(
+                ledgers,
+                spec.pool,
+                spec.token_in,
+                spec.amount_in,
+                zero_for_one,
+                stands,
+            )
+            .await
+        }
+    };
     let quoted = quoted.map_err(|error| call_stop("the pool's quote", error))?;
     if quoted < spec.least {
         return Ok(LegEnd::Short(quoted));

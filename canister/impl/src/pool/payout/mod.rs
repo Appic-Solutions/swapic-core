@@ -49,7 +49,7 @@ use crate::state::{State, Store};
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
 use candid::{Nat, Principal};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use types::hash::{PoolOpId, PoolRef};
 use types::pool::{
@@ -102,15 +102,150 @@ where
     };
     // unit tests run off the canister, where there is no timer to set
     #[cfg(target_arch = "wasm32")]
-    ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || ic_cdk::spawn(work(busy)));
+    start_when_read(ROUNDS_FOR_READS, busy, work);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (busy, work);
+}
+
+/// How many rounds a carried swap waits for a read of its sale still out beside its pull: past
+/// that it reads for itself, and that read is what the wait would have saved.
+#[cfg(target_arch = "wasm32")]
+const ROUNDS_FOR_READS: u8 = 3;
+
+#[cfg(target_arch = "wasm32")]
+fn start_when_read<F>(rounds: u8, busy: Busy, work: impl FnOnce(Busy) -> F + 'static)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
+        if rounds > 0 && READS_OUT.get() > 0 {
+            start_when_read(rounds - 1, busy, work);
+        } else {
+            ic_cdk::spawn(work(busy));
+        }
+    });
 }
 
 thread_local! {
     // Heap by necessity: the ICPSwap pools a payout's leg is at right now. Two legs at one
     // pool would overwrite each other's approval and mix their unused balances there.
     static LEGS: RefCell<BTreeSet<Principal>> = const { RefCell::new(BTreeSet::new()) };
+    // How many legs have gone to a pool since the canister started: a reading of a pool is good
+    // only while no leg has been there since it began.
+    static LEGS_TAKEN: Cell<u64> = const { Cell::new(0) };
+    // Heap by necessity, and nothing depends on it: the last sale read beside its pull. Gone, a
+    // leg reads for itself.
+    static READ_AHEAD: RefCell<Option<ReadAhead>> = const { RefCell::new(None) };
+    // How many such reads are out.
+    static READS_OUT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One round of a leg's reads: the pool's quote, what it holds of the canister's, and what it
+/// may still pull (none known for a token whose approval is for one swap).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Round {
+    pub quoted: TokenAmount,
+    pub before: PoolHeld,
+    pub allowed: Option<TokenAmount>,
+}
+
+/// A round read beside a pull, and what it is good for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadAhead {
+    pub pool: Principal,
+    pub token_in: Principal,
+    pub amount_in: TokenAmount,
+    pub round: Round,
+    /// [`LEGS_TAKEN`] when the read began.
+    pub legs_then: u64,
+    pub read_at: Timestamp,
+}
+
+/// How old a round read beside a pull may be.
+pub const READ_AHEAD_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl ReadAhead {
+    /// Whether this round is `spec`'s, for the leg holding the pool with `legs_taken` taken so
+    /// far: its own pool, token and amount, the first leg of its payout, and no leg at that
+    /// pool since the read began but this one, whose `before` would no longer say what the pool
+    /// holds.
+    pub fn serves(&self, spec: &LegSpec, legs_taken: u64, now: Timestamp) -> bool {
+        spec.leg.is_none()
+            && self.pool == spec.pool
+            && self.token_in == spec.token_in
+            && self.amount_in == spec.amount_in
+            && self.legs_then.saturating_add(1) == legs_taken
+            && now.as_nanos()
+                <= self
+                    .read_at
+                    .as_nanos()
+                    .saturating_add(READ_AHEAD_FOR.as_nanos() as u64)
+    }
+}
+
+/// Reads a sale's round beside its pull, in a task of its own: an answer from the pool cannot
+/// reach the pull however bad it is, and nothing waits on it for long. It writes nothing, moves
+/// nothing and spends no outcall: a pull refused leaves a reading no leg ever asks for. A pool a
+/// leg is at now is left alone.
+pub(crate) fn read_beside_pull(
+    pool: Principal,
+    token_in: Principal,
+    token_out: Principal,
+    amount_in: TokenAmount,
+) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if LEGS.with(|legs| legs.borrow().contains(&pool)) {
+            return;
+        }
+        let legs_then = LEGS_TAKEN.get();
+        let read_at = Timestamp::from_nanos(ic_cdk::api::time());
+        let out = ReadOut::begin();
+        ic_cdk::spawn(async move {
+            let _out = out;
+            let Ok(Some(zero_for_one)) = Live.direction(pool, token_in, token_out).await else {
+                return;
+            };
+            let stands = Live.may_stand(token_in);
+            let (quoted, before, allowed) =
+                legs::read_round(&Live, pool, token_in, amount_in, zero_for_one, stands).await;
+            if let (Ok(quoted), Ok(before)) = (quoted, before) {
+                READ_AHEAD.set(Some(ReadAhead {
+                    pool,
+                    token_in,
+                    amount_in,
+                    round: Round {
+                        quoted,
+                        before,
+                        allowed,
+                    },
+                    legs_then,
+                    read_at,
+                }));
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (pool, token_in, token_out, amount_in);
+}
+
+/// One read out beside a pull, ended on drop, a trap included.
+#[cfg(target_arch = "wasm32")]
+struct ReadOut;
+
+#[cfg(target_arch = "wasm32")]
+impl ReadOut {
+    fn begin() -> Self {
+        READS_OUT.set(READS_OUT.get().saturating_add(1));
+        Self
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for ReadOut {
+    fn drop(&mut self) {
+        READS_OUT.set(READS_OUT.get().saturating_sub(1));
+    }
 }
 
 /// Held while one payout's leg is at an ICPSwap pool, released on drop, a trap included.
@@ -119,8 +254,13 @@ pub(crate) struct Leg(Principal);
 impl Leg {
     pub(crate) fn take(pool: Principal) -> Option<Self> {
         // lazily: a guard built for a refusal would release the holder's pool on its drop
-        LEGS.with(|legs| legs.borrow_mut().insert(pool))
-            .then(|| Self(pool))
+        let leg = LEGS
+            .with(|legs| legs.borrow_mut().insert(pool))
+            .then(|| Self(pool));
+        if leg.is_some() {
+            LEGS_TAKEN.set(LEGS_TAKEN.get().saturating_add(1));
+        }
+        leg
     }
 }
 
@@ -194,6 +334,10 @@ pub trait Ledgers {
         spender: Principal,
         amount: TokenAmount,
     ) -> Result<(), CallError>;
+    /// `spec`'s round, if it was read beside its pull and is good still ([`ReadAhead::serves`]).
+    fn round_read_ahead(&self, _spec: &LegSpec) -> Option<Round> {
+        None
+    }
     /// Whether the canister's approval of a pool for `token` may outlast one swap ([`may_stand`]).
     fn may_stand(&self, _token: Principal) -> bool {
         false
@@ -330,6 +474,14 @@ impl Ledgers for Live {
         amount: TokenAmount,
     ) -> Result<(), CallError> {
         ic::icrc2_approve(ledger, spender, Nat::from(amount)).await
+    }
+
+    fn round_read_ahead(&self, spec: &LegSpec) -> Option<Round> {
+        let now = Timestamp::from_nanos(ic_cdk::api::time());
+        READ_AHEAD
+            .take()
+            .filter(|read| read.serves(spec, LEGS_TAKEN.get(), now))
+            .map(|read| read.round)
     }
 
     fn may_stand(&self, token: Principal) -> bool {
