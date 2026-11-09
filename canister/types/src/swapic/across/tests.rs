@@ -346,7 +346,7 @@ fn an_orders_one_across_step_is_found() {
         writes: Vec::new(),
     };
     assert_eq!(across_step_at(&[other.clone(), d.step()]), Some(1));
-    assert_eq!(across_step_at(&[other.clone()]), None);
+    assert_eq!(across_step_at(std::slice::from_ref(&other)), None);
     assert_eq!(across_step_at(&[d.step(), d.step()]), None);
 }
 
