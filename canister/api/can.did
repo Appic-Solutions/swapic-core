@@ -860,6 +860,9 @@ type PoolSettings = record {
   icp_tokens : vec IcpTokenEntry;
   // Micro USDC, the least move fee of an EVM stake and of an ICP withdrawal (each pays
   // for one Base to ICP move). Absent: 0.
+  // Micro USDC, what every use of the pool leaves in it on top of its other fees: a swap
+  // through it, a stake, a withdrawal. Absent: 0.
+  pool_fee : opt nat;
   least_move_fee_base_to_icp : opt nat;
   // The pool chain's blocks a large deposit waits. Absent: 6.
   large_deposit_confirmations : opt nat64;

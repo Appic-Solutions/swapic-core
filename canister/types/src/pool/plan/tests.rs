@@ -140,3 +140,43 @@ fn the_first_minimum_is_the_first_spending_steps_or_the_payouts() {
 fn usdc_micro(micro: u64) -> TokenAmount {
     TokenAmount::from(micro)
 }
+
+/// The pool fee comes off the payout, the inverse holds with it, and fees that take it all are
+/// refused.
+#[test]
+fn the_pool_fee_comes_off_the_payout() {
+    let with_fee = |premium_bps: u16, fee: u64| PoolSettings {
+        premium_bps,
+        pool_fee: Some(usdc(fee)),
+        ..PoolSettings::default()
+    };
+    // 100 USDC, 10 bps, 5 cents network, 1 cent pool
+    let settings = with_fee(10, 10_000);
+    assert_eq!(
+        payout_of(&settings, usdc(100_000_000), usdc(50_000)),
+        Some(usdc(100_000_000 - 100_000 - 10_000 - 50_000))
+    );
+    for planned in [123_u64, 1_000_000, 7_777_777, 100_000_000] {
+        for network in [0_u64, 50_000] {
+            for bps in [0_u16, 10, 1_000] {
+                let settings = with_fee(bps, 10_000);
+                let expected = expected_received(&settings, usdc(planned), usdc(network)).unwrap();
+                let paid = payout_of(&settings, expected, usdc(network)).unwrap();
+                assert!(paid >= usdc(planned), "{planned} {network} {bps}: {paid}");
+            }
+        }
+    }
+    assert_eq!(payout_of(&with_fee(0, 10_000), usdc(10_000), usdc(0)), None);
+    assert_eq!(payout_of(&with_fee(0, 10_000), usdc(9_999), usdc(0)), None);
+}
+
+/// No fee set, the sums are as they were: an upgrade changes nothing until a controller sets it.
+#[test]
+fn no_pool_fee_changes_nothing() {
+    let settings = settings(10);
+    assert_eq!(settings.pool_fee, None);
+    assert_eq!(
+        payout_of(&settings, usdc(100_000_000), usdc(50_000)),
+        Some(usdc(100_000_000 - 100_000 - 50_000))
+    );
+}

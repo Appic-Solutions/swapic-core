@@ -23,7 +23,8 @@ pub const WINDOW_BPS: u32 = 500;
 const BPS: u32 = 10_000;
 
 /// The ckUSDC a sale must make for its payout to be exactly `planned` after the premium on
-/// it and `network_fee`: `ceil((planned + network_fee) x 10^4 / (10^4 - premium_bps))`.
+/// it, the pool fee and `network_fee`:
+/// `ceil((planned + network_fee + pool_fee) x 10^4 / (10^4 - premium_bps))`.
 pub fn expected_received(
     settings: &PoolSettings,
     planned: TokenAmount,
@@ -32,6 +33,7 @@ pub fn expected_received(
     let kept = BPS.checked_sub(u32::from(settings.premium_bps))?;
     planned
         .checked_add(network_fee)?
+        .checked_add(settings.pool_fee())?
         .checked_mul(BPS)?
         .checked_div_ceil(kept)
 }
@@ -42,8 +44,8 @@ pub fn sale_floor(expected: TokenAmount, slippage_bps: u16) -> Option<TokenAmoun
     expected.checked_mul(kept)?.checked_div_ceil(2 * BPS)
 }
 
-/// The payout of a sale that made `received`: less the premium on it (rounded up) and the
-/// network fee. None when they take all of it.
+/// The payout of a sale that made `received`: less the premium on it (rounded up), the pool
+/// fee and the network fee. None when they take all of it.
 pub fn payout_of(
     settings: &PoolSettings,
     received: TokenAmount,
@@ -51,6 +53,7 @@ pub fn payout_of(
 ) -> Option<TokenAmount> {
     received
         .checked_sub(premium_share(settings, received)?)?
+        .checked_sub(settings.pool_fee())?
         .checked_sub(network_fee)
         .filter(|left| *left > TokenAmount::ZERO)
 }

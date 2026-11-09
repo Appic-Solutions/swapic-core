@@ -461,7 +461,10 @@ fn only_an_order_never_signed_is_replaced() {
         .step(PoolStep::MoveReverted { id, block: None })
         .unwrap();
     assert_eq!(world.item(id).status, MoveStatus::Routed);
-    assert!(world.step(routed(6)).is_err(), "signed once, it may have run");
+    assert!(
+        world.step(routed(6)).is_err(),
+        "signed once, it may have run"
+    );
 }
 
 /// Review Focus 3 from the fold's side: a stuck move keeps its lines where they are, a retry

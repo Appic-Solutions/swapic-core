@@ -2888,6 +2888,7 @@ fn pool_samples() -> Vec<Sample> {
                 base_to_icp: TokenAmount::from(1_500_000_u64),
                 icp_to_base: TokenAmount::from(1_400_000_u64),
             },
+            pool_fee: None,
         }),
         pockets: Pockets {
             base: Pocket {

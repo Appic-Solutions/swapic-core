@@ -162,10 +162,8 @@ pub async fn resolve(
                 return Err(PoolError::Halted);
             }
             let stake = pending_stake(id)?;
-            let shares = stake
-                .amount
-                .checked_sub(stake.move_fee)
-                .and_then(|staked| pool_store::ledger().mint_now(staked))
+            let shares = pool_store::ledger()
+                .mint_for_stake(stake.amount, stake.move_fee)
                 .filter(|shares| *shares > Shares::ZERO)
                 .ok_or_else(|| PoolError::NotAllowed("the stake mints nothing".to_string()))?;
             StakeResolution::Pulled { block, shares }

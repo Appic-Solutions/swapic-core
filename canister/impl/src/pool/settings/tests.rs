@@ -14,6 +14,7 @@ fn wire() -> WireSettings {
         large_deposit_confirmations: None,
         least_move_fee_base_to_icp: None,
         least_move_fee_icp_to_base: None,
+        pool_fee: None,
     }
 }
 

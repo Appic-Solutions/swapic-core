@@ -532,6 +532,34 @@ impl PoolLedger {
         Shares::mint_for(amount, self.total_assets(), self.total_shares)
     }
 
+    /// What every use of the pool leaves in it now.
+    pub fn pool_fee(&self) -> TokenAmount {
+        self.settings
+            .as_ref()
+            .map_or(TokenAmount::ZERO, PoolSettings::pool_fee)
+    }
+
+    /// What a stake of `amount` carrying `move_fee` mints now: priced on what is left once
+    /// Swapic's move fee is taken and the pool fee stays behind for the stakers. Every door and
+    /// the `Minted` rule read this one. None when the fees take all of it.
+    pub fn mint_for_stake(&self, amount: TokenAmount, move_fee: TokenAmount) -> Option<Shares> {
+        self.mint_now(amount.checked_sub(move_fee)?.checked_sub(self.pool_fee())?)
+    }
+
+    /// What a withdrawal of `usdc` by a staker holding `owned` burns now: its USDC's worth and
+    /// the pool fee's, which stays behind for the other stakers. A full exit pays only what its
+    /// shares allow, so Max still works. Below `burn_for(usdc)` never, so a staker short of that
+    /// is refused as before. None when the assets cannot pay `usdc`.
+    pub fn burn_for_withdrawal(&self, usdc: TokenAmount, owned: Shares) -> Option<Shares> {
+        let assets = self.total_assets();
+        let least = Shares::burn_for(usdc, assets, self.total_shares)?;
+        let with_fee = usdc
+            .checked_add(self.pool_fee())
+            .and_then(|whole| Shares::burn_for(whole, assets, self.total_shares))
+            .unwrap_or(least);
+        Some(with_fee.min(owned).max(least))
+    }
+
     /// The rules that read the line's own time `at`, beside [`PoolLedger::admits`],
     /// whoever wrote the line: a retry's fresh dedup instant is exactly
     /// the line's time; a retry with its own pair (its transfer may have landed) leaves its
@@ -815,7 +843,7 @@ impl PoolLedger {
                 if staker != *owner {
                     return Err(PoolStepError::Mismatch);
                 }
-                let expected = self.mint_now(sat_sub(deposit.owed(), deposit.terms.move_fee));
+                let expected = self.mint_for_stake(deposit.owed(), deposit.terms.move_fee);
                 if expected != Some(*shares) {
                     return Err(PoolStepError::WrongMint {
                         given: *shares,
@@ -1538,13 +1566,14 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
                 return Err(RegisterRefusal::TokenNotListed(token_out));
             }
             // the premium at arrival: at least 90% of the settings' share of what
-            // arrived, the quoter pricing it on the most a route delivers
+            // arrived, the quoter pricing it on the most a route delivers, and the pool fee
             let share = premium_share(settings, terms.min_usdc).ok_or(
                 RegisterRefusal::NotAllowed("the premium's share overflows".to_string()),
             )?;
             let least = share
                 .checked_mul(PREMIUM_AT_ARRIVAL_PERCENT)
                 .and_then(|scaled| scaled.checked_div_ceil(100_u32))
+                .and_then(|scaled| scaled.checked_add(settings.pool_fee()))
                 .unwrap_or(TokenAmount::MAX);
             if terms.premium < least {
                 return Err(RegisterRefusal::PremiumTooLow { least });

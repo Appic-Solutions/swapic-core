@@ -233,6 +233,9 @@ pub struct PoolSettings {
     /// Micro USDC, the least move fee of an ICP stake and of an EVM withdrawal (each pays
     /// for one ICP to Base move). Absent: 0.
     pub least_move_fee_icp_to_base: Option<Nat>,
+    /// Micro USDC, what every use of the pool leaves in it on top of its other fees: a swap
+    /// through it, a stake, a withdrawal. Absent: 0.
+    pub pool_fee: Option<Nat>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -572,6 +575,11 @@ impl TryFrom<PoolSettings> for domain::PoolSettings {
                     .transpose()?
                     .unwrap_or(TokenAmount::ZERO),
             },
+            pool_fee: settings
+                .pool_fee
+                .as_ref()
+                .map(|fee| amount("pool_fee", fee))
+                .transpose()?,
             // no registration: kept in the record at their defaults, read by nothing
             ..domain::PoolSettings::default()
         })
@@ -599,6 +607,7 @@ impl From<&domain::PoolSettings> for PoolSettings {
             large_deposit_confirmations: Some(settings.large_deposit().1.get()),
             least_move_fee_base_to_icp: Some(nat(settings.least_move_fee.base_to_icp)),
             least_move_fee_icp_to_base: Some(nat(settings.least_move_fee.icp_to_base)),
+            pool_fee: Some(nat(settings.pool_fee())),
         }
     }
 }
