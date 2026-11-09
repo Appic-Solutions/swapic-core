@@ -226,3 +226,46 @@ fn a_native_sweep_waits_for_a_nonce_still_being_signed() {
         );
     });
 }
+
+/// A fee sweep goes while the real balance holds every line, within the check's tolerance, and
+/// waits while it does not: a wrong fee line never reaches the pool's money.
+#[test]
+fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let config = types::Config {
+            pool_chain: Some(ChainId::BASE),
+            books_tolerance: types::config::BooksTolerance(TokenAmount::from(1_000_000_u32)),
+            ..types::Config::default()
+        };
+        let line = EventType::Books {
+            chain_id: ChainId::BASE,
+            step: BookStep::FeeEarned {
+                tx_hash: TxHash::new([1; 32]),
+                amount: TokenAmount::from(5_000_000_u32),
+                block: Some(types::BlockNumber::new(1)),
+            },
+        };
+        append_event_at(line, at(1)).unwrap();
+        let refuses = |observed: u32| {
+            read_state(|state| {
+                balance_refuses(
+                    state,
+                    &config,
+                    ChainId::BASE,
+                    types::BlockNumber::new(10),
+                    TokenAmount::from(observed),
+                )
+            })
+        };
+        assert_eq!(refuses(5_000_000), None, "the books match");
+        assert_eq!(
+            refuses(9_000_000),
+            None,
+            "a surplus takes nothing from anyone"
+        );
+        assert_eq!(refuses(4_000_000), None, "within the tolerance");
+        let why = refuses(3_999_999).expect("below the tolerance");
+        assert!(why.contains("below the books"), "{why}");
+    });
+}

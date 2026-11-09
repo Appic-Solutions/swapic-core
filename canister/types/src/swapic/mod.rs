@@ -629,6 +629,23 @@ pub fn transfer_calldata(to: EvmAddress, amount: U256) -> Vec<u8> {
     .abi_encode()
 }
 
+/// The CCTP message a finish's calldata carries: the first argument of `receiveMessage`,
+/// `completeCctp` and `release` alike, each `(bytes message, bytes attestation, ...)`. None for
+/// calldata that does not read as one.
+pub fn finish_message(calldata: &[u8]) -> Option<&[u8]> {
+    let word = |at: usize| -> Option<usize> {
+        let word = calldata.get(at..at.checked_add(32)?)?;
+        if word[..24] != [0; 24] {
+            return None;
+        }
+        usize::try_from(u64::from_be_bytes(word[24..].try_into().ok()?)).ok()
+    };
+    let start = word(4)?.checked_add(4)?;
+    let length = word(start)?;
+    let from = start.checked_add(32)?;
+    calldata.get(from..from.checked_add(length)?)
+}
+
 /// `token.balanceOf(account)`.
 pub fn balance_of_calldata(account: EvmAddress) -> Vec<u8> {
     balanceOfCall {

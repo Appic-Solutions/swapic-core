@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeFrom;
-use types::books::{BookStep, Books};
+use types::books::{BookStep, Books, UserFeeKey};
 use types::events::TxPurpose;
 use types::hash::{OwnerKey, PoolRef};
 use types::pool::{
@@ -43,6 +43,9 @@ pub trait Store {
     fn put_book(&mut self, chain_id: ChainId, books: Books);
     /// Every chain's books, in chain id order.
     fn books(&self) -> Vec<(ChainId, Books)>;
+    /// Whether the user-paid fees of this transaction are booked.
+    fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool;
+    fn put_user_fee_booked(&mut self, key: UserFeeKey);
     /// The pool's ledger, empty before its first step.
     fn pool_ledger(&self) -> PoolLedger;
     fn put_pool_ledger(&mut self, ledger: PoolLedger);
@@ -206,6 +209,7 @@ pub struct MemoryStore {
     sweeps: BTreeMap<u64, SweepEntry>,
     flow_by_source: BTreeMap<TxHash, QuoteHash>,
     flow_by_tx: BTreeMap<TxHash, QuoteHash>,
+    booked_user_fees: BTreeSet<UserFeeKey>,
 }
 
 #[cfg(test)]
@@ -302,6 +306,14 @@ impl Store for MemoryStore {
             .iter()
             .map(|(chain, books)| (*chain, books.clone()))
             .collect()
+    }
+
+    fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool {
+        self.booked_user_fees.contains(key)
+    }
+
+    fn put_user_fee_booked(&mut self, key: UserFeeKey) {
+        self.booked_user_fees.insert(key);
     }
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
@@ -530,6 +542,7 @@ impl State<MemoryStore> {
             sweeps,
             flow_by_source: _,
             flow_by_tx: _,
+            booked_user_fees: _,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -655,6 +668,12 @@ impl<S: Store> State<S> {
     fn record_books(&mut self, chain_id: ChainId, step: &BookStep, at: Timestamp) {
         let books = self.book(&chain_id).apply(step);
         self.store.put_book(chain_id, books);
+        if let BookStep::UserFeeEarned { tx_hash, .. } = step {
+            self.store.put_user_fee_booked(UserFeeKey {
+                chain: chain_id,
+                tx: *tx_hash,
+            });
+        }
         // a controller's reopening clears the ICP latch with the Base one
         match step {
             BookStep::Checked { check, .. } => self.seen_through(chain_id, check.block),

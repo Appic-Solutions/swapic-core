@@ -125,6 +125,15 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
         ),
         _ => None,
     };
+    // a fee sweep's balance, every node agreeing: what `balance_refuses` holds it to
+    let held = match asset {
+        SweepAsset::FeeUsdc => Some(
+            crate::agreed::balance_of(chain, usdc, canister)
+                .await
+                .map_err(SweepError::Unavailable)?,
+        ),
+        _ => None,
+    };
     // from here to the nonce no await: the line and the allocation are one message
     require_not_halted().map_err(SweepError::Guard)?;
     let now = Timestamp::from_nanos(ic_cdk::api::time());
@@ -156,6 +165,13 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
             (to, value, Vec::new(), TokenAmount::ZERO, TokenAmount::ZERO)
         }
         (SweepAsset::FeeUsdc, _) => {
+            let (block, raw) = held.expect("BUG: a fee sweep read its balance above");
+            let observed = evm.usdc_to_usd6(raw);
+            if let Some(why) =
+                read_state(|state| super::balance_refuses(state, &config, chain, block, observed))
+            {
+                return Err(SweepError::Busy(why));
+            }
             let (from_pool, fee_income) = read_state(|state| {
                 let from_pool = if config.pool_chain == Some(chain) {
                     super::spare_fees_base(state)

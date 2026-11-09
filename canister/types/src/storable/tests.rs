@@ -312,6 +312,40 @@ fn samples() -> Vec<Sample> {
                     block: BlockNumber::new(23_600_001),
                     amount: TokenAmount::from(157_740_u32),
                 }]),
+                user_paid: None,
+            },
+        ),
+        // a chain's books, once users paid fees in transactions of their own
+        sample(
+            "books with fees users paid themselves",
+            crate::books::Books {
+                fee_income: TokenAmount::from(900_001_u32),
+                user_paid: Some(TokenAmount::from(64_610_u32)),
+                ..crate::books::Books::default()
+            },
+        ),
+        // the key of a transaction whose user-paid fees are booked
+        sample(
+            "user fee key",
+            crate::books::UserFeeKey {
+                chain: ChainId::BASE,
+                tx: TxHash::new([0x5a; 32]),
+            },
+        ),
+        // a user-paid fee's line
+        sample(
+            "books line of a fee a user paid",
+            Event {
+                index: EventIndex::new(1_001),
+                timestamp: Timestamp::from_nanos(1_800_000_000_000_000_001),
+                payload: crate::events::EventType::Books {
+                    chain_id: ChainId::BASE,
+                    step: crate::books::BookStep::UserFeeEarned {
+                        tx_hash: TxHash::new([0x5a; 32]),
+                        amount: TokenAmount::from(64_610_u32),
+                        block: Some(BlockNumber::new(54_930_356)),
+                    },
+                },
             },
         ),
         // the outbox entries above are open; this one pins the block its attempt closed at
@@ -1074,6 +1108,19 @@ fn timer_state_samples() -> Vec<Sample> {
             // absent, so this sample's bytes stay the ones the golden pins
             ck_reads: None,
             pulls_to_check: None,
+            fee_catch_up: None,
+        },
+    ),
+    sample(
+        "the timers' memory, the fee catch-up on its way",
+        TimerState {
+            fee_catch_up: Some(crate::timer_state::FeeCatchUp {
+                next: 1_452,
+                end: 1_531,
+                tries: 2,
+                passed_over: 1,
+            }),
+            ..TimerState::default()
         },
     )]
 }

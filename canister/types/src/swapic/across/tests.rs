@@ -11,7 +11,10 @@ fn t0() -> Value {
 
 fn a(v: &Value) -> EvmAddress {
     let text = v.as_str().unwrap();
-    let bytes: [u8; 20] = hex::decode(text.trim_start_matches("0x")).unwrap().try_into().unwrap();
+    let bytes: [u8; 20] = hex::decode(text.trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap();
     EvmAddress::new(bytes)
 }
 
@@ -89,29 +92,48 @@ fn a_step_off_the_pins_or_off_the_identity_deposit_is_refused() {
     // another target
     let mut step = d.step();
     step.target = addr(p.spoke_pool);
-    assert_eq!(read_across_step(&step, &p), Err(StepError::NotCanonical("target")));
+    assert_eq!(
+        read_across_step(&step, &p),
+        Err(StepError::NotCanonical("target"))
+    );
     // another SpokePool, rebuilt honestly (AX4)
     let mut other = d.clone();
     other.spoke_pool = EvmAddress::new([0x77; 20]);
-    assert_eq!(read_across_step(&other.step(), &p), Err(StepError::NotCanonical("spokePool")));
+    assert_eq!(
+        read_across_step(&other.step(), &p),
+        Err(StepError::NotCanonical("spokePool"))
+    );
     // a signed swapTokenAmount, the proportional flag off, a nonce
     for (byte, value) in [(259usize, 1u8), (355, 0), (419, 7)] {
         let mut step = d.step();
         let mut data = step.data.to_vec();
         data[byte] = value;
         step.data = data.into();
-        assert_eq!(read_across_step(&step, &p), Err(StepError::NotCanonical("calldata")), "byte {byte}");
+        assert_eq!(
+            read_across_step(&step, &p),
+            Err(StepError::NotCanonical("calldata")),
+            "byte {byte}"
+        );
     }
     // another write, token or least
     let mut step = d.step();
     step.writes[0].minus = U256::from(1u8);
-    assert_eq!(read_across_step(&step, &p), Err(StepError::NotCanonical("writes")));
+    assert_eq!(
+        read_across_step(&step, &p),
+        Err(StepError::NotCanonical("writes"))
+    );
     let mut step = d.step();
     step.token = addr(d.output_token);
-    assert_eq!(read_across_step(&step, &p), Err(StepError::NotCanonical("token")));
+    assert_eq!(
+        read_across_step(&step, &p),
+        Err(StepError::NotCanonical("token"))
+    );
     let mut step = d.step();
     step.min -= U256::from(1u8);
-    assert_eq!(read_across_step(&step, &p), Err(StepError::NotCanonical("min")));
+    assert_eq!(
+        read_across_step(&step, &p),
+        Err(StepError::NotCanonical("min"))
+    );
     // not swapAndBridge at all
     let mut step = d.step();
     step.data = vec![0xde, 0xad, 0xbe, 0xef].into();
@@ -121,7 +143,13 @@ fn a_step_off_the_pins_or_off_the_identity_deposit_is_refused() {
 #[test]
 fn t0s_message_reads_back_as_its_envelope_and_recipe() {
     let t = t0();
-    let (envelope, got) = read_arrival(&b(&t["message"]), a(&t["recipient"]), a(&t["output_token"]), a(&t["runner"])).unwrap();
+    let (envelope, got) = read_arrival(
+        &b(&t["message"]),
+        a(&t["recipient"]),
+        a(&t["output_token"]),
+        a(&t["runner"]),
+    )
+    .unwrap();
     assert_eq!(envelope.encode(), b(&t["envelope"]));
     assert_eq!(envelope.action, Action::Swap);
     assert_eq!(got, recipe(&t));
@@ -133,8 +161,15 @@ fn a_message_naming_other_contracts_or_a_fallback_is_refused() {
     let message = b(&t["message"]);
     let (handler, stable, runner) = (a(&t["recipient"]), a(&t["output_token"]), a(&t["runner"]));
     let other = EvmAddress::new([0x77; 20]);
-    for (h, s, r) in [(other, stable, runner), (handler, other, runner), (handler, stable, other)] {
-        assert_eq!(read_arrival(&message, h, s, r), Err(StepError::NotCanonical("message")));
+    for (h, s, r) in [
+        (other, stable, runner),
+        (handler, other, runner),
+        (handler, stable, other),
+    ] {
+        assert_eq!(
+            read_arrival(&message, h, s, r),
+            Err(StepError::NotCanonical("message"))
+        );
     }
     let mut instructions = Instructions::abi_decode(&message).unwrap();
     instructions.fallbackRecipient = addr(runner);
@@ -142,7 +177,10 @@ fn a_message_naming_other_contracts_or_a_fallback_is_refused() {
         read_arrival(&instructions.abi_encode(), handler, stable, runner),
         Err(StepError::NotCanonical("message"))
     );
-    assert_eq!(read_arrival(&[], handler, stable, runner), Err(StepError::NotCanonical("message")));
+    assert_eq!(
+        read_arrival(&[], handler, stable, runner),
+        Err(StepError::NotCanonical("message"))
+    );
 }
 
 #[test]

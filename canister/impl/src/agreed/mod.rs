@@ -14,7 +14,7 @@ use crate::rpc::{self, hex0x, parse_block_number, Keep, RpcError};
 use crate::storage::config;
 use serde_json::{json, Value};
 use types::eco::{self, Fill};
-use types::{BlockDepth, BlockNumber, ChainId, EvmAddress};
+use types::{BlockDepth, BlockNumber, ChainId, EvmAddress, TokenAmount};
 
 /// The most one agreed answer of a call may be.
 const MAX_ANSWER_BYTES: u64 = 16_384;
@@ -110,6 +110,26 @@ fn deep_below(head: BlockNumber, depth: BlockDepth) -> BlockNumber {
 pub fn read_block(head: BlockNumber, depth: BlockDepth, after: BlockNumber) -> Option<BlockNumber> {
     let deep = deep_below(head, depth);
     (deep >= after).then_some(deep)
+}
+
+/// What `owner` holds of `token` on `chain`, in the token's own units, read by every node at one
+/// agreed block at the crediting depth (never `latest`), through a transform keeping only the
+/// word: the block and the balance. Err: not read now, ask again.
+pub async fn balance_of(
+    chain: ChainId,
+    token: EvmAddress,
+    owner: EvmAddress,
+) -> Result<(BlockNumber, TokenAmount), String> {
+    let (head, depth) = agreed_head(chain).await?;
+    let block = read_block(head, depth, BlockNumber::new(0))
+        .ok_or_else(|| format!("chain {chain}'s head is below the crediting depth"))?;
+    let data = types::swapic::balance_of_calldata(owner);
+    let calls = [("eth_call", call(token, &data, block), Keep::Whole)];
+    let mut answers = rpc::rpc_batch_agreed(chain, &calls, MAX_ANSWER_BYTES)
+        .await
+        .map_err(|error| format!("the balance: {:?}", error.kind()))?;
+    let answer = answers.pop().ok_or("the balance was not answered")?;
+    Ok((block, TokenAmount::from_be_bytes(word(answer)?)))
 }
 
 /// Whether Swapic's `used(order_id)` answer says the order ran.

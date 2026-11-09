@@ -197,7 +197,10 @@ pub fn read_across_step(step: &Step, pins: &AcrossPins) -> Result<AcrossDeposit,
     if deposit.calldata() != step.data.as_ref() {
         return Err(StepError::NotCanonical("calldata"));
     }
-    if step.token != d.swapToken || d.swapToken != d.exchange || d.exchange != d.depositData.inputToken {
+    if step.token != d.swapToken
+        || d.swapToken != d.exchange
+        || d.exchange != d.depositData.inputToken
+    {
         return Err(StepError::NotCanonical("token"));
     }
     if step.min != deposit.min_expected || deposit.min_expected.is_zero() {
@@ -276,13 +279,21 @@ pub fn read_arrival(
     let [_, second] = instructions.calls.as_slice() else {
         return Err(StepError::NotCanonical("message"));
     };
-    let outer = makeCallWithBalanceCall::abi_decode_with_config(&second.callData, strict()).map_err(bad)?;
+    let outer =
+        makeCallWithBalanceCall::abi_decode_with_config(&second.callData, strict()).map_err(bad)?;
     let fill = fillCall::abi_decode_with_config(&outer.callData, strict()).map_err(bad)?;
-    let rebuilt = arrival_message(handler, stable, runner, fill.envelope.to_vec(), fill.recipe.clone());
+    let rebuilt = arrival_message(
+        handler,
+        stable,
+        runner,
+        fill.envelope.to_vec(),
+        fill.recipe.clone(),
+    );
     if rebuilt != message {
         return Err(StepError::NotCanonical("message"));
     }
-    let envelope = Envelope::decode(&fill.envelope).map_err(|_| StepError::NotCanonical("envelope"))?;
+    let envelope =
+        Envelope::decode(&fill.envelope).map_err(|_| StepError::NotCanonical("envelope"))?;
     Ok((envelope, fill.recipe))
 }
 

@@ -7,6 +7,7 @@ mod tests;
 use crate::ecdsa;
 use crate::evm_reads::{self, Simulated};
 use crate::guards::require_not_halted;
+use crate::pool::arrival::{runner_transfers, Receipt, RunnerTransfer};
 use crate::state::{State, Store};
 use crate::storage::events::{append_event, read_state, AppendError};
 use crate::storage::halt::is_halted;
@@ -14,8 +15,9 @@ use crate::storage::{config, timer_state};
 use crate::tx::credit_confirmations;
 use serde_json::Value;
 use types::books::{
-    assess, pool_open, worth_recording, BalanceCheck, BookStep, PoolClosed, ReadFailure,
+    assess, pool_open, worth_recording, BalanceCheck, BookStep, PoolClosed, ReadFailure, UserFeeKey,
 };
+use types::config::EvmChain;
 use types::timer_state::{LastRead, TimerState};
 use types::{BlockNumber, ChainId, EventType, EvmAddress, Timestamp, TokenAmount, TxHash};
 
@@ -90,6 +92,92 @@ pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: T
         fee_earned(chain_id, pool_chain, tx_hash, block, fee),
     ) {
         ic_cdk::println!("fee {fee} of {tx_hash} on chain {chain_id} not booked: {error}");
+    }
+}
+
+/// What a source transaction paid the canister in fee steps, in the source chain's USDC: every
+/// `RunnerTransfer::Fee` of its receipt, by the one classifier the pool's arrivals read, so a
+/// pool deposit's own transfer is never a fee.
+pub fn user_fee_in(receipt: &Receipt, source: &EvmChain, canister: EvmAddress) -> TokenAmount {
+    runner_transfers(&receipt.logs, source.usdc, source.runner, canister)
+        .into_iter()
+        .filter_map(|transfer| match transfer {
+            RunnerTransfer::Fee { amount, .. } => Some(amount),
+            RunnerTransfer::Payout { .. } => None,
+        })
+        .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
+        .unwrap_or(TokenAmount::MAX)
+}
+
+/// Why a source transaction books no user-paid fee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoUserFee {
+    /// It reverted: nothing left the user.
+    Reverted,
+    /// Its fees are booked already.
+    Booked,
+    /// The canister signed it: a relay's fee is booked at its close, and a move or a payout
+    /// of its own pays none.
+    Ours,
+    /// It paid the canister nothing.
+    NoFee,
+}
+
+/// The line that books what `receipt`, a transaction on `chain_id`, paid the canister, pure.
+pub fn user_fee_step<S: Store>(
+    state: &State<S>,
+    chain_id: ChainId,
+    pool_chain: Option<ChainId>,
+    receipt: &Receipt,
+    source: &EvmChain,
+    canister: EvmAddress,
+) -> Result<BookStep, NoUserFee> {
+    if !receipt.success {
+        return Err(NoUserFee::Reverted);
+    }
+    let store = state.store();
+    if store.flow_by_tx(&receipt.tx).is_some() || store.pool_own_source(&receipt.tx).is_some() {
+        return Err(NoUserFee::Ours);
+    }
+    let key = UserFeeKey {
+        chain: chain_id,
+        tx: receipt.tx,
+    };
+    if store.is_user_fee_booked(&key) {
+        return Err(NoUserFee::Booked);
+    }
+    // booked in micro USD, as every chain's fee income counts
+    let amount = source.usdc_to_usd6(user_fee_in(receipt, source, canister));
+    if amount == TokenAmount::ZERO {
+        return Err(NoUserFee::NoFee);
+    }
+    Ok(BookStep::UserFeeEarned {
+        tx_hash: receipt.tx,
+        amount,
+        // only the pool chain's fees carry the block a check waits for, as `fee_earned`'s
+        block: (pool_chain == Some(chain_id)).then_some(receipt.block),
+    })
+}
+
+/// Books what `receipt` paid the canister, once. It never stands in a finish's way: a
+/// transaction already booked, or a line the books refuse, answers nothing and the finish goes
+/// on; the fee stays surplus until the books hold it. No await between the check and the line.
+pub fn book_user_fee(
+    chain_id: ChainId,
+    receipt: &Receipt,
+    source: &EvmChain,
+    canister: EvmAddress,
+) {
+    let pool_chain = config::with(|config| config.pool_chain);
+    let step =
+        read_state(|state| user_fee_step(state, chain_id, pool_chain, receipt, source, canister));
+    if let Ok(step) = step {
+        if let Err(error) = record(chain_id, step) {
+            ic_cdk::println!(
+                "the user fee of {} on chain {chain_id} not booked: {error}",
+                receipt.tx
+            );
+        }
     }
 }
 

@@ -86,6 +86,27 @@ type BookLines = record {
   // When the last check that could not read the balance was recorded.
   failed_at_ns : opt nat64;
 };
+// One chain's fees, micro USD.
+type ChainFees = record {
+  // What the fee income line holds now: withdrawable.
+  held : nat;
+  // Of every fee ever booked here, what users paid in transactions of their own. The rest
+  // of `held + swept` was read off the canister's own relays.
+  user_paid : nat;
+  swept : nat;
+  chain_id : nat64;
+};
+// Everything the canister has earned, by where it is held, micro USD.
+type FeesView = record {
+  pool_icp_swept : nat;
+  // The pool's fee line on ICP, in ckUSDC.
+  pool_icp : nat;
+  // The pool's fee line on Base: move fees and network fees on what the pool pays out.
+  pool_base : nat;
+  chains : vec ChainFees;
+  // What sweeps took off the pool's Base and ICP fee lines.
+  pool_base_swept : nat;
+};
 // A chain's head and gas price as the watcher read them, handed with the call that makes
 // the canister sign (`relay_gasless`, `finish_cctp`, `pay_payout`). There is no instant on
 // it: the canister stamps what it receives, so nothing a caller sends can date its data
@@ -1080,6 +1101,9 @@ type WithdrawIcpOk = record { paid : nat; burned : nat };
 service : (InitArg) -> {
   // The book lines of every chain, in micro-USDC, with the last balance read.
   books : () -> (vec record { nat64; BookLines }) query;
+  // Every fee the canister has earned, in one read: per chain what it holds and what users
+  // paid in transactions of their own, the pool's two fee lines, and what sweeps took.
+  fees : () -> (FeesView) query;
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
   // it, or answers the cached one. Deploy needs this before anything else: the Swapic
   // contracts are configured with this address and it has to be funded for gas, and neither

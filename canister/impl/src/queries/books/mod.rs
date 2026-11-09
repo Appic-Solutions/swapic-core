@@ -5,9 +5,10 @@ use crate::storage::events::read_state;
 use crate::storage::{config, timer_state};
 use candid::{Int, Nat};
 use ic_cdk::query;
-pub use settlement_api::types::books::BookLines;
+pub use settlement_api::types::books::{BookLines, ChainFees, FeesView};
 use std::collections::BTreeSet;
-use types::ChainId;
+use types::sweep::SweepAsset;
+use types::{ChainId, TokenAmount};
 
 /// The book lines of every chain, in micro-USDC, with the last balance read.
 #[query]
@@ -43,5 +44,58 @@ pub fn books() -> Vec<(u64, BookLines)> {
                 (chain.get(), lines)
             })
             .collect()
+    })
+}
+
+/// Every fee the canister has earned, in one read: per chain what it holds and what users paid
+/// in transactions of their own, the pool's two fee lines, and what sweeps took off each.
+#[query]
+pub fn fees() -> FeesView {
+    let mut chains: BTreeSet<ChainId> = config::get().evm_chains.0.into_keys().collect();
+    read_state(|state| {
+        let store = state.store();
+        chains.extend(store.books().into_iter().map(|(chain, _)| chain));
+        let sweeps: Vec<_> = (0..store.sweep_count())
+            .filter_map(|id| store.sweep(id))
+            .filter(|entry| !entry.reverted)
+            .map(|entry| entry.sweep)
+            .collect();
+        let sum = |parts: Vec<TokenAmount>| {
+            parts
+                .into_iter()
+                .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
+                .unwrap_or(TokenAmount::MAX)
+        };
+        let from_pool = |asset: SweepAsset| {
+            sum(sweeps
+                .iter()
+                .filter(|sweep| sweep.asset == asset)
+                .map(|sweep| sweep.from_pool_fees)
+                .collect())
+        };
+        let lines = state.pool().lines();
+        FeesView {
+            chains: chains
+                .into_iter()
+                .map(|chain| {
+                    let books = state.book(&chain);
+                    let swept = sum(sweeps
+                        .iter()
+                        .filter(|sweep| sweep.chain() == Some(chain))
+                        .map(|sweep| sweep.from_fee_income)
+                        .collect());
+                    ChainFees {
+                        chain_id: chain.get(),
+                        held: Nat::from(books.fee_income),
+                        user_paid: Nat::from(books.user_paid()),
+                        swept: Nat::from(swept),
+                    }
+                })
+                .collect(),
+            pool_base: Nat::from(lines.fees_base),
+            pool_icp: Nat::from(lines.fees_icp),
+            pool_base_swept: Nat::from(from_pool(SweepAsset::FeeUsdc)),
+            pool_icp_swept: Nat::from(from_pool(SweepAsset::CkUsdcFees)),
+        }
     })
 }

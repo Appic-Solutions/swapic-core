@@ -34,4 +34,6 @@ fn post_upgrade() {
     // which arms the backstop again while work is open
     crate::engine::arm();
     task_manager::backstop::arm_if_open();
+    // the user-paid fees of finishes from before they were booked: a walk of the log, once
+    task_manager::fee_catch_up::start();
 }

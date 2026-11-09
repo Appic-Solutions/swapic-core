@@ -1,4 +1,5 @@
 use crate::state::{State, Store};
+use types::books::{BookStep, BooksError, UserFeeKey};
 use types::events::{Event, EventType, TxPurpose};
 use types::FlowStep;
 use types::{ChainId, Nonce, NonceKey, Timestamp, TransitionError};
@@ -46,7 +47,19 @@ impl<S: Store> State<S> {
             EventType::TxCancelled {
                 chain_id, nonce, ..
             } => self.ensure_unsigned_nonce(*chain_id, *nonce),
-            EventType::Books { chain_id, step } => Ok(self.book(chain_id).admits(step)?),
+            EventType::Books { chain_id, step } => {
+                // a transaction's user-paid fees are booked once, whoever writes the line
+                if let BookStep::UserFeeEarned { tx_hash, .. } = step {
+                    let key = UserFeeKey {
+                        chain: *chain_id,
+                        tx: *tx_hash,
+                    };
+                    if self.store().is_user_fee_booked(&key) {
+                        return Err(BooksError::UserFeeBooked(*tx_hash).into());
+                    }
+                }
+                Ok(self.book(chain_id).admits(step)?)
+            }
             // a pool step that records a signed transaction spends the nonce handed out for
             // exactly its purpose, as a flow's does
             EventType::Pool { step } => {

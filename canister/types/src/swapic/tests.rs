@@ -822,3 +822,36 @@ fn the_interface_golden_empty_memo_order_holds() {
         word(&golden["order_id"])
     );
 }
+
+/// The message is the first argument of every finish, whatever its calldata carries after it.
+#[test]
+fn finish_message_reads_the_first_argument_of_each_finish() {
+    let message = vec![0xab; 696];
+    let attestation = vec![0xcd; 130];
+    let recipe = Recipe {
+        target: alloy_primitives::Address::ZERO,
+        data: alloy_primitives::Bytes::new(),
+        scaler: alloy_primitives::Address::ZERO,
+    };
+    for calldata in [
+        receive_message_calldata(&message, &attestation),
+        complete_cctp_calldata(&message, &attestation, recipe),
+        release_calldata(&message, &attestation),
+    ] {
+        assert_eq!(finish_message(&calldata), Some(message.as_slice()));
+    }
+}
+
+/// Calldata too short or pointing past its end reads as nothing, and never panics.
+#[test]
+fn finish_message_refuses_what_does_not_read() {
+    assert_eq!(finish_message(&[]), None);
+    assert_eq!(finish_message(&[0; 35]), None);
+    let mut past_the_end = vec![0; 4];
+    past_the_end.extend_from_slice(&[0xff; 32]);
+    assert_eq!(finish_message(&past_the_end), None);
+    let mut long = vec![0; 4];
+    long.extend_from_slice(&U256::from(32u8).to_be_bytes::<32>());
+    long.extend_from_slice(&U256::from(1_000u32).to_be_bytes::<32>());
+    assert_eq!(finish_message(&long), None);
+}

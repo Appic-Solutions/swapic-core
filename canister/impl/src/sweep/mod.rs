@@ -12,12 +12,41 @@ use crate::state::{State, Store};
 use types::books::BooksError;
 use types::pool::{OrphanStatus, PayoutKind, PayoutStatus, PendingOp};
 use types::sweep::{Sweep, SweepAsset};
-use types::TokenAmount;
+use types::{BlockNumber, ChainId, TokenAmount};
 
 fn sum(mut amounts: impl Iterator<Item = TokenAmount>) -> TokenAmount {
     amounts
         .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
         .unwrap_or(TokenAmount::MAX)
+}
+
+/// Why a USDC fee sweep on `chain` may not go now, given the `observed` balance (micro USD) every
+/// node read at `block`; None when it may. A fee line is read off a receipt one node gave, so it
+/// is never taken on its word: a sweep goes only while the real balance holds every line the
+/// books keep there, the pool's included, within the same tolerance as the hourly check. No
+/// wrong line, however it got there, reaches the pool's money.
+///
+/// A rebalancing move's USDC passes through the canister's address on Ethereum, so a balance
+/// there proves nothing while one is open.
+pub fn balance_refuses<S: Store>(
+    state: &State<S>,
+    config: &types::Config,
+    chain: ChainId,
+    block: BlockNumber,
+    observed: TokenAmount,
+) -> Option<String> {
+    if chain == ChainId::ETHEREUM && !crate::pool::rebalance::open_moves(state).is_empty() {
+        return Some("a rebalancing move is open on Ethereum".to_string());
+    }
+    let (expected, short) = crate::books::expected_at(
+        state,
+        chain,
+        config.pool_chain,
+        block,
+        observed,
+        config.books_tolerance.0,
+    );
+    short.then(|| format!("the balance {observed} at block {block} is below the books' {expected}"))
 }
 
 /// What the Base fee line can spare: `fees_base` less the fee an orphan's refund kept while

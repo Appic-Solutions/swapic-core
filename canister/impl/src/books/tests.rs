@@ -558,3 +558,283 @@ fn a_fee_step_and_a_pool_arrival_in_one_receipt_are_each_expected_once() {
         assert_eq!(expected(500), usdc(100).checked_add(fee).unwrap());
     });
 }
+
+// ---- the fees users pay in their own transactions, on real mainnet receipts
+
+const REAL_CANISTER: &str = "0x8Fd51f1C630ae3AFd0Bf1AFFeCc5cFBdB66e3023";
+const REAL_RUNNER: &str = "0x34d8a2debe49dcca0f7cc77d74163cfb94cc19f5";
+
+fn real_canister() -> EvmAddress {
+    REAL_CANISTER.parse().unwrap()
+}
+
+/// A chain as far as the fee reader cares: its USDC and the one shared Runner.
+fn source_chain(usdc: &str, decimals: Option<u8>) -> EvmChain {
+    EvmChain {
+        swapic: EvmAddress::new([0x51; 20]),
+        runner: REAL_RUNNER.parse().unwrap(),
+        cctp_receiver: EvmAddress::new([0x52; 20]),
+        usdc: usdc.parse().unwrap(),
+        token_messenger: EvmAddress::new([0x53; 20]),
+        message_transmitter: EvmAddress::new([0x54; 20]),
+        gas_limit: types::config::PerAction::all(types::GasAmount::from(300_000_u64)),
+        gas_budget: types::config::PerAction::all(types::Wei::ZERO),
+        min_network_fee: types::config::PerAction::all(TokenAmount::ZERO),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: decimals,
+        across: None,
+    }
+}
+
+fn base_usdc() -> EvmChain {
+    source_chain("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", None)
+}
+
+fn real(sample: &str) -> Receipt {
+    let json: serde_json::Value = serde_json::from_str(sample).unwrap();
+    Receipt::parse(&json).unwrap()
+}
+
+fn user_pays_base() -> Receipt {
+    real(include_str!("samples/user_pays_base_to_arbitrum.json"))
+}
+
+fn empty_state() -> State<crate::state::MemoryStore> {
+    State::new(crate::state::MemoryStore::default())
+}
+
+/// A "You pay gas" swap from Base: 2 USDC in, $0.06461 to the canister, the rest burned.
+#[test]
+fn a_user_paid_fee_is_read_off_a_real_receipt() {
+    let fee = user_fee_in(&user_pays_base(), &base_usdc(), real_canister());
+    assert_eq!(fee, TokenAmount::from(64_610_u32));
+}
+
+/// A stake from Polygon pays its network fee on Polygon, in its own transaction.
+#[test]
+fn a_stake_from_another_chain_pays_its_fee_there() {
+    let polygon = source_chain("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", None);
+    let receipt = real(include_str!("samples/user_pays_stake_polygon.json"));
+    let fee = user_fee_in(&receipt, &polygon, real_canister());
+    assert_eq!(fee, TokenAmount::from(53_498_u32));
+}
+
+/// The $260 same chain stake reaches the canister through the Runner too, explained by a
+/// `PaidOut`: pool money, never a fee.
+#[test]
+fn a_same_chain_deposit_is_no_fee() {
+    let receipt = real(include_str!("samples/same_chain_deposit_base.json"));
+    let step = user_fee_step(
+        &empty_state(),
+        ChainId::BASE,
+        Some(ChainId::BASE),
+        &receipt,
+        &base_usdc(),
+        real_canister(),
+    );
+    assert_eq!(step, Err(NoUserFee::NoFee));
+}
+
+/// BNB Chain's USDC has 18 decimals, and the books count micro USD.
+#[test]
+fn a_fee_on_an_18_decimal_usdc_books_in_micro_usd() {
+    let bsc = source_chain("0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", Some(18));
+    let receipt = real(include_str!("samples/gasless_relay_bsc_18_decimals.json"));
+    let step = user_fee_step(
+        &empty_state(),
+        ChainId::new(56),
+        Some(ChainId::BASE),
+        &receipt,
+        &bsc,
+        real_canister(),
+    );
+    let Ok(BookStep::UserFeeEarned { amount, block, .. }) = step else {
+        panic!("{step:?}");
+    };
+    assert_eq!(amount, TokenAmount::from(91_239_u32));
+    assert_eq!(block, None, "only the pool chain's fees carry a block");
+}
+
+/// On the pool chain the line carries its receipt's block, for the balance check.
+#[test]
+fn a_fee_on_the_pool_chain_carries_its_block() {
+    let receipt = user_pays_base();
+    let step = user_fee_step(
+        &empty_state(),
+        ChainId::BASE,
+        Some(ChainId::BASE),
+        &receipt,
+        &base_usdc(),
+        real_canister(),
+    );
+    let Ok(BookStep::UserFeeEarned {
+        tx_hash,
+        amount,
+        block,
+    }) = step
+    else {
+        panic!("{step:?}");
+    };
+    assert_eq!(tx_hash, receipt.tx);
+    assert_eq!(amount, TokenAmount::from(64_610_u32));
+    assert_eq!(block, Some(receipt.block));
+}
+
+/// A relay the canister signed is booked at its close: the finish that reads it books nothing,
+/// and that holds whichever of the two comes first.
+#[test]
+fn a_transaction_the_canister_signed_is_not_booked_again() {
+    let arbitrum = source_chain("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", None);
+    let receipt = real(include_str!("samples/gasless_relay_arbitrum.json"));
+    let canister = real_canister();
+    let chain = ChainId::new(42_161);
+
+    let unknown = user_fee_step(&empty_state(), chain, None, &receipt, &arbitrum, canister);
+    assert!(
+        unknown.is_ok(),
+        "a stranger who relays it is booked: {unknown:?}"
+    );
+
+    let mut store = crate::state::MemoryStore::default();
+    store.put_flow_tx(receipt.tx, types::QuoteHash::new([1; 32]));
+    let relayed = user_fee_step(
+        &State::new(store),
+        chain,
+        None,
+        &receipt,
+        &arbitrum,
+        canister,
+    );
+    assert_eq!(relayed, Err(NoUserFee::Ours));
+}
+
+/// A reverted source took nothing from the user: its logs are gone, and its status says so even
+/// if a provider answered logs.
+#[test]
+fn a_reverted_source_books_nothing() {
+    let mut receipt = user_pays_base();
+    receipt.success = false;
+    let step = user_fee_step(
+        &empty_state(),
+        ChainId::BASE,
+        None,
+        &receipt,
+        &base_usdc(),
+        real_canister(),
+    );
+    assert_eq!(step, Err(NoUserFee::Reverted));
+}
+
+/// Two finishes of one transaction, a retry, or the catch-up beside a live finish: one line. The
+/// fold refuses a second whoever writes it, the check before it answers quietly, and the fee
+/// landed on the source chain's books, the income line and the lifetime line alike.
+#[test]
+fn a_user_paid_fee_is_booked_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let receipt = user_pays_base();
+        let chain = ChainId::BASE;
+        let at = Timestamp::from_nanos(1);
+        let step = read_state(|state| {
+            user_fee_step(
+                state,
+                chain,
+                Some(chain),
+                &receipt,
+                &base_usdc(),
+                real_canister(),
+            )
+        })
+        .unwrap();
+        let line = EventType::Books {
+            chain_id: chain,
+            step,
+        };
+        append_event_at(line.clone(), at).unwrap();
+
+        let books = read_state(|state| state.book(&chain));
+        assert_eq!(books.fee_income, TokenAmount::from(64_610_u32));
+        assert_eq!(books.user_paid(), TokenAmount::from(64_610_u32));
+
+        let again = read_state(|state| {
+            user_fee_step(
+                state,
+                chain,
+                Some(chain),
+                &receipt,
+                &base_usdc(),
+                real_canister(),
+            )
+        });
+        assert_eq!(again, Err(NoUserFee::Booked));
+        assert!(
+            append_event_at(line, at).is_err(),
+            "the fold refuses a second line for one transaction"
+        );
+        let books = read_state(|state| state.book(&chain));
+        assert_eq!(books.fee_income, TokenAmount::from(64_610_u32));
+    });
+}
+
+/// The same hash on another chain is another key: a key is its chain and its hash.
+#[test]
+fn the_key_is_the_chain_and_the_hash() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let at = Timestamp::from_nanos(1);
+        let line = |chain_id| EventType::Books {
+            chain_id,
+            step: BookStep::UserFeeEarned {
+                tx_hash: TxHash::new([7; 32]),
+                amount: TokenAmount::from(1_u8),
+                block: None,
+            },
+        };
+        append_event_at(line(ChainId::BASE), at).unwrap();
+        append_event_at(line(ChainId::ETHEREUM), at).unwrap();
+        assert!(append_event_at(line(ChainId::BASE), at).is_err());
+    });
+}
+
+/// What the live books showed before: the fee in the balance and not on a line reads as surplus.
+/// Booked, the surplus is gone, and the balance check expects exactly what is there.
+#[test]
+fn booking_a_user_paid_fee_takes_it_out_of_the_surplus() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let tolerance = TokenAmount::from(1_000_000_u32);
+        let block = BlockNumber::new(100_000_000);
+        let observed = TokenAmount::from(64_610_u32);
+        let chain = ChainId::BASE;
+        let before =
+            read_state(|state| expected_at(state, chain, Some(chain), block, observed, tolerance));
+        assert_eq!(types::books::surplus_of(observed, before.0), 64_610);
+
+        let step = read_state(|state| {
+            user_fee_step(
+                state,
+                chain,
+                Some(chain),
+                &user_pays_base(),
+                &base_usdc(),
+                real_canister(),
+            )
+        })
+        .unwrap();
+        append_event_at(
+            EventType::Books {
+                chain_id: chain,
+                step,
+            },
+            Timestamp::from_nanos(1),
+        )
+        .unwrap();
+
+        let after =
+            read_state(|state| expected_at(state, chain, Some(chain), block, observed, tolerance));
+        assert_eq!(types::books::surplus_of(observed, after.0), 0);
+        assert!(!after.1, "no shortfall");
+    });
+}
