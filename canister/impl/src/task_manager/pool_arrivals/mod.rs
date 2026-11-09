@@ -24,6 +24,13 @@
 //! passed over, each with an alert line for ops (the watcher reports each arrival itself):
 //! a block whose transfers are too large for one answer even alone, and a receipt too large
 //! (or malformed) to ever read. One pass at a time.
+//!
+//! An Across refund to the canister found while a payout it may pay back waits for its fill
+//! read (a payout stopped for a human can wait for days) never holds the cursor: its
+//! transaction is kept aside (`across_refunds_waiting`, at most
+//! [`types::timer_state::MAX_WAITING_REFUNDS`]), read again at the start of every pass and
+//! credited once that read is in, while the read of Base moves on past it. Only a full set
+//! holds the cursor, with an alert.
 
 #[cfg(test)]
 mod tests;
@@ -407,6 +414,78 @@ pub fn holds_back(found: &[arrival::Found]) -> (bool, Option<String>) {
     (unproven.is_some() || early, unproven)
 }
 
+/// Keeps the transaction `tx` of an Across refund aside, to be read again each pass: whether it
+/// is kept (it was already, or the set has room).
+fn keep_aside(tx: TxHash) -> bool {
+    crate::storage::timer_state::update(|state| {
+        let waiting = state.across_refunds_waiting.get_or_insert_with(Vec::new);
+        if waiting.contains(&tx) {
+            return (true, false);
+        }
+        if waiting.len() >= types::timer_state::MAX_WAITING_REFUNDS {
+            return (false, false);
+        }
+        waiting.push(tx);
+        (true, true)
+    })
+}
+
+/// The Across refunds kept aside, each read again: credited once its payout's fill is read
+/// (and then let go), let go once credited or proving nothing, kept while it still waits or its
+/// receipt failed to read for now.
+async fn read_kept_aside(
+    reads: &impl BaseReads,
+    chain: &PoolChain,
+    clock: &impl Fn() -> Timestamp,
+    report: &mut PassReport,
+) {
+    let kept = crate::storage::timer_state::get()
+        .across_refunds_waiting
+        .unwrap_or_default();
+    let mut gone = Vec::new();
+    for tx in kept {
+        report.receipts += 1;
+        let base = match reads.receipt(tx).await {
+            Ok(base) => base,
+            Err(PoolError::BadArrival(why)) => {
+                report.alert(format!(
+                    "ALERT: the receipt of {tx}, an Across refund kept aside, cannot be read \
+                     ({why}); the canister's read of Base lets it go"
+                ));
+                gone.push(tx);
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if require_not_halted().is_err() {
+            return;
+        }
+        let Ok(found) = find(&base, None, chain) else {
+            gone.push(tx);
+            continue;
+        };
+        let waits = read_state(|state| {
+            found
+                .iter()
+                .any(|one| arrival::across_refund_waits(state, one, clock()))
+        });
+        if !waits {
+            record(&found, &Judge::without_terms(), clock());
+            gone.push(tx);
+        }
+    }
+    if !gone.is_empty() {
+        crate::storage::timer_state::update(|state| {
+            let waiting = state.across_refunds_waiting.get_or_insert_with(Vec::new);
+            waiting.retain(|tx| !gone.contains(tx));
+            if waiting.is_empty() {
+                state.across_refunds_waiting = None;
+            }
+            ((), true)
+        });
+    }
+}
+
 /// One pass over the blocks after the cursor, read through `reads`.
 pub async fn backup(
     reads: &impl BaseReads,
@@ -415,6 +494,11 @@ pub async fn backup(
 ) -> Result<PassReport, String> {
     let safe = reads.safe_block().await?;
     let mut report = PassReport::default();
+    // the Across refunds kept aside first: each credited once its payout's fill is read
+    read_kept_aside(reads, chain, &clock, &mut report).await;
+    if require_not_halted().is_err() {
+        return Ok(report);
+    }
     let stored = crate::storage::timer_state::get().scan_cursor;
     let (cursor, cursor_log) = (stored.map(|at| at.block), stored.and_then(|at| at.log));
     let Some((from, mut to)) = range(cursor, cursor_log, safe) else {
@@ -492,14 +576,22 @@ pub async fn backup(
                  Base stops before it and asks again"
             ));
         }
-        // an Across refund that may pay back a payout whose fill is not read yet waits for
-        // that read, with no alert: the cursor stops before it, the rest of it is credited now
+        if held {
+            failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
+        }
+        // an Across refund that may pay back a payout whose fill is not read yet is kept aside
+        // and read again each pass, and the cursor moves on; the rest of it is credited now
         let refund_waits = read_state(|state| {
             found
                 .iter()
                 .any(|one| arrival::across_refund_waits(state, one, clock()))
         });
-        if held || refund_waits {
+        if refund_waits && !keep_aside(tx) {
+            report.alert(format!(
+                "ALERT: {} Across refunds wait for their payouts' fill reads already; the \
+                 canister's read of Base stops before the one in {tx}",
+                types::timer_state::MAX_WAITING_REFUNDS
+            ));
             failed = Some(failed.map_or(first, |earlier| earlier.min(first)));
         }
         // the terms the chain shows (a same-chain order's own `OrderStarted`, a CCTP

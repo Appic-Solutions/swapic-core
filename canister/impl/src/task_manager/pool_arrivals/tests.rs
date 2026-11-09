@@ -642,3 +642,170 @@ fn a_failed_read_is_tried_again_soon_a_few_times_in_a_row() {
     retries_reset();
     assert!(retry_soon(), "a new interval tries again");
 }
+
+/// Review of 5ff0a4b: an Across refund that waits for its payout's fill read (a payout
+/// stopped for a human can wait for days) never freezes the read of Base. It is kept aside,
+/// the cursor moves on past it and every later arrival, and it is read again each pass and
+/// credited once the payout reads unfilled.
+#[test]
+fn an_across_refund_waiting_for_its_fill_read_is_kept_aside_and_the_read_moves_on() {
+    use crate::pool::arrival::Log;
+    use crate::storage::pool::tests::{across_cap, sign_payout_with, waiting_withdrawal};
+    use crate::storage::pool::{payout, record_at};
+    use alloy_primitives::{Address, U256};
+    use alloy_sol_types::SolEvent;
+    use types::pool::{PoolStep, Reclaim};
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal(
+            "0x1111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+        );
+        across_cap();
+        let mut data = types::swapic::across::SWAP_AND_BRIDGE.to_vec();
+        data.extend_from_slice(&[0x5e; 32]);
+        let order = types::swapic::encode_order(&types::swapic::Order {
+            r#ref: [0x5e; 32].into(),
+            payer: Address::repeat_byte(0x8f),
+            tokenIn: Address::repeat_byte(0x83),
+            amountIn: U256::from(1u8),
+            deadline: U256::from(900u64),
+            steps: vec![types::swapic::Step {
+                target: Address::repeat_byte(0x97),
+                data: data.into(),
+                token: Address::repeat_byte(0x83),
+                min: U256::from(1u8),
+                writes: Vec::new(),
+            }],
+            payout: types::swapic::Payout {
+                token: Address::ZERO,
+                recipient: Address::ZERO,
+                minOut: U256::ZERO,
+            },
+            memo: Vec::new().into(),
+        });
+        sign_payout_with(id, 0, 9, order);
+        let amount = payout(id).unwrap().amount.unwrap();
+        record_at(
+            PoolStep::PayoutPaid {
+                id,
+                tx_hash: TxHash::new([9; 32]),
+                block: BlockNumber::new(30),
+                intent: None,
+                across: Some(Box::new(types::pool::AcrossOut {
+                    destination: ChainId::BSC,
+                    relay: types::swapic::across::RelayData {
+                        depositor: [0x8f; 32],
+                        recipient: [0x0f; 32],
+                        exclusive_relayer: [0; 32],
+                        input_token: [0x83; 32],
+                        output_token: [0x8a; 32],
+                        input_amount: amount,
+                        output_amount: amount,
+                        origin_chain_id: ChainId::BASE,
+                        deposit_id: TokenAmount::from(7_u8),
+                        fill_deadline: 1_500,
+                        exclusivity_deadline: 0,
+                        message: Vec::new(),
+                    },
+                    deposit_time: 300,
+                })),
+            },
+            at(4),
+        )
+        .unwrap();
+        let spoke_pool = types::EvmAddress::new([0x5f; 20]);
+        let chain = PoolChain {
+            across: Some(crate::pool::across::AcrossPool {
+                chain: ChainId::BASE,
+                spoke_pool,
+                usdc: chain().usdc,
+                canister: chain().canister,
+                origins: vec![],
+            }),
+            ..chain()
+        };
+        // Across's refund leaf pays the deposit back at block 150; a later arrival at 400
+        let micro = u64::from_be_bytes(amount.to_be_bytes()[24..].try_into().unwrap());
+        let logged = transfer(1, 150, 3, micro);
+        let later = transfer(2, 400, 0, 5_000_000);
+        let tx = TxHash::new(parse_hash32(Some(&logged["transactionHash"])).unwrap());
+        let word = |address: types::EvmAddress| address.to_word();
+        let leaf = types::swapic::across::ExecutedRelayerRefundRoot {
+            amountToReturn: U256::ZERO,
+            chainId: U256::from(8453u64),
+            refundAmounts: vec![amount.to_u256()],
+            rootBundleId: 1,
+            leafId: 2,
+            l2TokenAddress: Address::from(*chain.usdc.as_bytes()),
+            refundAddresses: vec![Address::from(*chain.canister.as_bytes())],
+            deferredRefunds: false,
+            caller: Address::repeat_byte(0x44),
+        }
+        .encode_log_data();
+        let refund = Receipt {
+            tx,
+            block: BlockNumber::new(150),
+            success: true,
+            logs: vec![
+                Log {
+                    index: 3,
+                    address: chain.usdc,
+                    topics: vec![
+                        types::swapic::topics::transfer(),
+                        word(spoke_pool),
+                        word(chain.canister),
+                    ],
+                    data: amount.to_be_bytes().to_vec(),
+                    block_time: None,
+                },
+                Log {
+                    index: 4,
+                    address: spoke_pool,
+                    topics: leaf.topics().iter().map(|topic| topic.0).collect(),
+                    data: leaf.data.to_vec(),
+                    block_time: None,
+                },
+            ],
+        };
+        let base = FakeBase {
+            logs: vec![logged, later],
+            carrying: vec![refund],
+            ..FakeBase::default()
+        };
+        let now = || Timestamp::from_secs(2_000).unwrap();
+        let first = block_on(backup(&base, &chain, now)).unwrap();
+        // the cursor moves past the refund and the later arrival: the read is not frozen
+        assert!(
+            first.cursor.is_some_and(|(block, _)| block >= BlockNumber::new(400)),
+            "the read moves on: {:?}",
+            first.cursor
+        );
+        assert!(first.alerts.is_empty(), "{:?}", first.alerts);
+        assert_eq!(
+            crate::storage::timer_state::get().across_refunds_waiting,
+            Some(vec![tx])
+        );
+        assert_eq!(payout(id).unwrap().reclaim, None, "nothing credited yet");
+        // read again while the payout still waits: kept aside
+        block_on(backup(&base, &chain, now)).unwrap();
+        assert_eq!(
+            crate::storage::timer_state::get().across_refunds_waiting,
+            Some(vec![tx])
+        );
+        // the payout reads unfilled: the next pass credits the refund kept aside, once
+        record_at(
+            PoolStep::PayoutUnfilled {
+                id,
+                block: BlockNumber::new(31),
+            },
+            at(5),
+        )
+        .unwrap();
+        let third = block_on(backup(&base, &chain, now)).unwrap();
+        assert!(third.receipts >= 1, "the refund is read again");
+        assert_eq!(payout(id).unwrap().reclaim, Some(Reclaim::Credited));
+        assert_eq!(crate::storage::timer_state::get().across_refunds_waiting, None);
+    });
+}

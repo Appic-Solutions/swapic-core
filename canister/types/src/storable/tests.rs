@@ -420,6 +420,7 @@ fn samples() -> Vec<Sample> {
     all.push(hub_route_sample());
     all.extend(across_samples());
     all.extend(across_payout_samples());
+    all.extend(across_waiting_samples());
     all
 }
 
@@ -1075,6 +1076,21 @@ fn timer_state_samples() -> Vec<Sample> {
             // absent, so this sample's bytes stay the ones the golden pins
             ck_reads: None,
             pulls_to_check: None,
+            across_refunds_waiting: None,
+        },
+    )]
+}
+
+/// The read of Base's Across refunds kept aside, each waiting for its payout's fill read (BSC
+/// wave 2): appended after every older line.
+fn across_waiting_samples() -> Vec<Sample> {
+    use crate::hash::TxHash;
+    use crate::timer_state::TimerState;
+    vec![sample(
+        "the read of Base's Across refunds kept aside",
+        TimerState {
+            across_refunds_waiting: Some(vec![TxHash::new([0xf4; 32]), TxHash::new([0xf5; 32])]),
+            ..TimerState::default()
         },
     )]
 }
