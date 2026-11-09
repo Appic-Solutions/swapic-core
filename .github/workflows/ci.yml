@@ -41,10 +41,10 @@ jobs:
       # formatting it moves the panic locations the wasm carries, so it waits for the next
       # canister change (then: cargo fmt --check here)
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # this holds the candid check: settlement's the_committed_did_is_the_exported_one fails
+      # when canister/api/can.did is not the interface the code exports (generate-did.sh is
+      # the deliberate rewrite, and by design never passes)
       - run: cargo test --locked -p types -p settlement_api -p settlement
-      # the committed did must match the canister's exported interface, which also proves the
-      # inttest door never reaches the public interface
-      - run: scripts/generate-did.sh settlement && git diff --exit-code canister/api/can.did
 
   # The production wasm, built where the kit builds it: an Apple Silicon Mac. The same commit
   # gives other bytes on Linux (cargo's crate hashes take the build host's triple from the
