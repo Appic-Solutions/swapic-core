@@ -1051,7 +1051,27 @@ impl World {
                 }),
                 additional_responses: vec![],
             });
-        candid::decode_one(&self.pic.await_call(call).expect("the swap answers")).unwrap()
+        let answered: Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> =
+            candid::decode_one(&self.pic.await_call(call).expect("the swap answers")).unwrap();
+        answered.map(|ok| settlement_api::types::pool::SwapFromIcpOk {
+            id: ok.id,
+            status: self.carried(ok.id).status,
+        })
+    }
+
+    /// Payout `id` once the message its door left behind has gone as far as it can.
+    fn carried(&self, id: u64) -> settlement_api::types::pool::PayoutView {
+        for _ in 0..30 {
+            self.pic.tick();
+        }
+        let view: Option<settlement_api::types::pool::PayoutView> = query(
+            &self.pic,
+            self.canister,
+            self.admin,
+            "payout",
+            encode_one(id).unwrap(),
+        );
+        view.expect("the payout is there")
     }
 
     /// Answers `request` with `result` for its one call: from one node, or from every node of
@@ -1122,6 +1142,11 @@ fn an_icp_user_swaps_ckusdc_with_a_plan_that_fits_and_it_is_signed_without_pay_p
             encode_one(terms).unwrap(),
         )
         .expect("submitted");
+    // the wallet has its answer once the money is in, before anything reads the chain
+    let raw = world.pic.await_call(call).expect("the swap answers");
+    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Swapping);
     // the scaler's read, once the pull answered: for exactly the payout
     let request = world.next_outcall(&["eth_call"]);
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -1151,11 +1176,11 @@ fn an_icp_user_swaps_ckusdc_with_a_plan_that_fits_and_it_is_signed_without_pay_p
         serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
         false,
     );
-    let raw = world.pic.await_call(call).expect("the swap answers");
-    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
-    let swapped = swapped.expect("the swap is opened");
-    let PayoutStatus::Signed(tx_id) = swapped.status else {
-        panic!("signed at once, not {:?}", swapped.status);
+    let PayoutStatus::Signed(tx_id) = world.carried(swapped.id).status else {
+        panic!(
+            "signed with no call from the watcher, not {:?}",
+            world.carried(swapped.id).status
+        );
     };
     // the order signed: exactly the payout in, its swap the scaler's own rewrite
     let pinned = world
@@ -1220,7 +1245,7 @@ fn a_plan_the_scaler_refuses_waits_for_an_order() {
     let raw = world.pic.await_call(call).expect("the swap answers");
     let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
     let swapped = swapped.expect("the swap is opened");
-    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    assert_eq!(world.carried(swapped.id).status, PayoutStatus::Waiting);
     let waiting: Vec<PayoutWaiting> = query(
         &world.pic,
         world.canister,
@@ -1235,6 +1260,123 @@ fn a_plan_the_scaler_refuses_waits_for_an_order() {
         .pool_steps()
         .iter()
         .all(|step| !matches!(step, PoolStep::PayoutSigned { .. })));
+}
+
+/// An upgrade right after the door answered: the message it left behind is gone with the
+/// heap, and the payout timer carries the swap on. The money was taken once, one order is
+/// signed once.
+#[test]
+fn an_upgrade_right_after_the_door_answered_loses_no_swap() {
+    use settlement_api::types::pool::{PayoutStatus, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.push_reading();
+    world.approve(staker(), PAYS_501_65 + FEE);
+    let before = world.balance(staker());
+    let deadline_s = world.now().as_secs().get() + 600;
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(swap_terms(
+            &world,
+            PAYS_501_65,
+            kyber_plan(canister_address, deadline_s),
+            900_000,
+        ))
+        .unwrap(),
+    );
+    let swapped = swapped.expect("the swap is opened");
+    assert_eq!(swapped.status, PayoutStatus::Swapping);
+    crate::settlement_suite::init::upgrade(&world.pic, world.canister, world.admin)
+        .expect("the canister upgrades");
+    let taken = before.clone() - Nat::from(PAYS_501_65 + FEE);
+    assert_eq!(world.balance(staker()), taken);
+    // the timer picks it up: the read the upgrade cut off is asked again
+    world.pic.advance_time(Duration::from_secs(61));
+    world.push_reading();
+    let request = world.next_outcall(&["eth_call"]);
+    world.reply(
+        &request,
+        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+        false,
+    );
+    assert!(matches!(
+        world.carried(swapped.id).status,
+        PayoutStatus::Signed(_)
+    ));
+    let steps = world.pool_steps();
+    let pulled = steps
+        .iter()
+        .filter(|step| matches!(step, PoolStep::PayoutPulled { .. }))
+        .count();
+    let signed = steps
+        .iter()
+        .filter(|step| matches!(step, PoolStep::PayoutSigned { .. }))
+        .count();
+    assert_eq!((pulled, signed), (1, 1));
+    assert_eq!(world.balance(staker()), taken, "taken once");
+    assert_eq!(world.state().base.in_flight, Nat::from(501_650_000_u64));
+}
+
+/// While the message the door left behind holds the payout, the watcher's order is refused:
+/// one payout is signed once, whoever asks.
+#[test]
+fn the_watchers_order_waits_while_the_doors_message_holds_the_payout() {
+    use candid::encode_args;
+    use settlement_api::types::pool::{PayoutStatus, SwapFromIcpOk};
+    let (world, canister_address) = swap_world();
+    world.approve(staker(), usdc(100) + FEE);
+    let payout = usdc(100) - 100_000 - 50_000;
+    let deadline_s = world.now().as_secs().get() + 600;
+    let plan = usdc_plan(canister_address, payout, deadline_s);
+    let swapped: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(swap_terms(&world, usdc(100), plan.clone(), 400_000)).unwrap(),
+    );
+    let swapped = swapped.expect("the swap is opened");
+    // its gas read is out: the message holds the payout
+    let request = world.next_outcall(&["eth_feeHistory"]);
+    let paid: Result<u64, PoolError> = update(
+        &world.pic,
+        world.canister,
+        crate::settlement_suite::init::watcher(),
+        "pay_payout",
+        encode_args((
+            swapped.id,
+            plan,
+            400_000_u64,
+            None::<settlement_api::types::chain_data::ChainData>,
+        ))
+        .unwrap(),
+    );
+    assert!(
+        matches!(&paid, Err(PoolError::Unavailable(why)) if why.contains("being signed")),
+        "{paid:?}"
+    );
+    world.reply(
+        &request,
+        serde_json::json!({
+            "oldestBlock": "0x121eac0",
+            "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00"],
+            "gasUsedRatio": [0.5, 0.5, 0.5, 0.5, 0.5],
+            "reward": [["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"]],
+        }),
+        false,
+    );
+    assert!(matches!(
+        world.carried(swapped.id).status,
+        PayoutStatus::Signed(_)
+    ));
+    let signed = world
+        .pool_steps()
+        .iter()
+        .filter(|step| matches!(step, PoolStep::PayoutSigned { .. }))
+        .count();
+    assert_eq!(signed, 1);
 }
 
 /// Item 6: a payout whose transaction reverted is never signed again. Once its transaction
@@ -1633,7 +1775,7 @@ fn a_plan_whose_scaler_read_failed_once_is_signed_by_the_next_pass() {
     let raw = world.pic.await_call(call).expect("the swap answers");
     let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
     let swapped = swapped.expect("the swap is opened");
-    assert_eq!(swapped.status, PayoutStatus::Waiting);
+    assert_eq!(world.carried(swapped.id).status, PayoutStatus::Waiting);
     // the payout timer tries the plan again: the read answers this time
     world.pic.advance_time(Duration::from_secs(61));
     world.push_reading();
@@ -2108,37 +2250,28 @@ fn audit_c1_a_swap_at_21000_gas_is_refused_and_no_nonce_is_spent() {
 /// user's money is held by its payout, which waits for a proper order.
 #[test]
 fn audit_c1_a_limit_only_the_plans_own_bytes_pass_spends_no_nonce() {
-    use settlement_api::types::pool::{PayoutStatus, SwapFromIcpOk};
+    use settlement_api::types::pool::SwapFromIcpOk;
     let (world, canister_address) = swap_world();
     world.push_reading();
     world.approve(staker(), PAYS_501_65 + FEE);
     let deadline_s = world.now().as_secs().get() + 600;
     let plan = kyber_plan(canister_address, deadline_s);
     let lines = crate::client::settlement::event_count(&world.pic, world.canister, world.admin);
+    let before = world.balance(staker());
     let terms = swap_terms(&world, PAYS_501_65, plan.clone(), least_gas_of(&plan));
-    let call = world
-        .pic
-        .submit_call(
-            world.canister,
-            staker(),
-            "swap_from_icp",
-            encode_one(terms).unwrap(),
-        )
-        .expect("submitted");
-    let request = world.next_outcall(&["eth_call"]);
-    world.reply(
-        &request,
-        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
-        false,
+    // the floor is the calldata's own, which is longer than the plan: refused at the door
+    let answer: Result<SwapFromIcpOk, PoolError> = update(
+        &world.pic,
+        world.canister,
+        staker(),
+        "swap_from_icp",
+        encode_one(terms).unwrap(),
     );
-    let raw = world.pic.await_call(call).expect("the swap answers");
-    let swapped: Result<SwapFromIcpOk, PoolError> = candid::decode_one(&raw).unwrap();
-    let swapped = swapped.expect("the swap is opened");
     assert!(
-        !matches!(swapped.status, PayoutStatus::Signed(_)),
-        "{:?}",
-        swapped.status
+        matches!(&answer, Err(PoolError::NotAllowed(why)) if why.contains("gas limit")),
+        "{answer:?}"
     );
+    assert_eq!(world.balance(staker()), before, "nothing was pulled");
     assert!(
         nonces_created(&world, lines).is_empty(),
         "no nonce was handed out"

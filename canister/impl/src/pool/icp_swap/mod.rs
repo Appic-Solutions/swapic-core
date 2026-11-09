@@ -8,9 +8,11 @@
 //! route's leg or legs, at least the sale floor (half the slippage below what the plan
 //! needs), and only then knows the exact ckUSDC `u`: the payout from the Base pocket is `u`
 //! less the settings' premium on it and the payouts' flat network fee. No per swap cap: a
-//! swap opens only while the Base pocket can pay it. A plan that fits that payout is signed by
-//! the canister in the same message chain ([`crate::pool::plan`]); one that does not waits for
-//! the watcher's order (`pay_payout`).
+//! swap opens only while the Base pocket can pay it. The door answers once the money is in: the
+//! sale, the fit and the signature go on in a message chain of their own
+//! ([`crate::pool::payout::carry_on`]), since a wallet holds its screen open until the answer. A
+//! plan that fits that payout is signed by the canister in that chain ([`crate::pool::plan`]);
+//! one that does not waits for the watcher's order (`pay_payout`).
 //!
 //! Each line before the call it guards:
 //! - The pull first, under the door's own pair, before any line (audit C15): refused, nothing
@@ -35,7 +37,7 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
-use crate::pool::payout::{open, record, Busy, Ledgers, Leg, Stop};
+use crate::pool::payout::{carry_on, open, record, Ledgers, Leg, Stop};
 use crate::pool::plan::{Decided, Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Chains, Delivery, Party, Plan};
@@ -354,9 +356,9 @@ pub fn check<S: Store>(
 }
 
 /// `swap_from_icp`'s body: the payout's id and where it stands. A pull the ledger refused
-/// answers its refusal (nothing moved, the payout undone); anything else answers the id, and
-/// `payout(id)` tells where it stands (a pull whose answer was lost, or a leg still running,
-/// continues on the canister's payout timer).
+/// answers its refusal (nothing moved, the payout undone); anything else answers the id once the
+/// money is in, and `payout(id)` tells where it stands (the sale and the signature go on in a
+/// message of their own, and whatever stops them continues on the canister's payout timer).
 pub async fn swap_from_icp(
     args: settlement_api::types::pool::IcpSwapTerms,
     sanctioned: impl Fn(&Address) -> bool,
@@ -424,9 +426,9 @@ pub async fn swap_from_icp(
             return Err(why);
         }
     };
-    if let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) {
-        // whatever stops it, the payout timer carries it on; a plan that fits is signed in
-        // this same message chain, and one that is not waits for the watcher's order
+    carry_on(id, move |busy| async move {
+        // a plan that fits is signed in this same message chain, and one that is not waits for
+        // the watcher's order
         if let Ok(Some(fitted)) = drive(
             &crate::pool::payout::Live,
             id,
@@ -437,7 +439,7 @@ pub async fn swap_from_icp(
         {
             crate::pool::plan::sign_fitted(&busy, id, fitted, now).await;
         }
-    }
+    });
     answer(id)
 }
 
@@ -508,7 +510,7 @@ pub(crate) fn pulled_line(
     Ok(())
 }
 
-/// A swap door's answer once it drove the payout as far as it goes in its call.
+/// A swap door's answer once the money is in: the payout's id and where it stands now.
 pub(crate) fn answer(id: u64) -> Result<SwapFromIcpOk, PoolError> {
     match pool_store::payout(id) {
         // the pull was refused: nothing moved

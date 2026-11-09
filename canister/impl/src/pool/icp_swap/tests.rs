@@ -1487,7 +1487,7 @@ fn a_fitted_plan_whose_signature_is_refused_counts_a_try() {
         let id = open_planned(&planned(ckusdc(), usdc(100), &order));
         let fake = Fake::default();
         crate::storage::halt::set_halted(true);
-        let busy = Busy::take(evm_payout_ref(id).into_bytes()).unwrap();
+        let busy = crate::pool::payout::Busy::take(evm_payout_ref(id).into_bytes()).unwrap();
         let fitted = block_on(drive(&fake, id, clock, &open_pool))
             .unwrap()
             .expect("the plan fits");

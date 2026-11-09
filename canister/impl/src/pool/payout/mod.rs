@@ -53,9 +53,9 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use types::hash::{PoolOpId, PoolRef};
 use types::pool::{
-    payout_ref, DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath, PayoutProgress,
-    PendingOp, PoolHeld, PoolSettings, PoolStep, PrincipalBytes, Registered, RoutePath, SwapLeg,
-    LEG_BACK, LEG_SECOND,
+    evm_payout_ref, payout_ref, DepositKind, DepositStatus, IcpAccount, PayoutAttempt, PayoutPath,
+    PayoutProgress, PendingOp, PoolHeld, PoolSettings, PoolStep, PrincipalBytes, Registered,
+    RoutePath, SwapLeg, LEG_BACK, LEG_SECOND,
 };
 use types::{Timestamp, TokenAmount};
 
@@ -85,6 +85,26 @@ impl Drop for Busy {
     fn drop(&mut self) {
         BUSY.with(|busy| busy.borrow_mut().remove(&self.0));
     }
+}
+
+/// Carries payout `id` on in a message of its own, holding it, so the door that opened it
+/// answers its caller as soon as the money is in: a wallet waits for that answer, and the sale
+/// and the signature behind it take half a minute. A trap in `work` takes back nothing the door
+/// wrote. Whatever stops `work`, the payout timer carries the payout on, as it does one somebody
+/// else holds when this is called. An upgrade before the message runs drops it and the hold
+/// together, and the timer carries the payout on from there too.
+pub(crate) fn carry_on<F>(id: u64, work: impl FnOnce(Busy) -> F + 'static)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
+        return;
+    };
+    // unit tests run off the canister, where there is no timer to set
+    #[cfg(target_arch = "wasm32")]
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || ic_cdk::spawn(work(busy)));
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (busy, work);
 }
 
 thread_local! {
