@@ -169,6 +169,8 @@ fn arbitrum(name: Option<&str>, version: Option<&str>) -> EvmChainConfig {
         usdc_domain_name: name.map(str::to_string),
         usdc_domain_version: version.map(str::to_string),
         block_time_ms: 250,
+        usdc_decimals: None,
+        across: None,
     }
 }
 

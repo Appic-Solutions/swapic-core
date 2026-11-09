@@ -240,6 +240,7 @@ pub async fn propose(id: u64, order_bytes: Vec<u8>, gas_limit: u64) -> Result<()
             domains: &config.cctp_domains,
             canister,
             eco_portal: config.eco_portal,
+            across_fee: None,
         },
         swapic: source.swapic,
         source_usdc: source.usdc,

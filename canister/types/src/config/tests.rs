@@ -65,6 +65,8 @@ fn base_chain() -> EvmChain {
         usdc_name: None,
         usdc_version: None,
         block_time: Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     }
 }
 

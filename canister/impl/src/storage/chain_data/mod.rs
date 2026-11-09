@@ -27,6 +27,8 @@ pub fn init() {
 /// decision on it depends on. The caller reads the clock, so a unit test runs without a
 /// canister.
 pub fn put(chain_id: ChainId, reading: ChainReading, at: Timestamp) {
+    // every reading, the canister's own or the watcher's, holds the chain's least tip
+    let reading = reading.with_least_tip(chain_id);
     CHAIN_DATA.with(|cache| cache.borrow_mut().insert(chain_id, reading.pushed_at(at)));
 }
 

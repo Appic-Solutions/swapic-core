@@ -73,10 +73,18 @@ pub fn fee_earned(
 /// Credits `fee` withheld in `tx_hash`, whose receipt is in `block`, to `chain_id`'s fee
 /// income. A line the books refuse leaves the fee as surplus, which halts nothing.
 pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: TokenAmount) {
+    // booked in micro USD, as every chain's fee income counts: a chain whose USDC has more
+    // decimals (BNB Chain's 18) is scaled down, floored; the sweep scales it back up
+    let (pool_chain, fee) = config::with(|config| {
+        let fee = config
+            .evm_chains
+            .get(chain_id)
+            .map_or(fee, |chain| chain.usdc_to_usd6(fee));
+        (config.pool_chain, fee)
+    });
     if fee == TokenAmount::ZERO {
         return;
     }
-    let pool_chain = config::with(|config| config.pool_chain);
     if let Err(error) = record(
         chain_id,
         fee_earned(chain_id, pool_chain, tx_hash, block, fee),
@@ -231,6 +239,11 @@ async fn check_balance(
         Ok(Simulated::Reverted(_)) => return Err(ReadFailure::Provider),
         Ok(answer) => TokenAmount::from_be_bytes(answer.word().ok_or(ReadFailure::BadAnswer)?),
         Err(error) => return Err(error.kind()),
+    };
+    // the books keep micro USD: a USDC of other decimals is read in them (a no-op on 6)
+    let observed = match config.evm_chains.get(chain_id) {
+        Some(chain) => chain.usdc_to_usd6(observed),
+        None => observed,
     };
     keep_read(
         config,

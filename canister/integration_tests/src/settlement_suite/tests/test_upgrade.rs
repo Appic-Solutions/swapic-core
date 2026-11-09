@@ -345,3 +345,87 @@ fn the_deployed_state_survives_the_fix_round_upgrade() {
     assert!(cycles(admin).is_err(), "a controller is not the watcher");
     assert!(cycles(Principal::anonymous()).is_err(), "nobody else reads it");
 }
+
+/// The BNB Chain upgrade (bsc-canister) in place from the deployed build (`PRIOR_WASM`, its
+/// integration build of 7a85358): every line it wrote is read by this build, its routes and
+/// moves answer the same, and a config holding BNB Chain's Across rows written after it (the
+/// integrator, AX13 and AX14's bounds, the private send, BNB Chain finalized, a chain's 18
+/// decimal USDC and its Across pins) is read back as written, and again after the next upgrade.
+#[test]
+#[ignore = "needs PRIOR_WASM: scripts/build-canister.sh --integration-test settlement at the deployed commit"]
+fn the_deployed_state_survives_the_bsc_upgrade_and_keeps_its_across_rows() {
+    use crate::client::settlement::{get_config_full, set_config};
+    use settlement_api::types::config::{AcrossFeeConfig, AcrossPinsConfig};
+    let (pic, canister, admin) = setup_on(wasms::prior_settlement());
+    seed_with_a_stopped_withdrawal(&pic, canister, admin);
+    let events: u64 = read(&pic, canister, "event_count");
+    let routes: IcpRoutesView = read(&pic, canister, "icp_routes");
+    let moves: Vec<MoveView> = read(&pic, canister, "rebalance_moves");
+
+    upgrade(&pic, canister, admin).unwrap();
+
+    assert_eq!(read::<u64>(&pic, canister, "event_count"), events);
+    assert_eq!(read::<IcpRoutesView>(&pic, canister, "icp_routes"), routes);
+    assert_eq!(read::<Vec<MoveView>>(&pic, canister, "rebalance_moves"), moves);
+
+    let mut config = get_config_full(&pic, canister, admin).unwrap();
+    // the deployed build's config reads with every Across row absent
+    assert_eq!(config.across_fee, None);
+    assert_eq!(config.across_integrator, None);
+    config.across_integrator = Some("0x00ab".to_string());
+    config.across_fee = Some(AcrossFeeConfig {
+        least_ppm: 50,
+        most_ppm: 3_000,
+        gas_allowance_usd6: std::collections::BTreeMap::from([(1, 500_000), (56, 100_000)]),
+    });
+    config.private_send_chains = Some(vec![56]);
+    config.finalized_chains = Some(vec![137, 56]);
+    // BNB Chain's entry as the kit writes it: no CCTP (its contracts the zero address), an
+    // 18-decimal USDC, Across's pins, the relay_across row
+    let zero = "0x0000000000000000000000000000000000000000".to_string();
+    let swapic = "0xb3f66517bec4cc5a8e799db2dda4c810befcc917".to_string();
+    let amounts = settlement_api::types::config::ActionAmounts {
+        relay_across: Some(candid::Nat::from(100_000_000_000_000_u64)),
+        ..Default::default()
+    };
+    config.evm_chains.insert(
+        56,
+        settlement_api::types::config::EvmChainConfig {
+            swapic: swapic.clone(),
+            runner: swapic.clone(),
+            cctp_receiver: swapic,
+            usdc: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d".to_string(),
+            token_messenger: zero.clone(),
+            message_transmitter: zero,
+            gas_limit: settlement_api::types::config::ActionGas {
+                relay_across: Some(1_200_000),
+                ..Default::default()
+            },
+            gas_budget_wei: amounts.clone(),
+            min_network_fee: amounts,
+            usdc_domain_name: None,
+            usdc_domain_version: None,
+            block_time_ms: 1_000,
+            usdc_decimals: Some(18),
+            across: Some(AcrossPinsConfig {
+                periphery: "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4".to_string(),
+                swap_proxy: "0x1d1735bcf925d10b600279ce720da2673c2274c5".to_string(),
+                spoke_pool: "0x4e8E101924eDE233C13e2D8622DC8aED2872d505".to_string(),
+                multicall_handler: "0x0F7Ae28dE1C8532170AD4ee566B5801485c13a0E".to_string(),
+            }),
+        },
+    );
+    set_config(&pic, canister, admin, &config).unwrap();
+    let written = get_config_full(&pic, canister, admin).unwrap();
+    assert_eq!(written.across_fee, config.across_fee);
+    assert_eq!(written.private_send_chains, Some(vec![56]));
+    let bsc = &written.evm_chains[&56];
+    assert_eq!(bsc.usdc_decimals, Some(18));
+    assert!(bsc.across.is_some());
+    assert_eq!(bsc.gas_limit.relay_across, Some(1_200_000));
+
+    upgrade(&pic, canister, admin).unwrap();
+
+    assert_eq!(get_config_full(&pic, canister, admin).unwrap(), written);
+    assert_eq!(read::<u64>(&pic, canister, "event_count"), events + 1);
+}

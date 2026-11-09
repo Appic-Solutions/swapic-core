@@ -24,7 +24,8 @@ fn a_config_change_logs_json_of_the_redacted_wire_view() {
             r#""rpc_urls":{"1":"***"},"ecdsa_key_name":"key_1","cctp_domains":{},"#,
             r#""eco_portal":null,"eco_enabled":false,"cctp_min_fees":{},"#,
             r#""books_check_interval_s":3600,"books_tolerance":"1000000","evm_chains":{},"#,
-            r#""pool_chain":null,"credit_confirmations":{}}"#
+            r#""pool_chain":null,"credit_confirmations":{},"finalized_chains":null,"#,
+            r#""across_integrator":null,"across_fee":null,"private_send_chains":null}"#
         )
     );
     assert!(!json.contains("secret-key"), "leaked: {json}");
@@ -120,6 +121,8 @@ fn the_pools_gas_rows_show_in_the_json_only_once_set() {
             usdc_name: None,
             usdc_version: None,
             block_time: std::time::Duration::from_secs(2),
+            usdc_decimals: None,
+            across: None,
         }
     };
     let config = |rows: bool| Config {

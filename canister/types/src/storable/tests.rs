@@ -418,6 +418,7 @@ fn samples() -> Vec<Sample> {
         },
     ));
     all.push(hub_route_sample());
+    all.extend(across_samples());
     all
 }
 
@@ -1327,6 +1328,7 @@ fn rescue_samples() -> Vec<Sample> {
         pool_ck_deposit: None,
         eco_rescue: Some(base + 13),
         sweep: None,
+        relay_across: None,
     };
     let chain = EvmChain {
         swapic: address(0xb1),
@@ -1353,6 +1355,7 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(GasAmount::from),
                 sweep: None,
+                relay_across: None,
             }
         },
         gas_budget: {
@@ -1373,6 +1376,7 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(Wei::from),
                 sweep: None,
+                relay_across: None,
             }
         },
         min_network_fee: {
@@ -1393,11 +1397,14 @@ fn rescue_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: r.eco_rescue.map(TokenAmount::from),
                 sweep: None,
+                relay_across: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -1704,6 +1711,7 @@ fn rebalance_samples() -> Vec<Sample> {
         pool_ck_deposit: Some(base + 12),
         eco_rescue: None,
         sweep: None,
+        relay_across: None,
     };
     let chain = EvmChain {
         swapic: address(0x9d),
@@ -1730,6 +1738,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_ck_deposit: r.pool_ck_deposit.map(GasAmount::from),
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         gas_budget: {
@@ -1750,6 +1759,7 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_ck_deposit: r.pool_ck_deposit.map(Wei::from),
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         min_network_fee: {
@@ -1770,11 +1780,14 @@ fn rebalance_samples() -> Vec<Sample> {
                 pool_ck_deposit: r.pool_ck_deposit.map(TokenAmount::from),
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -2204,6 +2217,7 @@ fn pool_tx_samples() -> Vec<Sample> {
         pool_ck_deposit: None,
         eco_rescue: None,
         sweep: None,
+        relay_across: None,
     };
     let chain = EvmChain {
         swapic: address(0x51),
@@ -2230,6 +2244,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         gas_budget: {
@@ -2250,6 +2265,7 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         min_network_fee: {
@@ -2270,11 +2286,14 @@ fn pool_tx_samples() -> Vec<Sample> {
                 pool_ck_deposit: None,
                 eco_rescue: None,
                 sweep: None,
+                relay_across: None,
             }
         },
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     };
     let config = Config {
         ecdsa_key_name: "key_1".to_string(),
@@ -3168,4 +3187,56 @@ fn every_stored_layout_decodes_from_the_golden_file() {
             .unwrap_or_else(|e| panic!("{}: golden line is not hex ({e})", sample.name));
         (sample.decodes_from)(&golden);
     }
+}
+
+
+/// BNB Chain's line (BSC plan P6): a chain with its USDC's 18 decimals, Across's pins and the
+/// relay row, and the config's integrator id, Across fee bounds, private send and finalized
+/// BNB Chain.
+fn across_samples() -> Vec<Sample> {
+    use crate::config::{AcrossFee, AcrossPins, ChainSet, EvmChain, PerAction};
+    use crate::evm::EvmAddress;
+
+    let address = |byte: u8| EvmAddress::new([byte; 20]);
+    let chain = EvmChain {
+        swapic: address(0xc1),
+        runner: address(0xc2),
+        cctp_receiver: address(0xc3),
+        usdc: address(0xc4),
+        token_messenger: address(0),
+        message_transmitter: address(0),
+        gas_limit: PerAction {
+            relay_across: Some(GasAmount::from(1_600_000_u64)),
+            ..PerAction::all(GasAmount::from(900_000_u64))
+        },
+        gas_budget: PerAction::all(Wei::from(1_000_000_000_000_000_u64)),
+        min_network_fee: PerAction::all(TokenAmount::from(30_000_u64)),
+        usdc_name: None,
+        usdc_version: None,
+        block_time: std::time::Duration::from_millis(450),
+        usdc_decimals: Some(18),
+        across: Some(AcrossPins {
+            periphery: address(0xd1),
+            swap_proxy: address(0xd2),
+            spoke_pool: address(0xd3),
+            multicall_handler: address(0xd4),
+        }),
+    };
+    let config = Config {
+        ecdsa_key_name: "key_1".to_string(),
+        evm_chains: ChainTable(BTreeMap::from([(ChainId::BSC, chain)])),
+        finalized: ChainSet([ChainId::BSC].into()),
+        across_integrator: Some(0x00ab),
+        across_fee: Some(AcrossFee {
+            least_ppm: 50,
+            most_ppm: 3_000,
+            gas_allowance: ChainTable(BTreeMap::from([
+                (ChainId::ETHEREUM, TokenAmount::from(500_000_u64)),
+                (ChainId::BSC, TokenAmount::from(100_000_u64)),
+            ])),
+        }),
+        private_send: ChainSet([ChainId::BSC].into()),
+        ..Config::default()
+    };
+    vec![sample("config with BNB Chain's Across rows", config)]
 }

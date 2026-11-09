@@ -169,7 +169,12 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
                     available: Nat::from(available),
                 }
             })?;
-            let data = types::swapic::transfer_calldata(to, amount.to_u256());
+            // the books count micro USD; the transfer moves raw units of this chain's USDC
+            let raw = config
+                .evm_chains
+                .get(chain)
+                .map_or(amount.to_u256(), |entry| entry.usd6_to_usdc(amount));
+            let data = types::swapic::transfer_calldata(to, raw);
             (usdc, Wei::ZERO, data, pool, rest)
         }
         _ => return Err(invalid("not an EVM asset")),

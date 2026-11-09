@@ -197,9 +197,41 @@ impl<'b, C> Decode<'b, C> for ChainSet {
 }
 
 /// The chains whose transactions may wait for the chain's finalized block instead of a block
-/// count: Polygon, whose finalized block trails its head by a few seconds. Base's would follow
-/// Ethereum's finality and slow every pool credit to minutes.
-pub const FINALIZABLE: [ChainId; 1] = [ChainId::POLYGON];
+/// count: Polygon, whose finalized block trails its head by a few seconds, and BNB Chain,
+/// whose finalized block trails by one or two (0.45 s each). Base's would follow Ethereum's
+/// finality and slow every pool credit to minutes.
+pub const FINALIZABLE: [ChainId; 2] = [ChainId::POLYGON, ChainId::BSC];
+
+/// AX13 and AX14's bounds on an Across deposit, written by the kit from the one source the
+/// quoter's settings take too: the least and the most a relayer keeps, in millionths of what
+/// is deposited, and per destination an allowance for the arrival's gas, in micro USD.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct AcrossFee {
+    #[n(0)]
+    pub least_ppm: u32,
+    #[n(1)]
+    pub most_ppm: u32,
+    #[n(2)]
+    pub gas_allowance: ChainTable<TokenAmount>,
+}
+
+/// Across's contracts on one chain (BSC design 3.1): the periphery a deposit step calls, its
+/// swap proxy, the SpokePool the periphery deposits into, and the handler an arrival's message
+/// runs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct AcrossPins {
+    #[n(0)]
+    pub periphery: EvmAddress,
+    #[n(1)]
+    pub swap_proxy: EvmAddress,
+    #[n(2)]
+    pub spoke_pool: EvmAddress,
+    #[n(3)]
+    pub multicall_handler: EvmAddress,
+}
+
+/// The most a relayer may keep, AX14's ceiling: 10% of what is deposited.
+pub const MAX_ACROSS_MOST_PPM: u32 = 100_000;
 
 /// Every knob the canister reads at runtime. `Debug` is safe to log: [`RpcUrl`] prints
 /// as `***`.
@@ -274,6 +306,17 @@ pub struct Config {
     /// `credit_confirmations` decide nothing. At most [`FINALIZABLE`].
     #[n(36)]
     pub finalized: ChainSet,
+    /// The 2 bytes Across credits Swapic's deposits to (D13), appended to the data of every
+    /// transaction the canister signs with an Across step. None: nothing appended.
+    #[n(37)]
+    pub across_integrator: Option<u16>,
+    /// AX13 and AX14's bounds. None: no order with an Across step is relayed.
+    #[n(38)]
+    pub across_fee: Option<AcrossFee>,
+    /// The chains whose signed transactions the canister never broadcasts itself (6.2.13): the
+    /// watcher sends them through its private node. Empty: every chain as today.
+    #[n(39)]
+    pub private_send: ChainSet,
 }
 
 /// The kinds of transaction the canister signs and pays the gas of: the relay of a
@@ -330,11 +373,14 @@ pub enum GasAction {
     /// of booked fee income.
     #[n(14)]
     Sweep,
+    /// `Swapic.runFor` of an order that deposits on Across.
+    #[n(15)]
+    RelayAcross,
 }
 
 impl GasAction {
     /// Every action, in code order.
-    pub const ALL: [GasAction; 15] = [
+    pub const ALL: [GasAction; 16] = [
         GasAction::RelayCctp,
         GasAction::RelayEco,
         GasAction::RelayLocal,
@@ -350,6 +396,7 @@ impl GasAction {
         GasAction::PoolCkDeposit,
         GasAction::EcoRescue,
         GasAction::Sweep,
+        GasAction::RelayAcross,
     ];
 
     /// The action's one byte in an event's canonical preimage: its index, never reused.
@@ -370,6 +417,7 @@ impl GasAction {
             GasAction::PoolCkDeposit => 12,
             GasAction::EcoRescue => 13,
             GasAction::Sweep => 14,
+            GasAction::RelayAcross => 15,
         }
     }
 
@@ -391,6 +439,7 @@ impl GasAction {
             GasAction::PoolCkDeposit => "pool_ck_deposit",
             GasAction::EcoRescue => "eco_rescue",
             GasAction::Sweep => "sweep",
+            GasAction::RelayAcross => "relay_across",
         }
     }
 
@@ -437,6 +486,9 @@ pub struct PerAction<T> {
     /// The sweep's row, optional as the pool's.
     #[n(14)]
     pub sweep: Option<T>,
+    /// The Across relay's row, optional as the pool's: absent, an Across order is refused.
+    #[n(15)]
+    pub relay_across: Option<T>,
 }
 
 impl<T: Copy> PerAction<T> {
@@ -458,6 +510,7 @@ impl<T: Copy> PerAction<T> {
             GasAction::PoolCkDeposit => self.pool_ck_deposit,
             GasAction::EcoRescue => self.eco_rescue,
             GasAction::Sweep => self.sweep,
+            GasAction::RelayAcross => self.relay_across,
         }
     }
 
@@ -479,6 +532,7 @@ impl<T: Copy> PerAction<T> {
             pool_ck_deposit: Some(value),
             eco_rescue: Some(value),
             sweep: Some(value),
+            relay_across: Some(value),
         }
     }
 }
@@ -538,6 +592,38 @@ pub struct EvmChain {
     /// pace, its block time times the depth it still needs.
     #[n(11)]
     pub block_time: Duration,
+    /// The decimals of `usdc` here; none is 6. BNB Chain's (Binance's) USDC has 18: a fee
+    /// in it is counted in micro USD by these.
+    #[n(12)]
+    pub usdc_decimals: Option<u8>,
+    /// Across's contracts here. None: no Across step from, to or on this chain is relayed.
+    #[n(13)]
+    pub across: Option<AcrossPins>,
+}
+
+impl EvmChain {
+    /// The decimals of this chain's `usdc`: 6 unless set.
+    pub fn usdc_decimals(&self) -> u8 {
+        self.usdc_decimals.unwrap_or(6)
+    }
+
+    /// `raw` units of this chain's `usdc` in micro USD, floored: what fees and books count.
+    pub fn usdc_to_usd6(&self, raw: TokenAmount) -> TokenAmount {
+        match self.usdc_decimals().saturating_sub(6) {
+            0 => raw,
+            extra => {
+                let scale = alloy_primitives::U256::from(10u8).pow(alloy_primitives::U256::from(extra));
+                TokenAmount::from_u256(raw.to_u256() / scale)
+            }
+        }
+    }
+
+    /// `usd6` micro USD in raw units of this chain's `usdc`, exact (a sweep of booked fees).
+    pub fn usd6_to_usdc(&self, usd6: TokenAmount) -> alloy_primitives::U256 {
+        let extra = self.usdc_decimals().saturating_sub(6);
+        usd6.to_u256()
+            .saturating_mul(alloy_primitives::U256::from(10u8).pow(alloy_primitives::U256::from(extra)))
+    }
 }
 
 impl EvmChain {
@@ -719,6 +805,12 @@ pub enum ConfigError {
     },
     #[error("finalized_chains names chain {chain}, which may not wait for a finalized block")]
     NotFinalizable { chain: ChainId },
+    #[error("evm_chains[{chain}].usdc_decimals is {decimals}, outside 6 to 18")]
+    UsdcDecimalsOutOfRange { chain: ChainId, decimals: u8 },
+    #[error("across_fee: least_ppm {least_ppm} must be under most_ppm {most_ppm}, at most {MAX_ACROSS_MOST_PPM}")]
+    AcrossFeeOutOfRange { least_ppm: u32, most_ppm: u32 },
+    #[error("across_integrator is not 0x and 4 hex digits")]
+    NotAnIntegratorId,
     #[error("evm_chains[{chain}].block_time is {block_time:?}, outside {MIN_BLOCK_TIME:?} to {MAX_BLOCK_TIME:?}")]
     BlockTimeOutOfRange {
         chain: ChainId,
@@ -766,6 +858,9 @@ impl Default for Config {
             // crediting reads the swap depths, held to the floor on Ethereum
             credit_confirmations: ChainTable::default(),
             finalized: ChainSet::default(),
+            across_integrator: None,
+            across_fee: None,
+            private_send: ChainSet::default(),
         }
     }
 }
@@ -860,6 +955,24 @@ impl Config {
             .find_map(|(chain, url)| url.expose().is_empty().then_some(*chain))
         {
             return Err(ConfigError::EmptyRpcUrl { chain });
+        }
+        // a chain's USDC counts in 6 to 18 decimals; outside that a fee's micro USD is wrong
+        if let Some((chain, decimals)) = self.evm_chains.0.iter().find_map(|(chain, entry)| {
+            entry
+                .usdc_decimals
+                .filter(|d| !(6..=18).contains(d))
+                .map(|d| (*chain, d))
+        }) {
+            return Err(ConfigError::UsdcDecimalsOutOfRange { chain, decimals });
+        }
+        // a relayer keeps more than nothing and at most 10%
+        if let Some(fee) = &self.across_fee {
+            if fee.least_ppm >= fee.most_ppm || fee.most_ppm > MAX_ACROSS_MOST_PPM {
+                return Err(ConfigError::AcrossFeeOutOfRange {
+                    least_ppm: fee.least_ppm,
+                    most_ppm: fee.most_ppm,
+                });
+            }
         }
         Ok(())
     }

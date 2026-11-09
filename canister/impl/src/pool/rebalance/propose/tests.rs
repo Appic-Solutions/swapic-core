@@ -58,6 +58,8 @@ fn chain(usdc: EvmAddress) -> EvmChain {
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     }
 }
 
@@ -101,6 +103,7 @@ fn setup(world: &World, direction: MoveDirection) -> Setup<'_> {
             domains: &world.domains,
             canister: canister(),
             eco_portal: Some(portal()),
+            across_fee: None,
         },
         swapic: address("0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406"),
         source_usdc: usdc_on(src),

@@ -42,7 +42,7 @@ fn a_chain_names_the_seconds_its_block_takes_at_the_most() {
     assert_eq!(ChainId::ARBITRUM.block_seconds(), 1);
     assert_eq!(ChainId::new(5042).block_seconds(), 1);
     assert_eq!(ChainId::new(43114).block_seconds(), 2);
-    assert_eq!(ChainId::BSC.block_seconds(), 3);
+    assert_eq!(ChainId::BSC.block_seconds(), 1);
     assert_eq!(ChainId::POLYGON.block_seconds(), 2);
     assert_eq!(ChainId::new(999_999).block_seconds(), 12);
 }
@@ -62,13 +62,14 @@ fn the_chains_the_canister_signs_on_have_names_and_native_coins() {
         (42161, "Arbitrum", "ETH"),
         (43114, "Avalanche", "AVAX"),
         (5042, "Arc", "USDC"),
+        (56, "BNB Chain", "BNB"),
     ];
     for (id, name, symbol) in named {
         assert_eq!(ChainId::new(id).name(), Some(name), "{id}");
         assert_eq!(ChainId::new(id).native_symbol(), Some(symbol), "{id}");
     }
-    // BSC and Robinhood Chain are not deployed: unnamed, so a message writes their ids
-    for id in [56, 4663] {
+    // Robinhood Chain is not deployed: unnamed, so a message writes its id
+    for id in [4663] {
         assert_eq!(ChainId::new(id).name(), None);
         assert_eq!(ChainId::new(id).native_symbol(), None);
     }

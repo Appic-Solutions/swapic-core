@@ -59,8 +59,37 @@ pub struct Config {
     pub credit_confirmations: Option<BTreeMap<u64, u64>>,
     /// The chains whose transactions are final at the chain's own finalized block (the
     /// `finalized` tag) instead of a block count; their depths decide nothing. Only Polygon
-    /// (137) may be named (`NotFinalizable`). Absent or empty: block counts everywhere.
+    /// (137) and BNB Chain (56) may be named (`NotFinalizable`). Absent or empty: block counts
+    /// everywhere.
     pub finalized_chains: Option<Vec<u64>>,
+    /// The 2 bytes Across credits Swapic's deposits to, as `0x` and 4 hex digits; appended to
+    /// the data of every transaction the canister signs with an Across step. Absent: nothing.
+    pub across_integrator: Option<String>,
+    /// AX13 and AX14's bounds on an Across deposit. Absent: no order with an Across step is
+    /// relayed.
+    pub across_fee: Option<AcrossFeeConfig>,
+    /// The chains whose signed transactions the canister never broadcasts itself: the watcher
+    /// sends them through its private node. Absent or empty: every chain as today.
+    pub private_send_chains: Option<Vec<u64>>,
+}
+
+/// AX13 and AX14's bounds: the least and the most a relayer keeps, in millionths of what is
+/// deposited (`least_ppm < most_ppm <= 100,000`), and per destination chain an allowance for
+/// the arrival's gas, in micro USD.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AcrossFeeConfig {
+    pub least_ppm: u32,
+    pub most_ppm: u32,
+    pub gas_allowance_usd6: BTreeMap<u64, u64>,
+}
+
+/// Across's contracts on one chain, EVM addresses.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AcrossPinsConfig {
+    pub periphery: String,
+    pub swap_proxy: String,
+    pub spoke_pool: String,
+    pub multicall_handler: String,
 }
 
 /// One EVM chain as design C runs on it: its Swapic deployment, CCTP v2, its USDC, its
@@ -98,6 +127,10 @@ pub struct EvmChainConfig {
     /// How often the chain makes a block, 100 to 60,000: the outbox reads a transaction's
     /// receipt at this pace.
     pub block_time_ms: u64,
+    /// The decimals of `usdc`, 6 to 18. Absent: 6. BNB Chain's (Binance's) USDC: 18.
+    pub usdc_decimals: Option<u8>,
+    /// Across's contracts here. Absent: no Across step from, to or on this chain is relayed.
+    pub across: Option<AcrossPinsConfig>,
 }
 
 /// One gas limit per action the canister signs.
@@ -133,6 +166,9 @@ pub struct ActionGas {
     /// as the pool's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sweep: Option<u64>,
+    /// The relay of an order that deposits on Across, optional as the pool's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_across: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -196,6 +232,12 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub sweep: Option<Nat>,
+    /// The relay of an order that deposits on Across, optional as the pool's.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub relay_across: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -221,6 +263,7 @@ impl From<PerAction<GasAmount>> for ActionGas {
             pool_ck_deposit: gas.pool_ck_deposit.map(limit),
             eco_rescue: gas.eco_rescue.map(limit),
             sweep: gas.sweep.map(limit),
+            relay_across: gas.relay_across.map(limit),
         }
     }
 }
@@ -243,6 +286,7 @@ impl From<ActionGas> for PerAction<GasAmount> {
             pool_ck_deposit: gas.pool_ck_deposit.map(GasAmount::from),
             eco_rescue: gas.eco_rescue.map(GasAmount::from),
             sweep: gas.sweep.map(GasAmount::from),
+            relay_across: gas.relay_across.map(GasAmount::from),
         }
     }
 }
@@ -265,6 +309,7 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             pool_ck_deposit: amounts.pool_ck_deposit.map(Into::into),
             eco_rescue: amounts.eco_rescue.map(Into::into),
             sweep: amounts.sweep.map(Into::into),
+            relay_across: amounts.relay_across.map(Into::into),
         }
     }
 }
@@ -293,6 +338,7 @@ fn per_action<Unit>(
         pool_ck_deposit: amounts.pool_ck_deposit.map(amount).transpose()?,
         eco_rescue: amounts.eco_rescue.map(amount).transpose()?,
         sweep: amounts.sweep.map(amount).transpose()?,
+        relay_across: amounts.relay_across.map(amount).transpose()?,
     })
 }
 
@@ -311,6 +357,13 @@ impl From<EvmChain> for EvmChainConfig {
             usdc_domain_name: chain.usdc_name.map(|name| name.to_string()),
             usdc_domain_version: chain.usdc_version.map(|version| version.to_string()),
             block_time_ms: millis(chain.block_time),
+            usdc_decimals: chain.usdc_decimals,
+            across: chain.across.map(|pins| AcrossPinsConfig {
+                periphery: pins.periphery.to_string(),
+                swap_proxy: pins.swap_proxy.to_string(),
+                spoke_pool: pins.spoke_pool.to_string(),
+                multicall_handler: pins.multicall_handler.to_string(),
+            }),
         }
     }
 }
@@ -344,6 +397,21 @@ fn evm_chain(chain: ChainId, config: EvmChainConfig) -> Result<EvmChain, types::
         usdc_name: domain_text("evm_chains.usdc_domain_name", config.usdc_domain_name)?,
         usdc_version: domain_text("evm_chains.usdc_domain_version", config.usdc_domain_version)?,
         block_time: Duration::from_millis(config.block_time_ms),
+        usdc_decimals: config.usdc_decimals,
+        across: config
+            .across
+            .map(|pins| {
+                Ok::<_, types::ConfigError>(types::config::AcrossPins {
+                    periphery: at("evm_chains.across.periphery", &pins.periphery)?,
+                    swap_proxy: at("evm_chains.across.swap_proxy", &pins.swap_proxy)?,
+                    spoke_pool: at("evm_chains.across.spoke_pool", &pins.spoke_pool)?,
+                    multicall_handler: at(
+                        "evm_chains.across.multicall_handler",
+                        &pins.multicall_handler,
+                    )?,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -376,6 +444,9 @@ impl fmt::Debug for Config {
             pool_chain,
             credit_confirmations,
             finalized_chains,
+            across_integrator,
+            across_fee,
+            private_send_chains,
         } = self;
         let rpc_urls: BTreeMap<&u64, &str> =
             rpc_urls.keys().map(|chain| (chain, REDACTED)).collect();
@@ -397,6 +468,9 @@ impl fmt::Debug for Config {
             .field("pool_chain", pool_chain)
             .field("credit_confirmations", credit_confirmations)
             .field("finalized_chains", finalized_chains)
+            .field("across_integrator", across_integrator)
+            .field("across_fee", across_fee)
+            .field("private_send_chains", private_send_chains)
             .finish()
     }
 }
@@ -454,6 +528,9 @@ impl From<types::Config> for Config {
             pool_chain,
             credit_confirmations,
             finalized,
+            across_integrator,
+            across_fee,
+            private_send,
         } = config;
         Self {
             batch_window_ms: u64::try_from(batch_window.as_millis())
@@ -499,6 +576,26 @@ impl From<types::Config> for Config {
             ),
             finalized_chains: (!finalized.0.is_empty())
                 .then(|| finalized.0.into_iter().map(ChainId::get).collect()),
+            across_integrator: across_integrator.map(|id| format!("0x{id:04x}")),
+            across_fee: across_fee.map(|fee| AcrossFeeConfig {
+                least_ppm: fee.least_ppm,
+                most_ppm: fee.most_ppm,
+                gas_allowance_usd6: fee
+                    .gas_allowance
+                    .0
+                    .into_iter()
+                    .map(|(chain, usd6)| {
+                        (
+                            chain.get(),
+                            usd6.try_into_u128()
+                                .and_then(|v| u64::try_from(v).ok())
+                                .unwrap_or(u64::MAX),
+                        )
+                    })
+                    .collect(),
+            }),
+            private_send_chains: (!private_send.0.is_empty())
+                .then(|| private_send.0.into_iter().map(ChainId::get).collect()),
         }
     }
 }
@@ -597,8 +694,40 @@ impl TryFrom<Config> for types::Config {
                     .map(ChainId::new)
                     .collect(),
             ),
+            across_integrator: config
+                .across_integrator
+                .as_deref()
+                .map(integrator_id)
+                .transpose()?,
+            across_fee: config.across_fee.map(|fee| types::config::AcrossFee {
+                least_ppm: fee.least_ppm,
+                most_ppm: fee.most_ppm,
+                gas_allowance: ChainTable(
+                    fee.gas_allowance_usd6
+                        .into_iter()
+                        .map(|(chain, usd6)| (ChainId::new(chain), TokenAmount::from(usd6)))
+                        .collect(),
+                ),
+            }),
+            private_send: types::config::ChainSet(
+                config
+                    .private_send_chains
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(ChainId::new)
+                    .collect(),
+            ),
         })
     }
+}
+
+/// Across's integrator id from its text: `0x` and 4 hex digits, or the 4 digits.
+fn integrator_id(text: &str) -> Result<u16, types::ConfigError> {
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    if digits.len() != 4 {
+        return Err(types::ConfigError::NotAnIntegratorId);
+    }
+    u16::from_str_radix(digits, 16).map_err(|_| types::ConfigError::NotAnIntegratorId)
 }
 
 /// Why a config was refused, naming the knob at fault.
@@ -680,6 +809,18 @@ pub enum ConfigError {
         chain_id: u64,
         block_time_ms: u64,
     },
+    /// `evm_chains[chain_id].usdc_decimals` is outside 6 to 18.
+    UsdcDecimalsOutOfRange {
+        chain_id: u64,
+        decimals: u8,
+    },
+    /// `across_fee`: `least_ppm` is not under `most_ppm`, or `most_ppm` is above 100,000.
+    AcrossFeeOutOfRange {
+        least_ppm: u32,
+        most_ppm: u32,
+    },
+    /// `across_integrator` is not `0x` and 4 hex digits.
+    NotAnIntegratorId,
 }
 
 /// Whole milliseconds, for an error or a wire field to carry. A duration past `u64::MAX` of
@@ -777,6 +918,14 @@ impl From<types::ConfigError> for ConfigError {
                 chain_id: chain.get(),
                 block_time_ms: millis(block_time),
             },
+            Domain::UsdcDecimalsOutOfRange { chain, decimals } => Self::UsdcDecimalsOutOfRange {
+                chain_id: chain.get(),
+                decimals,
+            },
+            Domain::AcrossFeeOutOfRange { least_ppm, most_ppm } => {
+                Self::AcrossFeeOutOfRange { least_ppm, most_ppm }
+            }
+            Domain::NotAnIntegratorId => Self::NotAnIntegratorId,
         }
     }
 }

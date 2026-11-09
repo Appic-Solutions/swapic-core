@@ -22,7 +22,27 @@ pub struct ChainReading {
     pub priority_fee: WeiPerGas,
 }
 
+/// The least tip the canister pays on `chain`, whatever a reading says (BSC design 6.2.2):
+/// 0.1 gwei on BNB Chain, whose base fee is 0, so a zero tip would sign a transaction at 0 gwei
+/// that never mines and holds its nonce; zero on every other chain, which changes nothing there.
+pub fn least_tip(chain: crate::ChainId) -> WeiPerGas {
+    if chain == crate::ChainId::BSC {
+        WeiPerGas::new(100_000_000)
+    } else {
+        WeiPerGas::ZERO
+    }
+}
+
 impl ChainReading {
+    /// The reading with its tip held to at least [`least_tip`] for `chain`: what is stored, so
+    /// creation, bumps and cancels all price from the floored tip.
+    pub fn with_least_tip(self, chain: crate::ChainId) -> Self {
+        Self {
+            priority_fee: self.priority_fee.max(least_tip(chain)),
+            ..self
+        }
+    }
+
     /// The reading as the cache holds it, dated by the canister's own clock.
     pub fn pushed_at(self, at: Timestamp) -> ChainData {
         let Self {

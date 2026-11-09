@@ -41,6 +41,8 @@ fn chain(usdc: &str) -> EvmChain {
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     }
 }
 
@@ -197,6 +199,7 @@ fn the_canisters_reader_reads_an_icp_to_base_order_as_a_delivery_to_itself() {
             domains: &domains,
             canister: canister(),
             eco_portal: None,
+            across_fee: None,
         },
     )
     .unwrap();
@@ -237,6 +240,7 @@ fn a_base_to_icp_order_is_a_ck_deposit_for_the_canister_itself() {
             domains: &domains,
             canister: canister(),
             eco_portal: None,
+            across_fee: None,
         },
     )
     .unwrap();

@@ -307,6 +307,7 @@ pub fn payer_of(
             domains: &config.cctp_domains,
             canister,
             eco_portal: config.eco_portal,
+            across_fee: None,
         },
         swapic: chain.swapic,
         usdc: chain.usdc,
