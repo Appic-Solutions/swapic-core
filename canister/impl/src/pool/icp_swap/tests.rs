@@ -65,6 +65,8 @@ fn config() -> types::Config {
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     };
     types::Config {
         evm_chains: ChainTable(BTreeMap::from([

@@ -33,10 +33,8 @@ impl ChainId {
         match self.0 {
             // Optimism, Polygon, Base, Avalanche, Linea
             10 | 137 | 8453 | 43114 | 59144 => 2,
-            // BSC
-            56 => 3,
-            // Arbitrum's quarter seconds, Arc's half seconds
-            42161 | 5042 => 1,
+            // Arbitrum's quarter seconds, Arc's half seconds, BNB Chain's 0.45 s
+            42161 | 5042 | 56 => 1,
             _ => 12,
         }
     }
@@ -57,6 +55,7 @@ impl ChainId {
             42161 => Some("Arbitrum"),
             43114 => Some("Avalanche"),
             5042 => Some("Arc"),
+            56 => Some("BNB Chain"),
             _ => None,
         }
     }
@@ -73,6 +72,7 @@ impl ChainId {
             9745 => Some("XPL"),
             43114 => Some("AVAX"),
             5042 => Some("USDC"),
+            56 => Some("BNB"),
             _ => None,
         }
     }

@@ -120,6 +120,8 @@ fn the_pools_gas_rows_show_in_the_json_only_once_set() {
             usdc_name: None,
             usdc_version: None,
             block_time: std::time::Duration::from_secs(2),
+            usdc_decimals: None,
+            across: None,
         }
     };
     let config = |rows: bool| Config {

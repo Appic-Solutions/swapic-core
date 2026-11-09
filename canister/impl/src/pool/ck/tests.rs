@@ -52,6 +52,8 @@ fn config() -> types::Config {
         usdc_name: None,
         usdc_version: None,
         block_time: Duration::from_secs(12),
+        usdc_decimals: None,
+        across: None,
     };
     types::Config {
         evm_chains: ChainTable(BTreeMap::from([(ChainId::ETHEREUM, chain)])),

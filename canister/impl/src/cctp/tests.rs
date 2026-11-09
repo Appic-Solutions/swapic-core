@@ -59,6 +59,8 @@ fn chain(swapic: u8, runner: EvmAddress, receiver: EvmAddress, usdc: EvmAddress)
         usdc_name: None,
         usdc_version: None,
         block_time: std::time::Duration::from_secs(2),
+        usdc_decimals: None,
+        across: None,
     }
 }
 

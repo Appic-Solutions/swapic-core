@@ -1,3 +1,18 @@
+// AX13 and AX14's bounds: the least and the most a relayer keeps, in millionths of what is
+// deposited (`least_ppm < most_ppm <= 100,000`), and per destination chain an allowance for
+// the arrival's gas, in micro USD.
+type AcrossFeeConfig = record {
+  least_ppm : nat32;
+  most_ppm : nat32;
+  gas_allowance_usd6 : vec record { nat64; nat64 };
+};
+// Across's contracts on one chain, EVM addresses.
+type AcrossPinsConfig = record {
+  swap_proxy : text;
+  periphery : text;
+  spoke_pool : text;
+  multicall_handler : text;
+};
 // One amount per action the canister signs.
 type ActionAmounts = record {
   relay_local : nat;
@@ -15,6 +30,8 @@ type ActionAmounts = record {
   pool_approve : opt nat;
   // Eco's `cancelAndProve` of an unfilled intent, optional as the pool's.
   eco_rescue : opt nat;
+  // The relay of an order that deposits on Across, optional as the pool's.
+  relay_across : opt nat;
   // The pool's rows, optional: an absent one refuses its action.
   pool_payout : opt nat;
   relay_eco : nat;
@@ -40,6 +57,8 @@ type ActionGas = record {
   pool_approve : opt nat64;
   // Eco's `cancelAndProve` of an unfilled intent, optional as the pool's.
   eco_rescue : opt nat64;
+  // The relay of an order that deposits on Across, optional as the pool's.
+  relay_across : opt nat64;
   // The pool's rows, optional: an absent one refuses its action.
   pool_payout : opt nat64;
   relay_eco : nat64;
@@ -131,6 +150,9 @@ type CkSwapTerms = record {
 // Every knob the canister reads at runtime. The rpc urls, the chain table and the key name
 // are what a deploy fills in.
 type Config = record {
+  // The 2 bytes Across credits Swapic's deposits to, as `0x` and 4 hex digits; appended to
+  // the data of every transaction the canister signs with an Across step. Absent: nothing.
+  across_integrator : opt text;
   confirmations : vec record { nat64; nat64 };
   // How long the outbox holds signed transactions back to send them together.
   batch_window_ms : nat64;
@@ -148,11 +170,18 @@ type Config = record {
   // How often the engine's backstop drives while a payout, an ICP op or a move is open,
   // at most 60. Nothing drives on it while no work is open.
   backstop_interval_s : nat64;
+  // AX13 and AX14's bounds on an Across deposit. Absent: no order with an Across step is
+  // relayed.
+  across_fee : opt AcrossFeeConfig;
   // Whether the Eco rail may be used. False until its route is designed.
   eco_enabled : bool;
+  // The chains whose signed transactions the canister never broadcasts itself: the watcher
+  // sends them through its private node. Absent or empty: every chain as today.
+  private_send_chains : opt vec nat64;
   // The chains whose transactions are final at the chain's own finalized block (the
   // `finalized` tag) instead of a block count; their depths decide nothing. Only Polygon
-  // (137) may be named (`NotFinalizable`). Absent or empty: block counts everywhere.
+  // (137) and BNB Chain (56) may be named (`NotFinalizable`). Absent or empty: block counts
+  // everywhere.
   finalized_chains : opt vec nat64;
   // CCTP's domain id per chain: Circle's own numbering, never a chain id.
   cctp_domains : vec record { nat64; nat32 };
@@ -183,9 +212,15 @@ type ConfigError = variant {
   // the Swapic contracts on every chain name that address.
   EcdsaKeyNameFixed : record { requested : text; current : text };
   EmptyEcdsaKeyName;
+  // `across_integrator` is not `0x` and 4 hex digits.
+  NotAnIntegratorId;
+  // `across_fee`: `least_ppm` is not under `most_ppm`, or `most_ppm` is above 100,000.
+  AcrossFeeOutOfRange : record { least_ppm : nat32; most_ppm : nat32 };
   // `evm_chains[chain_id].block_time_ms` is outside 100 to 60,000.
   BlockTimeOutOfRange : record { chain_id : nat64; block_time_ms : nat64 };
   CapOutOfRange : record { cap : nat32; field : text; ceiling : nat32 };
+  // `evm_chains[chain_id].usdc_decimals` is outside 6 to 18.
+  UsdcDecimalsOutOfRange : record { decimals : nat8; chain_id : nat64 };
   // The text in `field` at `chain_id` is not an EIP-712 domain name or version: 1 to 32
   // printable ASCII characters.
   NotDomainText : record { field : text; chain_id : nat64 };
@@ -391,6 +426,8 @@ type EvmAddressError = variant {
 // block time, and per action the gas limit, the gas budget and the least fee. Addresses
 // are EVM addresses.
 type EvmChainConfig = record {
+  // Across's contracts here. Absent: no Across step from, to or on this chain is relayed.
+  across : opt AcrossPinsConfig;
   // The mint recipient and destination caller of every Swap and CkDeposit arriving here.
   cctp_receiver : text;
   // CCTP v2's `TokenMessengerV2`.
@@ -401,6 +438,8 @@ type EvmChainConfig = record {
   // USDC's EIP-712 domain version on this chain, as its contract answers `version()`.
   // None: "2". 1 to 32 printable ASCII characters.
   usdc_domain_version : opt text;
+  // The decimals of `usdc`, 6 to 18. Absent: 6. BNB Chain's (Binance's) USDC: 18.
+  usdc_decimals : opt nat8;
   // The least fee step, in USDC units, each action needs.
   min_network_fee : ActionAmounts;
   // USDC's EIP-712 domain name on this chain, as its contract answers `name()`: what a
