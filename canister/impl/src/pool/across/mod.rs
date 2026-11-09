@@ -15,6 +15,7 @@
 //!   that fits in it, the rest the canister's own surplus.
 
 pub mod claim;
+pub mod nudge;
 #[cfg(test)]
 mod tests;
 

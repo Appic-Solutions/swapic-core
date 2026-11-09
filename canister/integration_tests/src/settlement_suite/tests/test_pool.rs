@@ -3027,6 +3027,13 @@ fn answer_fill_read(
     // (counted at a second) and a minute
     let wait = after.saturating_sub(world.now().as_secs().get()) + 16 + 60 + 5;
     world.pic.advance_time(Duration::from_secs(wait));
+    answer_fill_read_at(world, hash, status, after + 30);
+}
+
+/// Answers the canister's next read of an Across fill on BNB Chain: the finalized head, then
+/// the agreed block (its time `timestamp`), the SpokePool's hash of the relay `hash` and its
+/// fill status `status`.
+fn answer_fill_read_at(world: &World, hash: [u8; 32], status: u8, timestamp: u64) {
     let finalized = world.next_outcall_to("bsc-mainnet", &["eth_feeHistory"]);
     world.reply_all(
         &finalized,
@@ -3051,7 +3058,7 @@ fn answer_fill_read(
             serde_json::json!({
                 "number": "0x3e1a2b2f",
                 "hash": format!("0x{}", "cd".repeat(32)),
-                "timestamp": format!("0x{:x}", after + 30),
+                "timestamp": format!("0x{timestamp:x}"),
             }),
             serde_json::json!(format!("0x{}", hex::encode(hash))),
             serde_json::json!(format!("0x{}", hex::encode(word))),
@@ -3287,6 +3294,52 @@ fn an_across_payout_read_unfilled_waits_and_the_user_is_paid_back_only_after_acr
         .filter(|step| matches!(step, PoolStep::PayoutUndone { id: undone, .. } if *undone == id))
         .count();
     assert_eq!(undone, 1, "one undo, never two");
+}
+
+/// Jeff's first live test: the fill landed on BNB Chain in seconds, and the payout showed in
+/// progress until its deadline. The watcher, seeing the fill, nudges the canister
+/// (`check_across_fill`); the canister reads the fill once itself, filled at an agreed block
+/// long before the deadline, and the payout is paid at once. Nobody but the watcher or a
+/// controller may nudge, and a second nudge reads nothing.
+#[test]
+fn an_across_payout_nudged_with_its_fill_before_its_deadline_is_paid() {
+    use settlement_api::types::pool::{AcrossFillCheck, PayoutStatus};
+    let (world, id, deposit, _) = across_delivering();
+    let stranger = Principal::from_slice(&[0x5a; 29]);
+    let refused: Result<AcrossFillCheck, PoolError> = update(
+        &world.pic,
+        world.canister,
+        stranger,
+        "check_across_fill",
+        encode_one(id).unwrap(),
+    );
+    assert!(matches!(refused, Err(PoolError::NotAllowed(_))), "{refused:?}");
+    assert_eq!(world.payout_status(id), PayoutStatus::Delivering);
+    let call = world
+        .pic
+        .submit_call(
+            world.canister,
+            crate::settlement_suite::init::watcher(),
+            "check_across_fill",
+            encode_one(id).unwrap(),
+        )
+        .expect("the door takes the call");
+    // filled, at an agreed block ten minutes before the fill deadline
+    let before_deadline = u64::from(deposit.fill_deadline) - 600;
+    answer_fill_read_at(&world, relay_of(&deposit).hash(ChainId::new(BSC)), 2, before_deadline);
+    let answer: Result<AcrossFillCheck, PoolError> =
+        candid::decode_one(&world.pic.await_call(call).expect("the door answers")).unwrap();
+    assert_eq!(answer, Ok(AcrossFillCheck::Paid));
+    assert_eq!(world.payout_status(id), PayoutStatus::Paid);
+    assert_eq!(world.state().base.in_flight, Nat::from(0_u8));
+    let again: Result<AcrossFillCheck, PoolError> = update(
+        &world.pic,
+        world.canister,
+        crate::settlement_suite::init::watcher(),
+        "check_across_fill",
+        encode_one(id).unwrap(),
+    );
+    assert_eq!(again, Ok(AcrossFillCheck::NotDelivering));
 }
 
 /// D8 and attack M5: a relay hash that is not the canister's, or a fill logged for a deposit
