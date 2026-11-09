@@ -911,41 +911,56 @@ pub async fn flush() {
             continue;
         }
         let mut went_out = false;
-        let calls: Vec<(&str, Value)> = batch
-            .iter()
-            .map(|entry| ("eth_sendRawTransaction", json!([hex0x(&entry.raw_tx)])))
-            .collect();
-        // the cap is the batch's own, so a `max_batch_items` a controller raised cannot
-        // put a batch on the wire that the answer will not fit inside
-        let cap = send_cap(calls.len());
-        let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, cap).await else {
-            // the provider is unreachable: every entry stays queued
-            continue;
-        };
-        for (entry, answer) in batch.into_iter().zip(answers) {
-            let refusal = match answer {
-                Ok(_) => None,
-                Err(RpcError::Rpc { message, .. })
-                    if already_on_the_network(&message) || nonce_already_spent(&message) =>
-                {
-                    None
-                }
-                Err(RpcError::Rpc { message, .. }) => Some(message),
-                // no answer to this call: the bytes are offered again next window
-                Err(_) => continue,
-            };
-            // A3: the entry is the one this pass read, and the only fields it moves are
-            // how far the broadcast got and what the provider said
-            if let Some(mut current) = outbox::get(entry.key()) {
-                if current.tx_hash() == entry.tx_hash() {
-                    match refusal {
-                        Some(message) => current.refused(now, &message),
-                        None => {
-                            current.sent(now);
-                            went_out = true;
-                        }
+        if config.private_send.contains(chain_id) {
+            // BSC design 6.2.13: the watcher sends this chain's bytes through its private node,
+            // so no searcher sees them before they land; the canister makes no outcall, marks
+            // the batch sent, and reads its receipts, bumps and cancels as on any chain
+            for entry in batch {
+                if let Some(mut current) = outbox::get(entry.key()) {
+                    if current.tx_hash() == entry.tx_hash() {
+                        current.sent(now);
+                        went_out = true;
+                        outbox::put(current);
                     }
-                    outbox::put(current);
+                }
+            }
+        } else {
+            let calls: Vec<(&str, Value)> = batch
+                .iter()
+                .map(|entry| ("eth_sendRawTransaction", json!([hex0x(&entry.raw_tx)])))
+                .collect();
+            // the cap is the batch's own, so a `max_batch_items` a controller raised cannot
+            // put a batch on the wire that the answer will not fit inside
+            let cap = send_cap(calls.len());
+            let Ok(answers) = rpc::rpc_batch_each(chain_id, &calls, cap).await else {
+                // the provider is unreachable: every entry stays queued
+                continue;
+            };
+            for (entry, answer) in batch.into_iter().zip(answers) {
+                let refusal = match answer {
+                    Ok(_) => None,
+                    Err(RpcError::Rpc { message, .. })
+                        if already_on_the_network(&message) || nonce_already_spent(&message) =>
+                    {
+                        None
+                    }
+                    Err(RpcError::Rpc { message, .. }) => Some(message),
+                    // no answer to this call: the bytes are offered again next window
+                    Err(_) => continue,
+                };
+                // A3: the entry is the one this pass read, and the only fields it moves are
+                // how far the broadcast got and what the provider said
+                if let Some(mut current) = outbox::get(entry.key()) {
+                    if current.tx_hash() == entry.tx_hash() {
+                        match refusal {
+                            Some(message) => current.refused(now, &message),
+                            None => {
+                                current.sent(now);
+                                went_out = true;
+                            }
+                        }
+                        outbox::put(current);
+                    }
                 }
             }
         }

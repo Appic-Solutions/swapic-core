@@ -204,6 +204,7 @@ impl Sample {
             domains: &self.domains,
             canister: self.canister,
             eco_portal: Some(address(ECO_PORTAL)),
+            across_fee: None,
         };
         check(order, auth, self.gas, &chains, self.now(), 3_600)
     }
@@ -362,6 +363,7 @@ fn wrong_order_id_refused() {
         domains: &sample.domains,
         canister: sample.canister,
         eco_portal: Some(address(ECO_PORTAL)),
+        across_fee: None,
     };
     assert_eq!(
         check(
@@ -385,6 +387,7 @@ fn the_deadline_must_leave_time_to_land_and_not_be_far_ahead() {
         domains: &sample.domains,
         canister: sample.canister,
         eco_portal: Some(address(ECO_PORTAL)),
+        across_fee: None,
     };
     let at = |now: u64, window: u64| {
         check(
@@ -1224,6 +1227,7 @@ fn every_real_order_reads_as_the_quoter_built_it() {
             domains: &sample.domains,
             canister: sample.canister,
             eco_portal: Some(address(ECO_PORTAL)),
+            across_fee: None,
         };
         let plan = read_plan(&sample.order, &chains).unwrap_or_else(|e| panic!("{flow}: {e}"));
         assert_eq!(plan.action, action, "{flow}");
@@ -1923,4 +1927,248 @@ fn a_gasless_swap_into_usdc_that_could_not_pay_is_refused() {
         ),
         Err(RelayError::Order("pays out with no least amount"))
     );
+}
+
+/// BNB Chain's line (BSC plan P6): an order whose rail is an Across deposit, held to T0, the
+/// live test of 2026-11-08 (3 USDC from Base, filled on Arbitrum into the Runner, delivered as
+/// ARB), and refused by each rule of design 7.4 it is tampered against.
+mod across_orders {
+    use super::*;
+    use types::config::{AcrossFee, AcrossPins};
+    use types::swapic::across::{arrival_message, read_across_step, AcrossDeposit};
+    use types::swapic::{Envelope, Recipe};
+
+    fn t0() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../types/src/swapic/across/samples/t0.json")).unwrap()
+    }
+    fn a(v: &serde_json::Value) -> EvmAddress {
+        v.as_str().unwrap().parse().unwrap()
+    }
+    fn bytes(v: &serde_json::Value) -> Vec<u8> {
+        hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap()
+    }
+    const BASE: ChainId = ChainId::BASE;
+    const HANDLER: &str = "0x0F7Ae28dE1C8532170AD4ee566B5801485c13a0E";
+    const PERIPHERY: &str = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4";
+    const ARB_SPOKE: &str = "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A";
+    const CANISTER: &str = "0x8Fd51f1C630ae3AFd0Bf1AFFeCc5cFBdB66e3023";
+
+    struct Case {
+        order: Order,
+        evm_chains: ChainTable<EvmChain>,
+        domains: ChainTable<CctpDomain>,
+        fee: AcrossFee,
+        deposit: AcrossDeposit,
+    }
+
+    fn case() -> Case {
+        let t = t0();
+        let order = types::swapic::decode_order(&bytes(&t["run_data"])[4..]).unwrap();
+        let runner = a(&t["runner"]);
+        let pins = |spoke: &str| AcrossPins {
+            periphery: address(PERIPHERY),
+            swap_proxy: address("0x1d1735bcf925d10b600279ce720da2673c2274c5"),
+            spoke_pool: address(spoke),
+            multicall_handler: address(HANDLER),
+        };
+        let mut base = chain(address("0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"), runner, address("0x404056Ab781D713B8f5Dc55F5B9592962B187099"), a(&t["input_token"]));
+        base.across = Some(pins("0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64"));
+        let mut arbitrum = chain(address("0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"), runner, address("0x404056Ab781D713B8f5Dc55F5B9592962B187099"), a(&t["output_token"]));
+        arbitrum.across = Some(pins(ARB_SPOKE));
+        let deposit = read_across_step(&order.steps[0], &base.across.unwrap()).unwrap();
+        Case {
+            order,
+            evm_chains: ChainTable(BTreeMap::from([(BASE, base), (ARBITRUM, arbitrum)])),
+            domains: ChainTable::default(),
+            fee: AcrossFee {
+                least_ppm: 50,
+                most_ppm: 3_000,
+                gas_allowance: ChainTable(BTreeMap::from([(ARBITRUM, TokenAmount::from(100_000_u64))])),
+            },
+            deposit,
+        }
+    }
+
+    impl Case {
+        fn read(&self) -> Result<Plan, RelayError> {
+            read_plan(
+                &self.order,
+                &Chains {
+                    chain_id: BASE,
+                    evm_chains: &self.evm_chains,
+                    domains: &self.domains,
+                    canister: address(CANISTER),
+                    eco_portal: None,
+                    across_fee: Some(&self.fee),
+                },
+            )
+        }
+        /// The order's one step made again from the deposit as it now is.
+        fn resign(&mut self) {
+            self.order.steps[0] = self.deposit.step();
+        }
+        /// The deposit's message made again from `envelope` and its recipe.
+        fn reseal(&mut self, envelope: Envelope, recipe: Recipe) {
+            let arbitrum = self.evm_chains.get(ARBITRUM).unwrap();
+            self.deposit.message = arrival_message(address(HANDLER), arbitrum.usdc, arbitrum.runner, envelope.encode(), recipe);
+            self.resign();
+        }
+        fn arrival(&self) -> (Envelope, Recipe) {
+            let arbitrum = self.evm_chains.get(ARBITRUM).unwrap();
+            types::swapic::across::read_arrival(&self.deposit.message, address(HANDLER), arbitrum.usdc, arbitrum.runner).unwrap()
+        }
+    }
+
+    fn broken(rule: &'static str) -> Result<Plan, RelayError> {
+        Err(RelayError::Across(rule))
+    }
+
+    #[test]
+    fn t0s_order_reads_as_an_across_relay_delivering_arb_to_its_payer() {
+        let t = t0();
+        let plan = case().read().unwrap();
+        assert_eq!(plan.action, GasAction::RelayAcross);
+        assert!(plan.arrival.is_none());
+        let delivery = plan.delivery.unwrap();
+        assert_eq!(delivery.chain, ARBITRUM);
+        assert_eq!(delivery.recipient, a(&t["depositor"]));
+        assert_eq!(delivery.token, address("0x912CE59144191C1204E64559FE8253a0e49E6548"));
+        assert!(plan.parties.contains(&Party::Evm(a(&t["depositor"]))));
+    }
+
+    #[test]
+    fn a_depositor_other_chain_or_stable_is_refused() {
+        let mut c = case();
+        c.deposit.depositor = address(CANISTER);
+        c.resign();
+        assert_eq!(c.read(), broken("AX5"));
+        let mut c = case();
+        c.deposit.destination_chain_id = 8453;
+        c.resign();
+        assert_eq!(c.read(), broken("AX6"));
+        let mut c = case();
+        c.deposit.output_token = c.deposit.input_token;
+        c.resign();
+        assert_eq!(c.read(), broken("AX6"));
+    }
+
+    #[test]
+    fn an_arrival_not_to_the_handler_or_a_message_off_its_rebuild_is_refused() {
+        let mut c = case();
+        c.deposit.recipient = address(ARB_SPOKE);
+        c.resign();
+        assert_eq!(c.read(), broken("AX7"));
+        let mut c = case();
+        let mut message = c.deposit.message.clone();
+        let last = message.len() - 1;
+        message[last] ^= 1;
+        c.deposit.message = message;
+        c.resign();
+        assert_eq!(c.read(), broken("AM1"));
+    }
+
+    #[test]
+    fn an_envelope_paying_ours_or_mis_sealed_is_refused() {
+        let mut c = case();
+        let (mut e, r) = c.arrival();
+        e.recipient = address(CANISTER);
+        c.reseal(e, r);
+        assert_eq!(c.read(), broken("AM2"));
+        for tamper in [
+            |e: &mut Envelope| e.min_gas = 0,
+            |e: &mut Envelope| e.min_gas = 2_000_001,
+            |e: &mut Envelope| e.min_out = U256::ZERO,
+            |e: &mut Envelope| e.reference = [7; 32],
+            |e: &mut Envelope| e.deadline += 1,
+            |e: &mut Envelope| e.principal = [1; 32],
+        ] as [fn(&mut Envelope); 6] {
+            let mut c = case();
+            let (mut e, r) = c.arrival();
+            tamper(&mut e);
+            c.reseal(e, r);
+            assert_eq!(c.read(), broken("AM3"));
+        }
+        let mut c = case();
+        let (e, mut r) = c.arrival();
+        r.scaler = alloy_primitives::Address::ZERO;
+        c.reseal(e, r);
+        assert_eq!(c.read(), broken("AM4"));
+    }
+
+    #[test]
+    fn a_fill_window_exclusivity_or_quote_out_of_bounds_is_refused() {
+        for shift in [-301_i64, 301] {
+            let mut c = case();
+            let (mut e, r) = c.arrival();
+            c.deposit.fill_deadline = (i64::from(c.deposit.fill_deadline) + shift) as u32;
+            e.deadline = u64::from(c.deposit.fill_deadline);
+            c.reseal(e, r);
+            assert_eq!(c.read(), broken("AX8"), "{shift}");
+        }
+        let mut c = case();
+        c.deposit.exclusivity = 301;
+        c.resign();
+        assert_eq!(c.read(), broken("AX9"));
+        let mut c = case();
+        c.deposit.exclusive_relayer = EvmAddress::ZERO;
+        c.resign();
+        assert_eq!(c.read(), broken("AX9"));
+        let mut c = case();
+        let deadline = u64::try_from(c.order.deadline).unwrap();
+        c.deposit.quote_timestamp = (deadline - 1_801) as u32;
+        c.resign();
+        assert_eq!(c.read(), broken("AX12"));
+    }
+
+    #[test]
+    fn an_output_too_close_to_the_input_or_dust_is_refused() {
+        let mut c = case();
+        c.deposit.output_amount = c.deposit.min_expected;
+        c.resign();
+        assert_eq!(c.read(), broken("AX13"));
+        let f = case().deposit.output_amount;
+        let m = case().deposit.min_expected;
+        for dust in [U256::from(1u8), f / U256::from(10u64).pow(U256::from(12u8)), m / U256::from(2u8)] {
+            let mut c = case();
+            c.deposit.output_amount = dust;
+            c.resign();
+            assert_eq!(c.read(), broken("AX14"), "{dust}");
+        }
+    }
+
+    #[test]
+    fn a_payout_a_step_after_the_deposit_or_no_fee_bounds_is_refused() {
+        let mut c = case();
+        c.order.payout.token = c.order.tokenIn;
+        c.order.payout.minOut = U256::from(1u8);
+        assert_eq!(c.read(), broken("AX10"));
+        let mut c = case();
+        let step = c.order.steps[0].clone();
+        c.order.steps.push(step);
+        assert_eq!(c.read(), Err(RelayError::AcrossDeposits(2)));
+        let c = case();
+        let plan = read_plan(
+            &c.order,
+            &Chains {
+                chain_id: BASE,
+                evm_chains: &c.evm_chains,
+                domains: &c.domains,
+                canister: address(CANISTER),
+                eco_portal: None,
+                across_fee: None,
+            },
+        );
+        assert_eq!(plan, broken("across_fee"));
+    }
+
+    /// BNB Chain's USDC has 18 decimals: a fee of 0.03 USD there is 3 x 10^16 raw units, and
+    /// 30,000 raw units (3 x 10^-14 USD) is far below the row (design D5).
+    #[test]
+    fn a_fee_on_an_eighteen_decimal_usdc_counts_in_micro_usd() {
+        let mut bsc = chain(EvmAddress::ZERO, EvmAddress::ZERO, EvmAddress::ZERO, EvmAddress::ZERO);
+        bsc.usdc_decimals = Some(18);
+        assert_eq!(bsc.usdc_to_usd6(TokenAmount::from(30_000_000_000_000_000_u64)), TokenAmount::from(30_000_u64));
+        assert_eq!(bsc.usdc_to_usd6(TokenAmount::from(30_000_u64)), TokenAmount::ZERO);
+        assert_eq!(bsc.usd6_to_usdc(TokenAmount::from(30_000_u64)), U256::from(30_000_000_000_000_000_u64));
+    }
 }

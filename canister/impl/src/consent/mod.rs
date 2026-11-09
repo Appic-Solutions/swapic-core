@@ -172,7 +172,11 @@ impl Known<'_> {
             return named;
         }
         match self.config.evm_chains.get(chain) {
-            Some(evm) if evm.usdc == token => USDC,
+            // in its own decimals: 6 for Circle's, 18 for Binance's on BNB Chain
+            Some(evm) if evm.usdc == token => TokenName::Known {
+                symbol: "USDC",
+                decimals: evm.usdc_decimals(),
+            },
             _ => TokenName::Evm(token),
         }
     }

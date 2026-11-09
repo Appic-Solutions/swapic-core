@@ -29,7 +29,8 @@ use alloy_primitives::U256;
 use settlement_api::types::chain_data::ChainData;
 use std::fmt;
 use thiserror::Error;
-use types::config::{ChainTable, EvmChain, GasAction};
+use types::config::{AcrossFee, ChainTable, EvmChain, GasAction};
+use types::swapic::across::{self, AcrossDeposit, MAX_MIN_GAS};
 use types::events::TxPurpose;
 use types::swapic::{
     self, Action, CctpBurn, EcoArrival, EcoIntent, Envelope, EnvelopeError, GaslessAuth, KnownStep,
@@ -141,6 +142,10 @@ pub enum RelayError {
     Step { index: usize, error: StepError },
     #[error("the Eco intent {0}")]
     Eco(&'static str),
+    #[error("the Across deposit breaks rule {0}")]
+    Across(&'static str),
+    #[error("the order deposits on Across {0} times, and one fee pays for one deposit")]
+    AcrossDeposits(usize),
 }
 
 /// What the order's checks read besides the order: the chains the canister signs on and
@@ -153,6 +158,8 @@ pub struct Chains<'a> {
     /// Eco's Portal, the one target an Eco intent is published on. None: no Eco order is
     /// relayed.
     pub eco_portal: Option<EvmAddress>,
+    /// AX13 and AX14's bounds. None: no order with an Across step is relayed.
+    pub across_fee: Option<&'a AcrossFee>,
 }
 
 /// A party an order or a message pays, screened against the sanctions set: an EVM
@@ -678,7 +685,19 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
     let mut swapped_into_usdc = false;
     let mut bought = U256::ZERO;
     let mut paid_from_swaps = None;
+    // each Across deposit and its step's index (BSC design 6.2.6)
+    let mut deposits = Vec::new();
     for (index, step) in order.steps.iter().enumerate() {
+        // a step to this chain's Across periphery is read as a deposit, and as nothing else
+        if let Some(pins) = source
+            .across
+            .filter(|pins| swapic::evm(step.target) == pins.periphery)
+        {
+            let deposit = across::read_across_step(step, &pins)
+                .map_err(|error| RelayError::Step { index, error })?;
+            deposits.push((index, deposit));
+            continue;
+        }
         let read = match swapic::read_step(step, source.usdc, source.token_messenger) {
             Ok(read) => read,
             Err(StepError::Unknown) => return Err(RelayError::UnknownStep(index)),
@@ -748,6 +767,32 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
         token: swapic::evm(order.payout.token),
         min_out: TokenAmount::from_u256(order.payout.minOut),
     });
+    // an Across order (BSC design 6.2.6): one deposit, the last step, no payout, no other
+    // rail; the relayer pays the destination, so there is no arrival action
+    if !deposits.is_empty() {
+        if !burns.is_empty() || !intents.is_empty() {
+            return Err(RelayError::TwoRails);
+        }
+        let [(index, deposit)] = deposits.as_slice() else {
+            return Err(RelayError::AcrossDeposits(deposits.len()));
+        };
+        if *index + 1 != order.steps.len() {
+            return Err(RelayError::Across("AX11"));
+        }
+        if !order.payout.token.is_zero() {
+            return Err(RelayError::Across("AX10"));
+        }
+        let (delivery, more) = across_delivery(deposit, order, &source, chains)?;
+        parties.extend(more);
+        return Ok(Plan {
+            fees,
+            action: GasAction::RelayAcross,
+            arrival: None,
+            parties,
+            delivery: Some(delivery),
+            intent: None,
+        });
+    }
     let (action, arrival, delivery) = match (burns.as_slice(), intents.as_slice()) {
         ([], []) if order.payout.token.is_zero() => return Err(RelayError::NoRecipient),
         ([], []) => (GasAction::RelayLocal, None, payout),
@@ -809,6 +854,151 @@ pub fn read_plan(order: &Order, chains: &Chains) -> Result<Plan, RelayError> {
     })
 }
 
+/// AX8: a deposit's `fillDeadline` is between these after the order's deadline.
+const FILL_AFTER_LEAST_S: u64 = 300;
+const FILL_AFTER_MOST_S: u64 = 900;
+/// AX9: an exclusive relayer's turn, an offset from the deposit's block, at most this.
+const MAX_EXCLUSIVITY_S: u32 = 300;
+/// AX12: the order ends within this of the quote's time.
+const QUOTE_LIFE_S: u64 = 1_800;
+
+/// An Across deposit's delivery and the parties it pays, or the rule it breaks (BSC design
+/// 7.4, AX5 to AX9, AX12 to AX14, AM1 to AM4; AX1 to AX4 are the step reader's, AX10 and AX11
+/// the plan's): the payer's refund and speed-ups, another chain the canister holds Across's
+/// pins for, that chain's USDC, a direct delivery to the user or an arrival into the Runner
+/// through the pinned handler with a message rebuilt byte for byte, a fill window and a short
+/// exclusivity, a fresh quote, and a relayer's fee between the bounds.
+fn across_delivery(
+    deposit: &AcrossDeposit,
+    order: &Order,
+    source: &EvmChain,
+    chains: &Chains,
+) -> Result<(Delivery, Vec<Party>), RelayError> {
+    let rule = RelayError::Across;
+    let fee_bounds = chains.across_fee.ok_or(rule("across_fee"))?;
+    // AX5: the refund and every speed-up are the payer's
+    if deposit.depositor != swapic::evm(order.payer) {
+        return Err(rule("AX5"));
+    }
+    // AX6: another chain the canister holds Across's pins for, the source's USDC in, its USDC out
+    let destination_id = ChainId::new(deposit.destination_chain_id);
+    let destination = chains
+        .evm_chains
+        .get(destination_id)
+        .filter(|_| destination_id != chains.chain_id)
+        .ok_or(rule("AX6"))?;
+    let pins = destination.across.ok_or(rule("AX6"))?;
+    if deposit.input_token != source.usdc || deposit.output_token != destination.usdc {
+        return Err(rule("AX6"));
+    }
+    let ours = |address: EvmAddress| {
+        address == EvmAddress::ZERO
+            || address == chains.canister
+            || [destination.swapic, destination.runner, destination.cctp_receiver].contains(&address)
+            || [pins.periphery, pins.spoke_pool, pins.multicall_handler, pins.swap_proxy].contains(&address)
+    };
+    let deadline = u64::try_from(order.deadline).unwrap_or(u64::MAX);
+    let fill = u64::from(deposit.fill_deadline);
+    // AX7 and AM1 to AM4: direct to the user, or into the Runner
+    let (delivery, recipient) = if deposit.message.is_empty() {
+        if ours(deposit.recipient) {
+            return Err(rule("AX7"));
+        }
+        let delivery = Delivery {
+            chain: destination_id,
+            recipient: deposit.recipient,
+            token: deposit.output_token,
+            min_out: TokenAmount::from_u256(deposit.output_amount),
+        };
+        (delivery, deposit.recipient)
+    } else {
+        if deposit.recipient != pins.multicall_handler {
+            return Err(rule("AX7"));
+        }
+        let (envelope, recipe) = across::read_arrival(
+            &deposit.message,
+            pins.multicall_handler,
+            destination.usdc,
+            destination.runner,
+        )
+        .map_err(|_| rule("AM1"))?;
+        if ours(envelope.recipient) {
+            return Err(rule("AM2"));
+        }
+        let sealed = envelope.action == Action::Swap
+            && envelope.reference == order.r#ref.0
+            && envelope.deadline == fill
+            && envelope.token_out != EvmAddress::ZERO
+            && envelope.token_out != deposit.output_token
+            && !envelope.min_out.is_zero()
+            && envelope.min_gas > 0
+            && envelope.min_gas <= MAX_MIN_GAS
+            && envelope.principal == [0; 32]
+            && envelope.subaccount == [0; 32];
+        if !sealed {
+            return Err(rule("AM3"));
+        }
+        // AM4: the recipe is KyberSwap's, read as a swap step of the destination's USDC there
+        if swapic::evm(recipe.target) != KYBER_ROUTER || swapic::evm(recipe.scaler) != swapic::KYBER_SCALER {
+            return Err(rule("AM4"));
+        }
+        let as_step = Step {
+            target: recipe.target,
+            data: recipe.data.clone(),
+            token: swapic::addr(destination.usdc),
+            min: U256::ZERO,
+            writes: Vec::new(),
+        };
+        match swapic::read_step(&as_step, destination.usdc, destination.token_messenger) {
+            Ok(KnownStep::Swap(swap)) if swap.dst_token == envelope.token_out => {
+                check_swap(&swap, &as_step, &destination, chains.canister).map_err(|_| rule("AM4"))?
+            }
+            _ => return Err(rule("AM4")),
+        }
+        let delivery = Delivery {
+            chain: destination_id,
+            recipient: envelope.recipient,
+            token: envelope.token_out,
+            min_out: TokenAmount::from_u256(envelope.min_out),
+        };
+        (delivery, envelope.recipient)
+    };
+    // AX8: the fill window after the order's deadline
+    if fill < deadline.saturating_add(FILL_AFTER_LEAST_S) || fill > deadline.saturating_add(FILL_AFTER_MOST_S) {
+        return Err(rule("AX8"));
+    }
+    // AX9: no exclusivity, or a short one
+    let exclusive = match (deposit.exclusive_relayer, deposit.exclusivity) {
+        (EvmAddress::ZERO, 0) => true,
+        (EvmAddress::ZERO, _) => false,
+        (_, offset) => offset > 0 && offset <= MAX_EXCLUSIVITY_S,
+    };
+    if !exclusive {
+        return Err(rule("AX9"));
+    }
+    // AX12: a quote time the SpokePool takes
+    if deadline > u64::from(deposit.quote_timestamp).saturating_add(QUOTE_LIFE_S) {
+        return Err(rule("AX12"));
+    }
+    // AX13 and AX14: F between the least and the most a relayer keeps, in micro USD
+    let million = U256::from(1_000_000u64);
+    let paid = destination.usdc_to_usd6(TokenAmount::from_u256(deposit.output_amount)).to_u256() * million;
+    let put = source.usdc_to_usd6(TokenAmount::from_u256(deposit.min_expected)).to_u256();
+    if paid > put * (million - U256::from(fee_bounds.least_ppm)) {
+        return Err(rule("AX13"));
+    }
+    let allowance = fee_bounds
+        .gas_allowance
+        .get(destination_id)
+        .map(|usd6| usd6.to_u256())
+        .unwrap_or(U256::ZERO);
+    let floor = (put * (million - U256::from(fee_bounds.most_ppm))).saturating_sub(allowance * million);
+    if paid < floor {
+        return Err(rule("AX14"));
+    }
+    Ok((delivery, vec![Party::Evm(recipient)]))
+}
+
 /// Every check on the order and its authorization that needs no chain: pure, so each rule
 /// is a unit test. `requested_gas` is the limit the quoter charged the fee on.
 pub fn check(
@@ -856,9 +1046,11 @@ pub fn check(
     }
 
     let plan = read_plan(order, chains)?;
+    // the fee in micro USD, as every row counts it: a chain whose USDC has more decimals
+    // (BNB Chain's 18) would otherwise pass a fee 10^12 times too small (BSC design D5)
     let fee = match plan.fees.as_slice() {
         [] => return Err(RelayError::NoFeeStep),
-        [fee] => TokenAmount::from_u256(*fee),
+        [fee] => source.usdc_to_usd6(TokenAmount::from_u256(*fee)),
         more => return Err(RelayError::FeeSteps(more.len())),
     };
     let Plan {
@@ -976,6 +1168,7 @@ pub async fn relay_gasless(
         domains: &config.cctp_domains,
         canister,
         eco_portal: config.eco_portal,
+        across_fee: config.across_fee.as_ref(),
     };
     let relay = check(
         &order,
@@ -997,7 +1190,14 @@ pub async fn relay_gasless(
         .get(chain_id)
         .expect("BUG: check found the chain in this table")
         .swapic;
-    let data = swapic::run_for_calldata(&order, &auth);
+    let mut data = swapic::run_for_calldata(&order, &auth);
+    // an Across order names Swapic's integrator after its call (BSC design 6.2.11): Solidity
+    // ignores trailing calldata and the order id does not cover it
+    if relay.action == GasAction::RelayAcross {
+        if let Some(id) = config.across_integrator {
+            data.extend_from_slice(&across::integrator_suffix(id));
+        }
+    }
     if config.simulate_before_sign {
         let (simulated, _) =
             evm_reads::simulate_and_estimate(chain_id, canister, swapic_address, &data)

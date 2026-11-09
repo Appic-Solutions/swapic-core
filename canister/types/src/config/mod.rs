@@ -606,6 +606,24 @@ impl EvmChain {
     pub fn usdc_decimals(&self) -> u8 {
         self.usdc_decimals.unwrap_or(6)
     }
+
+    /// `raw` units of this chain's `usdc` in micro USD, floored: what fees and books count.
+    pub fn usdc_to_usd6(&self, raw: TokenAmount) -> TokenAmount {
+        match self.usdc_decimals().saturating_sub(6) {
+            0 => raw,
+            extra => {
+                let scale = alloy_primitives::U256::from(10u8).pow(alloy_primitives::U256::from(extra));
+                TokenAmount::from_u256(raw.to_u256() / scale)
+            }
+        }
+    }
+
+    /// `usd6` micro USD in raw units of this chain's `usdc`, exact (a sweep of booked fees).
+    pub fn usd6_to_usdc(&self, usd6: TokenAmount) -> alloy_primitives::U256 {
+        let extra = self.usdc_decimals().saturating_sub(6);
+        usd6.to_u256()
+            .saturating_mul(alloy_primitives::U256::from(10u8).pow(alloy_primitives::U256::from(extra)))
+    }
 }
 
 impl EvmChain {
