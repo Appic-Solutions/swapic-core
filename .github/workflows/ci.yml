@@ -99,6 +99,9 @@ jobs:
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      LEDGER_RELEASE: ledger-suite-icrc-2025-06-19
+      LEDGER_SHA256: 40fa0b06370e6a80a8f2290eb55ab98aba5e1c8e25130f50da8ac0908f8a3511
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show active-toolchain || rustup toolchain install
@@ -112,6 +115,15 @@ jobs:
           # paired pin: dfx 0.29.2 bundles pocket-ic-server 9.0.3, which must stay on the same
           # major as the pocket-ic crate 9.x of the integration_tests crate. Bump both or neither.
           dfx-version: "0.29.2"
+      # the pool's suite runs ckUSDC on an ICRC-1 ledger the repository does not hold: DFINITY's
+      # u256 ledger release, held to the sha256 GitHub records for it (the whole suite passes
+      # on it: 124 tests, as on the ledger kept beside the repository on Jeff's Mac)
+      - name: The ICRC-1 ledger
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/ledger.wasm.gz" \
+            "https://github.com/dfinity/ic/releases/download/$LEDGER_RELEASE/ic-icrc1-ledger-u256.wasm.gz"
+          echo "$LEDGER_SHA256  $RUNNER_TEMP/ledger.wasm.gz" | sha256sum -c --quiet
+          echo "LEDGER_WASM=$RUNNER_TEMP/ledger.wasm.gz" >> "$GITHUB_ENV"
       - run: scripts/run-integration-tests.sh
 
   contracts:
