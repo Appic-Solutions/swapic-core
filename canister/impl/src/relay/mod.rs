@@ -160,6 +160,8 @@ pub struct Chains<'a> {
     pub eco_portal: Option<EvmAddress>,
     /// AX13 and AX14's bounds. None: no order with an Across step is relayed.
     pub across_fee: Option<&'a AcrossFee>,
+    /// The pool's chain: an Across deposit there may pay the canister, a pool deposit (AX7 c).
+    pub pool_chain: Option<ChainId>,
 }
 
 /// A party an order or a message pays, screened against the sanctions set: an EVM
@@ -899,8 +901,22 @@ fn across_delivery(
     };
     let deadline = u64::try_from(order.deadline).unwrap_or(u64::MAX);
     let fill = u64::from(deposit.fill_deadline);
-    // AX7 and AM1 to AM4: direct to the user, or into the Runner
-    let (delivery, recipient) = if deposit.message.is_empty() {
+    // AX7 c: into the pool, to the canister on the pool's chain in its USDC, with no message
+    // and the order's memo carrying the deposit's terms
+    let into_pool = deposit.recipient == chains.canister
+        && deposit.message.is_empty()
+        && chains.pool_chain == Some(destination_id)
+        && !order.memo.is_empty();
+    // AX7 and AM1 to AM4: direct to the user, into the pool, or into the Runner
+    let (delivery, recipient) = if into_pool {
+        let delivery = Delivery {
+            chain: destination_id,
+            recipient: chains.canister,
+            token: deposit.output_token,
+            min_out: TokenAmount::from_u256(deposit.output_amount),
+        };
+        (delivery, chains.canister)
+    } else if deposit.message.is_empty() {
         if ours(deposit.recipient) {
             return Err(rule("AX7"));
         }
@@ -1173,6 +1189,7 @@ pub async fn relay_gasless(
         canister,
         eco_portal: config.eco_portal,
         across_fee: config.across_fee.as_ref(),
+        pool_chain: config.pool_chain,
     };
     let relay = check(
         &order,

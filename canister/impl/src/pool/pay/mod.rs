@@ -356,6 +356,7 @@ pub fn payer_of(
             canister,
             eco_portal: config.eco_portal,
             across_fee: config.across_fee.as_ref(),
+            pool_chain: config.pool_chain,
         },
         swapic: chain.swapic,
         usdc: chain.usdc,
