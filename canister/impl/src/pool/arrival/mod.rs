@@ -19,6 +19,14 @@
 //!   full in the same transaction. An intent the canister created is a move's, never a
 //!   deposit.
 //!
+//! - Across (BSC design 6.2.8): the closest `FilledRelay` of the pool chain's SpokePool pin
+//!   before the transfer, paired with it by the relay's identity (`pool::across::explain`),
+//!   and on the source chain (one more read, at its final block) the order's one
+//!   `OrderStarted`, the one deposit the fill repeats field by field, and the Runner's funding
+//!   of it (`pool::across::origin_proof`). A transfer from the SpokePool that a relayer refund
+//!   leaf or the canister's own claim explains is an Across refund to the canister, credited
+//!   to the payouts it owes back (D9).
+//!
 //! No registration: the canister learns of a deposit only when its
 //! USDC arrives. Whoever reports the arrival hands over the deposit's terms, the preimage of
 //! the ref the order carries; the canister recomputes the ref and credits the transfer whose
@@ -141,6 +149,8 @@ pub struct PoolChain {
     pub canister: EvmAddress,
     /// Every chain a CCTP arrival may come from.
     pub cctp_sources: Vec<CctpSource>,
+    /// Across on the pool chain, when it holds Across's pins there.
+    pub across: Option<crate::pool::across::AcrossPool>,
 }
 
 /// The addresses an Eco proof reads on the order's own chain.
@@ -153,6 +163,20 @@ pub struct SourceChain {
     pub usdc: EvmAddress,
     /// The chain's Runner: an order's funder of its intent.
     pub runner: EvmAddress,
+    /// Across's pins on the chain: an Across deposit's proof.
+    pub across: Option<types::config::AcrossPins>,
+}
+
+impl SourceChain {
+    /// What an Across deposit's origin proof reads here, if the chain holds Across's pins.
+    fn across(&self) -> Option<crate::pool::across::AcrossSource> {
+        Some(crate::pool::across::AcrossSource {
+            chain: self.chain,
+            swapic: self.swapic,
+            runner: self.runner,
+            pins: self.across?,
+        })
+    }
 }
 
 /// One log as a receipt carries it.
@@ -351,6 +375,9 @@ pub enum Proof {
     /// in this transaction: a paid payout's whose intent is one of them, and whose amount this
     /// transfer is, takes it back.
     Refund { intents: Vec<[u8; 32]> },
+    /// Across's SpokePool refunded the canister (a relayer refund leaf, or its own claim):
+    /// credited to the payouts Across owes back (D9), the rest the canister's own.
+    AcrossRefund,
 }
 
 /// The intents whose rewards Eco's Portal refunded to the canister in `base`.
@@ -405,6 +432,19 @@ impl NoArrival {
 /// Whether the receipt holds a transfer only an Eco proof can explain, which needs the
 /// source transaction read.
 pub fn needs_source(base: &Receipt, chain: &PoolChain) -> bool {
+    // an Across fill to the canister is proven on its deposit's own chain
+    let across_fill = chain.across.as_ref().is_some_and(|across| {
+        base.logs
+            .iter()
+            .any(|log| log.is(across.spoke_pool, types::swapic::across::topics::filled_relay()))
+            && base
+                .transfers_to(chain)
+                .iter()
+                .any(|(_, from, _)| *from != chain.runner && *from != EvmAddress::ZERO)
+    });
+    if across_fill {
+        return true;
+    }
     let Some(portal) = chain.eco_portal else {
         return false;
     };
@@ -437,7 +477,28 @@ pub fn find(
     let mut messages = received_messages(base, chain);
     let refunds = refunded_intents(base, chain);
     let mut found = Vec::new();
+    // each refund leaf's entry, and each claim, pays one transfer
+    let mut across_refunds = Vec::new();
     for (log, from, amount) in transfers {
+        if from != chain.runner && from != EvmAddress::ZERO {
+            if let Some((rail, proof)) =
+                across_proof(base, source, chain, log.index, from, amount, &mut across_refunds)?
+            {
+                found.push(Found {
+                    credit: CreditKey {
+                        chain: chain.chain,
+                        tx: base.tx,
+                        log_index: log.index,
+                    },
+                    amount,
+                    block: base.block,
+                    at: log.block_time.and_then(Timestamp::from_secs),
+                    rail,
+                    proof,
+                });
+                continue;
+            }
+        }
         let rail = if from == chain.runner {
             PoolRail::SameChain
         } else if from == EvmAddress::ZERO {
@@ -483,6 +544,44 @@ pub fn find(
         return Err(NoArrival::OnlyFees);
     }
     Ok(found)
+}
+
+/// What Across's events say of the canister's transfer at `index` (BSC design 6.2.8, 6.2.9):
+/// a fill proven on its source (read for it: none given is `NeedsSource`), a fill that does
+/// not match its transfer (held), a refund to the canister, or nothing of Across's (None).
+fn across_proof(
+    base: &Receipt,
+    source: Option<(&Receipt, &SourceChain)>,
+    chain: &PoolChain,
+    index: u64,
+    from: EvmAddress,
+    amount: TokenAmount,
+    used_refunds: &mut Vec<(u64, usize)>,
+) -> Result<Option<(PoolRail, Proof)>, NoArrival> {
+    use crate::pool::across::{explain, origin_proof, Explained};
+    let Some(pool) = &chain.across else {
+        return Ok(None);
+    };
+    let proof = match explain(&base.logs, index, from, amount, pool, used_refunds) {
+        Explained::Nothing => return Ok(None),
+        Explained::Refund => Proof::AcrossRefund,
+        Explained::Mismatch(why) => Proof::Orphan {
+            payer: None,
+            why: format!("an Across fill to the canister that does not match it: {why}"),
+        },
+        Explained::Fill(filled) => {
+            let Some((receipt, at)) = source else {
+                return Err(NoArrival::NeedsSource);
+            };
+            match at.across() {
+                Some(at) => origin_proof(&filled, receipt, &at, pool),
+                None => Proof::Unproven {
+                    why: "the source chain holds no Across pins".to_string(),
+                },
+            }
+        }
+    };
+    Ok(Some((PoolRail::Across, proof)))
 }
 
 /// The ref and payer of the order `id` names, from Swapic's `OrderStarted` in `receipt`.
@@ -766,7 +865,8 @@ fn decide<S: Store>(
     // the source chain a report names is read on Eco only; the other rails are proven in
     // the pool chain's receipt
     let src_chain = match found.rail {
-        PoolRail::Eco => given.src_chain,
+        // proven on the source the report named
+        PoolRail::Eco | PoolRail::Across => given.src_chain,
         PoolRail::Cctp | PoolRail::SameChain => found.credit.chain,
     };
     let registration = given
@@ -880,7 +980,8 @@ pub fn steps_for<S: Store>(
         }
         Proof::Move { .. } => return Ok(Vec::new()),
         Proof::Deposit { r#ref, payer } => (*r#ref, *payer),
-        Proof::Refund { .. } if credited => return Ok(Vec::new()),
+        Proof::Refund { .. } | Proof::AcrossRefund if credited => return Ok(Vec::new()),
+        Proof::AcrossRefund => return Ok(vec![across_refund_step(state, found)]),
         Proof::Refund { intents } => {
             // the payout whose intent was refunded, for exactly its amount: one delivering
             // (the refund proves its intent unfilled), or one whose USDC Eco still owes back.
@@ -966,6 +1067,48 @@ pub fn steps_for<S: Store>(
     })
 }
 
+/// An Across refund to the canister credited (D9): the longest oldest-first prefix of the
+/// payouts Across owes back that fits in it, each its whole deposit, the rest the canister's
+/// own surplus; held for a controller only when payouts are owed back and not even the
+/// oldest fits.
+fn across_refund_step<S: Store>(state: &State<S>, found: &Found) -> PoolStep {
+    let payouts: Vec<types::pool::EvmPayout> = state
+        .pool()
+        .lines()
+        .across_owed
+        .iter()
+        .filter_map(|id| state.store().pool_payout(*id))
+        .collect();
+    let owed = crate::pool::across::owed_back(&payouts);
+    let Some(refunded) = crate::pool::across::credited(&owed, found.amount) else {
+        return PoolStep::Unattributed {
+            credit: found.credit,
+            amount: found.amount,
+            src_payer: None,
+            why: "an Across refund to the canister that no payout owed back fits: held for a \
+                  controller"
+                .to_string(),
+            block: found.block,
+            r#ref: None,
+            awaiting_until: None,
+        };
+    };
+    let back = payouts
+        .iter()
+        .filter(|payout| refunded.contains(&payout.id))
+        .filter_map(|payout| payout.amount)
+        .fold(TokenAmount::ZERO, |sum, amount| {
+            sum.checked_add(amount).unwrap_or(TokenAmount::MAX)
+        });
+    PoolStep::AcrossRefunded {
+        credit: found.credit,
+        amount: found.amount,
+        block: found.block,
+        refunded,
+        surplus: found.amount.checked_sub(back).unwrap_or(TokenAmount::ZERO),
+    }
+}
+
 /// What one report recorded: each transfer's outcome, and why the others were not recorded
 /// (unproven by what was read, or refused by the fold). One transfer never stops the rest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -988,6 +1131,20 @@ fn outcome_of(step: &PoolStep) -> Option<PoolArrivalOutcome> {
         PoolStep::Unattributed { amount, why, .. } => Some(PoolArrivalOutcome::Unattributed {
             amount: candid::Nat::from(*amount),
             why: why.clone(),
+        }),
+        // an Across refund credited back to the payouts it owed, named by the first one's ref;
+        // all of it the canister's own: unattributed, as it is booked
+        PoolStep::AcrossRefunded {
+            refunded, amount, ..
+        } => Some(match refunded.first() {
+            Some(id) => PoolArrivalOutcome::Credited {
+                r#ref: types::pool::evm_payout_ref(*id).into_bytes().to_vec(),
+                amount: candid::Nat::from(*amount),
+            },
+            None => PoolArrivalOutcome::Unattributed {
+                amount: candid::Nat::from(*amount),
+                why: "an Across refund of the canister's own".to_string(),
+            },
         }),
         // an Eco refund credited back to its payout, named by the payout's ref
         PoolStep::PayoutRefunded { id, amount, .. } => Some(PoolArrivalOutcome::Credited {
@@ -1090,6 +1247,19 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
             })
         })
         .collect();
+    let across = evm.across.map(|pins| crate::pool::across::AcrossPool {
+        chain,
+        spoke_pool: pins.spoke_pool,
+        usdc: evm.usdc,
+        canister,
+        origins: config
+            .evm_chains
+            .0
+            .iter()
+            .filter(|(origin, entry)| **origin != chain && entry.across.is_some())
+            .map(|(origin, _)| *origin)
+            .collect(),
+    });
     Ok(PoolChain {
         chain,
         usdc: evm.usdc,
@@ -1099,6 +1269,7 @@ pub async fn pool_chain() -> Result<PoolChain, PoolError> {
         eco_portal: config.eco_portal,
         canister,
         cctp_sources,
+        across,
     })
 }
 
@@ -1482,6 +1653,7 @@ async fn found_in(
                 eco_portal: config.eco_portal,
                 usdc: evm.usdc,
                 runner: evm.runner,
+                across: evm.across,
             })
         })
         .ok_or_else(|| {

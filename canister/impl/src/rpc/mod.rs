@@ -651,6 +651,9 @@ pub enum Keep {
     /// A head (`eth_blockNumber`), rounded down to a multiple of [`HEAD_GRAIN`]: nodes that
     /// ask a moment apart see heads a block or two apart, and agree on the rounded one.
     Head = 3,
+    /// A chain's finalized block, from a one-block `eth_feeHistory` ending at the `finalized`
+    /// tag (its `oldestBlock`), rounded down to a multiple of [`HEAD_GRAIN`] as a head is.
+    FinalizedHead = 4,
 }
 
 /// The blocks an agreed head is rounded down to a multiple of.
@@ -663,6 +666,7 @@ impl Keep {
             1 => Some(Keep::Receipt),
             2 => Some(Keep::Header),
             3 => Some(Keep::Head),
+            4 => Some(Keep::FinalizedHead),
             _ => None,
         }
     }
@@ -711,6 +715,10 @@ fn kept(result: &Value, keep: Keep) -> Value {
         }
         (Keep::Header, _) => fields(result, &["number", "hash", "timestamp"]),
         (Keep::Head, _) => match result.as_str().and_then(parse_block_number) {
+            Some(head) => json!(format!("0x{:x}", head.get() - head.get() % HEAD_GRAIN)),
+            None => result.clone(),
+        },
+        (Keep::FinalizedHead, _) => match finalized_of(result) {
             Some(head) => json!(format!("0x{:x}", head.get() - head.get() % HEAD_GRAIN)),
             None => result.clone(),
         },

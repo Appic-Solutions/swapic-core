@@ -261,7 +261,8 @@ pub fn check<S: Store>(
     let canister = canister.ok_or_else(|| {
         PoolError::Unavailable("the canister's address is not derived yet".to_string())
     })?;
-    let payer = pay::payer_of(config, canister, eco_prover)?;
+    let mut payer = pay::payer_of(config, canister, eco_prover)?;
+    payer.across_out = pay::across_out(state);
     let (read, delivery) = plan_delivery(&order, &payer.chains)?;
     let payout = PayoutTerms {
         dst_chain: delivery.chain,

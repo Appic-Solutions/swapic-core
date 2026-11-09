@@ -267,6 +267,7 @@ fn chain() -> PoolChain {
         eco_portal: None,
         canister: address(5),
         cctp_sources: vec![],
+        across: None,
     }
 }
 
@@ -446,6 +447,7 @@ fn an_eco_refund_whose_fill_was_not_read_holds_the_cursor() {
                 tx_hash: TxHash::new([7; 32]),
                 block: BlockNumber::new(30),
                 intent: Some(intent),
+                across: None,
             },
             at(4),
         )

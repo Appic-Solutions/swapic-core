@@ -13,6 +13,12 @@
 //! least its old minimum scaled to it. The whole order then meets every check a payout order
 //! meets ([`crate::pool::pay::check_order`], the amount exact).
 //!
+//! An Across step on Base (BSC design 7.5) is fitted with no outcall: its least M and the
+//! Runner's step minimum become the payout's exact amount, its output F the same ratio of it
+//! (`floor(F * amount / M)`, the periphery's own scaling above M, extended below it), every
+//! other byte as it was; the order's checks then read it again, the relayer's fee bounds
+//! (AX13, AX14) among them, and the delivery against the terms.
+//!
 //! A plan that does not fit leaves the payout waiting for the watcher's order, the way every
 //! payout waited before the plan flow; one whose first step asks more than the payout could
 //! only revert, so the payout is undone at once.
@@ -121,6 +127,8 @@ pub enum Fit {
 pub struct Decided {
     pub order: Order,
     pub swap: Option<usize>,
+    /// The place of its Across step, if it has one.
+    pub across: Option<usize>,
     pub amount: TokenAmount,
     pub gas_limit: u64,
 }
@@ -200,8 +208,14 @@ pub fn decide(
     if swaps.len() > 1 {
         return Err(Fit::Wait("the plan swaps more than once".to_string()));
     }
+    let across = types::swapic::across::across_step_at(&order.steps);
+    if across.is_some() && !swaps.is_empty() {
+        return Err(Fit::Wait(
+            "the plan swaps before its Across deposit: its least cannot be fitted".to_string(),
+        ));
+    }
     order.amountIn = amount.to_u256();
-    Ok((order, swaps.first().copied()))
+    Ok((order, swaps.first().copied().or(across)))
 }
 
 /// [`decide`] for `payout`, its plan, planned amount and amount read off it: none for a
@@ -213,13 +227,21 @@ pub fn decide_payout(payout: &EvmPayout, now_s: u64) -> Option<Result<Decided, F
         return None;
     };
     Some(
-        decide(plan, terms.planned?, amount, now_s).map(|(order, swap)| Decided {
-            order,
-            swap,
-            amount,
-            gas_limit: plan.gas_limit,
+        decide(plan, terms.planned?, amount, now_s).map(|(order, at)| {
+            let across = at.filter(|at| selector_is_across(&order.steps[*at]));
+            Decided {
+                swap: at.filter(|_| across.is_none()),
+                across,
+                order,
+                amount,
+                gas_limit: plan.gas_limit,
+            }
         }),
     )
+}
+
+fn selector_is_across(step: &Step) -> bool {
+    step.data.get(..4) == Some(types::swapic::across::SWAP_AND_BRIDGE.as_slice())
 }
 
 /// The plan's KyberSwap `step` rewritten to `route` for `amount`, pure: the same swap but for
@@ -278,9 +300,15 @@ pub async fn fit(
     let Decided {
         mut order,
         swap,
+        across,
         amount,
         gas_limit,
     } = decided;
+    // an Across step: fitted with no read
+    if let Some(at) = across {
+        order.steps[at] = types::swapic::across::fit_step(&order.steps[at], amount.to_u256())
+            .map_err(|error| format!("the plan's Across deposit was not fitted: {error}"))?;
+    }
     if let Some(at) = swap {
         let route = reads
             .scaled(&order.steps[at].data, amount)

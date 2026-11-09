@@ -622,7 +622,7 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         Ok(landed_second.clone()),
     ];
     let (latest, per_entry) =
-        landed(&[first.clone(), replaced.clone()], &answers, None).expect("a whole answer is read");
+        landed(&[first.clone(), replaced.clone()], &answers, None, None).expect("a whole answer is read");
     assert_eq!(latest, BlockNumber::new(19_000_010));
     assert_eq!(
         per_entry,
@@ -641,7 +641,7 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         Ok(json!(null)),
     ];
     let (_, per_entry) =
-        landed(&[first.clone(), replaced.clone()], &crossed, None).expect("a whole answer is read");
+        landed(&[first.clone(), replaced.clone()], &crossed, None, None).expect("a whole answer is read");
     assert_eq!(
         per_entry,
         vec![None, None],
@@ -652,13 +652,14 @@ fn a_chunks_answers_are_sliced_per_entry_in_call_order() {
         landed(
             std::slice::from_ref(&first),
             &[Ok(json!("not a number")), Ok(json!(null))],
+            None,
             None
         ),
         None,
         "no head, no depth, nothing to decide"
     );
     assert_eq!(
-        landed(&[first, replaced], &[head, Ok(json!(null))], None),
+        landed(&[first, replaced], &[head, Ok(json!(null))], None, None),
         None,
         "fewer answers than calls is not an answer to this chunk"
     );
@@ -1040,6 +1041,7 @@ fn receipt_at(block: u64) -> Receipt {
         success: true,
         network_fee: types::TokenAmount::ZERO,
         eco_intent: None,
+        across: None,
     }
 }
 
@@ -1191,7 +1193,7 @@ fn a_closed_entry_is_only_sent_again_with_its_own_bytes() {
             "{line}"
         );
         assert_eq!(divergence(&kept, &receipt_at(101)), None);
-        assert_eq!(decided(&again, Some(reverted), 105), 0);
+        assert_eq!(decided(&again, Some(reverted.clone()), 105), 0);
         assert_eq!(outbox::get(open.key()), Some(again.clone()));
         // and it still leaves at the crediting depth, never decided again
         assert_eq!(decided(&again, Some(reverted), 112), 0);

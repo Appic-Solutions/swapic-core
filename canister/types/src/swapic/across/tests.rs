@@ -150,3 +150,177 @@ fn the_integrator_suffix_is_1dc0de_and_two_bytes() {
     assert_eq!(integrator_suffix(0x00ab), [0x1d, 0xc0, 0xde, 0x00, 0xab]);
     assert_eq!(integrator_suffix(0x12cd), [0x1d, 0xc0, 0xde, 0x12, 0xcd]);
 }
+
+/// T0's receipts as the nodes returned them: the Base source (`OrderStarted`, the periphery's
+/// pull and swap, `FundsDeposited`) and the Arbitrum fill (`FilledRelay`, the handler into the
+/// Runner).
+fn receipts() -> Value {
+    serde_json::from_str(include_str!("samples/t0_receipts.json")).unwrap()
+}
+
+fn log_parts(log: &Value) -> (Vec<[u8; 32]>, Vec<u8>) {
+    let topics = log["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|topic| b(topic).try_into().unwrap())
+        .collect();
+    (topics, b(&log["data"]))
+}
+
+fn logs_of(receipt: &Value, topic: [u8; 32]) -> Vec<(Vec<[u8; 32]>, Vec<u8>)> {
+    receipt["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(log_parts)
+        .filter(|(topics, _)| topics.first() == Some(&topic))
+        .collect()
+}
+
+fn word(address: EvmAddress) -> [u8; 32] {
+    addr(address).into_word().0
+}
+
+/// T0's deposit as Base's SpokePool logged it.
+fn t0_deposited() -> Deposited {
+    let r = receipts();
+    let (topics, data) = logs_of(&r["source"], topics::funds_deposited()).remove(0);
+    read_funds_deposited(&topics, &data, ChainId::BASE).unwrap()
+}
+
+#[test]
+fn t0s_relay_hashes_to_what_arbitrums_spoke_pool_answered() {
+    let deposited = t0_deposited();
+    assert_eq!(deposited.destination, 42_161);
+    let relay = &deposited.relay;
+    assert_eq!(relay.input_amount, TokenAmount::from(3_000_000u32));
+    assert_eq!(relay.output_amount, TokenAmount::from(2_930_727u32));
+    assert_eq!(relay.deposit_id, TokenAmount::from(6_434_219u32));
+    assert_eq!(relay.fill_deadline, 1_794_161_828);
+    // the log's exclusivity is the instant it ends, not the offset the step signs
+    assert_eq!(relay.exclusivity_deadline, 1_794_160_691);
+    assert_eq!(relay.message, b(&t0()["message"]));
+    // `getV3RelayHash` read on Arbitrum after the fill (p0/t0/verify.json)
+    let answered: [u8; 32] =
+        hex::decode("d947afdcf5afc7f7270b7a9090f5211e29cbcbbac253643ca2ad06fe7e8ce202")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    assert_eq!(relay.hash(ChainId::new(42_161)), answered);
+    // on another destination it is another relay
+    assert_ne!(relay.hash(ChainId::BASE), answered);
+}
+
+#[test]
+fn t0s_fill_repeats_its_deposit_and_names_its_relayer() {
+    let r = receipts();
+    let (topics, data) = logs_of(&r["fill"], topics::filled_relay()).remove(0);
+    let filled = read_filled_relay(&topics, &data).unwrap();
+    assert_eq!(filled.key, t0_deposited().relay.key());
+    assert_eq!(filled.fill_type, FillType::FastFill);
+    assert_eq!(filled.relayer, word(a(&t0()["exclusive_relayer"])));
+    assert_eq!(filled.updated_recipient, word(a(&t0()["recipient"])));
+    assert_eq!(filled.updated_output_amount, U256::from(2_930_727u32));
+    assert_eq!(filled.updated_message_hash, message_hash(&b(&t0()["message"])));
+}
+
+#[test]
+fn t0s_periphery_logged_the_identity_swap() {
+    let r = receipts();
+    let (topics, data) = logs_of(&r["source"], topics::swap_before_bridge()).remove(0);
+    let swapped = read_swap_before_bridge(&topics, &data).unwrap();
+    let usdc = a(&t0()["input_token"]);
+    assert_eq!(swapped.swap_token, usdc);
+    assert_eq!(swapped.input_token, usdc);
+    assert_eq!(swapped.swap_token_amount, U256::from(3_000_000u32));
+    assert_eq!(swapped.input_amount, U256::from(3_000_000u32));
+}
+
+#[test]
+fn a_log_of_another_event_reads_as_none() {
+    let r = receipts();
+    let (topics, data) = logs_of(&r["source"], topics::funds_deposited()).remove(0);
+    assert_eq!(read_filled_relay(&topics, &data), None);
+    assert_eq!(read_swap_before_bridge(&topics, &data), None);
+    assert_eq!(read_refund_root(&topics, &data), None);
+}
+
+#[test]
+fn a_refund_leaf_and_a_claim_read_back() {
+    use alloy_sol_types::SolEvent;
+    let canister = EvmAddress::new([0x8f; 20]);
+    let usdc = a(&t0()["input_token"]);
+    let leaf = ExecutedRelayerRefundRoot {
+        amountToReturn: U256::ZERO,
+        chainId: U256::from(8_453u32),
+        refundAmounts: vec![U256::from(5u8), U256::from(3_000_000u32)],
+        rootBundleId: 7,
+        leafId: 2,
+        l2TokenAddress: addr(usdc),
+        refundAddresses: vec![Address::repeat_byte(0x11), addr(canister)],
+        deferredRefunds: false,
+        caller: Address::repeat_byte(0x22),
+    };
+    let encoded = leaf.encode_log_data();
+    let topics: Vec<[u8; 32]> = encoded.topics().iter().map(|topic| topic.0).collect();
+    let read = read_refund_root(&topics, &encoded.data).unwrap();
+    assert_eq!(read.chain_id, 8_453);
+    assert_eq!(read.token, usdc);
+    assert_eq!(read.refunds[1], (canister, TokenAmount::from(3_000_000u32)));
+    assert!(!read.deferred);
+    let claim = ClaimedRelayerRefund {
+        l2TokenAddress: addr(usdc).into_word(),
+        refundAddress: addr(canister).into_word(),
+        amount: U256::from(9u8),
+        caller: addr(canister),
+    };
+    let encoded = claim.encode_log_data();
+    let topics: Vec<[u8; 32]> = encoded.topics().iter().map(|topic| topic.0).collect();
+    let read = read_claimed_refund(&topics, &encoded.data).unwrap();
+    assert_eq!(read.refund_address, word(canister));
+    assert_eq!(read.caller, canister);
+    assert_eq!(read.amount, TokenAmount::from(9u8));
+}
+
+#[test]
+fn a_fitted_deposit_keeps_the_ratio_and_every_other_byte() {
+    let d = deposit(&t0());
+    // T0's M is 3 USDC and F 2.930727
+    let lower = d.fitted(U256::from(2_900_000u32)).unwrap();
+    assert_eq!(lower.min_expected, U256::from(2_900_000u32));
+    assert_eq!(lower.output_amount, U256::from(2_833_036u32)); // floor(2930727 * 2.9 / 3)
+    assert_eq!(AcrossDeposit { min_expected: d.min_expected, output_amount: d.output_amount, ..lower.clone() }, d);
+    let same = d.fitted(d.min_expected).unwrap();
+    assert_eq!(same, d);
+    // the step reads back with its least the amount
+    assert_eq!(lower.step().min, U256::from(2_900_000u32));
+}
+
+#[test]
+fn an_orders_one_across_step_is_found() {
+    let d = deposit(&t0());
+    let other = Step {
+        target: Address::repeat_byte(0x01),
+        data: vec![0xaa; 8].into(),
+        token: Address::ZERO,
+        min: U256::ZERO,
+        writes: Vec::new(),
+    };
+    assert_eq!(across_step_at(&[other.clone(), d.step()]), Some(1));
+    assert_eq!(across_step_at(&[other.clone()]), None);
+    assert_eq!(across_step_at(&[d.step(), d.step()]), None);
+}
+
+#[test]
+fn a_fill_status_reads_from_its_word() {
+    let mut word = [0u8; 32];
+    assert_eq!(FillStatus::of(word), Some(FillStatus::Unfilled));
+    word[31] = 2;
+    assert_eq!(FillStatus::of(word), Some(FillStatus::Filled));
+    word[31] = 3;
+    assert_eq!(FillStatus::of(word), None);
+    word[31] = 2;
+    word[0] = 1;
+    assert_eq!(FillStatus::of(word), None);
+}

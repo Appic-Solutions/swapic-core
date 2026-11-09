@@ -148,6 +148,9 @@ impl<S: Store> State<S> {
                 }
             }
             TxPurpose::PoolApprove => {}
+            // a controller's claim of the canister's own deferred Across refunds: one at a time
+            // by its key (below), whatever the chain holds back
+            TxPurpose::AcrossClaim(_) => {}
             // an EVM sweep's one transaction: the sweep made on that chain and not taken back
             TxPurpose::Sweep(id) => {
                 let sendable = self

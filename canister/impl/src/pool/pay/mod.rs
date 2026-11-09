@@ -15,6 +15,11 @@
 //! on their chain (a CCTP Deliver: what the burn is given less the most Circle may keep); its
 //! deadline is at least 60 s away and at most the payout's; no party is sanctioned; the gas
 //! limit is at most `max_payout_gas`.
+//! An order whose rail is an Across deposit (BSC design 6.2.7) is read with the canister's
+//! Across fee bounds, so AX5 to AX14 hold (the depositor is the payer, the canister; the
+//! relayer keeps between the least and the most fee), and is signed only while every Across
+//! payout in flight with it stays within `across_in_flight_max` (D16). Its transaction's data
+//! ends with Swapic's integrator suffix (6.2.11), counted in its gas floor.
 //! A payout signed once answers its transaction's id, and is never signed again: a revert
 //! undoes it.
 
@@ -53,6 +58,39 @@ pub struct Payer<'a> {
     pub usdc: EvmAddress,
     /// Eco's prover, the one a payout's onward intent may name.
     pub eco_prover: Option<EvmAddress>,
+    /// The 2 bytes Across credits Swapic's deposits to: what an Across payout's data ends with.
+    pub across_integrator: Option<u16>,
+    /// What the Across payouts in flight hold now, micro USDC: the in-flight cap's other side.
+    pub across_out: TokenAmount,
+}
+
+/// The data a payout's transaction carries: `run(order)`, and for an order with an Across
+/// step Swapic's integrator suffix after it (BSC design 6.2.11), which Solidity ignores and
+/// the order id does not cover.
+pub fn payout_calldata(order: &Order, integrator: Option<u16>) -> Vec<u8> {
+    let mut data = swapic::run_calldata(order);
+    if let (Some(id), Some(_)) = (
+        integrator,
+        types::swapic::across::across_step_at(&order.steps),
+    ) {
+        data.extend_from_slice(&types::swapic::across::integrator_suffix(id));
+    }
+    data
+}
+
+/// What the Across payouts in flight hold now: every payout whose deposit is out on Across or
+/// owed back by it.
+pub fn across_out<S: Store>(state: &crate::state::State<S>) -> TokenAmount {
+    state
+        .pool()
+        .lines()
+        .across_owed
+        .iter()
+        .filter_map(|id| state.store().pool_payout(*id))
+        .filter_map(|payout| payout.amount)
+        .fold(TokenAmount::ZERO, |sum, amount| {
+            sum.checked_add(amount).unwrap_or(TokenAmount::MAX)
+        })
 }
 
 /// The least network fee of a CCTP payout from the pool chain: its own least fee for an
@@ -143,6 +181,13 @@ pub fn check_order(
             "a payout order carries no fee step: the canister pays itself nothing",
         ));
     }
+    // an Across payout: within the cap on what Across payouts hold in flight together (D16)
+    if plan.action == GasAction::RelayAcross {
+        let this = amount.unwrap_or(TokenAmount::from_u256(order.amountIn));
+        settings
+            .admits_across(this, payer.across_out)
+            .map_err(refused)?;
+    }
     if plan.action == GasAction::RelayCctp {
         // the canister pays a CCTP finish only where the user's network fee paid for one
         let floor = cctp_floor(&payer.chains, plan.arrival.as_ref()).map_err(refused)?;
@@ -194,7 +239,10 @@ pub fn check_order(
     }
     // the floor signing holds (`tx::least_gas`) on the calldata it signs: a limit under it is
     // refused here, before the payout opens, never answered "try later" at every signature
-    let least = MIN_GAS_LIMIT.max(crate::tx::least_gas(&swapic::run_calldata(order)));
+    let least = MIN_GAS_LIMIT.max(crate::tx::least_gas(&payout_calldata(
+        order,
+        payer.across_integrator,
+    )));
     if !(least..=settings.max_payout_gas).contains(&gas_limit) {
         return Err(refused(format!(
             "a gas limit of {gas_limit} is not between {least} and {}",
@@ -307,11 +355,14 @@ pub fn payer_of(
             domains: &config.cctp_domains,
             canister,
             eco_portal: config.eco_portal,
-            across_fee: None,
+            across_fee: config.across_fee.as_ref(),
         },
         swapic: chain.swapic,
         usdc: chain.usdc,
         eco_prover,
+        across_integrator: config.across_integrator,
+        // the callers that sign set it from the ledger
+        across_out: TokenAmount::ZERO,
     })
 }
 
@@ -342,11 +393,12 @@ pub fn checked_payout(
         .lines()
         .settings
         .ok_or_else(|| PoolError::Closed("the payouts have no settings".to_string()))?;
-    let payer = payer_of(
+    let mut payer = payer_of(
         &config,
         canister,
         crate::storage::flow_settings::get().eco_prover,
     )?;
+    payer.across_out = read_state(across_out);
     check_order(
         payout,
         order,
@@ -397,7 +449,7 @@ pub async fn sign_held(
         chain_id,
         swapic_address,
         Wei::ZERO,
-        swapic::run_calldata(order),
+        payout_calldata(order, config.across_integrator),
         gas_limit,
         GasAction::PoolPayout,
         Some(Detail::PoolPayout { order: pinned }),

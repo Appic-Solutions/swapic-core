@@ -125,3 +125,58 @@ fn a_read_past_a_time_waits_the_grain_and_the_depth_in_the_chains_blocks() {
         Duration::from_secs((16 + 12) * 12 + 60)
     );
 }
+
+/// BSC design 6.2.7 and D8: an Across fill is read only past its deadline; the SpokePool's own
+/// relay hash must be the canister's; then its status decides.
+#[test]
+fn an_across_fill_reads_past_its_deadline_and_trusts_only_its_own_hash() {
+    let local = [0x5a; 32];
+    let hash = json!(hex0x(&local));
+    let deadline = 1_000;
+    let read = |at: u64, hash: Value, status: Value| {
+        across_fill_of(Ok(header(90, at)), Ok(hash), Ok(status), local, deadline)
+    };
+    assert_eq!(
+        read(deadline, hash.clone(), word_of(2)),
+        Err(FillRead::TooEarly)
+    );
+    let past = deadline + 1;
+    assert!(matches!(
+        read(past, hash.clone(), word_of(2)),
+        Ok((AcrossFill::Filled, Header { number, .. })) if number == BlockNumber::new(90)
+    ));
+    for open in [0, 1] {
+        assert!(matches!(
+            read(past, hash.clone(), word_of(open)),
+            Ok((AcrossFill::Open, _))
+        ));
+    }
+    assert!(matches!(
+        read(past, json!(hex0x(&[0x5b; 32])), word_of(0)),
+        Ok((AcrossFill::HashDiffers, _))
+    ));
+    assert!(matches!(
+        read(past, hash, word_of(3)),
+        Err(FillRead::Unread(_))
+    ));
+}
+
+/// Attack M5: any fill a page holds, a removed one aside, counts; a page not answered is no
+/// answer.
+#[test]
+fn any_log_in_any_page_is_a_fill() {
+    let page = |logs: Value| Ok(logs);
+    assert_eq!(any_log(vec![page(json!([])), page(json!([]))]), Ok(false));
+    assert_eq!(
+        any_log(vec![page(json!([])), page(json!([{"removed": false}]))]),
+        Ok(true)
+    );
+    assert_eq!(any_log(vec![page(json!([{"removed": true}]))]), Ok(false));
+    assert!(any_log(vec![
+        page(json!([])),
+        Err(RpcError::Unanswered {
+            method: "eth_getLogs".to_string()
+        })
+    ])
+    .is_err());
+}

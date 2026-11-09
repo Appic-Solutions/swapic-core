@@ -24,6 +24,8 @@ type ActionAmounts = record {
   // The rebalancing's rows, optional as the pool's.
   pool_move : opt nat;
   release : nat;
+  // The canister's claim of its own deferred Across refunds, optional as the pool's.
+  across_claim : opt nat;
   // A controller's sweep, optional as the pool's.
   sweep : opt nat;
   pool_ck_deposit : opt nat;
@@ -50,6 +52,8 @@ type ActionGas = record {
   // move's ck deposit on Ethereum.
   pool_move : opt nat64;
   release : nat64;
+  // The canister's claim of its own deferred Across refunds, optional as the pool's.
+  across_claim : opt nat64;
   // A controller's sweep (`sweep_evm`): a native transfer or a `USDC.transfer`, optional
   // as the pool's.
   sweep : opt nat64;
@@ -663,6 +667,9 @@ type PayoutResolution = variant {
 type PayoutSettings = record {
   // The ck minter's slow route. None: off.
   ck : opt CkSettings;
+  // Micro USDC, the most the Across payouts in flight may hold together (signed,
+  // delivering, or owed back by Across). None: no Across payout is signed.
+  across_in_flight_max : opt nat;
   // Micro USDC, the least a payout's network fee may be.
   min_network_fee : nat;
   // How long a waiting payout waits for a valid order before it is retried, then undone
@@ -681,7 +688,8 @@ type PayoutStatus = variant {
   // deadline (nothing is signed for it again).
   Refunding : text;
   Failed : text;
-  // Its order ran on Base and published an Eco intent: paid once the intent's fill is read.
+  // Its order ran on Base and published an Eco intent or made an Across deposit: paid once
+  // its fill is read.
   Delivering;
   // Through the ck minter: its withdrawal is on its way, nothing burned yet.
   CkWithdrawing;
@@ -826,7 +834,13 @@ type PoolError = variant {
   Expired;
   ShortShares : record { have : nat; need : nat };
 };
-type PoolRail = variant { Eco; Cctp; SameChain };
+type PoolRail = variant {
+  Eco;
+  Cctp;
+  // An Across deposit from another chain, filled to the canister on the pool chain.
+  Across;
+  SameChain;
+};
 type PoolSettings = record {
   // Micro USDC, launch 1_000_000_000 ($1,000): the quoter's per swap cap, which the
   // canister stores and shows but enforces nowhere.
@@ -893,8 +907,8 @@ type RebalanceSettings = record {
 // `data` paying the Runner, rescaled to what arrived by `scaler` when one is named.
 // Addresses are EVM addresses.
 type Recipe = record { scaler : opt text; data : blob; target : text };
-type Result = variant { Ok : text; Err : SignError };
-type Result_1 = variant { Ok : nat64; Err : text };
+type Result = variant { Ok : nat64; Err : text };
+type Result_1 = variant { Ok : text; Err : SignError };
 type Result_10 = variant { Ok; Err : GuardError };
 type Result_11 = variant { Ok; Err : text };
 type Result_12 = variant { Ok; Err : SetRolesError };
@@ -1045,6 +1059,8 @@ type TxPurpose = variant {
   Sweep : nat64;
   // Eco's `cancelAndProve` of an unfilled intent, by the order id that published it.
   EcoRescue : blob;
+  // The canister's claim of its own deferred Across refunds on that chain.
+  AcrossClaim : nat64;
   // The canister's standing USDC allowance to Swapic.
   PoolApprove;
   // A gasless order relayed, by its relay key.
@@ -1080,11 +1096,18 @@ type WithdrawIcpOk = record { paid : nat; burned : nat };
 service : (InitArg) -> {
   // The book lines of every chain, in micro-USDC, with the last balance read.
   books : () -> (vec record { nat64; BookLines }) query;
+  // Controller-only, refused while halted: claims what Across's SpokePool on the pool chain
+  // (`chain_id`) holds back for the canister (BSC design 6.2.9), once its
+  // `getRelayerRefund(USDC, canister)` reads above zero, signed with the chain's
+  // `across_claim` gas row. One claim at a time on the chain. The USDC it brings is credited
+  // as any Across refund to the canister, to the payouts Across owes back first. Answers the
+  // signed transaction's id in `signed_txs`.
+  claim_across_refund : (nat64) -> (Result);
   // Controller-only. Derives the canister's EVM address from its threshold key and caches
   // it, or answers the cached one. Deploy needs this before anything else: the Swapic
   // contracts are configured with this address and it has to be funded for gas, and neither
   // can wait for the first transaction to derive it.
-  derive_evm_address : () -> (Result);
+  derive_evm_address : () -> (Result_1);
   event_count : () -> (nat64) query;
   // `len` is capped server-side; ask for the count first and page through. A page may be
   // shorter than asked (its size): read on until a page comes back empty.
@@ -1119,7 +1142,7 @@ service : (InitArg) -> {
   // the canister reads the gas price itself. A reading whose block is not above the stored
   // one's is kept out.
   finish_cctp : (nat64, blob, blob, opt Recipe, blob, nat64, opt ChainData) -> (
-      Result_1,
+      Result,
     );
   // Public, so it answers with the redacted view; `get_config_full` is the ops door onto
   // the real thing.
@@ -1245,7 +1268,7 @@ service : (InitArg) -> {
   // on, stored right after the role and the halt; an invalid one refuses the call. With none
   // the canister reads the gas price itself. A reading whose block is not above the stored
   // one's is kept out.
-  relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result_1);
+  relay_gasless : (nat64, blob, blob, nat64, opt ChainData) -> (Result);
   // Watcher-only, refused while halted: for the Eco intent the order `order_id` published (a
   // relayed order's, a pool payout's or a move's: one the canister signed for), once its fill
   // deadline passed with no fill, the canister reads the order's own transaction and the
@@ -1423,7 +1446,7 @@ service : (InitArg) -> {
   // The canister's cycles balance, for the watcher's low cycles alert alone: a balance anyone
   // could read would tell an outsider how far the canister is from freezing. Any other caller is
   // refused. The balance saturates at `u64::MAX` (about 18 million T), far above any real one.
-  watcher_cycles_balance : () -> (Result_1) query;
+  watcher_cycles_balance : () -> (Result) query;
   // Any caller (the 65-byte EIP-712 signature proves the staker; the watcher's
   // `POST /v2/withdraw` forwards here), refused while halted, while the pool is closed, and for
   // a sanctioned party. Burns the shares `usdc` is worth (rounded up, at most `max_shares` and

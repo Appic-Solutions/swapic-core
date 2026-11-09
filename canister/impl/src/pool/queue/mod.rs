@@ -18,7 +18,13 @@
 //!   read, once, past its route deadline (every node at one block whose time is past it,
 //!   `agreed::fill_after`): filled, it is paid; never filled, it is undone at once, the
 //!   user refunded, while its USDC comes back from Eco later (`PayoutRefunded`, credited to
-//!   the Base pocket only).
+//!   the Base pocket only);
+//! - a payout whose order deposited on Across (BSC design 6.2.7) is delivering until its fill
+//!   is read on the destination, once, at an agreed block past its fill deadline: the
+//!   SpokePool's own relay hash must be the canister's (D8), then filled, it is paid; open,
+//!   the destination's logs are read for a fill of it (attack M5), and with none it is undone
+//!   at once, the user refunded, its USDC owed back by Across (`AcrossRefunded`). A hash that
+//!   differs, or a fill logged for a deposit read open, stops it for a human.
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +36,9 @@ use crate::pool::{icp_swap, log};
 use crate::state::Store;
 use crate::storage::events::read_state;
 use crate::storage::pool as pool_store;
+use crate::agreed::{AcrossFill, Header};
 use types::eco::Fill;
+use types::pool::payout::AcrossOut;
 use types::events::TxPurpose;
 use types::pool::payout::{EvmPayout, PayoutSettings, PayoutStatus};
 use types::pool::{evm_payout_ref, PoolStep};
@@ -68,6 +76,8 @@ pub enum Next {
         intent: [u8; 32],
         after_s: u64,
     },
+    /// Its Across deposit's fill read on `chain`, at a block whose time is past `after_s`.
+    ReadAcrossFill { chain: ChainId, after_s: u64 },
     /// Stopped for a human.
     Stop(String),
 }
@@ -161,10 +171,14 @@ fn decide(
                 && payout
                     .fill_early_at
                     .is_none_or(|early| now_s >= early.as_secs().get().saturating_add(wait));
-            match payout.intent {
-                Some(intent) if ready => Next::ReadFill {
+            match (payout.intent, &payout.across) {
+                (Some(intent), _) if ready => Next::ReadFill {
                     chain: payout.terms.dst_chain,
                     intent,
+                    after_s,
+                },
+                (None, Some(across)) if ready => Next::ReadAcrossFill {
+                    chain: across.destination,
                     after_s,
                 },
                 _ => Next::Wait,
@@ -172,7 +186,12 @@ fn decide(
         }
         // never filled: the user's refund at once
         PayoutStatus::Unfilled => Next::Undo {
-            why: UNFILLED.to_string(),
+            why: if payout.across.is_some() {
+                ACROSS_UNFILLED
+            } else {
+                UNFILLED
+            }
+            .to_string(),
             checked: false,
         },
         // past its withdrawal the deadline undoes nothing: its drive decides on the minter's
@@ -244,10 +263,29 @@ pub fn refittable(payout: &EvmPayout, now: Timestamp) -> Option<Result<Decided, 
 /// Why a payout whose Eco intent never filled is undone.
 pub const UNFILLED: &str = "its Eco intent was not filled";
 
+/// Why a payout whose Across deposit was never filled is undone.
+pub const ACROSS_UNFILLED: &str = "its Across deposit was not filled";
+
+/// Why a delivering Across payout stops when the destination's relay hash is not the
+/// canister's (D8).
+pub const ACROSS_HASH_DIFFERS: &str = "ALERT: the destination SpokePool's relay hash of its Across      deposit is not the canister's: whether it was filled is not known, for a human";
+
+/// Why a delivering Across payout read open stops when the destination logged a fill of it
+/// (attack M5).
+pub const ACROSS_FILL_LOGGED: &str = "ALERT: its Across deposit reads open, and the destination      logged a fill of it: for a human";
+
+/// Why a delivering Across payout stops when its fill is read too long after its deposit to
+/// look for every fill of it in one read.
+pub const ACROSS_TOO_LATE: &str = "ALERT: its Across deposit's fill is read too long after the      deposit to look for every fill of it: for a human";
+
 /// The time a delivering payout's Eco intent can last be filled: the one rule for a pinned
 /// order's ([`crate::pool::eco::fill_read_after`]); with no order pinned, the latest any route
-/// the canister signs may run to past the payout's own deadline.
+/// the canister signs may run to past the payout's own deadline. An Across deposit's: its fill
+/// deadline.
 pub fn fill_read_after(payout: &EvmPayout) -> u64 {
+    if let Some(across) = &payout.across {
+        return across.fill_deadline();
+    }
     payout.order.as_ref().map_or_else(
         || {
             payout
@@ -276,6 +314,22 @@ pub trait ChainReads {
         intent: [u8; 32],
         after_s: u64,
     ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead>;
+    /// An Across deposit's fill on its destination `chain` at a block whose time is past
+    /// `after_s`, and that block's header.
+    async fn across_fill_after(
+        &self,
+        chain: ChainId,
+        across: &AcrossOut,
+        after_s: u64,
+    ) -> Result<(AcrossFill, Header), crate::agreed::FillRead>;
+    /// Whether the destination `chain` logged a fill of the deposit in the blocks it could be
+    /// in up to `header`: Ok(None) when those are too many to read at once.
+    async fn fill_logged(
+        &self,
+        chain: ChainId,
+        across: &AcrossOut,
+        header: Header,
+    ) -> Result<Option<bool>, String>;
 }
 
 /// The chains themselves, read by every node at an agreed block.
@@ -297,6 +351,61 @@ impl ChainReads for LiveReads {
     ) -> Result<(Fill, BlockNumber), crate::agreed::FillRead> {
         crate::agreed::fill_after(chain, intent, after_s).await
     }
+
+    async fn across_fill_after(
+        &self,
+        chain: ChainId,
+        across: &AcrossOut,
+        after_s: u64,
+    ) -> Result<(AcrossFill, Header), crate::agreed::FillRead> {
+        let spoke_pool = spoke_pool_of(chain).map_err(crate::agreed::FillRead::Unread)?;
+        crate::agreed::across_fill_after(chain, spoke_pool, &across.relay, after_s).await
+    }
+
+    async fn fill_logged(
+        &self,
+        chain: ChainId,
+        across: &AcrossOut,
+        header: Header,
+    ) -> Result<Option<bool>, String> {
+        let spoke_pool = spoke_pool_of(chain)?;
+        let block_ms = crate::storage::config::with(|config| {
+            config
+                .evm_chains
+                .get(chain)
+                .map(|evm| u64::try_from(evm.block_time.as_millis()).unwrap_or(u64::MAX))
+        })
+        .unwrap_or(chain.block_seconds().saturating_mul(1_000));
+        let Some(pages) = crate::pool::across::log_pages(
+            header.number,
+            header.timestamp,
+            across.deposit_time,
+            block_ms,
+        ) else {
+            return Ok(None);
+        };
+        crate::agreed::filled_relay_logged(
+            chain,
+            spoke_pool,
+            across.relay.origin_chain_id,
+            across.relay.deposit_id.to_u256(),
+            &pages,
+        )
+        .await
+        .map(Some)
+    }
+}
+
+/// `chain`'s Across SpokePool, as the canister's config pins it.
+fn spoke_pool_of(chain: ChainId) -> Result<types::EvmAddress, String> {
+    crate::storage::config::with(|config| {
+        config
+            .evm_chains
+            .get(chain)
+            .and_then(|evm| evm.across)
+            .map(|pins| pins.spoke_pool)
+    })
+    .ok_or_else(|| format!("no Across pins are configured on chain {chain}"))
 }
 
 fn record(step: PoolStep, now: Timestamp) -> bool {
@@ -365,8 +474,13 @@ pub async fn pass_with(
         let waits = match payout.status {
             PayoutStatus::Delivering | PayoutStatus::Reverted => {
                 let config = crate::storage::config::get();
+                // an Across deposit's fill is read on its own destination
+                let destination = payout
+                    .across
+                    .as_ref()
+                    .map_or(payout.terms.dst_chain, |across| across.destination);
                 Waits {
-                    fill: crate::agreed::fill_wait_in(&config, payout.terms.dst_chain),
+                    fill: crate::agreed::fill_wait_in(&config, destination),
                     // a reverted order's `used` is read on the pool chain, whatever the
                     // payout pays on
                     ran: config
@@ -441,6 +555,69 @@ pub async fn pass_with(
                 // not read: asked again next pass
                 Err(crate::agreed::FillRead::Unread(_)) => {}
             },
+            Next::ReadAcrossFill { chain, after_s } => {
+                let Some(across) = payout.across.as_ref() else {
+                    continue;
+                };
+                let stop = |why: &str| {
+                    log(&format!("the pool payout {id}: {why}"));
+                    record(
+                        PoolStep::PayoutStopped {
+                            id,
+                            why: why.to_string(),
+                        },
+                        clock(),
+                    )
+                };
+                match reads.across_fill_after(chain, across, after_s).await {
+                    Ok((AcrossFill::Filled, header)) => {
+                        acted += usize::from(record(
+                            PoolStep::PayoutDelivered {
+                                id,
+                                block: header.number,
+                            },
+                            clock(),
+                        ))
+                    }
+                    Ok((AcrossFill::HashDiffers, _)) => {
+                        acted += usize::from(stop(ACROSS_HASH_DIFFERS))
+                    }
+                    // read open: a fill the destination logged stops it, none undoes it
+                    Ok((AcrossFill::Open, header)) => {
+                        match reads.fill_logged(chain, across, header).await {
+                            Ok(Some(false)) => {
+                                if !record(
+                                    PoolStep::PayoutUnfilled {
+                                        id,
+                                        block: header.number,
+                                    },
+                                    clock(),
+                                ) {
+                                    continue;
+                                }
+                                acted += 1;
+                                // the user's refund at once; Across's refund credits the pool
+                                // later
+                                if undo(&payout, ACROSS_UNFILLED.to_string(), clock())
+                                    && payout.is_icp_swap()
+                                {
+                                    let _ = icp_swap::drive(ledgers, id, clock, guard).await;
+                                }
+                            }
+                            Ok(Some(true)) => acted += usize::from(stop(ACROSS_FILL_LOGGED)),
+                            Ok(None) => acted += usize::from(stop(ACROSS_TOO_LATE)),
+                            // not read: asked again next pass
+                            Err(why) => log(&format!(
+                                "the pool payout {id}'s Across fill logs were not read: {why}"
+                            )),
+                        }
+                    }
+                    Err(crate::agreed::FillRead::TooEarly) => {
+                        acted += usize::from(record(PoolStep::PayoutFillEarly { id }, clock()))
+                    }
+                    Err(crate::agreed::FillRead::Unread(_)) => {}
+                }
+            }
             Next::Undo { why, checked } => {
                 if checked {
                     let Some(pinned) = payout.order.clone() else {

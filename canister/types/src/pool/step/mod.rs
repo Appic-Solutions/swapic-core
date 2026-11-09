@@ -354,6 +354,10 @@ pub enum PoolStep {
         /// The Eco intent the order published, read off the receipt.
         #[cbor(n(3), with = "minicbor::bytes")]
         intent: Option<[u8; 32]>,
+        /// The Across deposit the order made, read off the receipt, boxed: delivering until
+        /// its fill is read.
+        #[n(4)]
+        across: Option<Box<AcrossOut>>,
     },
     /// Its transaction reverted at depth: its USDC reserved again for its undo, which comes
     /// once Swapic says its order never ran; never signed again.
@@ -901,6 +905,38 @@ pub enum PoolStep {
         burned: bool,
     },
     // 87 is reserved for the cancelled EVM to ICP token route: never reused.
+    /// An Across refund to the canister (a relayer refund leaf, or the canister's own claim of
+    /// a deferred one) credited at once (BSC design D9): the Across payouts owed back,
+    /// `refunded`, oldest fill deadline first, each its whole deposit, and the rest of
+    /// `amount` the canister's own surplus, booked to the pool chain's unattributed line.
+    #[n(53)]
+    AcrossRefunded {
+        #[n(0)]
+        credit: CreditKey,
+        #[n(1)]
+        amount: TokenAmount,
+        #[n(2)]
+        block: BlockNumber,
+        #[n(3)]
+        refunded: Vec<u64>,
+        #[n(4)]
+        surplus: TokenAmount,
+    },
+    /// The canister signed `SpokePool.claimRelayerRefund` for its own deferred refunds on
+    /// `chain_id` (a controller's `claim_across_refund`): the transaction's exact bytes,
+    /// spending the nonce `TxCreated` handed out for it. Its transfer is credited as any Across
+    /// refund.
+    #[n(54)]
+    AcrossClaimSigned {
+        #[n(0)]
+        chain_id: ChainId,
+        #[n(1)]
+        nonce: Nonce,
+        #[n(2)]
+        tx_hash: TxHash,
+        #[cbor(n(3), with = "minicbor::bytes")]
+        raw_tx: Vec<u8>,
+    },
 }
 
 impl PoolStep {
@@ -990,6 +1026,8 @@ impl PoolStep {
             PoolStep::PayoutCkWithdrawn { .. } => "PayoutCkWithdrawn",
             PoolStep::PayoutCkLanded { .. } => "PayoutCkLanded",
             PoolStep::PayoutCkReimbursed { .. } => "PayoutCkReimbursed",
+            PoolStep::AcrossRefunded { .. } => "AcrossRefunded",
+            PoolStep::AcrossClaimSigned { .. } => "AcrossClaimSigned",
         }
     }
 
@@ -1001,7 +1039,8 @@ impl PoolStep {
             | PoolStep::SweepSigned { raw_tx, .. }
             | PoolStep::OrphanRefundSigned { raw_tx, .. }
             | PoolStep::MoveSigned { raw_tx, .. }
-            | PoolStep::EcoRescueSigned { raw_tx, .. } => raw_tx.clear(),
+            | PoolStep::EcoRescueSigned { raw_tx, .. }
+            | PoolStep::AcrossClaimSigned { raw_tx, .. } => raw_tx.clear(),
             // an order about to be signed as run(order) is the same calldata
             PoolStep::PayoutOpened {
                 plan: Some(plan), ..
@@ -1061,6 +1100,12 @@ impl PoolStep {
                 tx_hash,
                 raw_tx,
                 ..
+            }
+            | PoolStep::AcrossClaimSigned {
+                chain_id,
+                nonce,
+                tx_hash,
+                raw_tx,
             } => Some((*chain_id, *nonce, *tx_hash, raw_tx)),
             _ => None,
         }
@@ -1079,6 +1124,9 @@ impl PoolStep {
             PoolStep::MoveSigned { id, .. } => Some(crate::events::TxPurpose::PoolMove(*id)),
             PoolStep::EcoRescueSigned { order_id, .. } => {
                 Some(crate::events::TxPurpose::EcoRescue(*order_id))
+            }
+            PoolStep::AcrossClaimSigned { chain_id, .. } => {
+                Some(crate::events::TxPurpose::AcrossClaim(*chain_id))
             }
             _ => None,
         }
@@ -1103,6 +1151,7 @@ impl PoolStep {
                 | PoolStep::PayoutUnfilled { .. }
                 | PoolStep::PayoutResolved { .. }
                 | PoolStep::PayoutCkReimbursed { .. }
+                | PoolStep::AcrossRefunded { .. }
                 | PoolStep::Minted { .. }
                 // a deposit retried pays again; one refunded frees ckUSDC for the queue
                 | PoolStep::DepositResolved { .. }

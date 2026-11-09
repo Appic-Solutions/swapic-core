@@ -71,17 +71,25 @@ fn word(answer: Result<Value, RpcError>) -> Result<[u8; 32], String> {
 }
 
 /// The head the nodes agreed on, rounded down to [`rpc::HEAD_GRAIN`], and the chain's
-/// crediting depth (how far below it a block no reorg is expected to take back stands).
+/// crediting depth (how far below it a block no reorg is expected to take back stands). A
+/// chain final at its finalized block (BNB Chain, BSC design 6.2.3) answers that block,
+/// rounded down the same way, and no depth: every block below it is final.
 async fn agreed_head(chain: ChainId) -> Result<(BlockNumber, BlockDepth), String> {
-    let depth = crate::tx::credit_confirmations(&config::get(), chain)
-        .map_err(|_| format!("chain {chain} has no depth configured"))?;
-    let mut answers = rpc::rpc_batch_agreed(
-        chain,
-        &[("eth_blockNumber", json!([]), Keep::Head)],
-        rpc::MAX_BLOCK_NUMBER_BYTES,
-    )
-    .await
-    .map_err(|error| format!("the head: {:?}", error.kind()))?;
+    let (depth, call) = match crate::tx::credit_confirmations(&config::get(), chain) {
+        Ok(depth) => (depth, ("eth_blockNumber", json!([]), Keep::Head)),
+        Err(crate::tx::NoDepth::Finalized { .. }) => (
+            BlockDepth::new(0),
+            (
+                "eth_feeHistory",
+                json!(["0x1", "finalized", []]),
+                Keep::FinalizedHead,
+            ),
+        ),
+        Err(_) => return Err(format!("chain {chain} has no depth configured")),
+    };
+    let mut answers = rpc::rpc_batch_agreed(chain, &[call], rpc::MAX_BLOCK_NUMBER_BYTES.max(1_024))
+        .await
+        .map_err(|error| format!("the head: {:?}", error.kind()))?;
     let head = answers
         .pop()
         .and_then(Result::ok)
@@ -232,4 +240,142 @@ pub async fn fill_after(
         method: "eth_call".to_string(),
     }));
     fill_of(header, claimant, after_s)
+}
+
+/// What a destination SpokePool says of an Across deposit's fill at an agreed block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcrossFill {
+    Filled,
+    /// Unfilled, or a slow fill requested and not executed.
+    Open,
+    /// The SpokePool's own `getV3RelayHash` of the relay is not the canister's (D8): whether
+    /// it was filled is not known.
+    HashDiffers,
+}
+
+/// What an agreed header, `getV3RelayHash(relay)` and `fillStatuses(local)` say past
+/// `after_s`, pure: the fill and the header once the block is past the time, `TooEarly`
+/// before it.
+pub fn across_fill_of(
+    header: Result<Value, RpcError>,
+    hash: Result<Value, RpcError>,
+    status: Result<Value, RpcError>,
+    local: [u8; 32],
+    after_s: u64,
+) -> Result<(AcrossFill, Header), FillRead> {
+    let header =
+        header.map_err(|error| FillRead::Unread(format!("the block: {:?}", error.kind())))?;
+    let header = Header::parse(&header)
+        .ok_or_else(|| FillRead::Unread("the block is not one the nodes see".to_string()))?;
+    if header.timestamp <= after_s {
+        return Err(FillRead::TooEarly);
+    }
+    if word(hash).map_err(FillRead::Unread)? != local {
+        return Ok((AcrossFill::HashDiffers, header));
+    }
+    let status = word(status).map_err(FillRead::Unread)?;
+    match types::swapic::across::FillStatus::of(status) {
+        Some(types::swapic::across::FillStatus::Filled) => Ok((AcrossFill::Filled, header)),
+        Some(_) => Ok((AcrossFill::Open, header)),
+        None => Err(FillRead::Unread(
+            "fillStatuses answered no status".to_string(),
+        )),
+    }
+}
+
+/// An Across deposit's fill on `chain`'s SpokePool `spoke_pool`, read by every node at one
+/// agreed block whose time is past `after_s` (its fill deadline: no fill lands after it), with
+/// that block's header (BSC design 6.2.7). `TooEarly` while no agreed block is.
+pub async fn across_fill_after(
+    chain: ChainId,
+    spoke_pool: EvmAddress,
+    relay: &types::swapic::across::RelayData,
+    after_s: u64,
+) -> Result<(AcrossFill, Header), FillRead> {
+    let local = relay.hash(chain);
+    let block = agreed_block(chain).await.map_err(FillRead::Unread)?;
+    let calls = [
+        (
+            "eth_getBlockByNumber",
+            json!([block_tag(block), false]),
+            Keep::Header,
+        ),
+        (
+            "eth_call",
+            call(spoke_pool, &relay.hash_calldata(), block),
+            Keep::Whole,
+        ),
+        (
+            "eth_call",
+            call(
+                spoke_pool,
+                &types::swapic::across::fill_statuses_calldata(local),
+                block,
+            ),
+            Keep::Whole,
+        ),
+    ];
+    let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_BLOCK_ANSWER_BYTES)
+        .await
+        .map_err(|error| FillRead::Unread(format!("the SpokePool: {:?}", error.kind())))?;
+    let mut answers = answers.into_iter();
+    let mut next = |method: &str| {
+        answers.next().unwrap_or(Err(RpcError::Unanswered {
+            method: method.to_string(),
+        }))
+    };
+    let header = next("eth_getBlockByNumber");
+    let hash = next("eth_call");
+    let status = next("eth_call");
+    across_fill_of(header, hash, status, local, after_s)
+}
+
+/// The most one agreed answer of a fill's log pages may be: empty pages, or the one fill.
+const MAX_LOGS_ANSWER_BYTES: u64 = 64 * 1024;
+
+/// Whether `answers` (one `eth_getLogs` answer per page) hold any log a reorg did not remove,
+/// pure; Err when a page was not answered.
+pub fn any_log(answers: Vec<Result<Value, RpcError>>) -> Result<bool, String> {
+    let mut any = false;
+    for answer in answers {
+        let answer = answer.map_err(|error| format!("a page: {:?}", error.kind()))?;
+        let logs = answer.as_array().ok_or("a page answered no list")?;
+        any |= logs
+            .iter()
+            .any(|log| log.get("removed").and_then(Value::as_bool) != Some(true));
+    }
+    Ok(any)
+}
+
+/// Whether `chain`'s SpokePool `spoke_pool` logged a `FilledRelay` of the deposit `deposit_id`
+/// from `origin` in `pages` (each `[from, to]`), read by every node (attack M5: the second,
+/// independent check before an unfilled deposit's undo). Err when it was not read.
+pub async fn filled_relay_logged(
+    chain: ChainId,
+    spoke_pool: EvmAddress,
+    origin: ChainId,
+    deposit_id: alloy_primitives::U256,
+    pages: &[(u64, u64)],
+) -> Result<bool, String> {
+    let topics = [
+        hex0x(&types::swapic::across::topics::filled_relay()),
+        hex0x(&alloy_primitives::U256::from(origin.get()).to_be_bytes::<32>()),
+        hex0x(&deposit_id.to_be_bytes::<32>()),
+    ];
+    let calls: Vec<(&str, Value, Keep)> = pages
+        .iter()
+        .map(|(from, to)| {
+            let filter = json!({
+                "address": spoke_pool.to_string(),
+                "topics": topics,
+                "fromBlock": format!("0x{from:x}"),
+                "toBlock": format!("0x{to:x}"),
+            });
+            ("eth_getLogs", json!([filter]), Keep::Whole)
+        })
+        .collect();
+    let answers = rpc::rpc_batch_agreed(chain, &calls, MAX_LOGS_ANSWER_BYTES)
+        .await
+        .map_err(|error| format!("the fill's logs: {:?}", error.kind()))?;
+    any_log(answers)
 }

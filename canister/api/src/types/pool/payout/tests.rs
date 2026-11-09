@@ -44,6 +44,7 @@ fn payout_settings_cross_the_wire_and_back() {
         max_payout_gas: 2_000_000,
         cctp_payouts: false,
         ck: None,
+        across_in_flight_max: None,
     };
     let bytes = Encode!(&wire).unwrap();
     assert_eq!(Decode!(&bytes, PayoutSettings).unwrap(), wire);
@@ -53,7 +54,7 @@ fn payout_settings_cross_the_wire_and_back() {
     // CCTP payouts on: a payout below the destination's floor is refused, at it signed
     let cctp = PayoutSettings {
         cctp_payouts: true,
-        ..wire
+        ..wire.clone()
     };
     let domain = domain::PayoutSettings::try_from(cctp.clone()).unwrap();
     assert_eq!(PayoutSettings::from(&domain), cctp);
@@ -64,6 +65,21 @@ fn payout_settings_cross_the_wire_and_back() {
     assert_eq!(domain.admits_cctp(floor, floor), Ok(()));
     assert!(domain::PayoutSettings::default()
         .admits_cctp(TokenAmount::MAX, floor)
+        .is_err());
+    // the Across in-flight cap crosses too, and with none no Across payout is signed
+    let capped = PayoutSettings {
+        across_in_flight_max: Some(Nat::from(2_000_000_000_u64)),
+        ..wire
+    };
+    let domain = domain::PayoutSettings::try_from(capped.clone()).unwrap();
+    assert_eq!(PayoutSettings::from(&domain), capped);
+    let out = TokenAmount::from(1_999_000_000_u64);
+    assert_eq!(domain.admits_across(TokenAmount::from(1_000_000_u64), out), Ok(()));
+    assert!(domain
+        .admits_across(TokenAmount::from(1_000_001_u64), out)
+        .is_err());
+    assert!(domain::PayoutSettings::default()
+        .admits_across(TokenAmount::ONE, TokenAmount::ZERO)
         .is_err());
 }
 
