@@ -169,7 +169,9 @@ fn a_line_that_does_not_read_is_not_due() {
 }
 
 /// On the pool chain a past fee needs what the balance holds beyond the books: exactly enough
-/// passes, a micro more does not, and USDC the pool has on its way out is not counted.
+/// passes, a micro more does not. A bridged payout the pool still holds in flight has left the
+/// address and is not taken off the balance again (live, 2026-11-09: two Across payouts of
+/// $4.945 made the job pass over the last 57 Base fees, $3.790446, exactly the surplus).
 #[test]
 fn a_past_fee_must_fit_the_surplus() {
     let state = State::new(MemoryStore::default());
@@ -177,31 +179,55 @@ fn a_past_fee_must_fit_the_surplus() {
         pool_chain: Some(ChainId::BASE),
         ..types::Config::default()
     };
-    let holds = |amount: u32| {
+    let holds = |state: &State<MemoryStore>, amount: u32| {
         surplus_holds(
-            &state,
+            state,
             &config,
             ChainId::BASE,
             BlockNumber::new(10),
-            TokenAmount::from(14_974_902_u32),
+            TokenAmount::from(3_790_446_u32),
             TokenAmount::from(amount),
         )
     };
-    assert!(holds(14_974_902));
-    assert!(!holds(14_974_903));
+    assert!(holds(&state, 3_790_446));
+    assert!(!holds(&state, 3_790_447));
     let mut ledger = types::pool::PoolLedger::default();
-    ledger.pockets.base.in_flight = TokenAmount::from(1_u8);
+    ledger.pockets.base.in_flight = TokenAmount::from(4_945_000_u32);
     let mut store = MemoryStore::default();
     store.put_pool_ledger(ledger);
-    let moving = State::new(store);
-    assert!(!surplus_holds(
-        &moving,
-        &config,
-        ChainId::BASE,
-        BlockNumber::new(10),
-        TokenAmount::from(14_974_902_u32),
-        TokenAmount::from(14_974_902_u32),
-    ));
+    assert!(holds(&State::new(store), 64_631));
+}
+
+/// An upgrade after a walk that passed some over walks the same lines again; any other job is
+/// carried on as it stands.
+#[test]
+fn a_walk_that_passed_some_over_runs_again_at_the_next_upgrade() {
+    let done = FeeCatchUp {
+        next: 1_561,
+        end: 1_561,
+        tries: 0,
+        passed_over: 57,
+    };
+    assert_eq!(
+        again(done),
+        Some(FeeCatchUp {
+            next: 0,
+            end: 1_561,
+            tries: 0,
+            passed_over: 0,
+        })
+    );
+    let clean = FeeCatchUp {
+        passed_over: 0,
+        ..done
+    };
+    assert_eq!(again(clean), Some(clean));
+    let running = FeeCatchUp {
+        next: 900,
+        passed_over: 3,
+        ..done
+    };
+    assert_eq!(again(running), Some(running));
 }
 
 /// The walk is done at its end, and an empty log has nothing to walk.

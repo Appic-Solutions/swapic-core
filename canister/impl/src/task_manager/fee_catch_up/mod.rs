@@ -53,8 +53,12 @@ thread_local! {
 /// Called by every upgrade: the first one fixes where the walk ends, and any one before the walk
 /// is done wires its next pass again, since timers live in the heap.
 pub fn start() {
-    let job = timer_state::update(|state| match state.fee_catch_up {
-        Some(job) => (job, false),
+    let job = timer_state::update(|state| match state.fee_catch_up.and_then(again) {
+        Some(job) if Some(job) == state.fee_catch_up => (job, false),
+        Some(job) => {
+            state.fee_catch_up = Some(job);
+            (job, true)
+        }
         None => {
             let job = FeeCatchUp {
                 end: event_count(),
@@ -67,6 +71,21 @@ pub fn start() {
     if !job.is_done() {
         arm(NEXT_PASS);
     }
+}
+
+/// The job an upgrade carries on with, pure: as it stands, or, once it is done having passed some
+/// over, the same lines walked again from the start, so what it gave up on is read once more.
+/// What it booked already costs no read on the second walk.
+pub fn again(job: FeeCatchUp) -> Option<FeeCatchUp> {
+    if job.is_done() && job.passed_over > 0 {
+        return Some(FeeCatchUp {
+            next: 0,
+            end: job.end,
+            tries: 0,
+            passed_over: 0,
+        });
+    }
+    Some(job)
 }
 
 fn arm(delay: Duration) {
@@ -107,8 +126,9 @@ pub fn due_of<S: Store>(state: &State<S>, line: &EventType, setup: &Setup) -> Op
 
 /// Whether a past fee of `amount` on the pool chain may be booked, pure: what every node read
 /// there at `block` (`observed`) holds beyond the lines as they stand now, this job's own lines
-/// included, less the pool's USDC on its way out, which the balance still reads while no line
-/// holds it, must still hold it.
+/// included, must still hold it. Asked only while no transaction of the canister is open on the
+/// chain, so no USDC on its way out still reads in that balance; the pool's `in_flight` (a
+/// bridged payout until its fill is read) has left the address and is not taken off again.
 pub fn surplus_holds<S: Store>(
     state: &State<S>,
     config: &types::Config,
@@ -117,8 +137,6 @@ pub fn surplus_holds<S: Store>(
     observed: TokenAmount,
     amount: TokenAmount,
 ) -> bool {
-    let moving = state.pool().pockets.base.in_flight;
-    let observed = observed.checked_sub(moving).unwrap_or(TokenAmount::ZERO);
     let (expected, _) = expected_at(
         state,
         chain,
@@ -186,8 +204,9 @@ async fn book(due: &Due, canister: EvmAddress) -> Booked {
                     "a transaction of the canister on the pool chain is still open".to_string(),
                 ));
             }
+            // waited for, not passed over: an arrival or a payout between two reads moves it
             if !surplus_holds(state, &config, due.chain, block, observed, *amount) {
-                return Err(Booked::PassedOver(format!(
+                return Err(Booked::Later(format!(
                     "its {amount} is above what the balance holds beyond the books"
                 )));
             }

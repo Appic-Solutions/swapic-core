@@ -279,6 +279,40 @@ fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
             )
         });
         assert!(busy.is_some_and(|why| why.contains("still open")));
+        // a bridged payout the pool still holds in flight has left the address: once the chain
+        // is quiet it takes nothing off the balance
+        let mut ledger = crate::storage::pool::ledger();
+        ledger.pockets.base.in_flight = TokenAmount::from(4_945_000_u32);
+        let mut store = crate::state::MemoryStore::default();
+        store.put_pool_ledger(ledger);
+        let line = EventType::Books {
+            chain_id: ChainId::BASE,
+            step: BookStep::FeeEarned {
+                tx_hash: TxHash::new([1; 32]),
+                amount: TokenAmount::from(5_000_000_u32),
+                block: Some(types::BlockNumber::new(1)),
+            },
+        };
+        let mut state = crate::state::State::new(store);
+        crate::state::transitions::apply_state_transition(
+            &mut state,
+            &types::events::Event {
+                index: types::EventIndex::new(0),
+                timestamp: at(1),
+                payload: line,
+            },
+        );
+        assert_eq!(
+            balance_refuses(
+                &state,
+                &config,
+                ChainId::BASE,
+                types::BlockNumber::new(10),
+                TokenAmount::from(5_000_000_u32),
+                false,
+            ),
+            None
+        );
         assert!(why.contains("below the books"), "{why}");
     });
 }

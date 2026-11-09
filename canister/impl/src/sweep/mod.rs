@@ -41,20 +41,16 @@ pub fn balance_refuses<S: Store>(
     if chain == ChainId::ETHEREUM && !crate::pool::rebalance::open_moves(state).is_empty() {
         return Some("a rebalancing move is open on Ethereum".to_string());
     }
-    // USDC on its way out still reads in the balance while no line holds it: a payout or a
-    // move in flight, an earlier sweep not final yet. So a sweep waits for the chain to be
-    // quiet, and the pool's moving USDC is counted on its chain besides
+    // USDC on its way out still reads in the balance while no line holds it, but only while
+    // its transaction is open: a payout or a move signed, an earlier sweep not final yet. So a
+    // sweep waits for the chain to be quiet. Once that transaction is final the USDC has left
+    // the address and the lines leave it out too, whatever the pool's `in_flight` still holds
+    // (a bridged payout stays there until its fill is read): it is never taken off again
     if open_on_chain {
         return Some(format!(
             "a transaction of the canister on chain {chain} is still open"
         ));
     }
-    let moving = if config.pool_chain == Some(chain) {
-        state.pool().pockets.base.in_flight
-    } else {
-        TokenAmount::ZERO
-    };
-    let observed = observed.checked_sub(moving).unwrap_or(TokenAmount::ZERO);
     let (expected, short) = crate::books::expected_at(
         state,
         chain,
