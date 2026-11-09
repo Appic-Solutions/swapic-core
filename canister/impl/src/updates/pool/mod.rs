@@ -6,10 +6,10 @@ use crate::storage::sanctions::is_sanctioned;
 use ic_cdk::update;
 use settlement_api::types::chain_data::ChainData;
 pub use settlement_api::types::pool::{
-    CkResolution, CkSwapTerms, DepositResolution, EvmWithdrawal, IcpRoute, IcpSwapTerms,
-    OrphanAction, PayPayoutOk, PayoutResolution, PayoutSettings, PoolApproveOk, PoolArrival,
-    PoolArrivalOutcome, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk, StakeResolution,
-    SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
+    AcrossFillCheck, CkResolution, CkSwapTerms, DepositResolution, EvmWithdrawal, IcpRoute,
+    IcpSwapTerms, OrphanAction, PayPayoutOk, PayoutResolution, PayoutSettings, PoolApproveOk,
+    PoolArrival, PoolArrivalOutcome, PoolError, PoolSettings, StakeIcpArgs, StakeIcpOk,
+    StakeResolution, SwapFromIcpOk, WithdrawEvmOk, WithdrawIcpArgs, WithdrawIcpOk,
 };
 use types::pool::PoolStep;
 
@@ -329,6 +329,18 @@ pub async fn pay_payout(
     pool::pay::pay_payout(id, order, gas_limit, reading)
         .await
         .map(|tx_id| PayPayoutOk { tx_id })
+}
+
+/// The watcher or a controller, refused while halted: the watcher saw the fill of payout
+/// `id`'s Across deposit on its destination, and the canister reads it once itself, at an
+/// agreed block, as its queue would. Filled: the payout is paid (`Paid`). Anything else (open,
+/// no agreed block past it yet) changes nothing but the time of the read (`NotYet`); the
+/// canister's own read at the fill deadline is the only one that finds a deposit unfilled.
+/// At most one read per fill wait (`TooSoon`); a payout no longer delivering is not read
+/// (`NotDelivering`). An outcall that failed answers `Unavailable`: ask again.
+#[update]
+pub async fn check_across_fill(id: u64) -> Result<AcrossFillCheck, PoolError> {
+    pool::across::nudge::door(id).await
 }
 
 /// Controller-only, refused while halted (orphans are ALWAYS held for a
