@@ -3240,10 +3240,10 @@ fn two_sales_at_one_pool_never_share_a_reading_and_each_sells_once() {
         2,
         "each signed once"
     );
-    assert!(
-        sale.quotes_asked() >= 2,
-        "the second read for itself, its reading beside the pull not used"
-    );
+    // the second's door found the pool held and read nothing beside its pull: the one quote it
+    // asked is its own, once the pool was free. A reading made stale by a leg arriving after it
+    // began is `ReadAhead::serves`' unit test
+    assert_eq!(sale.quotes_asked(), 2);
 }
 
 /// A sale over before its reads come back: the fit reads for itself, as it always could, and

@@ -203,6 +203,8 @@ struct Fake {
     /// A token whose approval may stand: what the pool may still pull of it, or that the read
     /// fails. None: an approval is for the swap alone.
     standing: Cell<Option<Result<TokenAmount, ()>>>,
+    /// The ledger refuses a standing approval.
+    standing_refused: Cell<bool>,
     /// The round read beside the pull, for the leg that asks.
     ahead: Cell<Option<crate::pool::payout::Round>>,
     /// Whether reads beside a sale land before it answers, as the scaler answers them.
@@ -335,6 +337,11 @@ impl Ledgers for Fake {
         self.calls
             .borrow_mut()
             .push(format!("approve standing {amount}"));
+        if self.standing_refused.get() {
+            return Err(CallError::Refused(
+                "the ledger takes no such approval".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1418,6 +1425,42 @@ fn a_round_read_beside_the_pull_decides_as_a_fresh_one_does() {
             );
         });
     }
+}
+
+/// A ledger that refuses a standing approval still sells: the approval falls back to this swap
+/// alone, one line, one fee.
+#[test]
+fn a_ledger_that_refuses_a_standing_approval_is_approved_for_the_swap_alone() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let request = planned(
+            token(),
+            TokenAmount::from(5_000_000_u64),
+            &plan_order(usdc(2), usdc(1)),
+        );
+        let id = open_planned(&request);
+        let fake = Fake::default();
+        fake.standing.set(Some(Ok(TokenAmount::ZERO)));
+        fake.standing_refused.set(true);
+        fake.quote.set(Some(TokenAmount::from(2_100_000_u64)));
+        fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                "pull token 5000000".to_string(),
+                "quote 4998000".to_string(),
+                "allowance".to_string(),
+                "approve standing 49990000".to_string(),
+                "approve 4999000".to_string(),
+                "read ahead 2037910".to_string(),
+                "swap 4998000 at least 2051793".to_string(),
+            ]
+        );
+        let leg = pool_store::payout(id).unwrap().legs.unwrap().swap;
+        assert_eq!(leg.approvals, Some(1));
+    });
 }
 
 /// A token whose approval may not stand is approved for the swap alone, its allowance never read.

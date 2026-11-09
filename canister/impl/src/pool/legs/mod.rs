@@ -222,9 +222,16 @@ pub async fn run_beside(
     if allowed.is_none_or(|allowed| allowed < allowance) {
         let approved = if stands {
             let standing = allowance.checked_mul(STANDING_SWAPS).unwrap_or(allowance);
-            ledgers
+            match ledgers
                 .approve_standing(spec.token_in, spec.pool, standing)
                 .await
+            {
+                // a ledger that will not take a standing approval still sells: this swap alone
+                Err(CallError::Refused(_)) => {
+                    ledgers.approve(spec.token_in, spec.pool, allowance).await
+                }
+                answer => answer,
+            }
         } else {
             ledgers.approve(spec.token_in, spec.pool, allowance).await
         };
