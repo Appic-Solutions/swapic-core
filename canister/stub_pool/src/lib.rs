@@ -132,6 +132,7 @@ struct TransferArg {
 thread_local! {
     static TOKENS: RefCell<Option<Init>> = const { RefCell::new(None) };
     static SALE: RefCell<Sale> = RefCell::new(Sale::default());
+    static QUOTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn tokens() -> Init {
@@ -179,8 +180,15 @@ fn metadata() -> PoolResult<PoolMetadata> {
     })
 }
 
+/// How many times the pool was asked for a quote.
+#[query]
+fn quotes_asked() -> u64 {
+    QUOTES.with(|quotes| quotes.get())
+}
+
 #[update]
 fn quote(_args: SwapArgs) -> PoolResult<Nat> {
+    QUOTES.with(|quotes| quotes.set(quotes.get() + 1));
     let sale = sale();
     if sale.quote_fails {
         return refused("the quote fails");

@@ -2904,6 +2904,16 @@ impl SaleWorld {
             .expect("the stub answers");
     }
 
+    fn quotes_asked(&self) -> u64 {
+        query(
+            &self.world.pic,
+            self.pool,
+            self.world.admin,
+            "quotes_asked",
+            encode_one(()).unwrap(),
+        )
+    }
+
     fn token_balance(&self, owner: Principal) -> Nat {
         query(
             &self.world.pic,
@@ -3076,6 +3086,47 @@ impl SaleWorld {
     }
 }
 
+impl SaleWorld {
+    /// Answers the scaler's and the gas reads as they come until payout `id` is signed.
+    fn answer_reads_until(&self, id: u64) {
+        for _ in 0..60 {
+            self.world.settle();
+            for request in self.world.pic.get_canister_http() {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                match body[0]["method"].as_str() {
+                    Some("eth_call") => self.world.reply(
+                        &request,
+                        serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
+                        false,
+                    ),
+                    Some("eth_feeHistory") => self.world.reply(
+                        &request,
+                        serde_json::json!({
+                            "oldestBlock": "0x121eac0",
+                            "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00"],
+                            "gasUsedRatio": [0.5, 0.5, 0.5, 0.5, 0.5],
+                            "reward": [["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"]],
+                        }),
+                        false,
+                    ),
+                    _ => {}
+                }
+            }
+            let view: Option<settlement_api::types::pool::PayoutView> = query(
+                &self.world.pic,
+                self.world.canister,
+                self.world.admin,
+                "payout",
+                encode_one(id).unwrap(),
+            );
+            if is_signed(&view.expect("the payout is there").status) {
+                return;
+            }
+        }
+        panic!("payout {id} was not signed with its reads answered");
+    }
+}
+
 fn is_signed(status: &settlement_api::types::pool::PayoutStatus) -> bool {
     matches!(status, settlement_api::types::pool::PayoutStatus::Signed(_))
 }
@@ -3108,6 +3159,11 @@ fn a_token_sells_on_a_standing_approval_and_is_signed_with_nothing_read_after_th
         sale.world.pic.get_canister_http().is_empty(),
         "nothing is left to read after the sale"
     );
+    assert_eq!(
+        sale.quotes_asked(),
+        1,
+        "the round read beside the pull is the sale's: it does not ask again"
+    );
     let approvals = |step: &PoolStep| matches!(step, PoolStep::SwapApproved { .. });
     assert_eq!(sale.lines(approvals), 1);
     let need = SOLD - 2 * FEE + FEE;
@@ -3137,6 +3193,11 @@ fn a_token_sells_on_a_standing_approval_and_is_signed_with_nothing_read_after_th
     sale.hold(false);
     assert!(is_signed(&sale.until(second.id, is_signed)));
     assert_eq!(sale.lines(approvals), 1, "no other approval");
+    assert_eq!(
+        sale.quotes_asked(),
+        2,
+        "one more quote, read beside its pull"
+    );
     assert_eq!(sale.allowance().allowance, Nat::from(8 * need));
     assert_eq!(
         sale.token_balance(sale.world.canister),
@@ -3147,6 +3208,44 @@ fn a_token_sells_on_a_standing_approval_and_is_signed_with_nothing_read_after_th
     assert_eq!(signed, 2);
 }
 
+/// Two sales at one pool at once: the second's reading is read while the first is at the pool, so
+/// it is never used, and it reads for itself once the pool is free. Both are sold once and signed
+/// once, whichever way their messages fall.
+#[test]
+fn two_sales_at_one_pool_never_share_a_reading_and_each_sells_once() {
+    let sale = SaleWorld::new();
+    let first = sale.swap().expect("the swap is opened");
+    sale.answer_the_scaler();
+    sale.world.settle();
+    // the first sale is held at the pool: the second reads and waits its turn
+    let second = sale.swap().expect("the swap is opened");
+    sale.world.settle();
+    assert_eq!(
+        sale.lines(|step| matches!(step, PoolStep::SwapBegun { .. })),
+        1,
+        "one leg at the pool at a time"
+    );
+    sale.hold(false);
+    // the canister brings the second to the pool itself once the first has left it: its reads are
+    // answered as they come
+    sale.answer_reads_until(second.id);
+    assert!(is_signed(&sale.until(first.id, is_signed)));
+    assert_eq!(
+        sale.lines(|step| matches!(step, PoolStep::SwapBegun { .. })),
+        2,
+        "each sold once"
+    );
+    assert_eq!(
+        sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. })),
+        2,
+        "each signed once"
+    );
+    assert!(
+        sale.quotes_asked() >= 2,
+        "the second read for itself, its reading beside the pull not used"
+    );
+}
+
 /// A sale over before its reads come back: the fit reads for itself, as it always could, and
 /// signs once. What was read ahead is at most a read paid twice, never a second signature.
 #[test]
@@ -3154,31 +3253,8 @@ fn a_sale_over_before_its_reads_came_back_reads_again_and_signs_once() {
     let sale = SaleWorld::new();
     sale.hold(false);
     let first = sale.swap().expect("the swap is opened");
-    // the reads beside the sale, then the fit's own: answer them all as they come
-    for _ in 0..4 {
-        sale.world.settle();
-        for request in sale.world.pic.get_canister_http() {
-            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-            match body[0]["method"].as_str() {
-                Some("eth_call") => sale.world.reply(
-                    &request,
-                    serde_json::json!(format!("0x{}", hex::encode(scaler_answer(501_650_000)))),
-                    false,
-                ),
-                Some("eth_feeHistory") => sale.world.reply(
-                    &request,
-                    serde_json::json!({
-                        "oldestBlock": "0x121eac0",
-                        "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00", "0x3b9aca00"],
-                        "gasUsedRatio": [0.5, 0.5, 0.5, 0.5, 0.5],
-                        "reward": [["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"], ["0x5f5e100"]],
-                    }),
-                    false,
-                ),
-                _ => {}
-            }
-        }
-    }
+    // the reads beside the sale, then the fit's own: answered as they come
+    sale.answer_reads_until(first.id);
     assert!(is_signed(&sale.until(first.id, is_signed)));
     let signed = sale.lines(|step| matches!(step, PoolStep::PayoutSigned { .. }));
     assert_eq!(signed, 1);
