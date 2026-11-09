@@ -122,3 +122,19 @@ fn no_replacement_is_bid_below_the_floor() {
         "a ceiling at the floor still allows the one bid the chain asks for"
     );
 }
+
+/// BNB Chain's base fee is 0: a zero tip is held to 0.1 gwei there, and nowhere else.
+#[test]
+fn a_reading_holds_the_least_tip_on_bnb_chain_only() {
+    let reading = ChainReading {
+        block: BlockNumber::new(1),
+        base_fee: WeiPerGas::ZERO,
+        priority_fee: WeiPerGas::ZERO,
+    };
+    let bsc = reading.with_least_tip(crate::ChainId::BSC);
+    assert_eq!(bsc.priority_fee, WeiPerGas::new(100_000_000));
+    assert_eq!(reading.with_least_tip(crate::ChainId::BASE), reading);
+    // a higher tip stays as read
+    let high = ChainReading { priority_fee: WeiPerGas::new(300_000_000), ..reading };
+    assert_eq!(high.with_least_tip(crate::ChainId::BSC), high);
+}

@@ -12,6 +12,7 @@
 //! `encodeAbiParameters([OrderTuple], [order])` write, and what `runFor` carries after its
 //! selector.
 
+pub mod across;
 #[cfg(test)]
 mod tests;
 
