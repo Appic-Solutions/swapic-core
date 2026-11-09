@@ -130,6 +130,44 @@ impl Drop for Leg {
     }
 }
 
+/// A standing approval of a pool covers this many swaps of the size of the one that gives it.
+pub const STANDING_SWAPS: u8 = 10;
+
+/// How long a standing approval lasts: it ends by itself, and a pool no longer listed keeps it
+/// no longer than this.
+pub const STANDING_FOR: std::time::Duration = std::time::Duration::from_secs(24 * 3_600);
+
+/// An allowance closer than this to its end reads as none: a swap never leans on one that could
+/// end under it.
+pub const STANDING_MARGIN: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The ledger of ckETH on mainnet: named here as well as in the flow settings, so a canister
+/// whose settings do not name it yet still gives it no standing approval.
+const CKETH_MAINNET: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
+
+/// Whether the canister's approval of a pool for `token` may outlast one swap. Only a token the
+/// canister holds nothing of but swaps on their way, all headed for that pool anyway: never
+/// ckUSDC, the stakers' pocket, never ckETH, the ck route's float, and nothing at all while the
+/// pool has no settings to say which ledger is which.
+pub fn may_stand(token: Principal, ckusdc: Option<Principal>, cketh: Option<Principal>) -> bool {
+    let Some(ckusdc) = ckusdc else {
+        return false;
+    };
+    token != ckusdc && Some(token) != cketh && token.to_text() != CKETH_MAINNET
+}
+
+/// An allowance of `allowed`, ending at `ends` (nanoseconds), as a swap at `now` may lean on it.
+pub fn lasting(allowed: TokenAmount, ends: Option<u64>, now: Timestamp) -> TokenAmount {
+    let soon = now
+        .as_nanos()
+        .saturating_add(STANDING_MARGIN.as_nanos() as u64);
+    if ends.is_some_and(|ends| ends <= soon) {
+        TokenAmount::ZERO
+    } else {
+        allowed
+    }
+}
+
 /// The calls a payout makes, so the driver runs the same against the ledgers and a fake.
 #[allow(async_fn_in_trait)]
 pub trait Ledgers {
@@ -156,6 +194,28 @@ pub trait Ledgers {
         spender: Principal,
         amount: TokenAmount,
     ) -> Result<(), CallError>;
+    /// Whether the canister's approval of a pool for `token` may outlast one swap ([`may_stand`]).
+    fn may_stand(&self, _token: Principal) -> bool {
+        false
+    }
+    /// What `spender` may still pull from the canister's account for a good while yet: an
+    /// allowance about to end reads as none.
+    async fn allowance(
+        &self,
+        _ledger: Principal,
+        _spender: Principal,
+    ) -> Result<TokenAmount, CallError> {
+        Ok(TokenAmount::ZERO)
+    }
+    /// An approval that outlasts one swap and ends by itself ([`STANDING_FOR`]).
+    async fn approve_standing(
+        &self,
+        ledger: Principal,
+        spender: Principal,
+        amount: TokenAmount,
+    ) -> Result<(), CallError> {
+        self.approve(ledger, spender, amount).await
+    }
     /// Whether the pool sells `token_in` as its token0 (`zeroForOne`), None for a pool that
     /// does not trade the pair.
     async fn direction(
@@ -270,6 +330,40 @@ impl Ledgers for Live {
         amount: TokenAmount,
     ) -> Result<(), CallError> {
         ic::icrc2_approve(ledger, spender, Nat::from(amount)).await
+    }
+
+    fn may_stand(&self, token: Principal) -> bool {
+        may_stand(
+            token,
+            pool_store::ledger()
+                .settings
+                .map(|settings| settings.ckusdc_ledger),
+            crate::storage::flow_settings::get().cketh_ledger,
+        )
+    }
+
+    async fn allowance(
+        &self,
+        ledger: Principal,
+        spender: Principal,
+    ) -> Result<TokenAmount, CallError> {
+        let (allowance, ends) =
+            ic::icrc2_allowance_ending(ledger, ic_cdk::api::id(), spender).await?;
+        Ok(lasting(
+            amount(&allowance),
+            ends,
+            Timestamp::from_nanos(ic_cdk::api::time()),
+        ))
+    }
+
+    async fn approve_standing(
+        &self,
+        ledger: Principal,
+        spender: Principal,
+        amount: TokenAmount,
+    ) -> Result<(), CallError> {
+        let until = ic_cdk::api::time().saturating_add(STANDING_FOR.as_nanos() as u64);
+        ic::icrc2_approve_until(ledger, spender, Nat::from(amount), until).await
     }
 
     async fn direction(

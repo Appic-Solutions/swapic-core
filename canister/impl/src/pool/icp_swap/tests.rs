@@ -200,6 +200,9 @@ struct Fake {
     transfers: RefCell<Transfers>,
     /// What the scaler answers: none, it is not read.
     scaled: RefCell<Option<Result<Vec<u8>, String>>>,
+    /// A token whose approval may stand: what the pool may still pull of it, or that the read
+    /// fails. None: an approval is for the swap alone.
+    standing: Cell<Option<Result<TokenAmount, ()>>>,
 }
 
 /// The scaler as the fake answers it, and a payout order's checks on `config()`.
@@ -279,6 +282,34 @@ impl Ledgers for Fake {
         amount: TokenAmount,
     ) -> Result<(), CallError> {
         self.calls.borrow_mut().push(format!("approve {amount}"));
+        Ok(())
+    }
+
+    fn may_stand(&self, _token: Principal) -> bool {
+        self.standing.get().is_some()
+    }
+
+    async fn allowance(
+        &self,
+        _ledger: Principal,
+        _spender: Principal,
+    ) -> Result<TokenAmount, CallError> {
+        self.calls.borrow_mut().push("allowance".to_string());
+        self.standing
+            .get()
+            .expect("read only for a token that may stand")
+            .map_err(|()| CallError::Unknown("the ledger did not answer".to_string()))
+    }
+
+    async fn approve_standing(
+        &self,
+        _ledger: Principal,
+        _spender: Principal,
+        amount: TokenAmount,
+    ) -> Result<(), CallError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("approve standing {amount}"));
         Ok(())
     }
 
@@ -1156,6 +1187,149 @@ fn a_planned_token_sale_has_half_the_slippage_as_its_floor() {
         assert_eq!(payout.received, Some(TokenAmount::from(2_090_000_u64)));
         assert_eq!(payout.amount, Some(TokenAmount::from(2_037_910_u64)));
         assert_eq!(payout.status, PayoutStatus::Waiting);
+    });
+}
+
+/// A planned sale of a token whose approval may stand, driven as far as it goes.
+fn standing_sale(standing: Result<TokenAmount, ()>, quote: u64) -> (u64, Fake) {
+    pool_with(usdc(500));
+    let request = planned(
+        token(),
+        TokenAmount::from(5_000_000_u64),
+        &plan_order(usdc(2), usdc(1)),
+    );
+    let id = open_planned(&request);
+    let fake = Fake::default();
+    fake.standing.set(Some(standing));
+    fake.quote.set(Some(TokenAmount::from(quote)));
+    fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
+    block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+    (id, fake)
+}
+
+/// A standing approval that covers the swap: no approval, no line for one, no fee spent, and
+/// the sale goes on. Its allowance is read in the quote's round, never after it.
+#[test]
+fn a_standing_approval_that_covers_the_swap_asks_for_no_other() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake) = standing_sale(Ok(TokenAmount::from(4_999_000_u64)), 2_100_000);
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                "pull token 5000000".to_string(),
+                "quote 4998000".to_string(),
+                "allowance".to_string(),
+                "swap 4998000 at least 2051793".to_string(),
+            ]
+        );
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.received, Some(TokenAmount::from(2_090_000_u64)));
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+        let leg = payout.legs.unwrap().swap;
+        assert_eq!(
+            leg.approvals, None,
+            "no approval was given, none is counted"
+        );
+    });
+}
+
+/// An allowance one short of the swap, or one that could not be read, is approved for ten swaps
+/// of this size, with its line: a swap never leans on an allowance it does not know covers it.
+#[test]
+fn a_standing_approval_that_falls_short_is_given_for_ten_swaps() {
+    for standing in [Ok(TokenAmount::from(4_998_999_u64)), Err(())] {
+        on_fresh_memory(move || {
+            crate::storage::init();
+            let (id, fake) = standing_sale(standing, 2_100_000);
+            assert_eq!(
+                *fake.calls.borrow(),
+                vec![
+                    "pull token 5000000".to_string(),
+                    "quote 4998000".to_string(),
+                    "allowance".to_string(),
+                    "approve standing 49990000".to_string(),
+                    "swap 4998000 at least 2051793".to_string(),
+                ]
+            );
+            let leg = pool_store::payout(id).unwrap().legs.unwrap().swap;
+            assert_eq!(leg.approvals, Some(1));
+        });
+    }
+}
+
+/// A price below the floor approves nothing and sells nothing, however the allowance stands: the
+/// token goes back with no fee spent on an approval.
+#[test]
+fn a_quote_below_the_floor_approves_nothing() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake) = standing_sale(Ok(TokenAmount::ZERO), 1);
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.contains("approve")));
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("swap")));
+        let payout = pool_store::payout(id).unwrap();
+        assert!(
+            matches!(payout.status, PayoutStatus::Undone(_)),
+            "{:?}",
+            payout.status
+        );
+    });
+}
+
+/// A sale the pool refuses after a standing approval: the refund is what it is after an approval
+/// given for that swap, one fee short of what the canister holds: it can never pay out more than
+/// the swap brought in.
+#[test]
+fn a_refused_sale_on_a_standing_approval_refunds_the_same() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
+        request.terms.premium = TokenAmount::from(4 * FEE);
+        let id = open(&request);
+        let fake = Fake::default();
+        fake.standing.set(Some(Ok(TokenAmount::from(u64::MAX))));
+        fake.quote.set(Some(TokenAmount::from(2_100_000_u64)));
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        assert!(!fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.contains("approve")));
+        let transfers: Vec<_> = fake.transfers.borrow().values().copied().collect();
+        assert_eq!(
+            transfers,
+            vec![(token(), account(6), TokenAmount::from(4_998_000_u64))]
+        );
+    });
+}
+
+/// A token whose approval may not stand is approved for the swap alone, its allowance never read.
+#[test]
+fn a_token_that_may_not_stand_is_approved_for_the_swap_alone() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool_with(usdc(500));
+        let request = planned(
+            token(),
+            TokenAmount::from(5_000_000_u64),
+            &plan_order(usdc(2), usdc(1)),
+        );
+        let id = open_planned(&request);
+        let fake = Fake::default();
+        fake.quote.set(Some(TokenAmount::from(2_100_000_u64)));
+        fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
+        block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+        assert!(!fake.calls.borrow().contains(&"allowance".to_string()));
+        assert!(fake.calls.borrow().contains(&"approve 4999000".to_string()));
     });
 }
 

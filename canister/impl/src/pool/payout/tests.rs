@@ -2013,3 +2013,34 @@ fn a_route_through_icp_short_from_the_start_pays_ckusdc_and_calls_nothing() {
             .any(|call| call.starts_with("approve") || call.starts_with("swap")));
     });
 }
+
+/// ckUSDC is the stakers' pocket and ckETH the ck route's float: their approvals are for one swap
+/// each, whatever the settings say, and with no settings nothing may stand.
+#[test]
+fn only_a_token_held_for_nothing_but_swaps_may_stand() {
+    let ckusdc = Principal::from_slice(&[0x11; 10]);
+    let cketh = Principal::from_slice(&[0x22; 10]);
+    let icp = Principal::from_slice(&[0x33; 10]);
+    let mainnet_cketh = Principal::from_text("ss2fx-dyaaa-aaaar-qacoq-cai").unwrap();
+    assert!(may_stand(icp, Some(ckusdc), Some(cketh)));
+    assert!(may_stand(icp, Some(ckusdc), None));
+    assert!(!may_stand(ckusdc, Some(ckusdc), Some(cketh)));
+    assert!(!may_stand(cketh, Some(ckusdc), Some(cketh)));
+    assert!(!may_stand(mainnet_cketh, Some(ckusdc), None));
+    assert!(!may_stand(icp, None, Some(cketh)));
+}
+
+/// An allowance close to its end, or past it, reads as none; one with no end stands.
+#[test]
+fn an_allowance_about_to_end_reads_as_none() {
+    let now = Timestamp::from_nanos(1_000_000_000_000);
+    let held = TokenAmount::from(5_u32);
+    let margin = STANDING_MARGIN.as_nanos() as u64;
+    assert_eq!(lasting(held, None, now), held);
+    assert_eq!(lasting(held, Some(now.as_nanos() + margin + 1), now), held);
+    assert_eq!(
+        lasting(held, Some(now.as_nanos() + margin), now),
+        TokenAmount::ZERO
+    );
+    assert_eq!(lasting(held, Some(1), now), TokenAmount::ZERO);
+}
