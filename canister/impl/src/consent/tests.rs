@@ -946,3 +946,70 @@ fn no_account_the_anonymous_principal_owns_is_described() {
         assert!(answer.is_err(), "{answer:?}");
     }
 }
+
+/// BSC design 6.2.10 on T0's real order (Base USDC deposited on Across, the last swap to ARB
+/// on Arbitrum), rewritten to be a payout plan (the canister its payer and the deposit's
+/// depositor): the text names the least stablecoin the recipient gets when the last swap
+/// cannot be made, the deposit's output in USDC's own decimals.
+#[test]
+fn an_across_swap_names_what_a_failed_last_swap_pays() {
+    use types::config::{AcrossFee, AcrossPins};
+    use types::swapic::across::read_across_step;
+    let t0: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../types/src/swapic/across/samples/t0.json"
+    ))
+    .unwrap();
+    let run = hex::decode(t0["run_data"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let mut order = swapic::decode_order(&run[4..]).unwrap();
+    let pins = |spoke: &str| AcrossPins {
+        periphery: address("0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"),
+        swap_proxy: address("0x1d1735bcf925d10b600279ce720da2673c2274c5"),
+        spoke_pool: address(spoke),
+        multicall_handler: address("0x0F7Ae28dE1C8532170AD4ee566B5801485c13a0E"),
+    };
+    let prod = |usdc: EvmAddress, spoke: &str| EvmChain {
+        swapic: address("0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917"),
+        runner: address("0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5"),
+        cctp_receiver: address("0x404056Ab781D713B8f5Dc55F5B9592962B187099"),
+        across: Some(pins(spoke)),
+        ..chain(usdc)
+    };
+    let base = prod(base_usdc(), "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64");
+    let mut deposit = read_across_step(&order.steps[0], &base.across.unwrap()).unwrap();
+    deposit.depositor = canister();
+    order.steps[0] = deposit.step();
+    let config = types::Config {
+        pool_chain: Some(ChainId::BASE),
+        evm_chains: ChainTable(BTreeMap::from([
+            (ChainId::BASE, base),
+            (
+                ChainId::ARBITRUM,
+                prod(arbitrum_usdc(), "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A"),
+            ),
+        ])),
+        across_fee: Some(AcrossFee {
+            least_ppm: 50,
+            most_ppm: 3_000,
+            gas_allowance: ChainTable(BTreeMap::from([(
+                ChainId::ARBITRUM,
+                TokenAmount::from(100_000_u64),
+            )])),
+        }),
+        ..types::Config::default()
+    };
+    let arg = swap_arg(ckusdc(), 3_100_000, None, None, DEADLINE_NS, as_plan(order));
+    let ConsentMessageResponse::Ok(ConsentInfo {
+        consent_message: ConsentMessage::GenericDisplayMessage(text),
+        ..
+    }) = answer(&request("swap_from_icp", arg), &known(&config, user()))
+    else {
+        panic!("a generic message");
+    };
+    assert!(
+        text.contains(
+            "- If the last swap fails: the recipient gets at least 2.930727 USDC on Arbitrum \
+             instead\n"
+        ),
+        "{text}"
+    );
+}

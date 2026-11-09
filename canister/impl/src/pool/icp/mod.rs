@@ -169,11 +169,8 @@ pub fn check_stake<S: Store>(
             would_be: nat(would_be),
         });
     }
-    // priced as its mint is: on what is left once Swapic's move fee is taken
-    let minted = request
-        .amount
-        .checked_sub(request.move_fee)
-        .and_then(|staked| ledger.mint_now(staked));
+    // priced as its mint is: on what is left once Swapic's move fee and the pool fee are taken
+    let minted = ledger.mint_for_stake(request.amount, request.move_fee);
     if minted.is_none() {
         return Err(PoolError::NotAllowed(
             "the stake mints nothing at the pool's price".to_string(),
@@ -237,7 +234,8 @@ pub fn plan_withdrawal<S: Store>(
         .store()
         .pool_share(&PoolAccount::Icp(request.owner()).key())
         .map_or(Shares::ZERO, |line| line.shares);
-    let burned = Shares::burn_for(request.usdc, ledger.total_assets(), ledger.total_shares)
+    let burned = ledger
+        .burn_for_withdrawal(request.usdc, owned)
         .ok_or_else(|| PoolError::NotAllowed("the pool's assets cannot pay that".to_string()))?;
     if burned > request.max_shares || burned > owned {
         return Err(PoolError::ShortShares {
@@ -387,10 +385,8 @@ fn staked(
         at,
     )
     .map_err(|error| PoolError::NotAllowed(error.to_string()))?;
-    let minted = request
-        .amount
-        .checked_sub(request.move_fee)
-        .and_then(|staked| pool_store::ledger().mint_now(staked))
+    let minted = pool_store::ledger()
+        .mint_for_stake(request.amount, request.move_fee)
         .ok_or_else(|| "the stake mints nothing".to_string())
         .and_then(|shares| {
             pool_store::record_at(

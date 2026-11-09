@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeFrom;
-use types::books::{BookStep, Books};
+use types::books::{BookStep, Books, UserFeeKey};
 use types::events::TxPurpose;
 use types::hash::{OwnerKey, PoolRef};
 use types::pool::{
@@ -43,6 +43,11 @@ pub trait Store {
     fn put_book(&mut self, chain_id: ChainId, books: Books);
     /// Every chain's books, in chain id order.
     fn books(&self) -> Vec<(ChainId, Books)>;
+    /// Whether the user-paid fees of this transaction are booked.
+    fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool;
+    fn put_user_fee_booked(&mut self, key: UserFeeKey);
+    /// Every transaction whose user-paid fees are booked, in key order.
+    fn booked_user_fees(&self) -> Vec<UserFeeKey>;
     /// The pool's ledger, empty before its first step.
     fn pool_ledger(&self) -> PoolLedger;
     fn put_pool_ledger(&mut self, ledger: PoolLedger);
@@ -206,6 +211,7 @@ pub struct MemoryStore {
     sweeps: BTreeMap<u64, SweepEntry>,
     flow_by_source: BTreeMap<TxHash, QuoteHash>,
     flow_by_tx: BTreeMap<TxHash, QuoteHash>,
+    booked_user_fees: BTreeSet<UserFeeKey>,
 }
 
 #[cfg(test)]
@@ -302,6 +308,18 @@ impl Store for MemoryStore {
             .iter()
             .map(|(chain, books)| (*chain, books.clone()))
             .collect()
+    }
+
+    fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool {
+        self.booked_user_fees.contains(key)
+    }
+
+    fn put_user_fee_booked(&mut self, key: UserFeeKey) {
+        self.booked_user_fees.insert(key);
+    }
+
+    fn booked_user_fees(&self) -> Vec<UserFeeKey> {
+        self.booked_user_fees.iter().copied().collect()
     }
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
@@ -530,6 +548,7 @@ impl State<MemoryStore> {
             sweeps,
             flow_by_source: _,
             flow_by_tx: _,
+            booked_user_fees,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -564,6 +583,9 @@ impl State<MemoryStore> {
                 .iter()
                 .map(|(key, line)| (key, line)))
             && pool_credited.iter().eq(other.store.pool_credited().iter())
+            && booked_user_fees
+                .iter()
+                .eq(other.store.booked_user_fees().iter())
             && pool_payouts.iter().eq(other
                 .store
                 .pool_payouts()
@@ -655,6 +677,12 @@ impl<S: Store> State<S> {
     fn record_books(&mut self, chain_id: ChainId, step: &BookStep, at: Timestamp) {
         let books = self.book(&chain_id).apply(step);
         self.store.put_book(chain_id, books);
+        if let BookStep::UserFeeEarned { tx_hash, .. } = step {
+            self.store.put_user_fee_booked(UserFeeKey {
+                chain: chain_id,
+                tx: *tx_hash,
+            });
+        }
         // a controller's reopening clears the ICP latch with the Base one
         match step {
             BookStep::Checked { check, .. } => self.seen_through(chain_id, check.block),
@@ -770,6 +798,9 @@ impl<S: Store> State<S> {
         if let Some(payout) = effects.payout {
             self.store.put_pool_payout(payout.id, payout);
         }
+        for payout in effects.payouts {
+            self.store.put_pool_payout(payout.id, payout);
+        }
         if let Some(seq) = effects.dequeued {
             self.store.remove_payout_queued(seq);
         }
@@ -793,6 +824,19 @@ impl<S: Store> State<S> {
                 self.store.put_book(key.chain, books);
             }
             self.store.put_pool_orphan(key, orphan);
+        }
+        // an Across refund's surplus is the canister's own: the books' unattributed line of
+        // its chain
+        if let PoolStep::AcrossRefunded {
+            credit, surplus, ..
+        } = step
+        {
+            let mut books = self.book(&credit.chain);
+            books.unattributed = books
+                .unattributed
+                .checked_add(*surplus)
+                .unwrap_or(TokenAmount::MAX);
+            self.store.put_book(credit.chain, books);
         }
         if let Some(item) = effects.moved {
             self.store.put_pool_move(item.id, item);

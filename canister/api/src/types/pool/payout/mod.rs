@@ -114,7 +114,8 @@ pub enum PayoutStatus {
     Waiting,
     Signed(u64),
     Paid,
-    /// Its order ran on Base and published an Eco intent: paid once the intent's fill is read.
+    /// Its order ran on Base and published an Eco intent or made an Across deposit: paid once
+    /// its fill is read.
     Delivering,
     /// Its refund is on its way, with why: a revert, an Eco intent never filled, or its
     /// deadline (nothing is signed for it again).
@@ -196,6 +197,9 @@ pub struct PayoutSettings {
     pub cctp_payouts: bool,
     /// The ck minter's slow route. None: off.
     pub ck: Option<CkSettings>,
+    /// Micro USDC, the most the Across payouts in flight may hold together (signed,
+    /// delivering, or owed back by Across). None: no Across payout is signed.
+    pub across_in_flight_max: Option<Nat>,
 }
 
 /// The ck minter's slow route, the numbers door and quote read alike.
@@ -281,7 +285,12 @@ impl From<&domain::EvmPayout> for PayoutView {
             kind: (&payout.kind).into(),
             terms: payout.terms.into(),
             amount: payout.amount.map(nat),
-            status: (&payout.status).into(),
+            status: match (&payout.status, &payout.across) {
+                (domain::PayoutStatus::Unfilled, Some(across)) => {
+                    PayoutStatus::Refunding(across.unfilled_why())
+                }
+                (status, _) => status.into(),
+            },
             order_id: payout.order.as_ref().map(|order| order.order_id.to_vec()),
             tx_hash: payout.tx_hash.map(|hash| hash.into_bytes().to_vec()),
             received: payout.received.map(nat),
@@ -318,6 +327,10 @@ impl TryFrom<PayoutSettings> for domain::PayoutSettings {
             max_payout_gas: settings.max_payout_gas,
             cctp_payouts: settings.cctp_payouts,
             ck: settings.ck.map(TryInto::try_into).transpose()?,
+            across_in_flight_max: settings
+                .across_in_flight_max
+                .map(|max| amount("across_in_flight_max", &max))
+                .transpose()?,
         })
     }
 }
@@ -355,6 +368,7 @@ impl From<&domain::PayoutSettings> for PayoutSettings {
             max_payout_gas: settings.max_payout_gas,
             cctp_payouts: settings.cctp_payouts,
             ck: settings.ck.as_ref().map(Into::into),
+            across_in_flight_max: settings.across_in_flight_max.map(nat),
         }
     }
 }

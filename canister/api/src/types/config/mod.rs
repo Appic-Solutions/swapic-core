@@ -169,6 +169,9 @@ pub struct ActionGas {
     /// The relay of an order that deposits on Across, optional as the pool's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_across: Option<u64>,
+    /// The canister's claim of its own deferred Across refunds, optional as the pool's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub across_claim: Option<u64>,
 }
 
 /// One amount per action the canister signs.
@@ -238,6 +241,12 @@ pub struct ActionAmounts {
         serialize_with = "opt_nat_as_decimal"
     )]
     pub relay_across: Option<Nat>,
+    /// The canister's claim of its own deferred Across refunds, optional as the pool's.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_nat_as_decimal"
+    )]
+    pub across_claim: Option<Nat>,
 }
 
 impl From<PerAction<GasAmount>> for ActionGas {
@@ -264,6 +273,7 @@ impl From<PerAction<GasAmount>> for ActionGas {
             eco_rescue: gas.eco_rescue.map(limit),
             sweep: gas.sweep.map(limit),
             relay_across: gas.relay_across.map(limit),
+            across_claim: gas.across_claim.map(limit),
         }
     }
 }
@@ -287,6 +297,7 @@ impl From<ActionGas> for PerAction<GasAmount> {
             eco_rescue: gas.eco_rescue.map(GasAmount::from),
             sweep: gas.sweep.map(GasAmount::from),
             relay_across: gas.relay_across.map(GasAmount::from),
+            across_claim: gas.across_claim.map(GasAmount::from),
         }
     }
 }
@@ -310,6 +321,7 @@ impl<Unit> From<PerAction<CheckedAmountOf<Unit>>> for ActionAmounts {
             eco_rescue: amounts.eco_rescue.map(Into::into),
             sweep: amounts.sweep.map(Into::into),
             relay_across: amounts.relay_across.map(Into::into),
+            across_claim: amounts.across_claim.map(Into::into),
         }
     }
 }
@@ -339,6 +351,7 @@ fn per_action<Unit>(
         eco_rescue: amounts.eco_rescue.map(amount).transpose()?,
         sweep: amounts.sweep.map(amount).transpose()?,
         relay_across: amounts.relay_across.map(amount).transpose()?,
+        across_claim: amounts.across_claim.map(amount).transpose()?,
     })
 }
 

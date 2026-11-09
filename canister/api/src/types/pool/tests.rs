@@ -114,6 +114,7 @@ fn settings_go_to_the_domain_and_back() {
         large_deposit_confirmations: Some(6),
         least_move_fee_base_to_icp: Some(Nat::from(1_500_000_u64)),
         least_move_fee_icp_to_base: Some(Nat::from(1_400_000_u64)),
+        pool_fee: Some(Nat::from(10_000_u64)),
     };
     let domain = types::pool::PoolSettings::try_from(wire.clone()).unwrap();
     assert_eq!(
@@ -140,6 +141,7 @@ fn settings_go_to_the_domain_and_back() {
             // no least move fee until a controller sets one
             least_move_fee_base_to_icp: Some(Nat::from(0_u8)),
             least_move_fee_icp_to_base: Some(Nat::from(0_u8)),
+            pool_fee: Some(Nat::from(0_u8)),
             ..wire
         }
     );

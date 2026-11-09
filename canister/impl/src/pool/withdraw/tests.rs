@@ -328,3 +328,69 @@ fn a_withdrawal_the_base_pocket_cannot_cover_is_queued() {
         assert_eq!(ledger().lines().queue_len, 1);
     });
 }
+
+/// With a pool fee the door burns the cent's worth too, within what the staker signed, and what
+/// it answers goes through the fold; the payout stays exactly what was signed.
+#[test]
+fn a_withdrawal_burns_the_pool_fee_within_what_was_signed() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        record_at(
+            PoolStep::SettingsSet {
+                settings: types::pool::PoolSettings {
+                    pool_fee: Some(TokenAmount::from(10_000_u32)),
+                    ..crate::storage::pool::tests::settings()
+                },
+            },
+            at(2),
+        )
+        .unwrap();
+        // signed for exactly the USDC's worth: no room for the fee, refused
+        let tight = request(500, 7);
+        assert!(matches!(
+            planned(&tight, &signed(&tight, &key())),
+            Err(PoolError::ShortShares { .. })
+        ));
+        // the quoter's room: it goes, through the fold
+        let mut padded = request(500, 8);
+        let least = padded.max_shares;
+        padded.max_shares = Shares::new(least.get() + least.get() / 100);
+        let plan = planned(&padded, &signed(&padded, &key())).unwrap();
+        let burned = plan.withdrawal.burned;
+        assert!(burned > least, "the cent's worth is burned too");
+        assert!(burned <= padded.max_shares);
+        let id = record(plan, padded.payout, at(10));
+        let amount = usdc(500)
+            .checked_sub(padded.move_fee)
+            .and_then(|left| left.checked_sub(padded.network_fee))
+            .unwrap();
+        assert_eq!(payout(id).unwrap().amount, Some(amount), "as signed");
+    });
+}
+
+/// Max: a staker withdrawing all it holds pays what its shares allow and is not refused.
+#[test]
+fn a_full_exit_still_works_with_a_pool_fee() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        pool();
+        record_at(
+            PoolStep::SettingsSet {
+                settings: types::pool::PoolSettings {
+                    pool_fee: Some(TokenAmount::from(10_000_u32)),
+                    ..crate::storage::pool::tests::settings()
+                },
+            },
+            at(2),
+        )
+        .unwrap();
+        let mut all = request(2_000, 9);
+        let staker = PoolAccount::Evm(all.staker);
+        let owned = shares_of(&staker);
+        all.max_shares = owned;
+        all.move_fee = usdc(1);
+        let plan = planned(&all, &signed(&all, &key())).unwrap();
+        assert_eq!(plan.withdrawal.burned, owned);
+    });
+}

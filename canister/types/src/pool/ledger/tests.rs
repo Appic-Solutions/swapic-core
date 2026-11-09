@@ -71,6 +71,9 @@ impl Pool {
         if let Some(payout) = effects.payout {
             self.payouts.insert(payout.id, payout);
         }
+        for payout in effects.payouts {
+            self.payouts.insert(payout.id, payout);
+        }
         if let Some(seq) = effects.dequeued {
             self.queue.remove(&seq);
         }
@@ -2188,7 +2191,7 @@ fn an_ask_on_other_terms_is_refused_after_a_lost_answer_even_once_refused() {
 }
 
 /// How many variants `PoolStep` has: [`place`] gives each its own place below it.
-const STEP_COUNT: usize = 76;
+const STEP_COUNT: usize = 78;
 
 /// Each step's place in `PoolStep`'s order. The match has no catch-all, so a step added to
 /// `PoolStep` does not compile here until it has a place, and a sample in [`every_step`].
@@ -2270,6 +2273,8 @@ fn place(step: &PoolStep) -> usize {
         PoolStep::PayoutCkWithdrawn { .. } => 73,
         PoolStep::PayoutCkLanded { .. } => 74,
         PoolStep::PayoutCkReimbursed { .. } => 75,
+        PoolStep::AcrossRefunded { .. } => 76,
+        PoolStep::AcrossClaimSigned { .. } => 77,
     }
 }
 
@@ -2480,6 +2485,7 @@ fn every_step() -> Vec<PoolStep> {
             tx_hash,
             block,
             intent: None,
+            across: None,
         },
         PoolStep::PayoutReverted { id: 0, block: None },
         PoolStep::PayoutUndoing {
@@ -2690,6 +2696,19 @@ fn every_step() -> Vec<PoolStep> {
             block: None,
             burned: true,
         },
+        PoolStep::AcrossRefunded {
+            credit,
+            amount,
+            block,
+            refunded: vec![0],
+            surplus: TokenAmount::ZERO,
+        },
+        PoolStep::AcrossClaimSigned {
+            chain_id: ChainId::BASE,
+            nonce,
+            tx_hash,
+            raw_tx: vec![0x02],
+        },
     ]
 }
 
@@ -2840,4 +2859,174 @@ fn an_icp_withdrawal_reserves_all_but_its_move_fee() {
             .checked_add(fees)
             .unwrap()
     );
+}
+
+fn pool_with_fee(fee: u64) -> Pool {
+    let mut pool = funded(usdc(1_000));
+    pool.step(PoolStep::SettingsSet {
+        settings: PoolSettings {
+            pool_fee: Some(TokenAmount::from(fee)),
+            ..settings()
+        },
+    })
+    .unwrap();
+    pool
+}
+
+/// A stake's cent stays free for the stakers already in, and buys it no shares: the door and the
+/// `Minted` rule read one function, so they agree, and the rule refuses a mint with no fee.
+#[test]
+fn a_stake_leaves_the_pool_fee_with_the_stakers() {
+    let mut pool = pool_with_fee(10_000);
+    let owner = PoolAccount::Icp(recipient(2));
+    let r#ref = register(&mut pool, stake(2, usdc(100), usdc(1)));
+    pool.step(PoolStep::Arrived {
+        r#ref,
+        credit: credit(1),
+        amount: usdc(100),
+        block: BlockNumber::new(10),
+    })
+    .unwrap();
+    let no_fee = pool.ledger.mint_now(usdc(99)).unwrap();
+    let shares = pool.ledger.mint_for_stake(usdc(100), usdc(1)).unwrap();
+    assert!(shares < no_fee);
+    assert_eq!(
+        pool.step(PoolStep::Minted {
+            r#ref,
+            owner,
+            shares: no_fee
+        }),
+        Err(PoolStepError::WrongMint {
+            given: no_fee,
+            expected: Some(shares)
+        })
+    );
+    pool.step(PoolStep::Minted {
+        r#ref,
+        owner,
+        shares,
+    })
+    .unwrap();
+    // the whole arrival less Swapic's move fee stays in the pool, the cent with it
+    assert_eq!(pool.ledger.total_assets(), usdc(1_099));
+    assert_eq!(
+        pool.ledger.lines().fees_base,
+        usdc(1),
+        "the cent is not Swapic's"
+    );
+    let value = Shares::value_of(shares, pool.ledger.total_assets(), pool.ledger.total_shares);
+    let staked = usdc(99).checked_sub(TokenAmount::from(10_000_u32)).unwrap();
+    assert!(value >= staked, "{value}");
+    assert!(value < usdc(99), "{value}");
+}
+
+/// A stake the fees take whole mints nothing, and is refused rather than minted at zero.
+#[test]
+fn a_stake_the_fees_take_whole_mints_nothing() {
+    let pool = pool_with_fee(10_000);
+    let fee = TokenAmount::from(10_000_u32);
+    assert_eq!(pool.ledger.mint_for_stake(fee, TokenAmount::ZERO), None);
+    assert_eq!(pool.ledger.mint_for_stake(usdc(1), usdc(1)), None);
+    assert!(pool
+        .ledger
+        .mint_for_stake(TokenAmount::from(10_001_u32), TokenAmount::ZERO)
+        .is_some());
+}
+
+/// A withdrawal burns its USDC's worth and the cent's; a full exit burns what it has, so Max
+/// works, and a staker short of `usdc` itself is still refused by what the rule sees.
+#[test]
+fn a_withdrawal_burns_the_pool_fee_too() {
+    let pool = pool_with_fee(10_000);
+    let (assets, shares) = (pool.ledger.total_assets(), pool.ledger.total_shares);
+    let least = Shares::burn_for(usdc(100), assets, shares).unwrap();
+    let whole = usdc(100)
+        .checked_add(TokenAmount::from(10_000_u32))
+        .unwrap();
+    let with_fee = Shares::burn_for(whole, assets, shares).unwrap();
+    assert!(with_fee > least);
+    assert_eq!(
+        pool.ledger.burn_for_withdrawal(usdc(100), shares),
+        Some(with_fee)
+    );
+    // holding only the withdrawal's worth: the exit pays what its shares allow
+    assert_eq!(
+        pool.ledger.burn_for_withdrawal(usdc(100), least),
+        Some(least)
+    );
+    // holding less than the withdrawal's worth: above what it has, which the door refuses
+    let less = Shares::new(least.get() - 1);
+    assert_eq!(
+        pool.ledger.burn_for_withdrawal(usdc(100), less),
+        Some(least)
+    );
+    // the whole pool: the fee cannot be burned beyond it, and the pool can still pay
+    assert_eq!(
+        pool.ledger.burn_for_withdrawal(assets, shares),
+        Some(shares)
+    );
+    assert_eq!(
+        pool.ledger
+            .burn_for_withdrawal(assets.checked_add(TokenAmount::ONE).unwrap(), shares),
+        None
+    );
+}
+
+/// The arrival's premium holds 90% of the share and the whole pool fee, the swap's fee line and
+/// nothing else, and a deposit short of it is refused, not credited.
+#[test]
+fn a_swap_arrives_with_the_pool_fee_in_its_premium() {
+    let mut pool = funded(usdc(1_000));
+    pool.step(PoolStep::SettingsSet {
+        settings: PoolSettings {
+            premium_bps: 10,
+            pool_fee: Some(TokenAmount::from(10_000_u32)),
+            ..settings()
+        },
+    })
+    .unwrap();
+    // 100 USDC: the share is 0.10, 90% of it 0.09, and the cent
+    let least = TokenAmount::from(100_000_u32);
+    let short = TokenAmount::from(99_999_u32);
+    assert_eq!(
+        check_arrival(&pool.ledger, &swap(3, usdc(100), short)),
+        Err(RegisterRefusal::PremiumTooLow { least })
+    );
+    assert_eq!(
+        check_arrival(&pool.ledger, &swap(3, usdc(100), least)),
+        Ok(())
+    );
+}
+
+/// A slipped digit is refused at the settings.
+#[test]
+fn a_pool_fee_above_a_dollar_is_refused() {
+    let at = |fee: u64| PoolSettings {
+        pool_fee: Some(TokenAmount::from(fee)),
+        tvl_cap: usdc(1),
+        per_swap_cap: usdc(1),
+        ..settings()
+    };
+    assert!(at(1_000_000).validate().is_ok());
+    assert_eq!(
+        at(1_000_001).validate(),
+        Err(PoolSettingsError::PoolFeeTooHigh(TokenAmount::from(
+            1_000_001_u64
+        )))
+    );
+}
+
+/// A stake the move fee and the pool fee take whole is refused at its arrival and held for a
+/// human, never registered to fail at its mint ten times over.
+#[test]
+fn a_stake_the_fees_take_whole_is_refused_at_its_arrival() {
+    let pool = pool_with_fee(10_000);
+    let fee = usdc(1);
+    let whole = TokenAmount::from(1_010_000_u32);
+    assert!(matches!(
+        check_arrival(&pool.ledger, &stake(2, whole, fee)),
+        Err(RegisterRefusal::NotAllowed(why)) if why.contains("take all of the stake")
+    ));
+    let enough = TokenAmount::from(1_010_001_u32);
+    assert_eq!(check_arrival(&pool.ledger, &stake(2, enough, fee)), Ok(()));
 }

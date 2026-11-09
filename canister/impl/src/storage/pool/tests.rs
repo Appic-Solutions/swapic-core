@@ -521,6 +521,22 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
     id
 }
 
+/// The payout settings as they stand with an Across in-flight cap of a million USDC: what
+/// an Across payout is signed under (D16).
+pub(crate) fn across_cap() {
+    let settings = ledger().lines().settings.unwrap_or_default();
+    record_at(
+        PoolStep::PayoutSettingsSet {
+            settings: types::pool::PayoutSettings {
+                across_in_flight_max: Some(usdc(1_000_000)),
+                ..settings
+            },
+        },
+        at(2),
+    )
+    .unwrap();
+}
+
 /// Payout `id` signed at `nonce` on Base with order `byte`: its creation and its record.
 pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
     sign_payout_with(id, nonce, byte, vec![byte; 8])
@@ -599,4 +615,89 @@ pub(crate) fn eco_order(route_deadline: u64) -> Vec<u8> {
         },
         memo: Default::default(),
     })
+}
+
+/// A signature the fold refuses for the Across in-flight cap never exists for anyone (review
+/// of 5a725a7): the signed record is checked before it is written (`append_event_at`:
+/// `check_at`, then the append), so nothing is logged, nothing is in `signed_txs`, and the
+/// outbox, which `tx::create_and_send_with` fills only after the record is written, never
+/// holds it. The nonce stays handed out and unsigned, for the stranded-nonce pass to cancel;
+/// the payout waits on.
+#[test]
+fn a_payout_signature_refused_for_the_across_cap_is_never_written() {
+    use alloy_primitives::{Address, U256};
+    use types::pool::{PayoutSettings, PayoutStatus};
+    use types::swapic::{Order, Payout, Step};
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = waiting_withdrawal("0x1111111111111111111111111111111111111111".parse().unwrap());
+        // a cap of one USDC, under the payout's
+        let settings = ledger().lines().settings.unwrap_or_default();
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings {
+                    across_in_flight_max: Some(usdc(1)),
+                    ..settings
+                },
+            },
+            at(2),
+        )
+        .unwrap();
+        let mut data = types::swapic::across::SWAP_AND_BRIDGE.to_vec();
+        data.extend_from_slice(&[0x5d; 32]);
+        let order = types::swapic::encode_order(&Order {
+            r#ref: [0x5d; 32].into(),
+            payer: Address::repeat_byte(0x8f),
+            tokenIn: Address::repeat_byte(0x83),
+            amountIn: U256::from(1u8),
+            deadline: U256::from(900u64),
+            steps: vec![Step {
+                target: Address::repeat_byte(0x97),
+                data: data.into(),
+                token: Address::repeat_byte(0x83),
+                min: U256::from(1u8),
+                writes: Vec::new(),
+            }],
+            payout: Payout {
+                token: Address::ZERO,
+                recipient: Address::ZERO,
+                minOut: U256::ZERO,
+            },
+            memo: Vec::new().into(),
+        });
+        crate::storage::events::append_event_at(created(TxPurpose::PoolPayout(id), 0), at(3))
+            .unwrap();
+        let before = event_count();
+        let refused = record_at(
+            PoolStep::PayoutSigned {
+                id,
+                order: types::pool::PinnedOrder {
+                    order_id: [0x5d; 32],
+                    order,
+                    gas_limit: 300_000,
+                    deadline_s: 900,
+                },
+                chain_id: ChainId::BASE,
+                nonce: types::Nonce::new(0),
+                tx_hash: TxHash::new([0x5d; 32]),
+                raw_tx: vec![0x5d; 4],
+            },
+            at(3),
+        );
+        assert!(refused.is_err());
+        assert_eq!(event_count(), before);
+        let (signed, unsigned) = crate::storage::events::read_state(|state| {
+            (
+                state.store().signed_in(types::EventIndex::new(0).., 10),
+                state.store().unsigned_nonce(&types::NonceKey {
+                    chain_id: ChainId::BASE,
+                    nonce: types::Nonce::new(0),
+                }),
+            )
+        });
+        assert!(signed.is_empty());
+        assert!(unsigned.is_some());
+        assert_eq!(payout(id).unwrap().status, PayoutStatus::Waiting);
+        assert!(payout(id).unwrap().order.is_none());
+    });
 }

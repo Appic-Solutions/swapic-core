@@ -376,11 +376,15 @@ pub enum GasAction {
     /// `Swapic.runFor` of an order that deposits on Across.
     #[n(15)]
     RelayAcross,
+    /// `SpokePool.claimRelayerRefund` of the canister's own deferred Across refunds, a
+    /// controller's door.
+    #[n(16)]
+    AcrossClaim,
 }
 
 impl GasAction {
     /// Every action, in code order.
-    pub const ALL: [GasAction; 16] = [
+    pub const ALL: [GasAction; 17] = [
         GasAction::RelayCctp,
         GasAction::RelayEco,
         GasAction::RelayLocal,
@@ -397,6 +401,7 @@ impl GasAction {
         GasAction::EcoRescue,
         GasAction::Sweep,
         GasAction::RelayAcross,
+        GasAction::AcrossClaim,
     ];
 
     /// The action's one byte in an event's canonical preimage: its index, never reused.
@@ -418,6 +423,7 @@ impl GasAction {
             GasAction::EcoRescue => 13,
             GasAction::Sweep => 14,
             GasAction::RelayAcross => 15,
+            GasAction::AcrossClaim => 16,
         }
     }
 
@@ -440,6 +446,7 @@ impl GasAction {
             GasAction::EcoRescue => "eco_rescue",
             GasAction::Sweep => "sweep",
             GasAction::RelayAcross => "relay_across",
+            GasAction::AcrossClaim => "across_claim",
         }
     }
 
@@ -489,6 +496,9 @@ pub struct PerAction<T> {
     /// The Across relay's row, optional as the pool's: absent, an Across order is refused.
     #[n(15)]
     pub relay_across: Option<T>,
+    /// The Across refund claim's row, optional as the pool's: absent, no claim is signed.
+    #[n(16)]
+    pub across_claim: Option<T>,
 }
 
 impl<T: Copy> PerAction<T> {
@@ -511,6 +521,7 @@ impl<T: Copy> PerAction<T> {
             GasAction::EcoRescue => self.eco_rescue,
             GasAction::Sweep => self.sweep,
             GasAction::RelayAcross => self.relay_across,
+            GasAction::AcrossClaim => self.across_claim,
         }
     }
 
@@ -533,6 +544,7 @@ impl<T: Copy> PerAction<T> {
             eco_rescue: Some(value),
             sweep: Some(value),
             relay_across: Some(value),
+            across_claim: Some(value),
         }
     }
 }

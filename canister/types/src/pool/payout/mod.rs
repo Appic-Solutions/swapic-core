@@ -476,6 +476,43 @@ pub struct EvmPayout {
     /// A swap paid through the ck minter, never from the Base pocket.
     #[n(26)]
     pub ck: Option<CkLeg>,
+    /// The Across deposit its order made, read off the paid receipt (BSC design 6.2.7): its
+    /// fill is read on the destination past its fill deadline, and an unfilled one is
+    /// refunded to the canister, the depositor, later.
+    #[n(27)]
+    pub across: Option<AcrossOut>,
+}
+
+/// An ICP payout's Across deposit as the paid receipt shows it: the destination, the relay
+/// its fill is looked up by (every field of the source SpokePool's `FundsDeposited`, the
+/// deposit id and its fill deadline among them), and when it was made.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct AcrossOut {
+    #[n(0)]
+    pub destination: ChainId,
+    #[n(1)]
+    pub relay: crate::swapic::across::RelayData,
+    /// The deposit's time in seconds: its block's, or its quote's when the receipt gave no
+    /// block time (earlier, so a read from it misses nothing).
+    #[n(2)]
+    pub deposit_time: u64,
+}
+
+impl AcrossOut {
+    /// After it no relayer can fill the deposit, unix seconds.
+    pub fn fill_deadline(&self) -> u64 {
+        u64::from(self.relay.fill_deadline)
+    }
+
+    /// Why the payout is refunded when no relayer filled its deposit, in the words a person
+    /// reads (Jeff, 2026-11-09: the rail is never named): "the transfer to BNB Chain didn't go
+    /// through".
+    pub fn unfilled_why(&self) -> String {
+        format!(
+            "the transfer to {} didn't go through",
+            self.destination.name().unwrap_or("its chain")
+        )
+    }
 }
 
 /// A flag stored as nothing while it is false, so a record written before it existed reads
@@ -549,6 +586,7 @@ impl EvmPayout {
             reverted_block: None,
             reverted_at: None,
             ck: None,
+            across: None,
         }
     }
 
@@ -661,6 +699,10 @@ pub struct PayoutSettings {
     /// The ck minter's slow route. None: off.
     #[n(5)]
     pub ck: Option<CkSettings>,
+    /// The most USDC, micro, the Across payouts in flight may hold together: signed,
+    /// delivering, or owed back by Across (BSC design D16). None: no Across payout is signed.
+    #[n(6)]
+    pub across_in_flight_max: Option<TokenAmount>,
 }
 
 /// The ck minter's slow route, one set of numbers the door and the quote read alike.
@@ -708,6 +750,7 @@ impl Default for PayoutSettings {
             max_payout_gas: 2_000_000,
             cctp_payouts: false,
             ck: None,
+            across_in_flight_max: None,
         }
     }
 }
@@ -729,7 +772,9 @@ impl PayoutSettings {
     /// so a run that does not name them turns the route off and strands nothing.
     pub fn keeping_ck(self, stored: Option<CkSettings>) -> Self {
         Self {
-            ck: self.ck.or(stored.map(|ck| CkSettings { open: false, ..ck })),
+            ck: self
+                .ck
+                .or(stored.map(|ck| CkSettings { open: false, ..ck })),
             ..self
         }
     }
@@ -744,6 +789,23 @@ impl PayoutSettings {
         if network_fee < floor {
             return Err(format!(
                 "a CCTP payout's network fee must be at least {floor}, not {network_fee}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether an Across payout of `amount` may be signed beside `out`, what the Across
+    /// payouts in flight hold now (BSC design D16): only under a cap, and within it.
+    pub fn admits_across(&self, amount: TokenAmount, out: TokenAmount) -> Result<(), String> {
+        let max = self
+            .across_in_flight_max
+            .ok_or("no Across payout is signed: no in-flight cap is set")?;
+        let total = amount
+            .checked_add(out)
+            .ok_or("the Across payouts in flight overflow")?;
+        if total > max {
+            return Err(format!(
+                "the Across payouts in flight would hold {total}, above their cap of {max}"
             ));
         }
         Ok(())
@@ -794,6 +856,68 @@ pub struct PayoutLines {
     /// When the queue's head became its head.
     #[n(8)]
     pub head_since: Option<Timestamp>,
+    /// The payouts whose Across deposit is out: signed with an Across order, delivering, or
+    /// owed back by Across after it went unfilled. What the in-flight cap sums, and what an
+    /// Across refund to the canister is credited to.
+    #[n(9)]
+    pub across_owed: PayoutIds,
+}
+
+/// A set of payout ids, stored as nothing at all while it is empty, so lines written before
+/// it existed read back with it empty and write back the same bytes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PayoutIds(pub BTreeSet<u64>);
+
+impl PayoutIds {
+    pub fn contains(&self, id: &u64) -> bool {
+        self.0.contains(id)
+    }
+
+    pub fn insert(&mut self, id: u64) -> bool {
+        self.0.insert(id)
+    }
+
+    pub fn remove(&mut self, id: &u64) -> bool {
+        self.0.remove(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &u64> {
+        self.0.iter()
+    }
+}
+
+impl<C> Encode<C> for PayoutIds {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        self.0.encode(e, ctx)
+    }
+
+    fn is_nil(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'b, C> Decode<'b, C> for PayoutIds {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        if matches!(
+            d.datatype()?,
+            minicbor::data::Type::Null | minicbor::data::Type::Undefined
+        ) {
+            d.skip()?;
+            return Ok(Self::default());
+        }
+        BTreeSet::decode(d, ctx).map(Self)
+    }
+
+    fn nil() -> Option<Self> {
+        Some(Self::default())
+    }
 }
 
 /// A withdrawal nonce a staker used: the staker's address and the nonce, big endian, so a

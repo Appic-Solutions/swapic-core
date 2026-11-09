@@ -20,6 +20,12 @@
 //! through every check a fresh one does: the scaler is a pure function of the two. Never beside
 //! the pull: anyone can make a door pull, and an outcall is the canister's to pay for.
 //!
+//! An Across step on Base (BSC design 7.5) is fitted with no outcall: its least M and the
+//! Runner's step minimum become the payout's exact amount, its output F the same ratio of it
+//! (`floor(F * amount / M)`, the periphery's own scaling above M, extended below it), every
+//! other byte as it was; the order's checks then read it again, the relayer's fee bounds
+//! (AX13, AX14) among them, and the delivery against the terms.
+//!
 //! A plan that does not fit leaves the payout waiting for the watcher's order, the way every
 //! payout waited before the plan flow; one whose first step asks more than the payout could
 //! only revert, so the payout is undone at once.
@@ -205,6 +211,8 @@ pub enum Fit {
 pub struct Decided {
     pub order: Order,
     pub swap: Option<usize>,
+    /// The place of its Across step, if it has one.
+    pub across: Option<usize>,
     pub amount: TokenAmount,
     pub gas_limit: u64,
 }
@@ -251,14 +259,14 @@ pub async fn sign_fitted(
 }
 
 /// What a plan says of a payout of `amount` at `now_s`, before any read, pure: the order with
-/// that amount in and the place of its KyberSwap step, if it has one; or why it waits, or is
-/// undone.
+/// that amount in, the places of its KyberSwap step and of its Across step, each if it has
+/// one, and its gas limit; or why it waits, or is undone.
 pub fn decide(
     plan: &PinnedOrder,
     planned: TokenAmount,
     amount: TokenAmount,
     now_s: u64,
-) -> Result<(Order, Option<usize>), Fit> {
+) -> Result<Decided, Fit> {
     let mut order = swapic::decode_order(&plan.order)
         .ok_or_else(|| Fit::Wait("the plan is not abi.encode of an Order".to_string()))?;
     // a plan that could only revert undoes the payout, whatever else it says
@@ -284,8 +292,20 @@ pub fn decide(
     if swaps.len() > 1 {
         return Err(Fit::Wait("the plan swaps more than once".to_string()));
     }
+    let across = types::swapic::across::across_step_at(&order.steps);
+    if across.is_some() && !swaps.is_empty() {
+        return Err(Fit::Wait(
+            "the plan swaps before its Across deposit: its least cannot be fitted".to_string(),
+        ));
+    }
     order.amountIn = amount.to_u256();
-    Ok((order, swaps.first().copied()))
+    Ok(Decided {
+        order,
+        swap: swaps.first().copied(),
+        across,
+        amount,
+        gas_limit: plan.gas_limit,
+    })
 }
 
 /// [`decide`] for `payout`, its plan, planned amount and amount read off it: none for a
@@ -296,14 +316,7 @@ pub fn decide_payout(payout: &EvmPayout, now_s: u64) -> Option<Result<Decided, F
     else {
         return None;
     };
-    Some(
-        decide(plan, terms.planned?, amount, now_s).map(|(order, swap)| Decided {
-            order,
-            swap,
-            amount,
-            gas_limit: plan.gas_limit,
-        }),
-    )
+    Some(decide(plan, terms.planned?, amount, now_s))
 }
 
 /// The plan's KyberSwap `step` rewritten to `route` for `amount`, pure: the same swap but for
@@ -362,9 +375,15 @@ pub async fn fit(
     let Decided {
         mut order,
         swap,
+        across,
         amount,
         gas_limit,
     } = decided;
+    // an Across step: fitted with no read
+    if let Some(at) = across {
+        order.steps[at] = types::swapic::across::fit_step(&order.steps[at], amount.to_u256())
+            .map_err(|error| format!("the plan's Across deposit was not fitted: {error}"))?;
+    }
     if let Some(at) = swap {
         let route = match reads.scaled_ahead(id, &order.steps[at].data, amount) {
             Some(route) => route,

@@ -457,37 +457,72 @@ fn swap(door: Door, terms: IcpSwapTerms, known: &Known) -> Result<Consent, Refus
         token: known.evm_token(delivery.chain, delivery.token),
     };
     let refund = known.account(request.refund_to, request.from);
+    let mut lines = vec![
+        Line::text(
+            "You send",
+            format!(
+                "{}, plus the ledger fee",
+                Amount {
+                    units: request.amount_in,
+                    token: sent
+                }
+            ),
+        ),
+        Line::text(
+            "From",
+            AccountText::Yours {
+                subaccount: request.from.subaccount,
+            },
+        ),
+        Line::text("Recipient gets at least", format!("{gets} on {chain}")),
+        Line::text(
+            "Token",
+            token_line(delivery.chain, delivery.token, gets.token),
+        ),
+        Line::text("Recipient", delivery.recipient),
+    ];
+    // an Across payout with a last swap (BSC design 6.2.10): the least stablecoin the
+    // recipient gets instead when that swap cannot be made, the deposit's output (AX14)
+    if let Some(fallback) = across_fallback(&order, &delivery, known) {
+        lines.push(Line::text(
+            "If the last swap fails",
+            format!("the recipient gets at least {fallback} on {chain} instead"),
+        ));
+    }
     Ok(Consent {
         intent: format!("Swap {} to {chain}", sent.short()),
-        lines: vec![
-            Line::text(
-                "You send",
-                format!(
-                    "{}, plus the ledger fee",
-                    Amount {
-                        units: request.amount_in,
-                        token: sent
-                    }
-                ),
-            ),
-            Line::text(
-                "From",
-                AccountText::Yours {
-                    subaccount: request.from.subaccount,
-                },
-            ),
-            Line::text("Recipient gets at least", format!("{gets} on {chain}")),
-            Line::text(
-                "Token",
-                token_line(delivery.chain, delivery.token, gets.token),
-            ),
-            Line::text("Recipient", delivery.recipient),
+        lines: lines
+            .into_iter()
+            .chain([
             Line::time("Deadline", request.deadline),
             Line::text(
                 "If it can't finish",
                 format!("refunded to {refund}, in ckUSDC or the token you sent, less ledger fees"),
             ),
-        ],
+            ])
+            .collect(),
+    })
+}
+
+/// What a payout plan's Across deposit pays when its last swap on the destination cannot be
+/// made: its output F in the destination's stablecoin. None for a plan with no Across
+/// deposit, or one paid straight to the recipient (no last swap).
+fn across_fallback(
+    order: &types::swapic::Order,
+    delivery: &crate::relay::Delivery,
+    known: &Known,
+) -> Option<Amount> {
+    let pool_chain = known.config.pool_chain?;
+    let pins = known.config.evm_chains.get(pool_chain)?.across?;
+    let at = types::swapic::across::across_step_at(&order.steps)?;
+    let deposit = types::swapic::across::read_across_step(&order.steps[at], &pins).ok()?;
+    if deposit.message.is_empty() || delivery.token == deposit.output_token {
+        return None;
+    }
+    let chain = ChainId::new(deposit.destination_chain_id);
+    Some(Amount {
+        units: TokenAmount::from_u256(deposit.output_amount),
+        token: known.evm_token(chain, deposit.output_token),
     })
 }
 
