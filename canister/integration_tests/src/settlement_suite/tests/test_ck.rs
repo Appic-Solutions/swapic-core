@@ -124,6 +124,7 @@ fn ck_world_on(wasm: Option<Vec<u8>>, users: u8) -> CkWorld {
         large_deposit_confirmations: None,
         least_move_fee_base_to_icp: None,
         least_move_fee_icp_to_base: None,
+        pool_fee: None,
     };
     let set: Result<(), PoolError> = update(
         &world.pic,

@@ -237,6 +237,7 @@ fn world_settled(world: World) -> World {
         large_deposit_confirmations: None,
         least_move_fee_base_to_icp: None,
         least_move_fee_icp_to_base: None,
+        pool_fee: None,
     };
     let set: Result<(), PoolError> = update(
         &world.pic,
@@ -2855,6 +2856,7 @@ impl SaleWorld {
                 large_deposit_confirmations: None,
                 least_move_fee_base_to_icp: None,
                 least_move_fee_icp_to_base: None,
+                pool_fee: None,
             })
             .unwrap(),
         );
