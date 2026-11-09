@@ -81,6 +81,7 @@ fn chain(usdc: &str) -> EvmChainConfig {
         pool_ck_deposit: None,
         eco_rescue: None,
         sweep: None,
+        relay_across: None,
     };
     EvmChainConfig {
         swapic: SWAPIC.to_string(),
@@ -105,6 +106,7 @@ fn chain(usdc: &str) -> EvmChainConfig {
             pool_ck_deposit: None,
             eco_rescue: None,
             sweep: None,
+            relay_across: None,
         },
         // a tenth of an ether: the gas rule holds at the fees pushed below
         gas_budget_wei: amounts(100_000_000_000_000_000),
@@ -117,6 +119,8 @@ fn chain(usdc: &str) -> EvmChainConfig {
         usdc_domain_name: None,
         usdc_domain_version: None,
         block_time_ms: 2_000,
+        usdc_decimals: None,
+        across: None,
     }
 }
 

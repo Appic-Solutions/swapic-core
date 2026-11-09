@@ -53,6 +53,7 @@ fn outbox_config() -> Config {
         pool_ck_deposit: None,
         eco_rescue: None,
         sweep: None,
+        relay_across: None,
     };
     Config {
         rpc_urls: BTreeMap::from([(BASE, "https://base-mainnet.example/v2/key".to_string())]),
@@ -74,6 +75,8 @@ fn outbox_config() -> Config {
                 usdc_domain_name: None,
                 usdc_domain_version: None,
                 block_time_ms: 2_000,
+                usdc_decimals: None,
+                across: None,
             },
         )]),
         ..Config::default()

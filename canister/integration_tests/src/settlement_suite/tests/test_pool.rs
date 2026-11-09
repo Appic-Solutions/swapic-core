@@ -704,6 +704,7 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
         pool_ck_deposit: None,
         eco_rescue: None,
         sweep: None,
+        relay_across: None,
     };
     EvmChainConfig {
         swapic: "0xF0Ba68cBc87c31eCaA9654EB14daF3632eaCa406".to_string(),
@@ -728,12 +729,15 @@ pub(crate) fn base_chain() -> settlement_api::types::config::EvmChainConfig {
             pool_ck_deposit: None,
             eco_rescue: None,
             sweep: None,
+            relay_across: None,
         },
         gas_budget_wei: amounts(100_000_000_000_000_000),
         min_network_fee: amounts(0),
         usdc_domain_name: None,
         usdc_domain_version: None,
         block_time_ms: 2_000,
+        usdc_decimals: None,
+        across: None,
     }
 }
 
