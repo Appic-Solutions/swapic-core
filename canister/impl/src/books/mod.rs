@@ -45,11 +45,22 @@ pub struct FeePath {
 /// receipt with none.
 pub fn network_fee_in(receipt: &Value, path: FeePath) -> TokenAmount {
     let logs = crate::pool::arrival::logs_of(receipt);
-    crate::pool::arrival::runner_transfers(&logs, path.usdc, path.runner, path.canister)
+    fee_steps(&logs, path.usdc, path.runner, path.canister)
+}
+
+/// The fee steps in `logs`: every Runner transfer of `usdc` to `canister` no `PaidOut`
+/// explains, by the one classifier the pool's arrivals read too.
+fn fee_steps(
+    logs: &[crate::pool::arrival::Log],
+    usdc: EvmAddress,
+    runner: EvmAddress,
+    canister: EvmAddress,
+) -> TokenAmount {
+    runner_transfers(logs, usdc, runner, canister)
         .into_iter()
         .filter_map(|transfer| match transfer {
-            crate::pool::arrival::RunnerTransfer::Fee { amount, .. } => Some(amount),
-            crate::pool::arrival::RunnerTransfer::Payout { .. } => None,
+            RunnerTransfer::Fee { amount, .. } => Some(amount),
+            RunnerTransfer::Payout { .. } => None,
         })
         .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
         .unwrap_or(TokenAmount::MAX)
@@ -99,14 +110,20 @@ pub fn credit_fee(chain_id: ChainId, tx_hash: TxHash, block: BlockNumber, fee: T
 /// `RunnerTransfer::Fee` of its receipt, by the one classifier the pool's arrivals read, so a
 /// pool deposit's own transfer is never a fee.
 pub fn user_fee_in(receipt: &Receipt, source: &EvmChain, canister: EvmAddress) -> TokenAmount {
-    runner_transfers(&receipt.logs, source.usdc, source.runner, canister)
-        .into_iter()
-        .filter_map(|transfer| match transfer {
-            RunnerTransfer::Fee { amount, .. } => Some(amount),
-            RunnerTransfer::Payout { .. } => None,
-        })
-        .try_fold(TokenAmount::ZERO, TokenAmount::checked_add)
-        .unwrap_or(TokenAmount::MAX)
+    fee_steps(&receipt.logs, source.usdc, source.runner, canister)
+}
+
+/// Whether the canister signed `tx`: a relay or a finish (the index, replacements included,
+/// and a relay recorded before the index existed by its flow), or a move's or a payout's own
+/// source.
+pub fn signed_by_canister<S: Store>(state: &State<S>, tx: &TxHash) -> bool {
+    let store = state.store();
+    store.flow_by_tx(tx).is_some()
+        || store.pool_own_source(tx).is_some()
+        || store
+            .flows()
+            .into_iter()
+            .any(|(_, flow)| flow.tx_hash.as_ref() == Some(tx))
 }
 
 /// Why a source transaction books no user-paid fee.
@@ -136,7 +153,7 @@ pub fn user_fee_step<S: Store>(
         return Err(NoUserFee::Reverted);
     }
     let store = state.store();
-    if store.flow_by_tx(&receipt.tx).is_some() || store.pool_own_source(&receipt.tx).is_some() {
+    if signed_by_canister(state, &receipt.tx) {
         return Err(NoUserFee::Ours);
     }
     let key = UserFeeKey {

@@ -8,13 +8,15 @@
 //! good at the end of those lines and costs nothing after, and is removed by a later upgrade. A
 //! transaction a live finish books meanwhile is booked once: the fold keeps the key.
 //!
-//! On the pool chain it stops short of ever claiming more than is there: a past fee is booked only
-//! while the surplus the last balance read found still holds it. A fee it cannot read or claim is
-//! passed over with an alert line, and the daily proof shows it.
+//! On the pool chain it never claims more than is there: before each past fee, every node reads the
+//! balance, and the fee is booked only while the chain is quiet and that balance holds it beyond
+//! every line. A fee it cannot read or claim is passed over with an alert line and counted, and the
+//! daily proof shows it.
 
 #[cfg(test)]
 mod tests;
 
+use crate::agreed;
 use crate::books::{self, expected_at};
 use crate::cctp::{self, source, Setup};
 use crate::state::{State, Store};
@@ -27,7 +29,7 @@ use types::books::{surplus_of, BookStep};
 use types::cctp::BurnMessage;
 use types::config::EvmChain;
 use types::events::{EventType, TxPurpose};
-use types::timer_state::{FeeCatchUp, LastRead};
+use types::timer_state::FeeCatchUp;
 use types::{ChainId, EvmAddress, TokenAmount, TxHash};
 
 /// The most lines one pass looks at, so a pass stays small whatever the log holds.
@@ -39,8 +41,9 @@ const NEXT_PASS: Duration = Duration::from_secs(2);
 /// How soon a pass runs again after a read failed, or while the canister is halted.
 const AFTER_A_FAILURE: Duration = Duration::from_secs(30);
 
-/// How many failed reads in a row a transaction gets before it is passed over.
-const TRIES: u32 = 10;
+/// How many passes in a row a transaction may wait (a read failed, a halt, the pool chain
+/// busy) before it is passed over: about an hour at [`AFTER_A_FAILURE`].
+const TRIES: u32 = 120;
 
 thread_local! {
     // Heap by necessity: whether a pass is out right now. An upgrade clears it with the timers.
@@ -102,62 +105,105 @@ pub fn due_of<S: Store>(state: &State<S>, line: &EventType, setup: &Setup) -> Op
     (!store.is_user_fee_booked(&key)).then_some(Due { chain, source, tx })
 }
 
-/// Whether a past fee of `amount` on the pool chain may be booked, pure: what the last balance read
-/// found beyond the lines as they stand now, this job's own lines included, must still hold it.
-/// With no read there is nothing to claim it against.
+/// Whether a past fee of `amount` on the pool chain may be booked, pure: what every node read
+/// there at `block` (`observed`) holds beyond the lines as they stand now, this job's own lines
+/// included, less the pool's USDC on its way out, which the balance still reads while no line
+/// holds it, must still hold it.
 pub fn surplus_holds<S: Store>(
     state: &State<S>,
     config: &types::Config,
     chain: ChainId,
-    read: Option<types::books::BalanceCheck>,
+    block: types::BlockNumber,
+    observed: TokenAmount,
     amount: TokenAmount,
 ) -> bool {
-    let Some(read) = read else {
-        return false;
-    };
+    let moving = state.pool().pockets.base.in_flight;
+    let observed = observed.checked_sub(moving).unwrap_or(TokenAmount::ZERO);
     let (expected, _) = expected_at(
         state,
         chain,
         config.pool_chain,
-        read.block,
-        read.observed,
-        config.books_tolerance.0,
+        block,
+        observed,
+        TokenAmount::ZERO,
     );
     let wanted = amount
         .try_into_u128()
         .and_then(|value| i128::try_from(value).ok())
         .unwrap_or(i128::MAX);
-    surplus_of(read.observed, expected) >= wanted
+    surplus_of(observed, expected) >= wanted
 }
 
-/// Books what a past transaction's receipt shows; false when the pool chain's surplus would not
-/// hold it.
-fn book(due: &Due, receipt: &crate::pool::arrival::Receipt, canister: EvmAddress) -> bool {
+/// What one transaction due came to.
+enum Booked {
+    /// Its line is in, or it had nothing to book.
+    Done,
+    /// It is passed over for good, with why.
+    PassedOver(String),
+    /// Not now: the canister is halted, a read failed, or a transaction of the canister on the
+    /// pool chain is still open.
+    Later(String),
+}
+
+/// Reads a past transaction and books what it paid the canister. On the pool chain every node
+/// reads the balance first, and the line goes in only while the chain is quiet and that balance
+/// holds it. From the last read to the line there is no await.
+async fn book(due: &Due, canister: EvmAddress) -> Booked {
+    let receipt = match source::read(due.chain, due.tx).await {
+        Ok(receipt) => receipt,
+        Err(why) => return Booked::Later(why),
+    };
     let config = config::get();
-    let last_read = timer_state::get()
-        .books_reads
-        .get(&due.chain)
-        .and_then(LastRead::last);
-    let held = read_state(|state| {
+    let pool_chain = config.pool_chain == Some(due.chain);
+    let balance = if pool_chain {
+        match agreed::balance_of(due.chain, due.source.usdc, canister).await {
+            Ok((block, raw)) => Some((block, due.source.usdc_to_usd6(raw))),
+            Err(why) => return Booked::Later(why),
+        }
+    } else {
+        None
+    };
+    if is_halted() {
+        return Booked::Later("the canister is halted".to_string());
+    }
+    let outbox_chains = crate::storage::outbox::chains();
+    let decided = read_state(|state| {
         let step = books::user_fee_step(
             state,
             due.chain,
             config.pool_chain,
-            receipt,
+            &receipt,
             &due.source,
             canister,
         );
-        match step {
-            Ok(BookStep::UserFeeEarned { amount, .. }) if config.pool_chain == Some(due.chain) => {
-                surplus_holds(state, &config, due.chain, last_read, amount)
+        let Ok(step) = step else {
+            return Ok(None);
+        };
+        if let (Some((block, observed)), BookStep::UserFeeEarned { amount, .. }) = (balance, &step)
+        {
+            if crate::sweep::evm::gas_in_use(state, due.chain, &outbox_chains) {
+                return Err(Booked::Later(
+                    "a transaction of the canister on the pool chain is still open".to_string(),
+                ));
             }
-            _ => true,
+            if !surplus_holds(state, &config, due.chain, block, observed, *amount) {
+                return Err(Booked::PassedOver(format!(
+                    "its {amount} is above what the balance holds beyond the books"
+                )));
+            }
         }
+        Ok(Some(step))
     });
-    if held {
-        books::book_user_fee(due.chain, receipt, &due.source, canister);
+    match decided {
+        Ok(Some(step)) => {
+            if let Err(error) = books::record(due.chain, step) {
+                return Booked::PassedOver(format!("the books refused its line: {error}"));
+            }
+            Booked::Done
+        }
+        Ok(None) => Booked::Done,
+        Err(later) => later,
     }
-    held
 }
 
 /// One pass: to the next transaction due, its read, its line, and the next pass.
@@ -209,37 +255,16 @@ async fn step() -> Option<Duration> {
             ..job
         });
     };
-    // past the await the log has moved on, but only ever past the end of this walk's lines
-    let read = source::read(due.chain, due.tx).await;
-    match read {
-        Ok(receipt) => {
-            if !book(&due, &receipt, canister) {
-                ic_cdk::println!(
-                    "ALERT: the past fee of {} on chain {} is above the surplus: passed over",
-                    due.tx,
-                    due.chain
-                );
-            }
-            save(FeeCatchUp {
-                next: at + 1,
-                tries: 0,
-                ..job
-            })
-        }
-        Err(why) if job.tries + 1 >= TRIES => {
-            ic_cdk::println!(
-                "ALERT: the past fee of {} on chain {} was not read: {why}: passed over",
-                due.tx,
-                due.chain
-            );
-            save(FeeCatchUp {
-                next: at + 1,
-                tries: 0,
-                passed_over: job.passed_over.saturating_add(1),
-                ..job
-            })
-        }
-        Err(_) => {
+    // past the awaits the log has moved on, but only ever past the end of this walk's lines
+    match book(&due, canister).await {
+        Booked::Done => save(FeeCatchUp {
+            next: at + 1,
+            tries: 0,
+            ..job
+        }),
+        Booked::PassedOver(why) => passed_over(job, at, &due, &why),
+        Booked::Later(why) if job.tries + 1 >= TRIES => passed_over(job, at, &due, &why),
+        Booked::Later(_) => {
             save(FeeCatchUp {
                 next: at,
                 tries: job.tries + 1,
@@ -248,6 +273,21 @@ async fn step() -> Option<Duration> {
             Some(AFTER_A_FAILURE)
         }
     }
+}
+
+/// A transaction given up on: counted, with an alert line, and the walk goes on past it.
+fn passed_over(job: FeeCatchUp, at: u64, due: &Due, why: &str) -> Option<Duration> {
+    ic_cdk::println!(
+        "ALERT: the past fee of {} on chain {} is passed over: {why}",
+        due.tx,
+        due.chain
+    );
+    save(FeeCatchUp {
+        next: at + 1,
+        tries: 0,
+        passed_over: job.passed_over.saturating_add(1),
+        ..job
+    })
 }
 
 /// Keeps where the walk stands; how soon the next pass runs, none when it is done.

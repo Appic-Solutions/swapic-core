@@ -488,12 +488,12 @@ pub async fn finish_cctp(
             .get(source::charged_action(&plan.envelope))
             .unwrap_or(types::TokenAmount::MAX);
         let receipt = source::read(source_chain, source_tx).await?;
+        require_not_halted().map_err(|e| format!("{e:?}"))?;
         // the fee is the books' whether or not this finish goes through: on the source chain,
         // where it was paid
         crate::books::book_user_fee(source_chain, &receipt, &source, canister);
         paid = source::proves(&receipt, &parsed, &source, canister, needed)
             .map_err(|e| e.to_string())?;
-        require_not_halted().map_err(|e| format!("{e:?}"))?;
     }
 
     let _busy =

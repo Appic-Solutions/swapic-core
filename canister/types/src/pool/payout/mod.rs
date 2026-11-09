@@ -729,7 +729,9 @@ impl PayoutSettings {
     /// so a run that does not name them turns the route off and strands nothing.
     pub fn keeping_ck(self, stored: Option<CkSettings>) -> Self {
         Self {
-            ck: self.ck.or(stored.map(|ck| CkSettings { open: false, ..ck })),
+            ck: self
+                .ck
+                .or(stored.map(|ck| CkSettings { open: false, ..ck })),
             ..self
         }
     }

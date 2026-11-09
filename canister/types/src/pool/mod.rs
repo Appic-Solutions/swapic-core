@@ -519,15 +519,15 @@ pub enum PoolSettingsError {
 }
 
 impl PoolSettings {
-    /// The knobs hold together: caps above zero and the swap cap within the TVL cap, the
-    /// premium at most 10%, the held share at most all of the pocket, the ckUSDC entry (if
-    /// any) with its own ledger as its pool, every other token with a pool that is neither
-    /// its own ledger nor ckUSDC's, no ledger twice.
     /// What every use of the pool leaves in it, micro USDC.
     pub fn pool_fee(&self) -> TokenAmount {
         self.pool_fee.unwrap_or(TokenAmount::ZERO)
     }
 
+    /// The knobs hold together: caps above zero and the swap cap within the TVL cap, the
+    /// premium at most 10%, the held share at most all of the pocket, the ckUSDC entry (if
+    /// any) with its own ledger as its pool, every other token with a pool that is neither
+    /// its own ledger nor ckUSDC's, no ledger twice.
     pub fn validate(&self) -> Result<(), PoolSettingsError> {
         if self.tvl_cap == TokenAmount::ZERO {
             return Err(PoolSettingsError::Zero("tvl_cap"));

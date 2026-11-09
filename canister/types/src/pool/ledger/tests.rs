@@ -2996,3 +2996,18 @@ fn a_pool_fee_above_a_dollar_is_refused() {
         )))
     );
 }
+
+/// A stake the move fee and the pool fee take whole is refused at its arrival and held for a
+/// human, never registered to fail at its mint ten times over.
+#[test]
+fn a_stake_the_fees_take_whole_is_refused_at_its_arrival() {
+    let pool = pool_with_fee(10_000);
+    let fee = usdc(1);
+    let whole = TokenAmount::from(1_010_000_u32);
+    assert!(matches!(
+        check_arrival(&pool.ledger, &stake(2, whole, fee)),
+        Err(RegisterRefusal::NotAllowed(why)) if why.contains("take all of the stake")
+    ));
+    let enough = TokenAmount::from(1_010_001_u32);
+    assert_eq!(check_arrival(&pool.ledger, &stake(2, enough, fee)), Ok(()));
+}

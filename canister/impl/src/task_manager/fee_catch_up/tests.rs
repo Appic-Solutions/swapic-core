@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::MemoryStore;
-use types::books::{BalanceCheck, UserFeeKey};
+use types::books::UserFeeKey;
 use types::cctp::CctpDomain;
 use types::config::ChainTable;
 use types::{
@@ -168,8 +168,8 @@ fn a_line_that_does_not_read_is_not_due() {
     );
 }
 
-/// On the pool chain a past fee needs the surplus the last read found: exactly enough passes, a
-/// micro more does not, and with no read there is nothing to claim it against.
+/// On the pool chain a past fee needs what the balance holds beyond the books: exactly enough
+/// passes, a micro more does not, and USDC the pool has on its way out is not counted.
 #[test]
 fn a_past_fee_must_fit_the_surplus() {
     let state = State::new(MemoryStore::default());
@@ -177,28 +177,30 @@ fn a_past_fee_must_fit_the_surplus() {
         pool_chain: Some(ChainId::BASE),
         ..types::Config::default()
     };
-    let read = Some(BalanceCheck {
-        block: BlockNumber::new(10),
-        observed: TokenAmount::from(14_974_902_u32),
-        expected: TokenAmount::ZERO,
-    });
     let holds = |amount: u32| {
         surplus_holds(
             &state,
             &config,
             ChainId::BASE,
-            read,
+            BlockNumber::new(10),
+            TokenAmount::from(14_974_902_u32),
             TokenAmount::from(amount),
         )
     };
     assert!(holds(14_974_902));
     assert!(!holds(14_974_903));
+    let mut ledger = types::pool::PoolLedger::default();
+    ledger.pockets.base.in_flight = TokenAmount::from(1_u8);
+    let mut store = MemoryStore::default();
+    store.put_pool_ledger(ledger);
+    let moving = State::new(store);
     assert!(!surplus_holds(
-        &state,
+        &moving,
         &config,
         ChainId::BASE,
-        None,
-        TokenAmount::from(1_u8)
+        BlockNumber::new(10),
+        TokenAmount::from(14_974_902_u32),
+        TokenAmount::from(14_974_902_u32),
     ));
 }
 

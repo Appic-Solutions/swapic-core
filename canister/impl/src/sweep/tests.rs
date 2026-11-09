@@ -227,8 +227,8 @@ fn a_native_sweep_waits_for_a_nonce_still_being_signed() {
     });
 }
 
-/// A fee sweep goes while the real balance holds every line, within the check's tolerance, and
-/// waits while it does not: a wrong fee line never reaches the pool's money.
+/// A fee sweep goes while the real balance holds every line to the unit, and waits while it does
+/// not, whatever the hourly check's tolerance: a wrong fee line never reaches the pool's money.
 #[test]
 fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
     on_fresh_memory(|| {
@@ -255,6 +255,7 @@ fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
                     ChainId::BASE,
                     types::BlockNumber::new(10),
                     TokenAmount::from(observed),
+                    false,
                 )
             })
         };
@@ -264,8 +265,20 @@ fn a_fee_sweep_waits_while_the_balance_is_below_the_books() {
             None,
             "a surplus takes nothing from anyone"
         );
-        assert_eq!(refuses(4_000_000), None, "within the tolerance");
-        let why = refuses(3_999_999).expect("below the tolerance");
+        // the hourly check's tolerance is not given to a sweep: a unit short is refused
+        let why = refuses(4_999_999).expect("a unit below the books");
+        // and never while a transaction of the canister on the chain is still open
+        let busy = read_state(|state| {
+            balance_refuses(
+                state,
+                &config,
+                ChainId::BASE,
+                types::BlockNumber::new(10),
+                TokenAmount::from(9_000_000_u32),
+                true,
+            )
+        });
+        assert!(busy.is_some_and(|why| why.contains("still open")));
         assert!(why.contains("below the books"), "{why}");
     });
 }

@@ -46,6 +46,8 @@ pub trait Store {
     /// Whether the user-paid fees of this transaction are booked.
     fn is_user_fee_booked(&self, key: &UserFeeKey) -> bool;
     fn put_user_fee_booked(&mut self, key: UserFeeKey);
+    /// Every transaction whose user-paid fees are booked, in key order.
+    fn booked_user_fees(&self) -> Vec<UserFeeKey>;
     /// The pool's ledger, empty before its first step.
     fn pool_ledger(&self) -> PoolLedger;
     fn put_pool_ledger(&mut self, ledger: PoolLedger);
@@ -316,6 +318,10 @@ impl Store for MemoryStore {
         self.booked_user_fees.insert(key);
     }
 
+    fn booked_user_fees(&self) -> Vec<UserFeeKey> {
+        self.booked_user_fees.iter().copied().collect()
+    }
+
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {
         self.signed.range(range).take(limit).copied().collect()
     }
@@ -542,7 +548,7 @@ impl State<MemoryStore> {
             sweeps,
             flow_by_source: _,
             flow_by_tx: _,
-            booked_user_fees: _,
+            booked_user_fees,
         } = &self.store;
         let other_flows = other.store.flows();
         let other_nonces = other.store.nonces();
@@ -577,6 +583,9 @@ impl State<MemoryStore> {
                 .iter()
                 .map(|(key, line)| (key, line)))
             && pool_credited.iter().eq(other.store.pool_credited().iter())
+            && booked_user_fees
+                .iter()
+                .eq(other.store.booked_user_fees().iter())
             && pool_payouts.iter().eq(other
                 .store
                 .pool_payouts()

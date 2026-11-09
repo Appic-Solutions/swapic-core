@@ -1602,6 +1602,15 @@ pub fn check_arrival(ledger: &PoolLedger, terms: &Registration) -> Result<(), Re
                 .least_move_fee
                 .admits(MoveDirection::BaseToIcp, terms.move_fee)
                 .map_err(RegisterRefusal::NotAllowed)?;
+            // held for a human now rather than failing at its mint after ten tries
+            if ledger
+                .mint_for_stake(terms.min_usdc, terms.move_fee)
+                .is_none()
+            {
+                return Err(RegisterRefusal::NotAllowed(
+                    "the move fee and the pool fee take all of the stake".to_string(),
+                ));
+            }
             let would_be = sat_add(ledger.tvl_measure(), terms.min_usdc);
             if would_be > settings.tvl_cap {
                 return Err(RegisterRefusal::AboveTvlCap {

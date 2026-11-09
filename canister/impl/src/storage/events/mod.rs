@@ -1,11 +1,11 @@
 use crate::state::transitions::apply_state_transition;
 use crate::state::{State, Store};
 use crate::storage::memory::{
-    books_memory, eco_rescues_memory, events_data_memory, events_index_memory,
-    booked_user_fees_memory, flow_by_source_memory, flow_by_tx_memory, flows_memory, ledger_meta_memory, nonces_memory,
-    pool_credited_memory, pool_deposits_memory, pool_ledger_memory, pool_moves_memory,
-    pool_orphans_memory, pool_own_sources_memory, pool_payout_intents_memory,
-    pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
+    booked_user_fees_memory, books_memory, eco_rescues_memory, events_data_memory,
+    events_index_memory, flow_by_source_memory, flow_by_tx_memory, flows_memory,
+    ledger_meta_memory, nonces_memory, pool_credited_memory, pool_deposits_memory,
+    pool_ledger_memory, pool_moves_memory, pool_orphans_memory, pool_own_sources_memory,
+    pool_payout_intents_memory, pool_payout_queue_memory, pool_payouts_memory, pool_shares_memory,
     pool_withdrawal_nonces_memory, signed_memory, sweeps_memory, unsigned_nonces_memory, Memory,
 };
 use ic_stable_structures::log::WriteError;
@@ -204,6 +204,10 @@ impl Store for StableStore {
 
     fn put_user_fee_booked(&mut self, key: UserFeeKey) {
         BOOKED_USER_FEES.with(|booked| booked.borrow_mut().insert(key));
+    }
+
+    fn booked_user_fees(&self) -> Vec<UserFeeKey> {
+        BOOKED_USER_FEES.with(|booked| booked.borrow().iter().collect())
     }
 
     fn signed_in(&self, range: RangeFrom<EventIndex>, limit: usize) -> Vec<EventIndex> {

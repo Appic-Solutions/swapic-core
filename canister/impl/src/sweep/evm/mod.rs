@@ -167,9 +167,11 @@ pub async fn sweep(args: SweepEvmArgs) -> Result<SweepEvmOk, SweepError> {
         (SweepAsset::FeeUsdc, _) => {
             let (block, raw) = held.expect("BUG: a fee sweep read its balance above");
             let observed = evm.usdc_to_usd6(raw);
-            if let Some(why) =
-                read_state(|state| super::balance_refuses(state, &config, chain, block, observed))
-            {
+            let outbox_chains = outbox::chains();
+            if let Some(why) = read_state(|state| {
+                let open = gas_in_use(state, chain, &outbox_chains);
+                super::balance_refuses(state, &config, chain, block, observed, open)
+            }) {
                 return Err(SweepError::Busy(why));
             }
             let (from_pool, fee_income) = read_state(|state| {

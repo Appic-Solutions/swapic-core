@@ -75,6 +75,15 @@ fn word(answer: Result<Value, RpcError>) -> Result<[u8; 32], String> {
 async fn agreed_head(chain: ChainId) -> Result<(BlockNumber, BlockDepth), String> {
     let depth = crate::tx::credit_confirmations(&config::get(), chain)
         .map_err(|_| format!("chain {chain} has no depth configured"))?;
+    Ok((agreed_head_only(chain).await?, depth))
+}
+
+/// Blocks below the agreed head a balance is read at on a chain final at its own finalized
+/// tag: Polygon's tag trails by 2 to 3 blocks, BNB Chain's by 1 or 2.
+pub const FINALIZED_DEPTH: u64 = 64;
+
+/// The head the nodes agreed on, rounded down to [`rpc::HEAD_GRAIN`].
+async fn agreed_head_only(chain: ChainId) -> Result<BlockNumber, String> {
     let mut answers = rpc::rpc_batch_agreed(
         chain,
         &[("eth_blockNumber", json!([]), Keep::Head)],
@@ -89,7 +98,7 @@ async fn agreed_head(chain: ChainId) -> Result<(BlockNumber, BlockDepth), String
         .and_then(Value::as_str)
         .and_then(parse_block_number)
         .ok_or("the head does not read")?;
-    Ok((head, depth))
+    Ok(head)
 }
 
 /// The block every node reads at: the crediting depth below the agreed head.
@@ -120,7 +129,15 @@ pub async fn balance_of(
     token: EvmAddress,
     owner: EvmAddress,
 ) -> Result<(BlockNumber, TokenAmount), String> {
-    let (head, depth) = agreed_head(chain).await?;
+    // a chain final at its own finalized tag has no crediting depth: the nodes agree on a block
+    // well past it instead, a fixed number below their head
+    let config = config::get();
+    let depth = match crate::tx::credit_confirmations(&config, chain) {
+        Ok(depth) => depth,
+        Err(_) if config.finalized.contains(chain) => BlockDepth::new(FINALIZED_DEPTH),
+        Err(_) => return Err(format!("chain {chain} has no depth configured")),
+    };
+    let head = agreed_head_only(chain).await?;
     let block = read_block(head, depth, BlockNumber::new(0))
         .ok_or_else(|| format!("chain {chain}'s head is below the crediting depth"))?;
     let data = types::swapic::balance_of_calldata(owner);
