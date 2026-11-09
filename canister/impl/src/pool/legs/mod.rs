@@ -199,7 +199,12 @@ pub async fn run_beside(
         .checked_add(spec.fee_in)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
     let stands = ledgers.may_stand(spec.token_in);
-    let (quoted, before, allowed) = match ledgers.round_read_ahead(&spec) {
+    // a reading beside the pull can start a sale, never end one: a refund cannot be taken back, so
+    // a price below the least is asked again now, before it decides anything
+    let read_ahead = ledgers
+        .round_read_ahead(&spec)
+        .filter(|read| read.quoted >= spec.least);
+    let (quoted, before, allowed) = match read_ahead {
         Some(read) => (Ok(read.quoted), Ok(read.before), read.allowed),
         None => {
             read_round(
@@ -373,7 +378,10 @@ async fn settle(
 }
 
 /// What a leg cost the account it sold from: every approval's fee, and once begun its
-/// deposit and the pull's fee, or what the deposit cost in the end once undone.
+/// deposit and the pull's fee, or what the deposit cost in the end once undone. A begun leg with
+/// no approval counted gave one before approvals were counted, or leaned on a standing one: that
+/// one is budgeted too, so the sum is at worst a fee above what was spent, and a refund never
+/// pays out more than the swap brought in.
 pub fn cost_in(state: &SwapLeg, fee_in: TokenAmount) -> Option<TokenAmount> {
     let approved = fee_in.checked_mul(state.approvals.unwrap_or(u32::from(state.begun)))?;
     if !state.begun {

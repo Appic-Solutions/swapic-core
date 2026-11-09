@@ -1384,49 +1384,90 @@ fn a_round_read_beside_the_pull_goes_straight_to_the_sale() {
     });
 }
 
-/// Read beside the pull, a price below the floor still stops the sale and an allowance that
-/// falls short is still approved: the reading decides as a fresh one does.
-#[test]
-fn a_round_read_beside_the_pull_decides_as_a_fresh_one_does() {
-    let round = |quoted: u64, allowed: u64| crate::pool::payout::Round {
+/// A planned sale whose round was read beside its pull, as `quoted` and `allowed`, with the pool
+/// quoting `fresh` if it is asked again.
+fn sale_read_ahead(quoted: u64, allowed: u64, fresh: u64) -> (u64, Fake) {
+    pool_with(usdc(500));
+    let request = planned(
+        token(),
+        TokenAmount::from(5_000_000_u64),
+        &plan_order(usdc(2), usdc(1)),
+    );
+    let id = open_planned(&request);
+    let fake = Fake::default();
+    fake.standing.set(Some(Ok(TokenAmount::ZERO)));
+    fake.ahead.set(Some(crate::pool::payout::Round {
         quoted: TokenAmount::from(quoted),
         before: types::pool::PoolHeld {
             ckusdc: TokenAmount::ZERO,
             token: TokenAmount::ZERO,
         },
         allowed: Some(TokenAmount::from(allowed)),
-    };
-    for (quoted, allowed, approves, sells) in [
-        (1_u64, u64::MAX, false, false),
-        (2_100_000, 4_998_999, true, true),
-    ] {
-        on_fresh_memory(move || {
-            crate::storage::init();
-            pool_with(usdc(500));
-            let request = planned(
-                token(),
-                TokenAmount::from(5_000_000_u64),
-                &plan_order(usdc(2), usdc(1)),
-            );
-            let id = open_planned(&request);
-            let fake = Fake::default();
-            fake.standing.set(Some(Ok(TokenAmount::ZERO)));
-            fake.ahead.set(Some(round(quoted, allowed)));
-            fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
-            block_on(drive(&fake, id, clock, &open_pool)).unwrap();
-            let calls = fake.calls.borrow();
-            assert_eq!(
-                calls.iter().any(|call| call.contains("approve")),
-                approves,
-                "{calls:?}"
-            );
-            assert_eq!(
-                calls.iter().any(|call| call.starts_with("swap")),
-                sells,
-                "{calls:?}"
-            );
-        });
-    }
+    }));
+    fake.quote.set(Some(TokenAmount::from(fresh)));
+    fake.out.set(Some(TokenAmount::from(2_100_000_u64)));
+    block_on(drive(&fake, id, clock, &open_pool)).unwrap();
+    (id, fake)
+}
+
+/// A reading beside the pull with an allowance that falls short still approves.
+#[test]
+fn a_round_read_beside_the_pull_that_falls_short_still_approves() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (_, fake) = sale_read_ahead(2_100_000, 4_998_999, 2_100_000);
+        let calls = fake.calls.borrow();
+        assert!(
+            calls.iter().any(|call| call.contains("approve")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| call.starts_with("swap")),
+            "{calls:?}"
+        );
+    });
+}
+
+/// A low price read beside the pull never refunds by itself: a refund cannot be taken back, so
+/// the pool is asked again. The price has recovered: the swap sells, and the user never paid for
+/// a refund a price some seconds old would have forced.
+#[test]
+fn a_low_price_read_beside_the_pull_is_asked_again_before_it_refunds() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake) = sale_read_ahead(1, u64::MAX, 2_100_000);
+        let calls = fake.calls.borrow();
+        assert!(calls.contains(&"quote 4998000".to_string()), "{calls:?}");
+        assert!(
+            calls.iter().any(|call| call.starts_with("swap")),
+            "{calls:?}"
+        );
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(payout.status, PayoutStatus::Waiting);
+    });
+}
+
+/// Asked again, the price is still low: then it refunds, with nothing approved or sold.
+#[test]
+fn a_low_price_still_low_when_asked_again_refunds() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake) = sale_read_ahead(1, u64::MAX, 1);
+        let calls = fake.calls.borrow();
+        assert!(calls.contains(&"quote 4998000".to_string()), "{calls:?}");
+        assert!(
+            !calls.iter().any(|call| call.contains("approve")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("swap")),
+            "{calls:?}"
+        );
+        assert!(matches!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Undone(_)
+        ));
+    });
 }
 
 /// A ledger that refuses a standing approval still sells: the approval falls back to this swap

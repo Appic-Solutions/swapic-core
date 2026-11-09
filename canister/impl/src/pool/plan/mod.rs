@@ -97,27 +97,30 @@ impl PlanReads for crate::pool::payout::Live {
     }
 
     fn read_fit_ahead(&self, id: u64, route: Option<Vec<u8>>, amount: TokenAmount) {
-        // a task of its own: a sale's answer waits on nothing here, whatever becomes of this
+        // in a message of its own: this is called as the sale goes out, and a trap in a read that
+        // is only ever a saving must not take the sale's own lines back with it
         #[cfg(target_arch = "wasm32")]
-        ic_cdk::spawn(async move {
-            let live = crate::pool::payout::Live;
-            let scale = async {
-                match &route {
-                    Some(route) => live.scaled(route, amount).await.ok(),
-                    None => None,
-                }
-            };
-            let ((), scaled) = futures::future::join(live.gas_ready(), scale).await;
-            if let (Some(route), Some(scaled)) = (route, scaled) {
-                SCALED_AHEAD.with(|ahead| {
-                    *ahead.borrow_mut() = Some(ScaledAhead {
-                        id,
-                        route,
-                        amount,
-                        scaled,
+        ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
+            ic_cdk::spawn(async move {
+                let live = crate::pool::payout::Live;
+                let scale = async {
+                    match &route {
+                        Some(route) => live.scaled(route, amount).await.ok(),
+                        None => None,
+                    }
+                };
+                let ((), scaled) = futures::future::join(live.gas_ready(), scale).await;
+                if let (Some(route), Some(scaled)) = (route, scaled) {
+                    SCALED_AHEAD.with(|ahead| {
+                        *ahead.borrow_mut() = Some(ScaledAhead {
+                            id,
+                            route,
+                            amount,
+                            scaled,
+                        });
                     });
-                });
-            }
+                }
+            })
         });
         #[cfg(not(target_arch = "wasm32"))]
         let _ = (id, route, amount);

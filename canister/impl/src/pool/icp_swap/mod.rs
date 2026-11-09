@@ -37,7 +37,7 @@ mod tests;
 use crate::ic::{CallError, Dedup};
 use crate::pool::legs::{self, LegEnd, LegSpec};
 use crate::pool::pay::{self, refused, AmountIn};
-use crate::pool::payout::{carry_on, open, record, Ledgers, Leg, Stop};
+use crate::pool::payout::{carry_on_after_read, open, record, Ledgers, Leg, ReadDone, Stop};
 use crate::pool::plan::{Decided, Fit, Fitted, PlanReads};
 use crate::pool::{self, now};
 use crate::relay::{read_plan, Chains, Delivery, Party, Plan};
@@ -388,7 +388,7 @@ pub async fn swap_from_icp(
     let at = now();
     let (_, opened) = opening(at)?;
     crate::pool::pull_first::worth_pulling(request.token_in, request.amount_in)?;
-    read_sale_beside_pull(&opened.terms);
+    let read = read_sale_beside_pull(&opened.terms);
     let pair = crate::pool::pull_first::dedup(
         "swap_from_icp",
         &request.from,
@@ -427,7 +427,7 @@ pub async fn swap_from_icp(
             return Err(why);
         }
     };
-    carry_on(id, move |busy| async move {
+    carry_on_after_read(id, read, move |busy| async move {
         // a plan that fits is signed in this same message chain, and one that is not waits for
         // the watcher's order
         if let Ok(Some(fitted)) = drive(
@@ -454,20 +454,13 @@ fn first_leg_in(amount_in: TokenAmount, fee_in: TokenAmount) -> Option<TokenAmou
 /// A sale on one pool has nothing to wait for once its money is in, if what it reads comes back
 /// with the pull. A route through ICP reads on when its first leg is done, and ckUSDC sells
 /// nothing.
-fn read_sale_beside_pull(terms: &IcpSwapTerms) {
-    let Some(settings) = pool_store::ledger().settings else {
-        return;
-    };
+fn read_sale_beside_pull(terms: &IcpSwapTerms) -> Option<ReadDone> {
+    let settings = pool_store::ledger().settings?;
     let Some(PayoutPath::Icpswap { pool }) = inbound_path(&settings, terms.token_in) else {
-        return;
+        return None;
     };
-    let Some(amount_in) = settings
-        .fee_of(terms.token_in)
-        .and_then(|fee| first_leg_in(terms.amount_in, fee))
-    else {
-        return;
-    };
-    crate::pool::payout::read_beside_pull(pool, terms.token_in, settings.ckusdc_ledger, amount_in);
+    let amount_in = first_leg_in(terms.amount_in, settings.fee_of(terms.token_in)?)?;
+    crate::pool::payout::read_beside_pull(pool, terms.token_in, settings.ckusdc_ledger, amount_in)
 }
 
 /// The swap's opening and its pull, both written once the money is in, with no await between:
@@ -915,6 +908,11 @@ async fn swap(
     let in0 = first_leg_in(terms.amount_in, fee_in)
         .ok_or_else(|| Stop::Failed("the amount does not cover the token's fees".to_string()))?;
     let id = evm_payout_ref(payout.id);
+    // what `known` will read off the sale that ends in ckUSDC, as its quote says it
+    let read_fit = |quoted: TokenAmount| {
+        let received = landed(quoted, fee_ck);
+        read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
+    };
     match attempt.path {
         PayoutPath::Ckusdc => known(terms.amount_in),
         PayoutPath::Icpswap { pool } => {
@@ -929,10 +927,6 @@ async fn swap(
                 fee_in,
                 fee_out: fee_ck,
                 pays_out: false,
-            };
-            let read_fit = |quoted: TokenAmount| {
-                let received = landed(quoted, fee_ck);
-                read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
             };
             match run_leg_beside(ledgers, spec, progress.swap, clock, guard, read_fit).await? {
                 LegEnd::Out(out) => known(landed(out, fee_ck)),
@@ -1031,10 +1025,6 @@ async fn swap(
                     fee_in: fee_icp,
                     fee_out: fee_ck,
                     pays_out: false,
-                };
-                let read_fit = |quoted: TokenAmount| {
-                    let received = landed(quoted, fee_ck);
-                    read_fit_beside_sale(ledgers, payout, &terms, &settings, received, clock());
                 };
                 if let LegEnd::Out(out) =
                     run_leg_beside(ledgers, spec, second_leg, clock, guard, read_fit).await?
