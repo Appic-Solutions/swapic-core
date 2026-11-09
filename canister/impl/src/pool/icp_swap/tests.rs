@@ -212,8 +212,11 @@ struct Fake {
     /// Whether reads beside a sale land before it answers, as the scaler answers them.
     fit_read_ahead: Cell<bool>,
     /// What they read: for which route and amount, and what the fit then finds.
-    scaled_ahead: RefCell<Option<(Vec<u8>, TokenAmount, Vec<u8>)>>,
+    scaled_ahead: RefCell<Option<ScaledAhead>>,
 }
+
+/// A read beside a sale: its route, its amount, and the fit it finds.
+type ScaledAhead = (Vec<u8>, TokenAmount, Vec<u8>);
 
 /// The scaler as the fake answers it, and a payout order's checks on `config()`.
 impl PlanReads for Fake {
