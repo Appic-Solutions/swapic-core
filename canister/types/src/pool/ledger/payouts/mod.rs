@@ -72,6 +72,18 @@ fn on_across(lines: &PayoutLines, payout: &EvmPayout) -> bool {
     lines.across_owed.contains(&payout.id) && payout.reclaim.is_none()
 }
 
+/// What the Across payouts in flight hold together (every payout in `across_owed`), the
+/// in-flight cap's other side (D16).
+fn across_out(lines: &PayoutLines, lookup: &impl PoolLookup) -> Result<TokenAmount, PoolStepError> {
+    lines
+        .across_owed
+        .iter()
+        .filter_map(|id| lookup.payout(*id))
+        .filter_map(|payout| payout.amount)
+        .try_fold(TokenAmount::ZERO, |sum, amount| sum.checked_add(amount))
+        .ok_or(PoolStepError::Overflow)
+}
+
 fn status_of(payout: &EvmPayout) -> String {
     format!("{:?}", payout.status)
 }
@@ -499,7 +511,7 @@ impl PoolLedger {
             }
             // a payout waiting is signed once: a revert undoes it, never signs it
             // again, its pinned order included
-            PoolStep::PayoutSigned { id, .. } => {
+            PoolStep::PayoutSigned { id, order, .. } => {
                 let payout = payout_of(lookup, *id)?;
                 if payout.status != PayoutStatus::Waiting
                     || !payout.base_reserved
@@ -511,6 +523,20 @@ impl PoolLedger {
                 let amount = payout.amount.ok_or(PoolStepError::Mismatch)?;
                 if amount > self.pockets.base.reserved {
                     return Err(PoolStepError::Overflow);
+                }
+                // an Across order within the cap on what the Across payouts in flight hold
+                // together (D16), held here, where nothing awaits: payouts signed at once
+                // never all pass on one old total. Refused, its signature is dropped and the
+                // payout waits on, its USDC and ckUSDC where they were
+                if deposits_on_across(order) {
+                    let settings = lines.settings.as_ref().ok_or(PoolStepError::NoSettings)?;
+                    settings
+                        .admits_across(amount, across_out(&lines, lookup)?)
+                        .map_err(|_| {
+                            PoolStepError::Terms(
+                                "the Across payouts in flight would pass their cap",
+                            )
+                        })?;
                 }
                 Ok(())
             }
@@ -646,7 +672,9 @@ impl PoolLedger {
         let (mut deposits, mut back) = (TokenAmount::ZERO, TokenAmount::ZERO);
         for (at, id) in refunded.iter().enumerate() {
             if refunded[..at].contains(id) {
-                return Err(PoolStepError::Terms("an Across refund pays a payout back once"));
+                return Err(PoolStepError::Terms(
+                    "an Across refund pays a payout back once",
+                ));
             }
             let payout = payout_of(lookup, *id)?;
             let deposit = payout
@@ -663,7 +691,9 @@ impl PoolLedger {
                     "an Across deposit holds at least its payout's amount",
                 ));
             }
-            deposits = deposits.checked_add(deposit).ok_or(PoolStepError::Overflow)?;
+            deposits = deposits
+                .checked_add(deposit)
+                .ok_or(PoolStepError::Overflow)?;
             back = back.checked_add(amount).ok_or(PoolStepError::Overflow)?;
         }
         if deposits > amount {

@@ -1859,6 +1859,7 @@ fn an_across_refund_credits_the_payout_owed_back_and_books_the_rest() {
                 memo: Vec::new().into(),
             })
         };
+        crate::storage::pool::tests::across_cap();
         crate::storage::pool::tests::sign_payout_with(id, 0, 9, order);
         let amount = crate::storage::pool::payout(id).unwrap().amount.unwrap();
         let out = types::pool::AcrossOut {

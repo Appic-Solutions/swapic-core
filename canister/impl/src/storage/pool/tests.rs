@@ -521,6 +521,22 @@ pub(crate) fn waiting_withdrawal(staker: types::EvmAddress) -> u64 {
     id
 }
 
+/// The payout settings as they stand with an Across in-flight cap of a million USDC: what
+/// an Across payout is signed under (D16).
+pub(crate) fn across_cap() {
+    let settings = ledger().lines().settings.unwrap_or_default();
+    record_at(
+        PoolStep::PayoutSettingsSet {
+            settings: types::pool::PayoutSettings {
+                across_in_flight_max: Some(usdc(1_000_000)),
+                ..settings
+            },
+        },
+        at(2),
+    )
+    .unwrap();
+}
+
 /// Payout `id` signed at `nonce` on Base with order `byte`: its creation and its record.
 pub(crate) fn sign_payout(id: u64, nonce: u64, byte: u8) -> types::EventIndex {
     sign_payout_with(id, nonce, byte, vec![byte; 8])

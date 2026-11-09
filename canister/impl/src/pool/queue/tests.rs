@@ -1549,6 +1549,7 @@ const ACROSS_DEADLINE: u64 = 1_500;
 /// deadline [`ACROSS_DEADLINE`].
 fn delivering_across_withdrawal() -> u64 {
     let id = waiting_withdrawal(staker());
+    crate::storage::pool::tests::across_cap();
     crate::storage::pool::tests::sign_payout_with(id, 0, 9, across_order());
     let amount = payout(id).unwrap().amount.unwrap();
     let out = types::pool::AcrossOut {
