@@ -1230,6 +1230,8 @@ async fn via_icp(
                 )));
             }
             let mut least0 = TokenAmount::ZERO;
+            // the first leg's round, read with the chained quote under this lock
+            let mut read0 = None;
             if !progress.swap.begun {
                 let fees = fee_icp
                     .checked_mul(ICP_FEES_BEFORE_SECOND)
@@ -1248,7 +1250,10 @@ async fn via_icp(
                 )
                 .await?;
                 match chained {
-                    Ok(at_least) => least0 = at_least,
+                    Ok(chained) => {
+                        least0 = chained.least;
+                        read0 = Some(chained.read);
+                    }
                     Err(why) => {
                         if progress.swap.declined == 0 {
                             record(
@@ -1277,7 +1282,7 @@ async fn via_icp(
                 fee_out: fee_icp,
                 pays_out: false,
             };
-            match legs::run(ledgers, spec, progress.swap, clock, guard).await? {
+            match legs::run_with(ledgers, spec, progress.swap, clock, guard, read0).await? {
                 LegEnd::Out(out) => out,
                 LegEnd::Short(quoted) => {
                     return via_fall_back(
@@ -1562,10 +1567,15 @@ async fn swap_leg(
             )
         }
     };
-    let quoted = ledgers
-        .quote(pool, swap_in, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
+    // the pool's quote and what it holds of the canister's before this leg's deposit, in one
+    // round: read while this leg alone is at the pool, only what is there above it is ever this
+    // leg's
+    let (quoted, before) = futures::future::join(
+        ledgers.quote(pool, swap_in, zero_for_one),
+        held_at(ledgers, pool, zero_for_one),
+    )
+    .await;
+    let quoted = quoted.map_err(|error| call_stop("the pool's quote", error))?;
     if quoted < least {
         let why = format!("the pool quotes {quoted}, below the {least} needed");
         if payout.progress.swap.declined == 0 {
@@ -1584,9 +1594,7 @@ async fn swap_leg(
     let allowance = swap_in
         .checked_add(fee_ck)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
-    // what the pool holds of the canister's before this leg's deposit, read while this leg
-    // alone is at the pool: only what is there above it is ever this leg's
-    let before = held_at(ledgers, pool, zero_for_one).await?;
+    let before = before?;
     open(guard)?;
     ledgers
         .approve(ckusdc, pool, allowance)

@@ -979,7 +979,12 @@ async fn swap(
             let out0 = match progress.swap.out {
                 Some(out) => out,
                 None => {
+                    // the first pool held for this leg from its first read: what the pool holds
+                    // of the canister's is read beside the chained quote, and the leg reads
+                    // nothing again
+                    let _held = hold_pool(first, id)?;
                     let mut least0 = TokenAmount::ZERO;
+                    let mut read0 = None;
                     if !progress.swap.begun {
                         match legs::chained_least(
                             ledgers,
@@ -995,7 +1000,10 @@ async fn swap(
                         )
                         .await?
                         {
-                            Ok(at_least) => least0 = at_least,
+                            Ok(chained) => {
+                                least0 = chained.least;
+                                read0 = Some(chained.read);
+                            }
                             Err(why) => return undo(payout.id, why, clock()),
                         }
                     }
@@ -1011,7 +1019,7 @@ async fn swap(
                         fee_out: fee_icp,
                         pays_out: false,
                     };
-                    match run_leg(ledgers, spec, progress.swap, clock, guard).await? {
+                    match legs::run_with(ledgers, spec, progress.swap, clock, guard, read0).await? {
                         LegEnd::Out(out) => out,
                         LegEnd::Short(quoted) => {
                             return undo(
@@ -1157,21 +1165,24 @@ async fn run_leg_beside(
     if state.out.is_some() {
         return legs::run_beside(ledgers, spec, state, clock, guard, beside).await;
     }
-    let Some(_held) = Leg::take(spec.pool) else {
+    let _held = hold_pool(spec.pool, spec.id)?;
+    legs::run_beside(ledgers, spec, state, clock, guard, beside).await
+}
+
+/// `pool` held for one leg of payout `id` alone, with no other leg there unsettled: what the
+/// pool holds of the canister's is then known to be whose.
+fn hold_pool(pool: Principal, id: types::hash::PoolRef) -> Result<Leg, Stop> {
+    let Some(held) = Leg::take(pool) else {
         return Err(Stop::Retry(format!(
-            "another payout's leg is at the ICPSwap pool {}",
-            spec.pool
+            "another payout's leg is at the ICPSwap pool {pool}"
         )));
     };
-    if let Some(other) =
-        read_state(|state| crate::pool::payout::unsettled_at(state, spec.pool, spec.id))
-    {
+    if let Some(other) = read_state(|state| crate::pool::payout::unsettled_at(state, pool, id)) {
         return Err(Stop::Retry(format!(
-            "the swap of {other} at the ICPSwap pool {} is not settled yet",
-            spec.pool
+            "the swap of {other} at the ICPSwap pool {pool} is not settled yet"
         )));
     }
-    legs::run_beside(ledgers, spec, state, clock, guard, beside).await
+    Ok(held)
 }
 
 /// How far below the token its first leg sold a way back from ICP may buy it: wide enough

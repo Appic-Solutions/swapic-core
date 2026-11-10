@@ -736,9 +736,9 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
             *fake.calls.borrow(),
             vec![
                 "pull token 5000000".to_string(),
+                // the first pool's quote read once, in its leg's round (1a)
                 "quote 4998000".to_string(),
                 "quote 400000".to_string(),
-                "quote 4998000".to_string(),
                 "approve 4999000".to_string(),
                 "swap 4998000 at least 200030".to_string(),
                 "quote 400000".to_string(),
@@ -752,6 +752,28 @@ fn a_token_through_icp_reaches_ckusdc_on_two_legs() {
         let legs = payout.legs.unwrap();
         assert!(legs.swap.out.is_some());
         assert!(legs.second.unwrap().out.is_some());
+    });
+}
+
+/// A swap through ICP whose first pool another leg holds reads nothing: the chained quote is
+/// read under the pool's lock, beside what the pool holds of the canister's, so it waits its
+/// turn before any read.
+#[test]
+fn a_swap_through_icp_reads_nothing_while_its_first_pool_is_held() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        routed_through_icp();
+        let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
+        request.terms.premium = TokenAmount::from(8 * FEE);
+        let id = open(&request);
+        let fake = Fake::default();
+        let held = crate::pool::payout::Leg::take(token_pool()).expect("free");
+        assert!(matches!(
+            block_on(drive(&fake, id, clock, &open_pool)),
+            Err(Stop::Retry(_))
+        ));
+        assert_eq!(*fake.calls.borrow(), vec!["pull token 5000000".to_string()]);
+        drop(held);
     });
 }
 

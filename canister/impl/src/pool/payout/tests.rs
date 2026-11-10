@@ -1866,9 +1866,9 @@ fn a_route_through_icp_swaps_twice_and_pays_the_token() {
         assert_eq!(
             *pools.calls.borrow(),
             vec![
+                // the first pool's quote read once, in its leg's round (1a)
                 format!("quote icp/ckusdc {}", less(99, 2)),
                 "quote token/icp 1000000".to_string(),
-                format!("quote icp/ckusdc {}", less(99, 2)),
                 format!("approve icp/ckusdc {}", less(99, 1)),
                 format!("swap icp/ckusdc {} at least 500030", less(99, 2)),
                 "quote token/icp 1000000".to_string(),
