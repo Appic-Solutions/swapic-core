@@ -576,6 +576,96 @@ fn a_refused_leg_refunds_the_token_less_what_it_spent() {
     });
 }
 
+/// A token swap whose pull landed, the clock `before` its deadline when it is driven, and
+/// the pool ready to sell it: its id and the fake.
+fn sold_with(before: Duration) -> (u64, Fake, Timestamp) {
+    pool_with(usdc(500));
+    let mut request = request(token(), TokenAmount::from(5_000_000_u64), usdc(2));
+    request.terms.premium = TokenAmount::from(4 * FEE);
+    let id = open(&request);
+    let fake = Fake::default();
+    fake.quote.set(Some(TokenAmount::from(2_100_000_u64)));
+    fake.out.set(Some(TokenAmount::from(2_050_000_u64)));
+    let now = Timestamp::from_nanos(
+        request
+            .payout
+            .deadline
+            .as_nanos()
+            .saturating_sub(before.as_nanos() as u64),
+    );
+    (id, fake, now)
+}
+
+/// A first sale too close to the swap's deadline never begins: nothing is read, approved or
+/// swapped, and the token goes back unsold, all of it less the refund's fee.
+#[test]
+fn a_swap_too_close_to_its_deadline_goes_back_unsold() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake, now) = sold_with(SELL_MARGIN);
+        block_on(drive(&fake, id, || now, &open_pool)).unwrap();
+        assert_eq!(
+            *fake.calls.borrow(),
+            vec![
+                "pull token 5000000".to_string(),
+                "transfer 4999000".to_string(),
+            ]
+        );
+        let transfers: Vec<_> = fake.transfers.borrow().values().copied().collect();
+        assert_eq!(
+            transfers,
+            vec![(token(), account(6), TokenAmount::from(4_999_000_u64))]
+        );
+        let payout = pool_store::payout(id).unwrap();
+        assert_eq!(
+            payout.status,
+            PayoutStatus::Undone(TOO_LATE_TO_SELL.to_string())
+        );
+        assert_eq!(payout.received, None, "nothing was sold");
+        assert!(ledger().lines().open.is_empty());
+    });
+}
+
+/// One second more than the margin: the sale begins as it always did.
+#[test]
+fn a_swap_just_inside_its_margin_still_sells() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let (id, fake, now) = sold_with(SELL_MARGIN + Duration::from_secs(1));
+        block_on(drive(&fake, id, || now, &open_pool)).unwrap();
+        assert!(fake
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("swap 4998000")));
+        assert_eq!(
+            pool_store::payout(id).unwrap().status,
+            PayoutStatus::Waiting
+        );
+    });
+}
+
+/// A swap through ICP whose first leg sold before its deadline came close carries on to its
+/// second leg: its ICP is already bought, and going back would cost the user two more sales.
+#[test]
+fn a_second_leg_goes_on_past_the_margin() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        let id = past_the_first_leg();
+        let deadline = pool_store::payout(id).unwrap().terms.deadline;
+        let fake = Fake::default();
+        fake.quotes
+            .borrow_mut()
+            .insert(icp_pool(), TokenAmount::from(4_020_000_u64));
+        fake.outs
+            .borrow_mut()
+            .insert(icp_pool(), TokenAmount::from(4_010_000_u64));
+        let now = Timestamp::from_nanos(deadline.as_nanos() - 1);
+        block_on(drive(&fake, id, || now, &open_pool)).unwrap();
+        assert_eq!(swaps(&fake), vec!["swap 400000 at least 2010000".to_string()]);
+    });
+}
+
 fn icp_ledger() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
 }
