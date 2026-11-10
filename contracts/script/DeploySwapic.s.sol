@@ -43,9 +43,18 @@ contract DeploySwapic is Script {
     address constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     /// the ck minter's ERC-20 deposit helper with subaccounts
     address constant CK_HELPER = 0x18901044688D3756C35Ed2b36D93e6a5B8e00E68;
+    /// Arc, whose gas coin is USDC itself
+    uint256 constant ARC = 5042;
+    /// BNB Chain, where Circle's CCTP carries no USDC: Swapic runs there without it (Across
+    /// carries its stablecoins), so its CctpReceiver is built inert, with no USDC, transmitter or
+    /// messenger to reach
+    uint256 constant BSC = 56;
 
     /// Each chain's USDC, the wrapped native token Swapic wraps the native coin into (WETH;
-    /// WPOL on Polygon, WMON on Monad, WHYPE on HyperEVM, WXPL on Plasma) and its CCTP domain
+    /// WPOL on Polygon, WMON on Monad, WHYPE on HyperEVM, WXPL on Plasma, WAVAX on Avalanche,
+    /// WBNB on BNB Chain) and its CCTP domain. Arc has none: USDC is its gas coin, so no native
+    /// coin is ever wrapped there and the zero address makes a native order fail closed. BNB
+    /// Chain has no CCTP USDC: its USDC is the zero address, which marks a chain without CCTP.
     function configOf(uint256 chainId) public pure returns (address usdc, address wrapped, uint32 domain) {
         if (chainId == 8453) {
             return (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, 0x4200000000000000000000000000000000000006, 6);
@@ -77,6 +86,15 @@ contract DeploySwapic is Script {
         if (chainId == 9745) {
             return (0x2d661C89D812261039AF9764eceaAee884f5F67F, 0x6100E367285b01F48D07953803A2d8dCA5D19873, 33);
         }
+        if (chainId == 43114) {
+            return (0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E, 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7, 1);
+        }
+        if (chainId == ARC) {
+            return (0x3600000000000000000000000000000000000000, address(0), 26);
+        }
+        if (chainId == BSC) {
+            return (address(0), 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c, 0);
+        }
         revert("unsupported chain");
     }
 
@@ -92,14 +110,22 @@ contract DeploySwapic is Script {
         (,, domain) = configOf(chainId);
     }
 
+    /// The chain carries USDC by CCTP (every chain but BNB Chain)
+    function hasCctp(uint256 chainId) public pure returns (bool) {
+        return usdcOf(chainId) != address(0);
+    }
+
     function run() external returns (Swapic swapic) {
         (address usdc, address wrapped, uint32 domain) = configOf(block.chainid);
-        require(usdc.code.length > 0, "no USDC here");
-        require(wrapped.code.length > 0, "no wrapped native here");
-        require(TRANSMITTER.code.length > 0, "no MessageTransmitterV2 here");
-        require(TOKEN_MESSENGER.code.length > 0, "no TokenMessengerV2 here");
+        bool cctp = hasCctp(block.chainid);
+        if (cctp) {
+            require(usdc.code.length > 0, "no USDC here");
+            require(TRANSMITTER.code.length > 0, "no MessageTransmitterV2 here");
+            require(TOKEN_MESSENGER.code.length > 0, "no TokenMessengerV2 here");
+            require(ITransmitterDomain(TRANSMITTER).localDomain() == domain, "wrong CCTP domain");
+        }
+        require(block.chainid == ARC ? wrapped == address(0) : wrapped.code.length > 0, "no wrapped native here");
         require(PERMIT2.code.length > 0, "no Permit2 here");
-        require(ITransmitterDomain(TRANSMITTER).localDomain() == domain, "wrong CCTP domain");
         address ckHelper = block.chainid == 1 ? vm.envOr("CK_HELPER", CK_HELPER) : address(0);
         require(ckHelper == address(0) || ckHelper.code.length > 0, "no ck helper here");
         address canister = vm.envAddress("CANISTER");
@@ -119,7 +145,11 @@ contract DeploySwapic is Script {
         require(vm.getNonce(me) == 0, "the deployer is not fresh here: the addresses would differ across chains");
         address predicted = vm.computeCreateAddress(me, 0);
         address owner = vm.envOr("OWNER", me);
-        swapic = new Swapic(usdc, TRANSMITTER, TOKEN_MESSENGER, wrapped, ckHelper, me, guardian, canister);
+        // without CCTP the receiver is inert for life: every completeCctp and release reverts
+        // at the zero transmitter, and no live transmitter is ever reached
+        swapic = new Swapic(
+            usdc, cctp ? TRANSMITTER : address(0), cctp ? TOKEN_MESSENGER : address(0), wrapped, ckHelper, me, guardian, canister
+        );
         require(address(swapic) == predicted, "Swapic is not at the deployer's nonce 0 address");
         if (owner != me) swapic.transferOwnership(owner);
         vm.stopBroadcast();
