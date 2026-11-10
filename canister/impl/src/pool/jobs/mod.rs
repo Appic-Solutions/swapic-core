@@ -1,6 +1,6 @@
 //! The pool's payouts, each moved by a task of its own (Jeff, 2026-11-10: sales in parallel).
 //! A drive picks what can move now, without an await of its own, and starts each payout's next
-//! step as a task holding that payout (`Busy`) for as long as it runs: a sale held at one
+//! step as a task in a message of its own, holding that payout (`Busy`) for as long as it runs: a sale held at one
 //! ICPSwap pool holds back no deposit, refund, read or sale anywhere else. At most [`AT_ONCE`]
 //! run at once in each [`Lane`], so the payouts on ICP and the Base payouts never take each
 //! other's room; a drive that finds more work than room leaves the rest, and the next task to
@@ -85,9 +85,12 @@ pub fn take_skipped() -> bool {
 }
 
 /// Starts `work` as a task of its own in `lane` when there is room (false when there is none),
-/// holding the room until it ends; `work` holds its payout (`Busy`) itself. A task that ends
-/// after a drive left work for want of room arms one more drive. Off the canister nothing runs
-/// (unit tests run each picked step themselves).
+/// holding the room until it ends; `work` holds its payout (`Busy`) itself. The task begins in a
+/// message of its own (a zero-delay timer, as `payout::carry_on`): a step that traps takes back
+/// its own message alone, never the drive that picked it or the other steps, and the timer
+/// drops it with its hold and its room. A task that ends after a drive left work for want of
+/// room arms one more drive. Off the canister nothing runs (unit tests run each picked step
+/// themselves).
 pub fn start<F>(lane: Lane, work: F) -> bool
 where
     F: std::future::Future<Output = ()> + 'static,
@@ -96,12 +99,14 @@ where
         return false;
     };
     #[cfg(target_arch = "wasm32")]
-    ic_cdk::spawn(async move {
-        work.await;
-        drop(slot);
-        if take_skipped() {
-            crate::engine::arm();
-        }
+    ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
+        ic_cdk::spawn(async move {
+            work.await;
+            drop(slot);
+            if take_skipped() {
+                crate::engine::arm();
+            }
+        })
     });
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (slot, work);
