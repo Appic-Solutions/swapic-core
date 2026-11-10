@@ -919,6 +919,73 @@ fn queued_payouts_start_first_in_first_out_once_covered() {
     });
 }
 
+/// Sales in parallel (2026-11-10): the pick starts the queue's covered heads in the queue's
+/// order, in its own message and before any call, and hands each its payout as a step of its
+/// own, none waiting for another's to end. A payout whose step is out is never picked again
+/// while it runs, and a start with no room stops the pick there.
+#[test]
+fn the_pick_starts_the_queue_in_order_and_hands_each_payout_its_own_step() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(500));
+        let arrive = |byte: u8| {
+            let r#ref = register(swap_terms(byte, usdc(10), usdc(1), at(1_000)));
+            record_at(
+                PoolStep::Arrived {
+                    r#ref,
+                    credit: credit(byte.into()),
+                    amount: usdc(10),
+                    block: BlockNumber::new(5),
+                },
+                at(3),
+            )
+            .unwrap();
+            r#ref
+        };
+        let (first, second, third) = (arrive(1), arrive(2), arrive(3));
+        // no room past the first: the pick stops there, the others left queued
+        let mut asked = 0;
+        pick(clock, &open_pool, &mut |_busy, _job| {
+            asked += 1;
+            false
+        });
+        assert_eq!(asked, 1);
+        assert_eq!(deposit(&second).unwrap().status, DepositStatus::Arrived);
+        // room for all: each started in order, each its own step, nothing paid yet
+        let mut jobs = Vec::new();
+        pick(clock, &open_pool, &mut |busy, job| {
+            jobs.push((busy, job));
+            true
+        });
+        let picked: Vec<Job> = jobs.iter().map(|(_, job)| *job).collect();
+        assert_eq!(
+            picked,
+            vec![Job::Deposit(first), Job::Deposit(second), Job::Deposit(third)]
+        );
+        for r#ref in [first, second, third] {
+            assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paying);
+            assert!(Busy::is_held(&r#ref), "held while its step is out");
+        }
+        let fake = Fake::default();
+        assert!(fake.transfers().is_empty());
+        // while their steps are out, a pick hands none of them again
+        let mut again = 0;
+        pick(clock, &open_pool, &mut |_busy, _job| {
+            again += 1;
+            true
+        });
+        assert_eq!(again, 0);
+        for (_busy, job) in jobs {
+            assert_eq!(block_on(run(&fake, job, clock, &open_pool)), 1);
+        }
+        assert_eq!(fake.transfers().len(), 3);
+        for r#ref in [first, second, third] {
+            assert_eq!(deposit(&r#ref).unwrap().status, DepositStatus::Paid);
+            assert!(!Busy::is_held(&r#ref));
+        }
+    });
+}
+
 /// Review fix (head of line, and fix 10): a queued head the ICP pocket cannot cover holds
 /// back only the payouts behind it. With the pool closed, what moves nothing out still runs
 /// (a stake's pull asked again, an arrived stake's mint); with it open, the payout already

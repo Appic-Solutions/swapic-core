@@ -93,13 +93,53 @@ pub async fn drive_all() -> Drive {
     if require_not_halted().is_err() {
         return drive;
     }
-    drive.acted = crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
-    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines
-    drive.acted += crate::pool::queue::pass(
-        &crate::pool::payout::Live,
+    // every payout's next step a task of its own (`pool::jobs`): the pick has no await, so a
+    // drive is over at once and the next one runs whenever a line asks for it
+    drive.acted = crate::pool::payout::pick(
         crate::pool::now,
         &crate::pool::payout::guard,
-    )
-    .await;
+        &mut start_deposit_job,
+    );
+    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines
+    drive.acted += crate::pool::queue::pick(crate::pool::now, &mut start_payout_job);
     drive
+}
+
+/// Starts a deposit's, stake's or withdrawal's picked step as a task of its own, when there is
+/// room.
+fn start_deposit_job(busy: crate::pool::payout::Busy, job: crate::pool::payout::Job) -> bool {
+    let Some(slot) = crate::pool::jobs::Slot::take() else {
+        return false;
+    };
+    crate::pool::jobs::start(slot, async move {
+        // held for as long as the task runs
+        let _busy = busy;
+        crate::pool::payout::run(
+            &crate::pool::payout::Live,
+            job,
+            crate::pool::now,
+            &crate::pool::payout::guard,
+        )
+        .await;
+    });
+    true
+}
+
+/// Starts a Base payout's picked step as a task of its own, when there is room. The task holds
+/// the payout through the job's own hold.
+fn start_payout_job(job: crate::pool::queue::Job) -> bool {
+    let Some(slot) = crate::pool::jobs::Slot::take() else {
+        return false;
+    };
+    crate::pool::jobs::start(slot, async move {
+        crate::pool::queue::run(
+            &crate::pool::payout::Live,
+            &crate::pool::queue::LiveReads,
+            job,
+            crate::pool::now,
+            &crate::pool::payout::guard,
+        )
+        .await;
+    });
+    true
 }

@@ -504,6 +504,81 @@ fn an_undo_at_the_deadline_is_exact() {
     });
 }
 
+/// An ICP swap of 100 ckUSDC opened and not yet driven: the pass's next step for it is its
+/// drive.
+fn opened_swap() -> u64 {
+    let id = ledger().lines().next_id;
+    record_at(
+        PoolStep::PayoutOpened {
+            id,
+            kind: Box::new(PayoutKind::IcpSwap(IcpSwapTerms {
+                token_in: ckusdc(),
+                amount_in: usdc(100),
+                from: account(5),
+                min_usdc: usdc(100),
+                premium: usdc(1),
+                network_fee: TokenAmount::from(50_000_u32),
+                refund_to: account(6),
+                slippage_bps: None,
+                planned: None,
+            })),
+            terms: terms(at(1_000)),
+            undo: Undo::Refund { to: account(6) },
+            plan: None,
+            ck: Default::default(),
+        },
+        at(2),
+    )
+    .unwrap();
+    id
+}
+
+/// Sales in parallel (2026-11-10): the pick hands every payout that can move a step of its own
+/// at once, none waiting for another's to end; a payout another task holds is left to it, a
+/// payout whose step is out is never picked again while it runs, and a start with no room
+/// stops the pick there.
+#[test]
+fn the_pick_hands_each_payout_its_own_step_at_once() {
+    on_fresh_memory(|| {
+        crate::storage::init();
+        funded_pool(usdc(1_000));
+        record_at(
+            PoolStep::PayoutSettingsSet {
+                settings: PayoutSettings::default(),
+            },
+            at(1),
+        )
+        .unwrap();
+        let (first, second, third) = (opened_swap(), opened_swap(), opened_swap());
+        let held = Busy::take(evm_payout_ref(second).into_bytes()).expect("free");
+        let mut jobs = Vec::new();
+        pick(|| at(3), &mut |job| {
+            jobs.push(job);
+            true
+        });
+        let picked: Vec<(u64, Next)> = jobs
+            .iter()
+            .map(|job| (job.payout.id, job.next.clone()))
+            .collect();
+        assert_eq!(picked, vec![(first, Next::Drive), (third, Next::Drive)]);
+        assert!(Busy::is_held(&evm_payout_ref(first)));
+        let mut again = 0;
+        pick(|| at(3), &mut |_job| {
+            again += 1;
+            true
+        });
+        assert_eq!(again, 0, "each is held by its own step");
+        drop(jobs);
+        drop(held);
+        let mut asked = 0;
+        pick(|| at(3), &mut |_job| {
+            asked += 1;
+            false
+        });
+        assert_eq!(asked, 1, "no room: the pick stops at once");
+    });
+}
+
 /// A withdrawal undone at its deadline mints back exactly the shares it burned; a signed one
 /// waits for its transaction, whatever the clock says.
 #[test]
