@@ -1,7 +1,7 @@
 # swapic-core
 
-The on-chain side of Swapic: the settlement canister on the Internet Computer and the
-contracts on each EVM chain.
+The core of Swapic: the settlement canister on the Internet Computer and the contracts on
+each EVM chain.
 
 ## What runs in prod
 
