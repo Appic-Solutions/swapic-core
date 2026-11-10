@@ -1,0 +1,97 @@
+{
+  "canister": "x4cav-kaaaa-aaaar-qciya-cai",
+  "contracts_commit": "194d0c23024c56c5e0364d0f8f1f13367259b185",
+  "chains": {
+    "1": {
+      "name": "ethereum",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 26335795
+    },
+    "10": {
+      "name": "optimism",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 159064256
+    },
+    "56": {
+      "name": "bnb",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 132557146
+    },
+    "130": {
+      "name": "unichain",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 62982507
+    },
+    "137": {
+      "name": "polygon",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 96681195
+    },
+    "143": {
+      "name": "monad",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 119114102
+    },
+    "480": {
+      "name": "worldchain",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 37197778
+    },
+    "999": {
+      "name": "hyperevm",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 50298930
+    },
+    "5042": {
+      "name": "arc",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 30249748
+    },
+    "8453": {
+      "name": "base",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 53468881
+    },
+    "9745": {
+      "name": "plasma",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 36788531
+    },
+    "42161": {
+      "name": "arbitrum",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 520939290
+    },
+    "43114": {
+      "name": "avalanche",
+      "swapic": "0xB3f66517bEC4cC5A8E799dB2dDA4C810BefCc917",
+      "runner": "0x34D8A2debE49DCCa0f7cC77d74163cFB94Cc19F5",
+      "cctp_receiver": "0x404056Ab781D713B8f5Dc55F5B9592962B187099",
+      "deploy_block": 99797082
+    }
+  }
+}
