@@ -328,7 +328,7 @@ pub enum Job {
 /// ones first in first out, each started here in the queue's order (stopping at the first the
 /// ICP pocket does not cover, which waits and is alerted on), and the withdrawals. A head that
 /// waits holds back only the payouts queued behind it. No await: the steps' calls are the
-/// tasks'. Answers how many queued payouts it could not start (their failures recorded).
+/// tasks'. Answers how many steps it handed on.
 pub fn pick(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
@@ -344,6 +344,7 @@ pub fn pick(
         if !start(busy, Job::PullStake(id)) {
             return acted;
         }
+        acted += 1;
     }
     for r#ref in work.mints {
         let Some(busy) = Busy::take(r#ref.into_bytes()) else {
@@ -352,6 +353,7 @@ pub fn pick(
         if !start(busy, Job::Deposit(r#ref)) {
             return acted;
         }
+        acted += 1;
     }
     if guard().is_err() {
         return acted;
@@ -363,6 +365,7 @@ pub fn pick(
         if !start(busy, Job::Deposit(r#ref)) {
             return acted;
         }
+        acted += 1;
     }
     for r#ref in work.queue {
         if guard().is_err() {
@@ -379,13 +382,14 @@ pub fn pick(
                 break;
             }
             Err(stop) => {
-                acted += tally(Some(stop), r#ref, true, clock);
+                tally(Some(stop), r#ref, true, clock);
                 continue;
             }
         }
         if !start(busy, Job::Deposit(r#ref)) {
             return acted;
         }
+        acted += 1;
     }
     for id in work.withdrawals {
         if guard().is_err() {
@@ -397,6 +401,7 @@ pub fn pick(
         if !start(busy, Job::Withdrawal(id)) {
             return acted;
         }
+        acted += 1;
     }
     acted
 }
@@ -446,8 +451,9 @@ pub async fn run(
     }
 }
 
-/// One pass over everything the pool owes, each picked step run in turn: what a drive does,
-/// with the steps one after another instead of as tasks of their own.
+/// One pass over everything the pool owes, each picked step run in turn once the pick is over:
+/// what a drive does, with the steps one after another instead of as tasks of their own (a
+/// task's first part runs as it starts, inside the pick). Answers how many steps moved.
 #[cfg(test)]
 pub async fn drive_with(
     ledgers: &impl Ledgers,
@@ -455,10 +461,11 @@ pub async fn drive_with(
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
     let mut jobs = Vec::new();
-    let mut acted = pick(clock, guard, &mut |busy, job| {
+    pick(clock, guard, &mut |busy, job| {
         jobs.push((busy, job));
         true
     });
+    let mut acted = 0;
     for (_busy, job) in jobs {
         acted += run(ledgers, job, clock, guard).await;
     }

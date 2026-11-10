@@ -453,7 +453,10 @@ pub async fn pass(
 }
 
 /// One pass over the Base payouts with `reads` for the chain reads, each picked step run in
-/// turn: what a drive does, with the steps one after another instead of as tasks of their own.
+/// turn once the pick is over: what a drive does, with the steps one after another instead of
+/// as tasks of their own (a task's first part runs as it starts, inside the pick). As in a
+/// drive, the queue is served at the pick's start only: what a step frees is served by the
+/// next pass, which the step's own line asks for.
 #[cfg(test)]
 pub async fn pass_with(
     ledgers: &(impl Ledgers + PlanReads + CkCalls),
@@ -462,14 +465,16 @@ pub async fn pass_with(
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
     let mut jobs = Vec::new();
-    let mut acted = pick(clock, &mut |job| {
+    let picked = pick(clock, &mut |job| {
         jobs.push(job);
         true
     });
+    // what the pick did itself, then what each step it handed on did
+    let mut acted = picked.saturating_sub(jobs.len());
     for job in jobs {
         acted += run(ledgers, reads, job, clock, guard).await;
     }
-    acted + serve(clock())
+    acted
 }
 
 /// One Base payout's next step, as a pass picks it, holding the payout while it runs.
@@ -483,7 +488,8 @@ pub struct Job {
 /// call is done here (a relist, a stop for a human), and every other step is handed with its
 /// hold to `start`, which answers false when there is no room: the pick stops there, and what
 /// it left is picked up by the drive the next ending task arms. No await: the steps' calls and
-/// reads are the tasks'. Answers how many it acted on itself.
+/// reads are the tasks'. Answers how many it acted on: what it did itself and the steps it handed
+/// on.
 pub fn pick(clock: impl Fn() -> Timestamp + Copy, start: &mut impl FnMut(Job) -> bool) -> usize {
     let mut acted = serve(clock());
     // the ledger read once per pick, not once per payout
@@ -538,6 +544,7 @@ pub fn pick(clock: impl Fn() -> Timestamp + Copy, start: &mut impl FnMut(Job) ->
                 if !start(Job { busy, payout, next }) {
                     return acted;
                 }
+                acted += 1;
             }
         }
     }
@@ -560,7 +567,8 @@ pub async fn run(
     let id = payout.id;
     let mut acted = 0;
     match next {
-        Next::Wait => {}
+        // the pick does these itself and hands none of them on
+        Next::Wait | Next::Relist | Next::Stop(_) => {}
         Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
             Ok(fitted) => {
                 acted += 1;
@@ -578,7 +586,6 @@ pub async fn run(
             Ok(()) => acted += 1,
             Err(stop) => log(&format!("the ck payout {id} waits: {stop:?}")),
         },
-        Next::Relist => acted += usize::from(record(PoolStep::PayoutRelisted { id }, clock())),
         Next::Fit(decided) => {
             match icp_swap::refit(ledgers, id, *decided, clock, guard).await {
                 Ok(Some(fitted)) => {
@@ -588,10 +595,6 @@ pub async fn run(
                 Ok(None) => {}
                 Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
             }
-        }
-        Next::Stop(why) => {
-            log(&format!("the pool payout {id}: {why}"));
-            acted += usize::from(record(PoolStep::PayoutStopped { id, why }, clock()));
         }
         Next::ReadFill {
             chain,

@@ -18,6 +18,9 @@ pub mod flows;
 mod tests;
 
 use crate::guards::{require_not_halted, Running};
+use crate::pool::jobs::{start, Lane};
+use crate::pool::now;
+use crate::pool::payout::{guard, Live};
 use std::cell::Cell;
 use types::Timestamp;
 
@@ -95,51 +98,20 @@ pub async fn drive_all() -> Drive {
     }
     // every payout's next step a task of its own (`pool::jobs`): the pick has no await, so a
     // drive is over at once and the next one runs whenever a line asks for it
-    drive.acted = crate::pool::payout::pick(
-        crate::pool::now,
-        &crate::pool::payout::guard,
-        &mut start_deposit_job,
-    );
-    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines
-    drive.acted += crate::pool::queue::pick(crate::pool::now, &mut start_payout_job);
+    drive.acted = crate::pool::payout::pick(now, &guard, &mut |busy, job| {
+        start(Lane::Icp, async move {
+            // held for as long as the task runs
+            let _busy = busy;
+            crate::pool::payout::run(&Live, job, now, &guard).await;
+        })
+    });
+    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines; each job
+    // holds its payout itself
+    drive.acted += crate::pool::queue::pick(now, &mut |job| {
+        start(Lane::Base, async move {
+            crate::pool::queue::run(&Live, &crate::pool::queue::LiveReads, job, now, &guard).await;
+        })
+    });
     drive
 }
 
-/// Starts a deposit's, stake's or withdrawal's picked step as a task of its own, when there is
-/// room.
-fn start_deposit_job(busy: crate::pool::payout::Busy, job: crate::pool::payout::Job) -> bool {
-    let Some(slot) = crate::pool::jobs::Slot::take() else {
-        return false;
-    };
-    crate::pool::jobs::start(slot, async move {
-        // held for as long as the task runs
-        let _busy = busy;
-        crate::pool::payout::run(
-            &crate::pool::payout::Live,
-            job,
-            crate::pool::now,
-            &crate::pool::payout::guard,
-        )
-        .await;
-    });
-    true
-}
-
-/// Starts a Base payout's picked step as a task of its own, when there is room. The task holds
-/// the payout through the job's own hold.
-fn start_payout_job(job: crate::pool::queue::Job) -> bool {
-    let Some(slot) = crate::pool::jobs::Slot::take() else {
-        return false;
-    };
-    crate::pool::jobs::start(slot, async move {
-        crate::pool::queue::run(
-            &crate::pool::payout::Live,
-            &crate::pool::queue::LiveReads,
-            job,
-            crate::pool::now,
-            &crate::pool::payout::guard,
-        )
-        .await;
-    });
-    true
-}

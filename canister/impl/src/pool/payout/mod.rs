@@ -212,6 +212,18 @@ impl ReadAhead {
                     .as_nanos()
                     .saturating_add(READ_AHEAD_FOR.as_nanos() as u64)
     }
+
+    /// Whether a leg that this reading does not serve leaves it for its own sale: a reading of
+    /// another pool, still young enough to serve. One of `spec`'s own pool never serves again
+    /// once a leg is there.
+    pub fn kept_beside(&self, spec: &LegSpec, now: Timestamp) -> bool {
+        self.pool != spec.pool
+            && now.as_nanos()
+                <= self
+                    .read_at
+                    .as_nanos()
+                    .saturating_add(READ_AHEAD_FOR.as_nanos() as u64)
+    }
 }
 
 /// Reads a sale's round beside its pull, in a task of its own: an answer from the pool cannot
@@ -535,10 +547,16 @@ impl Ledgers for Live {
 
     fn round_read_ahead(&self, spec: &LegSpec) -> Option<Round> {
         let now = Timestamp::from_nanos(ic_cdk::api::time());
-        READ_AHEAD
-            .take()
-            .filter(|read| read.serves(spec, legs_taken_at(spec.pool), now))
-            .map(|read| read.round)
+        let read = READ_AHEAD.take()?;
+        if read.serves(spec, legs_taken_at(spec.pool), now) {
+            return Some(read.round);
+        }
+        // another pool's reading, young enough, is its own sale's: legs run side by side, so
+        // a leg elsewhere leaves it where it is
+        if read.kept_beside(spec, now) {
+            READ_AHEAD.set(Some(read));
+        }
+        None
     }
 
     fn may_stand(&self, token: Principal) -> bool {
@@ -1569,12 +1587,9 @@ async fn swap_leg(
     };
     // the pool's quote and what it holds of the canister's before this leg's deposit, in one
     // round: read while this leg alone is at the pool, only what is there above it is ever this
-    // leg's
-    let (quoted, before) = futures::future::join(
-        ledgers.quote(pool, swap_in, zero_for_one),
-        held_at(ledgers, pool, zero_for_one),
-    )
-    .await;
+    // leg's. ckUSDC is approved for one swap at a time: no allowance is read
+    let (quoted, before, _) =
+        legs::read_round(ledgers, pool, ckusdc, swap_in, zero_for_one, false).await;
     let quoted = quoted.map_err(|error| call_stop("the pool's quote", error))?;
     if quoted < least {
         let why = format!("the pool quotes {quoted}, below the {least} needed");

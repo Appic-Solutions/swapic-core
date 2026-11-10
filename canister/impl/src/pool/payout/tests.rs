@@ -2187,6 +2187,15 @@ fn a_round_read_ahead_serves_only_its_own_leg_at_an_untouched_pool() {
         8,
         at
     ));
+    // legs run side by side: a leg at another pool leaves the reading for its own sale while it
+    // is young; a leg at its own pool, or a reading too old, does not keep it
+    let elsewhere = LegSpec {
+        pool: other_pool,
+        ..spec
+    };
+    assert!(read.kept_beside(&elsewhere, at));
+    assert!(!read.kept_beside(&elsewhere, older), "too old to serve anyone");
+    assert!(!read.kept_beside(&spec, at), "its own pool: a leg is there now");
 }
 
 /// A flood of pulls that will be refused costs the canister its one call each: only so many
