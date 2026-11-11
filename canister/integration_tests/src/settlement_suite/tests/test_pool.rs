@@ -3383,6 +3383,8 @@ struct StubSale {
     refuse: bool,
     hold: bool,
     quote_fails: bool,
+    /// While held, how many sales (in the order their deposits came in) the pool lets go.
+    released: Option<u64>,
 }
 
 #[derive(CandidType)]
@@ -3518,19 +3520,156 @@ impl SaleWorld {
             refuse: false,
             hold,
             quote_fails: false,
+            released: None,
         });
     }
 
     fn set(&self, sale: StubSale) {
+        self.set_at(self.pool, sale);
+    }
+
+    fn set_at(&self, pool: Principal, sale: StubSale) {
         self.world
             .pic
-            .update_call(
-                self.pool,
-                self.world.admin,
-                "set_sale",
-                encode_one(sale).unwrap(),
-            )
+            .update_call(pool, self.world.admin, "set_sale", encode_one(sale).unwrap())
             .expect("the stub answers");
+    }
+
+    /// `pool`'s sales held, the first `released` of them let go.
+    fn release_at(&self, pool: Principal, released: u64) {
+        self.set_at(
+            pool,
+            StubSale {
+                quote: Nat::from(SALE_OUT),
+                out: Nat::from(SALE_OUT),
+                refuse: false,
+                hold: true,
+                quote_fails: false,
+                released: Some(released),
+            },
+        );
+    }
+
+    /// A second token with an ICPSwap pool of its own, listed beside the first with the same
+    /// prices, its sales held: its ledger and its pool.
+    fn second_token(&self) -> (Principal, Principal) {
+        use settlement_api::types::pool::{IcpRoute, IcpRouteVia, IcpTokenEntry};
+        let world = &self.world;
+        let token = install_ledger(&world.pic, world.admin, "TWO", vec![(staker(), 10 * SOLD)]);
+        let pool = world
+            .pic
+            .create_canister_with_settings(Some(world.admin), None);
+        world.pic.add_cycles(pool, 100_000_000_000_000);
+        world.pic.install_canister(
+            pool,
+            wasms::stub_pool(),
+            encode_one(PoolInit {
+                token0: token,
+                token1: world.ledger,
+            })
+            .unwrap(),
+            Some(world.admin),
+        );
+        let raw = world
+            .pic
+            .update_call(
+                world.ledger,
+                Principal::from_slice(&[0x50; 29]),
+                "icrc1_transfer",
+                encode_one(IcrcTransfer {
+                    from_subaccount: None,
+                    to: account(pool),
+                    amount: Nat::from(usdc(5_000)),
+                    fee: None,
+                    memo: None,
+                    created_at_time: None,
+                })
+                .unwrap(),
+            )
+            .expect("the ledger answers");
+        assert!(!raw.is_empty());
+        let set: Result<(), PoolError> = update(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "set_pool_settings",
+            encode_one(PoolSettings {
+                tvl_cap: Nat::from(usdc(10_000)),
+                per_swap_cap: Nat::from(usdc(1_000)),
+                premium_bps: 10,
+                ckusdc_ledger: world.ledger,
+                icp_tokens: vec![
+                    IcpTokenEntry {
+                        ledger: self.token,
+                        icpswap_pool: self.pool,
+                    },
+                    IcpTokenEntry {
+                        ledger: token,
+                        icpswap_pool: pool,
+                    },
+                ],
+                arrival_backup_s: 300,
+                pool_open_for_swaps: true,
+                large_deposit_usdc: None,
+                large_deposit_confirmations: None,
+                least_move_fee_base_to_icp: None,
+                least_move_fee_icp_to_base: None,
+                pool_fee: None,
+            })
+            .unwrap(),
+        );
+        assert_eq!(set, Ok(()));
+        let routes: Result<(), PoolError> = update(
+            &world.pic,
+            world.canister,
+            world.admin,
+            "set_icp_routes",
+            candid::encode_args((
+                None::<Principal>,
+                vec![
+                    IcpRoute {
+                        ledger: self.token,
+                        via: IcpRouteVia::Direct(self.pool),
+                    },
+                    IcpRoute {
+                        ledger: token,
+                        via: IcpRouteVia::Direct(pool),
+                    },
+                ],
+            ))
+            .unwrap(),
+        );
+        assert_eq!(routes, Ok(()));
+        world.settle();
+        self.release_at(pool, 0);
+        (token, pool)
+    }
+
+    /// Whether payout `id`'s first leg began at its pool (`SwapBegun`).
+    fn begun(&self, id: u64) -> bool {
+        let r#ref = types::pool::evm_payout_ref(id);
+        self.lines(|step| {
+            matches!(step, PoolStep::SwapBegun { r#ref: of, leg: None, .. } if *of == r#ref)
+        }) > 0
+    }
+
+    /// Whether payout `id`'s first leg has its output (`Swapped`).
+    fn sold(&self, id: u64) -> bool {
+        let r#ref = types::pool::evm_payout_ref(id);
+        self.lines(|step| {
+            matches!(step, PoolStep::Swapped { r#ref: of, leg: None, .. } if *of == r#ref)
+        }) > 0
+    }
+
+    /// Ticks until payout `id`'s first leg begins, within a bound.
+    fn until_begun(&self, id: u64) {
+        for _ in 0..200 {
+            if self.begun(id) {
+                return;
+            }
+            self.world.pic.tick();
+        }
+        panic!("payout {id}'s sale never began");
     }
 
     fn quotes_asked(&self) -> u64 {
@@ -3569,11 +3708,19 @@ impl SaleWorld {
 
     /// The staker's approval of the canister for one sale, and the sale's door.
     fn swap(&self) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
+        self.swap_of(self.token)
+    }
+
+    /// [`Self::swap`] of `token`.
+    fn swap_of(
+        &self,
+        token: Principal,
+    ) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
         let raw = self
             .world
             .pic
             .update_call(
-                self.token,
+                token,
                 staker(),
                 "icrc2_approve",
                 encode_one(ApproveArgs {
@@ -3590,10 +3737,17 @@ impl SaleWorld {
             )
             .expect("the ledger answers");
         assert!(!raw.is_empty());
-        self.door()
+        self.door_of(token)
     }
 
     fn door(&self) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
+        self.door_of(self.token)
+    }
+
+    fn door_of(
+        &self,
+        token: Principal,
+    ) -> Result<settlement_api::types::pool::SwapFromIcpOk, PoolError> {
         let deadline_s = self.world.now().as_secs().get() + 600;
         let mut terms = swap_terms(
             &self.world,
@@ -3601,7 +3755,7 @@ impl SaleWorld {
             kyber_plan(self.canister_address, deadline_s),
             900_000,
         );
-        terms.token_in = self.token;
+        terms.token_in = token;
         update(
             &self.world.pic,
             self.world.canister,
@@ -3875,6 +4029,44 @@ fn two_sales_at_one_pool_never_share_a_reading_and_each_sells_once() {
     assert_eq!(sale.quotes_asked(), 2);
 }
 
+/// Sales at two pools, the second at each carried on by the canister's own drive: a sale held at
+/// one pool no longer holds back the sale waiting at the other. Each pool's first sale is held
+/// from its door, and each pool's second waits its turn. Pool B lets its first go, so the drive
+/// brings B's second to B, where it is held; then pool A lets its first go, and A's second begins
+/// while B's is still held (one drive at a time used to wait on B's sale, and A's never began).
+#[test]
+fn a_sale_held_at_one_pool_does_not_hold_back_a_sale_at_another() {
+    let sale = SaleWorld::new();
+    // four sales open at once: the Base pocket pays the two that finish here
+    plant_base_stake(&sale.world, 0x73);
+    plant_base_stake(&sale.world, 0x74);
+    let (token_b, pool_b) = sale.second_token();
+    let a0 = sale.swap().expect("the swap is opened");
+    sale.answer_the_scaler();
+    sale.world.settle();
+    let a1 = sale.swap().expect("the swap is opened");
+    let b0 = sale.swap_of(token_b).expect("the swap is opened");
+    sale.answer_the_scaler();
+    sale.world.settle();
+    let b1 = sale.swap_of(token_b).expect("the swap is opened");
+    sale.world.settle();
+    assert!(sale.begun(a0.id) && sale.begun(b0.id), "each pool's first sale");
+    assert!(
+        !sale.begun(a1.id) && !sale.begun(b1.id),
+        "each second waits its turn at its pool"
+    );
+    // B lets its first sale go: the canister brings b1 to B itself, where it is held
+    sale.release_at(pool_b, 1);
+    sale.answer_reads_until(b0.id);
+    sale.until_begun(b1.id);
+    assert!(!sale.sold(b1.id), "b1 is held at B");
+    // A lets its first sale go: a1 begins at A while b1 is still held at B
+    sale.release_at(sale.pool, 1);
+    sale.answer_reads_until(a0.id);
+    sale.until_begun(a1.id);
+    assert!(!sale.sold(b1.id), "b1 is still held at B");
+}
+
 /// A sale over before its reads come back: the fit reads for itself, as it always could, and
 /// signs once. What was read ahead is at most a read paid twice, never a second signature.
 #[test]
@@ -3933,6 +4125,7 @@ fn a_sale_the_pool_refuses_refunds_the_token_once() {
         refuse: true,
         hold: false,
         quote_fails: false,
+        released: None,
     });
     let before = sale.token_balance(staker());
     let first = sale.swap().expect("the swap is opened");
@@ -3975,6 +4168,7 @@ fn a_pool_that_fails_its_reads_never_touches_the_pull() {
         refuse: false,
         hold: true,
         quote_fails: false,
+        released: None,
     };
     sale.set(StubSale {
         quote_fails: true,

@@ -11,6 +11,7 @@ pub mod ck;
 pub mod eco;
 pub mod icp;
 pub mod icp_swap;
+pub mod jobs;
 pub mod legs;
 pub mod orphans;
 pub mod pay;

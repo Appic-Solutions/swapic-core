@@ -23,6 +23,9 @@ pub struct Sale {
     /// A sale waits here once its deposit is in, until the test lets it go: what goes on beside
     /// it can be answered first, or after.
     pub hold: bool,
+    /// While held, how many of the sales (in the order their deposits came in) are let go:
+    /// none when unset.
+    pub released: Option<u64>,
     /// The quote fails, as a pool that does not answer does.
     pub quote_fails: bool,
 }
@@ -133,6 +136,8 @@ thread_local! {
     static TOKENS: RefCell<Option<Init>> = const { RefCell::new(None) };
     static SALE: RefCell<Sale> = RefCell::new(Sale::default());
     static QUOTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // How many sales' deposits came in: each sale's place in line.
+    static DEPOSITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn tokens() -> Init {
@@ -247,8 +252,19 @@ async fn deposit_from_and_swap(args: DepositAndSwapArgs) -> PoolResult<Nat> {
         Ok((Ok(_),)) => {}
         _ => return refused("the deposit was not pulled"),
     }
+    let place = DEPOSITS.with(|deposits| {
+        let place = deposits.get();
+        deposits.set(place + 1);
+        place
+    });
+    let held = || {
+        SALE.with(|sale| {
+            let sale = sale.borrow();
+            sale.hold && place >= sale.released.unwrap_or(0)
+        })
+    };
     let mut spins = 0_u32;
-    while SALE.with(|sale| sale.borrow().hold) && spins < 100_000 {
+    while held() && spins < 100_000 {
         let _: Result<(), _> = ic_cdk::call(ic_cdk::api::id(), "noop", ()).await;
         spins += 1;
     }

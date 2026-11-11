@@ -24,7 +24,7 @@
 mod tests;
 
 use crate::ic::CallError;
-use crate::pool::payout::{call_stop, open, record, Ledgers, Stop, STANDING_SWAPS};
+use crate::pool::payout::{call_stop, open, record, Ledgers, Round, Stop, STANDING_SWAPS};
 use candid::Principal;
 use futures::future::join3;
 use types::hash::PoolRef;
@@ -145,6 +145,14 @@ pub(crate) async fn read_round(
     .await
 }
 
+/// A first leg's round, read with the chained quote while the caller held the pool, for
+/// exactly `amount_in`: the leg takes it instead of reading again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoundRead {
+    pub amount_in: TokenAmount,
+    pub round: Round,
+}
+
 /// Runs the leg from where `state` stands, as far as it goes now.
 pub async fn run(
     ledgers: &impl Ledgers,
@@ -156,6 +164,19 @@ pub async fn run(
     run_beside(ledgers, spec, state, clock, guard, |_| {}).await
 }
 
+/// [`run`], with the round `read` with the chained quote: taken for the leg's own exact amount
+/// and only when it does not fall short, else the leg reads for itself.
+pub async fn run_with(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    read: Option<RoundRead>,
+) -> Result<LegEnd, Stop> {
+    run_beside_with(ledgers, spec, state, clock, guard, |_| {}, read).await
+}
+
 /// [`run`], and `beside` told the leg's quote just as its swap goes out. Only a swap that goes
 /// out now tells it: one that was begun before this run, or stops short, does not.
 pub async fn run_beside(
@@ -165,6 +186,18 @@ pub async fn run_beside(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
     beside: impl FnOnce(TokenAmount),
+) -> Result<LegEnd, Stop> {
+    run_beside_with(ledgers, spec, state, clock, guard, beside, None).await
+}
+
+async fn run_beside_with(
+    ledgers: &impl Ledgers,
+    spec: LegSpec,
+    state: SwapLeg,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+    beside: impl FnOnce(TokenAmount),
+    read: Option<RoundRead>,
 ) -> Result<LegEnd, Stop> {
     if let Some(out) = state.out {
         return Ok(LegEnd::Out(out));
@@ -199,11 +232,19 @@ pub async fn run_beside(
         .checked_add(spec.fee_in)
         .ok_or_else(|| Stop::Failed("the allowance overflows".to_string()))?;
     let stands = ledgers.may_stand(spec.token_in);
-    // a reading beside the pull can start a sale, never end one: a refund cannot be taken back, so
-    // a price below the least is asked again now, before it decides anything
-    let read_ahead = ledgers
-        .round_read_ahead(&spec)
-        .filter(|read| read.quoted >= spec.least);
+    // a reading made before this leg's own can start a sale, never end one: a refund cannot be
+    // taken back, so a price below the least is asked again now, before it decides anything. The
+    // round read with the chained quote is the leg's only for the amount it quoted (an approval
+    // given since leaves less to deposit)
+    let given = read
+        .filter(|read| read.amount_in == spec.amount_in)
+        .map(|read| read.round)
+        .filter(|round| round.quoted >= spec.least);
+    let read_ahead = given.or_else(|| {
+        ledgers
+            .round_read_ahead(&spec)
+            .filter(|read| read.quoted >= spec.least)
+    });
     let (quoted, before, allowed) = match read_ahead {
         Some(read) => (Ok(read.quoted), Ok(read.before), read.allowed),
         None => {
@@ -402,8 +443,18 @@ pub struct ChainNames {
     pub need: &'static str,
 }
 
+/// What two chained quotes say: the least the first leg must give, and the first leg's round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chained {
+    pub least: TokenAmount,
+    pub read: RoundRead,
+}
+
 /// The least the first of two legs must give, from both pools' quotes: the second leg's quote
-/// for what the first buys (less `fees`) must reach `least`; below it, why.
+/// for what the first buys (less `fees`) must reach `least`; below it, why. The first pool's
+/// quote is read in the first leg's own round (what the pool holds of the canister's, and what
+/// it may still pull of a token that may stand), so the leg reads nothing again: the caller
+/// holds the first pool from before this call, as the leg itself needs it held.
 pub async fn chained_least(
     ledgers: &impl Ledgers,
     (first, token_in, amount_in): (Principal, Principal, TokenAmount),
@@ -411,7 +462,7 @@ pub async fn chained_least(
     fees: TokenAmount,
     least: TokenAmount,
     names: ChainNames,
-) -> Result<Result<TokenAmount, String>, Stop> {
+) -> Result<Result<Chained, String>, Stop> {
     let Some(zero_for_one) = ledgers
         .direction(first, token_in, middle)
         .await
@@ -419,10 +470,19 @@ pub async fn chained_least(
     else {
         return Ok(Err(format!("{} does not trade the pair", names.first)));
     };
-    let bought = ledgers
-        .quote(first, amount_in, zero_for_one)
-        .await
-        .map_err(|error| call_stop("the pool's quote", error))?;
+    let stands = ledgers.may_stand(token_in);
+    let (bought, before, allowed) =
+        read_round(ledgers, first, token_in, amount_in, zero_for_one, stands).await;
+    let bought = bought.map_err(|error| call_stop("the pool's quote", error))?;
+    let before = before?;
+    let read = RoundRead {
+        amount_in,
+        round: Round {
+            quoted: bought,
+            before,
+            allowed,
+        },
+    };
     let sold = bought.checked_sub(fees).unwrap_or(TokenAmount::ZERO);
     let Some(zero_for_one) = ledgers
         .direction(second, middle, token_out)
@@ -442,7 +502,7 @@ pub async fn chained_least(
         )));
     }
     first_leg_least(sold, quoted, least, fees)
-        .map(Ok)
+        .map(|least| Ok(Chained { least, read }))
         .ok_or_else(|| Stop::Failed("the first leg's minimum overflows".to_string()))
 }
 

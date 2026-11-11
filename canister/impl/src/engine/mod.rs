@@ -18,6 +18,9 @@ pub mod flows;
 mod tests;
 
 use crate::guards::{require_not_halted, Running};
+use crate::pool::jobs::{start, Lane};
+use crate::pool::now;
+use crate::pool::payout::{guard, Live};
 use std::cell::Cell;
 use types::Timestamp;
 
@@ -93,13 +96,22 @@ pub async fn drive_all() -> Drive {
     if require_not_halted().is_err() {
         return drive;
     }
-    drive.acted = crate::pool::payout::drive(&crate::pool::payout::Live, crate::pool::now).await;
-    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines
-    drive.acted += crate::pool::queue::pass(
-        &crate::pool::payout::Live,
-        crate::pool::now,
-        &crate::pool::payout::guard,
-    )
-    .await;
+    // every payout's next step a task of its own (`pool::jobs`): the pick has no await, so a
+    // drive is over at once and the next one runs whenever a line asks for it
+    drive.acted = crate::pool::payout::pick(now, &guard, &mut |busy, job| {
+        start(Lane::Icp, async move {
+            // held for as long as the task runs
+            let _busy = busy;
+            crate::pool::payout::run(&Live, job, now, &guard).await;
+        })
+    });
+    // the Base payouts: the queue served, ICP swaps driven, retries and deadlines; each job
+    // holds its payout itself
+    drive.acted += crate::pool::queue::pick(now, &mut |job| {
+        start(Lane::Base, async move {
+            crate::pool::queue::run(&Live, &crate::pool::queue::LiveReads, job, now, &guard).await;
+        })
+    });
     drive
 }
+

@@ -35,33 +35,7 @@ pub async fn drive_deposit(
                 );
             }
             (DepositStatus::Arrived, DepositKind::Swap { token_out, .. }) => {
-                // the hold and the dedup pair's instant are taken only when the payout really
-                // starts: the queue's head, covered by the free ckUSDC
-                let head = ledger.queue.head().map(|(head, _)| head);
-                if head != Some(r#ref) || deposit.held() > ledger.pockets.icp.free {
-                    return Err(Stop::Queued);
-                }
-                let path = path_for(&settings, token_out);
-                let fee_ck = settings
-                    .fee_of(settings.ckusdc_ledger)
-                    .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
-                // the user pays every fee: out of `arrived - premium`
-                let amount = path_amount(deposit.owed(), path, fee_ck).ok_or_else(|| {
-                    Stop::Failed("the amount does not cover the fees".to_string())
-                })?;
-                record(
-                    PoolStep::PayoutStarted {
-                        r#ref,
-                        attempt: PayoutAttempt {
-                            created_at: clock(),
-                            memo: r#ref.into_bytes(),
-                            path,
-                            amount: Some(amount),
-                            token: Some(PrincipalBytes(settings.ckusdc_ledger)),
-                        },
-                    },
-                    clock(),
-                )?;
+                start_swap(r#ref, &deposit, &ledger, &settings, token_out, clock)?;
             }
             (DepositStatus::Paying, _) => {
                 let payout = of_deposit(r#ref, &deposit)
@@ -88,6 +62,63 @@ pub async fn drive_deposit(
         }
     }
     Ok(())
+}
+
+/// An arrived swap's payout started: the hold and the dedup pair's instant are taken only
+/// when the payout really starts, at the queue's head once the free ckUSDC covers it
+/// (`Stop::Queued` until then).
+fn start_swap(
+    r#ref: PoolRef,
+    deposit: &Registered,
+    ledger: &types::pool::PoolLedger,
+    settings: &PoolSettings,
+    token_out: Principal,
+    clock: impl Fn() -> Timestamp,
+) -> Result<(), Stop> {
+    let head = ledger.queue.head().map(|(head, _)| head);
+    if head != Some(r#ref) || deposit.held() > ledger.pockets.icp.free {
+        return Err(Stop::Queued);
+    }
+    let path = path_for(settings, token_out);
+    let fee_ck = settings
+        .fee_of(settings.ckusdc_ledger)
+        .ok_or_else(|| Stop::Failed("no ckUSDC fee was read".to_string()))?;
+    // the user pays every fee: out of `arrived - premium`
+    let amount = path_amount(deposit.owed(), path, fee_ck)
+        .ok_or_else(|| Stop::Failed("the amount does not cover the fees".to_string()))?;
+    record(
+        PoolStep::PayoutStarted {
+            r#ref,
+            attempt: PayoutAttempt {
+                created_at: clock(),
+                memo: r#ref.into_bytes(),
+                path,
+                amount: Some(amount),
+                token: Some(PrincipalBytes(settings.ckusdc_ledger)),
+            },
+        },
+        clock(),
+    )
+}
+
+/// A queued swap's payout started now, in the drive's own message and in the queue's order:
+/// `Stop::Queued` while it is not the head or the free ckUSDC does not cover it. Anything but
+/// an arrived swap is left as it is.
+pub fn start_queued(r#ref: PoolRef, clock: impl Fn() -> Timestamp) -> Result<(), Stop> {
+    let Some(deposit) = pool_store::deposit(&r#ref) else {
+        return Ok(());
+    };
+    let (DepositStatus::Arrived, DepositKind::Swap { token_out, .. }) =
+        (&deposit.status, deposit.terms.kind)
+    else {
+        return Ok(());
+    };
+    let ledger = pool_store::ledger();
+    let settings = ledger
+        .settings
+        .clone()
+        .ok_or_else(|| Stop::Retry("the pool has no settings".to_string()))?;
+    start_swap(r#ref, &deposit, &ledger, &settings, token_out, clock)
 }
 
 /// The withdrawal's payout, as far as it goes now: answers what it burned and paid once it
@@ -248,10 +279,6 @@ pub fn guard() -> Result<(), String> {
     crate::pool::pool_closed().map_or(Ok(()), Err)
 }
 
-/// One pass over everything the pool owes (`drive_with`).
-pub async fn drive(ledgers: &impl Ledgers, clock: impl Fn() -> Timestamp + Copy) -> usize {
-    drive_with(ledgers, clock, &guard).await
-}
 
 /// One line for ops when the queue's head has waited longer than one books interval for
 /// the ICP pocket to cover it: what the urgent rebalance is for.
@@ -281,87 +308,166 @@ fn alert_if_waited(now: Timestamp) {
     ));
 }
 
-/// One pass over everything the pool owes. What moves nothing out runs whatever the pool's
-/// guard says: an ICP stake's pull asked again, an arrived stake's mint. Then, while the pool
-/// is open: the payouts already started, the queued ones first in first out (stopping at the
-/// first the ICP pocket does not cover, which waits and is alerted on), and the withdrawals.
-/// A head that waits holds back only the payouts queued behind it.
-pub async fn drive_with(
-    ledgers: &impl Ledgers,
+/// One payout's next step, as a drive picks it: run as a task of its own (`pool::jobs`), or
+/// in turn by [`drive_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// An ICP stake's pull, asked again.
+    PullStake(PoolOpId),
+    /// A deposit's payout or an arrived stake's mint (`drive_deposit`).
+    Deposit(PoolRef),
+    /// An ICP withdrawal's payout.
+    Withdrawal(PoolOpId),
+}
+
+/// Picks what the pool owes that can move now, in the order one pass always took it, and hands
+/// each with its hold to `start`, which answers false when there is no room: the pick stops
+/// there, and what it left is picked up by the drive the next ending task arms. What moves
+/// nothing out is picked whatever the pool's guard says: an ICP stake's pull asked again, an
+/// arrived stake's mint. Then, while the pool is open: the payouts already started, the queued
+/// ones first in first out, each started here in the queue's order (stopping at the first the
+/// ICP pocket does not cover, which waits and is alerted on), and the withdrawals. A head that
+/// waits holds back only the payouts queued behind it. No await: the steps' calls are the
+/// tasks'. Answers how many steps it handed on.
+pub fn pick(
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
+    start: &mut impl FnMut(Busy, Job) -> bool,
 ) -> usize {
     let now = clock();
     let work = read_state(|state| Work::of(state, now));
     let mut acted = 0;
-    let mut tally = |stop: Option<Stop>, id: PoolRef, counts: bool| match stop {
-        None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => acted += 1,
-        Some(Stop::Failed(why)) if counts => fail(id, why, clock()),
-        Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
-            crate::pool::log(&format!("the pool's {id} waits: {why}"))
-        }
-    };
     for id in work.pulls {
-        let Some(_busy) = Busy::take(id.into_bytes()) else {
+        let Some(busy) = Busy::take(id.into_bytes()) else {
             continue;
         };
-        tally(
-            pull_stake(ledgers, id, clock).await.err(),
-            payout_ref(id),
-            false,
-        );
+        if !start(busy, Job::PullStake(id)) {
+            return acted;
+        }
+        acted += 1;
     }
     for r#ref in work.mints {
-        let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
+        let Some(busy) = Busy::take(r#ref.into_bytes()) else {
             continue;
         };
-        tally(
-            drive_deposit(ledgers, r#ref, clock, guard).await.err(),
-            r#ref,
-            true,
-        );
+        if !start(busy, Job::Deposit(r#ref)) {
+            return acted;
+        }
+        acted += 1;
     }
     if guard().is_err() {
         return acted;
     }
     for r#ref in work.started {
-        let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
+        let Some(busy) = Busy::take(r#ref.into_bytes()) else {
             continue;
         };
-        tally(
-            drive_deposit(ledgers, r#ref, clock, guard).await.err(),
-            r#ref,
-            true,
-        );
+        if !start(busy, Job::Deposit(r#ref)) {
+            return acted;
+        }
+        acted += 1;
     }
     for r#ref in work.queue {
         if guard().is_err() {
             return acted;
         }
-        let Some(_busy) = Busy::take(r#ref.into_bytes()) else {
+        let Some(busy) = Busy::take(r#ref.into_bytes()) else {
             break;
         };
-        match drive_deposit(ledgers, r#ref, clock, guard).await {
+        match start_queued(r#ref, clock) {
+            Ok(()) => {}
             // first in first out: nothing behind a queued payout starts ahead of it
             Err(Stop::Queued) => {
                 alert_if_waited(now);
                 break;
             }
-            other => tally(other.err(), r#ref, true),
+            Err(stop) => {
+                tally(Some(stop), r#ref, true, clock);
+                continue;
+            }
         }
+        if !start(busy, Job::Deposit(r#ref)) {
+            return acted;
+        }
+        acted += 1;
     }
     for id in work.withdrawals {
         if guard().is_err() {
             return acted;
         }
-        let Some(_busy) = Busy::take(id.into_bytes()) else {
+        let Some(busy) = Busy::take(id.into_bytes()) else {
             continue;
         };
-        tally(
+        if !start(busy, Job::Withdrawal(id)) {
+            return acted;
+        }
+        acted += 1;
+    }
+    acted
+}
+
+/// What one step's ending counts: 1 when it moved, else nothing, its failure recorded when
+/// it `counts` (the tenth stops it for a human) and logged otherwise.
+fn tally(stop: Option<Stop>, id: PoolRef, counts: bool, clock: impl Fn() -> Timestamp) -> usize {
+    match stop {
+        None | Some(Stop::Later) | Some(Stop::Again) | Some(Stop::Queued) => 1,
+        Some(Stop::Failed(why)) if counts => {
+            fail(id, why, clock());
+            0
+        }
+        Some(Stop::Failed(why)) | Some(Stop::Append(why)) | Some(Stop::Retry(why)) => {
+            crate::pool::log(&format!("the pool's {id} waits: {why}"));
+            0
+        }
+    }
+}
+
+/// Runs one picked step: answers 1 when it moved.
+pub async fn run(
+    ledgers: &impl Ledgers,
+    job: Job,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> usize {
+    match job {
+        Job::PullStake(id) => tally(
+            pull_stake(ledgers, id, clock).await.err(),
+            payout_ref(id),
+            false,
+            clock,
+        ),
+        Job::Deposit(r#ref) => tally(
+            drive_deposit(ledgers, r#ref, clock, guard).await.err(),
+            r#ref,
+            true,
+            clock,
+        ),
+        Job::Withdrawal(id) => tally(
             drive_withdrawal(ledgers, id, clock, guard).await.err(),
             payout_ref(id),
             true,
-        );
+            clock,
+        ),
+    }
+}
+
+/// One pass over everything the pool owes, each picked step run in turn once the pick is over:
+/// what a drive does, with the steps one after another instead of as tasks of their own (a
+/// task's first part runs as it starts, inside the pick). Answers how many steps moved.
+#[cfg(test)]
+pub async fn drive_with(
+    ledgers: &impl Ledgers,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> usize {
+    let mut jobs = Vec::new();
+    pick(clock, guard, &mut |busy, job| {
+        jobs.push((busy, job));
+        true
+    });
+    let mut acted = 0;
+    for (_busy, job) in jobs {
+        acted += run(ledgers, job, clock, guard).await;
     }
     acted
 }

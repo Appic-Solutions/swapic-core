@@ -441,8 +441,9 @@ fn undo(payout: &EvmPayout, why: String, now: Timestamp) -> bool {
     }
 }
 
-/// One pass over the Base payouts, reading the chains themselves: answers how many it acted
-/// on.
+/// One pass over the Base payouts, reading the chains themselves, each picked step run in turn:
+/// answers how many it acted on.
+#[cfg(test)]
 pub async fn pass(
     ledgers: &(impl Ledgers + PlanReads + CkCalls),
     clock: impl Fn() -> Timestamp + Copy,
@@ -451,16 +452,47 @@ pub async fn pass(
     pass_with(ledgers, &LiveReads, clock, guard).await
 }
 
-/// One pass over the Base payouts, with `reads` for the chain reads: answers how many it
-/// acted on.
+/// One pass over the Base payouts with `reads` for the chain reads, each picked step run in
+/// turn once the pick is over: what a drive does, with the steps one after another instead of
+/// as tasks of their own (a task's first part runs as it starts, inside the pick). As in a
+/// drive, the queue is served at the pick's start only: what a step frees is served by the
+/// next pass, which the step's own line asks for.
+#[cfg(test)]
 pub async fn pass_with(
     ledgers: &(impl Ledgers + PlanReads + CkCalls),
     reads: &impl ChainReads,
     clock: impl Fn() -> Timestamp + Copy,
     guard: &impl Fn() -> Result<(), String>,
 ) -> usize {
+    let mut jobs = Vec::new();
+    let picked = pick(clock, &mut |job| {
+        jobs.push(job);
+        true
+    });
+    // what the pick did itself, then what each step it handed on did
+    let mut acted = picked.saturating_sub(jobs.len());
+    for job in jobs {
+        acted += run(ledgers, reads, job, clock, guard).await;
+    }
+    acted
+}
+
+/// One Base payout's next step, as a pass picks it, holding the payout while it runs.
+pub struct Job {
+    pub busy: Busy,
+    pub payout: EvmPayout,
+    pub next: Next,
+}
+
+/// Picks every Base payout that can move now, in turn, after serving the queue: what needs no
+/// call is done here (a relist, a stop for a human), and every other step is handed with its
+/// hold to `start`, which answers false when there is no room: the pick stops there, and what
+/// it left is picked up by the drive the next ending task arms. No await: the steps' calls and
+/// reads are the tasks'. Answers how many it acted on: what it did itself and the steps it handed
+/// on.
+pub fn pick(clock: impl Fn() -> Timestamp + Copy, start: &mut impl FnMut(Job) -> bool) -> usize {
     let mut acted = serve(clock());
-    // the ledger read once per pass, not once per payout
+    // the ledger read once per pick, not once per payout
     let lines = pool_store::ledger().lines();
     let Some(settings) = lines.settings else {
         return acted;
@@ -470,13 +502,12 @@ pub async fn pass_with(
             continue;
         };
         let now = clock();
-        let Some(_busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
+        let Some(busy) = Busy::take(evm_payout_ref(id).into_bytes()) else {
             continue;
         };
         // what `next` reads only for some statuses is read only for them: the chains' waits
         // for a delivering or reverted payout, a transaction in flight for a waiting or
-        // reverted one. The waits come from the config as it stands now, after the awaits of
-        // the payouts before it, so a `set_config` mid-pass applies to the next payout
+        // reverted one
         let waits = match payout.status {
             PayoutStatus::Delivering | PayoutStatus::Reverted => {
                 let config = crate::storage::config::get();
@@ -504,161 +535,189 @@ pub async fn pass_with(
         ) && in_flight(id);
         match next(&payout, &settings, now, in_flight, waits) {
             Next::Wait => {}
-            Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
-                Ok(fitted) => {
-                    acted += 1;
-                    // a planned swap whose amount this drive learnt: its plan, fitted
-                    if let Some(fitted) = fitted {
-                        crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
-                    }
-                }
-                Err(Stop::Retry(why)) | Err(Stop::Append(why)) => {
-                    log(&format!("the pool payout {id} waits: {why}"))
-                }
-                Err(stop) => log(&format!("the pool payout {id} stopped: {stop:?}")),
-            },
-            Next::Ck => match ck::drive(ledgers, id, clock, guard).await {
-                Ok(()) => acted += 1,
-                Err(stop) => log(&format!("the ck payout {id} waits: {stop:?}")),
-            },
             Next::Relist => acted += usize::from(record(PoolStep::PayoutRelisted { id }, now)),
-            Next::Fit(decided) => {
-                match icp_swap::refit(ledgers, id, *decided, clock, guard).await {
-                    Ok(Some(fitted)) => {
-                        acted += 1;
-                        crate::pool::plan::sign_fitted(&_busy, id, fitted, clock).await;
-                    }
-                    Ok(None) => {}
-                    Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
-                }
-            }
             Next::Stop(why) => {
                 log(&format!("the pool payout {id}: {why}"));
                 acted += usize::from(record(PoolStep::PayoutStopped { id, why }, now));
             }
-            Next::ReadFill {
-                chain,
-                intent,
-                after_s,
-            } => match reads.fill_after(chain, intent, after_s).await {
-                Ok((Fill::Filled, block)) => {
-                    acted += usize::from(record(PoolStep::PayoutDelivered { id, block }, clock()))
+            next => {
+                if !start(Job { busy, payout, next }) {
+                    return acted;
                 }
-                Ok((Fill::Open | Fill::Cancelled, block)) => {
-                    if !record(PoolStep::PayoutUnfilled { id, block }, clock()) {
-                        continue;
-                    }
+                acted += 1;
+            }
+        }
+    }
+    acted
+}
+
+/// Runs one picked step, the payout held for it: answers how many it acted on.
+pub async fn run(
+    ledgers: &(impl Ledgers + PlanReads + CkCalls),
+    reads: &impl ChainReads,
+    job: Job,
+    clock: impl Fn() -> Timestamp + Copy,
+    guard: &impl Fn() -> Result<(), String>,
+) -> usize {
+    let Job {
+        busy,
+        payout,
+        next,
+    } = job;
+    let id = payout.id;
+    let mut acted = 0;
+    match next {
+        // the pick does these itself and hands none of them on
+        Next::Wait | Next::Relist | Next::Stop(_) => {}
+        Next::Drive => match icp_swap::drive(ledgers, id, clock, guard).await {
+            Ok(fitted) => {
+                acted += 1;
+                // a planned swap whose amount this drive learnt: its plan, fitted
+                if let Some(fitted) = fitted {
+                    crate::pool::plan::sign_fitted(&busy, id, fitted, clock).await;
+                }
+            }
+            Err(Stop::Retry(why)) | Err(Stop::Append(why)) => {
+                log(&format!("the pool payout {id} waits: {why}"))
+            }
+            Err(stop) => log(&format!("the pool payout {id} stopped: {stop:?}")),
+        },
+        Next::Ck => match ck::drive(ledgers, id, clock, guard).await {
+            Ok(()) => acted += 1,
+            Err(stop) => log(&format!("the ck payout {id} waits: {stop:?}")),
+        },
+        Next::Fit(decided) => {
+            match icp_swap::refit(ledgers, id, *decided, clock, guard).await {
+                Ok(Some(fitted)) => {
                     acted += 1;
-                    // the user's refund at once; Eco's refund credits the pool later
-                    if undo(&payout, UNFILLED.to_string(), clock()) && payout.is_icp_swap() {
-                        let _ = icp_swap::drive(ledgers, id, clock, guard).await;
+                    crate::pool::plan::sign_fitted(&busy, id, fitted, clock).await;
+                }
+                Ok(None) => {}
+                Err(stop) => log(&format!("the pool payout {id}'s plan: {stop:?}")),
+            }
+        }
+        Next::ReadFill {
+            chain,
+            intent,
+            after_s,
+        } => match reads.fill_after(chain, intent, after_s).await {
+            Ok((Fill::Filled, block)) => {
+                acted += usize::from(record(PoolStep::PayoutDelivered { id, block }, clock()))
+            }
+            Ok((Fill::Open | Fill::Cancelled, block)) => {
+                if !record(PoolStep::PayoutUnfilled { id, block }, clock()) {
+                    return acted;
+                }
+                acted += 1;
+                // the user's refund at once; Eco's refund credits the pool later
+                if undo(&payout, UNFILLED.to_string(), clock()) && payout.is_icp_swap() {
+                    let _ = icp_swap::drive(ledgers, id, clock, guard).await;
+                }
+            }
+            // too early: noted, not asked again within one wait
+            Err(crate::agreed::FillRead::TooEarly) => {
+                acted += usize::from(record(PoolStep::PayoutFillEarly { id }, clock()))
+            }
+            // not read: asked again next pass
+            Err(crate::agreed::FillRead::Unread(_)) => {}
+        },
+        Next::ReadAcrossFill { chain, after_s } => {
+            let Some(across) = payout.across.as_ref() else {
+                return acted;
+            };
+            let stop = |why: &str| {
+                log(&format!("the pool payout {id}: {why}"));
+                record(
+                    PoolStep::PayoutStopped {
+                        id,
+                        why: why.to_string(),
+                    },
+                    clock(),
+                )
+            };
+            match reads.across_fill_after(chain, across, after_s).await {
+                Ok((AcrossFill::Filled, header)) => {
+                    acted += usize::from(record(
+                        PoolStep::PayoutDelivered {
+                            id,
+                            block: header.number,
+                        },
+                        clock(),
+                    ))
+                }
+                Ok((AcrossFill::HashDiffers, _)) => {
+                    acted += usize::from(stop(ACROSS_HASH_DIFFERS))
+                }
+                // read open: a fill the destination logged stops it, none undoes it
+                Ok((AcrossFill::Open, header)) => {
+                    match reads.fill_logged(chain, across, header).await {
+                        Ok(Some(false)) => {
+                            if !record(
+                                PoolStep::PayoutUnfilled {
+                                    id,
+                                    block: header.number,
+                                },
+                                clock(),
+                            ) {
+                                return acted;
+                            }
+                            acted += 1;
+                            // no undo now: the user's ckUSDC goes back once Across's refund
+                            // is credited, which begins the undo in the same step; a refund
+                            // that came early, kept aside, is read again at once
+                            if crate::storage::timer_state::get()
+                                .across_refunds_waiting
+                                .is_some_and(|kept| !kept.is_empty())
+                            {
+                                reads.read_base_soon();
+                            }
+                        }
+                        Ok(Some(true)) => acted += usize::from(stop(ACROSS_FILL_LOGGED)),
+                        Ok(None) => acted += usize::from(stop(ACROSS_TOO_LATE)),
+                        // not read: asked again next pass
+                        Err(why) => log(&format!(
+                            "the pool payout {id}'s Across fill logs were not read: {why}"
+                        )),
                     }
                 }
-                // too early: noted, not asked again within one wait
                 Err(crate::agreed::FillRead::TooEarly) => {
                     acted += usize::from(record(PoolStep::PayoutFillEarly { id }, clock()))
                 }
-                // not read: asked again next pass
                 Err(crate::agreed::FillRead::Unread(_)) => {}
-            },
-            Next::ReadAcrossFill { chain, after_s } => {
-                let Some(across) = payout.across.as_ref() else {
-                    continue;
+            }
+        }
+        Next::Undo { why, checked } => {
+            if checked {
+                let Some(pinned) = payout.order.clone() else {
+                    return acted;
                 };
-                let stop = |why: &str| {
-                    log(&format!("the pool payout {id}: {why}"));
-                    record(
-                        PoolStep::PayoutStopped {
-                            id,
-                            why: why.to_string(),
-                        },
-                        clock(),
-                    )
-                };
-                match reads.across_fill_after(chain, across, after_s).await {
-                    Ok((AcrossFill::Filled, header)) => {
-                        acted += usize::from(record(
-                            PoolStep::PayoutDelivered {
-                                id,
-                                block: header.number,
-                            },
-                            clock(),
-                        ))
+                // read at or after the block its transaction reverted in: an older one
+                // says nothing of it (review item 1). A pinned order that never reverted
+                // never reached a block, so any block reads it; a revert in no recorded
+                // block stopped in `next`
+                let after = payout.reverted_block.unwrap_or(BlockNumber::new(0));
+                // a reorg may have turned the revert into a payment: a human's, once
+                match reads.ran(pinned.order_id, after).await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        let why = "ALERT: its order ran after its revert; it is not undone, for a human".to_string();
+                        log(&format!("the pool payout {id}: {why}"));
+                        acted +=
+                            usize::from(record(PoolStep::PayoutStopped { id, why }, clock()));
+                        return acted;
                     }
-                    Ok((AcrossFill::HashDiffers, _)) => {
-                        acted += usize::from(stop(ACROSS_HASH_DIFFERS))
-                    }
-                    // read open: a fill the destination logged stops it, none undoes it
-                    Ok((AcrossFill::Open, header)) => {
-                        match reads.fill_logged(chain, across, header).await {
-                            Ok(Some(false)) => {
-                                if !record(
-                                    PoolStep::PayoutUnfilled {
-                                        id,
-                                        block: header.number,
-                                    },
-                                    clock(),
-                                ) {
-                                    continue;
-                                }
-                                acted += 1;
-                                // no undo now: the user's ckUSDC goes back once Across's refund
-                                // is credited, which begins the undo in the same step; a refund
-                                // that came early, kept aside, is read again at once
-                                if crate::storage::timer_state::get()
-                                    .across_refunds_waiting
-                                    .is_some_and(|kept| !kept.is_empty())
-                                {
-                                    reads.read_base_soon();
-                                }
-                            }
-                            Ok(Some(true)) => acted += usize::from(stop(ACROSS_FILL_LOGGED)),
-                            Ok(None) => acted += usize::from(stop(ACROSS_TOO_LATE)),
-                            // not read: asked again next pass
-                            Err(why) => log(&format!(
-                                "the pool payout {id}'s Across fill logs were not read: {why}"
-                            )),
-                        }
-                    }
-                    Err(crate::agreed::FillRead::TooEarly) => {
-                        acted += usize::from(record(PoolStep::PayoutFillEarly { id }, clock()))
-                    }
-                    Err(crate::agreed::FillRead::Unread(_)) => {}
+                    Err(_) => return acted,
                 }
             }
-            Next::Undo { why, checked } => {
-                if checked {
-                    let Some(pinned) = payout.order.clone() else {
-                        continue;
-                    };
-                    // read at or after the block its transaction reverted in: an older one
-                    // says nothing of it (review item 1). A pinned order that never reverted
-                    // never reached a block, so any block reads it; a revert in no recorded
-                    // block stopped in `next`
-                    let after = payout.reverted_block.unwrap_or(BlockNumber::new(0));
-                    // a reorg may have turned the revert into a payment: a human's, once
-                    match reads.ran(pinned.order_id, after).await {
-                        Ok(false) => {}
-                        Ok(true) => {
-                            let why = "ALERT: its order ran after its revert; it is not undone, for a human".to_string();
-                            log(&format!("the pool payout {id}: {why}"));
-                            acted +=
-                                usize::from(record(PoolStep::PayoutStopped { id, why }, clock()));
-                            continue;
-                        }
-                        Err(_) => continue,
-                    }
-                }
-                let now = clock();
-                if undo(&payout, why, now) {
-                    acted += 1;
-                    // an ICP swap's refund, at once
-                    if payout.is_icp_swap() {
-                        let _ = icp_swap::drive(ledgers, id, clock, guard).await;
-                    }
+            let now = clock();
+            if undo(&payout, why, now) {
+                acted += 1;
+                // an ICP swap's refund, at once
+                if payout.is_icp_swap() {
+                    let _ = icp_swap::drive(ledgers, id, clock, guard).await;
                 }
             }
         }
     }
-    acted + serve(clock())
+    acted
 }

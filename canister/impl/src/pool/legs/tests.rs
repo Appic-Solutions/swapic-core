@@ -170,8 +170,10 @@ impl Ledgers for Quoting {
     ) -> Result<TokenAmount, CallError> {
         unreachable!("a chained quote moves nothing")
     }
-    async fn unused(&self, _: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
-        unreachable!("a chained quote moves nothing")
+    /// Read in the first pool's round, beside its quote: what the pool holds of the canister's.
+    async fn unused(&self, pool: Principal) -> Result<(TokenAmount, TokenAmount), CallError> {
+        assert_eq!(pool, first(), "the round is the first pool's alone");
+        Ok((TokenAmount::from(7_u32), TokenAmount::from(9_u32)))
     }
     async fn withdraw(
         &self,
@@ -210,6 +212,7 @@ fn a_chained_quote_names_its_pools_and_need_as_its_caller_says() {
             names,
         ))
         .unwrap()
+        .map(|chained| chained.least)
     };
     let swap = || ChainNames {
         first: "the first pool",
@@ -250,5 +253,54 @@ fn a_chained_quote_names_its_pools_and_need_as_its_caller_says() {
     assert_eq!(
         chain(&quoting((true, true), (1_030, 2_000)), payout()),
         Ok(TokenAmount::from(780_u32))
+    );
+}
+
+/// The first pool's quote is read in the first leg's own round, beside what the pool holds of
+/// the canister's: the chained quote hands the leg that round for the amount it quoted, so the
+/// leg asks the first pool nothing again.
+#[test]
+fn a_chained_quote_hands_the_first_leg_its_round() {
+    let quoting = Quoting {
+        trades: (true, true),
+        quotes: (1_030, 2_000),
+    };
+    let chained = crate::test_util::block_on(chained_least(
+        &quoting,
+        (
+            first(),
+            Principal::from_slice(&[3; 10]),
+            TokenAmount::from(1_000_u32),
+        ),
+        (
+            Principal::from_slice(&[2; 10]),
+            Principal::from_slice(&[4; 10]),
+            Principal::from_slice(&[5; 10]),
+        ),
+        TokenAmount::from(30_u32),
+        TokenAmount::from(1_500_u32),
+        ChainNames {
+            first: "the first pool",
+            second: "the second pool",
+            need: "needed",
+        },
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        chained.read,
+        RoundRead {
+            amount_in: TokenAmount::from(1_000_u32),
+            round: Round {
+                quoted: TokenAmount::from(1_030_u32),
+                // the first pool trades zero for one here: ckUSDC is its token0
+                before: PoolHeld {
+                    ckusdc: TokenAmount::from(7_u32),
+                    token: TokenAmount::from(9_u32),
+                },
+                // no approval of this token may stand: none is read
+                allowed: None,
+            },
+        }
     );
 }
